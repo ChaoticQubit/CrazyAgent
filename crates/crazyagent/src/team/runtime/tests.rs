@@ -10681,8 +10681,8 @@ fn a_message_delivered_to_a_codex_agent_is_read_once_its_rollout_answered_after_
 /// A steer the bridge delivered into a Codex turn that then ended aborted goes back to
 /// Sent when the rollout never records it, as Codex 0.164 drops a steer still pending at
 /// the abort, so the agent's next turn gets it; one the rollout records before the abort
-/// stays Delivered and is never sent twice, as do one delivered after the abort and one
-/// delivered before the session began (b19 P2).
+/// stays Delivered and is never sent twice, as do one delivered into the next turn and one
+/// into a turn before the session began (b19 P2).
 #[test]
 fn a_steer_an_aborted_codex_turn_dropped_goes_back_to_sent_and_a_recorded_one_stays_delivered() {
     let fixture = Fixture::new(1);
@@ -10690,7 +10690,7 @@ fn a_steer_an_aborted_codex_turn_dropped_goes_back_to_sent_and_a_recorded_one_st
     let mut team = fixture.runtime();
     let project = ProjectId::new(PROJECT).unwrap();
     let codex = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
-    let delivered = |body: &str, at: i64| {
+    let delivered = |body: &str, at: i64, turn: &str| {
         let id = crate::coord::send(
             &fixture.connection,
             crate::coord::NewMessage {
@@ -10714,12 +10714,19 @@ fn a_steer_an_aborted_codex_turn_dropped_goes_back_to_sent_and_a_recorded_one_st
             at,
         )
         .unwrap();
+        fixture
+            .connection
+            .execute(
+                "UPDATE coord_messages SET turn=?2 WHERE id=?1",
+                rusqlite::params![id, turn],
+            )
+            .unwrap();
         id
     };
-    let early = delivered("Before the session.", 1_793_233_100_000);
-    let drained = delivered("Drained before the abort.", 1_793_233_201_500);
-    let lost = delivered("Pending at the abort.", 1_793_233_204_000);
-    let later = delivered("Into the next turn.", 1_793_233_207_000);
+    let early = delivered("Before the session.", 1_793_233_100_000, "t0");
+    let drained = delivered("Drained before the abort.", 1_793_233_201_500, "t1");
+    let lost = delivered("Pending at the abort.", 1_793_233_204_000, "t1");
+    let later = delivered("Into the next turn.", 1_793_233_207_000, "t2");
     let at = |second: &str| format!("2026-10-29T00:20:{second}Z");
     let lines = [
         serde_json::json!({"timestamp": at("00.947"), "type": "session_meta",
@@ -10771,6 +10778,120 @@ fn a_steer_an_aborted_codex_turn_dropped_goes_back_to_sent_and_a_recorded_one_st
         (early, "the message delivered before the session began"),
     ] {
         assert_eq!(receipt(id), crate::coord::Receipt::Delivered, "{what}");
+    }
+}
+
+/// b19 P2 r2: an abort puts back only what the bridge delivered into that very turn. A
+/// steer still pending in another thread's running turn (a sub-agent rollout in the same
+/// `CODEX_HOME`) and one that went into the thread's next turn stay Delivered and are not
+/// sent twice, though both were marked while the aborted turn ran; one pending in the
+/// aborted turn itself still goes back to Sent.
+#[test]
+fn an_abort_puts_back_only_what_went_into_that_turn_never_a_steer_pending_in_another() {
+    let fixture = Fixture::new(1);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let codex = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let delivered = |body: &str, at: i64, turn: &str| {
+        let id = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(codex),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap();
+        crate::coord::mark(
+            &fixture.connection,
+            id,
+            crate::coord::Receipt::Delivered,
+            at,
+        )
+        .unwrap();
+        fixture
+            .connection
+            .execute(
+                "UPDATE coord_messages SET turn=?2 WHERE id=?1",
+                rusqlite::params![id, turn],
+            )
+            .unwrap();
+        id
+    };
+    let lost = delivered("Pending at the abort.", 1_793_233_204_500, "t1");
+    let elsewhere = delivered("Pending in the sub-agent's turn.", 1_793_233_204_000, "s1");
+    let next = delivered("Pending in the next turn.", 1_793_233_206_000, "t2");
+    let at = |second: &str| format!("2026-10-29T00:20:{second}Z");
+    let main = [
+        serde_json::json!({"timestamp": at("00.947"), "type": "session_meta",
+            "payload": {"id": "t", "cwd": "/repo"}}),
+        serde_json::json!({"timestamp": at("00.947"), "type": "event_msg",
+            "payload": {"type": "task_started", "turn_attribution": {"turn_id": "t1"}}}),
+        serde_json::json!({"timestamp": at("06.457"), "type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text",
+            "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose."}]}}),
+        serde_json::json!({"timestamp": at("06.459"), "type": "event_msg", "payload": {
+            "type": "turn_aborted", "root_turn_id": "t1", "turn_id": "t1",
+            "reason": "interrupted", "started_at": 1_793_233_200,
+            "completed_at": 1_793_233_206, "duration_ms": 5512}}),
+        serde_json::json!({"timestamp": at("06.500"), "type": "event_msg",
+            "payload": {"type": "task_started", "turn_attribution": {"turn_id": "t2"}}}),
+    ];
+    let sub_agent = [
+        serde_json::json!({"timestamp": at("00.950"), "type": "session_meta",
+            "payload": {"id": "s", "cwd": "/repo", "source": {"subagent": "review"}}}),
+        serde_json::json!({"timestamp": at("01.000"), "type": "event_msg",
+            "payload": {"type": "task_started", "turn_attribution": {"turn_id": "s1"}}}),
+    ];
+    let rollouts = agent_home(&team.state, codex)
+        .join("sessions")
+        .join("2026")
+        .join("10")
+        .join("29");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    for (name, lines) in [
+        ("rollout-2026-10-29T00-20-00-t.jsonl", &main[..]),
+        ("rollout-2026-10-29T00-20-00-s.jsonl", &sub_agent[..]),
+    ] {
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        std::fs::write(rollouts.join(name), text).unwrap();
+    }
+    team.workers
+        .insert(codex, between_turns(&project, AgentRole::Sub, false, false));
+
+    team.serve_relays(&project);
+    let receipt = |id: i64| {
+        crate::coord::message(&fixture.connection, id)
+            .unwrap()
+            .receipt
+    };
+    let pending: Vec<i64> = crate::coord::pending(&fixture.connection, codex, 64)
+        .unwrap()
+        .iter()
+        .map(|message| message.id)
+        .collect();
+    assert_eq!(
+        receipt(lost),
+        crate::coord::Receipt::Sent,
+        "the steer the aborted turn dropped waits for the agent's next turn"
+    );
+    for (id, what) in [
+        (
+            elsewhere,
+            "the steer pending in the sub-agent thread's running turn",
+        ),
+        (next, "the steer pending in the turn after the abort"),
+    ] {
+        assert_eq!(receipt(id), crate::coord::Receipt::Delivered, "{what}");
+        assert!(!pending.contains(&id), "{what} is not sent twice");
     }
 }
 
