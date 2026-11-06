@@ -257,6 +257,8 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     };
 
     let held = lock_only(&home).unwrap();
