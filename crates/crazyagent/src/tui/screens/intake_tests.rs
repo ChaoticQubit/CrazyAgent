@@ -1423,7 +1423,7 @@ fn confirmed_with_pool() -> (Shell, ProjectId, Option<Request>) {
     )))));
     shell.key(Key::Tab);
     keys(&mut shell, "Keeps notes.");
-    for _ in 0..3 {
+    for _ in 0..4 {
         shell.key(Key::Tab);
     }
     shell.key(Key::Enter);
@@ -1512,7 +1512,7 @@ fn confirming_the_review_sends_the_edited_setup_and_opens_the_project() {
     )))));
     shell.key(Key::Tab);
     keys(&mut shell, "Keeps notes.");
-    for _ in 0..3 {
+    for _ in 0..4 {
         shell.key(Key::Tab);
     }
     shell.key(Key::Enter);
