@@ -90,3 +90,30 @@ test("an intake code named like an object built-in gets the plain fallback sente
     assert.equal(api.intakeCopy(code), `Something went wrong. Try again. (${/^[a-z0-9_]+$/.test(code) ? code : "unknown"})`, code);
   }
 });
+
+test("each Move anyway and Copy anyway warning reads exactly as the owner asked", () => {
+  assert.deepEqual(api.ADD_WARNINGS, {
+    close_apps: "Close editors, terminals and apps that use this folder first. Files saved while it moves can be lost.",
+    old_place: "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working.",
+    across_disks: "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the move stops: your original stays, and a part copy may be left in your projects folder to delete.",
+    same_disk: "This is a rename on the same disk; it is quick.",
+    copy_all: "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete.",
+    large: "This folder is very large.",
+    unmeasured: "CrazyAgent couldn't measure it.",
+    too_many: "The folder is deeper or bigger than CrazyAgent checks, so the copy check can take a long time.",
+    unreadable: "Some files can't be read. They can't be copied, so a move across disks keeps the original in place and fails rather than leave them behind.",
+    unreadable_copy: "Some files can't be read. They can't be copied, so the copy fails rather than leave them behind.",
+    worktrees: "Git worktrees linked to this folder stop working until you run git worktree repair in each. Their files stay, but git there fails until repaired.",
+    linked_checkout: "The copy still uses the original repository's git data. Commits made in the copy change the original repository.",
+    no_git: "This folder has no git history. Agents' changes can't be shown or undone with git until you run git init here.",
+    git_unread: "CrazyAgent couldn't read this folder's git setup, so it can't tell what moving or copying it breaks.",
+  });
+  assert.equal(api.measuredLine(42 * 1024 ** 3), "It is about 42 GB.");
+});
+
+test("an add anyway sends the overrides with the add and a bad override reads as a plain sentence", () => {
+  const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
+  assert.match(client, /export type AddOverride = "worktrees" \| "linked_checkout" \| "too_large";/);
+  assert.match(client, /invoke<IntentReceipt>\("desktop_add_existing_folder", \{ source, mode, overrides, generation \}\)/);
+  assert.equal(api.intakeCopy("home_override_invalid"), "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.");
+});
