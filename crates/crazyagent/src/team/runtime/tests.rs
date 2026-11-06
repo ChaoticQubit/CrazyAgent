@@ -18641,7 +18641,10 @@ fn a_task_delegated_while_the_projects_folder_moves_waits_until_the_move_ends() 
         ("queued".to_owned(), None)
     );
     assert_eq!(
-        count(&fixture.connection, "SELECT count(*) FROM team_agents"),
+        count(
+            &fixture.connection,
+            "SELECT count(*) FROM team_agents WHERE project=?1"
+        ),
         0
     );
     let project = fixture.base.join("project");
@@ -18750,27 +18753,30 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
     assert_eq!(
         count(
             &fixture.connection,
-            "SELECT attempts FROM team_tasks WHERE prompt='Wait for the move'"
+            "SELECT attempts FROM team_tasks WHERE project=?1 AND prompt='Wait for the move'"
         ),
         0
     );
     assert_eq!(
         count(
             &fixture.connection,
-            &format!("SELECT keep_warm FROM team_settings WHERE project='{PROJECT}'")
+            "SELECT keep_warm FROM team_settings WHERE project=?1"
         ),
         1,
         "the owner's Keep warm switch stays on"
     );
     assert_eq!(
-        count(&fixture.connection, "SELECT count(*) FROM team_agents"),
+        count(
+            &fixture.connection,
+            "SELECT count(*) FROM team_agents WHERE project=?1"
+        ),
         1,
         "no agent starts while the move holds the folder"
     );
     assert_eq!(
         count(
             &fixture.connection,
-            "SELECT count(*) FROM team_messages WHERE text LIKE '%could not%' OR text LIKE '%turned off%'"
+            "SELECT count(*) FROM team_messages WHERE project=?1 AND (text LIKE '%could not%' OR text LIKE '%turned off%')"
         ),
         0,
         "nothing tells the owner a start failed"
@@ -18786,14 +18792,14 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
             task_of(f, "Wait for the move").0 == "running"
                 && count(
                     &f.connection,
-                    "SELECT count(*) FROM team_agents WHERE role='master'",
+                    "SELECT count(*) FROM team_agents WHERE project=?1 AND role='master'",
                 ) == 2
         },
     );
     assert_eq!(
         count(
             &fixture.connection,
-            &format!("SELECT keep_warm FROM team_settings WHERE project='{PROJECT}'")
+            "SELECT keep_warm FROM team_settings WHERE project=?1"
         ),
         1
     );
