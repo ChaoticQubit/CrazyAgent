@@ -3193,7 +3193,7 @@ fn an_owner_line_waiting_long_for_the_masters_app_says_so_once() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_stored_not_reading_line_goes_once_a_restarted_engine_types_into_its_master() {
-    let fixture = Fixture::new(1);
+    let mut fixture = Fixture::new(1);
     let host = fixture.host();
     let bin = fixture.base.join("bin");
     std::fs::create_dir(&bin).unwrap();
