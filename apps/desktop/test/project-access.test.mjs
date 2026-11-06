@@ -42,7 +42,7 @@ test("Full access asks for the plain warning first, and the project page names t
   assert.equal(access.confirmFirst(null, "full"), true);
   assert.equal(access.confirmFirst("full", "full"), false);
   assert.equal(access.confirmFirst("full", "own_branch"), false);
-  assert.equal(access.FULL_ACCESS_WARNING, "Agents run with your user's permissions: they can read your keys and change any file.");
+  assert.equal(access.FULL_ACCESS_WARNING, "Agents run with your user's permissions: they can read your keys and change any file. Processes an agent starts outside its terminal can keep running after it stops.");
   assert.equal(access.accessSummary(view), "Sandboxed · Rust");
   assert.equal(access.accessSummary({ ...view, access: "full", toolchains: [] }), "Full access · no toolchains");
   assert.equal(settings.settingsSection("access"), "access");
@@ -66,7 +66,7 @@ test("every engine refusal for agent access has its own sentence", () => {
 });
 
 test("Settings says beside the level choice that lowering it stops agents running above it, in both UIs", () => {
-  assert.equal(access.LOWERING_STOPS_AGENTS, "Lowering the level stops agents running above it; they restart at the new level.");
+  assert.equal(access.LOWERING_STOPS_AGENTS, "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.");
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.match(page, /<AccessLevels name="ps-access"[^\n]*\/>}\n\s*{view && <p className="pj-help">{LOWERING_STOPS_AGENTS}<\/p>}/);
   assert.ok(!page.includes("keep the access they started with"));
