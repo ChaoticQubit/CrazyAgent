@@ -539,7 +539,9 @@ fn an_agent_compiles_links_and_runs_git_without_an_xcrun_cache_error() {
     assert!(output.status.success(), "{stdout}\n{stderr}");
     assert!(stdout.contains("tiny ran"), "{stdout}");
     assert!(stdout.contains("git version"), "{stdout}");
-    assert!(!stderr.contains("xcrun: error"), "{stderr}");
+    for refused in ["couldn't create cache file", "xcrun: error"] {
+        assert!(!stderr.contains(refused), "{refused}: {stderr}");
+    }
     toolchains::remove_tmp(&case.home).unwrap();
 }
 
