@@ -491,6 +491,7 @@ fn engine_input_runs_its_step_only_right_before_it_types() {
     };
     host.spawn(&AgentId::team(MASTER).unwrap(), &command)
         .unwrap();
+    reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     let input = |text: &str, now: i64, answer: Result<bool, EngineError>| {
         let ran = std::cell::Cell::new(false);
         let result = master_input_at_when(
