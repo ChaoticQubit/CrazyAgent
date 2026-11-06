@@ -238,6 +238,61 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
     );
 }
 
+/// A context-less launch's hold takes the same home lock as an install and leaves the home's
+/// files as they were (aabe420f): an install or a second hold on the held home is refused, the
+/// home keeps its own file and gains only the lock file, and the home is free once the hold
+/// ends.
+#[cfg(unix)]
+#[test]
+fn lock_only_holds_the_home_and_leaves_no_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    fs::write(home.join("config.toml"), "model = \"kept\"\n").unwrap();
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+    };
+
+    let held = lock_only(&home).unwrap();
+    assert_eq!(
+        context
+            .install("codex", &home, false)
+            .err()
+            .map(|error| error.0),
+        Some("launch_home_busy".to_owned()),
+        "an install waits for the held home"
+    );
+    assert_eq!(
+        lock_only(&home).err().map(|error| error.0),
+        Some("launch_home_busy".to_owned()),
+        "a second hold waits for the held home"
+    );
+    drop(held);
+
+    let mut names: Vec<String> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["config.toml", LOCK]);
+    assert_eq!(
+        fs::read_to_string(home.join("config.toml")).unwrap(),
+        "model = \"kept\"\n"
+    );
+    assert!(
+        lock_only(&home).is_ok(),
+        "the ended hold still kept its home busy"
+    );
+}
+
 /// RV-DS-74: a second keyed launch on an account home whose agent is already running is
 /// refused at the home lock before it writes the key file, so the running agent's relay key
 /// file survives. The lock is taken by `command_with_context` ahead of `write_key_file`; the

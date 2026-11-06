@@ -11,6 +11,11 @@ pub const LEFT: &str = "harness_full_access_left";
 pub const UNCHECKED: &str = "harness_full_access_unchecked";
 /// The plain code of a stop whose warden did not confirm its sandbox empty.
 pub const UNCERTAIN: &str = "harness_cleanup_uncertain";
+/// The plain code of a stop that left running, inside the agent's sandbox, processes of a
+/// pane no warden empties, as a native lead's pane in its own server.
+pub const SANDBOX_LEFT: &str = "harness_sandbox_left";
+/// The plain code of such a sandboxed stop whose processes could not be listed.
+pub const SANDBOX_UNCHECKED: &str = "harness_sandbox_unchecked";
 
 /// How long a stop waits, after the agent's group is killed, for the processes it found
 /// before the kill to end before it names the ones still running.
@@ -114,7 +119,8 @@ pub fn held_by(account: &CredentialRef) -> Vec<String> {
 pub enum Unstopped {
     /// The run's warden did not confirm its sandbox empty.
     Uncertain,
-    /// Processes of a Full access agent still run after its stop, or could not be listed.
+    /// Processes of an agent no warden empties, at Full access or in a sandboxed pane its
+    /// host ran without the keeper, still run after its stop, or could not be listed.
     Left(Leftovers),
 }
 
@@ -143,7 +149,8 @@ struct Process {
 /// process that left both before it was seen, such as a daemon whose parent already
 /// exited, is not found. `table` is the command that lists the processes; `unchecked`
 /// tells that a listing failed, so the lineage may miss processes; `pending` is a listing
-/// still held up past its bound, which a later read waits out instead of starting another.
+/// still held up past its bound, which a later read waits out instead of starting another;
+/// `sandboxed` tells the agent ran in a sandbox no warden empties, not at Full access.
 #[derive(Debug)]
 pub(crate) struct Lineage {
     leader: i32,
@@ -151,36 +158,44 @@ pub(crate) struct Lineage {
     table: &'static [&'static str],
     unchecked: bool,
     pending: Option<Listing>,
+    sandboxed: bool,
 }
 
 /// Where a listing thread reports its output, or none when it failed or ran out of bounds.
 type Listing = std::sync::mpsc::Receiver<Option<Vec<u8>>>;
 
-/// The processes a Full access agent left running after its stop, which no Seatbelt
-/// warden can end, or a stop whose processes could not be listed; never both empty and
-/// checked.
+/// The processes an agent no warden empties left running after its stop, at Full access
+/// or in a sandboxed pane its host ran without the keeper, or a stop whose processes could
+/// not be listed; never both empty and checked.
 #[derive(Debug)]
 pub struct Leftovers(Lineage);
 
 impl Leftovers {
     /// Names the leftovers as a plain code. Input: the leftovers. Output: [`UNCHECKED`] when
-    /// none is named because the listing failed, else [`LEFT`].
+    /// none is named because the listing failed, else [`LEFT`]; [`SANDBOX_UNCHECKED`] and
+    /// [`SANDBOX_LEFT`] for a sandboxed pane's.
     pub fn code(&self) -> &'static str {
-        if self.0.known.is_empty() {
-            UNCHECKED
-        } else {
-            LEFT
+        match (self.0.sandboxed, self.0.known.is_empty()) {
+            (false, true) => UNCHECKED,
+            (false, false) => LEFT,
+            (true, true) => SANDBOX_UNCHECKED,
+            (true, false) => SANDBOX_LEFT,
         }
     }
 
-    /// Says plainly which processes still run and that Full access cannot stop them, or
-    /// that they could not be listed. Input: the leftovers. Output: one sentence naming at
+    /// Says plainly which processes still run and that Full access, or a sandbox no warden
+    /// empties, cannot stop them, or that they could not be listed. Input: the leftovers. Output: one sentence naming at
     /// most `NAMED_MAX` of them by id and program, counting the rest.
     pub fn plain(&self) -> String {
         assert!(!self.0.known.is_empty() || self.0.unchecked);
         if self.0.known.is_empty() {
+            let unlisted = if self.0.sandboxed {
+                "The engine could not list what the agent started outside its terminal after its stop, and no warden empties its sandbox"
+            } else {
+                "Full access could not list what the agent started outside its terminal after its stop"
+            };
             return format!(
-                "Full access could not list what the agent started outside its terminal after its stop, so it cannot confirm they ended. Its account stays held until they can be checked, at most {} minutes, or until you sign it out",
+                "{unlisted}, so it cannot confirm they ended. Its account stays held until they can be checked, at most {} minutes, or until you sign it out",
                 UNCHECKED_HOLD_MAX.as_secs() / 60
             );
         }
@@ -202,8 +217,13 @@ impl Leftovers {
         } else {
             ""
         };
+        let running = if self.0.sandboxed {
+            "No warden empties this agent's sandbox, so what it started outside its terminal outlived its stop; still running in its sandbox"
+        } else {
+            "Full access cannot stop what the agent started outside its terminal; still running"
+        };
         format!(
-            "Full access cannot stop what the agent started outside its terminal; still running: {}{counted}{unlisted}. Its account stays held until they end or you sign it out",
+            "{running}: {}{counted}{unlisted}. Its account stays held until they end or you sign it out",
             named.join(", ")
         )
     }
@@ -257,6 +277,16 @@ impl Lineage {
         Self::reading(leader, PS_TABLE)
     }
 
+    /// Finds, before its group is killed, the processes of a sandboxed pane no warden
+    /// empties, such as a native lead's in its own server, as [`Self::of`] does. Input: the
+    /// pane's first process, whose id is also its session's. Output: as for [`Self::of`].
+    pub(crate) fn of_sandboxed(leader: u32) -> Result<Self, Unstopped> {
+        Self::of(leader).map(|lineage| Self {
+            sandboxed: true,
+            ..lineage
+        })
+    }
+
     /// Finds a lineage as [`Self::of`] does with the processes listed by `table`.
     /// Inputs: the leader and the listing command. Output: as for [`Self::of`].
     #[cfg(unix)]
@@ -271,6 +301,7 @@ impl Lineage {
             table,
             unchecked: false,
             pending: None,
+            sandboxed: false,
         };
         lineage.unchecked = lineage.refresh().is_err();
         Ok(lineage)
@@ -571,6 +602,7 @@ mod tests {
             table: PS_TABLE,
             unchecked: false,
             pending: None,
+            sandboxed: false,
         })
         .plain();
         assert!(
@@ -700,6 +732,7 @@ mod tests {
             table: PS_TABLE,
             unchecked: false,
             pending: None,
+            sandboxed: false,
         })
         .plain();
     }

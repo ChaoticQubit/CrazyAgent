@@ -1,6 +1,6 @@
 use super::frame::Message;
 use super::glyphs::Glyphs;
-use super::seam::{AccountRow, PoolScope, ProjectCard, Request};
+use super::seam::{AccountRow, Arrival, PoolScope, ProjectCard, Request};
 use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
@@ -110,6 +110,7 @@ pub struct Ctx {
     pub shift_enter: crate::tui::keys::ShiftEnter,
     pub project_step: Option<(crate::protocol::ProjectId, bool)>,
     requests: VecDeque<Request>,
+    refused: Vec<Arrival>,
     reconnect: bool,
     message: Option<Message>,
     generation: u64,
@@ -147,6 +148,7 @@ impl Ctx {
             shift_enter: crate::tui::keys::ShiftEnter::default(),
             project_step: None,
             requests: VecDeque::new(),
+            refused: Vec::new(),
             reconnect: false,
             message: None,
             generation: 0,
@@ -161,22 +163,42 @@ impl Ctx {
         self.theme = Theme::new(self.depth, colors, appearance);
     }
 
-    /// Queues one engine request as `try_request` does, for callers that need
-    /// no answer because the refusal message already tells the owner.
-    /// Input: the request. Output: none.
+    /// Queues one engine request as `try_request` does. A request the full queue refuses
+    /// gets the failed reply that request gets from the engine worker, `owner_busy`, kept
+    /// until the shell delivers it at the end of the event, so the screen that asked stops
+    /// waiting and says so; a refused request with no reply, such as a keystroke, is dropped.
+    /// Every reply is kept, with no cap: each one stands for a request this event made, and
+    /// the shell takes them all at the end of every event. Input: the request. Output: none.
     pub fn request(&mut self, request: Request) {
-        self.try_request(request);
+        if let Err(request) = self.queue(request)
+            && let Some(arrival) = super::run::refused_arrival(*request)
+        {
+            self.refused.push(arrival);
+        }
+    }
+
+    /// Queues one engine request for a caller that handles a refusal itself.
+    /// Input: the request. Output: whether the engine will see it; false only when the
+    /// queue already holds 32 requests and this one was refused.
+    pub fn try_request(&mut self, request: Request) -> bool {
+        self.queue(request).is_ok()
+    }
+
+    /// Takes the busy replies for the requests the full queue refused since the last call,
+    /// oldest first. Input: none. Output: the replies.
+    pub fn take_refused(&mut self) -> Vec<Arrival> {
+        std::mem::take(&mut self.refused)
     }
 
     /// Queues one engine request; duplicates of a queued read are dropped and
     /// keystrokes for the agent terminal already waiting at the back join it.
-    /// Input: the request. Output: whether the engine will see it; false only
-    /// when the queue already holds 32 requests and this one was refused. A
-    /// joined terminal input holds at most the engine's terminal input limit.
-    pub fn try_request(&mut self, request: Request) -> bool {
+    /// Input: the request. Output: Ok when the engine will see it, or the request back
+    /// when the queue already holds 32 requests. A joined terminal input holds at most
+    /// the engine's terminal input limit.
+    fn queue(&mut self, request: Request) -> Result<(), Box<Request>> {
         if matches!(request, Request::Reconnect) {
             self.reconnect = true;
-            return true;
+            return Ok(());
         }
         if let Request::TerminalInput { agent, bytes } = &request
             && let Some(Request::TerminalInput {
@@ -187,7 +209,7 @@ impl Ctx {
             && queued.len() + bytes.len() <= INPUT_BYTES_MAX
         {
             queued.extend_from_slice(bytes);
-            return true;
+            return Ok(());
         }
         let read = matches!(
             request,
@@ -199,14 +221,14 @@ impl Ctx {
                 .iter()
                 .any(|queued| std::mem::discriminant(queued) == std::mem::discriminant(&request))
         {
-            return true;
+            return Ok(());
         }
         if self.requests.len() >= QUEUE_MAX {
             self.say(Message::error(
                 "Too many requests are waiting.",
                 "Wait a moment, then try again.",
             ));
-            return false;
+            return Err(Box::new(request));
         }
         match request {
             Request::Profile => self.store.profile = Load::Loading,
@@ -223,7 +245,7 @@ impl Ctx {
         }
         self.requests.push_back(request);
         assert!(self.requests.len() <= QUEUE_MAX);
-        true
+        Ok(())
     }
 
     /// Takes the next queued request.
@@ -372,6 +394,63 @@ mod tests {
         assert!(ctx.next_terminal_request().is_none());
         assert!(matches!(ctx.next_request(), Some(Request::Projects)));
         assert!(matches!(ctx.next_request(), Some(Request::Pools)));
+    }
+
+    fn full() -> Ctx {
+        let mut ctx = ctx();
+        while ctx.try_request(pool_removal()) {}
+        assert_eq!(ctx.queued(), QUEUE_MAX);
+        ctx
+    }
+
+    fn pool_removal() -> Request {
+        Request::EditPool {
+            change: crate::tui::seam::PoolChange::Remove {
+                id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+                opened_projects: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn every_refused_request_one_event_makes_is_kept_for_its_busy_reply() {
+        let mut ctx = full();
+        for _ in 0..40 {
+            ctx.request(pool_removal());
+        }
+        assert_eq!(
+            ctx.take_refused().len(),
+            40,
+            "no refused request past the first 32 is dropped without a reply"
+        );
+        assert!(ctx.take_refused().is_empty());
+    }
+
+    #[test]
+    fn refused_keystrokes_leave_room_for_the_replies_screens_wait_on() {
+        let mut ctx = full();
+        let agent = crate::terminal::AgentId::team(1).unwrap();
+        for _ in 0..40 {
+            ctx.request(Request::TerminalInput {
+                agent: agent.clone(),
+                bytes: b"x".to_vec(),
+            });
+        }
+        ctx.request(pool_removal());
+        assert_eq!(
+            ctx.take_refused().len(),
+            1,
+            "only the pool change waits on a reply"
+        );
+    }
+
+    #[test]
+    fn an_event_refused_over_a_thousand_times_still_answers_each_one_busy() {
+        let mut ctx = full();
+        for _ in 0..1100 {
+            ctx.request(pool_removal());
+        }
+        assert_eq!(ctx.take_refused().len(), 1100, "no refusal is past a cap");
     }
 
     #[test]

@@ -217,7 +217,8 @@ impl Team {
     }
 
     /// Sends the open team settings' next read once one is due, and the harness catalog
-    /// read once their master harness picker asks for it.
+    /// read once their master harness picker asks for it; a read the full queue refuses is
+    /// forgotten so the next key asks again.
     /// Input: the context. Output: none; a Setup or a Settings request may be queued.
     fn pump_settings(&mut self, ctx: &mut Ctx) {
         let Some(view) = self.settings.as_mut() else {
@@ -226,8 +227,10 @@ impl Team {
         if view.wants_catalog() {
             ctx.request(Request::Settings(Box::new(SettingsJob::Harnesses)));
         }
-        if let Some(query) = view.next_query(now_ms()) {
-            ctx.request(Request::Setup(query));
+        if let Some(query) = view.next_query(now_ms())
+            && !ctx.try_request(Request::Setup(query))
+        {
+            view.forget_reads();
         }
     }
 

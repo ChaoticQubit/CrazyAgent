@@ -1048,6 +1048,8 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
 /// server (see `Tmux::lead_environment`) with `pane_env` set over it in the lead's pane only.
 /// The lead's window becomes the session's current one, since tmux puts a split the lead's
 /// app runs without a target into the current window, which would otherwise be the holder.
+/// A command the engine put under its pane keeper is taken back out of it first
+/// (`crate::sandbox::unkept_pane`): the keeper cannot run inside the server's sandbox.
 /// Takes the agent, the command, the server's profile and those variables. Returns the line,
 /// or `terminal_command_invalid` for any other command or a variable name not plain.
 fn confined_line(
@@ -1058,17 +1060,22 @@ fn confined_line(
 ) -> Result<String, HostError> {
     let invalid = || failure("terminal_command_invalid");
     let cwd = checked(command)?;
+    #[cfg(target_os = "macos")]
+    let unkept = crate::sandbox::unkept_pane(&command.argv);
+    #[cfg(not(target_os = "macos"))]
+    let unkept: Option<Vec<String>> = None;
+    let argv = unkept.as_deref().unwrap_or(&command.argv);
     let profile = profile.to_str().ok_or_else(invalid)?;
     let confined = [crate::sandbox::SANDBOX_EXEC, "-f", profile];
-    if command.argv.len() <= confined.len()
-        || command.argv[..confined.len()]
+    if argv.len() <= confined.len()
+        || argv[..confined.len()]
             .iter()
             .zip(confined)
             .any(|(arg, wanted)| arg != wanted)
     {
         return Err(invalid());
     }
-    let program = &command.argv[confined.len()..];
+    let program = &argv[confined.len()..];
     let first = &program[0];
     if first.is_empty() || first.starts_with('-') || first.contains('=') {
         return Err(invalid());
@@ -1992,6 +1999,10 @@ impl Host for Tmux {
             &format!("kill-pane -t {pane}"),
         )
     }
+    fn unkept(&self, _agent: &AgentId) -> bool {
+        self.confined.is_some()
+    }
+
     fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
         let pane = if self.confined.is_some() {
             self.own_pane(agent)?

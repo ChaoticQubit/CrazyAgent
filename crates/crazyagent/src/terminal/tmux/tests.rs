@@ -233,6 +233,100 @@ fn the_attach_history_fills_a_fresh_view_scrollback_and_leaves_the_screen_to_red
     }
 }
 
+/// A native lead's own server takes the lead's command back out of the engine's own keeper
+/// and pane shim, which cannot run inside the server's sandbox, and checks what is left as
+/// strictly as a plain command; any other wrapper, keeper or shim text is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_lead_line_takes_only_the_engines_own_keeper_back_out() {
+    use crate::sandbox::{KEEPER, PANE_SHIM, SANDBOX_EXEC, kept_pane};
+    let agent = AgentId::team(4).unwrap();
+    let profile = Path::new("/private/tmp/lead.sb");
+    let plain = |profile: &str| -> Vec<String> {
+        [
+            SANDBOX_EXEC,
+            "-f",
+            profile,
+            "/usr/local/bin/claude",
+            "--resume",
+        ]
+        .map(String::from)
+        .to_vec()
+    };
+    let command = |argv: Vec<String>| InteractiveCommand {
+        argv,
+        cwd: PathBuf::from("/private/tmp/project"),
+        env: vec![],
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    let line = |argv: Vec<String>| confined_line(&agent, &command(argv), profile, &[]);
+    let lead = plain("/private/tmp/lead.sb");
+    let kept = kept_pane(lead.clone()).unwrap();
+    assert_eq!(
+        line(kept.clone()).map_err(|error| error.0),
+        Ok(line(lead.clone()).unwrap()),
+        "the lead command the engine kept is checked as the plain one"
+    );
+
+    let shim = KEEPER.len() + 3;
+    let mut keeper_text = kept.clone();
+    keeper_text[KEEPER.len() - 2].push(' ');
+    let mut shim_text = kept.clone();
+    shim_text[shim + PANE_SHIM.len() - 2].push(' ');
+    let mut no_shim = kept.clone();
+    no_shim.drain(shim..shim + PANE_SHIM.len());
+    let mut not_sandboxed = kept.clone();
+    not_sandboxed[KEEPER.len()] = "/bin/sh".into();
+    let mut wrapped = vec![
+        "/usr/bin/perl".to_owned(),
+        "-e".into(),
+        "exec @ARGV".into(),
+        "--".into(),
+    ];
+    wrapped.extend(lead.clone());
+    let refused = [
+        kept_pane(plain("/private/tmp/other.sb")).unwrap(),
+        keeper_text,
+        shim_text,
+        no_shim,
+        not_sandboxed,
+        wrapped,
+        kept[..KEEPER.len()]
+            .iter()
+            .chain(&kept[shim..])
+            .cloned()
+            .collect(),
+    ];
+    for argv in refused {
+        assert_eq!(
+            line(argv.clone()).unwrap_err().0,
+            "terminal_command_invalid",
+            "accepted {argv:?}"
+        );
+    }
+}
+
+/// Keeper r1 KP-L3: a pane's keeper is a perl outside the sandbox, so no pane command may
+/// carry a variable that makes perl load code from elsewhere, in any letter case.
+#[test]
+fn a_pane_command_with_a_perl_load_variable_is_refused() {
+    let agent = AgentId::team(4).unwrap();
+    let command = |name: &str| InteractiveCommand {
+        argv: vec!["/usr/local/bin/claude".into()],
+        cwd: PathBuf::from("/private/tmp/project"),
+        env: vec![(name.into(), "/private/tmp/planted".into())],
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    assert!(spawn_line(&agent, &command("TERM")).is_ok());
+    for name in ["PERL5LIB", "PERL5OPT", "PERLLIB", "PERL5DB", "perl5opt"] {
+        assert_eq!(
+            spawn_line(&agent, &command(name)).map_err(|error| error.0),
+            Err("terminal_command_invalid".to_owned()),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn spawn_commands_go_through_env_with_every_argument_quoted() {
     let agent = AgentId::team(4).unwrap();

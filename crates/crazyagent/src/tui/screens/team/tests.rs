@@ -3892,3 +3892,334 @@ fn an_agent_the_delivery_setting_leaves_without_messages_says_so_under_its_row()
         "only the noted agent says it: {tree:#?}"
     );
 }
+
+fn fill_queue(shell: &mut Shell) {
+    let mut filled = 0;
+    while filled < 64
+        && shell
+            .ctx
+            .try_request(Request::TeamGraph { project: project() })
+    {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+}
+
+#[test]
+fn a_team_tab_settings_change_the_full_queue_refuses_says_busy_and_can_be_made_again() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::TeamAction;
+    let mut shell = fresh(100, 40);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('s'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(finished_team()))),
+    ));
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.key(Key::Char('w'));
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("CrazyAgent is busy"),
+        "the refused change is said, not dropped: {text}"
+    );
+    assert!(!text.contains("Still saving"), "{text}");
+    requests(&mut shell);
+    shell.key(Key::Char('w'));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| matches!(
+            request,
+            Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::KeepWarm { .. },
+                ..
+            })
+        )),
+        "the change goes out once the queue has room: {sent:?}"
+    );
+}
+
+#[test]
+fn a_team_tab_settings_read_the_full_queue_refuses_is_asked_again_on_the_next_key() {
+    use crate::project_setup::SetupQuery;
+    let mut shell = team();
+    fill_queue(&mut shell);
+    shell.key(Key::Char('s'));
+    requests(&mut shell);
+    shell.key(Key::Down);
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| matches!(
+            request,
+            Request::Setup(SetupQuery::Team { project: asked }) if *asked == project()
+        )),
+        "the dropped read is not counted as out: {sent:?}"
+    );
+}
+
+fn busy(shell: &Shell) -> bool {
+    shell
+        .ctx
+        .message()
+        .is_some_and(|said| said.rest.contains("CrazyAgent is busy"))
+}
+
+#[test]
+fn a_live_master_start_the_full_queue_refuses_says_busy_instead_of_waiting_forever() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.arrive(switch(Some(false), None));
+    let rows = render(&mut shell);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("The master terminal could not start.")),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("CrazyAgent is busy")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn an_open_session_check_the_full_queue_refuses_says_busy() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.arrive(switch(Some(true), None));
+    assert!(busy(&shell), "{:?}", shell.ctx.message());
+}
+
+#[test]
+fn a_start_all_the_full_queue_refuses_says_busy_and_s_asks_again() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(paused_read(Some(true)));
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.key(Key::Char('S'));
+    let lead = shell.ctx.message().unwrap().lead.clone();
+    assert!(
+        lead.contains("CrazyAgent is busy"),
+        "the refused Start all is said in words: {lead}"
+    );
+    requests(&mut shell);
+    shell.key(Key::Char('S'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [change] if resume_sent(change)),
+        "S asks again once the queue has room: {sent:?}"
+    );
+}
+
+/// Opens the Finished box of a team with two finished agents and picks Sub-agent 3, the one
+/// that can wake. Takes nothing. Returns the shell with an empty request queue.
+fn finished_box() -> Shell {
+    use crate::project_setup::{SetupQuery, SetupView};
+    let mut shell = fresh(120, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('f'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(finished_team()))),
+    ));
+    shell.key(Key::Down);
+    requests(&mut shell);
+    shell
+}
+
+#[test]
+fn a_wake_the_full_queue_refuses_says_busy_and_w_wakes_again() {
+    use crate::project_setup::SetupQuery;
+    use crate::team::TeamAction;
+    let mut shell = finished_box();
+    fill_queue(&mut shell);
+    shell.key(Key::Char('w'));
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Could not wake Sub-agent 3."), "{text}");
+    assert!(busy(&shell), "{:?}", shell.ctx.message());
+    requests(&mut shell);
+    shell.key(Key::Char('w'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::WakeAgent { agent: 3, .. },
+                ..
+            })]
+        ),
+        "w wakes again once the queue has room: {sent:?}"
+    );
+}
+
+#[test]
+fn a_finished_setting_switch_the_full_queue_refuses_says_busy_and_h_switches_again() {
+    use crate::project_setup::SetupQuery;
+    use crate::team::TeamAction;
+    let mut shell = finished_box();
+    fill_queue(&mut shell);
+    shell.key(Key::Char('h'));
+    let lead = shell.ctx.message().unwrap().lead.clone();
+    assert_eq!(lead, "Could not change where finished agents show.");
+    assert!(busy(&shell), "{:?}", shell.ctx.message());
+    requests(&mut shell);
+    shell.key(Key::Char('h'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::FinishedAgents { .. },
+                ..
+            })]
+        ),
+        "h switches again once the queue has room: {sent:?}"
+    );
+}
+
+#[test]
+fn an_answer_the_full_queue_refuses_is_kept_said_busy_and_sent_again_with_enter() {
+    use crate::coord::{QuestionFor, Severity};
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::TeamAction;
+    use crate::team::questions::{Inbox, OwnerQuestion};
+    let mut shell = fresh(120, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('q'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::CoordQuestions { project: project() },
+        Ok(SetupView::CoordQuestions(Box::new(Inbox {
+            project_id: project(),
+            questions: vec![OwnerQuestion {
+                id: 41,
+                agent: 3,
+                label: "Sub-agent 3".into(),
+                severity: Severity::High,
+                asked_for: QuestionFor::Me,
+                for_label: "Me".into(),
+                text: "May I delete the old fixtures?".into(),
+                assumption: None,
+                created_ms: 1,
+                terminal: None,
+            }],
+            more: 0,
+            waiting: Vec::new(),
+        }))),
+    ));
+    shell.key(Key::Enter);
+    for typed in "Keep them.".chars() {
+        shell.key(Key::Char(typed));
+    }
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.key(Key::Enter);
+    let lead = shell.ctx.message().unwrap().lead.clone();
+    assert_eq!(lead, "The answer was not sent.");
+    assert!(busy(&shell), "{:?}", shell.ctx.message());
+    assert!(
+        render(&mut shell).join("\n").contains("Keep them."),
+        "the owner's answer stays in the box"
+    );
+    requests(&mut shell);
+    shell.key(Key::Enter);
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::AnswerQuestion { message: 41, text, .. },
+                ..
+            })] if text == "Keep them."
+        ),
+        "Enter sends the same answer once the queue has room: {sent:?}"
+    );
+}
+
+#[test]
+fn a_cleanup_read_the_full_queue_refuses_says_busy_and_c_reads_again() {
+    use crate::tui::client::cleanup::CleanupQuery;
+    let mut shell = team();
+    fill_queue(&mut shell);
+    shell.key(Key::Char('c'));
+    assert!(busy(&shell), "{:?}", shell.ctx.message());
+    assert!(
+        !render(&mut shell)
+            .join("\n")
+            .contains("Reading finished agents"),
+        "the box does not wait for a read that never went out"
+    );
+    requests(&mut shell);
+    shell.key(Key::Char('c'));
+    assert_eq!(
+        cleanup_sent(&mut shell),
+        vec![CleanupQuery::Finished { project: project() }]
+    );
+}
+
+#[test]
+fn a_cleanup_removal_the_full_queue_refuses_says_nothing_was_removed() {
+    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
+    let mut shell = team();
+    shell.key(Key::Char('c'));
+    let read = CleanupQuery::Finished { project: project() };
+    assert_eq!(cleanup_sent(&mut shell), vec![read.clone()]);
+    shell.arrive(cleanup_reply(
+        read,
+        Ok(CleanupReply::Finished(vec![finished(
+            4,
+            "Ada (@login-page)",
+            1024 * 1024,
+        )])),
+    ));
+    fill_queue(&mut shell);
+    shell.key(Key::Char('y'));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Nothing was removed.");
+    assert!(busy(&shell), "{message:?}");
+    assert!(
+        !render(&mut shell).join("\n").contains("Removing"),
+        "the box does not wait for a removal that never went out"
+    );
+}
+
+#[test]
+fn a_terminal_attach_the_full_queue_refuses_says_busy_and_enter_attaches_again() {
+    let mut shell = team();
+    fill_queue(&mut shell);
+    shell.key(Key::Enter);
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("The terminal closed."),
+        "the refused attach closes the box instead of waiting for frames: {text}"
+    );
+    assert!(text.contains("CrazyAgent is busy"), "{text}");
+    requests(&mut shell);
+    shell.key(LEADER);
+    shell.key(Key::Enter);
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| matches!(
+            request,
+            Request::TerminalAttach { agent } if agent.as_str() == "team-1"
+        )),
+        "Enter on the agent asks for its terminal again: {sent:?}"
+    );
+}

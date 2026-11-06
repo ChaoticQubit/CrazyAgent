@@ -275,6 +275,10 @@ const REFUSED_VARIABLES: &[&str] = &[
     "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_SYSTEM",
     "GOOGLE_APPLICATION_CREDENTIALS",
+    "PERL5LIB",
+    "PERL5OPT",
+    "PERLLIB",
+    "PERL5DB",
 ];
 
 const REFUSED_PREFIXES: &[&str] = &[
@@ -327,7 +331,8 @@ pub const AGENT_TLS_ENV: [(&str, &str); 0] = [];
 
 /// Tells whether an environment variable name may never reach an agent process: GitHub and
 /// git credential settings, the owner's SSH agent, cloud and provider keys, tokens,
-/// secrets, passwords and the engine's own `CRAZYAGENT_` settings, including the model key
+/// secrets, passwords, the perl variables that would make a pane's keeper, a perl outside
+/// the sandbox, load other code, and the engine's own `CRAZYAGENT_` settings, including the model key
 /// name `ANTHROPIC_API_KEY`, which passes only with the local placeholder (see
 /// [`agent_variable_allowed`]). Input: the variable name. Output: true when refused.
 pub fn agent_env_refused(name: &OsStr) -> bool {
@@ -516,6 +521,23 @@ pub fn kept_pane(argv: Vec<String>) -> Option<Vec<String>> {
     assert_eq!(kept.len(), KEEPER.len() + PANE_SHIM.len() + length);
     assert_eq!(kept[KEEPER.len()], SANDBOX_EXEC);
     Some(kept)
+}
+
+/// Takes a pane command back out of the [`KEEPER`] and the [`PANE_SHIM`], for a pane that
+/// starts in a server already running inside its sandbox, where neither can run. Input: an
+/// argv. Output: the `sandbox-exec -f <profile> <program> <arguments>` that [`kept_pane`]
+/// kept when keeping it again rebuilds exactly this argv, or none for any other argv.
+#[cfg(target_os = "macos")]
+pub fn unkept_pane(argv: &[String]) -> Option<Vec<String>> {
+    let shim = KEEPER.len() + 3;
+    let program = shim + PANE_SHIM.len();
+    if argv.len() <= program || argv[KEEPER.len()] != SANDBOX_EXEC || argv[KEEPER.len() + 1] != "-f"
+    {
+        return None;
+    }
+    let mut plain = argv[KEEPER.len()..shim].to_vec();
+    plain.extend_from_slice(&argv[program..]);
+    (kept_pane(plain.clone()).as_deref() == Some(argv)).then_some(plain)
 }
 
 /// Builds the one command every sandboxed headless agent process starts from: `-f

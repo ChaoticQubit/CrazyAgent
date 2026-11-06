@@ -277,11 +277,11 @@ fn deliver_to(
     }
 }
 
-/// Hands a Codex agent's waiting messages to its app-server bridge (DEC-104 Q13); the
-/// owner's notices alone only steer a turn the agent runs while its status is working.
-/// Takes the database, the agent, its status, the messages, the Delivery setting, the time
-/// and the reach. Returns what [`deliver_to`] answers once the bridge took them or they
-/// wait, or none when they fall back to typing.
+/// Hands a Codex agent's waiting messages to its app-server bridge (DEC-104 Q13), keeping
+/// the turn they went into with them (b19 P2); the owner's notices alone only steer a turn
+/// the agent runs while its status is working. Takes the database, the agent, its status,
+/// the messages, the Delivery setting, the time and the reach. Returns what [`deliver_to`]
+/// answers once the bridge took them or they wait, or none when they fall back to typing.
 fn bridge(
     db: &Connection,
     agent: AgentId,
@@ -297,8 +297,11 @@ fn bridge(
     }
     let (text, carried) = batch(db, agent, messages)?;
     let home = crate::team::runtime::agent_home(reach.state, agent);
-    if codex::deliver(&home, &text, !alone) == Bridged::Delivered {
+    if let Bridged::Delivered(turn) = codex::deliver(&home, &text, !alone) {
         mark_all(db, &carried, Receipt::Delivered, now)?;
+        if let Some(turn) = turn {
+            super::messages::delivered_into(db, &carried, &turn)?;
+        }
         return Ok(Some(carried.len() == messages.len()));
     }
     if alone || delivery == Delivery::NativeOnly {

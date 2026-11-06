@@ -18,6 +18,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::project_setup::ProjectSetup;
     use crazyagent::project_setup::ResearchKind;
     use crazyagent::projects_home::AddMode;
+    use crazyagent::projects_home::AddOverride;
     use crazyagent::protocol::ProjectSpec;
     use crazyagent::sandbox_settings::SandboxSettings;
     use crazyagent::scheduling::ScheduleChange;
@@ -1317,13 +1318,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 source: String,
                 mode: AddMode,
+                overrides: Vec<AddOverride>,
                 generation: u64,
             }
-            let Args { source, mode, generation } = match parse(args) {
+            let Args { source, mode, overrides, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .add_existing_folder(source, mode, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .add_existing_folder(source, mode, overrides, generation) .await }.await;
             routed(result)
         }
         "desktop_start_onboarding" => {

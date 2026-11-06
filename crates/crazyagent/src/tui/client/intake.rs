@@ -88,9 +88,16 @@ impl IntakeEvent {
     /// Takes the job.
     /// Returns the event for its query, or for the status read a token job answers as.
     pub(in crate::tui) fn unavailable(job: &IntakeJob) -> Self {
+        Self::failed(job, "trusted_connection_unavailable")
+    }
+
+    /// The reply for a job that failed before it reached the engine.
+    /// Takes the job and the problem code.
+    /// Returns the event for its query, or for the status read a token job answers as.
+    pub(in crate::tui) fn failed(job: &IntakeJob, code: &str) -> Self {
         Self {
             query: job.query(),
-            result: Err("trusted_connection_unavailable".into()),
+            result: Err(code.to_owned()),
         }
     }
 }
