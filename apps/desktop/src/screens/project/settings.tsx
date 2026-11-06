@@ -466,8 +466,8 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
     {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
-    {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}
     {view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}</p>}
+    {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
       onClick={() => confirmFirst(access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
