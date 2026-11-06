@@ -256,6 +256,33 @@ impl ChannelCase {
         (begun.reply.fact, begun.work.unwrap())
     }
 
+    /// Changes what a sign-in was admitted under: `owner` revokes the TUI owner, `entry`
+    /// edits the sign-in's own connection, and `elsewhere` edits only another connection,
+    /// which a sign-in outlives because it is bound to its own entry (NS-3).
+    /// Inputs: the change and the revocation's operation id. Output: nothing.
+    async fn change(&self, change: &str, revocation: &str) {
+        let edit = |from: &str, to: &str| {
+            assert_eq!(CATALOG.matches(from).count(), 1);
+            std::fs::write(&self.global, CATALOG.replace(from, to)).unwrap();
+        };
+        match change {
+            "owner" => {
+                self.host
+                    .control(OwnerControl {
+                        operation_id: request(revocation),
+                        target: OwnerClientKind::Tui,
+                        expected_epoch: self.admission().owner_epoch,
+                        decision: OwnerDecision::Revoke,
+                    })
+                    .await
+                    .unwrap();
+            }
+            "entry" => edit(r#"id = "model-a""#, r#"id = "model-a2""#),
+            "elsewhere" => edit(r#"id = "model-alias""#, r#"id = "model-alias2""#),
+            _ => unreachable!(),
+        }
+    }
+
     async fn launch(&self, id: &str) -> (NativeAuthFact, NativeAuthCustodyLaunch) {
         let (fact, work) = self.work(id).await;
         let launch = self.host.prepare_native_auth_custody(work).await.unwrap();
@@ -604,21 +631,15 @@ async fn native_auth_channel_consumes_capability_once_and_rejects_second_attach(
 
 #[tokio::test]
 async fn native_auth_channel_rejects_stale_owner_and_source_before_token_grant() {
-    for change in ["owner", "source"] {
+    for change in ["owner", "entry", "elsewhere"] {
         channel_case(move |case| async move {
             let (_, work) = case.work("stale-before-token").await;
-            if change == "owner" {
-                case.host
-                    .control(OwnerControl {
-                        operation_id: request("revoke-before-token"),
-                        target: OwnerClientKind::Tui,
-                        expected_epoch: case.admission().owner_epoch,
-                        decision: OwnerDecision::Revoke,
-                    })
-                    .await
-                    .unwrap();
-            } else {
-                std::fs::write(&case.global, format!("{CATALOG}\n")).unwrap();
+            case.change(change, "revoke-before-token").await;
+            if change == "elsewhere" {
+                let launch = case.host.prepare_native_auth_custody(work).await.unwrap();
+                assert!(case.host.authority.native_auth.lock().unwrap().is_some());
+                drop(launch);
+                return;
             }
             let before = case.snapshot();
             assert!(case.host.prepare_native_auth_custody(work).await.is_err());
@@ -627,6 +648,30 @@ async fn native_auth_channel_rejects_stale_owner_and_source_before_token_grant()
         })
         .await;
     }
+}
+
+/// Pin for the dispatch check: a revoked owner's sign-in stays refused even when only
+/// another connection changed, the one edit after which its own entry still holds (NS-3).
+/// It passes before and after the dispatch check stopped rescuing every refusal, because
+/// the continuation check refuses the revoked owner again with the same code.
+#[tokio::test]
+async fn native_auth_channel_refuses_a_revoked_owner_after_an_edit_elsewhere() {
+    channel_case(|case| async move {
+        let (_, work) = case.work("revoked-after-other-edit").await;
+        case.change("owner", "revoke-after-other-edit").await;
+        case.change("elsewhere", "").await;
+        let before = case.snapshot();
+        let refused = case
+            .host
+            .prepare_native_auth_custody(work)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(refused.0, "owner_grant_stale_or_revoked");
+        assert!(case.host.authority.native_auth.lock().unwrap().is_none());
+        assert_eq!(case.snapshot(), before);
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -914,24 +959,20 @@ async fn native_auth_channel_cancellation_uses_committed_actor_state_and_keeps_g
 
 #[tokio::test]
 async fn native_auth_channel_source_change_or_owner_revoke_cannot_continue_or_retire() {
-    for change in ["source", "owner"] {
+    for change in ["entry", "owner", "elsewhere"] {
         channel_case(move |case| async move {
             let (fact, launch) = case.launch("stale-live-custody").await;
             let mut channel = case.channel().await;
             let guard = case.guard(&fact, NativeProfileUsePurpose::Authentication);
             assert!(channel.revalidate(&guard).await.is_ok());
-            if change == "source" {
-                std::fs::write(&case.global, format!("{CATALOG}\n")).unwrap();
-            } else {
-                case.host
-                    .control(OwnerControl {
-                        operation_id: request("revoke-live-custody"),
-                        target: OwnerClientKind::Tui,
-                        expected_epoch: case.admission().owner_epoch,
-                        decision: OwnerDecision::Revoke,
-                    })
-                    .await
-                    .unwrap();
+            case.change(change, "revoke-live-custody").await;
+            if change == "elsewhere" {
+                assert!(matches!(
+                    channel.revalidate(&guard).await.unwrap(),
+                    NativeAuthCustodyControl::Continue
+                ));
+                drop((guard, channel, launch));
+                return;
             }
             let before = case.snapshot();
             assert!(channel.revalidate(&guard).await.is_err());
