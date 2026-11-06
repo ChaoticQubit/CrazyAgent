@@ -231,18 +231,23 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
 
 after(async () => {
   run.log.closing = true;
-  if (run.evidence) {
-    writeFileSync(join(run.evidence, "calls.json"), JSON.stringify(run.log.calls, null, 1));
-    writeFileSync(join(run.evidence, "answers.json"), JSON.stringify(run.log.trail, null, 1));
+  let left = [];
+  try {
+    if (run.evidence) {
+      writeFileSync(join(run.evidence, "calls.json"), JSON.stringify(run.log.calls, null, 1));
+      writeFileSync(join(run.evidence, "answers.json"), JSON.stringify(run.log.trail, null, 1));
+    }
+    left = run.disk ? releaseDisk(run.disk) : [];
+    run.site?.server.close();
+    await stop(run.bridgeProcess);
+    await stop(run.engine);
+  } finally {
+    if (run.root) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
-  const left = run.disk ? releaseDisk(run.disk) : [];
-  run.site?.server.close();
-  await stop(run.bridgeProcess);
-  await stop(run.engine);
+  assert.ok(!run.root || !existsSync(run.root), `the temp root ${run.root} is removed`);
   assert.deepEqual(left, [], "the scratch disk is detached and its image deleted");
   assert.deepEqual(run.log.invalid, [], "the bridge accepted every command's arguments");
   assert.deepEqual(run.log.dropped, [], "the bridge answered every call");
-  if (run.root) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 /** Move anyway on a folder with no git (DEC-115 addendum): the question shows
