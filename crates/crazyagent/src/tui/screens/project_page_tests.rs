@@ -178,6 +178,11 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     });
                     connection.process(*query).unwrap();
                 }
+                Request::Questions(query)
+                    if *query == crate::tui::client::questions::QuestionsQuery::Counts =>
+                {
+                    connection.questions(*query).unwrap();
+                }
                 other => panic!("project pages never send {other:?}"),
             }
         }

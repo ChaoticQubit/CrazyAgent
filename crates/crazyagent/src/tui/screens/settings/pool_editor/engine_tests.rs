@@ -150,6 +150,11 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push("settings");
                     connection.settings(*job).unwrap();
                 }
+                Request::Questions(query)
+                    if *query == crate::tui::client::questions::QuestionsQuery::Counts =>
+                {
+                    connection.questions(*query).unwrap();
+                }
                 other => panic!("Settings pools never send {other:?}"),
             }
         }

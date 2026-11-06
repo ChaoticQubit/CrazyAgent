@@ -170,7 +170,7 @@ fn fresh(width: u16, height: u16) -> Shell {
     let screen = open(&place, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     assert!(matches!(
-        shell.ctx.next_request(),
+        shell.ctx.next_screen_request(),
         Some(Request::TeamGraph { project: asked }) if asked == project()
     ));
     shell
@@ -213,7 +213,7 @@ fn chars(row: &str, from: usize, to: usize) -> String {
 }
 
 fn requests(shell: &mut Shell) -> Vec<Request> {
-    std::iter::from_fn(|| shell.ctx.next_request()).collect()
+    std::iter::from_fn(|| shell.ctx.next_screen_request()).collect()
 }
 
 fn input(request: &Request) -> Option<(&str, &[u8])> {
@@ -3461,14 +3461,14 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
         project: project(),
         result: Ok(Box::new(graph)),
     });
-    let first = served(&mut controller, shell.ctx.next_request().unwrap()).await;
-    assert!(shell.ctx.next_request().is_none());
+    let first = served(&mut controller, shell.ctx.next_screen_request().unwrap()).await;
+    assert!(shell.ctx.next_screen_request().is_none());
     shell.arrive(first);
     let rows = render(&mut shell);
     assert!(rows[39].contains("q Questions (2)"), "{}", rows[39]);
 
     shell.key(Key::Char('q'));
-    let listed = served(&mut controller, shell.ctx.next_request().unwrap()).await;
+    let listed = served(&mut controller, shell.ctx.next_screen_request().unwrap()).await;
     shell.arrive(listed);
     let rows = render(&mut shell).join("\n");
     assert!(rows.contains("May I delete the old fixtures?"), "{rows}");
@@ -3485,7 +3485,7 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
         shell.key(Key::Char(typed));
     }
     shell.key(Key::Enter);
-    let change = shell.ctx.next_request().unwrap();
+    let change = shell.ctx.next_screen_request().unwrap();
     let Request::Setup(SetupQuery::TeamChange { action, .. }) = &change else {
         panic!("Enter on a written answer sends the team change");
     };
@@ -3523,9 +3523,9 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
         "the answer reaches the asker as the owner's reply"
     );
 
-    let reread = served(&mut controller, shell.ctx.next_request().unwrap()).await;
+    let reread = served(&mut controller, shell.ctx.next_screen_request().unwrap()).await;
     shell.arrive(reread);
-    assert!(shell.ctx.next_request().is_none());
+    assert!(shell.ctx.next_screen_request().is_none());
     shell.key(Key::Enter);
     let opened = requests(&mut shell);
     assert!(
