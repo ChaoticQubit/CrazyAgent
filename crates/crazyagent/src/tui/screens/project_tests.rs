@@ -136,6 +136,22 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 SetupAction::PlanRoadmap { project_id } => {
                     controller.plan_roadmap(project_id, generation).await
                 }
+                SetupAction::Update {
+                    project_id,
+                    expected_revision,
+                    name,
+                    setup,
+                } => {
+                    controller
+                        .update_project_setup(
+                            project_id,
+                            expected_revision,
+                            name,
+                            setup,
+                            generation,
+                        )
+                        .await
+                }
                 other => panic!("the project screen never sends {other:?}"),
             }
             .map_err(problem)?,
