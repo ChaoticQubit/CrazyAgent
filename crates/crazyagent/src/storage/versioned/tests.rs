@@ -388,6 +388,7 @@ fn a_forgotten_item_starts_again_at_version_0_without_its_records() {
     let missing = missing.path().canonicalize().unwrap();
     assert!(open(&missing).is_err(), "open never creates engine.db");
     assert!(!missing.join("engine.db").exists());
-    let mut opened = open(&path).unwrap();
+    let root = path.parent().unwrap().canonicalize().unwrap();
+    let mut opened = open(&root).unwrap();
     assert_eq!(read(&mut opened, &item).version, 1);
 }
