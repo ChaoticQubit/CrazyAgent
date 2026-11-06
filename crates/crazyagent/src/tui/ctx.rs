@@ -444,12 +444,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "more than 1024")]
-    fn an_event_that_asks_the_engine_more_than_1024_times_is_a_bug() {
+    fn an_event_refused_over_a_thousand_times_still_answers_each_one_busy() {
         let mut ctx = full();
-        for _ in 0..1025 {
+        for _ in 0..1100 {
             ctx.request(pool_removal());
         }
+        assert_eq!(ctx.take_refused().len(), 1100, "no refusal is past a cap");
     }
 
     #[test]
