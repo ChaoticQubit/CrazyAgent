@@ -47,7 +47,7 @@ pub const NOTES_MAX: usize = 16;
 const QUOTED_BYTES_MAX: usize = 200;
 const BUSY_WAIT: Duration = Duration::from_secs(5);
 const COLUMNS: &str = "id,project,asker,question,options_json,recommended,context,status,answer,answered_by,created_ms,settled_ms";
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS owner_questions (
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS questions_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,
     asker TEXT NOT NULL,
@@ -65,8 +65,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS owner_questions (
     created_ms INTEGER NOT NULL,
     settled_ms INTEGER
 );
-CREATE INDEX IF NOT EXISTS owner_questions_status ON owner_questions(project, status, id);
-CREATE INDEX IF NOT EXISTS owner_questions_asker ON owner_questions(project, asker, status);";
+CREATE INDEX IF NOT EXISTS questions_log_status ON questions_log(project, status, id);
+CREATE INDEX IF NOT EXISTS questions_log_asker ON questions_log(project, asker, status);";
 
 /// The most bytes one question's stored texts hold.
 const STORED_BYTES_MAX: usize = QUESTION_BYTES_MAX
@@ -498,7 +498,7 @@ pub fn record_from_chat(
     }
     let turn: Option<String> = tx
         .query_row(
-            "SELECT m.text FROM team_messages m, team_owner_turns t, owner_questions q
+            "SELECT m.text FROM team_messages m, team_owner_turns t, questions_log q
              WHERE m.id=?1 AND m.project=?2 AND m.author='owner' AND t.message=m.id
              AND t.project=m.project AND q.id=?3 AND m.id>q.turn_floor",
             params![owner_turn, project.as_str(), column(question.id)],
@@ -549,7 +549,7 @@ pub fn record_from_session(
     if settled == Settlement::Settled {
         let marked = tx
             .execute(
-                "UPDATE owner_questions SET noted_ms=?2 WHERE id=?1 AND noted_ms IS NULL",
+                "UPDATE questions_log SET noted_ms=?2 WHERE id=?1 AND noted_ms IS NULL",
                 params![column(id), now_ms()],
             )
             .map_err(unavailable)?;
@@ -647,7 +647,7 @@ fn notes_of(db: &Connection, project: &ProjectId, asker: &str) -> Result<Vec<Not
     let settled = select(
         &tx,
         &format!(
-            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND asker=?2
+            "SELECT {COLUMNS} FROM questions_log WHERE project=?1 AND asker=?2
              AND status IN ('answered','dismissed') AND noted_ms IS NULL ORDER BY id LIMIT ?3"
         ),
         params![project.as_str(), asker, NOTES_MAX as i64],
@@ -676,7 +676,7 @@ fn mark_noted(
     let now = now_ms();
     for id in ids {
         tx.execute(
-            "UPDATE owner_questions SET noted_ms=?4 WHERE id=?1 AND project=?2 AND asker=?3
+            "UPDATE questions_log SET noted_ms=?4 WHERE id=?1 AND project=?2 AND asker=?3
              AND status!='pending' AND noted_ms IS NULL",
             params![column(*id), project.as_str(), asker, now],
         )
@@ -693,7 +693,7 @@ pub fn pending(db: &Connection, project: &ProjectId) -> Result<Vec<Question>, En
     select(
         &tx,
         &format!(
-            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status='pending'
+            "SELECT {COLUMNS} FROM questions_log WHERE project=?1 AND status='pending'
              ORDER BY id LIMIT ?2"
         ),
         params![project.as_str(), PENDING_PER_PROJECT_MAX],
@@ -718,7 +718,7 @@ pub fn page(db: &Connection, project: &ProjectId, after: Option<u64>) -> Result<
         rows = select(
             &tx,
             &format!(
-                "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status='pending' AND id>?2
+                "SELECT {COLUMNS} FROM questions_log WHERE project=?1 AND status='pending' AND id>?2
                  ORDER BY id LIMIT ?3"
             ),
             params![project.as_str(), from, limit as i64],
@@ -729,7 +729,7 @@ pub fn page(db: &Connection, project: &ProjectId, after: Option<u64>) -> Result<
         rows.extend(select(
             &tx,
             &format!(
-                "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status!='pending' AND id<?2
+                "SELECT {COLUMNS} FROM questions_log WHERE project=?1 AND status!='pending' AND id<?2
                  ORDER BY id DESC LIMIT ?3"
             ),
             params![project.as_str(), below, limit as i64],
@@ -765,7 +765,7 @@ pub fn count_pending(db: &Connection) -> Result<Vec<(ProjectId, u32)>, EngineErr
     let rows: Vec<(String, i64)> = {
         let mut statement = tx
             .prepare(
-                "SELECT project, COUNT(*) FROM owner_questions WHERE status='pending'
+                "SELECT project, COUNT(*) FROM questions_log WHERE status='pending'
                  GROUP BY project ORDER BY project LIMIT ?1",
             )
             .map_err(unavailable)?;
@@ -790,7 +790,7 @@ pub fn count_pending(db: &Connection) -> Result<Vec<(ProjectId, u32)>, EngineErr
 pub fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
     ensure(tx)?;
     tx.execute(
-        "DELETE FROM owner_questions WHERE project=?1",
+        "DELETE FROM questions_log WHERE project=?1",
         [project.as_str()],
     )
     .map_err(unavailable)?;
@@ -824,7 +824,7 @@ fn insert(
     if once {
         let same: Option<i64> = tx
             .query_row(
-                "SELECT id FROM owner_questions WHERE project=?1 AND asker=?2 AND status='pending' AND question=?3",
+                "SELECT id FROM questions_log WHERE project=?1 AND asker=?2 AND status='pending' AND question=?3",
                 params![project.as_str(), asker, ask.question],
                 |row| row.get(0),
             )
@@ -836,7 +836,7 @@ fn insert(
     }
     let mine: i64 = tx
         .query_row(
-            "SELECT COUNT(*) FROM owner_questions WHERE project=?1 AND asker=?2 AND status='pending'",
+            "SELECT COUNT(*) FROM questions_log WHERE project=?1 AND asker=?2 AND status='pending'",
             params![project.as_str(), asker],
             |row| row.get(0),
         )
@@ -856,7 +856,7 @@ fn insert(
         .map_err(unavailable)?;
     let now = now_ms();
     tx.execute(
-        "INSERT INTO owner_questions(project,asker,source,question,options_json,recommended,context,status,turn_floor,created_ms)
+        "INSERT INTO questions_log(project,asker,source,question,options_json,recommended,context,status,turn_floor,created_ms)
          VALUES (?1,?2,?3,?4,?5,?6,?7,'pending',?8,?9)",
         params![
             project.as_str(),
@@ -931,7 +931,7 @@ fn settle(
     };
     let changed = tx
         .execute(
-            "UPDATE owner_questions SET status=?2, answer=?3, answered_by=?4, message=?5, settled_ms=?6
+            "UPDATE questions_log SET status=?2, answer=?3, answered_by=?4, message=?5, settled_ms=?6
              WHERE id=?1 AND status='pending'",
             params![
                 column(question.id),
@@ -1053,7 +1053,7 @@ fn prune(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
     let dropped: Vec<i64> = {
         let mut statement = tx
             .prepare(
-                "SELECT id FROM owner_questions WHERE project=?1 AND status!='pending'
+                "SELECT id FROM questions_log WHERE project=?1 AND status!='pending'
                  ORDER BY id DESC LIMIT -1 OFFSET ?2",
             )
             .map_err(unavailable)?;
@@ -1066,7 +1066,7 @@ fn prune(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
     for id in dropped {
         let id = u64::try_from(id).map_err(unavailable)?;
         versioned::forget(tx, &item(project, id)?)?;
-        tx.execute("DELETE FROM owner_questions WHERE id=?1", [column(id)])
+        tx.execute("DELETE FROM questions_log WHERE id=?1", [column(id)])
             .map_err(unavailable)?;
     }
     Ok(())
@@ -1074,7 +1074,7 @@ fn prune(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
 
 fn pending_count(tx: &Transaction<'_>, project: &ProjectId) -> Result<i64, EngineError> {
     tx.query_row(
-        "SELECT COUNT(*) FROM owner_questions WHERE project=?1 AND status='pending'",
+        "SELECT COUNT(*) FROM questions_log WHERE project=?1 AND status='pending'",
         [project.as_str()],
         |row| row.get(0),
     )
@@ -1090,7 +1090,7 @@ fn found(tx: &Transaction<'_>, id: u64) -> Result<Question, EngineError> {
     };
     let mut rows = select(
         tx,
-        &format!("SELECT {COLUMNS} FROM owner_questions WHERE id=?1"),
+        &format!("SELECT {COLUMNS} FROM questions_log WHERE id=?1"),
         [id],
     )?;
     assert!(rows.len() <= 1);

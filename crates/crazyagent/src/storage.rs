@@ -3340,6 +3340,29 @@ mod owner_actor_tests {
         );
     }
 
+    /// The owner's questions log keeps out of the names the owner schema check reserves, so
+    /// an engine whose committed questions write made the log starts again ready.
+    /// Input: a fresh engine database. Output: none; the second owner start succeeds.
+    #[test]
+    fn an_engine_that_created_the_questions_log_restarts_ready() {
+        let (_root, path, _cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        owner_stop(&mut db, &started.host).unwrap();
+        let objects = |db: &Connection| -> i64 {
+            db.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = objects(&db);
+        let tx = db.transaction().unwrap();
+        crate::questions::forget_project(&tx, &crate::protocol::ProjectId::new("asked").unwrap())
+            .unwrap();
+        tx.commit().unwrap();
+        assert!(objects(&db) > before, "the questions log is made and kept");
+        let restarted = owner_start(&mut db).unwrap();
+        owner_stop(&mut db, &restarted.host).unwrap();
+    }
+
     #[test]
     fn owner_schema_is_additive_and_unknown_schema_is_preserved() {
         let (_root, path, _cfg) = fixture();

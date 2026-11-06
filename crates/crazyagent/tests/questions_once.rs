@@ -397,7 +397,7 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
     assert_eq!(settled.unwrap(), Settlement::Settled);
     let message: i64 = database
         .query_row(
-            "SELECT message FROM owner_questions WHERE id=?1",
+            "SELECT message FROM questions_log WHERE id=?1",
             [i64::try_from(question).unwrap()],
             |row| row.get(0),
         )
@@ -446,7 +446,7 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
     assert_eq!(queued, 1, "the answer was queued once");
     let (status, answer): (String, String) = database
         .query_row(
-            "SELECT status,answer FROM owner_questions WHERE id=?1",
+            "SELECT status,answer FROM questions_log WHERE id=?1",
             [i64::try_from(question).unwrap()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

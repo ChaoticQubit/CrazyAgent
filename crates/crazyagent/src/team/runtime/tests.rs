@@ -5036,20 +5036,25 @@ fn master_question_box_leaves(owner_keyed: bool) {
     for _ in 0..3 {
         idle_ticks(&mut team);
     }
-    let rows =
-        |f: &Fixture| -> Vec<(i64, String, String, Option<String>, String)> {
-            f.connection
+    let rows = |f: &Fixture| -> Vec<(i64, String, String, Option<String>, String)> {
+        f.connection
             .prepare(
-                "SELECT id,source,status,answered_by,asker FROM owner_questions WHERE project=?1",
+                "SELECT id,source,status,answered_by,asker FROM questions_log WHERE project=?1",
             )
             .unwrap()
             .query_map([PROJECT], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
-        };
+    };
     assert_eq!(
         rows(&fixture),
         vec![(
