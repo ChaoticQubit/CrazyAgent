@@ -217,7 +217,8 @@ impl Team {
     }
 
     /// Sends the open team settings' next read once one is due, and the harness catalog
-    /// read once their master harness picker asks for it.
+    /// read once their master harness picker asks for it; a read the full queue refuses is
+    /// forgotten so the next key asks again.
     /// Input: the context. Output: none; a Setup or a Settings request may be queued.
     fn pump_settings(&mut self, ctx: &mut Ctx) {
         let Some(view) = self.settings.as_mut() else {
@@ -226,14 +227,17 @@ impl Team {
         if view.wants_catalog() {
             ctx.request(Request::Settings(Box::new(SettingsJob::Harnesses)));
         }
-        if let Some(query) = view.next_query(now_ms()) {
-            ctx.request(Request::Setup(query));
+        if let Some(query) = view.next_query(now_ms())
+            && !ctx.try_request(Request::Setup(query))
+        {
+            view.forget_reads();
         }
     }
 
     /// Takes a key while the team settings are open: the settings take it first, a change
     /// goes to the engine as `SetupQuery::TeamChange`, a setup save as `SetupQuery::Change`,
-    /// and Esc the settings left alone closes them. Inputs: the key and the context.
+    /// and Esc the settings left alone closes them. A change or save the full request queue
+    /// refuses is said as the owner being busy. Inputs: the key and the context.
     /// Output: handled.
     fn settings_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(view) = self.settings.as_mut() else {
@@ -246,15 +250,22 @@ impl Team {
         };
         match reply {
             TeamReply::Change(action) => {
-                let generation = ctx.next_generation();
-                ctx.request(Request::Setup(SetupQuery::TeamChange {
+                let query = SetupQuery::TeamChange {
                     action,
-                    generation,
-                }));
+                    generation: ctx.next_generation(),
+                };
+                if !ctx.try_request(Request::Setup(query.clone())) {
+                    view.apply(&query, Err("owner_busy".into()));
+                }
             }
             TeamReply::Save(action) => {
-                let generation = ctx.next_generation();
-                ctx.request(Request::Setup(SetupQuery::Change { action, generation }));
+                let query = SetupQuery::Change {
+                    action,
+                    generation: ctx.next_generation(),
+                };
+                if !ctx.try_request(Request::Setup(query.clone())) {
+                    view.apply(&query, Err("owner_busy".into()));
+                }
             }
             TeamReply::Ignored if *key == Key::Esc => self.settings = None,
             TeamReply::Ignored | TeamReply::Handled => {}

@@ -3617,6 +3617,9 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
             "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.".into()
         }
         "team_background_grace_invalid" => "Pick a grace time from 10 s to 1 h.".into(),
+        "owner_busy" => {
+            "CrazyAgent is busy with other requests. Nothing changed; try again in a moment.".into()
+        }
         other => plain_problem(other),
     }
 }
