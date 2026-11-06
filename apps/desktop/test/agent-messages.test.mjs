@@ -205,11 +205,11 @@ test("the Agents tab offers Messages on each sub-agent and finished agent, never
 });
 
 test("the open graph card shows its sub-agent's Messages beside its instructions, and the master's card none", () => {
-  const node = (id, kind, label) => ({ id, kind, parent: null, label, harness: "codex", status: "working", status_label: null, account: null, agents: null, terminal: "t" });
-  const open = renderToStaticMarkup(createElement(messages.NodeMessages, { projectId: "p", node: node("team-5", "agent", NAME), refresh: 0 }));
+  const node = (id, kind, label, agent) => ({ id, kind, parent: null, label, harness: "codex", status: "working", status_label: null, account: null, agents: null, terminal: "t", agent });
+  const open = renderToStaticMarkup(createElement(messages.NodeMessages, { projectId: "p", node: node("team-5", "agent", NAME, 5), refresh: 0 }));
   assert.match(open, /<section class="am" aria-label="Messages with Ada \(@charts\)">/u);
   assert.match(words(open), /Reading this agent's messages\.\.\./u, "the first read is still running");
-  assert.equal(renderToStaticMarkup(createElement(messages.NodeMessages, { projectId: "p", node: node("master", "master", "Master"), refresh: 0 })), "");
+  assert.equal(renderToStaticMarkup(createElement(messages.NodeMessages, { projectId: "p", node: node("master", "master", "Master", null), refresh: 0 })), "");
   const graph = readFileSync(new URL("../src/screens/team/index.tsx", import.meta.url), "utf8");
   assert.match(graph, /<AgentInstructions key=\{openNode\.id\} projectId=\{projectId\} node=\{openNode\} \/>\n\s*<NodeMessages key=\{openNode\.id\} projectId=\{projectId\} node=\{openNode\} refresh=\{graph\} \/>/u);
 });
