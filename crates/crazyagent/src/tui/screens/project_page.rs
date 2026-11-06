@@ -1565,6 +1565,7 @@ impl Screen for ProjectPage {
         ctx.request(Request::PoolProjects);
         self.schedule_asked = false;
         self.covered = false;
+        self.screen.setup_due = true;
         if let Some((_, code)) = ctx
             .sessions_key
             .take_if(|(project, _)| *project == self.screen.project)

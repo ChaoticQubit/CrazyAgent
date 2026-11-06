@@ -621,7 +621,9 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                     | Request::Changes(_)
                     | Request::TeamGraph { .. }
                     | Request::Setup(
-                        SetupQuery::Jobs { .. }
+                        SetupQuery::Setup { .. }
+                            | SetupQuery::Jobs { .. }
+                            | SetupQuery::Log { .. }
                             | SetupQuery::Context { .. }
                             | SetupQuery::Memories { .. }
                             | SetupQuery::Team { .. }
@@ -900,6 +902,106 @@ async fn a_project_is_edited_given_a_file_and_removed_through_the_engine() {
         !matches!(after, Ok(SetupView::Setup(Some(_)))),
         "the engine forgot the project: {after:?}"
     );
+}
+
+/// A master harness saved from the Team screen over the project page, as Team settings save
+/// it, is read again once the owner is back on the page: the Conversation tab routes by the
+/// new master, here an RCLI console instead of the live master view, its head names the new
+/// master, and a General edit saves at the engine's revision instead of being refused as
+/// changed (rv-code TP1-M1, rv-secreview).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_master_saved_from_the_team_screen_is_read_again_by_the_project_page() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let tab = |tab: ProjectTab| Place::Project {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        tab,
+    };
+    let mut connection = engine.connect();
+    let mut shell = shell_on(&tab(ProjectTab::Agents));
+    pump(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('t'));
+    assert_eq!(shell.depth(), 2, "t opens the Team screen over the page");
+    pump(&mut shell, &mut connection).await;
+    let stored = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        stored.team.master, "rcli",
+        "the project starts on a live master"
+    );
+    let generation = shell.ctx.next_generation();
+    shell.ctx.request(Request::Setup(SetupQuery::Change {
+        action: crate::project_setup::SetupAction::Update {
+            project_id: notes.clone(),
+            expected_revision: stored.revision,
+            name: None,
+            setup: ProjectSetup {
+                about: stored.about.clone(),
+                tech_stack: stored.tech_stack.clone(),
+                platforms: stored.platforms.clone(),
+                research: stored.research.clone(),
+                pool: stored.pool.clone(),
+                team: Some(TeamPlan {
+                    master: "rcli".into(),
+                    master_tools: true,
+                    sub_harnesses: vec![],
+                    min_agents: 1,
+                    max_agents: 1,
+                }),
+                documents: Vec::new(),
+            },
+        },
+        generation,
+    }));
+    pump(&mut shell, &mut connection).await;
+    let saved = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        saved.revision > stored.revision && saved.team.master == "rcli",
+        "the master saved from the Team screen landed"
+    );
+
+    shell.key(Key::Esc);
+    assert_eq!(shell.depth(), 1, "Esc goes back to the page");
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        shell.place(),
+        Some(tab(ProjectTab::Conversation)),
+        "an RCLI master keeps the console, not the live master view"
+    );
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("Master  rcli"),
+        "the console names the saved master:\n{shown}"
+    );
+
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(shell.place(), Some(tab(ProjectTab::Settings)));
+    shell.key(Key::Char('g'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Edit project"), "{shown}");
+    shell.key(Key::Paste(" Pro".into()));
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"change"), "{sent:?}");
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Changes saved."), "{shown}");
+    assert!(!shown.contains("This project changed"), "{shown}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

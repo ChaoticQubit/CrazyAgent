@@ -4,16 +4,19 @@ use crate::engine::owner::AgentInstructions;
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::{
-    AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamAction, TeamGraph,
+    AgentRole, AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamAction,
+    TeamGraph,
 };
 use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
+use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::clock::now_ms;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::glyphs::{Glyphs, Status};
 use crate::tui::keys::{Key, ShiftArrows};
+use crate::tui::screens::new_project::{harness_name, same_harness};
 use crate::tui::screens::new_project_page::{key_event, look};
 use crate::tui::screens::new_project_view::Row;
 use crate::tui::screens::process::{message, size};
@@ -47,7 +50,7 @@ const STOPPED: &str = "agent_stopped";
 const PAGE_STEP: usize = 10;
 const MASTER_WAITING: &str =
     "Starting the master's terminal. It opens once the master signs in and starts.";
-const MASTER_ON: &str = "Live master on. It starts when you open this view.";
+const MASTER_ON_WHEN: &str = "It starts when you open this view.";
 const MASTER_ON_SWITCHED: &str = "Live master on.";
 const MASTER_OFF: &str = "Live master stopped.";
 pub(in crate::tui) const MASTER_NO_SESSION: &str =
@@ -105,13 +108,16 @@ struct TreeRow {
     body: Body,
 }
 
-/// The live master switch as the engine last told it: on, off, or never set, and why the
-/// master last could not start.
+/// The live master switch as the engine last told it: on, off, or never set, why the
+/// master last could not start, the team's saved master harness and the harness the
+/// running live master uses.
 #[derive(Debug)]
 struct LiveSwitch {
     on: Option<bool>,
     problem: Option<String>,
     switched: Option<String>,
+    saved: Option<String>,
+    running: Option<String>,
 }
 
 struct Attached {
@@ -149,6 +155,7 @@ pub struct Team {
     asked: bool,
     checked: bool,
     switch: Option<LiveSwitch>,
+    master_agent: Option<Option<i64>>,
     want: Option<bool>,
     refused: Option<String>,
     paused: bool,
@@ -177,6 +184,7 @@ impl Team {
             asked: false,
             checked: false,
             switch: None,
+            master_agent: None,
             want: None,
             refused: None,
             paused: false,
@@ -205,21 +213,25 @@ impl Team {
         self.pump_settings(ctx);
     }
 
-    /// Sends the open team settings' next team read once one is due.
-    /// Input: the context. Output: none; a Setup request may be queued.
+    /// Sends the open team settings' next read once one is due, and the harness catalog
+    /// read once their master harness picker asks for it.
+    /// Input: the context. Output: none; a Setup or a Settings request may be queued.
     fn pump_settings(&mut self, ctx: &mut Ctx) {
-        if let Some(query) = self
-            .settings
-            .as_mut()
-            .and_then(|view| view.next_query(now_ms()))
-        {
+        let Some(view) = self.settings.as_mut() else {
+            return;
+        };
+        if view.wants_catalog() {
+            ctx.request(Request::Settings(Box::new(SettingsJob::Harnesses)));
+        }
+        if let Some(query) = view.next_query(now_ms()) {
             ctx.request(Request::Setup(query));
         }
     }
 
     /// Takes a key while the team settings are open: the settings take it first, a change
-    /// goes to the engine as `SetupQuery::TeamChange`, and Esc the settings left alone
-    /// closes them. Inputs: the key and the context. Output: handled.
+    /// goes to the engine as `SetupQuery::TeamChange`, a setup save as `SetupQuery::Change`,
+    /// and Esc the settings left alone closes them. Inputs: the key and the context.
+    /// Output: handled.
     fn settings_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(view) = self.settings.as_mut() else {
             return Flow::Ignored;
@@ -236,6 +248,10 @@ impl Team {
                     action,
                     generation,
                 }));
+            }
+            TeamReply::Save(action) => {
+                let generation = ctx.next_generation();
+                ctx.request(Request::Setup(SetupQuery::Change { action, generation }));
             }
             TeamReply::Ignored if *key == Key::Esc => self.settings = None,
             TeamReply::Ignored | TeamReply::Handled => {}
@@ -376,6 +392,16 @@ impl Team {
                     on: status.live_master,
                     problem: status.live_problem.clone(),
                     switched: status.live_switch.as_ref().map(switched_words),
+                    saved: status
+                        .harnesses
+                        .iter()
+                        .find(|harness| harness.role == AgentRole::Master)
+                        .map(|harness| harness.harness.clone()),
+                    running: status
+                        .agents
+                        .iter()
+                        .find(|agent| agent.role == AgentRole::Master && agent.status.live())
+                        .map(|agent| agent.harness.clone()),
                 };
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
@@ -394,11 +420,16 @@ impl Team {
             } if *project_id == self.project => match result {
                 Ok(view) => {
                     self.want = None;
-                    let switched = self.switch.take().and_then(|switch| switch.switched);
+                    let last = self.switch.take();
+                    let (switched, saved, running) = last.map_or((None, None, None), |switch| {
+                        (switch.switched, switch.saved, switch.running)
+                    });
                     self.switch = Some(LiveSwitch {
                         on: Some(*on),
                         problem: None,
                         switched,
+                        saved,
+                        running,
                     });
                     if let SetupView::LiveWithoutSession(why) = view {
                         ctx.say(Message::error(MASTER_NO_SESSION, &unopened(why)));
@@ -441,6 +472,31 @@ impl Team {
             },
             generation,
         }));
+    }
+
+    /// Reads the team again when the graph shows another master agent than it showed last,
+    /// so the master view's harness follows a live master that started again (OP-28).
+    /// Input: the context. Output: none; a team read may be queued.
+    fn note_master_agent(&mut self, ctx: &mut Ctx) {
+        if !self.master {
+            return;
+        }
+        let Some(agent) = self.graph.ready().map(|graph| {
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == NodeKind::Master)
+                .and_then(|node| node.agent)
+        }) else {
+            return;
+        };
+        if self
+            .master_agent
+            .replace(agent)
+            .is_some_and(|last| last != agent)
+        {
+            self.read_switch(ctx);
+        }
     }
 
     /// Opens the master's terminal once the team lists it, and the new one
@@ -971,22 +1027,33 @@ impl Team {
         Some(lines)
     }
 
-    /// The master view's header: whether the live master is on, where the live session's
-    /// master harness last switched, and the session keys at the right edge. The state is
-    /// kept whole: when it does not fit beside both keys, only n New session shows and
-    /// l Sessions stays in the hints. Inputs: the width and context. Output: the line.
+    /// The master view's header: whether the live master is on, the harness it runs and a
+    /// saved one that waits for its next start, where the live session's master harness
+    /// last switched, and the session keys at the right edge. The state is kept whole: when
+    /// it does not fit beside both keys, only n New session shows and l Sessions stays in
+    /// the hints. Inputs: the width and context. Output: the line.
     fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
-        let switched = self
-            .switch
-            .as_ref()
-            .and_then(|switch| switch.switched.as_deref());
-        let state = match (self.paused, self.live_on() == Some(false), switched) {
-            (true, _, _) => MASTER_TEAM_STOPPED.to_owned(),
-            (false, true, None) => MASTER_OFF.to_owned(),
-            (false, true, Some(switched)) => format!("{MASTER_OFF} {switched}"),
-            (false, false, None) => MASTER_ON.to_owned(),
-            (false, false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
+        let switch = self.switch.as_ref();
+        let switched = switch.and_then(|switch| switch.switched.as_deref());
+        let off = self.live_on() == Some(false);
+        let lead = match (self.paused, off, switched) {
+            (true, _, _) => MASTER_TEAM_STOPPED,
+            (false, true, _) => MASTER_OFF,
+            (false, false, _) => MASTER_ON_SWITCHED,
         };
+        let rest = match (self.paused, off, switched) {
+            (true, _, _) => None,
+            (false, _, Some(switched)) => Some(switched),
+            (false, true, None) => None,
+            (false, false, None) => Some(MASTER_ON_WHEN),
+        };
+        let harness = switch
+            .and_then(|switch| harness_words(switch.saved.as_deref(), switch.running.as_deref()));
+        let state = [Some(lead), harness.as_deref(), rest]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
         let control = MASTER_CONTROLS
             .into_iter()
             .find(|control| width(&state) + 2 + width(control) <= limit)
@@ -1351,6 +1418,7 @@ impl Screen for Team {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
                 self.end_stopped(ctx);
+                self.note_master_agent(ctx);
                 self.follow_master(ctx);
                 if !self.master {
                     questions::Questions::read(&self.project, ctx);
@@ -1363,6 +1431,13 @@ impl Screen for Team {
                     self.took_setup(&event.query, &event.result, ctx);
                     if let Some(view) = self.settings.as_mut() {
                         view.apply(&event.query, event.result.clone());
+                    }
+                }
+                OwnerEvent::Settings(event) => {
+                    if let (SettingsEvent::Harnesses(result), Some(view)) =
+                        (event.as_ref(), self.settings.as_mut())
+                    {
+                        view.take_catalog(result);
                     }
                 }
                 _ => {}
@@ -2008,6 +2083,21 @@ fn inside(area: Rect) -> Rect {
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     )
+}
+
+/// The master header's words for the master's harness: the running one, else the saved
+/// one, and the saved one from the next start while the two differ (OP-28).
+/// Takes the saved and the running harness ids. Returns the words, none when both are unknown.
+fn harness_words(saved: Option<&str>, running: Option<&str>) -> Option<String> {
+    let shown = running.or(saved)?;
+    let title = harness_name(&plain(shown), None);
+    Some(match saved {
+        Some(saved) if !same_harness(saved, shown) => format!(
+            "Harness: {title}; {} from the next start.",
+            harness_name(&plain(saved), None)
+        ),
+        _ => format!("Harness: {title}."),
+    })
 }
 
 /// The master header's words for the live session's last master harness switch.

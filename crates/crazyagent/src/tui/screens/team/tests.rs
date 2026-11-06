@@ -1537,7 +1537,15 @@ fn switched(
     problem: Option<&str>,
     live_switch: Option<crate::team::SessionSwitch>,
 ) -> Arrival {
-    let status = crate::team::TeamStatus {
+    team_read(master_status(on, problem, live_switch))
+}
+
+fn master_status(
+    on: Option<bool>,
+    problem: Option<&str>,
+    live_switch: Option<crate::team::SessionSwitch>,
+) -> crate::team::TeamStatus {
+    crate::team::TeamStatus {
         project_id: project(),
         keep_warm: false,
         turn_limit_secs: None,
@@ -1575,13 +1583,143 @@ fn switched(
         plan: Vec::new(),
         events: crate::team::events::EventsView::default(),
         partial: false,
-    };
+    }
+}
+
+fn team_read(status: crate::team::TeamStatus) -> Arrival {
     Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Setup(Box::new(
         crate::tui::client::SetupEvent {
             query: crate::project_setup::SetupQuery::Team { project: project() },
             result: Ok(crate::project_setup::SetupView::Team(Box::new(status))),
         },
     ))))
+}
+
+/// A team read whose saved master harness is `saved` and whose live master agent, when
+/// one runs, uses `running`. Inputs: the switch, the saved and the running harness ids.
+/// Output: the arrival.
+fn harnessed(on: Option<bool>, saved: &str, running: Option<&str>) -> Arrival {
+    use crate::team::{AgentRole, TeamAgent, TeamHarness};
+    let mut status = master_status(on, None, None);
+    status.harnesses = vec![TeamHarness {
+        harness: saved.into(),
+        role: AgentRole::Master,
+        agents_max: 1,
+        tools: true,
+        live: 1,
+        delegation: None,
+        delegation_label: None,
+        runnable: true,
+    }];
+    status.agents = running
+        .into_iter()
+        .map(|harness| TeamAgent {
+            id: 1,
+            role: AgentRole::Master,
+            label: AgentRole::Master.agent_label(1),
+            harness: harness.into(),
+            tools: true,
+            account: None,
+            worktree: None,
+            status: AgentStatus::Idle,
+            status_label: AgentStatus::Idle.label().into(),
+            task: None,
+            turns: 1,
+            problem: None,
+            process_group: None,
+            created_ms: 1,
+            heartbeat_ms: 1,
+            stopped_ms: None,
+            persona: None,
+            handle: None,
+            finished: false,
+            wakeable: false,
+            wake_note: None,
+            parent: None,
+            owner_stopped: false,
+            teammates: Vec::new(),
+            pane: None,
+            hookless: false,
+            instructions_changed: false,
+            message_note: None,
+        })
+        .collect();
+    team_read(status)
+}
+
+/// The master view's header names the harness the running live master uses, the saved one
+/// while none runs, and the saved one from the next start while the two differ (N-D26,
+/// OP-28); its state words stay first.
+#[test]
+fn the_master_view_head_names_the_running_harness_and_the_saved_one_from_the_next_start() {
+    let mut shell = master_view(120, 24);
+    requests(&mut shell);
+    shell.arrive(harnessed(Some(true), "codex", Some("claude-code")));
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains(
+            "Live master on. Harness: Claude Code; Codex from the next start. It starts when you open this view."
+        ),
+        "{}",
+        rows[2]
+    );
+    shell.arrive(harnessed(Some(true), "codex", Some("codex")));
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains("Live master on. Harness: Codex. It starts when you open this view."),
+        "{}",
+        rows[2]
+    );
+    shell.arrive(harnessed(Some(true), "codex", None));
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains("Live master on. Harness: Codex. It starts when you open this view."),
+        "the saved harness while none runs: {}",
+        rows[2]
+    );
+    shell.arrive(turned(false, Ok(())));
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains("Live master stopped. Harness: Codex."),
+        "an accepted stop keeps the harness last read: {}",
+        rows[2]
+    );
+}
+
+/// The master view reads the team again when the team shows another master agent, so the
+/// header follows the live master that restarted on the saved harness.
+#[test]
+fn the_master_view_reads_the_harness_again_when_another_master_agent_starts() {
+    let mut shell = master_view(120, 24);
+    requests(&mut shell);
+    let mut graph = graph();
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph.clone()),
+    });
+    requests(&mut shell);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph.clone()),
+    });
+    assert!(
+        !requests(&mut shell).iter().any(switch_read),
+        "the same master agent reads nothing"
+    );
+    let master = graph
+        .nodes
+        .iter_mut()
+        .find(|node| node.kind == NodeKind::Master)
+        .unwrap();
+    master.agent = Some(master.agent.unwrap_or(0) + 1);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph),
+    });
+    assert!(
+        requests(&mut shell).iter().any(switch_read),
+        "a new master agent reads the team"
+    );
 }
 
 #[test]

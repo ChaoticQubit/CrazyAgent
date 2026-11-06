@@ -1540,6 +1540,407 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
     );
 }
 
+fn entry(
+    id: &str,
+    name: &str,
+    status: crate::harnesses::HarnessStatus,
+    team: crate::harnesses::TeamUse,
+) -> crate::harnesses::HarnessEntry {
+    crate::harnesses::HarnessEntry {
+        id: id.into(),
+        name: name.into(),
+        status_label: String::new(),
+        status,
+        executable: None,
+        headless: String::new(),
+        tools: crate::harnesses::ToolControl::Switchable,
+        model_selection: false,
+        account_kinds: Vec::new(),
+        team,
+        aliases: Vec::new(),
+    }
+}
+
+fn catalog() -> Vec<crate::harnesses::HarnessEntry> {
+    use crate::harnesses::{HarnessStatus, TeamUse};
+    vec![
+        entry("codex", "Codex", HarnessStatus::Ready, TeamUse::Available),
+        entry(
+            "claude",
+            "Claude Code",
+            HarnessStatus::Ready,
+            TeamUse::Available,
+        ),
+        entry(
+            "opencode",
+            "OpenCode",
+            HarnessStatus::NotInstalled,
+            TeamUse::Available,
+        ),
+        entry(
+            "pi",
+            "Pi",
+            HarnessStatus::Ready,
+            TeamUse::Unavailable {
+                reason: "No reader for its replies yet.".into(),
+            },
+        ),
+        entry(
+            "gemini",
+            "Gemini CLI",
+            HarnessStatus::Ready,
+            TeamUse::MasterOnly {
+                reason: "It runs only as the project master.".into(),
+            },
+        ),
+    ]
+}
+
+fn stored() -> crate::project_setup::StoredSetup {
+    crate::project_setup::StoredSetup {
+        project_id: project(),
+        name: "Tidepool".into(),
+        about: "Tide charts for the harbour.".into(),
+        tech_stack: vec!["Next.js".into(), "Postgres".into()],
+        platforms: Vec::new(),
+        research: Vec::new(),
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![HarnessSlot {
+                harness: "claude-code".into(),
+                agents: 2,
+                tools: true,
+            }],
+            min_agents: 1,
+            max_agents: 4,
+        },
+        documents: Vec::new(),
+        folder: "/Users/mira/CrazyAgent/Projects/tidepool".into(),
+        created_ms: NOW - 60 * MINUTE,
+        revision: 7,
+    }
+}
+
+/// Team settings name the saved master harness on the plan line and, after the On harness
+/// switch choice, when a saved change reaches the running master; at 80 columns too, where a
+/// setting of its own would fold the first settings row away.
+#[test]
+fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_master() {
+    let view = loaded();
+    for (width, height) in [(160, 36), (80, 24)] {
+        let rows = frame(&view, width, height);
+        assert!(find(&rows, "leads.").contains("Codex leads."));
+        assert!(
+            find(&rows, "On harness switch")
+                .contains("On harness switch  Carry over, when the master is idle"),
+            "{}",
+            rows.join("\n")
+        );
+    }
+    let mut later = team();
+    later.apply_harness_switch = crate::team::SwitchApply::NextStart;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(later))));
+    assert!(
+        find(&frame(&view, 160, 36), "On harness switch")
+            .contains("On harness switch  Carry over, at the next start")
+    );
+    assert!(view.help().contains(&("H", "Master harness")));
+    assert!(view.help().contains(&("A", "Apply master change")));
+}
+
+/// A flips Apply a master harness change between When the master is idle and At the next
+/// start, through the engine's ApplyHarnessSwitch change.
+#[test]
+fn the_apply_setting_flips_between_when_idle_and_at_the_next_start() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('A'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    let reply = view.key(press(KeyCode::Char('A')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::ApplyHarnessSwitch {
+            project_id: project(),
+            mode: crate::team::SwitchApply::NextStart,
+        })
+    );
+    let TeamReply::Change(action) = reply else {
+        unreachable!();
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "A saved master harness change now waits for the master's next start."
+        ))
+    );
+    let mut later = team();
+    later.apply_harness_switch = crate::team::SwitchApply::NextStart;
+    let query = view.next_query(NOW + 10).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(later))));
+    assert_eq!(
+        view.key(press(KeyCode::Char('A'))),
+        TeamReply::Change(TeamAction::ApplyHarnessSwitch {
+            project_id: project(),
+            mode: crate::team::SwitchApply::WhenIdle,
+        })
+    );
+}
+
+/// H opens the master harness picker: it reads the harness catalog once and the stored
+/// setup, lists the harnesses that can run the master with the running one marked now,
+/// and Enter saves the picked one as the team's master through the project setup at the
+/// read revision; the current one saves nothing, a refused save keeps the picker open and
+/// reads the setup again, and Esc closes it.
+#[test]
+fn the_master_harness_picker_saves_the_picked_harness_through_the_project_setup() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('H'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    assert!(!view.wants_catalog());
+
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('H'))), TeamReply::Handled);
+    assert!(view.wants_catalog());
+    assert!(!view.wants_catalog(), "the catalog is read once");
+    assert_eq!(
+        view.next_query(NOW + 1),
+        Some(SetupQuery::Setup { project: project() })
+    );
+    assert_eq!(view.next_query(NOW + 2), None, "one setup read at a time");
+    let shown = words(&frame(&view, 120, 36));
+    assert!(shown.contains("Harness for the master"), "{shown}");
+    assert!(shown.contains("Reading the harnesses"), "{shown}");
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert!(
+        view.master_pick.is_some(),
+        "nothing to save before the reads"
+    );
+
+    view.take_catalog(&Ok(catalog()));
+    view.apply(
+        &SetupQuery::Setup { project: project() },
+        Ok(SetupView::Setup(Some(Box::new(stored())))),
+    );
+    let rows = frame(&view, 120, 36);
+    let at = rows
+        .iter()
+        .position(|row| row.contains("Harness for the master"))
+        .unwrap();
+    let picker: Vec<String> = rows[at + 1..]
+        .iter()
+        .map(|row| {
+            row.trim_matches(|c: char| c == ' ' || c == '\u{2502}')
+                .to_owned()
+        })
+        .filter(|row| row.ends_with("now") || ["Claude Code", "Gemini CLI"].contains(&row.as_str()))
+        .collect();
+    assert_eq!(
+        picker,
+        ["> Codex  now", "Claude Code", "Gemini CLI"],
+        "{}",
+        rows.join("\n")
+    );
+    assert!(
+        words(&rows).contains("The running master switches once it is idle."),
+        "{}",
+        rows.join("\n")
+    );
+
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert!(view.master_pick.is_none());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The master already uses Codex."))
+    );
+
+    assert_eq!(view.key(press(KeyCode::Char('H'))), TeamReply::Handled);
+    assert!(!view.wants_catalog(), "the catalog stays read");
+    assert_eq!(view.next_query(NOW + 3), None, "the setup stays read");
+    assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    let reply = view.key(press(KeyCode::Enter));
+    let mut team_plan = stored().team;
+    team_plan.master = "claude".into();
+    assert_eq!(
+        reply,
+        TeamReply::Save(crate::project_setup::SetupAction::Update {
+            project_id: project(),
+            expected_revision: 7,
+            name: None,
+            setup: ProjectSetup {
+                about: "Tide charts for the harbour.".into(),
+                tech_stack: vec!["Next.js".into(), "Postgres".into()],
+                platforms: Vec::new(),
+                research: Vec::new(),
+                pool: None,
+                team: Some(team_plan),
+                documents: Vec::new(),
+            },
+        })
+    );
+    let TeamReply::Save(action) = reply else {
+        unreachable!();
+    };
+    assert!(view.busy());
+    let mut other = action.clone();
+    if let crate::project_setup::SetupAction::Update { name, .. } = &mut other {
+        *name = Some("Tidepool two".into());
+    }
+    view.apply(
+        &SetupQuery::Change {
+            action: other,
+            generation: 3,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert!(
+        view.busy() && view.master_pick.is_some(),
+        "another screen's setup save is not the picker's"
+    );
+    view.apply(
+        &SetupQuery::Change {
+            action,
+            generation: 4,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert!(view.master_pick.is_none());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "The master switches to Claude Code once it is idle."
+        ))
+    );
+    assert_eq!(
+        view.next_query(NOW + 4),
+        Some(SetupQuery::Team { project: project() }),
+        "the summary reads the saved master again"
+    );
+
+    view.apply(
+        &SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(team()))),
+    );
+    assert_eq!(view.key(press(KeyCode::Char('H'))), TeamReply::Handled);
+    assert_eq!(
+        view.next_query(NOW + 5),
+        Some(SetupQuery::Setup { project: project() }),
+        "a save raises the revision, so the setup is read again"
+    );
+    view.apply(
+        &SetupQuery::Setup { project: project() },
+        Ok(SetupView::Setup(Some(Box::new(stored())))),
+    );
+    assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    let TeamReply::Save(action) = view.key(press(KeyCode::Enter)) else {
+        panic!("Enter on Gemini CLI saves it");
+    };
+    view.apply(
+        &SetupQuery::Change {
+            action,
+            generation: 5,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "setup_revision_conflict".into(),
+        })),
+    );
+    assert!(
+        view.master_pick.is_some(),
+        "a refused save keeps the picker"
+    );
+    assert!(view.notice.as_ref().is_some_and(|notice| notice.error));
+    assert_eq!(
+        view.next_query(NOW + 6),
+        Some(SetupQuery::Setup { project: project() })
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(view.master_pick.is_none());
+}
+
+/// A failed setup read under the master harness picker is said once and read again only
+/// after the refresh interval, not on every arrival that asks for the next read
+/// (rv-code TP1-L1).
+#[test]
+fn a_failed_setup_read_under_the_master_picker_waits_for_the_refresh_interval() {
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('H'))), TeamReply::Handled);
+    assert_eq!(
+        view.next_query(NOW + 1),
+        Some(SetupQuery::Setup { project: project() })
+    );
+    view.apply(
+        &SetupQuery::Setup { project: project() },
+        Err("team_engine_not_ready".into()),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "The engine is still starting. Try again in a moment."
+        ))
+    );
+    assert!(view.master_pick.is_some(), "the picker shows the problem");
+    assert_ne!(
+        view.next_query(NOW + 2),
+        Some(SetupQuery::Setup { project: project() }),
+        "a failed setup read is not sent again at once"
+    );
+    assert_ne!(
+        view.next_query(NOW + REFRESH_MS),
+        Some(SetupQuery::Setup { project: project() }),
+        "nor before the refresh interval passed"
+    );
+    assert_eq!(
+        view.next_query(NOW + 1 + REFRESH_MS),
+        Some(SetupQuery::Setup { project: project() }),
+        "the setup is read again after the refresh interval"
+    );
+}
+
+/// A project without a saved setup closes the master harness picker with the reason, so
+/// the picker does not read the missing setup again and again (rv-code TP1-L1).
+#[test]
+fn a_missing_setup_closes_the_master_picker_with_the_reason() {
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('H'))), TeamReply::Handled);
+    assert_eq!(
+        view.next_query(NOW + 1),
+        Some(SetupQuery::Setup { project: project() })
+    );
+    view.apply(
+        &SetupQuery::Setup { project: project() },
+        Ok(SetupView::Setup(None)),
+    );
+    assert!(view.master_pick.is_none(), "the picker closes");
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "This project has no saved setup, so its master harness cannot change."
+        ))
+    );
+    assert_ne!(
+        view.next_query(NOW + 2),
+        Some(SetupQuery::Setup { project: project() }),
+        "the missing setup is not read again"
+    );
+}
+
 #[test]
 fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
     let mut view = TeamView::new(project());
@@ -1549,7 +1950,10 @@ fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
         Some(Notice::plain("The team is still loading."))
     );
     let mut view = loaded();
-    assert!(find(&frame(&view, 120, 36), "Team").contains("On harness switch  Carry over"));
+    assert!(
+        find(&frame(&view, 120, 36), "On harness switch")
+            .contains("On harness switch  Carry over, when the master is idle")
+    );
     let reply = view.key(press(KeyCode::Char('h')));
     assert_eq!(
         reply,
@@ -1578,7 +1982,10 @@ fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
     fresh.on_harness_switch = crate::team::SwitchMode::Fresh;
     let query = view.next_query(NOW + 10).unwrap();
     view.apply(&query, Ok(SetupView::Team(Box::new(fresh))));
-    assert!(find(&frame(&view, 120, 36), "Team").contains("On harness switch  Start fresh"));
+    assert!(
+        find(&frame(&view, 120, 36), "On harness switch")
+            .contains("On harness switch  Start fresh, when the master is idle")
+    );
     assert_eq!(
         view.key(press(KeyCode::Char('h'))),
         TeamReply::Change(TeamAction::OnHarnessSwitch {
