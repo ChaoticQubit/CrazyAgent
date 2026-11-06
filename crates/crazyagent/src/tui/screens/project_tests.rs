@@ -764,6 +764,63 @@ fn report_paths_map_back_to_their_research() {
 }
 
 #[test]
+fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
+    let families = [
+        "agent_access_",
+        "agent_policy_",
+        "agent_network_",
+        "agent_toolchain_",
+        "agent_project_",
+    ];
+    let mut missing = Vec::new();
+    for source in [
+        include_str!("../../sandbox/policy.rs"),
+        include_str!("../../project_setup.rs"),
+        include_str!("../../storage.rs"),
+    ] {
+        for code in source.split('"').filter(|text| {
+            families.iter().any(|family| text.starts_with(family))
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        }) {
+            if plain_problem(code).contains("(code: ") && !missing.contains(&code) {
+                missing.push(code);
+            }
+        }
+    }
+    assert_eq!(
+        missing,
+        Vec::<&str>::new(),
+        "every access, policy, network, toolchain and project refusal has a sentence"
+    );
+    for (code, sentence) in [
+        (
+            "agent_access_lowered",
+            "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
+        ),
+        (
+            "agent_network_narrowed",
+            "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
+        ),
+        (
+            "agent_toolchain_lowered",
+            "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
+        ),
+        (
+            "agent_project_unreadable",
+            "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
+        ),
+    ] {
+        assert_eq!(
+            plain_problem(code),
+            sentence,
+            "{code} reads as on the desktop"
+        );
+    }
+}
+
+#[test]
 fn a_memory_stands_for_itself_by_its_first_line_of_prose() {
     use super::project_view::memory_quote;
     assert_eq!(
