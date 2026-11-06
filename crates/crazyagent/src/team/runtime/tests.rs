@@ -8114,6 +8114,18 @@ struct LevelRun {
 /// level. Output: the run, once the script has finished.
 #[cfg(target_os = "macos")]
 fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
+    agent_at_level_running(access, &[])
+}
+
+/// Starts one tools-on sub-agent as [`agent_at_level`] does, whose stand-in script also runs
+/// `extra` in its working folder before it finishes. Inputs: the level and the script lines,
+/// which record their own exit codes in `codes.txt`. Output: the run, once the script has
+/// finished.
+#[cfg(target_os = "macos")]
+fn agent_at_level_running(
+    access: crate::sandbox::policy::AgentAccess,
+    extra: &[String],
+) -> LevelRun {
     let mut fixture = Fixture::new(1);
     fixture.setup.team.sub_harnesses[0].tools = true;
     fixture
@@ -8175,7 +8187,7 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
     let git = format!(
         "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
     );
-    let script = [
+    let mut lines = vec![
         "#!/bin/sh".to_owned(),
         "echo 'Written by the agent.' > page.md".to_owned(),
         "cargo build --offline -q > /dev/null 2>&1; echo build=$? >> codes.txt".to_owned(),
@@ -8192,10 +8204,13 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
             "echo x > {} 2> /dev/null; echo outside=$? >> codes.txt",
             quoted(&outside.join("planted"))
         ),
+    ];
+    lines.extend(extra.iter().cloned());
+    lines.extend([
         "echo done=0 >> codes.txt".to_owned(),
         "exec /bin/sleep 300".to_owned(),
-    ]
-    .join("\n");
+    ]);
+    let script = lines.join("\n");
     let bin = fixture.base.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let codex = bin.join("codex");
@@ -8759,6 +8774,143 @@ impl LevelRun {
                 f.agent_status(member).0 == AgentStatus::Stopped
             });
     }
+}
+
+/// The lines an agent runs to move one folder it may write out of the way, change a file
+/// below it that its profile protects, and move it back (CTX-M1). Each step records its exit
+/// code in `codes.txt` as `<name>_away`, `<name>_write` and `<name>_back`. Inputs: the step
+/// name, the folder, where to move it and the protected file below it, as shell words.
+/// Output: the script lines.
+#[cfg(target_os = "macos")]
+fn moved_root_lines(name: &str, root: &str, away: &str, file: &str) -> Vec<String> {
+    vec![
+        format!("mv {root} {away} 2> /dev/null; echo {name}_away=$? >> codes.txt"),
+        format!(
+            "printf 'planted = 1\\n' >> {away}/{file} 2> /dev/null; echo {name}_write=$? >> codes.txt"
+        ),
+        format!(
+            "if [ -d {away} ]; then mv {away} {root} 2> /dev/null; fi; echo {name}_back=$? >> codes.txt"
+        ),
+    ]
+}
+
+/// The lines an agent runs for the work it does in the folders it may write (CTX-M1): make,
+/// change and remove a file in its home and in its working folder, make both again with
+/// `mkdir -p`, and see `mkdir` of its home answer that it exists. Each records its exit code
+/// in `codes.txt`. Input: the home as a shell word. Output: the script lines.
+#[cfg(target_os = "macos")]
+fn own_folder_lines(home: &str) -> Vec<String> {
+    vec![
+        format!(
+            "printf a > {home}/note.txt && printf b >> {home}/note.txt && rm {home}/note.txt; echo home_files=$? >> codes.txt"
+        ),
+        "printf a > scratch.txt && printf b >> scratch.txt && rm scratch.txt; echo work_files=$? >> codes.txt".to_owned(),
+        format!("mkdir -p {home} \"$(pwd -P)\"; echo mkdir_roots=$? >> codes.txt"),
+        format!(
+            "/bin/mkdir {home} 2>&1 | /usr/bin/grep -q 'File exists'; echo home_exists=$? >> codes.txt"
+        ),
+    ]
+}
+
+/// CTX-M1: a Sandboxed agent, in the profile the engine starts it in, cannot move its own
+/// home into its worktree to change a launch file its profile protects there (LL-2) and move
+/// it back, nor move its worktree away from the engine's links, while it still makes,
+/// changes and removes files in its home and worktree and builds the project.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_agent_cannot_move_its_home_or_worktree_away_but_still_works_in_them() {
+    let mut extra = moved_root_lines(
+        "home",
+        "\"$CODEX_HOME\"",
+        "\"$PWD\"/home-away",
+        "config.toml",
+    );
+    extra.push("c=$(pwd -P)".to_owned());
+    extra.extend(moved_root_lines(
+        "worktree",
+        "\"$c\"",
+        "\"$CODEX_HOME\"/worktree-away",
+        ".git",
+    ));
+    extra.extend(own_folder_lines("\"$CODEX_HOME\""));
+    let mut run = agent_at_level_running(crate::sandbox::policy::AgentAccess::Sandboxed, &extra);
+    let home = agent_home(&run.fixture.base.join("team"), run.member);
+    let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    let link = std::fs::read_to_string(run.worktree.join(".git")).unwrap();
+    assert_ne!(run.code("home_away"), 0, "{:?}", run.codes);
+    assert!(!config.contains("planted"), "{config}");
+    assert_ne!(run.code("worktree_away"), 0, "{:?}", run.codes);
+    assert!(!link.contains("planted"), "{link}");
+    for name in [
+        "build",
+        "home_files",
+        "work_files",
+        "mkdir_roots",
+        "home_exists",
+    ] {
+        assert_eq!(run.code(name), 0, "{name}: {:?}", run.codes);
+    }
+    run.stop();
+}
+
+/// CTX-M1: an Own branch agent, in the profile the engine starts it in, cannot move its own
+/// home into its clone to change a launch file its profile protects there (LL-2) and move it
+/// back, nor move its clone into its home to point the clone's store elsewhere, while it
+/// still makes, changes and removes files in its home and clone, builds the project, commits
+/// and lists and prunes the clone's worktrees.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_own_branch_agent_cannot_move_its_home_or_clone_away_but_still_works_in_them() {
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let mut extra = moved_root_lines(
+        "home",
+        "\"$CODEX_HOME\"",
+        "\"$PWD\"/home-away",
+        "config.toml",
+    );
+    extra.push("c=$(pwd -P)".to_owned());
+    extra.extend(moved_root_lines(
+        "clone",
+        "\"$c\"",
+        "\"$CODEX_HOME\"/clone-away",
+        ".git/objects/info/alternates",
+    ));
+    extra.extend(own_folder_lines("\"$CODEX_HOME\""));
+    extra.extend([
+        format!("{git} worktree list > /dev/null 2>&1; echo worktree_list=$? >> codes.txt"),
+        format!("{git} worktree prune > /dev/null 2>&1; echo worktree_prune=$? >> codes.txt"),
+        format!("{git} status --porcelain > /dev/null 2>&1; echo git_status=$? >> codes.txt"),
+    ]);
+    let mut run = agent_at_level_running(crate::sandbox::policy::AgentAccess::OwnBranch, &extra);
+    let home = agent_home(&run.fixture.base.join("team"), run.member);
+    let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    let alternates = run
+        .worktree
+        .join(".git")
+        .join("objects")
+        .join("info")
+        .join("alternates");
+    let store = std::fs::read_to_string(&alternates).unwrap_or_default();
+    assert_ne!(run.code("home_away"), 0, "{:?}", run.codes);
+    assert!(!config.contains("planted"), "{config}");
+    assert_ne!(run.code("clone_away"), 0, "{:?}", run.codes);
+    assert!(!store.contains("planted"), "{store}");
+    for name in [
+        "build",
+        "commit",
+        "home_files",
+        "work_files",
+        "mkdir_roots",
+        "home_exists",
+        "worktree_list",
+        "worktree_prune",
+        "git_status",
+    ] {
+        assert_eq!(run.code(name), 0, "{name}: {:?}", run.codes);
+    }
+    run.stop();
 }
 
 #[cfg(target_os = "macos")]
@@ -19399,6 +19551,128 @@ fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_sess
             "a teammate's {attempt} write in its lead's config home succeeded: {attempts}"
         );
     }
+}
+
+/// CTX-M1: in the profiles the engine starts a native lead and its teammates in, the lead
+/// cannot move its own home into its worktree to change a launch file its profile protects
+/// there (LL-2) and move it back, and no teammate can do so with the home all its teammates
+/// share, to plant settings or a launch file the others load. Both still make, change and
+/// remove files in their homes and in the folders they work in, and make each again with
+/// `mkdir -p`.
+#[cfg(target_os = "macos")]
+#[test]
+fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_in_it() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let home = agent_home(&runtime.state, id);
+    let mates = crate::launch_context::mates_home(&home);
+    let state = crate::launch_context::STATE;
+    assert!(home.join(state).is_dir() && mates.is_dir());
+    let work = plan.working_dir.clone();
+    let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let settings = std::fs::read(home.join("settings.json")).ok();
+    let quoted = |path: &Path| {
+        let text = path.to_str().unwrap();
+        assert!(!text.contains('\''));
+        format!("'{text}'")
+    };
+
+    for (who, profile, own, folder) in [
+        ("lead", plan.sandbox_profile.clone(), &home, &work),
+        (
+            "teammate",
+            agent_teammates_profile(&runtime.state, id),
+            &mates,
+            &probe,
+        ),
+    ] {
+        let away = quoted(&folder.join("home-away"));
+        let mut lines = moved_root_lines("home", &quoted(own), &away, "settings.json");
+        lines.extend(moved_root_lines(
+            "state",
+            &quoted(own),
+            &away,
+            &format!("{state}/planted"),
+        ));
+        lines.extend(own_folder_lines(&quoted(own)));
+        let output = crate::spawn_gate::output(
+            Command::new(crate::sandbox::SANDBOX_EXEC)
+                .arg("-f")
+                .arg(&profile)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(lines.join("\n"))
+                .current_dir(folder)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", own)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(folder.join("codes.txt")).unwrap_or_default();
+        let code = |name: &str| {
+            text.lines()
+                .filter_map(|line| line.split_once('='))
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.parse::<i32>().unwrap())
+                .unwrap_or_else(|| panic!("{who}: {name} missing: {text} {output:?}"))
+        };
+        assert_ne!(code("home_away"), 0, "{who}: {text}");
+        assert_ne!(code("state_away"), 0, "{who}: {text}");
+        for name in ["home_files", "work_files", "mkdir_roots", "home_exists"] {
+            assert_eq!(code(name), 0, "{who} {name}: {text}");
+        }
+    }
+    assert_eq!(std::fs::read(home.join("settings.json")).ok(), settings);
+    assert!(!home.join(state).join("planted").exists());
+    let shared = std::fs::read_to_string(mates.join("settings.json")).unwrap_or_default();
+    assert!(!shared.contains("planted"), "{shared}");
+    assert!(!mates.join(state).join("planted").exists());
 }
 
 /// A native lead's teammates run in their own home and only read the lead's (TPH-2 C). A
