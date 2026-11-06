@@ -257,14 +257,11 @@ impl ChannelCase {
     }
 
     /// Changes what a sign-in was admitted under: `owner` revokes the TUI owner, `entry`
-    /// edits the sign-in's own connection, and `elsewhere` edits only another connection,
-    /// which a sign-in outlives because it is bound to its own entry (NS-3).
+    /// edits the sign-in's own connection, and `bytes` rewrites the same settings with other
+    /// bytes, which a sign-in outlives because it is bound to its own entry (NS-3). This
+    /// engine keeps the settings it started with, so any real edit refuses here.
     /// Inputs: the change and the revocation's operation id. Output: nothing.
     async fn change(&self, change: &str, revocation: &str) {
-        let edit = |from: &str, to: &str| {
-            assert_eq!(CATALOG.matches(from).count(), 1);
-            std::fs::write(&self.global, CATALOG.replace(from, to)).unwrap();
-        };
         match change {
             "owner" => {
                 self.host
@@ -277,8 +274,12 @@ impl ChannelCase {
                     .await
                     .unwrap();
             }
-            "entry" => edit(r#"id = "model-a""#, r#"id = "model-a2""#),
-            "elsewhere" => edit(r#"id = "model-alias""#, r#"id = "model-alias2""#),
+            "entry" => {
+                assert_eq!(CATALOG.matches(r#"id = "model-a""#).count(), 1);
+                let edited = CATALOG.replace(r#"id = "model-a""#, r#"id = "model-a2""#);
+                std::fs::write(&self.global, edited).unwrap();
+            }
+            "bytes" => std::fs::write(&self.global, format!("{CATALOG}\n")).unwrap(),
             _ => unreachable!(),
         }
     }
@@ -631,11 +632,11 @@ async fn native_auth_channel_consumes_capability_once_and_rejects_second_attach(
 
 #[tokio::test]
 async fn native_auth_channel_rejects_stale_owner_and_source_before_token_grant() {
-    for change in ["owner", "entry", "elsewhere"] {
+    for change in ["owner", "entry", "bytes"] {
         channel_case(move |case| async move {
             let (_, work) = case.work("stale-before-token").await;
             case.change(change, "revoke-before-token").await;
-            if change == "elsewhere" {
+            if change == "bytes" {
                 let launch = case.host.prepare_native_auth_custody(work).await.unwrap();
                 assert!(case.host.authority.native_auth.lock().unwrap().is_some());
                 drop(launch);
@@ -650,16 +651,16 @@ async fn native_auth_channel_rejects_stale_owner_and_source_before_token_grant()
     }
 }
 
-/// Pin for the dispatch check: a revoked owner's sign-in stays refused even when only
-/// another connection changed, the one edit after which its own entry still holds (NS-3).
+/// Pin for the dispatch check: a revoked owner's sign-in stays refused after a byte change
+/// to the settings, the one change this engine lets a sign-in outlive (NS-3).
 /// It passes before and after the dispatch check stopped rescuing every refusal, because
 /// the continuation check refuses the revoked owner again with the same code.
 #[tokio::test]
-async fn native_auth_channel_refuses_a_revoked_owner_after_an_edit_elsewhere() {
+async fn native_auth_channel_refuses_a_revoked_owner_after_a_byte_change() {
     channel_case(|case| async move {
-        let (_, work) = case.work("revoked-after-other-edit").await;
-        case.change("owner", "revoke-after-other-edit").await;
-        case.change("elsewhere", "").await;
+        let (_, work) = case.work("revoked-after-byte-change").await;
+        case.change("owner", "revoke-after-byte-change").await;
+        case.change("bytes", "").await;
         let before = case.snapshot();
         let refused = case
             .host
@@ -959,14 +960,14 @@ async fn native_auth_channel_cancellation_uses_committed_actor_state_and_keeps_g
 
 #[tokio::test]
 async fn native_auth_channel_source_change_or_owner_revoke_cannot_continue_or_retire() {
-    for change in ["entry", "owner", "elsewhere"] {
+    for change in ["entry", "owner", "bytes"] {
         channel_case(move |case| async move {
             let (fact, launch) = case.launch("stale-live-custody").await;
             let mut channel = case.channel().await;
             let guard = case.guard(&fact, NativeProfileUsePurpose::Authentication);
             assert!(channel.revalidate(&guard).await.is_ok());
             case.change(change, "revoke-live-custody").await;
-            if change == "elsewhere" {
+            if change == "bytes" {
                 assert!(matches!(
                     channel.revalidate(&guard).await.unwrap(),
                     NativeAuthCustodyControl::Continue

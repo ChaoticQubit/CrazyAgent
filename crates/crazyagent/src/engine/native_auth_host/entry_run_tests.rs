@@ -272,7 +272,7 @@ async fn native_auth_custodian_entry_run_session_check_reads_real_cancel_and_ret
 
 #[tokio::test]
 async fn native_auth_custodian_entry_run_session_check_rejects_real_source_or_owner_change() {
-    for change in ["entry", "owner", "elsewhere"] {
+    for change in ["entry", "owner", "bytes"] {
         channel_case(move |case| async move {
             let (committed, launch) = case.launch("entry-run-session-stale").await;
             let mut channel = case.channel().await;
@@ -283,7 +283,7 @@ async fn native_auth_custodian_entry_run_session_check_rejects_real_source_or_ow
                 NativeAuthCustodyControl::Continue
             ));
             case.change(change, "entry-run-session-revoke").await;
-            if change == "elsewhere" {
+            if change == "bytes" {
                 assert!(matches!(
                     session.check(&mut channel).await.unwrap(),
                     NativeAuthCustodyControl::Continue
