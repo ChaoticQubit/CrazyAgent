@@ -2184,9 +2184,10 @@ fn a_fresh_agent_home_starts_context_mode_from_the_engine_install_not_npx() {
 }
 
 /// Starts one MCP server under the agent sandbox and completes the MCP initialize handshake,
-/// a tool listing and then each given tool call in turn. Inputs: the sandboxed command, with
-/// its program and arguments, the `tools/call` params to send and the time allowed for all.
-/// Output: the seconds the handshake took, the tool names and each call's reply.
+/// a tool listing and then each given tool call in turn, quoting the end of the server's
+/// stderr when it stops answering. Inputs: the sandboxed command, with its program and
+/// arguments, the `tools/call` params to send and the time allowed for all. Output: the
+/// seconds the handshake took, the tool names and each call's reply.
 fn mcp_handshake(
     mut command: std::process::Command,
     calls: &[serde_json::Value],
@@ -2194,10 +2195,12 @@ fn mcp_handshake(
 ) -> (Duration, Vec<String>, Vec<serde_json::Value>) {
     use std::io::{BufRead, BufReader, Write};
     use std::process::Stdio;
+    const STDERR_TAIL_BYTES: usize = 4096;
+    let errors = tempfile::NamedTempFile::new().unwrap();
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(errors.reopen().unwrap());
     let started = std::time::Instant::now();
     let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -2215,9 +2218,14 @@ fn mcp_handshake(
         stdin.flush().unwrap();
         loop {
             let left = limit.saturating_sub(started.elapsed());
-            let line = replies
-                .recv_timeout(left)
-                .unwrap_or_else(|_| panic!("the context-mode server answers within {limit:?}"));
+            let line = replies.recv_timeout(left).unwrap_or_else(|_| {
+                let text = fs::read(errors.path()).unwrap_or_default();
+                let tail = &text[text.len().saturating_sub(STDERR_TAIL_BYTES)..];
+                panic!(
+                    "the context-mode server answers within {limit:?}; its stderr ends: {}",
+                    String::from_utf8_lossy(tail)
+                )
+            });
             let answer = serde_json::from_str::<serde_json::Value>(&line.unwrap()).unwrap();
             if answer["id"] == request["id"] {
                 break answer;
@@ -2360,8 +2368,8 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
 
 /// T3-15/18: an agent's `ctx_execute` runs. The engine install of context-mode, started from
 /// the launch's own config under the deny-default profile the runtime builds for a tools-on
-/// agent with its short temp folder, with only the variables Claude Code hands an MCP
-/// server, runs a script whose temp folder is in the agent's short temp folder, where the
+/// agent with its short temp folder, with the harness's variables and the ones Claude Code
+/// adds for an MCP server, runs a script whose temp folder is in that short folder, where the
 /// launch's own `getconf` points context-mode, not in the per-user temp folder the profile
 /// denies. The agent can neither change, add to nor move that `getconf`'s folder.
 #[cfg(target_os = "macos")]
@@ -2369,7 +2377,6 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
 fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
     use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
     use crate::sandbox::{ProjectSandbox, SandboxNetwork};
-    const MCP_SERVER_ENV: [&str; 6] = ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"];
     const MARKER: &str = "ctx-execute-4471";
     const CALL_LIMIT: Duration = Duration::from_secs(60);
     const CHANGE: &str = r#"printf x >> "$1/getconf" 2>/dev/null && echo changed
@@ -2413,14 +2420,9 @@ exit 0"#;
     let mut harness = std::process::Command::new(server["command"].as_str().unwrap());
     harness.args(&args).current_dir(&project);
     let mut command = sandbox.wrap(&profile, &harness).unwrap();
-    let dropped: Vec<OsString> = command
-        .get_envs()
-        .map(|(name, _)| name.to_owned())
-        .filter(|name| !MCP_SERVER_ENV.iter().any(|kept| name == kept))
-        .collect();
-    for name in dropped {
-        command.env_remove(name);
-    }
+    command
+        .env("CLAUDE_PROJECT_DIR", &project)
+        .env("CLAUDECODE", "1");
     for (name, value) in server["env"].as_object().into_iter().flatten() {
         command.env(name, value.as_str().unwrap());
     }
