@@ -365,8 +365,9 @@ mod failed {
     /// launch and every typed line, and in a fresh session hangs once in a task that started
     /// a command it never finishes, as a turn cut short does, reading single keys until
     /// Escape, which ends that turn as interrupted in its rollout, as Codex records it, and
-    /// then reads what is typed again; any other turn, and every turn of a resumed session,
-    /// even one whose note quotes that task, ends with "Done.".
+    /// then reads what is typed again; with a `deaf` file in its home it never answers
+    /// Escape. Any other turn, and every turn of a resumed session, even one whose note
+    /// quotes that task, ends with "Done.".
     const RESUMING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
@@ -416,7 +417,7 @@ while IFS= read -r line; do
     while :; do
       c=$(/bin/dd bs=1 count=1 2>/dev/null | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \n')
       [ -n "$c" ] || exit 0
-      [ "$c" = 1b ] && break
+      [ "$c" = 1b ] && [ ! -e "$CODEX_HOME/deaf" ] && break
     done
     printf '{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}\n' >> "$f"
     /bin/stty icanon
@@ -984,6 +985,55 @@ done
                 .count(),
             2,
             "typed once and quoted once in the note: {typed}"
+        );
+        assert_eq!(fixture.subs(), 1);
+        team.shutdown().unwrap();
+        host.close(&[]).unwrap();
+    }
+
+    /// A kept pane whose hung turn never ends on Escape cannot be taken over: the next
+    /// engine ends it. The task its run holds waits for that takeover instead of going to
+    /// the pane that is about to end, so it is not failed with that pane; it resumes in a
+    /// new pane from the recorded Codex session (`resume <id>`) and finishes there.
+    #[test]
+    fn a_task_whose_kept_pane_cannot_be_taken_over_resumes_in_a_new_pane() {
+        let fixture = Team::new();
+        let host = fixture.host();
+        let mut team = fixture.runtime(&host);
+        let (task, sub) = fixture.hung(&mut team);
+        std::fs::write(
+            fixture
+                .base
+                .join("team/agents")
+                .join(format!("agent-{sub}"))
+                .join("home/deaf"),
+            "",
+        )
+        .unwrap();
+        assert_eq!(team.shutdown().unwrap(), vec![AgentId::team(sub).unwrap()]);
+        drop(team);
+
+        let mut team = fixture.runtime(&host);
+        fixture.until(&mut team, "the task ends", |f| {
+            matches!(f.task(task).0.as_str(), "done" | "failed")
+        });
+        assert_eq!(fixture.task(task), ("done".into(), Some(sub), 2));
+        assert_eq!(fixture.error(task), None);
+        let runs = fixture.runs();
+        assert_eq!(runs.len(), 1, "{runs:#?}");
+        assert_eq!(runs[0].agent, sub);
+        assert_eq!(runs[0].state, RunState::Resumed);
+        let resume = conversation(&runs[0]).unwrap();
+        let launched = fixture.launches(sub);
+        assert_eq!(launched.len(), 2, "{launched:?}");
+        assert!(
+            launched[1].ends_with(&format!(" resume {}", resume.id)),
+            "{launched:?}"
+        );
+        let typed = fixture.home_file(sub, "typed");
+        assert!(
+            typed.contains("The task, in case your session does not show it:"),
+            "{typed}"
         );
         assert_eq!(fixture.subs(), 1);
         team.shutdown().unwrap();
