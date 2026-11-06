@@ -1173,8 +1173,9 @@ export interface FoundProject {
 
 /** What the native bridge read about a picked folder: its bytes, or null with the size code when
  * it could not be measured, its GitHub repository, its linked worktrees and their folders, whether
- * the engine lets it move and be copied without an override, whether it has git, and whether it
- * shares a disk with the projects folder (null when that is unknown). */
+ * the engine lets it move and be copied without an override and which git link a Move breaks,
+ * whether it has git, and whether it shares a disk with the projects folder (null when that is
+ * unknown). */
 export interface FolderSize {
   bytes: number | null;
   size_problem?: string | null;
@@ -1182,10 +1183,14 @@ export interface FolderSize {
   worktrees?: number;
   worktree_paths?: string[];
   movable?: boolean;
+  git_link?: GitLink;
   copyable?: boolean;
   git?: boolean;
   same_volume?: boolean | null;
 }
+
+/** Which git link outside a folder a Move breaks, as the engine reads it. */
+export type GitLink = "none" | "worktrees" | "linked_worktree" | "submodule" | "unreadable";
 
 export type AddFolderMode = "move" | "copy";
 

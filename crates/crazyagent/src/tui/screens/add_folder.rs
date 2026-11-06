@@ -2,7 +2,7 @@ use super::intake::{AddWarning, COPY_WARN_BYTES, ask, copy, event};
 use super::new_project::{complete, expand, size_label};
 use super::{Flow, Place, Screen, open};
 use crate::engine::owner::OwnerResult;
-use crate::projects_home::{AddMode, AddOverride, PATH_BYTES_MAX};
+use crate::projects_home::{AddMode, AddOverride, GitLink, PATH_BYTES_MAX};
 use crate::tui::client::intake::{IntakeQuery, IntakeView};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
@@ -53,16 +53,20 @@ enum Issue {
     TooMany,
     Unreadable,
     Worktrees,
+    LinkedWorktree,
+    Submodule,
+    GitDataUnread,
     LinkedCheckout,
     NoGit,
 }
 
-/// What a Move or Copy of the typed folder meets, read as the engine reads it: its git
-/// links, whether it has git, whether it shares the projects folder's disk, its linked
-/// worktree folders and its size or the soft reason it could not be measured.
+/// What a Move or Copy of the typed folder meets, read as the engine reads it: the git link
+/// a Move breaks, whether a Copy keeps its own git data, whether it has git, whether it shares
+/// the projects folder's disk, its linked worktree folders and its size or the soft reason it
+/// could not be measured.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Facts {
-    movable: bool,
+    git_link: GitLink,
     copyable: bool,
     git: bool,
     same_volume: Option<bool>,
@@ -183,7 +187,7 @@ impl AddFolder {
                 .collect();
         assert!(worktree_paths.len() <= WORKTREE_PATHS_MAX);
         Facts {
-            movable: !crate::projects_home::git_links(folder),
+            git_link: crate::projects_home::git_link(folder),
             copyable: !crate::projects_home::linked_checkout(folder),
             git: std::fs::symlink_metadata(folder.join(".git")).is_ok(),
             same_volume: self
@@ -277,16 +281,14 @@ impl AddFolder {
             Way::Here => return self.here(&source, ctx),
             Way::Into(mode) => mode,
         };
-        if mode == AddMode::Copy {
-            match self.sized(&source) {
-                Some(Load::Ready(_)) => {}
-                Some(Load::Failed(code)) if SOFT_SIZE_CODES.contains(&code.as_str()) => {}
-                Some(Load::Loading) => return Flow::Handled,
-                _ => {
-                    self.size = Some((source.clone(), Load::Loading));
-                    ask(ctx, IntakeQuery::FolderSize { path: source });
-                    return Flow::Handled;
-                }
+        match self.sized(&source) {
+            Some(Load::Ready(_)) => {}
+            Some(Load::Failed(code)) if SOFT_SIZE_CODES.contains(&code.as_str()) => {}
+            Some(Load::Loading) => return Flow::Handled,
+            _ => {
+                self.size = Some((source.clone(), Load::Loading));
+                ask(ctx, IntakeQuery::FolderSize { path: source });
+                return Flow::Handled;
             }
         }
         if !self.confirming && self.ask_anyway(&source, mode, None) {
@@ -390,24 +392,26 @@ impl AddFolder {
                 (_, AddMode::Copy) => "Copy anyway",
             };
         }
-        match self.way {
-            Way::Here => "Set up here",
-            Way::Into(AddMode::Move) if self.confirming => "Move it now",
-            Way::Into(AddMode::Move) => "Move into projects folder",
-            Way::Into(AddMode::Copy) => {
-                let size = self
-                    .source(ctx)
-                    .ok()
-                    .and_then(|source| self.sized(&source).cloned());
-                match size {
-                    Some(Load::Ready(bytes)) if bytes > COPY_WARN_BYTES => "Copy anyway",
-                    Some(Load::Ready(_)) => "Copy into projects folder",
-                    Some(Load::Failed(code)) if SOFT_SIZE_CODES.contains(&code.as_str()) => {
-                        "Copy into projects folder"
-                    }
-                    _ => "Check size",
-                }
+        let Way::Into(mode) = self.way else {
+            return "Set up here";
+        };
+        let size = self
+            .source(ctx)
+            .ok()
+            .and_then(|source| self.sized(&source).cloned());
+        let measured = match &size {
+            Some(Load::Ready(_)) => true,
+            Some(Load::Failed(code)) => SOFT_SIZE_CODES.contains(&code.as_str()),
+            _ => false,
+        };
+        match mode {
+            _ if !measured => "Check size",
+            AddMode::Move if self.confirming => "Move it now",
+            AddMode::Move => "Move into projects folder",
+            AddMode::Copy if matches!(size, Some(Load::Ready(bytes)) if bytes > COPY_WARN_BYTES) => {
+                "Copy anyway"
             }
+            AddMode::Copy => "Copy into projects folder",
         }
     }
 }
@@ -639,7 +643,8 @@ impl Screen for AddFolder {
                 .map(|text| styled(text, Role::Warning, theme)),
             );
         }
-        if self.way == Way::Into(AddMode::Copy) {
+        if let Way::Into(mode) = self.way {
+            let copying = mode == AddMode::Copy;
             let size = self
                 .source(ctx)
                 .ok()
@@ -647,14 +652,14 @@ impl Screen for AddFolder {
             match size {
                 Some(Load::Ready(bytes)) => {
                     lines.push(Line::raw(format!("Size: {}", size_label(bytes))));
-                    if self.worktrees > 0 {
+                    if copying && self.worktrees > 0 {
                         lines.extend(
                             wrap(&worktrees_line(self.worktrees), limit)
                                 .into_iter()
                                 .map(Line::raw),
                         );
                     }
-                    if bytes > COPY_WARN_BYTES {
+                    if copying && bytes > COPY_WARN_BYTES {
                         lines.extend(
                             wrap(
                                 "This folder is over 1 GB. Copying takes a while and uses that much more disk space.",
@@ -668,7 +673,11 @@ impl Screen for AddFolder {
                 Some(Load::Loading) => lines.push(ctx.loading("Measuring the folder")),
                 Some(Load::Failed(code)) => lines.push(styled(copy(&code), Role::Error, theme)),
                 _ => lines.push(styled(
-                    "CrazyAgent shows the size before it copies.",
+                    if copying {
+                        "CrazyAgent shows the size before it copies."
+                    } else {
+                        "CrazyAgent shows the size before it moves."
+                    },
                     Role::Muted,
                     theme,
                 )),
@@ -731,13 +740,13 @@ impl Screen for AddFolder {
 fn issues(mode: AddMode, facts: &Facts, refused: Option<&str>) -> Vec<Issue> {
     let mut found = Vec::with_capacity(6);
     match refused {
-        Some("home_move_worktrees") => found.push(Issue::Worktrees),
+        Some("home_move_worktrees") => found.push(move_link_issue(facts.git_link)),
         Some("home_copy_linked_checkout") => found.push(Issue::LinkedCheckout),
         Some("home_copy_too_large") => found.push(Issue::TooMany),
         _ => {}
     }
-    if mode == AddMode::Move && !facts.movable {
-        found.push(Issue::Worktrees);
+    if mode == AddMode::Move && facts.git_link != GitLink::None {
+        found.push(move_link_issue(facts.git_link));
     }
     if mode == AddMode::Copy && !facts.copyable {
         found.push(Issue::LinkedCheckout);
@@ -769,12 +778,30 @@ fn issues(mode: AddMode, facts: &Facts, refused: Option<&str>) -> Vec<Issue> {
     found
 }
 
+/// The issue a Move of a folder with git links outside it is asked about: the link the read
+/// named, or linked worktrees for an engine refusal the read did not explain. Takes the link.
+/// Returns the issue.
+fn move_link_issue(link: GitLink) -> Issue {
+    match link {
+        GitLink::LinkedWorktree => Issue::LinkedWorktree,
+        GitLink::Submodule => Issue::Submodule,
+        GitLink::Unreadable => Issue::GitDataUnread,
+        GitLink::None | GitLink::Worktrees => Issue::Worktrees,
+    }
+}
+
 /// The overrides yes sends: one for each issue the engine itself refuses. Takes the way,
 /// the issues and the facts. Returns them in the engine's order.
 fn overrides(mode: AddMode, issues: &[Issue], facts: &Facts) -> Vec<AddOverride> {
     let unmeasured = facts.size_problem.as_deref() == Some("folder_size_timeout");
     let mut overrides = Vec::with_capacity(crate::projects_home::ADD_OVERRIDES_MAX);
-    if mode == AddMode::Move && issues.contains(&Issue::Worktrees) {
+    let links = [
+        Issue::Worktrees,
+        Issue::LinkedWorktree,
+        Issue::Submodule,
+        Issue::GitDataUnread,
+    ];
+    if mode == AddMode::Move && issues.iter().any(|issue| links.contains(issue)) {
         overrides.push(AddOverride::Worktrees);
     }
     if mode == AddMode::Copy && issues.contains(&Issue::LinkedCheckout) {
@@ -787,10 +814,11 @@ fn overrides(mode: AddMode, issues: &[Issue], facts: &Facts) -> Vec<AddOverride>
     overrides
 }
 
-/// The warnings the question shows: data loss blocks first (apps still using the folder, a
-/// copy across disks, a very large or deep folder, unreadable files), then the other effects
-/// (the old place, git worktrees with their folders, a shared git checkout, no git, a quick
-/// rename). Takes the way, the issues and the facts. Returns the blocks in that order.
+/// The warnings the question shows: data loss blocks first (a copy sharing another checkout's
+/// git data, apps still using the folder, a copy across disks, a very large or deep folder,
+/// unreadable files), then the other effects (the old place, git worktrees with their folders,
+/// the folder being a worktree or submodule, git data not read, no git, a quick rename). Takes
+/// the way, the issues and the facts. Returns the blocks in that order.
 fn warnings(mode: AddMode, issues: &[Issue], facts: &Facts) -> Vec<Block> {
     let moving = mode == AddMode::Move;
     let copy_line = if moving {
@@ -804,7 +832,10 @@ fn warnings(mode: AddMode, issues: &[Issue], facts: &Facts) -> Vec<Block> {
         paths: Vec::new(),
     };
     let text = |warning: AddWarning| warning.text().to_owned();
-    let mut blocks = Vec::with_capacity(8);
+    let mut blocks = Vec::with_capacity(9);
+    if issues.contains(&Issue::LinkedCheckout) {
+        blocks.push(block(true, vec![text(AddWarning::LinkedCheckout)]));
+    }
     if moving {
         blocks.push(block(true, vec![text(AddWarning::CloseApps)]));
     }
@@ -851,8 +882,14 @@ fn warnings(mode: AddMode, issues: &[Issue], facts: &Facts) -> Vec<Block> {
             paths: facts.worktree_paths.clone(),
         });
     }
-    if issues.contains(&Issue::LinkedCheckout) {
-        blocks.push(block(false, vec![text(AddWarning::LinkedCheckout)]));
+    for (issue, warning) in [
+        (Issue::LinkedWorktree, AddWarning::LinkedWorktree),
+        (Issue::Submodule, AddWarning::Submodule),
+        (Issue::GitDataUnread, AddWarning::GitDataUnread),
+    ] {
+        if issues.contains(&issue) {
+            blocks.push(block(false, vec![text(warning)]));
+        }
     }
     if issues.contains(&Issue::NoGit) {
         blocks.push(block(false, vec![text(AddWarning::NoGit)]));

@@ -157,8 +157,9 @@ const SETUP_CODES: [&str; 33] = [
 /// What the window asks about before a Move or Copy: the folder's size, or None with the
 /// soft size code (timeout, too large, unreadable) when it could not be measured, the
 /// GitHub owner/name of its `origin` remote on github.com, its linked git worktrees and their
-/// folders, whether a Move keeps its git links and a Copy its own git data, whether it has git
-/// at all, and whether it is on the projects folder's disk (None when that is unknown).
+/// folders, whether a Move keeps its git links and which link it breaks, whether a Copy keeps
+/// its own git data, whether it has git at all, and whether it is on the projects folder's
+/// disk (None when that is unknown).
 #[derive(Debug, Serialize)]
 pub struct FolderSize {
     pub bytes: Option<u64>,
@@ -168,6 +169,7 @@ pub struct FolderSize {
     pub worktrees: usize,
     pub worktree_paths: Vec<String>,
     pub movable: bool,
+    pub git_link: crazyagent::projects_home::GitLink,
     pub copyable: bool,
     pub git: bool,
     pub same_volume: Option<bool>,
@@ -392,7 +394,8 @@ impl NativeBridge {
                 .filter_map(|worktree| worktree.to_str().map(str::to_owned))
                 .collect();
         assert!(worktree_paths.len() <= WORKTREE_PATHS_MAX);
-        let movable = !crazyagent::projects_home::git_links(folder);
+        let git_link = crazyagent::projects_home::git_link(folder);
+        let movable = git_link == crazyagent::projects_home::GitLink::None;
         let copyable = !crazyagent::projects_home::linked_checkout(folder);
         let git = std::fs::symlink_metadata(folder.join(".git")).is_ok();
         let same_volume = match self.owner_read(OwnerRead::ProjectsHome).await? {
@@ -422,6 +425,7 @@ impl NativeBridge {
             worktrees,
             worktree_paths,
             movable,
+            git_link,
             copyable,
             git,
             same_volume,

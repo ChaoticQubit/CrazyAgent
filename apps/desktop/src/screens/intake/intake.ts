@@ -149,15 +149,42 @@ export function addWay(mode: AddWay, size: Loaded<FolderSize> | null): AddWay {
 }
 
 /** Something about a folder the owner is asked about before a Move or Copy goes ahead. */
-export type AnywayIssue = "large" | "too_many" | "unreadable" | "worktrees" | "linked_checkout" | "no_git" | "git_unread";
+export type AnywayIssue =
+  | "large"
+  | "too_many"
+  | "unreadable"
+  | "worktrees"
+  | "linked_worktree"
+  | "submodule"
+  | "git_data_unread"
+  | "linked_checkout"
+  | "no_git"
+  | "git_unread";
 
-const ISSUE_ORDER: AnywayIssue[] = ["large", "too_many", "unreadable", "worktrees", "linked_checkout", "no_git", "git_unread"];
+const ISSUE_ORDER: AnywayIssue[] = ["large", "too_many", "unreadable", "worktrees", "linked_worktree", "submodule", "git_data_unread", "linked_checkout", "no_git", "git_unread"];
+
+const MOVE_LINK_ISSUES: AnywayIssue[] = ["worktrees", "linked_worktree", "submodule", "git_data_unread"];
 
 const REFUSED_ISSUES: Record<string, AnywayIssue> = {
-  home_move_worktrees: "worktrees",
   home_copy_linked_checkout: "linked_checkout",
   home_copy_too_large: "too_many",
 };
+
+/** The issue a Move of a folder with git links outside it is asked about: the link the read
+ * named, or linked worktrees when the read did not name one. Input: the folder read, if any.
+ * Output: the issue. */
+function moveLinkIssue(read: FolderSize | null): AnywayIssue {
+  switch (read?.git_link) {
+    case "linked_worktree":
+      return "linked_worktree";
+    case "submodule":
+      return "submodule";
+    case "unreadable":
+      return "git_data_unread";
+    default:
+      return "worktrees";
+  }
+}
 
 /** What the owner is asked about before a Move or Copy of a picked folder: what its read found
  * for that way, plus the issue of a soft refusal the engine sent back. A Move on the same disk is
@@ -167,10 +194,11 @@ const REFUSED_ISSUES: Record<string, AnywayIssue> = {
 export function anywayIssues(way: AddFolderMode, size: Loaded<FolderSize> | null, refused: string | null): AnywayIssue[] {
   if (size === null || size.kind === "loading") return [];
   const found = new Set<AnywayIssue>();
-  if (refused !== null && Object.hasOwn(REFUSED_ISSUES, refused)) found.add(REFUSED_ISSUES[refused]);
   const read = size.kind === "ok" ? size.value : null;
+  if (refused === "home_move_worktrees") found.add(moveLinkIssue(read));
+  else if (refused !== null && Object.hasOwn(REFUSED_ISSUES, refused)) found.add(REFUSED_ISSUES[refused]);
   if (read === null || typeof read.movable !== "boolean" || typeof read.copyable !== "boolean") found.add("git_unread");
-  else if (way === "move" && !read.movable) found.add("worktrees");
+  else if (way === "move" && !read.movable) found.add(moveLinkIssue(read));
   else if (way === "copy" && !read.copyable) found.add("linked_checkout");
   if (read?.git === false) found.add("no_git");
   if (read?.size_problem === "folder_size_unreadable") found.add("unreadable");
@@ -187,7 +215,7 @@ export function anywayIssues(way: AddFolderMode, size: Loaded<FolderSize> | null
 export function anywayOverrides(way: AddFolderMode, issues: AnywayIssue[], size: Loaded<FolderSize> | null): AddOverride[] {
   const unmeasured = size?.kind === "ok" && size.value.size_problem === "folder_size_timeout";
   const overrides: AddOverride[] = [];
-  if (way === "move" && issues.includes("worktrees")) overrides.push("worktrees");
+  if (way === "move" && issues.some((issue) => MOVE_LINK_ISSUES.includes(issue))) overrides.push("worktrees");
   if (way === "copy" && issues.includes("linked_checkout")) overrides.push("linked_checkout");
   if (issues.includes("too_many") || (issues.includes("large") && unmeasured)) overrides.push("too_large");
   return overrides;
@@ -214,16 +242,18 @@ export interface AnywayWarning {
   paths: string[];
 }
 
-/** The warnings the question shows: data loss blocks first (apps still using the folder, a copy
- * across disks, a very large or deep folder, unreadable files), then the other effects (the old
- * place, git worktrees with their folders, a shared git checkout, no git, git not read, a quick
- * rename). Inputs: the way, the issues and the folder read. Output: the blocks in that order. */
+/** The warnings the question shows: data loss blocks first (a copy sharing another checkout's
+ * git data, apps still using the folder, a copy across disks, a very large or deep folder,
+ * unreadable files), then the other effects (the old place, git worktrees with their folders, the
+ * folder being a worktree or submodule, git data not read, no git, git not read, a quick rename).
+ * Inputs: the way, the issues and the folder read. Output: the blocks in that order. */
 export function anywayWarnings(way: AddFolderMode, issues: AnywayIssue[], size: Loaded<FolderSize> | null): AnywayWarning[] {
   const read = size?.kind === "ok" ? size.value : null;
   const moving = way === "move";
   const copyLine = moving ? ADD_WARNINGS.across_disks : ADD_WARNINGS.copy_all;
   const block = (loss: boolean, lines: string[], paths: string[] = []): AnywayWarning => ({ loss, lines, paths });
-  const loss: AnywayWarning[] = moving ? [block(true, [ADD_WARNINGS.close_apps])] : [];
+  const loss: AnywayWarning[] = issues.includes("linked_checkout") ? [block(true, [ADD_WARNINGS.linked_checkout])] : [];
+  if (moving) loss.push(block(true, [ADD_WARNINGS.close_apps]));
   let copying = false;
   if (issues.includes("large")) {
     loss.push(block(true, [ADD_WARNINGS.large, typeof read?.bytes === "number" ? measuredLine(read.bytes) : ADD_WARNINGS.unmeasured, copyLine]));
@@ -240,7 +270,9 @@ export function anywayWarnings(way: AddFolderMode, issues: AnywayIssue[], size: 
   if (issues.includes("unreadable")) loss.push(block(true, [moving ? ADD_WARNINGS.unreadable : ADD_WARNINGS.unreadable_copy]));
   const effects: AnywayWarning[] = moving ? [block(false, [ADD_WARNINGS.old_place])] : [];
   if (issues.includes("worktrees")) effects.push(block(false, [ADD_WARNINGS.worktrees], read?.worktree_paths ?? []));
-  if (issues.includes("linked_checkout")) effects.push(block(false, [ADD_WARNINGS.linked_checkout]));
+  if (issues.includes("linked_worktree")) effects.push(block(false, [ADD_WARNINGS.linked_worktree]));
+  if (issues.includes("submodule")) effects.push(block(false, [ADD_WARNINGS.submodule]));
+  if (issues.includes("git_data_unread")) effects.push(block(false, [ADD_WARNINGS.git_data_unread]));
   if (issues.includes("no_git")) effects.push(block(false, [ADD_WARNINGS.no_git]));
   if (issues.includes("git_unread")) effects.push(block(false, [ADD_WARNINGS.git_unread]));
   if (moving && !copying && read?.same_volume === true) effects.push(block(false, [ADD_WARNINGS.same_disk]));

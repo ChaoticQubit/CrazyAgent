@@ -25,6 +25,9 @@ pub(in crate::tui) enum AddWarning {
     Unreadable,
     UnreadableCopy,
     Worktrees,
+    LinkedWorktree,
+    Submodule,
+    GitDataUnread,
     LinkedCheckout,
     NoGit,
 }
@@ -40,7 +43,7 @@ impl AddWarning {
                 "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working."
             }
             Self::AcrossDisks => {
-                "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the move stops: your original stays, and a part copy may be left in your projects folder to delete."
+                "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left."
             }
             Self::SameDisk => "This is a rename on the same disk; it is quick.",
             Self::CopyAll => {
@@ -60,8 +63,17 @@ impl AddWarning {
             Self::Worktrees => {
                 "Git worktrees linked to this folder stop working until you run git worktree repair in each. Their files stay, but git there fails until repaired."
             }
+            Self::LinkedWorktree => {
+                "This folder is a git worktree of another repository. After the move, git here fails until you run git worktree repair in the moved folder."
+            }
+            Self::Submodule => {
+                "This folder is a submodule of another repository. After the move, the parent repository no longer finds it and git here can fail."
+            }
+            Self::GitDataUnread => {
+                "CrazyAgent could not read this folder's git data, so it cannot tell what a move breaks."
+            }
             Self::LinkedCheckout => {
-                "The copy still uses the original repository's git data. Commits made in the copy change the original repository."
+                "The copy keeps this folder's link to another repository's git data. Where that link still reaches it, the copy shares that repository's index and current branch: switching branches, staging or resetting in either one changes the other, and uncommitted work can be lost. Where it does not, git fails in the copy."
             }
             Self::NoGit => {
                 "This folder has no git history. Agents' changes can't be shown or undone with git until you run git init here."
@@ -282,6 +294,9 @@ mod tests {
             AddWarning::Unreadable => "unreadable",
             AddWarning::UnreadableCopy => "unreadable_copy",
             AddWarning::Worktrees => "worktrees",
+            AddWarning::LinkedWorktree => "linked_worktree",
+            AddWarning::Submodule => "submodule",
+            AddWarning::GitDataUnread => "git_data_unread",
             AddWarning::LinkedCheckout => "linked_checkout",
             AddWarning::NoGit => "no_git",
         };
@@ -297,6 +312,9 @@ mod tests {
             AddWarning::Unreadable,
             AddWarning::UnreadableCopy,
             AddWarning::Worktrees,
+            AddWarning::LinkedWorktree,
+            AddWarning::Submodule,
+            AddWarning::GitDataUnread,
             AddWarning::LinkedCheckout,
             AddWarning::NoGit,
         ]

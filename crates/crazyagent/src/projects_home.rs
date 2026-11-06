@@ -288,24 +288,57 @@ pub enum GitLink {
 /// Tells which git link a Move of `folder` would break. Input: the folder. Output: the
 /// link, or `None` when its git, if any, is all inside it.
 pub fn git_link(folder: &Path) -> GitLink {
-    let _ = folder;
-    GitLink::None
+    let git = folder.join(".git");
+    let metadata = match std::fs::symlink_metadata(&git) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return GitLink::None,
+        Err(_) => return GitLink::Unreadable,
+        Ok(metadata) => metadata,
+    };
+    if metadata.file_type().is_symlink() {
+        return GitLink::Unreadable;
+    }
+    if metadata.is_file() {
+        return checkout_link(&git);
+    }
+    if !metadata.is_dir() {
+        return GitLink::Unreadable;
+    }
+    match std::fs::read_dir(git.join("worktrees")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GitLink::None,
+        Err(_) => GitLink::Unreadable,
+        Ok(mut entries) if entries.next().is_some() => GitLink::Worktrees,
+        Ok(_) => GitLink::None,
+    }
 }
 
-/// True when moving `folder` would break git links kept outside it: the
-/// folder is a linked worktree or submodule (its `.git` is a file or a link),
-/// or its repository has linked worktrees. An unreadable `.git` counts.
-/// [`plan_add`] refuses such a Move, and the windows offer no Move for it.
-pub fn git_links(folder: &Path) -> bool {
-    let git = folder.join(".git");
-    match std::fs::symlink_metadata(&git) {
-        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-        Ok(metadata) if !metadata.is_dir() => true,
-        Ok(_) => match std::fs::read_dir(git.join("worktrees")) {
-            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-            Ok(mut entries) => entries.next().is_some(),
-        },
+/// Tells a checkout apart by the git data its `.git` file names: a linked worktree's sits in
+/// `<repository>/.git/worktrees/<name>`, a submodule's under a `modules` folder of its parent's
+/// git data. Input: the `.git` file. Output: the link, `Unreadable` for any other or unread file.
+fn checkout_link(git: &Path) -> GitLink {
+    let Some(text) = crate::platform::read_plain_file(git, PATH_BYTES_MAX as u64 + 16) else {
+        return GitLink::Unreadable;
+    };
+    let Some(named) = text.trim_end_matches(['\n', '\r']).strip_prefix("gitdir: ") else {
+        return GitLink::Unreadable;
+    };
+    let named = Path::new(named);
+    if named.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("worktrees")) {
+        return GitLink::LinkedWorktree;
     }
+    if named
+        .components()
+        .any(|part| part.as_os_str() == std::ffi::OsStr::new("modules"))
+    {
+        return GitLink::Submodule;
+    }
+    GitLink::Unreadable
+}
+
+/// True when moving `folder` would break git links kept outside it: any [`GitLink`] other
+/// than `None`, an unreadable `.git` included. [`plan_add`] refuses such a Move unless the
+/// owner chose to go past it.
+pub fn git_links(folder: &Path) -> bool {
+    git_link(folder) != GitLink::None
 }
 
 /// True when `folder` is itself a checkout whose git data lives in another repository:
