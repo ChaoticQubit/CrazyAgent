@@ -3651,9 +3651,10 @@ impl TeamRuntime {
     /// room the input limit leaves beside the message; when not even the cut block fits, a
     /// team note says the edit waits for a later message, once per edited text until it is
     /// delivered (DEC-111 QR1). While the master's app does not read keys the message
-    /// waits, and past `READY_WAIT` one note and the problem line say so (F2). Takes the
-    /// project. Returns any SQLite failure; a message that cannot be typed is failed with a
-    /// team note, one that must wait stays pending.
+    /// waits, and past `READY_WAIT` one note and the problem line say so (F2); a typed
+    /// message takes that line down, also one an earlier engine stored. Takes the project.
+    /// Returns any SQLite failure; a message that cannot be typed is failed with a team
+    /// note, one that must wait stays pending.
     fn feed_live(&mut self, project: &ProjectId) -> Result<(), EngineError> {
         let Some(id) = self.master(project) else {
             return Ok(());
@@ -3712,7 +3713,6 @@ impl TeamRuntime {
             Err(super::master::InputRefused::Unready) => return self.unread_wait(project, id),
             Err(_) => return Ok(()),
         };
-        self.unread_ended(project)?;
         self.connection
             .execute(
                 "UPDATE team_messages SET state=?2 WHERE id=?1",
@@ -3725,6 +3725,8 @@ impl TeamRuntime {
                 "A team message could not be typed into the master because it is empty or not plain text.",
             );
         }
+        self.unread.remove(project);
+        super::master::clear_problem(&self.connection, project, super::master::MASTER_NOT_READING)?;
         if let Some(edit) = &edit {
             let _ = crate::instruction_files::delivered(edit, &home);
         }
@@ -3773,9 +3775,8 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Ends a project's wait for its live master's app to read keys once nothing waits or
-    /// a message was typed, and takes its wait line down. Takes the project. Returns any
-    /// SQLite failure.
+    /// Ends a project's wait for its live master's app to read keys once nothing waits,
+    /// and takes its wait line down. Takes the project. Returns any SQLite failure.
     fn unread_ended(&mut self, project: &ProjectId) -> Result<(), EngineError> {
         if self.unread.remove(project).is_some() {
             super::master::clear_problem(
