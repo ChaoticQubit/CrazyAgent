@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { closeSync, existsSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, statfsSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -17,6 +17,9 @@ const SETUP_MS = 120000;
 const DISK_MS = 120000;
 const LARGE_BYTES = Math.round(1.1 * 1024 ** 3);
 const FREE_BYTES_MIN = 5 * 1024 ** 3;
+const MARK_BYTES = 64;
+const MARKS = [0, Math.floor(LARGE_BYTES / 2), LARGE_BYTES - MARK_BYTES].map((at) => ({ at, bytes: Buffer.from(`CA-E2E archive.bin mark at ${at} `.padEnd(MARK_BYTES, "#")) }));
+assert(MARKS.every(({ at, bytes }) => bytes.length === MARK_BYTES && at >= 0 && at + MARK_BYTES <= LARGE_BYTES), "every mark fits inside the large file");
 const SETUP_ROUTE = /^#\/projects\/([^/]+)\/setup$/;
 const WAYS = '[role=radiogroup][aria-label="How to add it"] button';
 const SAID = {
@@ -84,6 +87,21 @@ function releaseDisk(disk) {
   if (existsSync(disk.image)) left.push(`${disk.image} is still on disk`);
   if (left.length === 0) run.disk = null;
   return left;
+}
+
+/** Reads the bytes a file holds at each mark's offset. Inputs: the file and [{ at, bytes }].
+ * Output: one Buffer per mark, as long as its bytes; fails when the file ends before one. */
+function bytesAt(file, marks) {
+  const fd = openSync(file, "r");
+  try {
+    return marks.map(({ at, bytes }) => {
+      const read = Buffer.alloc(bytes.length);
+      assert.equal(readSync(fd, read, 0, read.length, at), read.length, `${file} holds ${read.length} bytes at ${at}`);
+      return read;
+    });
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Checks that each line shows in the question, in the given order. Inputs: the question's text,
@@ -361,9 +379,11 @@ test("Move anyway moves a very large folder from another disk after the copy war
     const big = openSync(join(folder, "archive.bin"), "w");
     try {
       ftruncateSync(big, LARGE_BYTES);
+      for (const { at, bytes } of MARKS) writeSync(big, bytes, 0, bytes.length, at);
     } finally {
       closeSync(big);
     }
+    assert.deepEqual(bytesAt(join(folder, "archive.bin"), MARKS), MARKS.map((mark) => mark.bytes), "the large file holds its marks before the move");
     assert.notEqual(statSync(folder).dev, statSync(run.projects).dev, "the folder sits on another disk than the projects folder");
     const name = basename(folder);
     const landed = join(run.projects, name);
@@ -379,6 +399,7 @@ test("Move anyway moves a very large folder from another disk after the copy war
     });
     assert.ok(!existsSync(folder), `${folder} is removed from the other disk once the copy is checked`);
     assert.equal(statSync(join(landed, "archive.bin")).size, LARGE_BYTES, "the large file moved whole");
+    assert.deepEqual(bytesAt(join(landed, "archive.bin"), MARKS), MARKS.map((mark) => mark.bytes), "the large file's bytes at its start, middle and end moved unchanged");
     assert.equal(git(landed, ["rev-parse", "HEAD"]), head, "git works in the moved folder at the same commit");
     movedOnce(folder, []);
   } finally {
