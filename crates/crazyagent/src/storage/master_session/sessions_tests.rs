@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::{AccountPool, ModelAccessEdit};
 use crate::engine::owner::{ModelAccessCollection, Started};
 use crate::master_session::MasterSelection;
 use crate::master_sessions::{MasterSessionSummary, ResumePlan, SESSIONS_LISTED_MAX};
@@ -951,14 +952,28 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
     case.close().await;
 }
 
-const NATIVE_POOL_PROJECTS: &str =
-    "members = [\"native-connection\"]\nprojects = [\"session-project\"]";
-
-/// Parks a used native session behind a fresh one, then restarts the engine under
-/// settings whose native pool lists the given projects instead of the session's own.
-/// Inputs: the case and the projects line. Output: the restarted case and the parked session.
-async fn parked_native_under(case: Case, projects: &str) -> (Case, SessionId) {
-    assert_eq!(CONFIG.matches(NATIVE_POOL_PROJECTS).count(), 1);
+/// Parks a used native session behind a fresh one, then has the owner replace the native
+/// pool with one serving the given projects, as adding a folder again did in run 7 (N-D15).
+/// A second project exists first so the pool can name it. Inputs: the case and the
+/// projects. Output: the parked session, after asserting the edit changed the settings.
+async fn parked_native_after_pool_edit(case: &Case, projects: &[&str]) -> SessionId {
+    let repository = case.root.path().join("joined-repository");
+    std::fs::create_dir(&repository).unwrap();
+    std::fs::write(repository.join("README.md"), "Joined repository\n").unwrap();
+    assert_eq!(
+        case.apply(
+            "create-joined-project",
+            OwnerMutation::CreateProject {
+                project_id: ProjectId::new("joined-project").unwrap(),
+                spec: ProjectSpec {
+                    name: "Joined project".into(),
+                    repositories: vec![repository.to_str().unwrap().into()],
+                },
+            },
+        )
+        .await,
+        OwnerResult::Applied
+    );
     assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
     let rcli = case.shown().await;
     case.used_in_terminal(&rcli.session_id);
@@ -970,21 +985,41 @@ async fn parked_native_under(case: Case, projects: &str) -> (Case, SessionId) {
     let native = case.shown().await;
     case.used_in_terminal(&native.session_id);
     assert_eq!(case.renew("renew-last", false).await, OwnerResult::Applied);
-    let changed = CONFIG.replace(
-        NATIVE_POOL_PROJECTS,
-        &format!("members = [\"native-connection\"]\nprojects = {projects}"),
+    let (expected_config_id, expected_source_hash, _) = case.basis().await;
+    assert_eq!(native.config_id, expected_config_id);
+    let replaced = case
+        .apply(
+            "replace-native-pool",
+            OwnerMutation::ModelAccess {
+                expected_config_id: expected_config_id.clone(),
+                expected_source_hash,
+                edit: ModelAccessEdit::ReplacePool {
+                    pool: AccountPool {
+                        id: reference("native-pool"),
+                        name: None,
+                        members: vec![reference("native-connection")],
+                        projects: projects.iter().copied().map(reference).collect(),
+                        roles: vec![reference("project_leader")],
+                        fallback_allowed: false,
+                        provider_quota_policy: Default::default(),
+                    },
+                },
+            },
+        )
+        .await;
+    assert_eq!(replaced, OwnerResult::Applied);
+    let (after, _, _) = case.basis().await;
+    assert_ne!(
+        after, expected_config_id,
+        "the pool edit changes the settings"
     );
-    assert_ne!(changed, CONFIG);
-    (case.reopen_with(Some(&changed)).await, native.session_id)
+    native.session_id
 }
 
 #[tokio::test]
 async fn resume_continues_a_session_after_another_project_joins_its_pool() {
-    let (case, native) = parked_native_under(
-        Case::new().await,
-        "[\"session-project\", \"joined-project\"]",
-    )
-    .await;
+    let case = Case::new().await;
+    let native = parked_native_after_pool_edit(&case, &["session-project", "joined-project"]).await;
     assert_eq!(
         case.resume("resume-joined", &native, false).await,
         OwnerResult::Applied,
@@ -996,7 +1031,8 @@ async fn resume_continues_a_session_after_another_project_joins_its_pool() {
 
 #[tokio::test]
 async fn resume_refuses_a_session_whose_own_project_left_its_pool() {
-    let (case, native) = parked_native_under(Case::new().await, "[\"joined-project\"]").await;
+    let case = Case::new().await;
+    let native = parked_native_after_pool_edit(&case, &["joined-project"]).await;
     let before = snapshot(&case);
     assert_eq!(
         case.resume("resume-left", &native, false).await,
