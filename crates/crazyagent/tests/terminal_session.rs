@@ -412,6 +412,28 @@ fn stopping_a_pane_session_ends_every_process_left_in_its_group() {
     assert!(test_kill_process_group(group).is_err());
 }
 
+/// CB-2 one signal: a Full access pane has no keeper, so the host's kill still finds it
+/// running and its stop holds the pane's group across that kill. The stop alone ends what
+/// the pane left in its group and confirms only once the group is gone.
+#[test]
+fn stopping_a_full_access_pane_session_ends_every_process_left_in_its_group() {
+    let pane = stand_in_on(SERVER_STAND_IN, "stand-in-13", None, false);
+    let group = Pid::from_raw(i32::try_from(pane.session.process_group()).unwrap()).unwrap();
+    let server = background(&pane.home, group);
+
+    let stopped = pane.session.stop();
+    let ended = within(Duration::from_secs(10), || {
+        test_kill_process_group(group) == Err(rustix::io::Errno::SRCH)
+    });
+    if !ended {
+        let _ = kill_process(server, Signal::KILL);
+    }
+    assert_eq!(stopped.map_err(|problem| problem.code()), Ok(None));
+    assert!(!pane.host.alive().unwrap().contains(&pane.agent));
+    assert!(ended, "the Full access pane's group outlived the stop");
+    assert_eq!(test_kill_process(server), Err(rustix::io::Errno::SRCH));
+}
+
 /// RV-DS-75: a pane whose harness exited unseen for longer than a pane id stays proven
 /// its own leaves its group alone, since the id may name a reused group by then, and its
 /// stop reports the cleanup uncertain instead of a confirmed stop while that group runs.

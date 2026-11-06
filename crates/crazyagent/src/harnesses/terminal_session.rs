@@ -768,8 +768,7 @@ impl TerminalSession {
         }
         #[cfg(unix)]
         {
-            super::launch::kill_group(self.pid);
-            self.uncertain |= !super::launch::await_group_exit(self.pid);
+            self.uncertain |= !super::launch::end_pane_group(self.pid, None);
         }
     }
 }
@@ -799,10 +798,7 @@ pub fn end_left_pane(host: &dyn Host, agent: &AgentId, owner: &str) -> Result<bo
         Err(problem) => return Err(problem),
     }
     #[cfg(unix)]
-    let ended = pid.is_some_and(|pid| {
-        super::launch::kill_group(pid);
-        super::launch::await_group_exit(pid)
-    });
+    let ended = pid.is_some_and(|pid| super::launch::end_pane_group(pid, None));
     #[cfg(not(unix))]
     let ended = pid.is_none();
     let confirmed = kept && ended;

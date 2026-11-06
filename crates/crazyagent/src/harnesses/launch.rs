@@ -395,6 +395,90 @@ pub(crate) fn kill_group(group: u32) {
     let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
 }
 
+/// The process groups some path is ending now, so a pane's stop and the terminal host's
+/// close never both signal one group (CB-2 one signal).
+static ENDING: std::sync::Mutex<std::collections::BTreeSet<u32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// One path's hold on ending a process group: while it lives every other path leaves the
+/// group alone, and dropping it frees the number, which may lead a new group later.
+pub(crate) struct Ending(u32);
+
+impl Ending {
+    /// Takes the hold on a process group. Input: the group id, a pid above 1. Output: the
+    /// hold, or none while another path holds that group.
+    pub(crate) fn claim(group: u32) -> Option<Self> {
+        assert!(group > 1 && i32::try_from(group).is_ok());
+        let mut ending = ENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if ending.insert(group) {
+            Some(Self(group))
+        } else {
+            None
+        }
+    }
+
+    /// The group this hold names. Output: its id as a pid.
+    #[cfg(unix)]
+    pub(crate) fn pid(&self) -> rustix::process::Pid {
+        i32::try_from(self.0)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("a held group id is a pid above 1")
+    }
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        let mut ending = ENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ending.remove(&self.0);
+    }
+}
+
+/// Ends a pane's process group once its pane is gone: KILL until no member is left, for at
+/// most `GROUP_EXIT_WAIT`. Inputs: the group id and this path's hold on it, if any. Output:
+/// whether the group is gone.
+#[cfg(unix)]
+pub(crate) fn end_pane_group(group: u32, held: Option<Ending>) -> bool {
+    let Some(pid) = i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return true;
+    };
+    end_pane_group_with(
+        held,
+        GROUP_EXIT_WAIT,
+        || rustix::process::test_kill_process_group(pid).is_ok(),
+        || {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        },
+    )
+}
+
+/// Ends a group as `end_pane_group` describes, through `left`, which tells whether the
+/// group still answers, and `kill`, which sends it KILL. Inputs: the hold, the longest wait
+/// and both calls. Output: whether the group is gone.
+#[cfg(unix)]
+fn end_pane_group_with(
+    held: Option<Ending>,
+    wait: Duration,
+    mut left: impl FnMut() -> bool,
+    mut kill: impl FnMut(),
+) -> bool {
+    drop(held);
+    kill();
+    let started = Instant::now();
+    while left() && started.elapsed() < wait {
+        kill();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    !left()
+}
+
 /// Waits until no process of a killed agent's group is left, killing again
 /// any member that is still there. Takes the group id; returns once the group
 /// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
