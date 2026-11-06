@@ -461,7 +461,10 @@ fn native_auth_custody_dispatch_goes_on_only_while_its_own_entry_holds() {
             continue;
         }
         let before = case.snapshot();
-        assert!(case.dispatch(work).is_err());
+        assert_eq!(
+            case.dispatch(work).err().unwrap().0,
+            "native_profile_source_conflict"
+        );
         assert_eq!(case.snapshot(), before);
     }
 }
@@ -478,7 +481,10 @@ fn native_auth_custody_check_goes_on_only_while_its_own_entry_holds() {
             continue;
         }
         let before = case.snapshot();
-        assert!(case.check(&dispatch).is_err());
+        assert_eq!(
+            case.check(&dispatch).err().unwrap().0,
+            "native_profile_source_conflict"
+        );
         assert_eq!(case.snapshot(), before);
     }
 }

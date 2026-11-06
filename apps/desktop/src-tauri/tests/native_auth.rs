@@ -541,7 +541,7 @@ async fn desktop_native_auth_selection_and_reconnect_do_not_retarget_original_op
 }
 
 #[tokio::test]
-async fn desktop_native_auth_source_conflict_preserves_original_operation() {
+async fn desktop_native_auth_settings_changes_never_lose_the_original_operation() {
     run_case(|fixture| async move {
         let mut bridge = fixture.bridge().await;
         let detail = inspect(&mut bridge, "connection-a").await;

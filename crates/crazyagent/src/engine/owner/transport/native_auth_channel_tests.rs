@@ -643,7 +643,15 @@ async fn native_auth_channel_rejects_stale_owner_and_source_before_token_grant()
                 return;
             }
             let before = case.snapshot();
-            assert!(case.host.prepare_native_auth_custody(work).await.is_err());
+            let refused = case
+                .host
+                .prepare_native_auth_custody(work)
+                .await
+                .err()
+                .unwrap();
+            if change == "entry" {
+                assert_eq!(refused.0, "native_profile_source_conflict");
+            }
             assert!(case.host.authority.native_auth.lock().unwrap().is_none());
             assert_eq!(case.snapshot(), before);
         })
@@ -958,6 +966,9 @@ async fn native_auth_channel_cancellation_uses_committed_actor_state_and_keeps_g
     .await;
 }
 
+/// A held custody whose own entry changed or whose owner was revoked cannot go on or retire.
+/// The engine ends the custody session on a refused own-entry check, so the custodian reads
+/// the channel's end; the engine's refusal code itself is pinned by `native_auth_custody_tests`.
 #[tokio::test]
 async fn native_auth_channel_source_change_or_owner_revoke_cannot_continue_or_retire() {
     for change in ["entry", "owner", "bytes"] {
@@ -976,7 +987,10 @@ async fn native_auth_channel_source_change_or_owner_revoke_cannot_continue_or_re
                 return;
             }
             let before = case.snapshot();
-            assert!(channel.revalidate(&guard).await.is_err());
+            let refused = channel.revalidate(&guard).await.err().unwrap();
+            if change == "entry" {
+                assert_eq!(refused.0, "unexpected end of file");
+            }
             let retirement = CustodySession::new(guard).seal_without_effect().unwrap();
             assert!(channel.retire(retirement).await.is_err());
             assert_eq!(case.snapshot().fences, before.fences);

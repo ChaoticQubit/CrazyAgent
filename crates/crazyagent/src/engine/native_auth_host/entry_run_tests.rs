@@ -270,6 +270,9 @@ async fn native_auth_custodian_entry_run_session_check_reads_real_cancel_and_ret
     .await;
 }
 
+/// A custodian's session check refuses a real change of its own entry or a revoked owner.
+/// The engine ends the custody session on a refused own-entry check, so the custodian reads
+/// the channel's end; the engine's refusal code itself is pinned by `native_auth_custody_tests`.
 #[tokio::test]
 async fn native_auth_custodian_entry_run_session_check_rejects_real_source_or_owner_change() {
     for change in ["entry", "owner", "bytes"] {
@@ -293,7 +296,10 @@ async fn native_auth_custodian_entry_run_session_check_rejects_real_source_or_ow
                 return;
             }
             let before = case.snapshot();
-            assert!(session.check(&mut channel).await.is_err());
+            let refused = session.check(&mut channel).await.err().unwrap();
+            if change == "entry" {
+                assert_eq!(refused.0, "unexpected end of file");
+            }
             let probe = case.probe();
             assert!(
                 rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive)
