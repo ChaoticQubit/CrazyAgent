@@ -42,7 +42,7 @@ test("Full access asks for the plain warning first, and the project page names t
   assert.equal(access.confirmFirst(null, "full"), true);
   assert.equal(access.confirmFirst("full", "full"), false);
   assert.equal(access.confirmFirst("full", "own_branch"), false);
-  assert.equal(access.FULL_ACCESS_WARNING, "Agents run with your user's permissions: they can read your keys and change any file.");
+  assert.equal(access.FULL_ACCESS_WARNING, "Agents run with your user's permissions: they can read your keys and change any file. Processes an agent starts outside its terminal can keep running after it stops.");
   assert.equal(access.accessSummary(view), "Sandboxed · Rust");
   assert.equal(access.accessSummary({ ...view, access: "full", toolchains: [] }), "Full access · no toolchains");
   assert.equal(settings.settingsSection("access"), "access");
@@ -59,14 +59,25 @@ test("New Project preselects Own branch and every level the engine knows has the
 });
 
 test("every engine refusal for agent access has its own sentence", () => {
+  const missing = new Set();
   for (const file of ["sandbox/policy.rs", "project_setup.rs", "storage.rs"]) {
     const engine = readFileSync(new URL(`../../../crates/crazyagent/src/${file}`, import.meta.url), "utf8");
-    for (const code of engine.matchAll(/"(agent_(?:access|policy)_[a-z_]+)"/g)) assert.ok(api.KNOWN_ERROR_CODES.includes(code[1]), code[1]);
+    for (const code of engine.matchAll(/"(agent_(?:access|policy|network|toolchain|project)_[a-z_]+)"/g)) {
+      if (!api.KNOWN_ERROR_CODES.includes(code[1])) missing.add(code[1]);
+    }
   }
+  assert.deepEqual([...missing], [], "every access, policy, network, toolchain and project refusal has a sentence");
+});
+
+test("a stop for lowered access claims only what is true at every level", () => {
+  assert.equal(
+    api.knownError("agent_access_lowered"),
+    "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
+  );
 });
 
 test("Settings says beside the level choice that lowering it stops agents running above it, in both UIs", () => {
-  assert.equal(access.LOWERING_STOPS_AGENTS, "Lowering the level stops agents running above it; they restart at the new level.");
+  assert.equal(access.LOWERING_STOPS_AGENTS, "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.");
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.match(page, /<AccessLevels name="ps-access"[^\n]*\/>}\n\s*{view && <p className="pj-help">{LOWERING_STOPS_AGENTS}<\/p>}/);
   assert.ok(!page.includes("keep the access they started with"));

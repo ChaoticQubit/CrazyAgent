@@ -1,5 +1,4 @@
-import { createElement } from "react";
-import { flushSync } from "react-dom";
+import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { useChangeList } from "../../src/screens/changes/poll.ts";
 
@@ -11,6 +10,7 @@ let open = 0;
 let most = 0;
 let shown = null;
 let reread = null;
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 function read(projectId) {
   asked.push(projectId);
@@ -35,6 +35,13 @@ async function settle(ms) {
   await new Promise((done) => setTimeout(done, ms));
 }
 
+async function acted(work) {
+  await act(async () => {
+    work();
+    await settle(0);
+  });
+}
+
 function state() {
   return { asked: [...asked], open, most, shown };
 }
@@ -48,14 +55,12 @@ export async function mount(id) {
   shown = null;
   document.body.innerHTML = '<div id="root"></div>';
   root = createRoot(document.getElementById("root"));
-  flushSync(() => root.render(createElement(Probe, { id })));
-  await settle(0);
+  await acted(() => root.render(createElement(Probe, { id })));
   return state();
 }
 
 export async function move(id) {
-  flushSync(() => root.render(createElement(Probe, { id })));
-  await settle(0);
+  await acted(() => root.render(createElement(Probe, { id })));
   return state();
 }
 
@@ -67,19 +72,17 @@ export async function wait(ms) {
 export async function reply(ids) {
   const answer = replies.shift();
   if (!answer) throw new Error("no change list read is waiting for a reply");
-  answer(ids);
-  await settle(0);
+  await acted(() => answer(ids));
   return state();
 }
 
 export async function again() {
-  reread();
-  await settle(0);
+  await acted(() => reread());
   return state();
 }
 
 export async function unmount(ms) {
-  root?.unmount();
+  await acted(() => root?.unmount());
   root = null;
   await settle(ms);
   return state();
