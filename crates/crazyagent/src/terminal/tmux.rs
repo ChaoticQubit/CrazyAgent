@@ -1973,6 +1973,10 @@ impl Host for Tmux {
             &format!("kill-pane -t {pane}"),
         )
     }
+    fn unkept(&self, _agent: &AgentId) -> bool {
+        self.confined.is_some()
+    }
+
     fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
         let pane = if self.confined.is_some() {
             self.own_pane(agent)?

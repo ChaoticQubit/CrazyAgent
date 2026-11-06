@@ -66,6 +66,7 @@ pub struct TerminalSession {
     group_ended: bool,
     uncertain: bool,
     unconfined: bool,
+    unkept: bool,
     record: Option<PaneRecord>,
     _key: Option<KeyFile>,
     _context: Option<Installed>,
@@ -288,6 +289,7 @@ impl TerminalSession {
         let resumed = resume.map(|resume| (resume.record.clone(), reader.start()));
         let pane = host.spawn(&agent, &command).map_err(host_failure)?;
         assert_eq!(pane.agent, agent);
+        let unkept = host.unkept(&agent);
         let ready = LaunchEvent::Ready {
             native_session: claude.then_some(session_id),
         };
@@ -315,6 +317,7 @@ impl TerminalSession {
             group_ended: false,
             uncertain: false,
             unconfined: request.unconfined,
+            unkept,
             record: PaneRecord::new(
                 &command.transcript,
                 &command.cwd,
@@ -522,12 +525,19 @@ impl TerminalSession {
     /// kill every process in the sandbox, sessions of their own included; then every process
     /// left in the pane's process group is killed, as a dev server started in the background.
     /// A Full access pane has no Seatbelt and so no keeper, whose warden only arms inside a
-    /// sandbox, so the processes found in its lineage before the end are checked after it. Output: none, since a pane reports no exit code,
+    /// sandbox, so the processes found in its lineage before the end are checked after it. A
+    /// pane its host runs without the keeper, as a native lead's own server does, has no
+    /// warden either: its lineage is checked the same way. Output: none, since a pane reports no exit code,
     /// [`Unstopped::Uncertain`] when the keeper did not confirm in time, or the group outlived
     /// the wait or was found by an id no longer proven to be this pane's, or
-    /// [`Unstopped::Left`] naming what a Full access pane left running.
+    /// [`Unstopped::Left`] naming what a Full access pane, or one run without the keeper,
+    /// left running.
     pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
-        let lineage = self.unconfined.then(|| Lineage::of(self.pid));
+        let lineage = if self.unkept {
+            Some(Lineage::of_sandboxed(self.pid))
+        } else {
+            self.unconfined.then(|| Lineage::of(self.pid))
+        };
         self.halt();
         if self.uncertain {
             return Err(Unstopped::Uncertain);
@@ -743,8 +753,9 @@ impl TerminalSession {
                     .alive()
                     .is_ok_and(|alive| alive.contains(&self.agent)));
         #[cfg(target_os = "macos")]
-        if seen && !self.unconfined && !stop_keeper(self.host.as_ref(), &self.agent, self.pid) {
-            self.uncertain = true;
+        if seen && !self.unconfined {
+            let ended = stop_keeper(self.host.as_ref(), &self.agent, self.pid);
+            self.uncertain |= !ended && !self.unkept;
         }
         let _ = self.host.kill(&self.agent);
         self.end_group(seen);
@@ -783,12 +794,16 @@ impl Drop for TerminalSession {
 /// Ends an agent pane no session holds, as one an earlier engine left, and every process its
 /// harness started: on macOS its keeper first empties the run's sandbox, then the window ends
 /// and every process left in the pane's process group is killed, found by the first process
-/// the host names while the pane runs. A cleanup not confirmed is reported on stderr.
+/// the host names while the pane runs. A pane its host runs without the keeper is confirmed
+/// only by a listing of its processes showing none left. A cleanup not confirmed is reported
+/// on stderr.
 /// Inputs: the host, the pane and the owner's label, such as `research`. Output: whether
 /// every process was confirmed gone, or the host's failure, such as
 /// `terminal_agent_unknown` for a pane already gone.
 pub fn end_left_pane(host: &dyn Host, agent: &AgentId, owner: &str) -> Result<bool, HostError> {
     let pid = host.pane_pid(agent)?;
+    let unkept = host.unkept(agent);
+    let lineage = pid.filter(|_| unkept).map(Lineage::of_sandboxed);
     #[cfg(target_os = "macos")]
     let kept = pid.is_none_or(|pid| stop_keeper(host, agent, pid));
     #[cfg(not(target_os = "macos"))]
@@ -805,7 +820,11 @@ pub fn end_left_pane(host: &dyn Host, agent: &AgentId, owner: &str) -> Result<bo
     });
     #[cfg(not(unix))]
     let ended = pid.is_none();
-    let confirmed = kept && ended;
+    let swept = match lineage {
+        Some(lineage) => lineage.and_then(Lineage::settle).is_ok(),
+        None => kept && !unkept,
+    };
+    let confirmed = swept && ended;
     if !confirmed {
         eprintln!("{owner}_pane_cleanup_uncertain agent={}", agent.as_str());
     }
@@ -1008,7 +1027,7 @@ impl AgentSession {
     /// Stops the agent and every process it started. Output: the exit code when known,
     /// [`Unstopped::Uncertain`] when a headless agent's warden did not confirm it or a pane's
     /// process group was not confirmed gone, or [`Unstopped::Left`] naming what a Full access
-    /// agent left running.
+    /// agent, or a pane run without the keeper, left running.
     pub fn stop(self) -> Result<Option<i32>, Unstopped> {
         match self {
             Self::Piped(session) => session.stop(),
