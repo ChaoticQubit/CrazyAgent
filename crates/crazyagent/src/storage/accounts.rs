@@ -24,6 +24,7 @@ pub(crate) enum Command {
     List(Option<CredentialRef>, usize),
     Get(CredentialRef),
     KeyReplaced(CredentialRef),
+    Held,
 }
 
 pub(crate) struct Listed {
@@ -38,6 +39,7 @@ pub(crate) enum ResultValue {
     Account(Box<Listed>),
     Removed(Box<ModelConnection>),
     Page(Vec<Listed>, Option<CredentialRef>),
+    Held(Vec<CredentialRef>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -171,6 +173,17 @@ pub(super) fn execute(
     initialize(db)?;
     match command {
         Command::List(after, limit) => list(db, config, admission, after.as_ref(), limit),
+        Command::Held => {
+            let tx = db.transaction().map_err(error)?;
+            check_owner_admission(&tx, admission)?;
+            let held = config
+                .settings
+                .model_access
+                .as_ref()
+                .map(|catalog| catalog.connections.iter().map(|c| c.id.clone()).collect())
+                .unwrap_or_default();
+            Ok(ResultValue::Held(held))
+        }
         Command::Get(id) => {
             let tx = db.transaction().map_err(error)?;
             check_owner_admission(&tx, admission)?;
@@ -281,6 +294,7 @@ pub(super) fn execute(
             check_owner_admission(&tx, admission)?;
             tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])
                 .map_err(error)?;
+            crate::usage::forget_limits(&tx, &id)?;
             if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
                 super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential_ref.as_str())?;
             }

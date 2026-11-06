@@ -1,9 +1,10 @@
 use super::capture::Tokens;
 use super::{AccountLimits, all_limits, failure, storage};
 use crate::engine::EngineError;
-use crate::protocol::ProjectId;
+use crate::protocol::{CredentialRef, ProjectId};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 pub const ROWS_MAX: usize = 25;
 pub const DAYS_MAX: usize = 60;
@@ -133,6 +134,22 @@ fn rows(
         .map_err(storage)
 }
 
+/// The saved accounts that have stored limits. Input: the store. Output: their ids, none
+/// in a store without an accounts table, or `usage_unavailable`.
+fn saved_accounts(db: &Connection) -> Result<BTreeSet<String>, EngineError> {
+    if !has_table(db, "accounts")? {
+        return Ok(BTreeSet::new());
+    }
+    let mut statement = db
+        .prepare("SELECT id FROM accounts WHERE id IN (SELECT account FROM account_limits)")
+        .map_err(storage)?;
+    statement
+        .query_map([], |row| row.get(0))
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)
+}
+
 fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
     db.query_row(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
@@ -252,16 +269,19 @@ fn fit(mut report: UsageReport) -> Result<UsageReport, EngineError> {
 
 /// Builds the usage page's numbers for the range starting at `since_ms`, None for all
 /// time, with days cut at local midnight `offset_minutes` east of UTC, for one project or
-/// every project. Inputs: the store, the project, the range start, the viewer's offset and
-/// the time. Output: the report, at most `ROWS_MAX` rows a group, the latest `DAYS_MAX`
-/// days and `LIMITS_MAX` accounts, trimmed by `fit` to `REPORT_BYTES_MAX`;
-/// `usage_request_invalid` for an offset beyond 14 hours, or `usage_unavailable`.
+/// every project, with limits only for accounts that exist now: saved in the accounts
+/// table or `held` by the live config. Inputs: the store, the project, the range start,
+/// the viewer's offset, the time and the held accounts. Output: the report, at most
+/// `ROWS_MAX` rows a group, the latest `DAYS_MAX` days and `LIMITS_MAX` accounts, trimmed
+/// by `fit` to `REPORT_BYTES_MAX`; `usage_request_invalid` for an offset beyond 14 hours,
+/// or `usage_unavailable`.
 pub fn report(
     db: &Connection,
     project: Option<&ProjectId>,
     since_ms: Option<i64>,
     offset_minutes: i32,
     now_ms: i64,
+    held: &[CredentialRef],
 ) -> Result<UsageReport, EngineError> {
     if offset_minutes.unsigned_abs() > OFFSET_MINUTES_MAX
         || since_ms.is_some_and(|since| since > now_ms)
@@ -312,7 +332,9 @@ pub fn report(
         )
         .map(count)
         .map_err(storage)?;
+    let saved = saved_accounts(db)?;
     let mut limits = all_limits(db)?;
+    limits.retain(|row| held.contains(&row.account) || saved.contains(row.account.as_str()));
     limits.truncate(LIMITS_MAX);
     let report = fit(UsageReport {
         since_ms,
