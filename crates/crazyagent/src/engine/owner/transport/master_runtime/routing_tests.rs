@@ -2590,8 +2590,13 @@ async fn a_console_master_turn_reads_its_harness_while_each_inspection_outlasts_
     });
     let observed = tokio::time::timeout(
         Duration::from_secs(30),
-        case.runtime()
-            .collect_master_turn(&prepared, &case.turn.id, &mut active, Some(&mailbox)),
+        case.runtime().collect_master_turn(
+            &prepared,
+            &case.turn.id,
+            &prepared.text,
+            &mut active,
+            Some(&mailbox),
+        ),
     )
     .await;
     barrier.abort();
@@ -2645,8 +2650,13 @@ async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_th
     );
     let observed = tokio::time::timeout(
         Duration::from_secs(120),
-        case.runtime()
-            .collect_master_turn(&prepared, &case.turn.id, &mut active, Some(&mailbox)),
+        case.runtime().collect_master_turn(
+            &prepared,
+            &case.turn.id,
+            &prepared.text,
+            &mut active,
+            Some(&mailbox),
+        ),
     )
     .await;
     let _ = active.host.close().await;
@@ -3717,7 +3727,7 @@ fn served_questions(record: &Path, calls: &[serde_json::Value]) -> String {
         input.push(b'\n');
     }
     let mut output = Vec::new();
-    crate::team::tool::serve(std::io::Cursor::new(input), &mut output, record).unwrap();
+    crate::team::tool::serve(std::io::Cursor::new(input), &mut output, record, None, &[]).unwrap();
     String::from_utf8(output).unwrap()
 }
 

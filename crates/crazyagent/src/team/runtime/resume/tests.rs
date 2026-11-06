@@ -988,6 +988,7 @@ mod live {
             sandbox_profile: plan.sandbox_profile.clone(),
             access: plan.access,
             toolchains: plan.toolchains.clone(),
+            network: plan.network,
             layout: plan.layout,
             git_identity: plan.git_identity.clone(),
             limits: plan.limits,
@@ -999,6 +1000,9 @@ mod live {
             tmux: plan.tmux.clone(),
             hookless: plan.hookless,
             scratch_pin: plan.scratch_pin,
+            proxy: plan.proxy.clone(),
+            claude_display: plan.claude_display,
+            task_start: plan.task_start.clone(),
         }
     }
 

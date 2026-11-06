@@ -114,13 +114,15 @@ async fn under_no_network_an_agent_reaches_no_other_host_through_or_around_its_m
         .unwrap();
     assert_eq!(rejection(&started), None, "{started:?}");
     let project = project_id_for(&repo).unwrap();
+    let saved = owner.project_agent_policy(project.clone()).await.unwrap();
     let policy = AgentPolicy {
         access: AgentAccess::Sandboxed,
         toolchains: Vec::new(),
         network: AgentNetwork::None,
+        ide_git_hooks: false,
     };
     let set = owner
-        .set_project_agent_policy(project.clone(), policy, 2)
+        .set_project_agent_policy(project.clone(), saved.version, policy, 2)
         .await
         .unwrap();
     assert_eq!(rejection(&set), None, "{set:?}");

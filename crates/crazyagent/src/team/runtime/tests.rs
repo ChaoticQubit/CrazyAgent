@@ -4906,7 +4906,7 @@ fn a_team_master_s_questions_are_logged_as_its_own_and_a_refused_one_is_noted() 
         input.push(b'\n');
     }
     let mut output = Vec::new();
-    tool::serve(std::io::Cursor::new(input), &mut output, &record).unwrap();
+    tool::serve(std::io::Cursor::new(input), &mut output, &record, None, &[]).unwrap();
     let output = String::from_utf8(output).unwrap();
     assert_eq!(output.matches("Recorded.").count(), 2, "{output}");
 
@@ -9932,6 +9932,7 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
+            ide_git_hooks: false,
         },
     )
     .unwrap();
@@ -12183,16 +12184,21 @@ fn an_owner_wake_reaches_the_lead_under_the_shipped_rule_at_its_next_real_turn()
 #[test]
 fn an_owner_action_never_pins_a_wake_task_for_the_lead_with_progress_on() {
     let mut case = OwnerActionCase::new();
+    let tx = case.fixture.connection.unchecked_transaction().unwrap();
+    let version =
+        crate::team::events::rule_version(&tx, &crate::team::events::RuleTarget::App).unwrap();
     crate::team::events::set_rule(
-        &case.fixture.connection,
+        &tx,
         &crate::team::events::RuleTarget::App,
         Some(&crate::team::events::WakeRule {
             progress: true,
             ..crate::team::events::WakeRule::default()
         }),
+        version,
     )
     .unwrap()
     .unwrap();
+    tx.commit().unwrap();
     case.team
         .owner_woke(&case.project, case.worker, true, false)
         .unwrap();
