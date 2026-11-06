@@ -4671,6 +4671,10 @@ impl TeamRuntime {
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
         let harness_cap = super::caps::read(&self.connection, project)?.harnesses;
+        let reserved: BTreeSet<i64> = crate::recovery::open_runs(&self.connection, project)?
+            .into_iter()
+            .map(|run| run.agent)
+            .collect();
         for (task, harness, prompt, pin, by_master, parent, mode) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
@@ -4698,6 +4702,7 @@ impl TeamRuntime {
                             && w.busy.is_none()
                             && w.own_turn.is_none()
                             && !w.stopping
+                            && !reserved.contains(*id)
                             && !paused.contains(&w.connection)
                             && pin.map_or(w.parent == parent, |pin| pin == **id)
                             && mode.as_deref().is_none_or(|mode| {
