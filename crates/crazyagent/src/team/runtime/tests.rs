@@ -6193,7 +6193,7 @@ fn under_native_only_a_message_for_a_tools_off_codex_agent_reaches_it_once_it_wa
     fixture.until(
         &mut team,
         "the agent woken tools on gets the owner's message in its first turn",
-        |f| launches(f, member).len() == 2 && typed(f, member).contains(NOTE),
+        |f| launches(f, member).len() == 2 && pasted(f, member).contains(NOTE),
     );
     let receipt: String = fixture
         .connection
@@ -6743,7 +6743,7 @@ fn with_next_message_full_inputs_note_the_waiting_edit_once_per_edited_text() {
     let master = masters(&fixture.connection)[0];
     tell_master(&fixture, "Plan the page");
     fixture.until(&mut team, "the live master's turn ends", |f| {
-        typed(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+        pasted(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
     });
     let mut notes = Vec::new();
     for (turns, edit) in [
@@ -6773,11 +6773,11 @@ fn with_next_message_full_inputs_note_the_waiting_edit_once_per_edited_text() {
         .unwrap();
         tx.commit().unwrap();
         fixture.until(&mut team, "the live master's turn ends", |f| {
-            typed(f, master).contains(&label) && live_turns(&f.connection) == (turns, false)
+            pasted(f, master).contains(&label) && live_turns(&f.connection) == (turns, false)
         });
         notes.push(noted(&fixture, INSTRUCTIONS_WAIT_FOR_ROOM));
     }
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     assert_eq!(notes, [1, 1, 1, 2, 2], "wait notes after each full input");
@@ -8169,7 +8169,7 @@ fn a_tools_on_sub_agent_s_task_turn_carries_the_task_start_reminder_only_while_i
         task_of(f, "Write page.md").0 == "done"
     });
     let agent = subs(&fixture)[0];
-    let first = typed(&fixture, agent);
+    let first = pasted(&fixture, agent);
     assert!(first.contains("Write page.md"), "{first}");
     assert_eq!(
         first.matches(REMINDER).count(),
@@ -8190,7 +8190,7 @@ fn a_tools_on_sub_agent_s_task_turn_carries_the_task_start_reminder_only_while_i
     fixture.until(&mut team, "the second task is done", |f| {
         task_of(f, "Write menu.md").0 == "done"
     });
-    let text = typed(&fixture, agent);
+    let text = pasted(&fixture, agent);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     assert_eq!(
@@ -18308,7 +18308,7 @@ fn quiet_task(fixture: &Fixture) -> (String, Option<String>, usize, i64) {
             |row| row.get(0),
         )
         .unwrap();
-    let asked = typed(fixture, agent).matches(super::REASK_EMPTY).count();
+    let asked = pasted(fixture, agent).matches(super::REASK_EMPTY).count();
     (status, result, asked, turns)
 }
 
