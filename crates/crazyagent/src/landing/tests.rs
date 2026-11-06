@@ -6308,6 +6308,9 @@ fn files_an_instruction_file_imports_or_links_to_are_marked() {
     assert_eq!(
         marked,
         [
+            (".claude/CLAUDE.md", true),
+            (".codex", true),
+            ("AGENTS.md", true),
             ("CLAUDE.md", true),
             ("config/codex/config.toml", true),
             ("docs/agents-target.md", true),
