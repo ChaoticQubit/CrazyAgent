@@ -797,7 +797,7 @@ fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
     for (code, sentence) in [
         (
             "agent_access_lowered",
-            "This project's agent access was lowered below what the agent started with, so it was stopped. Any changes it made are still in Changes.",
+            "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
         ),
         (
             "agent_network_narrowed",
