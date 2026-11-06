@@ -4276,3 +4276,75 @@ async fn shift_arrows_walk_the_project_tabs_across_the_master_view() {
     shell.key(Key::ShiftLeft);
     assert_eq!(shell.place(), Some(tab(ProjectTab::Overview)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_creation_reconcile_the_full_queue_refuses_keeps_the_submission_and_reconciles_again() {
+    use crate::tui::client::{CreationEvent, MutationDelivery};
+    let engine = Engine::start().await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let submission = std::iter::from_fn(|| shell.ctx.next_request())
+        .find_map(|request| match request {
+            Request::Creation(job) => Some(job.submission),
+            _ => None,
+        })
+        .expect("Enter sends the creation");
+    let mut filled = 0;
+    while filled < 64
+        && shell.ctx.try_request(Request::EditPool {
+            change: crate::tui::seam::PoolChange::Remove {
+                id: CredentialRef::new("pool-a").unwrap(),
+                opened_projects: 0,
+            },
+        })
+    {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+
+    shell.arrive(owner_arrival(OwnerEvent::Creation(Box::new(
+        CreationEvent {
+            submission: submission.clone(),
+            operation: None,
+            result: Err("trusted_owner_connection_failed".into()),
+            retained: true,
+        },
+    ))));
+    assert_eq!(shell.place(), Some(Place::NewProject));
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        !shown.contains("create the project again"),
+        "a creation whose outcome is unknown is never offered as a fresh create: {shown}"
+    );
+
+    while shell.ctx.next_request().is_some() {}
+    shell.tick();
+    let reconciles = std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Creation(job) => Some(*job),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reconciles.len(),
+        1,
+        "the refused reconcile goes out once the queue has room"
+    );
+    assert!(matches!(
+        reconciles[0].delivery,
+        MutationDelivery::Reconcile
+    ));
+    assert_eq!(
+        reconciles[0].submission, submission,
+        "the same submission and project id, never a second one"
+    );
+}
