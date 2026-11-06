@@ -18,6 +18,7 @@ fn database() -> (tempfile::TempDir, Connection) {
     super::super::initialize_schema(&connection).unwrap();
     super::super::plugins::initialize(&connection).unwrap();
     super::super::accounts::initialize(&connection).unwrap();
+    super::super::setup::initialize(&connection).unwrap();
     initialize(&connection).unwrap();
     (root, connection)
 }
