@@ -233,6 +233,7 @@ pub struct SkillView {
     pub on_here: Option<bool>,
     pub source: String,
     pub folder: String,
+    pub version: u64,
     pub refused: Option<String>,
 }
 
@@ -260,6 +261,7 @@ pub struct ServerView {
     pub checks: u64,
     pub secrets: Vec<SecretView>,
     pub on_here: Option<bool>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,6 +306,7 @@ pub struct ToolView {
 /// One hook as Settings lists it: the plugin it came from, the Claude Code event and
 /// matcher it runs on, its command, where it applies and whether it is on. `follows` names
 /// the skill or MCP server the hook came with; the hook runs only while that item is on.
+/// `version` is the hook's owner change version a project switch names, as for skills.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookView {
@@ -319,6 +322,7 @@ pub struct HookView {
     pub on_here: Option<bool>,
     pub follows: Option<String>,
     pub source: String,
+    pub version: u64,
 }
 
 /// One hook an agent launch writes into its generated plugin: the plugin's stored folder
@@ -542,6 +546,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     (
         "plugin_switch_global_only",
         "Only items from global settings can be switched here.",
+    ),
+    (
+        "stale_revision",
+        "This changed in another window, so yours was not saved. The list shows it now.",
     ),
     (
         "plugin_store_unavailable",

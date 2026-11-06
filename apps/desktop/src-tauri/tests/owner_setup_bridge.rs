@@ -173,13 +173,18 @@ async fn large_schedule(root: &Path) -> Result<(), String> {
     let project = |n: u64| {
         crazyagent::protocol::CredentialRef::new(format!("{n:04}{}", "p".repeat(120))).unwrap()
     };
+    let start = bridge
+        .account_schedule()
+        .await
+        .map_err(|e| e.code.to_owned())?
+        .version;
     for n in 0..600 {
         let change = ScheduleChange::ProjectStrategy {
             project: project(n),
             strategy: Some(Strategy::Balanced),
         };
         let receipt = bridge
-            .set_account_schedule(change, n + 1)
+            .set_account_schedule(change, start + n, n + 1)
             .await
             .map_err(|e| format!("{n}: {}", e.code))?;
         assert!(matches!(receipt.outcome, ActionOutcome::Applied), "{n}");
@@ -189,7 +194,7 @@ async fn large_schedule(root: &Path) -> Result<(), String> {
         strategy: None,
     };
     let receipt = bridge
-        .set_account_schedule(shrink, 601)
+        .set_account_schedule(shrink, start + 600, 601)
         .await
         .map_err(|e| e.code.to_owned())?;
     assert!(

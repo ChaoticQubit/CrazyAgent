@@ -343,6 +343,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_remove: "removing the project",
   research_cancel: "cancelling the research",
   research_retry: "retrying the research",
+  plan_roadmap: "planning the roadmap",
 };
 
 /** Names a kept change in plain words. Input: the change. Output: a lower-case phrase, the
@@ -620,6 +621,7 @@ export interface AccountSchedule {
   pools: { id: string; strategy: AccountStrategy }[];
   projects: { id: string; strategy: AccountStrategy }[];
   accounts: { connection: string; plan: AccountPlan }[];
+  version: number;
 }
 
 export type ScheduleChange =
@@ -660,8 +662,8 @@ export function accountRanking(): Promise<Result<PoolRanking[]>> {
 
 /** Saves one account choice change. Input: the change. Output: ok once the engine applied
  * it, or a plain error. */
-export function setAccountSchedule(scheduleChange: ScheduleChange): Promise<Result<void>> {
-  return change("desktop_set_account_schedule", { change: scheduleChange, generation: nextGeneration() });
+export function setAccountSchedule(scheduleChange: ScheduleChange, version: number): Promise<Result<void>> {
+  return change("desktop_set_account_schedule", { change: scheduleChange, version, generation: nextGeneration() });
 }
 
 function poolId(): string {
@@ -768,9 +770,10 @@ export function addSkill(scope: PluginScope, folder: string): Promise<Result<Ski
   return call<SkillView>("desktop_add_skill", { scope, folder });
 }
 
-/** Turns a skill on or off where it was added. Inputs: skill id and the switch. */
-export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<SkillView>> {
-  return call<SkillView>("desktop_set_skill_enabled", { id, enabled });
+/** Turns a skill on or off where it was added. Inputs: skill id, the switch and the version
+ * the list showed; a skill changed since is refused with `stale_revision`. */
+export function setSkillEnabled(id: string, enabled: boolean, version: number): Promise<Result<SkillView>> {
+  return call<SkillView>("desktop_set_skill_enabled", { id, enabled, version });
 }
 
 /** Reads hooks for global settings (no project) or one project's settings, where global
@@ -791,8 +794,8 @@ export function setHookEnabled(id: string, enabled: boolean): Promise<Result<Hoo
 }
 
 /** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
-export function removeSkill(id: string): Promise<Result<void>> {
-  return call<void>("desktop_remove_skill", { id });
+export function removeSkill(id: string, version: number): Promise<Result<void>> {
+  return call<void>("desktop_remove_skill", { id, version });
 }
 
 /** Reads one skill for its detail view: the skill with the project's switch when a project
@@ -833,14 +836,15 @@ export function approveMcpServer(id: string, spec: McpServerSpec): Promise<Resul
   return call<McpServerView>("desktop_approve_mcp_server", { id, spec });
 }
 
-/** Turns an MCP server on or off where it was added. Inputs: server id and the switch. */
-export function setMcpServerEnabled(id: string, enabled: boolean): Promise<Result<McpServerView>> {
-  return call<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled });
+/** Turns an MCP server on or off where it was added. Inputs: server id, the switch and the
+ * version the list showed; a server changed since is refused with `stale_revision`. */
+export function setMcpServerEnabled(id: string, enabled: boolean, version: number): Promise<Result<McpServerView>> {
+  return call<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled, version });
 }
 
 /** Removes an MCP server and its saved secrets. Input: server id. */
-export function removeMcpServer(id: string): Promise<Result<void>> {
-  return call<void>("desktop_remove_mcp_server", { id });
+export function removeMcpServer(id: string, version: number): Promise<Result<void>> {
+  return call<void>("desktop_remove_mcp_server", { id, version });
 }
 
 /** Saves or replaces one secret for an MCP server; the value is sent once and not kept here.
@@ -861,9 +865,9 @@ export function checkMcpServer(id: string): Promise<Result<McpServerView>> {
 }
 
 /** Switches a global skill or MCP server on or off for one project.
- * Inputs: project id, item id and the switch. */
-export function switchPlugin(projectId: string, id: string, on: boolean): Promise<Result<void>> {
-  return call<void>("desktop_switch_plugin", { projectId, id, on });
+ * Inputs: project id, item id, the switch and the item's version the list showed. */
+export function switchPlugin(projectId: string, id: string, on: boolean, version: number): Promise<Result<void>> {
+  return call<void>("desktop_switch_plugin", { projectId, id, on, version });
 }
 
 /** Reads tool switches: the CrazyAgent built-in tools (no server id) or one MCP server's
@@ -1143,26 +1147,27 @@ export function detachTerminal(agent: string, serial: number): Promise<Result<vo
   return call<void>("desktop_terminal_detach", { agent, serial });
 }
 
-/** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id
- * and the switch. Output: the engine receipt, not ready, or a plain error. */
-export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+/** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id,
+ * the switch and the team settings version the screen read. Output: the engine receipt, not
+ * ready, or a plain error; a save from an older read is rejected as `stale_revision`. */
+export function keepTeamWarm(id: string, on: boolean, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_keep_warm", { id, on, version, generation: nextGeneration() });
 }
 
 /** Sets how long one task turn and one agent session of the team may run, and how long a
  * sub-agent may sit idle; null is no limit. Inputs: the project id, the three limits in
- * seconds and the team settings revision the window read. Output: the engine receipt, refused
- * as stale once another client changed the settings, not ready, or a plain error. */
-export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, revision: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, revision, generation: nextGeneration() });
+ * seconds and the team settings version the screen read. Output: the engine receipt, not
+ * ready, or a plain error; a save from an older read is rejected as `stale_revision`. */
+export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, version, generation: nextGeneration() });
 }
 
 /** Sets what the live master does with the conversation when the master harness changes.
- * Inputs: the project id, the mode and the team settings revision the window read. Output:
- * the engine receipt, refused as stale once another client changed the settings, not ready,
- * or a plain error. */
-export function setOnHarnessSwitch(id: string, mode: SwitchMode, revision: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, revision, generation: nextGeneration() });
+ * Inputs: the project id, the mode and the team settings version the screen read. Output:
+ * the engine receipt, not ready, or a plain error; a save from an older read is rejected as
+ * `stale_revision`. */
+export function setOnHarnessSwitch(id: string, mode: SwitchMode, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, version, generation: nextGeneration() });
 }
 
 /** Sets when a saved master harness change reaches the running live master: once it is idle, or
@@ -1186,10 +1191,11 @@ export function setChildLanding(id: string, mode: ChildLanding): Promise<Result<
 }
 
 /** Sets where the team's finished agents show: in the agents list and graph (Show) or only in
- * the Finished fold-out (Hide). Inputs: the project id and true for Show. Output: the engine
- * receipt, not ready, or a plain error. */
-export function showFinishedAgents(id: string, show: boolean): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, generation: nextGeneration() });
+ * the Finished fold-out (Hide). Inputs: the project id, true for Show and the team settings
+ * version the screen read. Output: the engine receipt, not ready, or a plain error; a save
+ * from an older read is rejected as `stale_revision`. */
+export function showFinishedAgents(id: string, show: boolean, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, version, generation: nextGeneration() });
 }
 
 /** Sets where the project's new sub-agents commit: each on its own branch crazyagent/agent-<id>
@@ -1297,10 +1303,11 @@ export function setHarnessDelivery(id: string, harness: CoordHarness, delivery: 
 }
 
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running
- * in a terminal. Inputs: the project id and the switch. Output: the engine receipt, not ready,
- * or a plain error. */
-export function setLiveMaster(id: string, on: boolean): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_live_master", { id, on, generation: nextGeneration() });
+ * in a terminal. Inputs: the project id, the switch and the team settings version the screen
+ * read. Output: the engine receipt, not ready, or a plain error; a save from an older read is
+ * rejected as `stale_revision`. */
+export function setLiveMaster(id: string, on: boolean, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_live_master", { id, on, version, generation: nextGeneration() });
 }
 
 /** Hands one task straight to a sub-agent. Inputs: the project id, a harness of the team plan

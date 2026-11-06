@@ -42,15 +42,20 @@ async function devtoolsEndpoint(profile, chrome) {
 }
 
 /** Opens one DevTools connection. Input: its WebSocket URL. Output: `send(method, params)`, which
- * fails a call Chrome does not answer within CALL_MS or once the connection closes, and
- * `close()`. */
+ * fails a call Chrome does not answer within CALL_MS or once the connection closes,
+ * `on(method, listener)` for DevTools events such as `Network.loadingFailed`, and `close()`. */
 async function connect(url) {
   const socket = new WebSocket(url);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = () => reject(new Error("DevTools connection failed")); });
   const waiting = new Map();
+  const listeners = new Map();
   let next = 0;
   socket.onmessage = (message) => {
     const reply = JSON.parse(message.data);
+    if (reply.method) {
+      for (const listener of listeners.get(reply.method) ?? []) listener(reply.params);
+      return;
+    }
     const pending = waiting.get(reply.id);
     if (!pending) return;
     waiting.delete(reply.id);
@@ -72,7 +77,8 @@ async function connect(url) {
     waiting.set(id, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: (error) => { clearTimeout(timer); reject(error); } });
     socket.send(JSON.stringify({ id, method, params }));
   });
-  return { send, close: () => socket.close() };
+  const on = (method, listener) => listeners.set(method, [...(listeners.get(method) ?? []), listener]);
+  return { send, on, close: () => socket.close() };
 }
 
 /** Starts the one headless Google Chrome a test file's pages run in, before any test starts, so
@@ -115,8 +121,9 @@ const chrome = await launch();
 /** Runs a check in a fresh page of the file's headless Google Chrome, in its own browser context
  * so no storage, permission or cache crosses tests, and always closes that context afterwards.
  * Input: the check, given `evaluate(expression)` for page scripts (awaited, returned by value),
- * `send(method, params)` for DevTools commands and `context`, the browser context id. Output:
- * what the check returns. */
+ * `send(method, params)` for DevTools commands, `on(method, listener)` for DevTools events such
+ * as `Network.loadingFailed` and `context`, the browser context id. Output: what the check
+ * returns. */
 export async function withPage(check) {
   const browser = await connect(chrome.browser);
   try {
@@ -133,7 +140,7 @@ export async function withPage(check) {
         };
         await page.send("Emulation.setFocusEmulationEnabled", { enabled: true });
         assert.equal(await evaluate("document.hasFocus()"), true, "the page has focus, as the app window does");
-        return await check({ evaluate, send: page.send, context: browserContextId });
+        return await check({ evaluate, send: page.send, on: page.on, context: browserContextId });
       } finally {
         page.close();
       }

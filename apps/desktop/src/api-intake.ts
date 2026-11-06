@@ -62,7 +62,7 @@ const COPY: Record<string, string> = {
   folder_size_interrupted: "Measuring the folder stopped. Try again.",
   crazyagent_folder_invalid: "The project's .crazyagent folder isn't a plain folder. Rename or remove it, then try again.",
   crazyagent_folder_unwritable: "CrazyAgent can't write the project's .crazyagent folder. Check the folder's permissions.",
-  git_exclude_invalid: "The project's git exclude file can't be updated. Check .git/info/exclude.",
+  git_exclude_invalid: "The project's git exclude file can't be updated: .git/info must be a plain folder and .git/info/exclude a plain file under 1 MiB, not links. Fix them, then try again.",
   owner_home_unknown: "Your home folder couldn't be found.",
   onboarding_folder_missing: "This folder isn't there anymore. Choose it again.",
   onboarding_folder_unsafe: "This folder can't be set up. Choose a project's own folder, not your home folder or the app's data.",
@@ -114,6 +114,7 @@ const COPY: Record<string, string> = {
   setup_store_unavailable: "The app's data folder can't be written.",
   pack_unknown: "One of the picked items isn't in the pack anymore. The list was reloaded.",
   pack_not_installed: "This entry isn't installed yet. Run setup first.",
+  stale_revision: "The pack changed in another window, so this was not saved. The list was reloaded.",
   pack_id_invalid: "One of the picked items isn't in the pack anymore. The list was reloaded.",
   pack_too_many: "Pick at most 64 entries.",
   pack_name_taken: "A skill or server with this name already exists. Remove it first, then try again.",
@@ -278,13 +279,13 @@ export function runSetup(pack: string[]): Promise<Result<SetupStatus>> {
 }
 
 /** Switches one installed pack entry on or off for every project.
- * Inputs: its id and the state. Output: the new setup status. */
-export function setPackEntry(id: string, on: boolean): Promise<Result<SetupStatus>> {
-  return wrap(() => switchEntry(id, on, nextGeneration()));
+ * Inputs: its id, the state and the pack version shown. Output: the new setup status. */
+export function setPackEntry(id: string, on: boolean, version: number): Promise<Result<SetupStatus>> {
+  return wrap(() => switchEntry(id, on, version, nextGeneration()));
 }
 
 /** Removes one installed pack entry and the skill or server it added.
- * Input: its id. Output: the new setup status. */
-export function removePackEntry(id: string): Promise<Result<SetupStatus>> {
-  return wrap(() => removeEntry(id, nextGeneration()));
+ * Inputs: its id and the pack version shown. Output: the new setup status. */
+export function removePackEntry(id: string, version: number): Promise<Result<SetupStatus>> {
+  return wrap(() => removeEntry(id, version, nextGeneration()));
 }

@@ -3,7 +3,7 @@ use super::new_project_frames::check_frames;
 use super::new_project_input::cells;
 use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
 use super::project::OpenRequest;
-use super::project_page::{BANNER_ROWS_MAX, Opening, move_banner, opening};
+use super::project_page::{BANNER_ROWS_MAX, Opening, changed_file, move_banner, opening};
 use super::{Flow, Place, ProjectTab, SettingsSection, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
@@ -25,7 +25,7 @@ use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
 use crate::tui::master_session::{Event as MasterEvent, Job as MasterJob};
 use crate::tui::run::owner_arrival;
-use crate::tui::seam::{ProjectCard, Request, ShellRequest};
+use crate::tui::seam::{Arrival, ProjectCard, Request, ShellRequest};
 use crate::tui::shell::Shell;
 use crate::tui::terminal_pane::LEADER;
 use crate::tui::theme::{Appearance, Colors, Depth};
@@ -155,6 +155,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 Request::Changes(query) => {
                     sent.push("changes");
                     connection.changes(*query).unwrap();
+                }
+                Request::Recovery(query) => {
+                    sent.push("recovery");
+                    connection.recovery(*query).unwrap();
                 }
                 Request::TeamGraph { project } => {
                     sent.push("team graph");
@@ -516,6 +520,41 @@ fn o_opens_each_listed_context_file_from_the_folder_the_engine_listed_it_in() {
 }
 
 #[test]
+fn a_changed_file_goes_to_the_editor_only_as_the_owners_copy_inside_the_project_folder() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-changed-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let folder = home.join("notes");
+    std::fs::create_dir_all(folder.join("src")).unwrap();
+    std::fs::write(folder.join("src/app.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(home.join("outside.rs"), "kept outside").unwrap();
+    std::os::unix::fs::symlink(home.join("outside.rs"), folder.join("src/escape.rs")).unwrap();
+    assert_eq!(
+        changed_file(&folder, "src/app.rs"),
+        Ok(folder.join("src/app.rs"))
+    );
+    assert_eq!(
+        changed_file(&folder, "src/added.rs"),
+        Err(
+            "That file isn't in your project folder yet. It lands there when you accept the change."
+        )
+    );
+    for refused in ["src/escape.rs", "../outside.rs", "src"] {
+        assert_eq!(
+            changed_file(&folder, refused),
+            Err("CrazyAgent opens only files inside the project folder."),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        changed_file(&home.join("gone"), "src/app.rs"),
+        Err("That file or folder is not there any more.")
+    );
+}
+
+#[test]
 fn a_project_folder_is_revealed_and_only_documents_inside_it_open() {
     let root = tempfile::Builder::new()
         .prefix("ca-tui-open-")
@@ -617,12 +656,13 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             "pool projects",
             "pending import",
             "uncommitted",
+            "recovery",
             "setup",
             "jobs",
             "context",
             "memories"
         ],
-        "a project page also reads its instruction files waiting to import and its uncommitted move"
+        "a project page also reads its instruction files waiting to import, its uncommitted move and its recovery notices"
     );
     let shown = render(&mut shell, 80, 24);
     assert!(
@@ -2480,6 +2520,215 @@ async fn the_changes_tab_reads_the_project_change_sets_from_the_engine() {
     assert!(shown.contains("No changes yet."), "{shown}");
 }
 
+/// While the owner types in the Conversation composer, Ctrl-D stays with the composer and
+/// the banner's notice is not dismissed; once the owner leaves the composer, Ctrl-D
+/// dismisses it.
+#[test]
+fn ctrl_d_while_typing_in_the_conversation_never_dismisses_a_recovery_notice() {
+    use crate::engine::owner::{BannerNotice, NoticeShown, RecoveryBanner};
+    use crate::tui::client::recovery::{RecoveryEvent, RecoveryQuery, RecoveryReply};
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(80, 24);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let recovery = |shell: &mut Shell| {
+        let mut asked = Vec::new();
+        while let Some(request) = shell.ctx.next_request() {
+            if let Request::Recovery(query) = request {
+                asked.push(*query);
+            }
+        }
+        asked
+    };
+    let read = recovery(&mut shell);
+    assert_eq!(
+        read,
+        [RecoveryQuery::Read {
+            project: notes.clone()
+        }]
+    );
+    let banner = RecoveryBanner {
+        runs: Vec::new(),
+        notices: vec![BannerNotice {
+            action_kind: crate::ledger::ActionKind::AgentSpawn,
+            id: 7,
+            agent: Some(2),
+            label: Some("Ada".into()),
+            change_set: None,
+            shown: NoticeShown::Unknown,
+            started_ms: 1_800_000_000_000,
+        }],
+        more: 0,
+    };
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Recovery(Box::new(
+        RecoveryEvent {
+            query: read[0].clone(),
+            result: Ok(RecoveryReply::Banner(banner)),
+        },
+    )))));
+
+    shell.key(Key::Ctrl('d'));
+    assert_eq!(
+        recovery(&mut shell),
+        Vec::<RecoveryQuery>::new(),
+        "Ctrl-D while typing is the composer's"
+    );
+
+    shell.key(Key::Tab);
+    shell.key(Key::Ctrl('d'));
+    assert_eq!(
+        recovery(&mut shell),
+        [RecoveryQuery::Dismiss {
+            project: notes,
+            kind: crate::ledger::ActionKind::AgentSpawn,
+            id: 7
+        }],
+        "out of the composer, Ctrl-D dismisses the notice"
+    );
+}
+
+#[test]
+fn the_recovery_banner_on_the_conversation_tab_says_tab_first_while_the_composer_has_the_keys() {
+    use crate::engine::owner::{BannerNotice, NoticeShown, RecoveryBanner};
+    use crate::tui::client::recovery::{RecoveryEvent, RecoveryQuery, RecoveryReply};
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(80, 24);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut read = Vec::new();
+    while let Some(request) = shell.ctx.next_request() {
+        if let Request::Recovery(query) = request {
+            read.push(*query);
+        }
+    }
+    assert_eq!(read, [RecoveryQuery::Read { project: notes }]);
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Recovery(Box::new(
+        RecoveryEvent {
+            query: read[0].clone(),
+            result: Ok(RecoveryReply::Banner(RecoveryBanner {
+                runs: Vec::new(),
+                notices: vec![BannerNotice {
+                    action_kind: crate::ledger::ActionKind::AgentSpawn,
+                    id: 7,
+                    agent: Some(2),
+                    label: Some("Ada".into()),
+                    change_set: None,
+                    shown: NoticeShown::Unknown,
+                    started_ms: 1_800_000_000_000,
+                }],
+                more: 0,
+            })),
+        },
+    )))));
+
+    let typing = render(&mut shell, 80, 24);
+    assert!(
+        typing.contains("Tab first, then Ctrl-D Dismiss Ada's start"),
+        "the composer has Ctrl-D, so the banner says Tab first:\n{typing}"
+    );
+
+    shell.key(Key::Tab);
+    let out = render(&mut shell, 80, 24);
+    assert!(
+        out.contains("Ctrl-D Dismiss Ada's start") && !out.contains("Tab first"),
+        "out of the composer the key works as shown:\n{out}"
+    );
+}
+
+#[test]
+fn at_eighty_columns_with_a_failed_run_and_a_notice_every_banner_key_is_drawn_whole() {
+    use crate::engine::owner::{BannerNotice, BannerRun, NoticeShown, RecoveryBanner, RunShown};
+    use crate::tui::client::recovery::{RecoveryEvent, RecoveryQuery, RecoveryReply};
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(80, 24);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut read = Vec::new();
+    while let Some(request) = shell.ctx.next_request() {
+        if let Request::Recovery(query) = request {
+            read.push(*query);
+        }
+    }
+    assert_eq!(read, [RecoveryQuery::Read { project: notes }]);
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Recovery(Box::new(
+        RecoveryEvent {
+            query: read[0].clone(),
+            result: Ok(RecoveryReply::Banner(RecoveryBanner {
+                runs: vec![BannerRun {
+                    agent: 3,
+                    label: "Sub-agent 3".into(),
+                    role: crate::team::AgentRole::Sub,
+                    harness: "Codex".into(),
+                    at_ms: 1_800_000_000_000,
+                    turn: 3,
+                    asked: Some("Plan the page".into()),
+                    state: RunShown::Failed,
+                    reason: Some("The account is unavailable.".into()),
+                    paused: false,
+                }],
+                notices: vec![BannerNotice {
+                    action_kind: crate::ledger::ActionKind::AgentSpawn,
+                    id: 7,
+                    agent: Some(2),
+                    label: Some("Ada".into()),
+                    change_set: None,
+                    shown: NoticeShown::Unknown,
+                    started_ms: 1_800_000_000_000,
+                }],
+                more: 0,
+            })),
+        },
+    )))));
+
+    for (state, out) in [
+        ("typing", render(&mut shell, 80, 24)),
+        ("after Tab", {
+            shell.key(Key::Tab);
+            render(&mut shell, 80, 24)
+        }),
+    ] {
+        for key in [
+            "Ctrl-R Retry Sub-agent 3",
+            "Ctrl-D Dismiss Ada's start",
+            "Ctrl-N Next item",
+        ] {
+            assert!(
+                out.lines().any(|line| line.contains(key)),
+                "{state}: {key:?} is drawn whole on one line:\n{out}"
+            );
+        }
+        assert!(
+            !out.lines()
+                .any(|line| line.contains("Ctrl-") && line.contains('\u{2026}')),
+            "{state}: no key line is cut:\n{out}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ctrl_t_on_the_conversation_input_opens_team_and_keeps_the_draft() {
     let mut engine = Engine::start().await;
@@ -3053,9 +3302,18 @@ async fn the_tools_page_switches_real_tools_and_ignores_reads_for_another_scope(
         "{shown}"
     );
 
+    let version = engine
+        .controller
+        .plugin_servers(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|view| view.id == server.id)
+        .unwrap()
+        .version;
     engine
         .controller
-        .remove_mcp_server(server.id.clone())
+        .remove_mcp_server(server.id.clone(), version)
         .await
         .unwrap();
     shell.key(Key::Char(' '));
@@ -3797,7 +4055,7 @@ async fn desktop_time_limits(engine: &Engine, project: &ProjectId, session_secs:
         turn_secs: read.turn_limit_secs,
         session_secs: Some(session_secs),
         idle_secs: read.idle_stop_secs,
-        revision: read.settings_revision,
+        version: read.settings_version,
     };
     match desktop.team_action(action, 1).await.unwrap() {
         OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {

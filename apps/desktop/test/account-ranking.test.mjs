@@ -43,7 +43,7 @@ test("each standing reads as one short reason", () => {
 });
 
 test("Settings, Pools shows each pool's next accounts in order with why the rest wait", () => {
-  const schedule = { strategy: "use_it_or_lose_it", pools: [], projects: [], accounts: [] };
+  const schedule = { strategy: "use_it_or_lose_it", pools: [], projects: [], accounts: [], version: 0 };
   const html = renderToStaticMarkup(createElement(AccountChoiceView, {
     schedule: { kind: "ok", value: schedule }, pools: { kind: "ok", value: [pool] }, names,
     ranking: { kind: "ok", value: ranking }, nowMs: monday, onChange: forbidden, onRetry: forbidden,

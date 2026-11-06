@@ -768,14 +768,30 @@ async fn a_confirmed_setup_gives_the_chosen_pool_to_the_project_master() {
     pump(&mut shell, &mut connection).await;
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Confirm"), "{rows:#?}");
+    assert!(
+        shows(&rows, "[x] Plan a roadmap after research"),
+        "an imported project plans a roadmap by default: {rows:#?}"
+    );
     shell.key(Key::Tab);
     keys(&mut shell, "Keeps notes.");
-    for _ in 0..3 {
+    for _ in 0..4 {
         shell.key(Key::Tab);
     }
     shell.key(Key::Enter);
     let sent = serve_until_project(&mut shell, &mut connection).await;
     assert_eq!(sent, ["setup", "edit pool"], "{sent:?}");
+    let stored = engine
+        .controller
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .expect("the confirmed setup is saved");
+    assert!(
+        stored
+            .research
+            .contains(&crate::project_setup::ResearchKind::RoadmapPlanning),
+        "the confirmed setup keeps the toggle on"
+    );
 
     let reply = engine
         .controller

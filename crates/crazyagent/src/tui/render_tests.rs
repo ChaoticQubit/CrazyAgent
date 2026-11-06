@@ -38,14 +38,14 @@ fn ctx(width: u16, height: u16) -> Ctx {
     ctx
 }
 
-fn ready(width: u16, height: u16) -> Ctx {
+pub(in crate::tui) fn ready(width: u16, height: u16) -> Ctx {
     let mut ctx = ctx(width, height);
     ctx.link = Link::Ready;
     ctx.store.setup = Load::Ready(tools(&[]));
     ctx
 }
 
-fn render(shell: &mut Shell, width: u16, height: u16) -> Vec<String> {
+pub(in crate::tui) fn render(shell: &mut Shell, width: u16, height: u16) -> Vec<String> {
     let away = Position::new(u16::MAX, u16::MAX);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.backend_mut().set_cursor_position(away).unwrap();
@@ -104,7 +104,7 @@ fn save(name: &str, rows: &[String]) {
     }
 }
 
-fn check(name: &str, actual: &[String], swaps: &[(&str, &str)]) {
+pub(in crate::tui) fn check(name: &str, actual: &[String], swaps: &[(&str, &str)]) {
     save(name, actual);
     let expected = fixture(name, swaps);
     let wrong: Vec<String> = expected
@@ -308,7 +308,7 @@ fn swapped<'a>(swaps: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a st
         .collect()
 }
 
-fn shell_at(ctx: Ctx, place: Place) -> Shell {
+pub(in crate::tui) fn shell_at(ctx: Ctx, place: Place) -> Shell {
     let mut ctx = ctx;
     let screen = open(&place, &mut ctx);
     Shell::with(ctx, screen)

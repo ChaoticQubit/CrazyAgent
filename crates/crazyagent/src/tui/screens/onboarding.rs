@@ -1,12 +1,13 @@
 use super::intake::{NOT_READY, ask, copy, event, not_ready};
 use super::new_project::{NAME_BYTES_MAX, PLATFORM_ORDER};
+use super::new_project_view::ROADMAP_LABEL;
 use super::project_markdown::sanitize;
 use super::project_time::{clock, local_offset};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
 use crate::onboarding::{MappingTry, OnboardingView, Step};
 use crate::pools::PoolSummary;
-use crate::project_setup::{Platform, SetupAction, SetupQuery, SetupView};
+use crate::project_setup::{Platform, ResearchKind, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::intake::{IntakeQuery, IntakeView};
@@ -37,15 +38,17 @@ enum Focus {
     About,
     Stack,
     Platforms,
+    Roadmap,
     Confirm,
 }
 
 impl Focus {
-    const ORDER: [Focus; 5] = [
+    const ORDER: [Focus; 6] = [
         Self::Name,
         Self::About,
         Self::Stack,
         Self::Platforms,
+        Self::Roadmap,
         Self::Confirm,
     ];
 
@@ -72,6 +75,7 @@ struct Review {
     stack: TextField,
     platforms: Vec<Platform>,
     platform: usize,
+    roadmap: bool,
     focus: Focus,
     revision: Load<u64>,
     move_left: bool,
@@ -86,6 +90,11 @@ impl Review {
         let mut stack = TextField::new("Tech stack", STACK_CHARS_MAX).note("Separate with commas.");
         stack.set(&onboarding.draft.tech_stack.join(", "));
         let platforms = onboarding.draft.platforms.clone();
+        let roadmap = !onboarding.finished
+            || onboarding
+                .draft
+                .research
+                .contains(&ResearchKind::RoadmapPlanning);
         Self {
             onboarding,
             name,
@@ -93,9 +102,21 @@ impl Review {
             stack,
             platforms,
             platform: 0,
+            roadmap,
             focus: Focus::Name,
             revision: Load::Idle,
             move_left: false,
+        }
+    }
+
+    /// Moves the focus on, past the roadmap toggle once the setup is saved, since planning
+    /// after research belongs to the first setup. Takes the direction. Returns the focus.
+    fn step(&self, forward: bool) -> Focus {
+        let next = self.focus.step(forward);
+        if next == Focus::Roadmap && self.onboarding.finished {
+            next.step(forward)
+        } else {
+            next
         }
     }
 
@@ -148,6 +169,12 @@ impl Review {
         setup.tech_stack = self.stack();
         setup.platforms = self.platforms.clone();
         setup.documents = Vec::new();
+        setup
+            .research
+            .retain(|kind| *kind != ResearchKind::RoadmapPlanning);
+        if self.roadmap {
+            setup.research.push(ResearchKind::RoadmapPlanning);
+        }
         SetupAction::Update {
             project_id: self.onboarding.project_id.clone(),
             expected_revision: revision,
@@ -745,6 +772,15 @@ impl OnboardingPage {
             lines.push(Line::from(spans));
         }
         lines.push(Line::default());
+        if !review.onboarding.finished {
+            let text = checkbox(review.roadmap, ROADMAP_LABEL);
+            lines.push(Line::from(if editing && review.focus == Focus::Roadmap {
+                Span::styled(text, theme.selection)
+            } else {
+                Span::raw(text)
+            }));
+            lines.push(Line::default());
+        }
         let facts = &review.onboarding.facts;
         for (label, items) in [
             ("Languages", &facts.languages),
@@ -824,6 +860,11 @@ impl Screen for OnboardingPage {
                 Focus::Platforms => vec![
                     hint("Space", "Turn on or off"),
                     hint(&format!("{}{}", ctx.glyphs.left, ctx.glyphs.right), "Move"),
+                    hint("Tab", "Next"),
+                    hint("Esc", "Back"),
+                ],
+                Focus::Roadmap => vec![
+                    hint("Space", "Turn on or off"),
                     hint("Tab", "Next"),
                     hint("Esc", "Back"),
                 ],
@@ -918,8 +959,9 @@ impl Screen for OnboardingPage {
                         self.retry(ctx);
                         return Flow::Handled;
                     }
-                    (_, Key::Tab | Key::Enter) => review.focus = review.focus.step(true),
-                    (_, Key::BackTab) => review.focus = review.focus.step(false),
+                    (_, Key::Tab | Key::Enter) => review.focus = review.step(true),
+                    (_, Key::BackTab) => review.focus = review.step(false),
+                    (Focus::Roadmap, Key::Char(' ')) => review.roadmap = !review.roadmap,
                     (Focus::Platforms, Key::Left) => {
                         review.platform = review.platform.saturating_sub(1);
                     }

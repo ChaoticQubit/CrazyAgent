@@ -151,6 +151,7 @@ pub enum LibraryAction {
     Forget {
         project_id: ProjectId,
         entry_id: RequestId,
+        version: u64,
     },
     Remember {
         project_id: ProjectId,
@@ -450,7 +451,8 @@ pub(crate) fn execute(
         LibraryAction::Forget {
             project_id,
             entry_id,
-        } => forget(tx, project_id, entry_id),
+            version,
+        } => forget(tx, project_id, entry_id, *version),
         LibraryAction::Remember {
             project_id,
             research,
@@ -984,12 +986,16 @@ fn forget(
     tx: &Transaction<'_>,
     project: &ProjectId,
     entry_id: &RequestId,
+    version: u64,
 ) -> Result<Outcome, EngineError> {
     let Some(entry) = load_entry(tx, entry_id)? else {
         return rejected("memory_missing");
     };
     if &entry.project_id != project {
         return rejected("memory_missing");
+    }
+    if entry.version != version {
+        return rejected("memory_changed");
     }
     let versions = tx
         .execute(

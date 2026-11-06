@@ -2,21 +2,22 @@ import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api"
 import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
 import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
-import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, NetworkChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
+import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
+import { AccessLevels, FULL_ACCESS_WARNING, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
-import type { MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
 import { PoolPicker } from "../new-project/pool-picker";
 import { TeamEditor } from "../new-project/team-editor";
-import { basicsErrors, draftOf, editRequest, poolName, teamValid, wireTeam } from "../new-project/wizard";
+import { basicsErrors, draftOf, editRequest, poolName, researchChoices, teamValid, wireTeam } from "../new-project/wizard";
 import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
+import { PlanningLine } from "./planning";
 import { SessionContext, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { PluginsAndSkills } from "../settings/plugins";
@@ -126,7 +127,7 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
   }
   return <div className="pj-stack">
     <h2>Team</h2>
-    <TeamEditor prefix="ps" team={team} harnesses={harnesses} pool={data.assigned} research={setup.research} onChange={setTeam} />
+    <TeamEditor prefix="ps" team={team} harnesses={harnesses} pool={data.assigned} research={researchChoices(setup.research).research} onChange={setTeam} />
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div className="pj-summary"><span>Running sub-agents keep their current harness; changes apply to agents started after you save, and the master follows Apply a master harness change. Waiting research moves to the new team.</span>
       <button type="button" className="btn primary" disabled={!teamValid(team, harnesses) || JSON.stringify(wireTeam(team)) === JSON.stringify(setup.team)} onClick={() => void save()}>Save team</button></div>
@@ -219,7 +220,7 @@ function GeneralSection({ data, setup }: { data: ProjectData; setup: StoredSetup
   const [note, setNote] = useState("");
   useEffect(() => {
     let live = true;
-    void loadProjectCatalog(setup.pool, setup.research).then((result) => { if (live) setCatalog(result); });
+    void loadProjectCatalog(setup.pool, researchChoices(setup.research).research).then((result) => { if (live) setCatalog(result); });
     void loadProjects().then((result) => { if (live && result.kind === "ok") setNames(result.value.filter((item) => item.id !== data.id).map((item) => item.name)); });
     return () => { live = false; };
   }, [data.id]);
@@ -275,6 +276,23 @@ export function addReadPath(paths: string[], typed: string): { paths: string[] }
   return { paths: [...paths, path] };
 }
 
+/** What the folders list says after a save refused because the folders changed since it read
+ * them, once it shows the saved folders again. */
+export const READ_PATHS_STALE = "These folders changed since you opened them. The list now shows the saved folders; make your change again.";
+
+/** What Agent access says after a save refused because the policy changed since the page read
+ * it, once it shows the saved access again. */
+export const ACCESS_STALE = "Agent access changed since you opened it. The page now shows the saved access; make your change again.";
+
+/** Whether a versioned save, such as read-only folders or agent access, was refused because
+ * the value changed since the screen read it, so the screen reads it again instead of
+ * resending the same old version. Input: the save's result. Output: true for that refusal. */
+export function savedStale(result: Result<IntentReceipt>): boolean {
+  if (result.kind !== "ok") return result.kind === "error" && result.code === "stale_revision";
+  const state = receiptState(result.value);
+  return state.kind === "rejected" && state.code === "stale_revision";
+}
+
 /** Adds one typed folder to the hidden list, as the engine will check it again against the
  * project folder. Inputs: the current list and the typed text. Output: the new list, or a plain
  * error for what the client can judge; the engine checks the folder exists inside the project. */
@@ -288,7 +306,7 @@ export function addHiddenPath(paths: string[], typed: string): { paths: string[]
 }
 
 function SandboxSection({ data }: { data: ProjectData }) {
-  const [saved, setSaved] = useState<string[] | null>(null);
+  const [saved, setSaved] = useState<ReadPaths | null>(null);
   const [paths, setPaths] = useState<string[]>([]);
   const [typed, setTyped] = useState("");
   const [note, setNote] = useState("");
@@ -297,7 +315,7 @@ function SandboxSection({ data }: { data: ProjectData }) {
     let live = true;
     void loadReadPaths(data.id).then((result) => {
       if (!live) return;
-      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value); }
+      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value.paths); }
       else setNote(result.kind === "not_ready" ? "Not ready yet: extra read-only folders aren't in this build." : failureCopy(result));
     });
     return () => { live = false; };
@@ -311,19 +329,34 @@ function SandboxSection({ data }: { data: ProjectData }) {
     setNote("");
   }
 
+  async function reread(): Promise<boolean> {
+    const fresh = await loadReadPaths(data.id);
+    if (fresh.kind !== "ok") return false;
+    setSaved(fresh.value);
+    setPaths(fresh.value.paths);
+    return true;
+  }
+
   async function save() {
+    if (saved === null) return;
     setBusy(true);
-    const result = await saveReadPaths(data.id, paths, nextGeneration());
-    setBusy(false);
-    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: extra read-only folders aren't in this build." : failureCopy(result));
+    const result = await saveReadPaths(data.id, paths, saved.version, nextGeneration());
+    if (savedStale(result)) {
+      const shown = await reread();
+      setBusy(false);
+      return setNote(shown ? READ_PATHS_STALE : "These folders changed since you opened them. Reopen this page to see them.");
+    }
+    if (result.kind !== "ok") { setBusy(false); return setNote(result.kind === "not_ready" ? "Not ready yet: extra read-only folders aren't in this build." : failureCopy(result)); }
     const state = receiptState(result.value);
-    if (state.kind !== "applied") return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
-    setSaved(paths);
+    if (state.kind !== "applied") { setBusy(false); return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again."); }
+    const shown = await reread();
+    setBusy(false);
+    if (!shown) return setNote("Read-only folders saved. Reopen this page to change them again.");
     setNote("");
     data.notify("Read-only folders saved. Agents started from now on get them.");
   }
 
-  const changed = saved !== null && JSON.stringify(saved) !== JSON.stringify(paths);
+  const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Sandbox</h2>
     <p className="pj-secondary">Agents find the toolchains this project uses (Rust, Node, Python and Homebrew) on their own and can read them, never change them. Add other folders they may read here. They can never read credential files, such as .npmrc, .netrc or .ssh, even inside these folders.</p>
@@ -411,6 +444,7 @@ function AccessSection({ data }: { data: ProjectData }) {
   const [access, setAccess] = useState<AgentAccess>("sandboxed");
   const [network, setNetwork] = useState<AgentNetwork>("open");
   const [allowed, setAllowed] = useState<boolean[]>([]);
+  const [ideGitHooks, setIdeGitHooks] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
@@ -420,6 +454,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     setAccess(next.access);
     setNetwork(next.network);
     setAllowed(next.toolchains.map((row) => row.allowed));
+    setIdeGitHooks(next.ide_git_hooks);
   }
   useEffect(() => {
     let live = true;
@@ -435,7 +470,14 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const result = await saveAgentPolicy(data.id, policyOf(view, access, network, allowed), nextGeneration());
+    const result = await saveAgentPolicy(data.id, policyOf(view, access, network, allowed, ideGitHooks), view.version, nextGeneration());
+    if (savedStale(result)) {
+      const fresh = await loadAgentPolicy(data.id);
+      setBusy(false);
+      if (fresh.kind !== "ok") return setNote("Agent access changed since you opened it. Reopen this page to see it.");
+      seed(fresh.value);
+      return setNote(ACCESS_STALE);
+    }
     if (result.kind !== "ok") {
       setBusy(false);
       return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
@@ -452,7 +494,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     data.notify(`Agent access saved: ${accessLabel(access)}. Agents and master turns started from now on use it.`);
   }
 
-  const changed = view !== null && (access !== view.access || network !== view.network || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  const changed = view !== null && (access !== view.access || network !== view.network || ideGitHooks !== view.ide_git_hooks || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
   return <div className="pj-stack">
     <h2>Agent access</h2>
     <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
@@ -461,10 +503,11 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
     {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
+    {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}
     {view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
-      onClick={() => confirmFirst(view?.access ?? null, access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
+      onClick={() => confirmFirst(access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
     <ConfirmDialog open={confirming} title="Give this project's agents Full access?" confirmLabel="Allow Full access" cancelLabel="Keep current access" pending={busy}
       onCancel={() => setConfirming(false)} onConfirm={() => void save()}>
       {FULL_ACCESS_WARNING}
@@ -543,7 +586,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {SECTIONS.map((item) => <button type="button" key={item.id} aria-current={active === item.id ? "page" : undefined} onClick={() => setActive(item.id)}>{item.label}</button>)}
     </nav>
     <div className="pj-settings-body">
-      {active === "general" && needsSetup(() => <GeneralSection data={data} setup={setup!} />)}
+      {active === "general" && needsSetup(() => <><GeneralSection data={data} setup={setup!} /><PlanningLine data={data} /></>)}
       {active === "pool" && <PoolSection data={data} setup={setup} />}
       {active === "team" && needsSetup(() => <TeamSection data={data} setup={setup!} />)}
       {active === "plugins" && <div className="pj-stack">

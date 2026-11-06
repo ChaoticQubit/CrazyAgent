@@ -15,6 +15,12 @@ export const LOWERING_STOPS_AGENTS = "Lowering the level stops agents running ab
 /** What turning a toolchain off does to work already running: the engine stops each agent, research job and master turn its sandbox granted it to. */
 export const TOOLCHAIN_OFF_STOPS_AGENTS = "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it.";
 
+/** The IDE hooks switch's name, the same in the TUI. */
+export const IDE_GIT_HOOKS = "IDE git runs the project's hooks";
+
+/** What the IDE hooks switch does and never does, the same in the TUI. */
+export const IDE_GIT_HOOKS_LINE = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed; the Sandboxed terminal runs hooks and signs. Applies when the IDE next starts.";
+
 /** Every access level from the most to the least confined, with what it lets agents do. */
 export const ACCESS_LEVELS: { access: AgentAccess; label: string; help: string }[] = [
   { access: "sandboxed", label: "Sandboxed", help: "Edits only its own worktree and makes no git commits. Your keys and other folders stay out of reach." },
@@ -42,16 +48,17 @@ export function networkLabel(network: AgentNetwork): string {
   return NETWORK_CHOICES.find((choice) => choice.network === network)?.label ?? network;
 }
 
-/** The policy Save sends: the level, the network choice and a choice only for each toolchain
- * whose switch differs from the project's own use, so the others keep following the project.
- * Inputs: the engine's view, the chosen level and network, and one switch per view toolchain.
- * Output: the policy. */
-export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[]): AgentPolicy {
+/** The policy Save sends: the level, the network choice, a choice only for each toolchain
+ * whose switch differs from the project's own use, so the others keep following the project,
+ * and the IDE hooks switch. Inputs: the engine's view, the chosen level and network, one
+ * switch per view toolchain and the IDE hooks switch. Output: the policy. */
+export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[], ideGitHooks: boolean): AgentPolicy {
   assert(allowed.length === view.toolchains.length, "one switch per toolchain");
   return {
     access,
     network,
     toolchains: view.toolchains.flatMap((row, index) => row.used === allowed[index] ? [] : [{ toolchain: row.toolchain, allowed: allowed[index] }]),
+    ide_git_hooks: ideGitHooks,
   };
 }
 
@@ -62,10 +69,11 @@ export function accessSummary(view: PolicyView): string {
   return `${accessLabel(view.access)} · ${tools.length ? tools.join(", ") : "no toolchains"}`;
 }
 
-/** Whether the owner must confirm the Full access warning before saving.
- * Inputs: the saved level, or null when none is saved yet, and the chosen level. Output: true to ask first. */
-export function confirmFirst(saved: AgentAccess | null, chosen: AgentAccess): boolean {
-  return chosen === "full" && saved !== "full";
+/** Whether the owner must confirm the Full access warning before saving: on every save
+ * with Full chosen, as the TUI asks, since the level the screen showed may no longer be the
+ * saved one. Input: the chosen level. Output: true to ask first. */
+export function confirmFirst(chosen: AgentAccess): boolean {
+  return chosen === "full";
 }
 
 function toolchainNote(row: PolicyView["toolchains"][number]): string {
@@ -135,5 +143,19 @@ export function ToolchainSwitches({ prefix, view, allowed, onChange }: {
       <Switch id={`${prefix}-toolchain-${row.toolchain}`} label={row.label} hideLabel checked={allowed[index]}
         onChecked={(on) => onChange(allowed.map((value, at) => at === index ? on : value))} />
     </div>)}</div>
+  </fieldset>;
+}
+
+/** The IDE hooks switch with what it does and never does. Inputs: the id prefix, the switch and
+ * the change handler. Output: the fieldset. */
+export function IdeGitHooksSwitch({ prefix, checked, onChange }: {
+  prefix: string; checked: boolean; onChange: (checked: boolean) => void;
+}) {
+  return <fieldset className="pj-field">
+    <legend>IDE git</legend>
+    <div className="pj-switch-list"><div className="pj-switch-item">
+      <span><strong>{IDE_GIT_HOOKS}</strong><span className="pj-secondary">{IDE_GIT_HOOKS_LINE}</span></span>
+      <Switch id={`${prefix}-ide-git-hooks`} label={IDE_GIT_HOOKS} hideLabel checked={checked} onChecked={onChange} />
+    </div></div>
   </fieldset>;
 }

@@ -14,11 +14,14 @@ use super::settings_accounts::send as send_settings;
 use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage, ToolsPage};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{ImportFile, OwnerResponse, OwnerResult};
+use crate::ide::bridge::reveal::RevealTarget;
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use crate::tui::app::UiEvent;
+use crate::tui::client::editor;
+use crate::tui::client::ide::RevealQuery;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{OwnerEvent, SetupEvent};
@@ -37,12 +40,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const SENT_MAX: usize = 8;
 const MASTER_SENT_MAX: usize = 4;
 const TEAM_READ_MS: i64 = 3_000;
 const TEAM_WAIT_MS: i64 = 15_000;
+const CHANGED_MISSING: &str =
+    "That file isn't in your project folder yet. It lands there when you accept the change.";
+const CHANGED_NOTE: &str =
+    "That was your copy in the project folder. The agent's version lands there when you accept.";
 const IMPORT_MODAL_WIDTH: u16 = 72;
 const IMPORT_ROWS_MAX: usize = 12;
 pub(in crate::tui) const BANNER_ROWS_MAX: usize = 3;
@@ -180,6 +187,19 @@ fn open_request(request: &OpenRequest) -> Result<(), String> {
     .map_err(|_| "Could not open it on this computer.".to_owned())
 }
 
+/// Checks one changed file before it goes to the owner's editor: the owner's own copy
+/// in the project folder, never an agent's worktree, any type, and never through a link.
+/// Takes the project folder and the path the change set lists. Returns the file, or the
+/// plain problem.
+pub(in crate::tui) fn changed_file(folder: &Path, path: &str) -> Result<PathBuf, &'static str> {
+    let folder = crate::platform::project_folder(&folder.to_string_lossy())
+        .map_err(|_| "That file or folder is not there any more.")?;
+    crate::platform::project_file(&folder, path).map_err(|code| match code {
+        "project_file_missing" => CHANGED_MISSING,
+        _ => "CrazyAgent opens only files inside the project folder.",
+    })
+}
+
 /// One project as a shell screen.
 /// Holds the project state, its last drawn view, the engine reads it sent and its master conversation.
 /// Reads go one at a time through the shell queue; only replies to its own reads are applied.
@@ -189,6 +209,8 @@ pub(in crate::tui) struct ProjectPage {
     sent: Vec<SetupQuery>,
     assigning: Option<(Option<CredentialRef>, Option<String>)>,
     recording: Option<u64>,
+    access_wanted: Option<AgentAccess>,
+    live_wanted: bool,
     created_access: Option<u64>,
     master: MasterState,
     master_sent: Vec<MasterSent>,
@@ -277,6 +299,8 @@ impl ProjectPage {
             sent: Vec::new(),
             assigning: None,
             recording: None,
+            access_wanted: None,
+            live_wanted: false,
             created_access: None,
             master: MasterState::default(),
             master_sent: Vec::new(),
@@ -307,19 +331,33 @@ impl ProjectPage {
     }
 
     /// Saves the agent access level the owner picked in New project, right after the project
-    /// was made; until it lands the project stays Sandboxed, and a refusal says so.
-    /// Takes the picked level and the context. Returns nothing; the reply arrives later.
+    /// was made: it reads the project's policy first and saves at the version read, since a
+    /// project made again under an earlier id keeps that id's policy version. Until the save
+    /// lands the project stays Sandboxed, and a refusal says so.
+    /// Takes the picked level and the context. Returns nothing; the replies arrive later.
     pub(in crate::tui) fn save_created_access(&mut self, access: AgentAccess, ctx: &mut Ctx) {
         assert_ne!(access, AgentAccess::Sandboxed);
+        self.access_wanted = Some(access);
+        self.send(
+            SetupQuery::AgentPolicy {
+                project: self.screen.project.clone(),
+            },
+            ctx,
+        );
+    }
+
+    fn send_created_access(&mut self, access: AgentAccess, version: u64, ctx: &mut Ctx) {
         let generation = ctx.next_generation();
         self.created_access = Some(generation);
         self.send(
             SetupQuery::Change {
                 action: SetupAction::SetAgentPolicy {
                     project_id: self.screen.project.clone(),
+                    version,
                     policy: AgentPolicy {
                         access,
                         toolchains: Vec::new(),
+                        ide_git_hooks: false,
                         network: crate::sandbox::policy::AgentNetwork::default(),
                     },
                 },
@@ -329,9 +367,13 @@ impl ProjectPage {
         );
     }
 
-    /// Reads the team graph for the panel beside the master, while this page is on top on
-    /// the Conversation tab: at most one read out at a time, at most one every
-    /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
+    fn stays_sandboxed(why: &str, ctx: &mut Ctx) {
+        ctx.say(Message::warning(
+            "The project is made, but its agents stay Sandboxed.",
+            &format!("{why} Choose Agent access again on the Settings tab with c."),
+        ));
+    }
+
     /// Asks the engine, once per opening, which instruction files wait to be copied into the
     /// project's instructions.md (DEC-106). Input: the context. Output: none; the list arrives
     /// as a process event and shows as a prompt when it isn't empty.
@@ -552,6 +594,9 @@ impl ProjectPage {
         )
     }
 
+    /// Reads the team graph for the panel beside the master, while this page is on top on
+    /// the Conversation tab: at most one read out at a time, at most one every
+    /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
     fn ask_team(&mut self, ctx: &mut Ctx) {
         if self.covered || self.screen.tab != Tab::Conversation || ctx.link != Link::Ready {
             return;
@@ -870,14 +915,27 @@ impl ProjectPage {
         }
     }
 
-    /// Turns the project's live master switch on, for a new session the owner asked for.
-    /// Takes the context; the change goes out with a fresh generation.
-    fn turn_live_on(&self, ctx: &mut Ctx) {
+    /// Turns the project's live master switch on, for a new session the owner asked for: it
+    /// reads the team status first and switches at the team settings version read, since
+    /// the switch is a versioned team setting (DEC-098). Takes the context; the replies
+    /// arrive later.
+    fn turn_live_on(&mut self, ctx: &mut Ctx) {
+        self.live_wanted = true;
+        self.send(
+            SetupQuery::Team {
+                project: self.screen.project.clone(),
+            },
+            ctx,
+        );
+    }
+
+    fn send_live_on(&self, version: u64, ctx: &mut Ctx) {
         let generation = ctx.next_generation();
         ctx.request(Request::Setup(SetupQuery::TeamChange {
             action: crate::team::TeamAction::LiveMaster {
                 project_id: self.screen.project.clone(),
                 on: true,
+                version,
             },
             generation,
         }));
@@ -912,6 +970,33 @@ impl ProjectPage {
         self.screen.now_ms = now_ms();
         self.screen.apply(&query, event.result.clone());
         let applied = matches!(event.result, Ok(SetupView::Changed(OwnerResult::Applied)));
+        if matches!(query, SetupQuery::AgentPolicy { .. })
+            && let Some(access) = self.access_wanted.take()
+        {
+            match &event.result {
+                Ok(SetupView::AgentPolicy(view)) => {
+                    self.send_created_access(access, view.version, ctx);
+                }
+                Err(code) => Self::stays_sandboxed(&plain_problem(code), ctx),
+                Ok(_) => Self::stays_sandboxed(&plain_problem("change_outcome_unknown"), ctx),
+            }
+            return;
+        }
+        if matches!(query, SetupQuery::Team { .. }) && std::mem::take(&mut self.live_wanted) {
+            let why = match &event.result {
+                Ok(SetupView::Team(status)) => {
+                    self.send_live_on(status.settings_version, ctx);
+                    return;
+                }
+                Err(code) => plain_problem(code),
+                Ok(_) => plain_problem("change_outcome_unknown"),
+            };
+            ctx.say(Message::warning(
+                "The live master was not turned on for the new session.",
+                &why,
+            ));
+            return;
+        }
         let SetupQuery::Change { action, generation } = &query else {
             return;
         };
@@ -933,10 +1018,7 @@ impl ProjectPage {
                     Ok(SetupView::Changed(OwnerResult::Rejected { code })) => plain_problem(code),
                     Ok(_) => plain_problem("change_outcome_unknown"),
                 };
-                ctx.say(Message::warning(
-                    "The project is made, but its agents stay Sandboxed.",
-                    &format!("{why} Choose Agent access again on the Settings tab with c."),
-                ));
+                Self::stays_sandboxed(&why, ctx);
             }
             return;
         }
@@ -1127,10 +1209,18 @@ impl ProjectPage {
     }
 
     fn pump(&mut self, ctx: &mut Ctx) {
+        if let Some(query) = self.screen.recovery.next_query(now_ms()) {
+            ctx.request(Request::Recovery(Box::new(query)));
+        }
         if self.screen.tab == Tab::Changes
             && let Some(query) = self.screen.changes.next_query(now_ms())
         {
             ctx.request(Request::Changes(Box::new(query)));
+        }
+        if self.screen.tab == Tab::Questions
+            && let Some(query) = self.screen.questions.next_query(now_ms())
+        {
+            ctx.request(Request::Questions(Box::new(query)));
         }
         if self.screen.tab == Tab::Settings
             && let Some(job) = self.screen.plugins.next_job()
@@ -1234,6 +1324,18 @@ impl ProjectPage {
                 }
                 Flow::Handled
             }
+            ProjectReply::Reveal(target) => {
+                self.reveal(target, ctx);
+                Flow::Handled
+            }
+            ProjectReply::Edit(request) => {
+                match opening(&request) {
+                    Ok(Opening::Open(file)) => editor::ask(ctx, file, None),
+                    Ok(Opening::Reveal(_)) => unreachable!("a folder never goes to the editor"),
+                    Err(problem) => ctx.say(Message::error(&problem, "")),
+                }
+                Flow::Handled
+            }
             ProjectReply::Assign(pool) => {
                 self.assign(pool, ctx);
                 Flow::Handled
@@ -1319,6 +1421,11 @@ impl ProjectPage {
             ctx,
             SettingsJob::SetSchedule {
                 change: crate::scheduling::ScheduleChange::ProjectStrategy { project, strategy },
+                version: self
+                    .screen
+                    .schedule
+                    .as_ref()
+                    .map_or(0, |schedule| schedule.version),
                 generation,
             },
         );
@@ -1345,8 +1452,49 @@ impl ProjectPage {
         }
     }
 
+    fn reveal(&self, target: RevealTarget, ctx: &mut Ctx) {
+        ctx.request(Request::Reveal(Box::new(RevealQuery {
+            project: self.screen.project.clone(),
+            target,
+        })));
+    }
+
+    fn edit_changed(&self, path: &str, ctx: &mut Ctx) {
+        let Some(folder) = self.screen.project_folder() else {
+            ctx.say(Message::error(
+                "The project folder isn't loaded yet.",
+                "Try again in a moment.",
+            ));
+            return;
+        };
+        match changed_file(&folder, path) {
+            Ok(file) => editor::ask(ctx, file, Some(CHANGED_NOTE)),
+            Err(problem) => ctx.say(Message::error(problem, "")),
+        }
+    }
+
+    fn recovery_has_keys(&self) -> bool {
+        self.screen.edit.is_none()
+            && self.screen.review.is_none()
+            && self.screen.pool_picker.is_none()
+            && self.screen.confirm_delete.is_none()
+            && self.screen.confirm_stop.is_none()
+            && self.screen.adding.is_none()
+            && self.screen.folders.is_none()
+            && self.screen.general.is_none()
+            && !self.screen.confirm_remove
+            && !self.screen.changes.editing()
+            && !self.typing()
+    }
+
     fn changes_have_keys(&self) -> bool {
         self.screen.tab == Tab::Changes && !self.screen.boxed()
+    }
+
+    fn questions_have_keys(&self) -> bool {
+        self.screen.tab == Tab::Questions
+            && self.screen.edit.is_none()
+            && self.screen.review.is_none()
     }
 
     fn plugins_have_keys(&self) -> bool {
@@ -1422,6 +1570,7 @@ impl Screen for ProjectPage {
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
             || (self.changes_have_keys() && self.screen.changes.editing())
+            || (self.questions_have_keys() && self.screen.questions.editing())
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -1437,9 +1586,28 @@ impl Screen for ProjectPage {
             return Flow::Handled;
         }
         self.screen.width = ctx.width;
+        if self.recovery_has_keys() && self.screen.recovery.key(key) {
+            self.pump(ctx);
+            self.redraw(ctx);
+            return Flow::Handled;
+        }
         if self.changes_have_keys()
             && let Some(event) = key_event(key)
             && self.screen.changes.key(event, now_ms())
+        {
+            if let Some(path) = self.screen.changes.take_edit() {
+                self.edit_changed(&path, ctx);
+            }
+            if let Some(target) = self.screen.changes.take_reveal() {
+                self.reveal(target, ctx);
+            }
+            self.pump(ctx);
+            self.redraw(ctx);
+            return Flow::Handled;
+        }
+        if self.questions_have_keys()
+            && let Some(event) = key_event(key)
+            && self.screen.questions.key(event)
         {
             self.pump(ctx);
             self.redraw(ctx);
@@ -1513,6 +1681,10 @@ impl Screen for ProjectPage {
                     self.screen.plugins.apply(event);
                 }
                 OwnerEvent::Changes(event) => self.screen.changes.apply(event),
+                OwnerEvent::Questions(event) => self.screen.questions.apply(event),
+                OwnerEvent::Recovery(event) if event.query.project() == &self.screen.project => {
+                    self.screen.recovery.apply(event);
+                }
                 OwnerEvent::Process(event) => {
                     self.import_arrived(event, ctx);
                     return Flow::Handled;
@@ -1541,6 +1713,8 @@ impl Screen for ProjectPage {
                 self.screen.forget_reads();
                 self.screen.plugins.forget_reads();
                 self.screen.changes.forget_reads();
+                self.screen.questions.forget_reads();
+                self.screen.recovery.forget_reads();
                 self.master_sent
                     .retain(|sent| matches!(sent, MasterSent::Mutation(_)));
             }
@@ -1716,6 +1890,8 @@ impl Screen for ProjectPage {
             || self.waiting.is_some()
             || self.screen.plugins.busy()
             || self.screen.changes.busy()
+            || self.screen.questions.busy()
+            || self.screen.recovery.busy()
     }
 
     fn draft(&self) -> bool {

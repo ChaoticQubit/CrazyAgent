@@ -153,6 +153,7 @@ pub enum ResearchKind {
     DesignResearch,
     FrontEndDesign,
     TechStackResearch,
+    RoadmapPlanning,
 }
 
 impl ResearchKind {
@@ -162,6 +163,16 @@ impl ResearchKind {
         Self::DesignResearch,
         Self::FrontEndDesign,
         Self::TechStackResearch,
+    ];
+    /// Every kind a setup may hold: the research toggles, then the roadmap planning toggle,
+    /// whose job waits until the project's other jobs end.
+    pub const CHOICES: [ResearchKind; 6] = [
+        Self::MarketResearch,
+        Self::CompetitorResearch,
+        Self::DesignResearch,
+        Self::FrontEndDesign,
+        Self::TechStackResearch,
+        Self::RoadmapPlanning,
     ];
 
     /// Names the research toggle in plain language for every client.
@@ -174,6 +185,7 @@ impl ResearchKind {
             Self::DesignResearch => "Design research",
             Self::FrontEndDesign => "Front-end design",
             Self::TechStackResearch => "Tech stack research",
+            Self::RoadmapPlanning => "Roadmap and release process",
         }
     }
 
@@ -187,6 +199,7 @@ impl ResearchKind {
             Self::DesignResearch => "design_research",
             Self::FrontEndDesign => "front_end_design",
             Self::TechStackResearch => "tech_stack_research",
+            Self::RoadmapPlanning => "roadmap_planning",
         }
     }
 
@@ -194,14 +207,17 @@ impl ResearchKind {
     /// Takes the snake case name.
     /// Returns the kind, or none for an unknown name.
     pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.name() == name)
+        Self::CHOICES.into_iter().find(|kind| kind.name() == name)
     }
 
     /// Gives the report path of this kind relative to the project folder.
     /// Takes the research kind.
-    /// Returns `context/research/<kind>.md`.
+    /// Returns `context/research/<kind>.md`, or the roadmap beside the brief for planning.
     pub fn report_path(self) -> String {
-        format!("{CONTEXT_DIRECTORY}/research/{}.md", self.name())
+        match self {
+            Self::RoadmapPlanning => crate::planning::ROADMAP.to_owned(),
+            _ => format!("{CONTEXT_DIRECTORY}/research/{}.md", self.name()),
+        }
     }
 }
 
@@ -389,7 +405,7 @@ impl ProjectSetup {
             team.validate()?;
         }
         assert!(self.platforms.len() <= Platform::ALL.len());
-        assert!(self.research.len() <= ResearchKind::ALL.len());
+        assert!(self.research.len() <= ResearchKind::CHOICES.len());
         Ok(())
     }
 }
@@ -399,6 +415,15 @@ impl ProjectSetup {
 pub struct StoredDocument {
     pub name: String,
     pub bytes: u64,
+}
+
+/// A project's extra read-only folders in saved order, with the version the owner's screen
+/// sends back when it changes them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPaths {
+    pub paths: Vec<String>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,14 +444,14 @@ pub struct StoredSetup {
     pub revision: u64,
 }
 
-/// The revision a project setup is recorded at; only the owner's
-/// `UpdateProjectSetup` raises it.
+/// The revision a project setup is recorded at; the owner's `UpdateProjectSetup` raises it,
+/// and so does Plan roadmap now when it turns planning on.
 pub(crate) const FIRST_REVISION: u64 = 1;
 
 impl StoredSetup {
-    /// Whether the owner saved this setup after it was recorded: only
-    /// `UpdateProjectSetup` raises the revision past [`FIRST_REVISION`], so
-    /// an onboarding whose setup was saved is finished.
+    /// Whether the owner saved this setup after it was recorded: only owner
+    /// changes raise the revision past [`FIRST_REVISION`], and Plan roadmap now
+    /// refuses an unconfirmed onboarding, so an onboarding whose setup was saved is finished.
     pub fn saved(&self) -> bool {
         self.revision > FIRST_REVISION
     }
@@ -611,6 +636,7 @@ pub enum ContextKind {
     Brief,
     Document,
     Research,
+    Plan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -718,7 +744,7 @@ pub enum SetupView {
     Setup(Option<Box<StoredSetup>>),
     Jobs(Vec<ResearchJob>),
     Context(ProjectContext),
-    ReadPaths(Vec<String>),
+    ReadPaths(ReadPaths),
     HiddenPaths(Vec<String>),
     AgentPolicy(crate::sandbox::policy::PolicyView),
     Item(ContextChunk),
@@ -772,8 +798,12 @@ pub enum SetupAction {
         project_id: ProjectId,
         job: i64,
     },
+    PlanRoadmap {
+        project_id: ProjectId,
+    },
     SetReadPaths {
         project_id: ProjectId,
+        version: u64,
         paths: Vec<String>,
     },
     SetHiddenPaths {
@@ -782,6 +812,7 @@ pub enum SetupAction {
     },
     SetAgentPolicy {
         project_id: ProjectId,
+        version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
     },
 }
@@ -860,7 +891,7 @@ impl SetupAction {
                 }
                 setup.validate()
             }
-            Self::Remove { .. } => Ok(()),
+            Self::Remove { .. } | Self::PlanRoadmap { .. } => Ok(()),
             Self::CancelResearch { job, .. } | Self::RetryResearch { job, .. } => {
                 if *job <= 0 {
                     return Err(failure("research_job_missing"));
@@ -944,7 +975,7 @@ pub fn catalog(
     if pool.is_some_and(|pool| !pool_exists(config, pool)) {
         return Err("pool_missing");
     }
-    if research.len() > ResearchKind::ALL.len() {
+    if research.len() > ResearchKind::CHOICES.len() {
         return Err("research_duplicate");
     }
     let catalog = ProjectCatalog {
@@ -1561,8 +1592,8 @@ fn sync_pool_status(tx: &Transaction<'_>, config: &EffectiveConfig) -> Result<()
     Ok(())
 }
 
-/// Atomically claims the oldest queued research job for one runner.
-/// Takes a connection, the configuration, a claimer identity and the time.
+/// Atomically claims the oldest queued research job for one runner; a roadmap planning job
+/// waits until its project's other jobs end. Takes a connection, the configuration, a claimer identity and the time.
 /// Returns the claimed job marked Running, or none when nothing is claimable.
 pub fn claim_research_job(
     connection: &mut Connection,
@@ -1577,10 +1608,14 @@ pub fn claim_research_job(
     sync_pool_status(&tx, config)?;
     let id: Option<i64> = tx
         .query_row(
-            "UPDATE research_jobs SET status='running', claimer=?1, attempts=attempts+1,
-            started_ms=?2, heartbeat_ms=?2, finished_ms=NULL, error=NULL, output_bytes=0
-            WHERE id=(SELECT id FROM research_jobs WHERE status='queued' ORDER BY id LIMIT 1)
-            AND status='queued' RETURNING id",
+            &format!(
+                "UPDATE research_jobs SET status='running', claimer=?1, attempts=attempts+1,
+                started_ms=?2, heartbeat_ms=?2, finished_ms=NULL, error=NULL, output_bytes=0
+                WHERE id=(SELECT id FROM research_jobs WHERE status='queued' AND {}
+                ORDER BY id LIMIT 1)
+                AND status='queued' RETURNING id",
+                crate::planning::AFTER_RESEARCH
+            ),
             params![claimer, now],
             |row| row.get(0),
         )
@@ -1846,16 +1881,23 @@ pub(crate) fn execute(
         ),
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
-        SetupAction::SetReadPaths { project_id, paths } => set_read_paths(tx, project_id, paths),
+        SetupAction::SetReadPaths {
+            project_id,
+            version,
+            paths,
+        } => set_read_paths(tx, project_id, *version, paths),
         SetupAction::SetHiddenPaths { project_id, paths } => {
             set_hidden_paths(tx, project_id, paths)
         }
-        SetupAction::SetAgentPolicy { project_id, policy } => {
-            set_agent_policy(tx, project_id, policy)
-        }
+        SetupAction::SetAgentPolicy {
+            project_id,
+            version,
+            policy,
+        } => set_agent_policy(tx, project_id, *version, policy),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
+        SetupAction::PlanRoadmap { project_id } => plan_roadmap(tx, config, project_id),
         SetupAction::SaveToMemory {
             project_id,
             research,
@@ -1974,7 +2016,7 @@ fn delete_context(
         return Ok(rejected("project_setup_missing"));
     };
     let kind = context_kind(path).ok_or_else(|| failure("context_path_invalid"))?;
-    if kind == ContextKind::Brief {
+    if matches!(kind, ContextKind::Brief | ContextKind::Plan) {
         return Ok(rejected("context_item_protected"));
     }
     let (directory, name) = path
@@ -2213,9 +2255,11 @@ fn cancel_research(
     Ok(Outcome::Applied)
 }
 
-/// Queues a failed or cancelled research job again with a fresh attempt budget.
+/// Queues a failed or cancelled research job again with a fresh attempt budget. A job whose
+/// kind was turned off turns it back on, so the next setup edit does not cancel it again.
 /// Takes the transaction, configuration, project and job id. Returns Applied,
-/// `research_job_missing`, or `research_job_not_retryable` for a job that is not stopped.
+/// `research_job_missing`, `project_setup_missing`, `setup_unconfirmed` for a kind turned off in
+/// an unconfirmed setup review, or `research_job_not_retryable` for a job that is not stopped.
 fn retry_research(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2231,6 +2275,12 @@ fn retry_research(
     ) {
         return Ok(rejected("research_job_not_retryable"));
     }
+    let Some(mut stored) = load_setup(tx, project_id)? else {
+        return Ok(rejected("project_setup_missing"));
+    };
+    if !stored.research.contains(&job.kind) && unconfirmed(tx, project_id, &stored)? {
+        return Ok(rejected("setup_unconfirmed"));
+    }
     let status = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
     let changed = tx
         .execute(
@@ -2243,12 +2293,101 @@ fn retry_research(
     if changed != 1 {
         return Ok(rejected("research_job_not_retryable"));
     }
+    turn_on(tx, &mut stored, job.kind)?;
+    Ok(Outcome::Applied)
+}
+
+/// Whether a found or cloned project's setup review is still open, so its setup was never saved.
+/// Takes the transaction, project and stored setup. Returns true until the owner confirms it.
+fn unconfirmed(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    stored: &StoredSetup,
+) -> Result<bool, EngineError> {
+    let onboarding: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM onboarding WHERE project=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(onboarding && !stored.saved())
+}
+
+/// Turns a research kind on in the stored setup and raises its revision, so an edit drafted
+/// before it is refused as stale instead of cancelling the kind's job. A kind already on is kept.
+/// Takes the transaction, the stored setup and the kind. Returns nothing.
+fn turn_on(
+    tx: &Transaction<'_>,
+    stored: &mut StoredSetup,
+    kind: ResearchKind,
+) -> Result<(), EngineError> {
+    if !stored.research.contains(&kind) {
+        let before = stored.revision;
+        stored.research.push(kind);
+        stored.revision = before
+            .checked_add(1)
+            .ok_or_else(|| failure("project_setup_revision_limit"))?;
+        save_setup(tx, stored)?;
+        assert!(stored.revision > before);
+    }
+    assert!(stored.research.contains(&kind));
+    Ok(())
+}
+
+/// Queues the project's roadmap planning job for Plan roadmap now: its finished or stopped job
+/// runs again, so a project keeps one planning row, or a first one is added. Turning the toggle
+/// on raises the setup revision, so an edit drafted before it is refused as stale instead of
+/// cancelling the job. A found or cloned project plans from its setup review until confirmed.
+/// Takes the transaction, configuration and project. Returns Applied, `project_setup_missing`,
+/// `setup_unconfirmed`, or `planning_busy` while the planning job waits or runs.
+fn plan_roadmap(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project_id: &ProjectId,
+) -> Result<Outcome, EngineError> {
+    let Some(mut stored) = load_setup(tx, project_id)? else {
+        return Ok(rejected("project_setup_missing"));
+    };
+    if unconfirmed(tx, project_id, &stored)? {
+        return Ok(rejected("setup_unconfirmed"));
+    }
+    let kind = ResearchKind::RoadmapPlanning;
+    let jobs = load_jobs(tx, "project", &project_id.as_str())?;
+    let waiting = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
+    match jobs.iter().rev().find(|job| job.kind == kind) {
+        Some(job)
+            if matches!(
+                job.status,
+                ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running
+            ) =>
+        {
+            return Ok(rejected("planning_busy"));
+        }
+        Some(job) => {
+            let changed = tx
+                .execute(
+                    "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
+                    cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
+                    finished_ms=NULL WHERE id=?1 AND status IN ('done','failed','cancelled')",
+                    params![job.id, waiting.stored()],
+                )
+                .map_err(error)?;
+            assert_eq!(changed, 1);
+        }
+        None => {
+            let harnesses = stored.team.research_harnesses();
+            assert!(!harnesses.is_empty());
+            insert_job(tx, project_id, kind, harnesses[0], waiting, now_ms())?;
+        }
+    }
+    turn_on(tx, &mut stored, kind)?;
     Ok(Outcome::Applied)
 }
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 34] = [
+const REMOVED_WITH_PROJECT: [&str; 37] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2258,9 +2397,11 @@ const REMOVED_WITH_PROJECT: [&str; 34] = [
     "team_tasks",
     "team_owner_prompts",
     "team_settings",
+    "team_wake_rules",
+    "team_nesting",
+    "team_new_folder_limit",
     "team_time_limits",
     "team_master_switch",
-    "team_settings_revision",
     "team_master_apply",
     "team_session_switches",
     "team_finished_view",
@@ -2275,6 +2416,7 @@ const REMOVED_WITH_PROJECT: [&str; 34] = [
     "team_task_pins",
     "team_wake_requests",
     "team_owner_stops",
+    "team_owner_turns",
     "team_caps",
     "team_token_budgets",
     "team_teammates",
@@ -2286,11 +2428,14 @@ const REMOVED_WITH_PROJECT: [&str; 34] = [
 ];
 
 /// Saves a project's extra read-only folders once each passes
-/// [`crate::sandbox::extra_paths::checked`]. Takes the transaction, project and typed paths.
-/// Returns Applied, or a plain rejection for an unknown project or a refused path.
+/// [`crate::sandbox::extra_paths::checked`] and the owner's screen showed the current ones.
+/// Takes the transaction, project, the version the screen showed and the typed paths.
+/// Returns Applied, or a plain rejection for an unknown project, a refused path or
+/// `stale_revision` when the folders changed since.
 fn set_read_paths(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
+    version: u64,
     paths: &[String],
 ) -> Result<Outcome, EngineError> {
     let exists: bool = tx
@@ -2310,6 +2455,10 @@ fn set_read_paths(
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(code)),
     };
+    let item = crate::storage::versioned::read_paths_item(project_id);
+    if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(rejected(crate::storage::versioned::STALE_CODE));
+    }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
 }
@@ -2339,11 +2488,14 @@ fn set_hidden_paths(
 }
 
 /// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
-/// choices. Takes the transaction, project and policy. Returns Applied, or a plain
-/// rejection for an unknown project, an invalid policy or a level this computer cannot run.
+/// choices, when the owner's screen showed the current version. Takes the transaction,
+/// project, the version the screen read and the policy. Returns Applied, or a plain
+/// rejection for an unknown project, an invalid policy, a level this computer cannot run or
+/// a policy that changed since it was read (`stale_revision`).
 fn set_agent_policy(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
+    version: u64,
     policy: &crate::sandbox::policy::AgentPolicy,
 ) -> Result<Outcome, EngineError> {
     let exists: bool = tx
@@ -2362,6 +2514,10 @@ fn set_agent_policy(
     if policy.access.unavailable().is_some() {
         return Ok(rejected("agent_access_unavailable"));
     }
+    let item = crate::storage::versioned::agent_policy_item(project_id);
+    if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(rejected(crate::storage::versioned::STALE_CODE));
+    }
     crate::sandbox::policy::save(tx, project_id.as_str(), policy).map_err(error)?;
     Ok(Outcome::Applied)
 }
@@ -2369,10 +2525,17 @@ fn set_agent_policy(
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
-/// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
-/// running one stops. Its project-scoped MCP servers, skills, secrets and per-project
-/// switches are cleared too, so a new project reusing the id never inherits them. Returns
-/// `invalid_project` for an unknown project.
+/// tasks, settings (sub-agent nesting and the new folder limit among them), wake rules and
+/// ended agents are deleted, so a waiting step is never
+/// claimed and a running one stops; its read folders, agent access, agent settings and its
+/// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
+/// per-project switches are cleared too, so a new project reusing the id never inherits
+/// them. The versions of its read folders, agent access, agent settings, project
+/// instructions, team settings and project wake rule move on once more, so a project added
+/// again under the same id refuses a save from a screen read before the removal (V2V-1,
+/// V2SYNC-2); agent ids are never reused, so its agents' instruction versions are dropped
+/// and their wake rule versions need no move. Returns `invalid_project` for an unknown
+/// project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2397,8 +2560,20 @@ fn remove(
         .map_err(error)?;
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
+    crate::storage::agent_text::forget_project(tx, project_id)?;
+    crate::questions::forget_project(tx, project_id)?;
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
+    for item in [
+        crate::storage::versioned::read_paths_item(project_id),
+        crate::storage::versioned::agent_policy_item(project_id),
+        crate::storage::versioned::instruction_settings_item(project_id),
+        crate::storage::versioned::process_text_item(Some(project_id)),
+        crate::storage::versioned::team_settings_item(project_id),
+        crate::storage::versioned::team_rule_item(Some(project_id), 0),
+    ] {
+        crate::storage::versioned::retire(tx, &item)?;
+    }
     crate::scheduling::forget_project(tx, project_id.as_str())?;
     crate::coord::forget_project(tx, project_id)?;
     tx.execute(
@@ -2763,6 +2938,9 @@ fn context_kind(path: &str) -> Option<ContextKind> {
     if rest == "brief.md" {
         return Some(ContextKind::Brief);
     }
+    if [crate::planning::ROADMAP, crate::planning::RELEASE_PROCESS].contains(&path) {
+        return Some(ContextKind::Plan);
+    }
     let (directory, name) = rest.split_once('/')?;
     if name.is_empty()
         || name.starts_with('.')
@@ -2876,6 +3054,9 @@ pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError>
         Ok(())
     };
     push(format!("{CONTEXT_DIRECTORY}/brief.md"), ContextKind::Brief)?;
+    for path in [crate::planning::ROADMAP, crate::planning::RELEASE_PROCESS] {
+        push(path.to_owned(), ContextKind::Plan)?;
+    }
     for (directory, kind) in [
         ("documents", ContextKind::Document),
         ("research", ContextKind::Research),

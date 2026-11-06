@@ -2,6 +2,7 @@ use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint};
 use crate::engine::EngineError;
 use crate::project_setup::{HarnessSlot, StoredSetup, TEAM_AGENTS_MAX, TeamPlan};
 use crate::protocol::{CredentialRef, Outcome, ProjectId, RequestId, SessionId};
+use crate::storage::versioned::{self, STALE_CODE};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -19,6 +20,7 @@ pub mod master;
 pub mod names;
 pub mod questions;
 pub mod runtime;
+pub mod screen_questions;
 pub mod tool;
 
 pub use graph::{
@@ -158,7 +160,7 @@ impl AgentStatus {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|status| status.name() == value)
     }
 
@@ -627,22 +629,19 @@ pub enum TeamAction {
     KeepWarm {
         project_id: ProjectId,
         on: bool,
+        version: u64,
     },
     TimeLimits {
         project_id: ProjectId,
         turn_secs: Option<u32>,
         session_secs: Option<u32>,
         idle_secs: Option<u32>,
-        /// The team settings revision the client last read; a stale one is refused.
-        #[serde(default)]
-        revision: u64,
+        version: u64,
     },
     OnHarnessSwitch {
         project_id: ProjectId,
         mode: SwitchMode,
-        /// The team settings revision the client last read; a stale one is refused.
-        #[serde(default)]
-        revision: u64,
+        version: u64,
     },
     ApplyHarnessSwitch {
         project_id: ProjectId,
@@ -659,6 +658,7 @@ pub enum TeamAction {
     LiveMaster {
         project_id: ProjectId,
         on: bool,
+        version: u64,
     },
     Pause {
         project_id: ProjectId,
@@ -674,6 +674,7 @@ pub enum TeamAction {
     Wake {
         target: events::RuleTarget,
         rule: Option<events::WakeRule>,
+        version: u64,
     },
     Seen {
         project_id: ProjectId,
@@ -687,6 +688,7 @@ pub enum TeamAction {
     FinishedAgents {
         project_id: ProjectId,
         show: bool,
+        version: u64,
     },
     AgentBranches {
         project_id: ProjectId,
@@ -859,7 +861,7 @@ impl TeamAction {
                 }
                 Ok(())
             }
-            Self::Wake { target, rule } => {
+            Self::Wake { target, rule, .. } => {
                 if rule.is_some_and(|rule| rule.hourly_cap > events::HOURLY_CAP_MAX) {
                     return Err(failure("team_wake_cap_invalid"));
                 }
@@ -1425,10 +1427,6 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('carry','fresh'))
             );
-            CREATE TABLE IF NOT EXISTS team_settings_revision (
-                project TEXT PRIMARY KEY,
-                revision INTEGER NOT NULL CHECK(revision > 0)
-            );
             CREATE TABLE IF NOT EXISTS team_master_apply (
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('when_idle','next_start'))
@@ -1550,7 +1548,12 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 text TEXT NOT NULL,
                 created_ms INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
+            CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);
+            CREATE TABLE IF NOT EXISTS team_owner_turns (
+                message INTEGER PRIMARY KEY,
+                project TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS team_owner_turns_project ON team_owner_turns(project);",
         )
         .map_err(error)?;
     add_late_columns(connection)?;
@@ -2040,37 +2043,6 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
-/// Refuses a time limits or On harness switch change made from a read older than another
-/// client's change, so one client never silently reverts the other, then moves the revision
-/// for the change about to be written. Takes the transaction, the project and the revision the
-/// client read. Returns the `stale_revision` refusal, or none once the revision moved.
-fn claim_settings_revision(
-    tx: &Transaction<'_>,
-    project: &ProjectId,
-    read: u64,
-) -> Result<Option<Outcome>, EngineError> {
-    let current = settings_revision(tx, project)?;
-    if current != read {
-        return Ok(Some(rejected("stale_revision")));
-    }
-    let next = current
-        .checked_add(1)
-        .and_then(|next| i64::try_from(next).ok())
-        .ok_or_else(|| error("team_settings_revision_invalid"))?;
-    tx.execute(
-        "INSERT INTO team_settings_revision(project,revision) VALUES (?1,?2)
-         ON CONFLICT(project) DO UPDATE SET revision=excluded.revision",
-        params![project.as_str(), next],
-    )
-    .map_err(error)?;
-    assert_eq!(
-        settings_revision(tx, project)?,
-        current + 1,
-        "an applied team settings change moves the revision by one"
-    );
-    Ok(None)
-}
-
 /// Deletes a project's oldest history rows so that one more row fits within `max`.
 /// Takes the transaction, the table, the SQL condition that marks history, the project and the bound.
 /// Returns any SQLite failure; live rows are never deleted, so live rows filling the bound is a broken invariant.
@@ -2146,6 +2118,45 @@ pub fn append_message(
     Ok(Ok(tx.last_insert_rowid()))
 }
 
+/// Records a message the owner typed in the team chat as an owner turn, the only kind of
+/// message a master may name as the owner's answer to a question, and forgets the turns of
+/// messages the conversation no longer keeps, so the records stay within its bound.
+/// Takes the transaction, the project and the message id.
+fn owner_turn(tx: &Transaction<'_>, project: &ProjectId, message: i64) -> Result<(), EngineError> {
+    tx.execute(
+        "DELETE FROM team_owner_turns WHERE project=?1
+         AND message NOT IN (SELECT id FROM team_messages WHERE project=?1)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    tx.execute(
+        "INSERT INTO team_owner_turns(message,project) VALUES (?1,?2)",
+        params![message, project.as_str()],
+    )
+    .map_err(error)?;
+    Ok(())
+}
+
+/// Takes the next version of a project's team settings for an owner change made from a read
+/// of `version`, in the change's transaction before the value is written, so a change from a
+/// screen that read older settings never replaces newer ones (V2SYNC-2). Inputs: the owner
+/// transaction, the project and the version the owner's screen showed. Output: true when the
+/// change may be written, false when it is stale.
+fn settings_write(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    version: u64,
+) -> Result<bool, EngineError> {
+    Ok(versioned::owner_write(tx, &versioned::team_settings_item(project), version)?.is_ok())
+}
+
+/// Reads the version of a project's team settings that a change must name, 0 before the
+/// owner first changed one. Inputs: the engine database and the project. Output: the version,
+/// or `versioned_unavailable`.
+pub fn settings_version(connection: &Connection, project: &ProjectId) -> Result<u64, EngineError> {
+    Ok(versioned::current(connection, &versioned::team_settings_item(project))?.version)
+}
+
 /// Cuts text to at most `max` bytes on a character boundary.
 /// Takes the text and the byte bound.
 /// Returns the bounded text.
@@ -2158,13 +2169,38 @@ pub fn bound_text(text: &str, max: usize) -> String {
     text[..end].to_owned()
 }
 
-/// Executes one owner team action inside the owner transaction.
+/// Executes one owner team action inside the owner transaction. A message is the owner's
+/// own chat turn, so it is recorded as one a master may name as the owner's answer.
 /// Takes the transaction, the engine configuration and the action.
 /// Returns Applied, or a plain rejection before any row is written.
 pub fn execute(
     tx: &Transaction<'_>,
     access: &ModelAccess,
     action: &TeamAction,
+) -> Result<Outcome, EngineError> {
+    perform(tx, access, action, true)
+}
+
+/// Executes one owner team action whose message an engine surface framed around the
+/// owner's words with text the owner did not type, such as an IDE review comment, so the
+/// message is never an owner turn. Takes the transaction, the engine configuration and the
+/// action. Returns what `execute` returns.
+pub(crate) fn execute_framed(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    action: &TeamAction,
+) -> Result<Outcome, EngineError> {
+    perform(tx, access, action, false)
+}
+
+/// Executes one owner team action, recording its message as an owner turn only when the
+/// owner typed all of it. Takes the transaction, the engine configuration, the action and
+/// whether the owner typed it. Returns what `execute` returns.
+fn perform(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    action: &TeamAction,
+    typed: bool,
 ) -> Result<Outcome, EngineError> {
     action.validate()?;
     let Some(project) = action.project() else {
@@ -2189,7 +2225,12 @@ pub fn execute(
                 MessageState::Pending,
                 now,
             )? {
-                Ok(_) => Outcome::Applied,
+                Ok(message) => {
+                    if typed {
+                        owner_turn(tx, project, message)?;
+                    }
+                    Outcome::Applied
+                }
                 Err(code) => rejected(code),
             },
         ),
@@ -2235,7 +2276,10 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::KeepWarm { on, .. } => {
+        TeamAction::KeepWarm { on, version, .. } => {
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
+            }
             tx.execute(
                 "INSERT INTO team_settings(project,keep_warm) VALUES (?1,?2)
                  ON CONFLICT(project) DO UPDATE SET keep_warm=excluded.keep_warm",
@@ -2248,11 +2292,11 @@ pub fn execute(
             turn_secs,
             session_secs,
             idle_secs,
-            revision,
+            version,
             ..
         } => {
-            if let Some(stale) = claim_settings_revision(tx, project, *revision)? {
-                return Ok(stale);
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
             }
             tx.execute(
                 "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,?2,?3,?4)
@@ -2263,9 +2307,9 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::OnHarnessSwitch { mode, revision, .. } => {
-            if let Some(stale) = claim_settings_revision(tx, project, *revision)? {
-                return Ok(stale);
+        TeamAction::OnHarnessSwitch { mode, version, .. } => {
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
             }
             tx.execute(
                 "INSERT INTO team_master_switch(project,mode) VALUES (?1,?2)
@@ -2302,7 +2346,10 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::FinishedAgents { show, .. } => {
+        TeamAction::FinishedAgents { show, version, .. } => {
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
+            }
             tx.execute(
                 "INSERT INTO team_finished_view(project,show) VALUES (?1,?2)
                  ON CONFLICT(project) DO UPDATE SET show=excluded.show",
@@ -2410,12 +2457,15 @@ pub fn execute(
             agent_messages::save_settings(tx, project, settings)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::LiveMaster { on, .. } => {
+        TeamAction::LiveMaster { on, version, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
                     != crate::harnesses::interactive::Support::Terminal
             {
                 return Ok(rejected("team_master_no_terminal"));
+            }
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
             }
             master::set_live(tx, project, *on)?;
             Ok(Outcome::Applied)
@@ -2684,13 +2734,20 @@ fn request_wake(
 }
 
 fn wake(tx: &Transaction<'_>, action: &TeamAction) -> Result<Outcome, EngineError> {
-    let TeamAction::Wake { target, rule } = action else {
+    let TeamAction::Wake {
+        target,
+        rule,
+        version,
+    } = action
+    else {
         unreachable!("only a wake rule action has no project");
     };
-    Ok(match events::set_rule(tx, target, rule.as_ref())? {
-        Ok(()) => Outcome::Applied,
-        Err(code) => rejected(code),
-    })
+    Ok(
+        match events::set_rule(tx, target, rule.as_ref(), *version)? {
+            Ok(()) => Outcome::Applied,
+            Err(code) => rejected(code),
+        },
+    )
 }
 
 fn master_reply(
@@ -2962,10 +3019,6 @@ pub struct TeamStatus {
     pub child_landing: ChildLanding,
     #[serde(default)]
     pub show_finished: bool,
-    /// The revision of the time limits and the On harness switch setting; a change to
-    /// either sends it back and is refused once another client changed them since.
-    #[serde(default)]
-    pub settings_revision: u64,
     #[serde(default)]
     pub message_settings: agent_messages::MessageSettings,
     #[serde(default)]
@@ -3003,6 +3056,8 @@ pub struct TeamStatus {
     pub live_master: Option<bool>,
     #[serde(default)]
     pub live_problem: Option<String>,
+    #[serde(default)]
+    pub settings_version: u64,
     pub min_agents: u8,
     pub max_agents: u8,
     pub harnesses: Vec<TeamHarness>,
@@ -3228,27 +3283,6 @@ pub fn on_harness_switch(
     match mode.as_deref() {
         None => Ok(SwitchMode::default()),
         Some(name) => SwitchMode::named(name).ok_or_else(|| error("team_switch_mode_invalid")),
-    }
-}
-
-/// Reads the revision of a project's time limits and On harness switch setting, which every
-/// applied change to either moves by one. Takes a connection and the project.
-/// Returns 0 until the first change; a stored value below 1 is refused as invalid.
-pub fn settings_revision(connection: &Connection, project: &ProjectId) -> Result<u64, EngineError> {
-    let stored: Option<i64> = connection
-        .query_row(
-            "SELECT revision FROM team_settings_revision WHERE project=?1",
-            [project.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    match stored {
-        None => Ok(0),
-        Some(value) => u64::try_from(value)
-            .ok()
-            .filter(|revision| *revision > 0)
-            .ok_or_else(|| error("team_settings_revision_invalid")),
     }
 }
 
@@ -4291,7 +4325,6 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
         message_settings: agent_messages::settings(connection, project)?,
-        settings_revision: settings_revision(connection, project)?,
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         max_harnesses: limited.harnesses,
@@ -4302,6 +4335,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         spread_accounts: spread_accounts(connection, project)?,
         live_master,
         live_problem,
+        settings_version: settings_version(connection, project)?,
         min_agents: plan.min_agents,
         max_agents: plan.max_agents,
         harnesses,

@@ -11,6 +11,7 @@ import type {
 export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
 export type ResearchKind = "market_research" | "competitor_research" | "design_research" | "front_end_design" | "tech_stack_research";
 export type ResearchStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
+export type JobKind = ResearchKind | "roadmap_planning";
 
 export interface HarnessSlot {
   harness: string;
@@ -35,7 +36,7 @@ export interface ProjectSetup {
   about: string;
   tech_stack: string[];
   platforms: Platform[];
-  research: ResearchKind[];
+  research: JobKind[];
   pool: string | null;
   team: TeamPlan | null;
   documents: string[];
@@ -64,7 +65,7 @@ export interface StoredSetup {
   about: string;
   tech_stack: string[];
   platforms: Platform[];
-  research: ResearchKind[];
+  research: JobKind[];
   pool: string | null;
   team: TeamPlan;
   documents: { name: string; bytes: number }[];
@@ -76,7 +77,7 @@ export interface StoredSetup {
 export interface ResearchJob {
   id: number;
   project_id: string;
-  kind: ResearchKind;
+  kind: JobKind;
   kind_label: string;
   status: ResearchStatus;
   status_label: string;
@@ -96,7 +97,7 @@ export interface ResearchJob {
 
 export interface ContextItem {
   path: string;
-  kind: "brief" | "document" | "research";
+  kind: "brief" | "document" | "research" | "plan";
   bytes: number;
 }
 
@@ -126,22 +127,27 @@ export type AgentNetwork = "open" | "https" | "none";
 /** A toolchain family the engine detects in the owner's home folder and the project. */
 export type Toolchain = "rust" | "node" | "python";
 
-/** A project's saved agent policy: the level, the network choice and the toolchain switches
- * that differ from the project's own use. */
+/** A project's saved agent policy: the level, the network choice, the toolchain switches
+ * that differ from the project's own use, and whether git in the IDE runs the project's own
+ * hooks. */
 export interface AgentPolicy {
   access: AgentAccess;
   network: AgentNetwork;
   toolchains: { toolchain: Toolchain; allowed: boolean }[];
+  ide_git_hooks: boolean;
 }
 
 /** The engine's view of a project's agent policy: the level, the levels this computer offers
- * with the reason one can't run, the network choices and every detected toolchain. */
+ * with the reason one can't run, the network choices, every detected toolchain and the IDE
+ * hooks switch. */
 export interface PolicyView {
   access: AgentAccess;
   network: AgentNetwork;
   levels: { access: AgentAccess; label: string; unavailable: string | null }[];
   networks: { network: AgentNetwork; label: string }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
+  ide_git_hooks: boolean;
+  version: number;
 }
 
 export interface PoolChoice {
@@ -169,6 +175,8 @@ const copy: Record<string, string> = {
   research_job_missing: "This research job no longer exists. The list was reloaded.",
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
+  planning_busy: "A roadmap is already being planned for this project. Wait for it to finish.",
+  setup_unconfirmed: "Confirm this project's setup first. Its setup review has the roadmap switch.",
   invalid_pool: "That pool no longer exists. Choose another pool.",
   pool_missing: "That pool no longer exists. Choose another pool.",
   project_spec_bounds: "Enter a project name of at most 80 characters.",
@@ -391,9 +399,10 @@ export function loadTeamEvents(): Promise<Result<AppTeamEvents>> {
 }
 
 /** Sets the wake rule of the app, a project or one agent, or clears it with null so the level
- * above applies. Inputs: the level, the rule or null and a generation. Output: the receipt. */
-export function setWakeRule(target: WakeRuleTarget, rule: WakeRule | null, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_wake_rule", { target, rule, generation });
+ * above applies; a rule changed since the version shown is refused with `stale_revision`.
+ * Inputs: the level, the rule or null, the version shown and a generation. Output: the receipt. */
+export function setWakeRule(target: WakeRuleTarget, rule: WakeRule | null, version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_wake_rule", { target, rule, version, generation });
 }
 
 /** Marks a project's owner notifications up to one id as seen. Inputs: the project id, the
@@ -480,6 +489,13 @@ export function retryResearch(id: string, job: number, generation: number): Prom
   return call<IntentReceipt>("desktop_retry_research", { id, job, generation });
 }
 
+/** Asks the engine to plan a roadmap and release process for the project now, from what it knows.
+ * Inputs: the project id and a draft generation. Output: the engine receipt; `planning_busy` while
+ * a planning job of the project is queued or running. */
+export function planRoadmap(id: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_plan_roadmap", { id, generation });
+}
+
 export type MemoryStatus = "Provisional" | "Confirmed" | "Rejected" | "Removed" | "Retracted";
 
 export interface MemoryItem {
@@ -492,6 +508,17 @@ export interface MemoryItem {
 
 export type MemoryDecision = { decision: "Keep" } | { decision: "Reject" } | { decision: "Remove" };
 
+
+/** One decision the project's IDE asked the owner to confirm: the memory at the asked
+ * version and whether to approve or reject it. */
+export type IdeAsk = MemoryItem & { decision: "approve" | "reject" };
+
+/** Reads the decisions this project's IDE asked the owner to confirm on memories still
+ * waiting at the asked version. The desktop draws the confirm, which the IDE cannot click.
+ * Input: the project id. Output: at most one engine batch of asks. */
+export function loadIdeAsks(id: string): Promise<Result<IdeAsk[]>> {
+  return call<IdeAsk[]>("desktop_ide_asks", { id });
+}
 
 /** Saves, dismisses or deletes one memory; Keep is the owner's one-click approval.
  * Inputs: project id, memory id, the version shown, the decision and a generation.
@@ -506,10 +533,13 @@ export function promoteProjectMemory(id: string, memory: string, version: number
   return call<IntentReceipt>("desktop_promote_memory", { project: id, memory, version, generation });
 }
 
+/** A project's extra read-only folders in saved order and the version a change sends back. */
+export type ReadPaths = { paths: string[]; version: number };
+
 /** Reads the extra read-only folders this project's agents get beside its toolchains.
- * Input: project id. Output: the folders in saved order. */
-export function loadReadPaths(id: string): Promise<Result<string[]>> {
-  return call<string[]>("desktop_project_read_paths", { id });
+ * Input: project id. Output: the folders in saved order and their version. */
+export function loadReadPaths(id: string): Promise<Result<ReadPaths>> {
+  return call<ReadPaths>("desktop_project_read_paths", { id });
 }
 
 /** Lists this project's files for `@` tags: tracked and untracked, not ignored paths
@@ -519,10 +549,11 @@ export function loadProjectFiles(id: string, query: string): Promise<Result<stri
   return call<string[]>("desktop_project_files", { id, query });
 }
 
-/** Replaces this project's extra read-only folders; the engine refuses unsafe ones.
- * Inputs: project id, the folders and a generation. Output: the receipt. */
-export function saveReadPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+/** Replaces this project's extra read-only folders; the engine refuses unsafe ones, and
+ * folders changed since the version shown with `stale_revision`.
+ * Inputs: project id, the folders, the version shown and a generation. Output: the receipt. */
+export function saveReadPaths(id: string, paths: string[], version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_read_paths", { id, version, paths, generation });
 }
 
 /** Reads the folders this project's agents are kept out of, read, write and run.
@@ -544,10 +575,11 @@ export function loadAgentPolicy(id: string): Promise<Result<PolicyView>> {
 }
 
 /** Replaces this project's agent access level and toolchain switches; the engine refuses a
- * level this computer can't enforce. Inputs: project id, the policy and a generation.
- * Output: the receipt. */
-export function saveAgentPolicy(id: string, policy: AgentPolicy, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_set_project_agent_policy", { id, policy, generation });
+ * level this computer can't enforce, and a policy changed since the screen read it as
+ * `stale_revision`. Inputs: project id, the policy, the version the screen read and a
+ * generation. Output: the receipt. */
+export function saveAgentPolicy(id: string, policy: AgentPolicy, version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_agent_policy", { id, version, policy, generation });
 }
 
 /** Deletes one document or research report from the project folder.

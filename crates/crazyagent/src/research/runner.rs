@@ -14,6 +14,7 @@ use crate::harnesses::launch::{await_group_exit, kill_group};
 use crate::harnesses::leftovers::{self, Unstopped};
 use crate::harnesses::terminal_session::{TerminalSession, end_left_pane};
 use crate::launch_context::AgentContext;
+use crate::project_setup::ResearchKind;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
@@ -271,7 +272,8 @@ impl From<io::Error> for RunError {
 
 /// Claims queued research jobs and runs each one as a sandboxed Codex or
 /// Claude Code agent in its own git worktree under the project folder, then
-/// writes the agent's report to `context/research/<kind>.md`.
+/// writes the agent's report to `context/research/<kind>.md`, or a roadmap
+/// planning reply to `context/roadmap.md` and `context/release-process.md`.
 pub struct ResearchRunner {
     database: PathBuf,
     state: PathBuf,
@@ -642,7 +644,10 @@ impl ResearchRunner {
                         return Ok(run(status, None, Some(group)));
                     }
                 };
-                let relative = format!("context/research/{}.md", job.kind);
+                let relative = ResearchKind::parse(&job.kind).map_or_else(
+                    || format!("context/research/{}.md", job.kind),
+                    ResearchKind::report_path,
+                );
                 jobs.finish(&job, &relative)?;
                 Ok(run(ResearchStatus::Done, Some(report), Some(group)))
             }
@@ -1357,6 +1362,13 @@ impl ResearchRunner {
         let body = body.trim();
         if body.is_empty() {
             return Err("Agent returned no report");
+        }
+        if job.kind == ResearchKind::RoadmapPlanning.name() {
+            let state = crate::projects_home::state_folder(root);
+            let plan = crate::planning::publish(&state, body, harness.label())?;
+            crate::planning::raise(self.database(), &job.project, &plan)
+                .map_err(|_| crate::planning::QUESTIONS_UNLOGGED)?;
+            return Ok(state.join(crate::planning::ROADMAP));
         }
         let report = render_report(&kind_label(&job.kind), harness.label(), body);
         write_report(root, &job.kind, &report).map_err(|_| "Could not save the research report")
@@ -2198,8 +2210,9 @@ pub(crate) fn add_worktree_at(
 
 /// Adds a detached git worktree at `worktree` inside the sandbox's project folder, running
 /// git under the installed profile so that no command the repository configures runs: the
-/// worktree is added without a checkout, its effective config is listed in the worktree's
-/// own context, and the checkout blanks every filter driver that listing names.
+/// worktree is added without a checkout and made local-only, its effective config is
+/// listed in the worktree's own context, and the checkout blanks every filter driver that
+/// listing names.
 /// Takes the sandbox, its installed profile and the new worktree path.
 #[cfg(unix)]
 pub(crate) fn add_worktree(
@@ -2235,6 +2248,8 @@ pub(crate) fn add_worktree_at(
         .arg(worktree)
         .arg(base);
     setup_step(&mut add, "worktree_add_failed")?;
+    crate::worktrees::lock_remotes(sandbox.project_root(), worktree)
+        .map_err(|_| RunError::Setup("worktree_remote_lock_failed"))?;
     let mut listing = worktree_git(sandbox, profile);
     listing
         .arg("-C")
@@ -2966,6 +2981,10 @@ fn read_bounded(base: &Path, path: &Path, max: u64) -> io::Result<String> {
 }
 
 fn research_prompt(root: &Path, kind: &str) -> Result<String, RunError> {
+    if kind == ResearchKind::RoadmapPlanning.name() {
+        let state = crate::projects_home::state_folder(root);
+        return Ok(crate::planning::prompt::prompt(&state)?);
+    }
     let context = crate::projects_home::state_folder(root).join("context");
     let brief = match read_bounded(&context, &context.join("brief.md"), BRIEF_BYTES_MAX) {
         Ok(text) => text,
@@ -3019,6 +3038,7 @@ pub fn kind_label(kind: &str) -> String {
         "design_research" => "Design research".into(),
         "front_end_design" => "Front-end design".into(),
         "tech_stack_research" => "Tech stack research".into(),
+        "roadmap_planning" => ResearchKind::RoadmapPlanning.label().into(),
         other => {
             let words = other.replace(['_', '-'], " ");
             let mut chars = words.chars();
@@ -4149,6 +4169,66 @@ mod tests {
             !marker.exists(),
             "the engine's git ran the project fsmonitor"
         );
+    }
+
+    /// A team or research agent's worktree, added the way the runtime adds it, is
+    /// local-only: the owner's own git pushing from it gets the plain refusal and the
+    /// remote gains nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_added_agent_worktree_refuses_remotes_with_the_plain_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("agent").join("home");
+        let tmp = base.join("agent").join("tmp");
+        let profiles = base.join("profiles");
+        let remote = base.join("remote.git");
+        for folder in [&project, &home, &tmp, &profiles] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let owner_git = |dir: &Path, args: &[&str]| {
+            crate::spawn_gate::output(
+                Command::new(GIT)
+                    .env_clear()
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap()
+        };
+        let remote_path = remote.to_str().unwrap();
+        assert!(
+            owner_git(&base, &["init", "-q", "--bare", remote_path])
+                .status
+                .success()
+        );
+        assert!(
+            owner_git(&project, &["remote", "add", "origin", remote_path])
+                .status
+                .success()
+        );
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let profile = profiles.join("agent.sb");
+        sandbox.install(&profile).unwrap();
+        let worktree = project.join("worktrees").join("agent-one");
+        add_worktree(&sandbox, &profile, &worktree).unwrap();
+        let pushed = owner_git(&worktree, &["push", "origin", "HEAD:refs/heads/agent-work"]);
+        assert!(!pushed.status.success(), "{pushed:?}");
+        assert!(
+            String::from_utf8_lossy(&pushed.stderr).contains(crate::worktrees::REMOTE_REFUSAL),
+            "{pushed:?}"
+        );
+        let refs = owner_git(&remote, &["for-each-ref"]);
+        assert!(refs.status.success(), "{refs:?}");
+        assert!(refs.stdout.is_empty(), "{refs:?}");
     }
 
     /// The engine's sandboxed setup git must be the real git, not the `/usr/bin/git` xcrun

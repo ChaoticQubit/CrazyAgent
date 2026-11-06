@@ -140,6 +140,7 @@ export function PackSettings() {
   const [problem, setProblem] = useState("");
   const status: Loaded<SetupStatus> = fresh ? { kind: "ok", value: fresh } : loaded;
   const moving = status.kind === "ok" && (setupBusy(status.value) || toolsChecking(status.value));
+  const version = status.kind === "ok" ? status.value.version : 0;
 
   useEffect(() => { if (loaded.kind === "ok") setFresh(loaded.value); else setFresh(null); }, [loaded]);
   useEffect(() => {
@@ -162,14 +163,14 @@ export function PackSettings() {
 
   const confirm = (pending: PackAsk) => {
     const name = entryName(pending.entry);
-    if (pending.kind === "remove") void apply(pending.entry.id, () => removePackEntry(pending.entry.id), `${name} was removed.`);
+    if (pending.kind === "remove") void apply(pending.entry.id, () => removePackEntry(pending.entry.id, version), `${name} was removed.`);
     else void apply(pending.entry.id, () => runSetup([pending.entry.id]), `Installing ${name}.`);
   };
 
   return <>
     <PackSettingsView status={status} busy={busy} problem={problem} skills={listed.kind === "ok" ? skillEntries(listed.value) : []} onRetry={reload} onAsk={setAsk}
       onInstallTools={() => void apply(TOOLS_BUSY, () => runSetup([]), "Installing tmux, uv and graphify.")}
-      onSwitch={(entry, on) => void apply(entry.id, () => setPackEntry(entry.id, on), `${entryName(entry)} is ${on ? "on" : "off"}.`)} />
+      onSwitch={(entry, on) => void apply(entry.id, () => setPackEntry(entry.id, on, version), `${entryName(entry)} is ${on ? "on" : "off"}.`)} />
     <PackConfirmDialogs ask={ask} pending={busy !== null} onCancel={() => { if (busy === null) setAsk(null); }} onConfirm={confirm} />
   </>;
 }

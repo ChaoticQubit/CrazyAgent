@@ -6,6 +6,8 @@ use crate::config::{
 
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 
+use crate::ledger;
+
 use crate::project_setup::{HarnessSlot, TeamPlan};
 
 use crate::team::status;
@@ -16,7 +18,7 @@ use crate::terminal::tmux::{SOCKET, Tmux, installed};
 
 use std::process::{Command, Stdio};
 
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const PROJECT: &str = "team-panes";
 
@@ -166,10 +168,14 @@ impl Fixture {
     }
 
     fn pane(&self, host: &Arc<dyn Host>, id: i64) -> PaneRecord {
+        self.pane_running(host, id, &["/bin/sh", "-c", "exec cat"])
+    }
+
+    fn pane_running(&self, host: &Arc<dyn Host>, id: i64, argv: &[&str]) -> PaneRecord {
         let file = self.base.join(format!("session-{id}.jsonl"));
         std::fs::write(&file, format!("{TURN_OPEN}\n{TURN_DONE}\n")).unwrap();
         let command = InteractiveCommand {
-            argv: vec!["/bin/sh".into(), "-c".into(), "exec cat".into()],
+            argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: self.base.clone(),
             env: Vec::new(),
             transcript: Transcript::ClaudeSession { file },
@@ -334,6 +340,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
                 access,
                 network: crate::sandbox::policy::AgentNetwork::default(),
                 toolchains: Vec::new(),
+                ide_git_hooks: false,
             },
         )
         .unwrap();
@@ -432,6 +439,7 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
                 toolchain: Toolchain::Rust,
                 allowed: false,
             }],
+            ide_git_hooks: false,
             network: crate::sandbox::policy::AgentNetwork::default(),
         },
     )
@@ -516,6 +524,7 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
     let sandboxed = crate::sandbox::policy::AgentPolicy {
         access: AgentAccess::Sandboxed,
         toolchains: Vec::new(),
+        ide_git_hooks: false,
         network: crate::sandbox::policy::AgentNetwork::default(),
     };
     crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
@@ -792,7 +801,7 @@ fn a_kept_master_hears_of_a_sub_agent_that_finished_after_its_briefing() {
         replies(f) == 1
     });
     let master = masters(&fixture.connection)[0];
-    assert!(!typed(&fixture, master).contains(syntax));
+    assert!(!pasted(&fixture, master).contains(syntax));
 
     let finished = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
     assert!(
@@ -812,7 +821,7 @@ fn a_kept_master_hears_of_a_sub_agent_that_finished_after_its_briefing() {
     fixture.until(&mut team, "the master answers the second message", |f| {
         replies(f) == 2
     });
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     let told = text
         .find(syntax)
         .unwrap_or_else(|| panic!("the kept master hears how to wake: {text}"));
@@ -827,7 +836,7 @@ fn a_kept_master_hears_of_a_sub_agent_that_finished_after_its_briefing() {
     fixture.until(&mut team, "the master answers the third message", |f| {
         replies(f) == 3
     });
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     assert!(text.contains("Plan the footer"), "{text}");
     assert_eq!(
         text.matches(syntax).count(),
@@ -1843,6 +1852,14 @@ fn the_master_framing_names_the_harnesses_an_empty_plan_can_use() {
     for team in ["Your sub-agents", "- codex", "- claude-code"] {
         assert!(!live.contains(team), "{team}: {live}");
     }
+    let tools = live_instructions(&setup, true);
+    assert!(
+        tools.contains("ask(question, options?, recommended?, context?) for one the owner answers in the Questions view; record_answer(question, version, owner_turn) records an answer the owner gave you in chat"),
+        "{tools}"
+    );
+    let typed = live_instructions(&setup, false);
+    assert!(!typed.contains("ask(question"));
+    assert!(!typed.contains("record_answer"));
 }
 
 #[test]
@@ -3750,7 +3767,7 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
         "{seeded}"
     );
     assert!(seeded.contains("You: Done."), "{seeded}");
-    assert_eq!(typed(&fixture, master), "", "the seed is never typed");
+    assert_eq!(pasted(&fixture, master), "", "the seed is never typed");
 
     std::fs::remove_file(&first_record).unwrap();
     switch_session(&fixture.connection, "s-one");
@@ -4125,6 +4142,1283 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     assert!(host.alive().unwrap().is_empty());
 }
 
+const RECORDING_CODEX: &str = r#"#!/bin/sh
+d="$CODEX_HOME/sessions/2026/10/27"
+/bin/mkdir -p "$d" || exit 1
+f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
+printf '{"type":"session_meta","payload":{"id":"recorded-%s","cwd":"%s"}}\n' "$$" "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0 ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && continue ;;
+  esac
+  [ "$line" = "/exit" ] && exit 0
+  typed=$(printf '%s' "$line" | /usr/bin/tr -cd '[:alnum:] .,:')
+  printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$typed" >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+const INTERRUPTED: &str = "Ship the release notes";
+
+fn reopen(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
+    let access = fixture.access.clone();
+    TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", fixture.base.join("bin").join("codex"))]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_terminal(host.clone())
+    .unwrap()
+}
+
+/// Starts a recording live master, lets its briefing turn end and stops the engine with
+/// the master's pane left running, as a closing engine does. Returns the master's id.
+fn left_live_master(fixture: &Fixture, host: &Arc<dyn Host>) -> i64 {
+    let mut team = live_runtime(fixture, host, RECORDING_CODEX);
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let master = masters(&fixture.connection)[0];
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+    master
+}
+
+/// Leaves what an engine killed while sending one owner message leaves behind: the message
+/// marked sent and the ledger intent recorded before the send. Returns the message id.
+fn interrupted_message(fixture: &Fixture, agent: i64) -> i64 {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES (?1,'owner',?2,'sent',1)",
+            params![PROJECT, INTERRUPTED],
+        )
+        .unwrap();
+    let message = fixture.connection.last_insert_rowid();
+    ledger::initialize(&fixture.connection).unwrap();
+    assert!(
+        delivery::intend(
+            &fixture.connection,
+            Busy::Message(message),
+            agent,
+            INTERRUPTED,
+            None
+        )
+        .unwrap()
+    );
+    message
+}
+
+/// Counts the typed lines holding `text` in every Codex rollout under the fixture's folder,
+/// skipping folders the running agents remove while it reads.
+fn typed_count(fixture: &Fixture, text: &str) -> usize {
+    let mut folders = vec![fixture.base.clone()];
+    let mut count = 0;
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                folders.push(path);
+            } else if kind.is_file() && entry.file_name().to_string_lossy().starts_with("rollout-")
+            {
+                count += std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|line| line.contains(r#""role":"user""#) && line.contains(text))
+                    .count();
+            }
+        }
+    }
+    count
+}
+
+fn message_state(fixture: &Fixture, message: i64) -> String {
+    fixture
+        .connection
+        .query_row(
+            "SELECT state FROM team_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn outcomes(fixture: &Fixture, kind: &str, key: &str) -> Vec<Option<String>> {
+    fixture
+        .connection
+        .prepare("SELECT outcome FROM ledger_actions WHERE kind=?1 AND action_key=?2 ORDER BY id")
+        .unwrap()
+        .query_map([kind, key], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn pending_keys(fixture: &Fixture, kind: ledger::ActionKind) -> Vec<String> {
+    ledger::pending(&fixture.connection, kind)
+        .unwrap()
+        .into_iter()
+        .map(|action| action.key)
+        .collect()
+}
+
+fn nothing_pending(fixture: &Fixture) -> bool {
+    ledger::pending(&fixture.connection, ledger::ActionKind::Message)
+        .unwrap()
+        .is_empty()
+        && ledger::pending(&fixture.connection, ledger::ActionKind::Dispatch)
+            .unwrap()
+            .is_empty()
+}
+
+/// An engine killed right after it typed a message into the live master leaves the message
+/// marked sent; the next engine finds it in the master's own record, marks it answered with
+/// a note, and never types it again into the master it takes over.
+#[cfg(target_os = "macos")]
+#[test]
+fn message_interrupted_after_send_is_not_sent_again() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let master = left_live_master(&fixture, &host);
+    let message = interrupted_message(&fixture, master);
+    host.input(
+        &AgentId::team(master).unwrap(),
+        format!("{INTERRUPTED}\r").as_bytes(),
+    )
+    .unwrap();
+    let deadline = Instant::now() + WAIT;
+    while typed_count(&fixture, INTERRUPTED) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the master's record never showed the message"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut again = reopen(&fixture, &host);
+    assert_eq!(message_state(&fixture, message), "answered");
+    assert!(fixture.note(delivery::DELIVERED_NOTE));
+    assert!(!fixture.note(delivery::UNKNOWN_NOTE));
+    assert_eq!(
+        outcomes(&fixture, "message", &format!("team-message/{message}")),
+        [Some("done".to_owned())]
+    );
+    assert!(nothing_pending(&fixture), "no intent is left open");
+    fixture.until(
+        &mut again,
+        "the next engine takes the live master over",
+        |f| f.agent_status(master) == (AgentStatus::Idle, None) && f.recorded(master),
+    );
+    idle_ticks(&mut again);
+    assert_eq!(
+        typed_count(&fixture, INTERRUPTED),
+        1,
+        "the message reached the master once"
+    );
+    assert_eq!(message_state(&fixture, message), "answered");
+    assert_eq!(again.shutdown().unwrap(), names(&[master]));
+    host.close(&[]).unwrap();
+}
+
+/// An engine killed after it recorded its intent but before it typed the message leaves
+/// the master's record without it; the next engine closes that intent as failed and types
+/// the message exactly once into the master it takes over.
+#[cfg(target_os = "macos")]
+#[test]
+fn message_interrupted_before_send_is_sent_once() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let master = left_live_master(&fixture, &host);
+    let message = interrupted_message(&fixture, master);
+    let key = format!("team-message/{message}");
+
+    let mut again = reopen(&fixture, &host);
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [Some("failed".to_owned())]
+    );
+    assert_eq!(message_state(&fixture, message), "pending");
+    fixture.until(&mut again, "the message is typed into the master", |f| {
+        typed_count(f, INTERRUPTED) == 1
+    });
+    fixture.until(&mut again, "the master's turn on it is counted", |f| {
+        live_turns(&f.connection) == (2, false)
+    });
+    idle_ticks(&mut again);
+    assert_eq!(
+        typed_count(&fixture, INTERRUPTED),
+        1,
+        "the message reached the master once"
+    );
+    assert_eq!(message_state(&fixture, message), "answered");
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [Some("failed".to_owned()), Some("done".to_owned())]
+    );
+    assert!(nothing_pending(&fixture), "no intent is left open");
+    assert!(!fixture.note(delivery::DELIVERED_NOTE));
+    assert!(!fixture.note(delivery::UNKNOWN_NOTE));
+    assert_eq!(again.shutdown().unwrap(), names(&[master]));
+    host.close(&[]).unwrap();
+}
+
+/// A message whose idle master, which no interrupted run holds it for, left no session
+/// record cannot be told delivered or not; the next engine fails the message with a note and never types it, and its intent stays pending
+/// for the owner across starts until the owner dismisses it (DEC-098 addendum 4).
+#[test]
+fn message_whose_arrival_cannot_be_told_is_failed_with_a_note_and_stays_pending_for_the_owner() {
+    let fixture = Fixture::new(1);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let message = interrupted_message(&fixture, master);
+    let key = format!("team-message/{message}");
+
+    drop(fixture.runtime());
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [None],
+        "an unknown intent stays open for the owner"
+    );
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Message),
+        std::slice::from_ref(&key),
+        "the recovery banner reads it from pending()"
+    );
+
+    drop(fixture.runtime());
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(
+        noted(&fixture, delivery::UNKNOWN_NOTE),
+        1,
+        "a second start says it once and types nothing"
+    );
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Message),
+        std::slice::from_ref(&key)
+    );
+
+    let open = ledger::pending_key(&fixture.connection, ledger::ActionKind::Message, &key)
+        .unwrap()
+        .expect("the unknown intent is still open");
+    ledger::finish(&fixture.connection, open.id, ledger::Outcome::Unknown).unwrap();
+    drop(fixture.runtime());
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [Some("unknown".to_owned())],
+        "the owner's dismissal closes it"
+    );
+    assert!(nothing_pending(&fixture));
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
+}
+
+/// A task whose sub-agent left no session record cannot be told handed over or not; the
+/// next engine fails it once with a plain reason and never hands it out again, and its
+/// intent stays pending for the owner across starts.
+#[test]
+fn dispatch_whose_arrival_cannot_be_told_fails_once_and_stays_pending_for_the_owner() {
+    let fixture = Fixture::new(1);
+    let sub = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let prompt = "Write the changelog";
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,created_ms,started_ms) VALUES (?1,'master','claude-code',0,?2,'running',?3,1,1,1)",
+            params![PROJECT, prompt, sub],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    ledger::initialize(&fixture.connection).unwrap();
+    assert!(delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap());
+    let key = format!("team-task/{task}");
+    let row = |fixture: &Fixture| -> (String, Option<i64>, Option<String>, Option<i64>) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,agent,error,finished_ms FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap()
+    };
+
+    drop(fixture.runtime());
+    let failed = row(&fixture);
+    assert_eq!(
+        (failed.0.as_str(), failed.1, failed.2.as_deref()),
+        ("failed", Some(sub), Some(delivery::UNKNOWN_TASK))
+    );
+    assert_eq!(outcomes(&fixture, "dispatch", &key), [None]);
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Dispatch),
+        std::slice::from_ref(&key)
+    );
+
+    drop(fixture.runtime());
+    assert_eq!(
+        row(&fixture),
+        failed,
+        "a second start fails it no second time"
+    );
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Dispatch),
+        std::slice::from_ref(&key)
+    );
+}
+
+/// A delivery no interrupted run holds that an engine start found unknown stays unknown at
+/// every later start: no later
+/// start reads a record for it, so a newer session of the agent that shows the same first
+/// line neither settles it as delivered nor drops it from the owner's list.
+#[test]
+fn an_unknown_delivery_is_not_settled_later_by_a_newer_session() {
+    let fixture = Fixture::new(1);
+    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Idle);
+    let message = interrupted_message(&fixture, master);
+    let key = format!("team-message/{message}");
+
+    drop(fixture.runtime());
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Message),
+        std::slice::from_ref(&key)
+    );
+    let marked = ledger::pending_key(&fixture.connection, ledger::ActionKind::Message, &key)
+        .unwrap()
+        .expect("the unknown intent is still open");
+    assert!(
+        marked.payload.contains(r#""unknown":true"#),
+        "{}",
+        marked.payload
+    );
+
+    let file = fixture.base.join(format!("session-{master}.jsonl"));
+    let typed = serde_json::json!({"type": "user", "message": {"content": INTERRUPTED}});
+    std::fs::write(&file, format!("{TURN_OPEN}\n{typed}\n{TURN_DONE}\n")).unwrap();
+    let record = PaneRecord::new(
+        &Transcript::ClaudeSession { file },
+        &fixture.base,
+        SystemTime::now(),
+        4242,
+        None,
+    )
+    .unwrap();
+    fixture.keep(master, &record);
+
+    for _ in 0..2 {
+        drop(fixture.runtime());
+        assert_eq!(
+            outcomes(&fixture, "message", &key),
+            [None],
+            "a newer session settles nothing"
+        );
+        assert_eq!(
+            pending_keys(&fixture, ledger::ActionKind::Message),
+            std::slice::from_ref(&key)
+        );
+        assert_eq!(message_state(&fixture, message), "failed");
+        assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
+        assert_eq!(noted(&fixture, delivery::DELIVERED_NOTE), 0);
+    }
+}
+
+/// Unknown deliveries the owner has not dismissed stay pending up to `UNKNOWN_KEPT` of each
+/// kind; a start closes the oldest beyond that as unknown, so undismissed ones never fill
+/// the ledger that every delivery and agent start shares.
+#[test]
+fn a_start_keeps_the_newest_unknown_deliveries_of_each_kind_and_closes_older_ones() {
+    let fixture = Fixture::new(1);
+    ledger::initialize(&fixture.connection).unwrap();
+    let kinds = [
+        (ledger::ActionKind::Message, "message", "team-message"),
+        (ledger::ActionKind::Dispatch, "dispatch", "team-task"),
+    ];
+    let keys = |prefix: &str| -> Vec<String> {
+        (0..=delivery::UNKNOWN_KEPT)
+            .map(|n| format!("{prefix}/{}", 900_000 + n))
+            .collect()
+    };
+    for (kind, _, prefix) in kinds {
+        for key in keys(prefix) {
+            ledger::begin(&fixture.connection, kind, &key, "{}").unwrap();
+        }
+    }
+
+    for _ in 0..2 {
+        drop(fixture.runtime());
+        for (kind, name, prefix) in kinds {
+            let all = keys(prefix);
+            assert_eq!(
+                pending_keys(&fixture, kind),
+                all[1..],
+                "the newest {} stay pending",
+                delivery::UNKNOWN_KEPT
+            );
+            assert_eq!(
+                outcomes(&fixture, name, &all[0]),
+                [Some("unknown".to_owned())],
+                "the oldest is closed as unknown"
+            );
+        }
+    }
+}
+
+/// A task its sub-agent's record shows was handed over is never handed out again after a
+/// restart: it fails with a plain reason. A task the record lacks waits to be handed out.
+#[test]
+fn dispatch_interrupted_after_send_is_not_handed_out_again_and_one_before_send_waits() {
+    let fixture = Fixture::new(1);
+    let sub = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let file = fixture.base.join(format!("session-{sub}.jsonl"));
+    std::fs::write(&file, format!("{TURN_OPEN}\n{TURN_DONE}\n")).unwrap();
+    let record = PaneRecord::new(
+        &Transcript::ClaudeSession { file: file.clone() },
+        &fixture.base,
+        SystemTime::now(),
+        4242,
+        None,
+    )
+    .unwrap();
+    fixture.keep(sub, &record);
+    let mut tasks = Vec::new();
+    for prompt in ["Write the changelog", "Tag the release"] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,created_ms,started_ms) VALUES (?1,'master','claude-code',0,?2,'running',?3,1,1,1)",
+                params![PROJECT, prompt, sub],
+            )
+            .unwrap();
+        let task = fixture.connection.last_insert_rowid();
+        ledger::initialize(&fixture.connection).unwrap();
+        assert!(
+            delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap()
+        );
+        tasks.push(task);
+    }
+    let typed = r#"{"type":"user","message":{"content":"You are a sub-agent of the project \"Panes\".\nYour task: Write the changelog"}}"#;
+    let mut kept = std::fs::read_to_string(&file).unwrap();
+    kept.push_str(typed);
+    kept.push('\n');
+    std::fs::write(&file, kept).unwrap();
+
+    drop(fixture.runtime());
+    let task = |id: i64| -> (String, Option<i64>, Option<String>) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,agent,error FROM team_tasks WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        task(tasks[0]),
+        (
+            "failed".to_owned(),
+            Some(sub),
+            Some(delivery::DELIVERED_TASK.to_owned())
+        ),
+        "the handed-over task is not handed out again"
+    );
+    assert_eq!(task(tasks[1]), ("queued".to_owned(), None, None));
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{}", tasks[0])),
+        [Some("done".to_owned())]
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{}", tasks[1])),
+        [Some("failed".to_owned())]
+    );
+    assert!(nothing_pending(&fixture), "no intent is left open");
+
+    drop(fixture.runtime());
+    assert_eq!(task(tasks[0]).0, "failed");
+    assert_eq!(task(tasks[1]).0, "queued");
+}
+
+/// Reads everything typed into an agent's terminal so far, as its pane wrote it to a file.
+fn typed(fixture: &Fixture, id: i64) -> String {
+    std::fs::read_to_string(fixture.base.join(format!("typed-{id}.txt"))).unwrap_or_default()
+}
+
+/// Starts a team runtime that serves the engine's agent tools over idle sub-agents with
+/// tools, one per id, each taken over from a pane that writes what is typed into it to the
+/// file `typed` reads. Takes the fixture, whose plan must have room for the ids, and the
+/// ids. Returns the terminal host and the runtime once every agent is idle.
+fn asking_team(fixture: &mut Fixture, ids: &[i64]) -> (Arc<dyn Host>, TeamRuntime) {
+    fixture.setup.team.sub_harnesses[0].tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    let host = fixture.host();
+    for id in ids {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_agents(id,project,role,harness,tools,connection,status,created_ms,heartbeat_ms) VALUES (?1,?2,'sub','codex',1,?3,'idle',1,1)",
+                params![id, PROJECT, ENDPOINT],
+            )
+            .unwrap();
+        let log = fixture.base.join(format!("typed-{id}.txt"));
+        let record = fixture.pane_running(
+            &host,
+            *id,
+            &["/bin/sh", "-c", "exec cat >>\"$0\"", log.to_str().unwrap()],
+        );
+        fixture.keep(*id, &record);
+    }
+    let folder = fixture.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let mut team = fixture
+        .runtime()
+        .with_delegation_tool(&engine)
+        .unwrap()
+        .with_terminal(host.clone())
+        .unwrap();
+    fixture.until(&mut team, "the sub-agents are taken over", |f| {
+        ids.iter()
+            .all(|id| f.agent_status(*id).0 == AgentStatus::Idle)
+    });
+    (host, team)
+}
+
+/// Waits until an answer was typed into an agent's terminal, lets the runtime tick on, and
+/// requires it was typed exactly once. Takes the fixture, the runtime, the agent and the
+/// answer.
+fn typed_once(fixture: &Fixture, team: &mut TeamRuntime, id: i64, answer: &str) {
+    let deadline = Instant::now() + WAIT;
+    while !typed(fixture, id).contains(answer) {
+        assert!(Instant::now() < deadline, "{}", typed(fixture, id));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    idle_ticks(team);
+    assert_eq!(
+        typed(fixture, id).matches(answer).count(),
+        1,
+        "{}",
+        typed(fixture, id)
+    );
+}
+
+/// The owner's answer to agent 7's question is typed into agent 7's own terminal exactly
+/// once, with no panic, even while agent 8 carries the handle `team-7`, and agent 8 is never
+/// given it. Agent 7's Messages timeline keeps it once as the engine's notice and agent 8's
+/// keeps nothing of it (V2PB-L2). Each pane writes what it is given to a file, so the count
+/// does not depend on how the screen echoes or wraps.
+#[test]
+fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds_its_id_as_a_handle()
+ {
+    let mut fixture = Fixture::new(2);
+    let (asker, holder) = (7, 8);
+    let (_host, mut team) = asking_team(&mut fixture, &[asker, holder]);
+    let project = fixture.setup.project_id.clone();
+    super::super::names::assign_persona(&fixture.connection, &project, holder).unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_names SET handle=?2 WHERE agent=?1",
+            params![holder, format!("team-{asker}")],
+        )
+        .unwrap();
+
+    let ask = crate::questions::Ask {
+        question: "Which database should the service use?".into(),
+        options: vec![],
+        recommended: None,
+        context: None,
+    };
+    let question = crate::questions::ask(
+        &fixture.connection,
+        &project,
+        &crate::questions::Asker::Agent(asker),
+        &ask,
+    )
+    .unwrap();
+    let answer = "Use Postgres 16 for the service.";
+    assert_eq!(
+        crate::questions::answer(
+            &fixture.connection,
+            question,
+            0,
+            &crate::questions::Answer::Text(answer.into()),
+        )
+        .unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    fixture.until(&mut team, "the answer is typed once", |f| {
+        crate::questions::agent_notes(&f.connection, &project, asker)
+            .unwrap()
+            .is_empty()
+    });
+    typed_once(&fixture, &mut team, asker, answer);
+    assert!(
+        !typed(&fixture, holder).contains(answer),
+        "the agent holding the handle team-{asker} never gets agent {asker}'s answer"
+    );
+    use crate::team::agent_messages::{Speaker, read};
+    let kept = |id: i64| -> Vec<Speaker> {
+        read(&fixture.connection, &project, id, None, None)
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.contains(answer))
+            })
+            .map(|entry| entry.from)
+            .collect()
+    };
+    assert_eq!(kept(asker), [Speaker::Engine]);
+    assert!(kept(holder).is_empty(), "{:?}", kept(holder));
+    team.shutdown().unwrap();
+}
+
+/// A sub-agent's question goes from its team server, which leaves `record_answer` out,
+/// through a runtime tick into the questions log under that agent, the server hands the
+/// agent the question's id, and the owner's answer is typed into that agent's terminal
+/// exactly once.
+#[test]
+fn a_sub_agent_s_question_is_logged_on_a_tick_and_the_owner_s_answer_is_typed_back_once() {
+    let mut fixture = Fixture::new(1);
+    let asker = 7;
+    let (_host, mut team) = asking_team(&mut fixture, &[asker]);
+    let project = fixture.setup.project_id.clone();
+    let mailbox = team.mailbox(asker);
+    let tmp = mailbox.parent().unwrap().to_path_buf();
+    for folder in [team.agent_folder(asker), tmp, mailbox.clone()] {
+        private_directory(&folder).unwrap();
+    }
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+    "params": {"name": tool::ASK_TOOL, "arguments": {
+        "question": "Which database should the service use?",
+        "options": ["Postgres", "SQLite"],
+        "recommended": "Postgres"
+    }}});
+    let mut input = serde_json::to_vec(&call).unwrap();
+    input.push(b'\n');
+    let server = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        tool::serve_live(
+            std::io::Cursor::new(input),
+            &mut output,
+            &mailbox,
+            &[tool::RECORD_TOOL.to_owned()],
+        )
+        .map(|()| output)
+    });
+    fixture.until(&mut team, "the ask server is answered", |_| {
+        server.is_finished()
+    });
+    let output = String::from_utf8(server.join().unwrap().unwrap()).unwrap();
+    let pending = crate::questions::pending(&fixture.connection, &project).unwrap();
+    assert_eq!(pending.len(), 1, "{output}");
+    assert_eq!(
+        pending[0].asker,
+        crate::questions::Asker::Agent(asker).name()
+    );
+    assert!(
+        output.contains(&format!("Question {} is logged", pending[0].id)),
+        "{output}"
+    );
+
+    let answer = "Use Postgres 16 for the service.";
+    assert_eq!(
+        crate::questions::answer(
+            &fixture.connection,
+            pending[0].id,
+            pending[0].version,
+            &crate::questions::Answer::Text(answer.into()),
+        )
+        .unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    fixture.until(&mut team, "the answer is typed", |f| {
+        crate::questions::agent_notes(&f.connection, &project, asker)
+            .unwrap()
+            .is_empty()
+    });
+    typed_once(&fixture, &mut team, asker, answer);
+    team.shutdown().unwrap();
+}
+
+/// A team master's question calls from one reply are logged as its own by the runtime step
+/// its turn end and turn start run, and the one the store refuses comes back to it as a team
+/// note naming why, so the master hears it on its next turn.
+#[test]
+fn a_team_master_s_questions_are_logged_as_its_own_and_a_refused_one_is_noted() {
+    use crate::questions::{Ask, Asker};
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let mut team = fixture.runtime();
+    let record = team.tool_record(master);
+    for folder in [
+        team.agent_folder(master),
+        record.parent().unwrap().to_path_buf(),
+    ] {
+        private_directory(&folder).unwrap();
+    }
+    for earlier in 1..crate::questions::PENDING_PER_ASKER_MAX {
+        let ask = Ask {
+            question: format!("Earlier question {earlier}?"),
+            options: vec![],
+            recommended: None,
+            context: None,
+        };
+        crate::questions::ask(&fixture.connection, &project, &Asker::Master(master), &ask).unwrap();
+    }
+    let mut input = Vec::new();
+    for (id, question) in [
+        (1, "Should the page ship today?"),
+        (2, "Should the page keep its old banner?"),
+    ] {
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": tool::ASK_TOOL, "arguments": {"question": question}}});
+        input.extend(serde_json::to_vec(&call).unwrap());
+        input.push(b'\n');
+    }
+    let mut output = Vec::new();
+    tool::serve(std::io::Cursor::new(input), &mut output, &record).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert_eq!(output.matches("Recorded.").count(), 2, "{output}");
+
+    team.log_master_asks(&project, master).unwrap();
+    let mine: Vec<String> = crate::questions::pending(&fixture.connection, &project)
+        .unwrap()
+        .into_iter()
+        .filter(|question| question.asker == Asker::Master(master).name())
+        .map(|question| question.question)
+        .collect();
+    assert_eq!(
+        mine.len(),
+        usize::try_from(crate::questions::PENDING_PER_ASKER_MAX).unwrap()
+    );
+    assert!(mine.contains(&"Should the page ship today?".to_owned()));
+    assert!(
+        fixture.note(
+            "Your question \"Should the page keep its old banner?\" was not logged for the owner: 8 of your questions are still open."
+        ),
+        "{:#?}",
+        fixture.status()
+    );
+    assert!(
+        tool::questions::take_asks(&record).is_empty(),
+        "the calls are taken once"
+    );
+    team.log_master_asks(&project, master).unwrap();
+    assert_eq!(
+        crate::questions::pending(&fixture.connection, &project)
+            .unwrap()
+            .len(),
+        usize::try_from(crate::questions::PENDING_PER_ASKER_MAX).unwrap()
+    );
+}
+
+const ASKING_CODEX: &str = r#"#!/bin/sh
+d="$CODEX_HOME/sessions/2026/10/27"
+/bin/mkdir -p "$d" || exit 1
+f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
+printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+asked=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0 ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && continue ;;
+  esac
+  [ "$line" = "/exit" ] && exit 0
+  if [ "$asked" = 1 ]; then
+    printf '\033[2J\033[HThanks, picked %s\n' "$line"
+    asked=2
+    continue
+  fi
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+  if [ "$asked" = 0 ]; then
+    asked=1
+    printf '\n  Which database should the service use?\n\n\342\200\272 1. Postgres\n  2. SQLite\n  3. None of the above\n\n  tab to add notes \302\267 enter to submit answer \302\267 esc to interrupt\n'
+  fi
+done
+"#;
+
+/// A question box a live master's own harness draws in its terminal is logged once in the
+/// owner questions log as asked in terminal, rendered into questions.md and never typed back
+/// to the master; once the owner answers on that screen it is marked answered there.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_s_question_box_is_logged_once_and_answered_in_its_terminal() {
+    master_question_box_leaves(true);
+}
+
+/// A logged question box that leaves its live master's screen with no owner key typed into
+/// that terminal since it was asked settles as dismissed, never as answered in terminal.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_s_question_box_leaving_without_an_owner_key_is_dismissed() {
+    master_question_box_leaves(false);
+}
+
+/// Runs a live master whose harness asks the owner a question box in its terminal, checks
+/// it is logged once, then answers the box on that screen: as the owner, whose keys the
+/// owner typing signal records, when `owner_keyed`, otherwise as input no owner typed.
+/// Takes whether the owner typed. Checks how the question settles.
+#[cfg(target_os = "macos")]
+fn master_question_box_leaves(owner_keyed: bool) {
+    let fixture = Fixture::new(1);
+    std::fs::create_dir_all(
+        fixture
+            .base
+            .join("project")
+            .join(crate::projects_home::CRAZYAGENT_DIRECTORY),
+    )
+    .unwrap();
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, ASKING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    let line =
+        "Which database should the service use? | 1. Postgres | 2. SQLite | 3. None of the above";
+    let logged = |f: &Fixture| -> Vec<(u64, String)> {
+        masters(&f.connection)
+            .first()
+            .map(|master| {
+                let asker = crate::questions::Asker::Terminal(*master).name();
+                crate::questions::pending(&f.connection, &project)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|question| question.asker == asker)
+                    .map(|question| (question.id, question.question))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    fixture.until(&mut team, "the master's question box is logged", |f| {
+        !logged(f).is_empty()
+    });
+    let master = masters(&fixture.connection)[0];
+    let pending = logged(&fixture);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].1, line);
+    let id = i64::try_from(pending[0].0).unwrap();
+    for _ in 0..3 {
+        idle_ticks(&mut team);
+    }
+    let rows =
+        |f: &Fixture| -> Vec<(i64, String, String, Option<String>, String)> {
+            f.connection
+            .prepare(
+                "SELECT id,source,status,answered_by,asker FROM owner_questions WHERE project=?1",
+            )
+            .unwrap()
+            .query_map([PROJECT], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+    assert_eq!(
+        rows(&fixture),
+        vec![(
+            id,
+            "terminal".into(),
+            "pending".into(),
+            None,
+            format!("terminal:{master}")
+        )],
+        "a box still on screen is logged once"
+    );
+    let page = fixture
+        .base
+        .join("project")
+        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join("questions.md");
+    assert!(
+        std::fs::read_to_string(&page)
+            .unwrap()
+            .contains("Which database should the service use?"),
+        "the logged question reaches questions.md"
+    );
+
+    if owner_keyed {
+        let now = crate::team::now_ms();
+        super::super::master::owner_typed(&fixture.connection, master, b"2\r", now).unwrap();
+        assert_eq!(
+            super::super::master::owner_key_ms(&fixture.connection, None, master).unwrap(),
+            Some(now)
+        );
+    }
+    host.input(&AgentId::team(master).unwrap(), b"2\r").unwrap();
+    let (settled, shown) = if owner_keyed {
+        (
+            "answered_in_terminal",
+            "Answered by the owner in that agent's terminal.",
+        )
+    } else {
+        ("dismissed", "Closed without an answer.")
+    };
+    fixture.until(&mut team, "the box leaving the terminal is noted", |f| {
+        rows(f)
+            .first()
+            .is_some_and(|row| row.2 == settled && row.3.is_none())
+    });
+    assert!(logged(&fixture).is_empty());
+    let written = std::fs::read_to_string(&page).unwrap();
+    assert!(written.contains(shown), "{written}");
+    let screen = String::from_utf8(host.screen(&AgentId::team(master).unwrap()).unwrap())
+        .unwrap_or_default();
+    assert!(screen.contains("Thanks, picked 2"), "{screen}");
+    idle_ticks(&mut team);
+    assert_eq!(
+        rows(&fixture).len(),
+        1,
+        "a box that left is not logged again"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+fn running_task(fixture: &Fixture, sub: i64, prompt: &str) -> i64 {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,created_ms,started_ms) VALUES (?1,'master','claude-code',0,?2,'running',?3,1,1,1)",
+            params![PROJECT, prompt, sub],
+        )
+        .unwrap();
+    fixture.connection.last_insert_rowid()
+}
+
+/// An agent that starts its harness for each turn keeps no pane record, only the session
+/// record of its running turn. A start reads that record for a delivery intended before
+/// the session started, so a task the session shows is never handed out again, and never
+/// reads an older session left from an earlier turn, so that one stays unknown.
+#[test]
+fn a_per_turn_agent_s_delivery_settles_from_the_session_record_of_its_running_turn() {
+    let fixture = Fixture::new(2);
+    let current = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let earlier = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    ledger::initialize(&fixture.connection).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let prompt = "Write the changelog";
+    let tasks = [current, earlier].map(|sub| {
+        let task = running_task(&fixture, sub, prompt);
+        assert!(
+            delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap()
+        );
+        task
+    });
+    std::thread::sleep(Duration::from_millis(5));
+    let session = |sub: i64, since: SystemTime| {
+        let file = fixture.base.join(format!("session-{sub}.jsonl"));
+        let typed = serde_json::json!({
+            "type": "user",
+            "message": {"content": format!("You are a sub-agent of the project \"Panes\".\nYour task: {prompt}")}
+        });
+        std::fs::write(&file, format!("{typed}\n{TURN_DONE}\n")).unwrap();
+        let record = PaneRecord::new(
+            &Transcript::ClaudeSession { file },
+            &fixture.base,
+            since,
+            4242,
+            None,
+        )
+        .unwrap();
+        crate::recovery::remember(&fixture.connection, sub, &record).unwrap();
+    };
+    session(current, SystemTime::now());
+    session(earlier, UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    assert!(!fixture.recorded(current) && !fixture.recorded(earlier));
+
+    drop(fixture.runtime());
+    let task = |id: i64| -> (String, Option<String>) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,error FROM team_tasks WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        task(tasks[0]),
+        (
+            "failed".to_owned(),
+            Some(delivery::DELIVERED_TASK.to_owned())
+        ),
+        "the running turn's session shows the task"
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{}", tasks[0])),
+        [Some("done".to_owned())]
+    );
+    assert_eq!(
+        task(tasks[1]),
+        ("failed".to_owned(), Some(delivery::UNKNOWN_TASK.to_owned())),
+        "a session older than the delivery tells nothing about it"
+    );
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Dispatch),
+        [format!("team-task/{}", tasks[1])]
+    );
+}
+
+/// A message its master was answering when the engine stopped is held for the master's
+/// resume: the start neither fails it nor types it. A resume that fails keeps it held for
+/// the owner's retry; a retried resume that fails again gives the run up and lets the
+/// message go, settled as a start settles a message no run holds: failed with a note, its
+/// intent pending for the owner.
+#[test]
+fn a_held_message_waits_for_its_resume_and_a_retried_resume_that_fails_again_lets_it_go() {
+    let fixture = Fixture::new(1);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Working);
+    let message = interrupted_message(&fixture, master);
+    let key = format!("team-message/{message}");
+    let project = fixture.setup.project_id.clone();
+    let runs = |f: &Fixture| {
+        let listed = crate::recovery::list(&f.base, &project).unwrap();
+        let mut runs = [listed.waiting, listed.settled].concat();
+        runs.sort_by_key(|run| run.id);
+        runs
+    };
+    let held = |f: &Fixture| {
+        crate::recovery::holds(&f.connection, crate::recovery::HeldItem::Message(message)).unwrap()
+    };
+
+    let mut team = fixture.runtime();
+    assert_eq!(message_state(&fixture, message), "pending");
+    assert_eq!(outcomes(&fixture, "message", &key), [None]);
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 0);
+    assert!(held(&fixture));
+    fixture.until(&mut team, "the resume fails for its missing record", |f| {
+        runs(f)
+            .first()
+            .is_some_and(|run| run.state == crate::recovery::RunState::Failed)
+    });
+    idle_ticks(&mut team);
+    assert_eq!(
+        message_state(&fixture, message),
+        "pending",
+        "held for a retry"
+    );
+    assert_eq!(outcomes(&fixture, "message", &key), [None]);
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 0);
+    assert!(held(&fixture));
+
+    assert!(crate::recovery::retry(&fixture.base, master).unwrap());
+    fixture.until(&mut team, "the retried resume fails again", |f| {
+        runs(f)[0].state == crate::recovery::RunState::Failed
+    });
+    assert!(!held(&fixture), "the run let the message go");
+    assert_eq!(runs(&fixture)[0].last_turn.message, None);
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Message),
+        std::slice::from_ref(&key)
+    );
+    idle_ticks(&mut team);
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
+}
+
+/// A per-turn agent stopped in a turn on its task leaves a run that holds the task. A start
+/// that reads the task in the session record of that running turn keeps it held for the
+/// run's resume, queued with its intent open, and the run waits to resume it; a start that
+/// finds the turn ran without the task releases it from its run, closes its intent failed
+/// and lets it wait to be handed out as usual.
+#[test]
+fn a_per_turn_agent_s_held_task_stays_held_when_its_session_shows_it_and_is_released_when_not() {
+    let fixture = Fixture::new(2);
+    let reached = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let missed = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    ledger::initialize(&fixture.connection).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let shown = "Write the changelog";
+    let tasks = [(reached, shown), (missed, "Tag the release")].map(|(sub, prompt)| {
+        let task = running_task(&fixture, sub, prompt);
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET task=?2 WHERE id=?1",
+                params![sub, task],
+            )
+            .unwrap();
+        assert!(
+            delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap()
+        );
+        task
+    });
+    std::thread::sleep(Duration::from_millis(5));
+    for sub in [reached, missed] {
+        let file = fixture.base.join(format!("session-{sub}.jsonl"));
+        let typed = serde_json::json!({
+            "type": "user",
+            "message": {"content": format!("You are a sub-agent of the project \"Panes\".\nYour task: {shown}")}
+        });
+        std::fs::write(&file, format!("{typed}\n{TURN_DONE}\n")).unwrap();
+        let record = PaneRecord::new(
+            &Transcript::ClaudeSession { file },
+            &fixture.base,
+            SystemTime::now(),
+            4242,
+            None,
+        )
+        .unwrap();
+        crate::recovery::remember(&fixture.connection, sub, &record).unwrap();
+    }
+
+    drop(fixture.runtime());
+    let task = |id: i64| -> (String, Option<String>) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,error FROM team_tasks WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    let held = |id: i64| {
+        crate::recovery::holds(&fixture.connection, crate::recovery::HeldItem::Task(id)).unwrap()
+    };
+    assert_eq!(
+        task(tasks[0]),
+        ("queued".to_owned(), None),
+        "the run keeps the task its turn reached"
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{}", tasks[0])),
+        [None]
+    );
+    assert!(held(tasks[0]));
+    assert_eq!(
+        task(tasks[1]),
+        ("queued".to_owned(), None),
+        "a task its turn never got waits as usual"
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{}", tasks[1])),
+        [Some("failed".to_owned())]
+    );
+    assert!(!held(tasks[1]));
+
+    let runs = crate::recovery::scan(&fixture.base).unwrap();
+    assert_eq!(
+        runs.iter()
+            .map(|run| (run.agent, run.last_turn.task))
+            .collect::<Vec<_>>(),
+        [(reached, Some(tasks[0]))],
+        "only the run whose turn reached its task waits to resume it"
+    );
+    assert!(held(tasks[0]));
+    assert!(!held(tasks[1]));
+}
+
+/// Engine input to the live master records its delivery intent only right before it types,
+/// so a team message that waits, here on the owner's unsent draft, leaves no intent open
+/// and nothing typed; once the draft is gone it is typed once and its intent closes done.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_message_waiting_for_the_live_master_has_no_open_intent_until_it_is_typed() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, RECORDING_CODEX);
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let master = masters(&fixture.connection)[0];
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_live_masters SET typed_ms=?2, draft=1 WHERE agent=?1",
+            params![master, now_ms()],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES (?1,'owner',?2,'pending',1)",
+            params![PROJECT, INTERRUPTED],
+        )
+        .unwrap();
+    let message = fixture.connection.last_insert_rowid();
+    let key = format!("team-message/{message}");
+
+    idle_ticks(&mut team);
+    assert_eq!(message_state(&fixture, message), "pending");
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        Vec::<Option<String>>::new(),
+        "a message that waits records no intent"
+    );
+    assert!(nothing_pending(&fixture), "no intent is left open");
+    assert_eq!(typed_count(&fixture, INTERRUPTED), 0);
+
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_live_masters SET typed_ms=NULL, draft=0 WHERE agent=?1",
+            [master],
+        )
+        .unwrap();
+    fixture.until(&mut team, "the message is typed into the master", |f| {
+        typed_count(f, INTERRUPTED) == 1
+    });
+    fixture.until(&mut team, "the master's turn on it is counted", |f| {
+        live_turns(&f.connection) == (2, false)
+    });
+    idle_ticks(&mut team);
+    assert_eq!(
+        typed_count(&fixture, INTERRUPTED),
+        1,
+        "the message reached the master once"
+    );
+    assert_eq!(message_state(&fixture, message), "answered");
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [Some("done".to_owned())]
+    );
+    assert!(nothing_pending(&fixture), "no intent is left open");
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+    host.close(&[]).unwrap();
+}
+
 #[cfg(target_os = "macos")]
 const WORKING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
@@ -4312,7 +5606,11 @@ fn with_the_task_limit_off_a_turn_runs_past_where_a_limit_would_stop_it() {
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: Some(crate::team::IDLE_STOP_DEFAULT_SECS),
-                revision: 0,
+                version: crate::team::settings_version(
+                    &fixture.connection,
+                    &fixture.setup.project_id,
+                )
+                .unwrap(),
             },
             hand_off(&fixture, "Write page.md"),
         ],
@@ -4472,7 +5770,11 @@ fn an_idle_sub_agent_is_stopped_by_the_idle_setting_and_never_while_it_is_off() 
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: None,
-                revision: 0,
+                version: crate::team::settings_version(
+                    &fixture.connection,
+                    &fixture.setup.project_id,
+                )
+                .unwrap(),
             },
             hand_off(&fixture, "Write page.md"),
         ],
@@ -4651,7 +5953,9 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
     fixture.until(
         &mut team,
         "the woken sub-agent continues its conversation with the new task",
-        |f| launches(f, member).len() == 2 && typed(f, member).contains("Add a footer to page.md."),
+        |f| {
+            launches(f, member).len() == 2 && pasted(f, member).contains("Add a footer to page.md.")
+        },
     );
     let label = super::super::events::label(&fixture.connection, member).unwrap();
     let stored = wake_call(&fixture, &mailbox, 3, &persona, "Again");
@@ -4670,7 +5974,7 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
         "{:?}",
         launches(&fixture, member)
     );
-    assert!(!typed(&fixture, member).contains("Your last result then"));
+    assert!(!pasted(&fixture, member).contains("Your last result then"));
     assert_eq!(
         subs(&fixture),
         vec![member],
@@ -4704,7 +6008,7 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
     fixture.until(
         &mut team,
         "the sub-agent without its conversation starts a fresh one",
-        |f| launches(f, member).len() == 3 && typed(f, member).contains("Check page.md."),
+        |f| launches(f, member).len() == 3 && pasted(f, member).contains("Check page.md."),
     );
     assert!(
         !launches(&fixture, member)[2].contains("resume"),
@@ -4712,9 +6016,9 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
         launches(&fixture, member)
     );
     assert!(
-        typed(&fixture, member).contains("Your last result then: Done."),
+        pasted(&fixture, member).contains("Your last result then: Done."),
         "{}",
-        typed(&fixture, member)
+        pasted(&fixture, member)
     );
     fixture.until(&mut team, "the fresh conversation is kept", |f| {
         agent_conversation(f, member).is_some_and(|(kept, _)| kept != conversation)
@@ -5269,7 +6573,7 @@ fn with_next_message_an_edit_reaches_the_masters_next_message_once() {
     fixture.until(&mut team, "the master answers the third message", |f| {
         master_replies(f) == 3
     });
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     let started = launches(&fixture, master);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
@@ -5318,10 +6622,10 @@ fn with_next_message_an_edit_reaches_the_live_masters_next_typed_message_once() 
         }
         tell_master(&fixture, text);
         fixture.until(&mut team, "the live master's turn ends", |f| {
-            typed(f, master).contains(text) && live_turns(&f.connection) == (turns, false)
+            pasted(f, master).contains(text) && live_turns(&f.connection) == (turns, false)
         });
     }
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     let started = launches(&fixture, master);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
@@ -5389,10 +6693,10 @@ fn with_next_message_an_edit_past_the_input_limit_reaches_the_live_master_once_c
         }
         tell_master(&fixture, text);
         fixture.until(&mut team, "the live master's turn ends", |f| {
-            typed(f, master).contains(text) && live_turns(&f.connection) == (turns, false)
+            pasted(f, master).contains(text) && live_turns(&f.connection) == (turns, false)
         });
     }
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     assert_eq!(text.matches(CHANGED_HEADER).count(), 1, "{text}");
@@ -5509,7 +6813,7 @@ fn with_restart_an_idle_live_master_restarts_in_its_own_conversation_with_the_ne
     }
     let started = launches(&fixture, master);
     let given = agents_md(&fixture, master);
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     let on = super::super::master::live(&fixture.connection, &project).unwrap();
     let turns = live_turns(&fixture.connection);
     team.shutdown().unwrap();
@@ -5601,7 +6905,7 @@ fn with_restart_an_idle_master_stops_and_its_next_message_starts_it_with_the_new
     let all = masters(&fixture.connection);
     let master = *all.last().unwrap();
     let given = agents_md(&fixture, master);
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     assert_eq!(all.len(), 2, "{all:?}");
@@ -5638,9 +6942,9 @@ fn with_badge_the_master_gets_nothing_and_shows_instructions_changed_until_it_st
     fixture.until(&mut team, "the badge shows", |f| badge(f, master));
     tell_master(&fixture, "Plan the title");
     fixture.until(&mut team, "the live master's turn ends", |f| {
-        typed(f, master).contains("Plan the title") && live_turns(&f.connection) == (1, false)
+        pasted(f, master).contains("Plan the title") && live_turns(&f.connection) == (1, false)
     });
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     assert_eq!(launches(&fixture, master).len(), 1, "it kept running");
     assert!(badge(&fixture, master), "the badge stays while it runs");
 
@@ -6913,7 +8217,7 @@ fn under_stop_a_kept_codex_agent_is_not_told_its_background_commands_stop() {
         task_of(f, "Write page.md").0 == "done"
     });
     let agent = subs(&fixture)[0];
-    let text = typed(&fixture, agent);
+    let text = pasted(&fixture, agent);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     assert!(text.contains("Write page.md"), "{text}");
@@ -7160,7 +8464,7 @@ fn stop_live(fixture: &Fixture, team: &mut TeamRuntime) {
 
 /// What the engine typed into one agent's pasted inputs, from its stand-in's log.
 #[cfg(target_os = "macos")]
-fn typed(fixture: &Fixture, agent: i64) -> String {
+fn pasted(fixture: &Fixture, agent: i64) -> String {
     std::fs::read_to_string(
         fixture
             .base
@@ -7256,7 +8560,7 @@ fn a_master_harness_switch_carries_the_conversation_over_by_default() {
     });
     let second = masters(&fixture.connection)[1];
     idle_ticks(&mut team);
-    assert_eq!(typed(&fixture, second), "", "the handoff is never typed");
+    assert_eq!(pasted(&fixture, second), "", "the handoff is never typed");
     let handed = instructions_file(&fixture, second).unwrap();
     assert!(
         handed.contains(
@@ -7311,7 +8615,7 @@ fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
             &crate::team::TeamAction::OnHarnessSwitch {
                 project_id: project.clone(),
                 mode: crate::team::SwitchMode::Fresh,
-                revision: 0,
+                version: crate::team::settings_version(&tx, &project).unwrap(),
             },
         )
         .unwrap(),
@@ -7351,7 +8655,7 @@ fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
     let briefed = instructions_file(&fixture, second).unwrap();
     assert!(!briefed.contains("The owner switched"), "{briefed}");
     assert!(!briefed.contains("You: Done."), "{briefed}");
-    assert_eq!(typed(&fixture, second), "");
+    assert_eq!(pasted(&fixture, second), "");
     host.input(&AgentId::team(second).unwrap(), b"hello again\r")
         .unwrap();
     fixture.until(
@@ -7745,7 +9049,7 @@ fn a_live_master_types_nothing_before_the_owners_first_line() {
         "",
         "nothing reaches the master before the owner types"
     );
-    assert_eq!(typed(&fixture, master), "");
+    assert_eq!(pasted(&fixture, master), "");
     assert_eq!(live_turns(&fixture.connection), (0, false));
 
     host.input(&AgentId::team(master).unwrap(), b"hello\r")
@@ -7754,7 +9058,7 @@ fn a_live_master_types_nothing_before_the_owners_first_line() {
         live_turns(&f.connection) == (1, false)
     });
     assert_eq!(std::fs::read_to_string(&input).unwrap(), "hello\n");
-    assert_eq!(typed(&fixture, master), "");
+    assert_eq!(pasted(&fixture, master), "");
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
@@ -7780,7 +9084,7 @@ fn the_live_master_instructions_file_holds_the_rules_and_brief_but_no_team_list(
     assert_live_master_instructions(&instructions_file(&fixture, master).unwrap());
     idle_ticks(&mut team);
     assert_eq!(
-        typed(&fixture, master),
+        pasted(&fixture, master),
         "",
         "the instructions are never typed"
     );
@@ -8156,6 +9460,7 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
             access,
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
+            ide_git_hooks: false,
         },
     )
     .unwrap();
@@ -8374,6 +9679,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
             access: crate::sandbox::policy::AgentAccess::OwnBranch,
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
+            ide_git_hooks: false,
         },
     )
     .unwrap();
@@ -8429,6 +9735,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
                 toolchain: crate::sandbox::toolchains::Toolchain::Rust,
                 allowed: false,
             }],
+            ide_git_hooks: false,
             network: crate::sandbox::policy::AgentNetwork::default(),
         },
     )
@@ -8478,6 +9785,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
+            ide_git_hooks: false,
         },
     )
     .unwrap();
@@ -9070,7 +10378,11 @@ fn idle_sub_agent(fixture: &Fixture, team: &mut TeamRuntime) -> i64 {
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: None,
-                revision: 0,
+                version: crate::team::settings_version(
+                    &fixture.connection,
+                    &fixture.setup.project_id,
+                )
+                .unwrap(),
             },
             hand_off(fixture, "Write page.md"),
         ],
@@ -9529,7 +10841,7 @@ fn the_owners_wake_without_a_conversation_hands_the_last_result_to_the_next_task
         )
         .unwrap();
     assert_eq!(told, 1, "the master is told the owner woke it");
-    assert!(!typed(&fixture, member).contains("Your last result then"));
+    assert!(!pasted(&fixture, member).contains("Your last result then"));
 
     let tx = connection.transaction().unwrap();
     assert_eq!(
@@ -9547,12 +10859,12 @@ fn the_owners_wake_without_a_conversation_hands_the_last_result_to_the_next_task
     );
     tx.commit().unwrap();
     fixture.until(&mut team, "the woken agent takes the next task", |f| {
-        typed(f, member).contains("Check page.md.")
+        pasted(f, member).contains("Check page.md.")
     });
     assert!(
-        typed(&fixture, member).contains("Your last result then: Done."),
+        pasted(&fixture, member).contains("Your last result then: Done."),
         "{}",
-        typed(&fixture, member)
+        pasted(&fixture, member)
     );
     assert_eq!(subs(&fixture), vec![member]);
     team.shutdown().unwrap();
@@ -9914,7 +11226,7 @@ fn the_owners_wake_of_a_lead_clears_its_workers_stops_and_their_held_tasks_start
         |f| {
             launches(f, lead).len() == 2
                 && launches(f, worker).len() == 2
-                && typed(f, worker).contains("Finish the notes.")
+                && pasted(f, worker).contains("Finish the notes.")
         },
     );
     assert!(!crate::team::owner_stopped(&fixture.connection, worker).unwrap());
@@ -9944,7 +11256,7 @@ fn the_owners_restart_of_a_lead_clears_its_workers_stops_and_their_held_tasks_st
         |f| {
             launches(f, lead).len() == 2
                 && launches(f, worker).len() == 2
-                && typed(f, worker).contains("Finish the notes.")
+                && pasted(f, worker).contains("Finish the notes.")
         },
     );
     assert!(!crate::team::owner_stopped(&fixture.connection, worker).unwrap());
@@ -10455,6 +11767,7 @@ fn between_turns(
         managed,
         tools: true,
         team_tool: true,
+        ask_tool: role != AgentRole::Master,
         grants: 0,
         thread: None,
         hosted: None,
@@ -13613,7 +14926,7 @@ fn a_worker_at_the_depth_and_a_switched_off_tool_are_left_out_and_refused_if_pla
         assert_eq!(args[1], runtime.mailbox(id).to_str().unwrap());
         let mut off: Vec<&str> = args[2..].iter().map(String::as_str).collect();
         off.sort_unstable();
-        let mut wanted = vec![tool::REMEMBER_TOOL];
+        let mut wanted = vec![tool::REMEMBER_TOOL, tool::RECORD_TOOL];
         if !leads {
             wanted.extend(tool::LEAD_TOOLS);
         }
@@ -16208,6 +17521,7 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                     access,
                     network: crate::sandbox::policy::AgentNetwork::default(),
                     toolchains: Vec::new(),
+                    ide_git_hooks: false,
                 },
             )
             .unwrap();
@@ -17222,7 +18536,7 @@ fn max_harnesses_each_choice_holds_the_next_harness_until_the_cap_rises() {
             turn_secs: None,
             session_secs: None,
             idle_secs: None,
-            revision: 0,
+            version: crate::team::settings_version(&fixture.connection, &project).unwrap(),
         }],
     );
     let mut handed = 0;
@@ -17306,7 +18620,7 @@ fn max_harnesses_holds_a_woken_harness_until_the_cap_rises() {
             turn_secs: None,
             session_secs: None,
             idle_secs: None,
-            revision: 0,
+            version: crate::team::settings_version(&fixture.connection, &project).unwrap(),
         }],
     );
     max_harnesses(&fixture, Some(1));
@@ -17483,6 +18797,7 @@ fn max_harnesses_holds_keep_warm_at_each_choice_and_no_limit_fills_the_floor() {
     let host = fixture.host();
     let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
     let project = fixture.setup.project_id.clone();
+    let version = crate::team::settings_version(&fixture.connection, &project).unwrap();
     owner(
         &fixture,
         &[
@@ -17491,11 +18806,12 @@ fn max_harnesses_holds_keep_warm_at_each_choice_and_no_limit_fills_the_floor() {
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: None,
-                revision: 0,
+                version,
             },
             crate::team::TeamAction::KeepWarm {
                 project_id: project.clone(),
                 on: true,
+                version: version + 1,
             },
         ],
     );
@@ -17539,6 +18855,7 @@ fn spread_accounts_puts_the_next_harness_on_an_unused_account_and_falls_back() {
         {
             let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
             let tx = connection.transaction().unwrap();
+            let version = crate::scheduling::load(&tx).unwrap().version;
             assert_eq!(
                 crate::scheduling::apply(
                     &tx,
@@ -17551,6 +18868,7 @@ fn spread_accounts_puts_the_next_harness_on_an_unused_account_and_falls_back() {
                             pin: None,
                         },
                     },
+                    version,
                 )
                 .unwrap(),
                 crate::protocol::Outcome::Applied
@@ -17565,7 +18883,7 @@ fn spread_accounts_puts_the_next_harness_on_an_unused_account_and_falls_back() {
                     turn_secs: None,
                     session_secs: None,
                     idle_secs: None,
-                    revision: 0,
+                    version: crate::team::settings_version(&fixture.connection, &project).unwrap(),
                 },
                 crate::team::TeamAction::SpreadAccounts {
                     project_id: project.clone(),
@@ -18224,6 +19542,11 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
             crate::team::TeamAction::KeepWarm {
                 project_id: fixture.setup.project_id.clone(),
                 on: true,
+                version: crate::team::settings_version(
+                    &fixture.connection,
+                    &fixture.setup.project_id,
+                )
+                .unwrap(),
             },
             hand_off(&fixture, "Wait for the move"),
         ],
@@ -18335,7 +19658,11 @@ fn a_task_passes_an_idle_agent_past_its_session_and_goes_to_another_idle_agent_a
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: None,
-                revision: 0,
+                version: crate::team::settings_version(
+                    &fixture.connection,
+                    &fixture.setup.project_id,
+                )
+                .unwrap(),
             },
             hand_off(&fixture, "Write a.md"),
             hand_off(&fixture, "Write b.md"),
@@ -18410,7 +19737,7 @@ fn a_fresh_switch_whose_new_harness_ends_before_reporting_starts_fresh_again() {
         &[crate::team::TeamAction::OnHarnessSwitch {
             project_id: project.clone(),
             mode: crate::team::SwitchMode::Fresh,
-            revision: 0,
+            version: crate::team::settings_version(&fixture.connection, &project).unwrap(),
         }],
     );
     switch_session(&fixture.connection, "s-one");

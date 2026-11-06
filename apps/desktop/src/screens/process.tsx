@@ -2,14 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
 import { type ImportFile, type Nudges } from "../engine-client";
 import {
-  DEFAULT_INSTRUCTION_SETTINGS, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport, defaultProcess, flagWords,
-  importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadProcess, processMessage, processTextError, saveInstructionSettings,
-  saveProcess, savedMessage, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionSettings, type SkillEntry,
+  AGENT_SETTINGS_STALE, DEFAULT_INSTRUCTION_SETTINGS, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport,
+  defaultProcess, flagWords, importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadProcess, processMessage,
+  processTextError, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionSettings,
+  type InstructionView, type SavedText, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
 import { Button, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
 import { navigate } from "../ui/router";
 import { displayText } from "./conversation";
+import { ConflictView, keepMine, type Conflict } from "./conflict";
 import { SkillTag, skillEntries } from "./skill-tag";
 import "./process.css";
 
@@ -46,12 +48,20 @@ export function byteSize(bytes: number): string {
   return bytes < 1024 ? `${bytes} bytes` : `${(bytes / 1024).toFixed(1)} KB`;
 }
 
+/** The conflict a stale instructions save shows: the version the save named, the text that
+ * landed with its version, and who saved it. Input: the stale reply. Output: the conflict. */
+export function conflictOf(stale: Extract<SavedText, { kind: "stale" }>): Conflict<string> {
+  return { opened: stale.version, version: stale.current.version, current: stale.current.text, writer: stale.writer };
+}
+
 /** The Process page as a pure view: the editor with Save, the text with skill tags, and at
- * app level the two seeds, each opening a preview first. Inputs: where it applies, the saved
- * text, the draft, the skill catalog, the last failure, what is running, the preview, the
- * skill the owner asked to open over unsaved text and the actions. The editor is read-only
- * while saving. Nothing reads the owner's files or saves without the matching click. */
-export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, leaving = null, onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onOpenSkill, onLeave, onStay }: {
+ * app level the two seeds, each opening a preview first. After a stale save it shows the
+ * conflict, whose Reload and Keep mine are then the only ways on. Inputs: where it applies,
+ * the saved text, the draft, the skill catalog, the last failure, what is running, the
+ * preview, the conflict, the skill the owner asked to open over unsaved text and the
+ * actions. The editor is read-only while saving. Nothing reads the owner's files or saves
+ * without the matching click. */
+export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, leaving = null, onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onReload, onKeepMine, onOpenSkill, onLeave, onStay }: {
   scope: ProcessScope;
   saved: Loaded<string>;
   draft: string;
@@ -59,6 +69,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   failure: string;
   busy: "save" | "import" | "default" | null;
   preview: ProcessPreview | null;
+  conflict: Conflict<string> | null;
   leaving?: SkillEntry | null;
   onDraft: (text: string) => void;
   onSave: () => void;
@@ -67,6 +78,8 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   onUsePreview: () => void;
   onClosePreview: () => void;
   onRetry: () => void;
+  onReload: () => void;
+  onKeepMine: () => void;
   onOpenSkill?: (skill: SkillEntry) => void;
   onLeave?: () => void;
   onStay?: () => void;
@@ -86,15 +99,18 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   return <div className="stack">
     <p className="secondary">{intro}</p>
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
+    {conflict && <ConflictView conflict={conflict} busy={busy === "save"} onReload={onReload} onKeepMine={onKeepMine}>
+      <TaggedText text={conflict.current} skills={skills} />
+    </ConflictView>}
     {seeds}
     <Panel title="Instructions">
-      <form className="stack-small" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed) onSave(); }}>
+      <form className="stack-small" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed && !conflict) onSave(); }}>
         <TextArea id={`process-${scope.kind}`} label="Instructions for agents" value={draft} onValue={onDraft} rows={16} error={invalid} readOnly={busy === "save"}
           helper={`${byteSize(textBytes(draft))} of ${byteSize(PROCESS_TEXT_BYTES_MAX)}${changed ? ". Not saved yet." : ""}`} />
         <span className="row">
           <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
-            disabled={Boolean(invalid) || !changed || busy !== null}>Save</Button>
-          {changed && <Button disabled={busy !== null} onClick={() => onDraft(saved.value)}>Discard edits</Button>}
+            disabled={Boolean(invalid) || !changed || busy !== null || Boolean(conflict)}>Save</Button>
+          {changed && !conflict && <Button disabled={busy !== null} onClick={() => onDraft(saved.value)}>Discard edits</Button>}
         </span>
       </form>
     </Panel>
@@ -122,14 +138,14 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
  * change. Settings that could not be read say why and show the defaults, so a change replaces
  * them. Inputs: the read, whether a save runs, the last save failure and the save action. */
 export function AgentSettingsView({ settings, busy, failure, onSave }: {
-  settings: Loaded<InstructionSettings>;
+  settings: Loaded<InstructionView>;
   busy: boolean;
   failure: string;
   onSave: (settings: InstructionSettings) => void;
 }) {
   if (settings.kind === "loading") return <Skeleton shape="card" count={1} />;
   if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
-  const current = settings.kind === "ok" ? settings.value : DEFAULT_INSTRUCTION_SETTINGS;
+  const current = settings.kind === "ok" ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS;
   const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[2];
   const delivery = EDIT_DELIVERIES.find((option) => option.value === current.edits) ?? EDIT_DELIVERIES[0];
   const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
@@ -156,7 +172,8 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
   </Panel>;
 }
 
-/** A project's agent settings: reads them from the engine and saves each change at once.
+/** A project's agent settings: reads them from the engine and saves each change at once at
+ * the version read; a save refused because they changed since reads them again and says so.
  * Input: the project id. */
 export function AgentSettings({ projectId }: { projectId: string }) {
   const session = useAppSession();
@@ -166,11 +183,14 @@ export function AgentSettings({ projectId }: { projectId: string }) {
   const store = async (next: InstructionSettings) => {
     setFailure("");
     setBusy(true);
-    const result = session.noteResult(await saveInstructionSettings(projectId, next));
+    const result = session.noteResult(await saveInstructionSettings(projectId, next, settingsSaveVersion(settings)));
     setBusy(false);
     if (result.kind === "ok") {
       session.showToast("Agent settings saved. Agents started from now on follow them.");
       reload();
+    } else if (result.kind === "error" && result.code === "stale_revision") {
+      reload();
+      setFailure(AGENT_SETTINGS_STALE);
     } else setFailure(processMessage(result));
   };
   return <AgentSettingsView settings={settings} busy={busy} failure={failure} onSave={(next) => void store(next)} />;
@@ -277,25 +297,30 @@ export function catalogOf(skills: Loaded<{ id: string; name: string; description
 }
 
 /** The Process page for one scope: reads the saved text and the skill catalog from the
- * engine, keeps the owner's draft, and saves only on Save. The seeds read the owner's global
- * file or the default text only on their click, into a preview. Input: where it applies. */
+ * engine, keeps the owner's draft, which no later read replaces while it holds unsaved
+ * edits, and saves only on Save. A stale save shows the conflict and keeps the draft until
+ * the owner picks Reload or Keep mine. A skill link over unsaved text asks first. The seeds
+ * read the owner's global file or the default text only on their click, into a preview. A
+ * project's page also shows its agent settings. Input: where it applies. */
 export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   const session = useAppSession();
   const projectId = scope.kind === "project" ? scope.id : null;
-  const [saved, reload] = useLoad(() => loadProcess(projectId), [projectId]);
+  const [loaded, reload] = useLoad(() => loadProcess(projectId), [projectId]);
+  const saved: Loaded<string> = loaded.kind === "ok" ? { kind: "ok", value: loaded.value.text } : loaded;
   const [skills] = useLoad(() => listSkills(projectId ?? undefined), [projectId]);
   const [draft, setDraft] = useState("");
   const [failure, setFailure] = useState("");
   const [busy, setBusy] = useState<"save" | "import" | "default" | null>(null);
   const [preview, setPreview] = useState<ProcessPreview | null>(null);
+  const [conflict, setConflict] = useState<Conflict<string> | null>(null);
   const [leaving, setLeaving] = useState<SkillEntry | null>(null);
-  const loaded = useRef<string | null>(null);
+  const lastRead = useRef<string | null>(null);
   const savedText = saved.kind === "ok" ? saved.value : null;
   useEffect(() => {
     if (savedText === null) return;
-    const before = loaded.current;
-    loaded.current = savedText;
-    setDraft((current) => keptDraft(current, before, savedText));
+    const before = lastRead.current;
+    lastRead.current = savedText;
+    if (conflict === null) setDraft((current) => keptDraft(current, before, savedText));
   }, [savedText]);
   const open = (skill: SkillEntry) => navigate({ name: "settings", tab: "plugins", skill: skill.id });
   const openSkill = (skill: SkillEntry) => {
@@ -313,19 +338,31 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     if (result.kind !== "ok") fail(result);
     else if (result.value !== null) setPreview({ source, text: result.value });
   };
-  const save = async () => {
+  const save = async (shown: Conflict<string> | null) => {
+    if (loaded.kind !== "ok") return;
     setFailure("");
     setBusy("save");
-    const result = session.noteResult(await saveProcess(projectId, draft));
+    const named = shown ? keepMine(shown) : { version: loaded.value.version, opened: null };
+    const result = session.noteResult(await saveProcess(projectId, draft, named.version, named.opened));
     setBusy(null);
-    if (result.kind === "ok") {
-      session.showToast(savedMessage(result.value));
+    if (result.kind !== "ok") fail(result);
+    else if (result.value.kind === "stale") setConflict(conflictOf(result.value));
+    else {
+      setConflict(null);
+      session.showToast(savedMessage(result.value.size));
       reload();
-    } else fail(result);
+    }
   };
-  const editor = <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview}
-    onDraft={setDraft} onSave={() => void save()} onImport={() => void seed("import")} onDefault={() => void seed("default")}
+  const reloadConflict = () => {
+    if (conflict) setDraft(conflict.current);
+    setConflict(null);
+    setFailure("");
+    reload();
+  };
+  const editor = <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview} conflict={conflict}
+    onDraft={setDraft} onSave={() => void save(null)} onImport={() => void seed("import")} onDefault={() => void seed("default")}
     onUsePreview={() => { if (preview) setDraft(preview.text); setPreview(null); }} onClosePreview={() => setPreview(null)} onRetry={reload}
+    onReload={reloadConflict} onKeepMine={() => void save(conflict)}
     leaving={leaving} onOpenSkill={openSkill} onLeave={() => { if (leaving) open(leaving); setLeaving(null); }} onStay={() => setLeaving(null)} />;
   if (scope.kind === "app") return editor;
   return <div className="stack">

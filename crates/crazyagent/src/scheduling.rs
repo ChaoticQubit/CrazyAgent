@@ -1,6 +1,7 @@
 use crate::config::ModelAccess;
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome};
+use crate::storage::versioned;
 use crate::usage::{AccountLimits, LimitWindow};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -129,7 +130,8 @@ pub struct AccountEntry {
 }
 
 /// Every stored scheduling choice: the app default strategy, pool strategies, project
-/// overrides and account plans, each list sorted by id.
+/// overrides and account plans, each list sorted by id, and the version an owner change
+/// names.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
@@ -137,6 +139,7 @@ pub struct Schedule {
     pub pools: Vec<ScopedStrategy>,
     pub projects: Vec<ScopedStrategy>,
     pub accounts: Vec<AccountEntry>,
+    pub version: u64,
 }
 
 impl Schedule {
@@ -168,8 +171,10 @@ impl Schedule {
 
     /// Applies one change as the engine stores it, so a view can build the next change on
     /// the last one before the schedule is read back: a strategy of none or a default plan
-    /// removes the row and each list stays sorted by id. Takes the change.
+    /// removes the row, each list stays sorted by id and the version moves past the one the
+    /// change names. Takes the change.
     pub fn update(&mut self, change: &ScheduleChange) {
+        self.version += 1;
         match change {
             ScheduleChange::AppStrategy { strategy } => self.strategy = *strategy,
             ScheduleChange::PoolStrategy { pool, strategy } => {
@@ -281,27 +286,45 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
         .map_err(error)
 }
 
-/// Applies one owner scheduling change inside the engine transaction. Removing a row
-/// needs no known pool or connection, so a row whose target is gone can still be deleted.
-/// Takes the transaction, the current model access and the change. Returns Applied, or a
-/// rejection for a row kept for an unknown pool or connection, a value out of range or a
-/// full table.
+/// Applies one owner scheduling change inside the engine transaction when the schedule is
+/// still at the version the owner's screen showed. Removing a row needs no known pool or
+/// connection, so a row whose target is gone can still be deleted. Takes the transaction,
+/// the current model access, the change and that version. Returns Applied, or a rejection
+/// for a row kept for an unknown pool or connection, a value out of range, a full table or
+/// `stale_revision`.
 pub fn apply(
     tx: &Transaction<'_>,
     access: &ModelAccess,
     change: &ScheduleChange,
+    version: u64,
 ) -> Result<Outcome, EngineError> {
     if let Err(refusal) = change.validate() {
         return Ok(rejected(&refusal.0));
+    }
+    let item = versioned::account_schedule_item();
+    let unknown = match change {
+        ScheduleChange::PoolStrategy { pool, strategy } => (strategy.is_some()
+            && !access.pools.iter().any(|known| &known.id == pool))
+        .then_some("pool_not_found"),
+        ScheduleChange::Account { connection, plan } => (*plan != AccountPlan::default()
+            && !access
+                .connections
+                .iter()
+                .any(|known| &known.id == connection))
+        .then_some("connection_not_found"),
+        _ => None,
+    };
+    if let Some(code) = unknown {
+        return Ok(rejected(code));
+    }
+    if versioned::current(tx, &item)?.version != version {
+        return Ok(rejected(versioned::STALE_CODE));
     }
     match change {
         ScheduleChange::AppStrategy { strategy } => {
             set_strategy(tx, "app", "", Some(*strategy))?;
         }
         ScheduleChange::PoolStrategy { pool, strategy } => {
-            if strategy.is_some() && !access.pools.iter().any(|known| &known.id == pool) {
-                return Ok(rejected("pool_not_found"));
-            }
             if !set_strategy(tx, "pool", pool.as_str(), *strategy)? {
                 return Ok(rejected("account_schedule_full"));
             }
@@ -312,19 +335,17 @@ pub fn apply(
             }
         }
         ScheduleChange::Account { connection, plan } => {
-            if *plan != AccountPlan::default()
-                && !access
-                    .connections
-                    .iter()
-                    .any(|known| &known.id == connection)
-            {
-                return Ok(rejected("connection_not_found"));
-            }
             if !set_plan(tx, connection, plan)? {
                 return Ok(rejected("account_schedule_full"));
             }
         }
     }
+    let written = versioned::owner_write(tx, &item, version)?;
+    assert_eq!(
+        written.ok(),
+        Some(version + 1),
+        "the schedule version read in this transaction is still current"
+    );
     Ok(Outcome::Applied)
 }
 
@@ -423,15 +444,19 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, EngineError
         .map_err(error)
 }
 
-/// Reads every stored scheduling choice. Takes the engine connection; a database
-/// without the scheduling tables holds no choices yet.
+/// Reads every stored scheduling choice and the schedule's version. Takes the engine
+/// connection; a database without the scheduling tables holds no choices yet.
 /// Returns the schedule with lists sorted by id; a stored value this engine cannot read
 /// is an `account_schedule_record` failure.
 pub fn load(connection: &Connection) -> Result<Schedule, EngineError> {
+    let version = versioned::current(connection, &versioned::account_schedule_item())?.version;
     if !table_exists(connection, "account_strategies")?
         || !table_exists(connection, "account_plans")?
     {
-        return Ok(Schedule::default());
+        return Ok(Schedule {
+            version,
+            ..Schedule::default()
+        });
     }
     let bound = i64::try_from(SCOPED_STRATEGIES_MAX * 2 + 1).map_err(error)?;
     let mut statement = connection
@@ -448,7 +473,10 @@ pub fn load(connection: &Connection) -> Result<Schedule, EngineError> {
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    let mut schedule = Schedule::default();
+    let mut schedule = Schedule {
+        version,
+        ..Schedule::default()
+    };
     for (scope, id, code) in rows {
         let strategy = Strategy::parse(&code).ok_or_else(|| error("account_schedule_record"))?;
         match scope.as_str() {
@@ -592,6 +620,7 @@ pub fn load_page(
         pools: page.take(ScheduleList::Pools, all.pools, |row| &row.id)?,
         projects: page.take(ScheduleList::Projects, all.projects, |row| &row.id)?,
         accounts: page.take(ScheduleList::Accounts, all.accounts, |row| &row.connection)?,
+        version: all.version,
     };
     assert!(page.bytes <= PAGE_BYTES_MAX);
     assert!(!page.full || page.last.is_some());
@@ -998,4 +1027,4 @@ impl Choice {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -22,10 +22,19 @@ pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
 pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;
+pub use transport::ide::IDE_CODES;
+pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
+pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
 pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{
     Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionMode, InstructionRecord,
-    InstructionSettings, PROCESS_CODES, ProcessSaved, UncommittedImport,
+    InstructionSettings, InstructionView, PROCESS_CODES, ProcessSaved, ProcessText, SavedText,
+    UncommittedImport,
+};
+pub use transport::questions::QUESTIONS_CODES;
+pub use transport::recovery::{
+    BANNER_NOTICES_MAX, BANNER_RUNS_MAX, BannerNotice, BannerRun, NoticeShown, RECOVERY_CODES,
+    RecoveryBanner, RunShown,
 };
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::usage::USAGE_CODES;
@@ -153,6 +162,7 @@ pub enum OwnerMutation {
     },
     SetProjectReadPaths {
         project_id: ProjectId,
+        version: u64,
         paths: Vec<String>,
     },
     SetProjectHiddenPaths {
@@ -161,6 +171,7 @@ pub enum OwnerMutation {
     },
     SetProjectAgentPolicy {
         project_id: ProjectId,
+        version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
     },
     Team {
@@ -168,6 +179,7 @@ pub enum OwnerMutation {
     },
     AccountSchedule {
         change: crate::scheduling::ScheduleChange,
+        version: u64,
     },
     UpdateProjectSetup {
         project_id: ProjectId,
@@ -184,9 +196,11 @@ pub enum OwnerMutation {
     SetPackEntry {
         id: String,
         on: bool,
+        version: u64,
     },
     RemovePackEntry {
         id: String,
+        version: u64,
     },
     SetProjectsHome {
         path: String,
@@ -213,6 +227,9 @@ pub enum OwnerMutation {
     RetryResearch {
         project_id: ProjectId,
         job: i64,
+    },
+    PlanRoadmap {
+        project_id: ProjectId,
     },
     ModelAccess {
         expected_config_id: ConfigId,
@@ -329,9 +346,14 @@ impl OwnerMutation {
                 action.validate()?;
                 Command::ProjectSetup { action }
             }
-            Self::SetProjectReadPaths { project_id, paths } => {
+            Self::SetProjectReadPaths {
+                project_id,
+                version,
+                paths,
+            } => {
                 let action = crate::project_setup::SetupAction::SetReadPaths {
                     project_id: project_id.clone(),
+                    version: *version,
                     paths: paths.clone(),
                 };
                 action.validate()?;
@@ -345,9 +367,14 @@ impl OwnerMutation {
                 action.validate()?;
                 Command::ProjectSetup { action }
             }
-            Self::SetProjectAgentPolicy { project_id, policy } => {
+            Self::SetProjectAgentPolicy {
+                project_id,
+                version,
+                policy,
+            } => {
                 let action = crate::project_setup::SetupAction::SetAgentPolicy {
                     project_id: project_id.clone(),
+                    version: *version,
                     policy: policy.clone(),
                 };
                 action.validate()?;
@@ -359,10 +386,11 @@ impl OwnerMutation {
                     action: action.clone(),
                 }
             }
-            Self::AccountSchedule { change } => {
+            Self::AccountSchedule { change, version } => {
                 change.validate()?;
                 Command::AccountSchedule {
                     change: change.clone(),
+                    version: *version,
                 }
             }
             Self::UpdateProjectSetup {
@@ -388,14 +416,18 @@ impl OwnerMutation {
             Self::RunSetup { pack } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Run { pack: pack.clone() },
             },
-            Self::SetPackEntry { id, on } => Command::OwnerSetup {
+            Self::SetPackEntry { id, on, version } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Set {
                     id: id.clone(),
                     on: *on,
+                    version: *version,
                 },
             },
-            Self::RemovePackEntry { id } => Command::OwnerSetup {
-                action: crate::setup::SetupAction::Remove { id: id.clone() },
+            Self::RemovePackEntry { id, version } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::Remove {
+                    id: id.clone(),
+                    version: *version,
+                },
             },
             Self::SetProjectsHome { path } => {
                 let action = crate::projects_home::HomeAction::SetHome { path: path.clone() };
@@ -446,6 +478,13 @@ impl OwnerMutation {
                 let action = crate::project_setup::SetupAction::RetryResearch {
                     project_id: project_id.clone(),
                     job: *job,
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::PlanRoadmap { project_id } => {
+                let action = crate::project_setup::SetupAction::PlanRoadmap {
+                    project_id: project_id.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -634,6 +673,9 @@ pub enum OwnerRead {
     TeamGraph {
         project_id: ProjectId,
     },
+    IdeAsks {
+        project_id: ProjectId,
+    },
     TeamAgentMessages {
         project_id: ProjectId,
         agent: i64,
@@ -754,6 +796,7 @@ impl OwnerRead {
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
+            | Self::IdeAsks { .. }
             | Self::TeamEvents
             | Self::CoordQuestions { .. }
             | Self::ProjectContext { .. }
@@ -773,7 +816,7 @@ impl OwnerRead {
                 return Ok(None);
             }
             Self::ProjectCatalog { research, .. } => {
-                if research.len() > crate::project_setup::ResearchKind::ALL.len() {
+                if research.len() > crate::project_setup::ResearchKind::CHOICES.len() {
                     return Err(failure("research_duplicate"));
                 }
                 return Ok(None);
@@ -1118,6 +1161,7 @@ pub enum OwnerData {
     ProjectReadPaths {
         project_id: ProjectId,
         paths: Vec<String>,
+        version: u64,
     },
     ProjectHiddenPaths {
         project_id: ProjectId,
@@ -1136,6 +1180,9 @@ pub enum OwnerData {
     },
     TeamGraph {
         graph: Box<crate::team::TeamGraph>,
+    },
+    IdeAsks {
+        asks: Vec<crate::ide::bridge::memory::IdeAsk>,
     },
     TeamAgentMessages {
         messages: Box<crate::team::agent_messages::AgentMessages>,

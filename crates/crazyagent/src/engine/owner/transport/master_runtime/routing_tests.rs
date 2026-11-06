@@ -1415,6 +1415,7 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
             toolchain: Toolchain::Rust,
             allowed: false,
         }],
+        ide_git_hooks: false,
         network: crate::sandbox::policy::AgentNetwork::default(),
     };
     let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
@@ -3703,5 +3704,135 @@ async fn a_reserve_and_a_never_use_pin_block_the_master_turn_naming_each_account
     assert!(named.contains(&("claude-a", Some(MasterReason::ScopeRevoked))));
     assert!(named.contains(&("claude-b", Some(MasterReason::QuotaExhausted))));
     assert_eq!(case.paused_until("claude-b"), None);
+    case.finish().await;
+}
+
+/// Runs the drop-file server a conversation master's question tools talk to on the given
+/// calls, the way the master's harness would, and returns what the server answered.
+fn served_questions(record: &Path, calls: &[serde_json::Value]) -> String {
+    let mut input = Vec::new();
+    for (id, call) in calls.iter().enumerate() {
+        let line = serde_json::json!({"jsonrpc": "2.0", "id": id + 1, "method": "tools/call", "params": call});
+        input.extend(serde_json::to_vec(&line).unwrap());
+        input.push(b'\n');
+    }
+    let mut output = Vec::new();
+    crate::team::tool::serve(std::io::Cursor::new(input), &mut output, record).unwrap();
+    String::from_utf8(output).unwrap()
+}
+
+/// A conversation master's question calls reach the questions log when its turns end: a
+/// question from one turn is logged under its session, a record naming another message
+/// than the turn's own is refused, a record naming the next turn's owner message settles
+/// the question with the engine's copy of that message, and the notes a replied turn
+/// carried are marked as given.
+#[tokio::test]
+async fn a_conversation_master_s_questions_are_logged_and_recorded_when_its_turns_end() {
+    use crate::questions::{AnsweredBy, Asker, QuestionStatus};
+    use crate::team::tool::{ASK_TOOL, DROP_FILE, RECORD_TOOL};
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let project = case.session.project_id.clone();
+    let session = case.session.session_id.clone();
+    let folder = case.root.path().join("master-tools");
+    private_directory(&folder);
+    let record = folder.join(DROP_FILE);
+    let db = crate::questions::open(case.root.path()).unwrap();
+    let ask = |question: &str| {
+        serde_json::json!({"name": ASK_TOOL, "arguments": {
+            "question": question,
+            "options": ["Postgres", "SQLite"],
+            "recommended": "Postgres"
+        }})
+    };
+
+    let first = case.prepared(&case.turn.id).await;
+    assert!(first.owner_turn.is_some());
+    let answered = served_questions(
+        &record,
+        &[
+            ask("Which database should the service use?"),
+            ask("Should the service keep a cache?"),
+        ],
+    );
+    assert_eq!(answered.matches("Recorded.").count(), 2, "{answered}");
+    case.runtime()
+        .log_session_asks(&first, &record, Vec::new())
+        .await;
+    let pending = crate::questions::pending(&db, &project).unwrap();
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    let asker = Asker::Session(session.clone()).name();
+    assert!(pending.iter().all(|question| question.asker == asker));
+    let (database, cache) = (pending[0].id, pending[1].id);
+    case.fail(
+        &case.turn.id,
+        &first.attempt.request.id,
+        MasterReason::InvalidAuthentication,
+    )
+    .await;
+    drop(first);
+
+    let owner_words = "Use Postgres 16 for the service.";
+    let second = case.submit(owner_words).await;
+    let next = case.prepared(&second).await;
+    let owner_turn = next.owner_turn.unwrap();
+    let record_call = |turn: u64| {
+        serde_json::json!({"name": RECORD_TOOL, "arguments": {
+            "question": database, "version": 0, "owner_turn": turn
+        }})
+    };
+    let answered = served_questions(&record, &[record_call(owner_turn + 1)]);
+    assert!(answered.contains("Noted."), "{answered}");
+    case.runtime()
+        .log_session_asks(&next, &record, Vec::new())
+        .await;
+    assert_eq!(
+        crate::questions::pending(&db, &project).unwrap().len(),
+        2,
+        "a record naming another message than the turn's own is not taken"
+    );
+    let answered = served_questions(&record, &[record_call(owner_turn)]);
+    assert!(answered.contains("Noted."), "{answered}");
+    case.runtime()
+        .log_session_asks(&next, &record, Vec::new())
+        .await;
+    let settled = crate::questions::page(&db, &project, None)
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|question| question.id == database)
+        .unwrap();
+    assert_eq!(settled.status, QuestionStatus::Answered);
+    assert_eq!(settled.answer.as_deref(), Some(owner_words));
+    assert_eq!(settled.answered_by, Some(AnsweredBy::Chat));
+    assert!(
+        crate::questions::session_notes(&db, &project, &session)
+            .unwrap()
+            .is_empty(),
+        "an answer recorded from the master's own chat sends no note back"
+    );
+
+    let version = crate::questions::pending(&db, &project).unwrap()[0].version;
+    assert_eq!(
+        crate::questions::dismiss(&db, cache, version).unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    let notes = crate::questions::session_notes(&db, &project, &session).unwrap();
+    assert_eq!(
+        notes.iter().map(|note| note.question).collect::<Vec<_>>(),
+        vec![cache]
+    );
+    case.runtime()
+        .log_session_asks(&next, &record, vec![cache])
+        .await;
+    assert!(
+        crate::questions::session_notes(&db, &project, &session)
+            .unwrap()
+            .is_empty(),
+        "the note a replied turn carried is not given again"
+    );
+    drop(next);
+    drop(db);
     case.finish().await;
 }

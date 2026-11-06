@@ -458,6 +458,28 @@ async fn replay(
     Ok(())
 }
 
+/// What a sent prompt does to the owner's line for the owner typing signal: a line sent
+/// with Enter.
+#[cfg(unix)]
+const PROMPT_SENT: &[u8] = b"\r";
+
+/// The keys an owner request puts into a team agent's terminal, for the owner typing
+/// signal: the typed keys, or for a prompt a line sent with Enter, since a prompt is the
+/// owner's own text too and can answer a box on that screen. Takes the request. Returns
+/// the keys, or none for a request that types nothing.
+#[cfg(unix)]
+fn owner_keys(request: &TerminalRequest) -> Option<&[u8]> {
+    match request {
+        TerminalRequest::Input { bytes } => Some(bytes.as_slice()),
+        TerminalRequest::Prompt { .. } => Some(PROMPT_SENT),
+        TerminalRequest::Attach { .. }
+        | TerminalRequest::AttachPane { .. }
+        | TerminalRequest::AttachSized { .. }
+        | TerminalRequest::Resize { .. }
+        | TerminalRequest::Detach => None,
+    }
+}
+
 /// Records a prompt the owner sent to a team sub-agent for the master's next turn.
 /// Takes the engine database, the team agent id and the prompt. A failure loses only the
 /// note; the prompt already reached the terminal.
@@ -584,23 +606,27 @@ async fn watch(
                     Some(_) if !still_granted(authority, packet, &admission) => {
                         break GRANT_ENDED;
                     }
-                    Some(TerminalRequest::Prompt { text }) => {
-                        let typed = prompt(&host, &agent, text.clone()).await;
-                        if typed.as_ref().is_err_and(|error| error.0 == "terminal_agent_unknown") {
-                            break "terminal_ended";
-                        }
-                        if let (Ok(true), Some(member), Some(database)) = (typed, member, &database) {
-                            heard(database.clone(), member, text).await;
-                        }
-                    }
                     Some(request) => {
-                        if let (TerminalRequest::Input { bytes }, Some(member)) = (&request, member)
+                        if let (Some(keys), Some(member)) = (owner_keys(&request), member)
                             && let Some(agents) = engine.agents_if_open()
                         {
-                            agents.typing().record(member, bytes, crate::team::now_ms());
+                            agents.typing().record(member, keys, crate::team::now_ms());
                         }
-                        if act(&host, &agent, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
-                            break "terminal_ended";
+                        match request {
+                            TerminalRequest::Prompt { text } => {
+                                let typed = prompt(&host, &agent, text.clone()).await;
+                                if typed.as_ref().is_err_and(|error| error.0 == "terminal_agent_unknown") {
+                                    break "terminal_ended";
+                                }
+                                if let (Ok(true), Some(member), Some(database)) = (typed, member, &database) {
+                                    heard(database.clone(), member, text).await;
+                                }
+                            }
+                            request => {
+                                if act(&host, &agent, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
+                                    break "terminal_ended";
+                                }
+                            }
                         }
                     }
                 },

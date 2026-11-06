@@ -358,6 +358,330 @@ fn token_sums_past_the_integer_range_still_report_saturated() {
     assert_eq!(report.days[0].tokens.input, u64::MAX);
 }
 
+fn readerless(project: &str, agent: &str, harness: &str, kind: RunKind) -> Attribution {
+    Attribution {
+        harness: harness.into(),
+        ..who(project, None, "key-1", agent, kind)
+    }
+}
+
+fn flagged(rows: &[UsageRow]) -> Vec<(&str, u64, Option<&str>)> {
+    rows.iter()
+        .map(|row| {
+            (
+                row.key.as_str(),
+                row.tokens.input,
+                row.not_reported_by.as_deref(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn harness_without_reader_reports_not_reported_never_zero() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    assert!(Format::of("opencode").is_none() && Format::of("gemini-cli").is_none());
+    append(&home.path().join("projects/f/a.jsonl"), &line("a", 70, 7));
+    scan_home(
+        &db,
+        home.path(),
+        Format::Claude,
+        &who(
+            "alpha",
+            Some("pool-a"),
+            "claude-1",
+            "team-1",
+            RunKind::Agent,
+        ),
+        MIDNIGHT + HOUR,
+    )
+    .unwrap();
+    let opencode = readerless("alpha", "team-4", "opencode", RunKind::Agent);
+    for at in [MIDNIGHT + HOUR, MIDNIGHT + HOUR + 5, MIDNIGHT + 3 * HOUR] {
+        mark_unreported(&db, &opencode, at).unwrap();
+    }
+    let gemini = readerless("alpha", "team-1", "gemini-cli", RunKind::Agent);
+    mark_unreported(&db, &gemini, MIDNIGHT + 2 * HOUR).unwrap();
+    let beta = readerless("beta", "master-beta", "gemini-cli", RunKind::Master);
+    mark_unreported(&db, &beta, MIDNIGHT + 4 * HOUR).unwrap();
+    let old = readerless("alpha", "team-5", "opencode", RunKind::Agent);
+    mark_unreported(&db, &old, MIDNIGHT - 3 * DAY).unwrap();
+    let hours: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM usage_unreported WHERE agent='team-4'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(hours, 2, "one row per hour an agent ran");
+
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    assert_eq!(all.total.input, 70, "unreported runs add no tokens");
+    assert_eq!(all.not_reported_by, ["Gemini CLI", "OpenCode"]);
+    assert_eq!(
+        flagged(&all.agents),
+        [
+            ("team-1", 70, Some("Gemini CLI")),
+            ("master-beta", 0, Some("Gemini CLI")),
+            ("team-4", 0, Some("OpenCode")),
+        ],
+        "a counted agent keeps its tokens; a readerless one is flagged, never a bare zero"
+    );
+    let four = all.agents.iter().find(|row| row.key == "team-4").unwrap();
+    assert_eq!(four.last_ms, MIDNIGHT + 3 * HOUR);
+    assert!(
+        !all.agents.iter().any(|row| row.key == "team-5"),
+        "outside the range"
+    );
+    assert_eq!(
+        flagged(&all.projects),
+        [
+            ("alpha", 70, Some("OpenCode")),
+            ("beta", 0, Some("Gemini CLI"))
+        ]
+    );
+    assert!(all.pools.iter().all(|row| row.not_reported_by.is_none()));
+    assert!(all.accounts.iter().all(|row| row.not_reported_by.is_none()));
+
+    let only = crate::protocol::ProjectId::new("beta").unwrap();
+    let beta_report = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    assert_eq!(beta_report.total, Tokens::default());
+    assert_eq!(beta_report.not_reported_by, ["Gemini CLI"]);
+    assert_eq!(
+        flagged(&beta_report.agents),
+        [("master-beta", 0, Some("Gemini CLI"))]
+    );
+    let earlier = report(&db, None, Some(MIDNIGHT - 4 * DAY), 0, MIDNIGHT + DAY).unwrap();
+    assert!(earlier.agents.iter().any(|row| row.key == "team-5"));
+
+    let counted = who("alpha", None, "claude-1", "team-2", RunKind::Agent);
+    let empty = readerless("alpha", "", "opencode", RunKind::Agent);
+    let unnamed = readerless("alpha", "team-6", "", RunKind::Agent);
+    for refused in [&counted, &empty, &unnamed] {
+        assert_eq!(
+            mark_unreported(&db, refused, MIDNIGHT).unwrap_err().0,
+            "usage_attribution_invalid"
+        );
+    }
+    let rows: i64 = db
+        .query_row("SELECT COUNT(*) FROM usage_unreported", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 5, "a refused mark writes nothing");
+}
+
+#[test]
+fn rcli_counted_from_host_frames_is_reported_and_never_marked_unreported() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    assert!(Format::of("rcli").is_none() && reports_usage("rcli"));
+    assert!(reports_usage("claude-code") && reports_usage("codex"));
+    assert!(!reports_usage("opencode") && !reports_usage(""));
+    let rcli = readerless("alpha", "master-alpha", "rcli", RunKind::Master);
+    crate::usage::capture::count_reported(
+        &db,
+        &rcli,
+        Tokens {
+            input: 300,
+            output: 40,
+            cache_read: 0,
+            cache_write: 0,
+        },
+        "session-1",
+        MIDNIGHT + HOUR,
+    )
+    .unwrap();
+    assert_eq!(
+        mark_unreported(&db, &rcli, MIDNIGHT + HOUR).unwrap_err().0,
+        "usage_attribution_invalid"
+    );
+    let opencode = readerless("alpha", "team-4", "opencode", RunKind::Agent);
+    mark_unreported(&db, &opencode, MIDNIGHT + HOUR).unwrap();
+
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    assert_eq!(all.total.input, 300);
+    assert_eq!(all.not_reported_by, ["OpenCode"]);
+    assert_eq!(
+        flagged(&all.agents),
+        [("master-alpha", 300, None), ("team-4", 0, Some("OpenCode"))],
+        "a counted RCLI master is never labelled not reported; a readerless agent still is"
+    );
+}
+
+#[test]
+fn a_report_from_an_engine_without_step_health_reads_as_healthy() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    crate::usage::health::record_panic(&db, crate::usage::health::UsageStep::Poll, 7).unwrap();
+    let report = report(&db, None, None, 0, MIDNIGHT).unwrap();
+    assert_eq!(report.health.len(), 1);
+    let mut older = serde_json::to_value(&report).unwrap();
+    older.as_object_mut().unwrap().remove("health");
+    let read: UsageReport = serde_json::from_value(older).unwrap();
+    assert!(read.health.is_empty());
+    assert_eq!(
+        serde_json::to_value(&report.health).unwrap(),
+        serde_json::json!([{"step": "poll", "panics": 1, "last_ms": 7, "recovered_ms": null}])
+    );
+}
+
+#[test]
+fn a_flagged_key_outside_the_top_rows_keeps_its_full_count() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let listed = ROWS_MAX as u64 + 1;
+    for index in 1..=listed {
+        let project = format!("p-{index:02}");
+        let agent = format!("team-{index}");
+        crate::usage::capture::count_reported(
+            &db,
+            &who(&project, None, "claude-1", &agent, RunKind::Agent),
+            Tokens {
+                input: 1000 - index,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            &format!("s-{index}"),
+            MIDNIGHT + HOUR,
+        )
+        .unwrap();
+    }
+    let last = format!("team-{listed}");
+    let last_project = format!("p-{listed:02}");
+    let trimmed = readerless(&last_project, &last, "opencode", RunKind::Agent);
+    mark_unreported(&db, &trimmed, MIDNIGHT + 2 * HOUR + 5).unwrap();
+    let readerless_only = readerless("p-01", "team-99", "opencode", RunKind::Agent);
+    mark_unreported(&db, &readerless_only, MIDNIGHT + HOUR + 5).unwrap();
+
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    assert_eq!(all.agents.len(), ROWS_MAX + 2);
+    assert!(
+        all.agents[..ROWS_MAX]
+            .iter()
+            .all(|row| row.not_reported_by.is_none())
+    );
+    assert_eq!(
+        flagged(&all.agents[ROWS_MAX..]),
+        [
+            (last.as_str(), 1000 - listed, Some("OpenCode")),
+            ("team-99", 0, Some("OpenCode")),
+        ],
+        "the trimmed agent shows the tokens it counted, not a bare not reported"
+    );
+    let row = &all.agents[ROWS_MAX];
+    assert_eq!(row.runs, 1);
+    assert_eq!(row.last_ms, MIDNIGHT + 2 * HOUR + 5);
+
+    assert_eq!(all.projects.len(), ROWS_MAX + 1);
+    assert_eq!(
+        flagged(&all.projects[..1]),
+        [("p-01", 999, Some("OpenCode"))],
+        "a listed project is flagged in place"
+    );
+    assert_eq!(
+        flagged(&all.projects[ROWS_MAX..]),
+        [(last_project.as_str(), 1000 - listed, Some("OpenCode"))],
+        "a trimmed project keeps its full count too"
+    );
+
+    let only = crate::protocol::ProjectId::new(last_project.as_str()).unwrap();
+    let alone = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    assert_eq!(
+        flagged(&alone.agents),
+        [(last.as_str(), 1000 - listed, Some("OpenCode"))]
+    );
+}
+
+#[test]
+fn trimmed_flagged_keys_are_counted_together_and_an_unattributed_agent_mark_stays_out() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let counted = ROWS_MAX as u64 + 3;
+    for index in 1..=counted {
+        crate::usage::capture::count_reported(
+            &db,
+            &who(
+                "p-1",
+                None,
+                "claude-1",
+                &format!("team-{index}"),
+                RunKind::Agent,
+            ),
+            Tokens {
+                input: 1000 - index,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            &format!("s-{index}"),
+            MIDNIGHT + HOUR,
+        )
+        .unwrap();
+    }
+    let first = format!("team-{}", ROWS_MAX + 1);
+    let second = format!("team-{}", ROWS_MAX + 2);
+    let marks = [
+        (first.as_str(), "opencode", MIDNIGHT + HOUR + 5),
+        (first.as_str(), "gemini-cli", MIDNIGHT + 4 * HOUR),
+        (second.as_str(), "opencode", MIDNIGHT + 3 * HOUR),
+        ("team-99", "opencode", MIDNIGHT + 2 * HOUR),
+    ];
+    for (agent, harness, at) in marks {
+        mark_unreported(&db, &readerless("p-1", agent, harness, RunKind::Agent), at).unwrap();
+    }
+    db.execute(
+        "INSERT INTO usage_unreported(hour_ms,kind,project,agent,harness,last_ms)
+         VALUES (?1,'agent','p-1','','opencode',?2)",
+        params![MIDNIGHT + 5 * HOUR, MIDNIGHT + 5 * HOUR + 1],
+    )
+    .unwrap();
+
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    assert!(
+        !all.agents.iter().any(|row| row.key.is_empty()),
+        "the agents list leaves the unattributed key out, marked or not"
+    );
+    assert_eq!(all.agents.len(), ROWS_MAX + 3);
+    assert_eq!(
+        flagged(&all.agents[ROWS_MAX..]),
+        [
+            (
+                first.as_str(),
+                1000 - (ROWS_MAX as u64 + 1),
+                Some("Gemini CLI")
+            ),
+            (
+                second.as_str(),
+                1000 - (ROWS_MAX as u64 + 2),
+                Some("OpenCode")
+            ),
+            ("team-99", 0, Some("OpenCode")),
+        ],
+        "each trimmed key read in the one grouped count keeps its own tokens, once, under its newest harness"
+    );
+    let row = &all.agents[ROWS_MAX];
+    assert_eq!((row.runs, row.last_ms), (1, MIDNIGHT + 4 * HOUR));
+    assert!(
+        !all.agents
+            .iter()
+            .any(|row| row.key == format!("team-{counted}")),
+        "a trimmed key without a mark stays trimmed"
+    );
+    assert_eq!(
+        flagged(&all.projects),
+        [(
+            "p-1",
+            (1..=counted).map(|index| 1000 - index).sum::<u64>(),
+            Some("OpenCode")
+        )],
+        "the project column keeps its unattributed rule and its place"
+    );
+}
+
 /// How many accounts, runs and days `fill_past_one_frame` writes: past every cap.
 pub(crate) const WIDE_ROWS: usize = 70;
 

@@ -4,6 +4,7 @@ use super::new_project_input::cells;
 use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
 };
+use super::planning_line::{planning, planning_value};
 use super::project::{
     Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, Picks, ProjectScreen, REVIEW_ROWS, Speaker,
     Tab, Transcript, memory_source, research_kind,
@@ -19,6 +20,39 @@ use ratatui::style::Style;
 
 const SPINNER: &str = "\u{283c}";
 
+/// The project tabs for the tab strip: each label after its section glyph, with the count of
+/// running agents on Agents. When the labels with glyphs and the narrowest gaps do not fit
+/// the width, the glyphs go. Inputs: the running count, the width and the look. Output: the
+/// labels and counts in tab order.
+pub(in crate::tui) fn tab_items(
+    running: usize,
+    width: usize,
+    look: &Look,
+) -> Vec<(String, String)> {
+    let glyphed: usize = Tab::ALL
+        .iter()
+        .map(|tab| cells(look.glyph(tab.glyph())) + 1 + cells(tab.label()))
+        .sum::<usize>()
+        + 2 * (Tab::ALL.len() - 1)
+        + 2;
+    Tab::ALL
+        .iter()
+        .map(|tab| {
+            let count = if *tab == Tab::Agents && running > 0 {
+                running.to_string()
+            } else {
+                String::new()
+            };
+            let label = if glyphed <= width {
+                format!("{} {}", look.glyph(tab.glyph()), tab.label())
+            } else {
+                tab.label().to_owned()
+            };
+            (label, count)
+        })
+        .collect()
+}
+
 /// Draws one project tab with its tab strip, header status and help keys.
 /// Takes the screen state, the frame size and the look; the reader caches rendered reports.
 /// Returns the body rows, cursor, breadcrumb and help keys.
@@ -32,22 +66,14 @@ pub(in crate::tui) fn project_screen(
     let body_height = usize::from(height).saturating_sub(4);
     let content = width.saturating_sub(4);
     let running = screen.counts().0;
-    let items: Vec<(String, String)> = Tab::ALL
-        .iter()
-        .map(|tab| {
-            let count = if *tab == Tab::Agents && running > 0 {
-                running.to_string()
-            } else {
-                String::new()
-            };
-            (
-                format!("{} {}", look.glyph(tab.glyph()), tab.label()),
-                count,
-            )
-        })
-        .collect();
+    let items = tab_items(running, width, look);
     let mut rows: Vec<Row> = tab_strip(width, &items, screen.tab as usize, look).into();
-    let room = body_height.saturating_sub(2);
+    let composer = screen.tab == Tab::Conversation && screen.typing;
+    let banner = screen.recovery.rows(content, look, composer);
+    let room = body_height.saturating_sub(2 + banner.len());
+    for line in banner {
+        rows.push(Row::of("  ", Style::new()).cat(line).pad(width));
+    }
     let mut crumbs = vec!["Home".to_owned(), screen.name.clone()];
     if screen.tab != Tab::Overview {
         crumbs.push(screen.tab.label().to_owned());
@@ -57,6 +83,7 @@ pub(in crate::tui) fn project_screen(
         Tab::Conversation => conversation(screen, content, room, look),
         Tab::Agents => agents(screen, width, content, room, look),
         Tab::Changes => screen.changes.rows(content, room, screen.now_ms, look),
+        Tab::Questions => screen.questions.rows(content, room, screen.offset, look),
         Tab::Context => {
             if screen.reading
                 && width < 100
@@ -434,6 +461,25 @@ pub(in crate::tui) fn project_screen(
             ("Esc", "Keep running"),
         ];
     }
+    if screen.confirm_plan.is_some() {
+        let mut body = vec![Row::of("Replace the roadmap?", look.fg)];
+        body.extend(
+            wrap_words(
+                "Planning writes roadmap.md and release-process.md again from the brief and research. Your edits to them are lost.",
+                50,
+            )
+            .into_iter()
+            .map(|line| Row::of(line, look.muted)),
+        );
+        body.push(Row::default());
+        body.push(
+            Row::of("[ Replace ]", look.fg)
+                .push("   ", Style::new())
+                .push("[> Keep ]", look.selection),
+        );
+        rows = modal(&rows, width, 56, "Plan roadmap", body, 5, look);
+        help = vec![("y", "Replace"), ("n", "Keep"), ("Esc", "Keep")];
+    }
     if let Some(cursor) = screen.pool_picker {
         let mut body = vec![
             Row::of(
@@ -609,19 +655,30 @@ fn title(screen: &ProjectScreen, content: usize, look: &Look) -> Row {
     spread(content, name, path)
 }
 
+/// Draws the roadmap planning line under the Work rows once the jobs are read.
+/// Takes the screen and the look. Returns the row, or none before the jobs are read.
+fn roadmap_row(screen: &ProjectScreen, look: &Look) -> Option<Row> {
+    let jobs = screen.jobs.as_ref()?;
+    Some(
+        Row::of("  ", Style::new())
+            .cat(Row::of("Roadmap", look.fg).pad(24))
+            .cat(planning_value(&planning(jobs), look)),
+    )
+}
+
 fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> Vec<Row> {
-    let Some(setup) = &screen.setup else {
+    if screen.setup.is_none() {
         return vec![Row::of("Loading...", look.muted)];
-    };
-    if setup.research.is_empty() {
+    }
+    let kinds = screen.work_kinds();
+    if kinds.is_empty() {
         return vec![Row::of(
             "  No research was picked for this project.",
             look.muted,
         )];
     }
     let suggested = screen.suggested().len();
-    setup
-        .research
+    kinds
         .iter()
         .enumerate()
         .map(|(index, kind)| {
@@ -825,6 +882,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
         left.extend(needs_you(screen, look));
         left.push(Row::of("Work", look.heading));
         left.extend(work_rows(screen, look, true, left_width));
+        left.extend(roadmap_row(screen, look));
         let mut right = vec![Row::of("Team", look.heading)];
         if let Some(setup) = &screen.setup {
             let team = &setup.team;
@@ -898,6 +956,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
     lines.extend(needs_you(screen, look));
     lines.push(Row::of("Work", look.heading));
     lines.extend(work_rows(screen, look, false, content));
+    lines.extend(roadmap_row(screen, look));
     lines.push(Row::default());
     lines.push(
         Row::of("Team", look.heading)
@@ -1610,6 +1669,10 @@ fn source(screen: &ProjectScreen, item: &ContextItem, look: &Look) -> (Row, Row)
     match item.kind {
         ContextKind::Brief => (Row::default(), Row::of("Project brief", look.muted)),
         ContextKind::Document => (Row::default(), Row::of("You added it", look.muted)),
+        ContextKind::Plan => (
+            Row::default(),
+            Row::of("Planned after research", look.muted),
+        ),
         ContextKind::Research => {
             let label = research_kind(&item.path).map_or("Research", |kind| kind.label());
             match screen.job_for(&item.path) {
@@ -1762,16 +1825,18 @@ fn context(
             vec![
                 ("y", "Save to memory"),
                 ("n", "Dismiss"),
-                ("o", "Open in editor"),
+                ("o", "Open in app"),
                 ("PgDn", "Scroll"),
                 ("Esc", "Back to files"),
+                ("v", "Edit file"),
             ]
         } else {
             vec![
                 ("m", "Save to memory"),
-                ("o", "Open in editor"),
+                ("o", "Open in app"),
                 ("PgDn", "Scroll"),
                 ("Esc", "Back to files"),
+                ("v", "Edit file"),
             ]
         };
         return (preview_rows(screen, content, room, look), None, help);
@@ -1779,11 +1844,13 @@ fn context(
     let help = vec![
         ("Enter", "Open"),
         ("a", "Add file"),
-        ("o", "Open in editor"),
+        ("o", "Open in app"),
         ("d", "Delete"),
         ("m", "Save to memory"),
+        ("v", "Edit file"),
         TABS,
         ("Esc", "Home"),
+        ("O", "Open in IDE"),
     ];
     let mut lines = vec![
         spread(
@@ -1957,7 +2024,11 @@ fn general_form(general: &GeneralEdit, content: usize, look: &Look) -> Drawn {
 /// The Settings line for a project's extra read-only folders: how many, or loading.
 /// Takes the screen and look. Returns the row with its edit key.
 fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
-    let text = match screen.read_paths.as_deref() {
+    let text = match screen
+        .read_paths
+        .as_ref()
+        .map(|saved| saved.paths.as_slice())
+    {
         None => "Loading...".to_owned(),
         Some([]) => "Toolchains only".to_owned(),
         Some([one]) => one.clone(),
@@ -2031,6 +2102,13 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             "Process",
             Row::of("Instructions for this project's agents", look.fg)
                 .push("   i Edit", look.muted),
+        ),
+        entry(
+            "Roadmap",
+            match &screen.jobs {
+                Some(jobs) => planning_value(&planning(jobs), look),
+                None => Row::of("Loading...", look.muted),
+            },
         ),
     ];
     if room.saturating_sub(lines.len()) > screen.plugins.floor() {

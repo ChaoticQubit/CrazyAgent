@@ -25,3 +25,20 @@ test("every engine refusal for a read-only folder has its own sentence", () => {
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/extra_paths.rs", import.meta.url), "utf8");
   for (const code of engine.matchAll(/"(read_paths?_[a-z_]+)"/g)) assert.ok(api.KNOWN_ERROR_CODES.includes(code[1]), code[1]);
 });
+
+test("a save refused because the folders changed reads them again instead of resending the old version", () => {
+  const receipt = (outcome, rejection = null) => ({ kind: "ok", value: { pending: false, outcome, rejection } });
+  assert.equal(settings.savedStale(receipt("rejected", "stale_revision")), true, "another writer changed the folders since this screen read them");
+  assert.equal(settings.savedStale({ kind: "error", code: "stale_revision", message: "" }), true);
+  assert.equal(settings.savedStale(receipt("applied")), false);
+  assert.equal(settings.savedStale(receipt("rejected", "read_path_credentials")), false, "an unsafe folder keeps the owner's list to fix");
+  assert.equal(settings.savedStale({ kind: "not_ready" }), false);
+  assert.equal(settings.savedStale({ kind: "ok", value: { pending: true, outcome: "uncertain", rejection: null } }), false, "an unconfirmed save is not a stale one");
+  assert.match(settings.READ_PATHS_STALE, /changed since you opened them\. The list now shows the saved folders/);
+  const source = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  const save = source.slice(source.indexOf("  async function save() {\n    if (saved === null) return;"));
+  assert.match(save, /if \(savedStale\(result\)\) \{\n      const shown = await reread\(\);/, "the stale save reads the folders and their version again");
+  assert.ok(save.indexOf("savedStale(result)") < save.indexOf("failureCopy(result)"), "before the plain refusal copy");
+  const reread = source.slice(source.indexOf("  async function reread()"), source.indexOf("  async function save() {\n    if (saved === null)"));
+  assert.match(reread, /setSaved\(fresh\.value\);\n    setPaths\(fresh\.value\.paths\);/);
+});

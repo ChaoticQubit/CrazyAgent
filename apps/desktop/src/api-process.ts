@@ -79,10 +79,13 @@ export function processTextError(text: string): string | undefined {
   return undefined;
 }
 
-/** Reads the owner's instructions. Input: null for app-wide, or the project id.
- * Output: the text, empty when nothing is saved. */
-export function loadProcess(projectId: string | null): Promise<Result<string>> {
-  return call<string>("desktop_process_text", { projectId });
+/** Who saved a shared item's current version: nobody yet, the owner, or one agent. */
+export type LastWriter = "nobody" | "owner" | { agent: string };
+
+/** One instructions text and the version it was read at; a save names that version. */
+export interface ProcessText {
+  text: string;
+  version: number;
 }
 
 /** What a save comes to: the bytes of app and project instructions the project's agents now
@@ -90,16 +93,33 @@ export function loadProcess(projectId: string | null): Promise<Result<string>> {
  * sure to take. */
 export type ProcessSaved = { bytes: number; claude_bytes_max: number };
 
-/** Saves the owner's instructions whole. Inputs: null for app-wide, or the project id,
- * and the text. Agents launched after this get it. Output: what the save comes to. */
-export function saveProcess(projectId: string | null, text: string): Promise<Result<ProcessSaved>> {
-  return call<ProcessSaved>("desktop_save_process_text", { projectId, text });
+/** What a save of instructions did: stored as the next version, with what it comes to for app
+ * or project text and null for an agent's, or refused as stale because another save landed
+ * after the version it named, with that newer text and who saved it. */
+export type SavedText =
+  | { kind: "saved"; version: number; size: ProcessSaved | null }
+  | { kind: "stale"; version: number; current: ProcessText; writer: LastWriter };
+
+/** Reads the owner's instructions. Input: null for app-wide, or the project id.
+ * Output: the text, empty when nothing is saved, and the version a save names. */
+export function loadProcess(projectId: string | null): Promise<Result<ProcessText>> {
+  return call<ProcessText>("desktop_process_text", { projectId });
+}
+
+/** Saves the owner's instructions whole when no other save landed since they were read.
+ * Inputs: null for app-wide, or the project id; the text; the version read; and, only for
+ * "Keep mine" after a stale reply, the older version the owner opened. Output: saved with
+ * the new version and what it comes to, or stale with the newer text. Agents launched after
+ * a save get it. */
+export function saveProcess(projectId: string | null, text: string, version: number, opened: number | null = null): Promise<Result<SavedText>> {
+  return call<SavedText>("desktop_save_process_text", { projectId, text, version, opened });
 }
 
 /** The line shown after a save: the plain saved line, or, when a Claude master may refuse the
- * instructions, what it takes beside what agents now get. Input: the save. Output: the line. */
-export function savedMessage(saved: ProcessSaved): string {
-  if (saved.bytes <= saved.claude_bytes_max) return "Instructions saved. Agents started from now on get them.";
+ * instructions, what it takes beside what agents now get. Input: what the save comes to, null
+ * when it reports none. Output: the line. */
+export function savedMessage(saved: ProcessSaved | null): string {
+  if (saved === null || saved.bytes <= saved.claude_bytes_max) return "Instructions saved. Agents started from now on get them.";
   const size = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`;
   return `Instructions saved, but a project's agents now get ${size(saved.bytes)} of app and project instructions and a Claude master takes only ${size(saved.claude_bytes_max)}. Shorten them before a Claude master's next turn.`;
 }
@@ -228,6 +248,12 @@ export interface InstructionSettings {
   edits?: EditDelivery;
 }
 
+/** One project's agent settings and the version they were read at, which a save names. */
+export interface InstructionView {
+  settings: InstructionSettings;
+  version: number;
+}
+
 /** The settings of a project the owner never changed. */
 export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { mode: "both", transcripts: true, edits: "next_message" };
 
@@ -247,15 +273,27 @@ export const INSTRUCTION_MODES: readonly { value: InstructionMode; label: string
 ];
 
 /** Reads one project's agent settings. Input: the project id. Output: the settings, the
- * defaults when the owner never changed them. */
-export function loadInstructionSettings(projectId: string): Promise<Result<InstructionSettings>> {
-  return call<InstructionSettings>("desktop_instruction_settings", { projectId });
+ * defaults when the owner never changed them, with their version. */
+export function loadInstructionSettings(projectId: string): Promise<Result<InstructionView>> {
+  return call<InstructionView>("desktop_instruction_settings", { projectId });
 }
 
 /** Stores one project's agent settings whole; agents launched after this follow them.
- * Inputs: the project id and the settings. Output: the settings as stored. */
-export function saveInstructionSettings(projectId: string, settings: InstructionSettings): Promise<Result<InstructionSettings>> {
-  return call<InstructionSettings>("desktop_save_instruction_settings", { projectId, settings });
+ * Inputs: the project id, the settings and the version the page read, null when it could
+ * not read the stored settings and replaces them. Output: the settings as stored with their
+ * new version, or `stale_revision` when they changed since that version. */
+export function saveInstructionSettings(projectId: string, settings: InstructionSettings, version: number | null): Promise<Result<InstructionView>> {
+  return call<InstructionView>("desktop_save_instruction_settings", { projectId, settings, version });
+}
+
+/** What the agent settings say after a save refused because they changed since the page
+ * read them, once it shows the saved ones again. */
+export const AGENT_SETTINGS_STALE = "These agent settings changed since you opened them. The page now shows the saved ones; make your change again.";
+
+/** The version an agent settings save names: the one read, or null when the stored settings
+ * could not be read and the save replaces them. Input: the read. Output: the version. */
+export function settingsSaveVersion(settings: { kind: string; value?: InstructionView }): number | null {
+  return settings.kind === "ok" && settings.value ? settings.value.version : null;
 }
 
 /** What became of one instruction file at a launch, as the engine recorded it. */

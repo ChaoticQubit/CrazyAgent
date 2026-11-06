@@ -2162,6 +2162,78 @@ fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
 }
 
 #[test]
+fn agent_change_to_vscode_folder_or_workspace_file_is_flagged() {
+    let case = Case::new();
+    case.edit(".vscode/extensions.json", "{\"recommendations\": []}\n");
+    case.agent_commit("Recommend nothing");
+    case.start();
+    case.agent(&["mv", ".vscode/extensions.json", "extensions.json"]);
+    case.edit(
+        ".vscode/settings.json",
+        "{\"chat.disableAIFeatures\": false}\n",
+    );
+    case.edit("web/.VSCODE/launch.json", "{}\n");
+    case.edit("shop.code-workspace", "{\"folders\": []}\n");
+    case.edit("docs/Team.CODE-WORKSPACE", "{\"folders\": []}\n");
+    std::fs::create_dir(case.workspace.worktree.join("app")).unwrap();
+    std::os::unix::fs::symlink("../README", case.workspace.worktree.join("app/.vscode")).unwrap();
+    case.edit("vscode/notes.md", "plain\n");
+    case.edit("src/.vscode-old/a.txt", "plain\n");
+    case.edit("notes.code-workspace.md", "plain\n");
+    case.edit(".code-workspaces/a.txt", "plain\n");
+    case.edit("api/.v\u{17f}code/settings.json", "{}\n");
+    case.edit("ui/.VSCode/tasks.json", "{}\n");
+    case.edit("ops/team.code-wor\u{212a}space", "{\"folders\": []}\n");
+    case.edit("lib/.gitattribute\u{17f}", "* text\n");
+    case.edit("a/.vscod\u{e9}/x.json", "{}\n");
+    case.edit("b/.vscode\u{301}/y.json", "{}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let page = diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
+    assert!(page.next.is_none());
+    let mut flagged: Vec<(&str, Option<&str>)> = page
+        .files
+        .iter()
+        .filter(|file| file.marks.contains(&FileMark::IdeConfig))
+        .map(|file| (file.path.as_str(), file.old_path.as_deref()))
+        .collect();
+    flagged.sort_unstable();
+    assert_eq!(
+        flagged,
+        [
+            (".vscode/settings.json", None),
+            ("api/.v\u{17f}code/settings.json", None),
+            ("app/.vscode", None),
+            ("docs/Team.CODE-WORKSPACE", None),
+            ("extensions.json", Some(".vscode/extensions.json")),
+            ("ops/team.code-wor\u{212a}space", None),
+            ("shop.code-workspace", None),
+            ("ui/.VSCode/tasks.json", None),
+            ("web/.VSCODE/launch.json", None),
+        ]
+    );
+    let attributes = page
+        .files
+        .iter()
+        .find(|file| file.path == "lib/.gitattribute\u{17f}")
+        .unwrap();
+    assert_eq!(attributes.marks, [FileMark::Attributes]);
+    let accented: Vec<&str> = page
+        .files
+        .iter()
+        .filter(|file| file.path.starts_with("a/") || file.path.starts_with("b/"))
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(accented.len(), 2, "{accented:?}");
+    let link = page
+        .files
+        .iter()
+        .find(|file| file.path == "app/.vscode")
+        .unwrap();
+    assert_eq!(link.marks, [FileMark::Symlink, FileMark::IdeConfig]);
+    assert_eq!(page.files.len(), 16, "{:?}", page.files);
+}
+
+#[test]
 fn an_instruction_file_change_is_marked_and_its_hidden_characters_show_as_escapes() {
     let case = Case::new();
     case.edit("AGENTS.md", "Follow the plan.\u{200b}\u{e0041}\u{e0042}\n");
@@ -3010,6 +3082,112 @@ fn all_pages(case: &Case, id: &ChangeSetId) -> Vec<ChangeDiff> {
     pages
 }
 
+/// How many owner edits the store keeps. Inputs: the store and the change set they settled
+/// on, `""` for those still waiting, or None for every one. Output: the count.
+fn owner_edit_rows(db: &Connection, change_set: Option<&str>) -> i64 {
+    match change_set {
+        Some(set) => db.query_row(
+            "SELECT COUNT(*) FROM landing_owner_edits WHERE change_set=?1",
+            [set],
+            |row| row.get(0),
+        ),
+        None => db.query_row("SELECT COUNT(*) FROM landing_owner_edits", [], |row| {
+            row.get(0)
+        }),
+    }
+    .unwrap()
+}
+
+#[test]
+fn a_turn_end_that_cannot_settle_owner_edits_still_reports_its_change_set() {
+    let case = Case::new();
+    case.edit("notes.txt", "a note\n");
+    owner_edit::record(&case.db, &case.workspace.worktree, "notes.txt", NOW_MS).unwrap();
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_settle BEFORE UPDATE ON landing_owner_edits
+             BEGIN SELECT RAISE(ABORT, 'store busy'); END;",
+        )
+        .unwrap();
+    let id = case
+        .turn(TurnOutcome::Succeeded)
+        .expect("the recorded change set is reported");
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(owner_edit_rows(&case.db, Some("")), 1);
+    case.db
+        .execute_batch("DROP TRIGGER refuse_settle;")
+        .unwrap();
+    case.edit("notes.txt", "a longer note\n");
+    let again = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(owner_edit_rows(&case.db, Some("")), 0);
+    assert_eq!(owner_edit_rows(&case.db, Some(again.as_str())), 1);
+}
+
+#[test]
+fn owner_edits_are_forgotten_once_their_set_is_accepted_or_pruned_or_the_worktree_retires() {
+    let case = Case::new();
+    case.edit("notes.txt", "a note\n");
+    owner_edit::record(&case.db, &case.workspace.worktree, "notes.txt", NOW_MS).unwrap();
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(owner_edit_rows(&case.db, Some(first.as_str())), 1);
+    let landed = case.accept(&first).unwrap();
+    assert!(matches!(landed, AcceptOutcome::Landed { .. }), "{landed:?}");
+    assert_eq!(owner_edit_rows(&case.db, None), 0);
+
+    case.edit("more.txt", "more\n");
+    owner_edit::record(&case.db, &case.workspace.worktree, "more.txt", NOW_MS).unwrap();
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    let until = discard(&case.db, &second, &case.view(&second).head, NOW_MS).unwrap();
+    assert_eq!(
+        owner_edit_rows(&case.db, Some(second.as_str())),
+        1,
+        "a discarded set keeps its marks while it can be restored"
+    );
+    assert_eq!(prune(&case.db, until + 1).unwrap(), 1);
+    assert_eq!(owner_edit_rows(&case.db, None), 0);
+
+    owner_edit::record(&case.db, &case.workspace.worktree, "late.txt", NOW_MS).unwrap();
+    assert_eq!(owner_edit_rows(&case.db, Some("")), 1);
+    let workspace = &case.workspace;
+    let retired = retire_worktree(
+        &case.db,
+        &workspace.repository,
+        &workspace.worktree,
+        &workspace.git_dir,
+        until + 2,
+    )
+    .unwrap();
+    assert_eq!(retired, Ok(()));
+    assert_eq!(owner_edit_rows(&case.db, None), 0);
+}
+
+#[test]
+fn a_change_sets_file_list_stays_when_other_diffs_push_its_diff_out() {
+    let case = Case::new();
+    case.edit("notes.txt", "a note\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &id).unwrap();
+    let first = diff::listed(&record.repository, &record.base, &record.head).unwrap();
+    let paths: Vec<&str> = first.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["notes.txt"]);
+    let mut from = case.tip();
+    for index in 0..=diff::RECENT_MAX {
+        let to = case.owner_commit("flood.txt", &format!("{index}\n"), "Flood the recent diffs");
+        diff::page(&record.repository, &from, &to, 0).unwrap();
+        from = to;
+    }
+    let (git, moved) = (case.repo.join(".git"), case.repo.join("git-moved"));
+    std::fs::rename(&git, &moved).unwrap();
+    let paged = diff::page(&record.repository, &record.base, &record.head, 0);
+    let again = diff::listed(&record.repository, &record.base, &record.head);
+    std::fs::rename(&moved, &git).unwrap();
+    assert!(
+        paged.is_err(),
+        "the flood left this diff among the recent diffs"
+    );
+    assert!(std::sync::Arc::ptr_eq(&first, &again.unwrap()));
+}
+
 #[test]
 fn later_diff_pages_are_read_from_the_first_computation_without_running_git() {
     let case = Case::new();
@@ -3032,6 +3210,98 @@ fn later_diff_pages_are_read_from_the_first_computation_without_running_git() {
     std::fs::rename(&moved, &git).unwrap();
     assert_eq!(again, first);
     assert!(past.files.is_empty() && past.text.is_empty() && past.next.is_none());
+}
+
+fn ledger_rows(case: &Case) -> Vec<(String, String, Option<String>)> {
+    let engine = Path::new(case.db.path().unwrap()).parent().unwrap();
+    crate::ledger::open(engine)
+        .unwrap()
+        .prepare("SELECT kind,action_key,outcome FROM ledger_actions ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// An Accept an engine stop interrupted is listed once in the action ledger after the
+/// engine settles it, for the recovery banner: a pending notice saying whether it landed,
+/// kept across later runs until the owner dismisses it with the outcome it showed.
+#[test]
+fn an_interrupted_accept_is_listed_in_the_ledger_once_settled() {
+    for (step, landed, outcome) in [
+        (owner::Step::Recorded, false, crate::ledger::Outcome::Failed),
+        (
+            owner::Step::FilesWritten,
+            true,
+            crate::ledger::Outcome::Done,
+        ),
+        (owner::Step::BranchMoved, true, crate::ledger::Outcome::Done),
+    ] {
+        let case = Case::new();
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| at == step);
+        assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
+        reconcile(&case.db).unwrap();
+        reconcile(&case.db).unwrap();
+        let listed: (String, String, Option<String>) =
+            ("landing_accept".to_owned(), id.as_str().to_owned(), None);
+        assert_eq!(ledger_rows(&case), vec![listed], "{step:?}");
+        let engine = Path::new(case.db.path().unwrap()).parent().unwrap();
+        let ledger = crate::ledger::open(engine).unwrap();
+        let shown =
+            crate::ledger::pending(&ledger, crate::ledger::ActionKind::LandingAccept).unwrap();
+        assert_eq!(shown.len(), 1, "{step:?}");
+        let notice: serde_json::Value = serde_json::from_str(&shown[0].payload).unwrap();
+        assert_eq!(notice["change_set"], id.as_str(), "{step:?}");
+        assert_eq!(notice["landed"], landed, "{step:?}");
+        let dismissed = crate::ledger::dismiss(
+            &ledger,
+            crate::ledger::ActionKind::LandingAccept,
+            shown[0].id.get(),
+        );
+        assert_eq!(dismissed.unwrap(), outcome, "{step:?}");
+        reconcile(&case.db).unwrap();
+        let name = if landed { "done" } else { "failed" };
+        let dismissed = (
+            "landing_accept".to_owned(),
+            id.as_str().to_owned(),
+            Some(name.to_owned()),
+        );
+        assert_eq!(ledger_rows(&case), vec![dismissed], "{step:?}");
+    }
+}
+
+/// An Accept that finishes while upkeep's reconcile waits for the repository is a normal
+/// Accept: reconcile decides from the record it loads under the hold, so it lists nothing.
+/// The test holds the repository, lets reconcile take its list of in-flight change sets
+/// and wait, then settles the change set as the live Accept does before letting go.
+#[test]
+fn an_accept_settled_while_reconcile_waits_is_not_listed_as_interrupted() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| {
+        at == owner::Step::Recorded
+    });
+    assert_eq!(refused(stopped), "changes_git_failed");
+    let repository = store::load(&case.db, &id).unwrap().repository;
+    let held = flow::hold(&repository);
+    let path = PathBuf::from(case.db.path().unwrap());
+    let upkeep = std::thread::spawn(move || {
+        let db = Connection::open(&path).unwrap();
+        db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        reconcile(&db)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(owner::settled(&case.db, &id).unwrap().intent.is_none());
+    drop(held);
+    upkeep.join().unwrap().unwrap();
+    assert!(ledger_rows(&case).is_empty());
+    assert!(store::in_flight(&case.db).unwrap().is_empty());
 }
 
 impl Case {

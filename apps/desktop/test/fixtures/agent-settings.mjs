@@ -6,14 +6,15 @@ import { AgentSettingsView } from "../../src/screens/process.tsx";
 let root = null;
 const saved = [];
 
-/** Mounts a project's agent settings with the engine read given, recording each save. */
+/** Mounts a project's agent settings with the settings given, as read at version 0,
+ * recording each save. */
 export function mount(value) {
   root?.unmount();
   saved.length = 0;
   document.body.innerHTML = '<div id="root"></div>';
   root = createRoot(document.getElementById("root"));
   flushSync(() => root.render(createElement(AgentSettingsView, {
-    settings: { kind: "ok", value }, busy: false, failure: "", onSave: (next) => saved.push(next),
+    settings: { kind: "ok", value: { settings: value, version: 0 } }, busy: false, failure: "", onSave: (next) => saved.push(next),
   })));
 }
 

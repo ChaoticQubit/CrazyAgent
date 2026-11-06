@@ -15,6 +15,7 @@ use crate::project_setup::{
     SetupQuery, SetupView, StoredSetup, TeamPlan,
 };
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy, LevelView, PolicyView};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::os::unix::fs::PermissionsExt;
 
@@ -131,6 +132,9 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 }
                 SetupAction::RetryResearch { project_id, job } => {
                     controller.retry_research(project_id, job, generation).await
+                }
+                SetupAction::PlanRoadmap { project_id } => {
+                    controller.plan_roadmap(project_id, generation).await
                 }
                 other => panic!("the project screen never sends {other:?}"),
             }
@@ -1030,7 +1034,8 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
     .await;
     assert_eq!(
         settle(&mut screen, &mut controller, start + 4_000).await,
-        ["jobs", "log"]
+        ["setup", "jobs", "log"],
+        "a retry may turn its research back on, so the setup is read again"
     );
     assert_eq!(
         screen.focused_job().map(|job| (job.status, job.attempts)),
@@ -1630,9 +1635,9 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     screen.key(key(KeyCode::Up));
     assert_eq!(screen.general.as_ref().unwrap().cursor, 11);
 
-    let update = SetupAction::Update {
+    let update_at = |expected_revision: u64| SetupAction::Update {
         project_id: project.clone(),
-        expected_revision: 4,
+        expected_revision,
         name: Some("Notes Pro".into()),
         setup: ProjectSetup {
             about: "Terminal-first notes.".into(),
@@ -1644,6 +1649,7 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
             documents: vec![],
         },
     };
+    let update = update_at(4);
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
         ProjectReply::Change(Box::new(update.clone()))
@@ -1659,27 +1665,51 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     screen.apply(
         &change,
         Ok(SetupView::Changed(OwnerResult::Rejected {
-            code: "project_setup_revision".into(),
+            code: crate::storage::versioned::STALE_CODE.into(),
         })),
     );
     let general = screen.general.as_ref().unwrap();
     assert!(!general.busy);
+    assert!(general.stale);
     assert_eq!(
         general.error.as_deref(),
-        Some("This project changed since you opened the form. Open it again.")
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
     );
     assert_eq!(screen.problem, None);
+    let read = screen.next_query(20);
     assert_eq!(
-        screen.next_query(20),
+        read,
         Some(SetupQuery::Setup {
             project: project.clone()
         }),
         "an edit always re-reads the setup"
     );
+    let mut elsewhere = stored(&project);
+    elsewhere.name = "Notes Server".into();
+    elsewhere.revision = 5;
+    screen.apply(
+        &read.unwrap(),
+        Ok(SetupView::Setup(Some(Box::new(elsewhere)))),
+    );
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(general.name.value(), "Notes Pro", "the typed draft is kept");
+    assert_eq!(general.stack.value(), "rust, sqlite, tauri");
+    assert_eq!(general.revision, 5, "the form takes the saved revision");
+    assert!(!general.stale);
+    assert_eq!(
+        general.error.as_deref(),
+        Some("Changed elsewhere: name. Enter saves your edit over it; Esc keeps the saved one."),
+        "the field changed elsewhere is named before Enter saves over it"
+    );
+    let drawn = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
+    assert!(drawn.contains("Enter saves your edit over it"), "{drawn}");
 
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
-        ProjectReply::Change(Box::new(update))
+        ProjectReply::Change(Box::new(update_at(5))),
+        "Enter keeps the owner's edit over the saved one"
     );
     screen.apply(&change, Ok(SetupView::Changed(OwnerResult::Applied)));
     assert!(screen.general.is_none());
@@ -1688,6 +1718,182 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     screen.key(key(KeyCode::Char('g')));
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(screen.general.is_none());
+}
+
+#[test]
+fn a_general_save_takes_the_re_read_revision_only_after_a_stale_refusal() {
+    let project = ProjectId::new("general-stale").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('g')));
+    let control_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    screen.key(control_u);
+    assert_eq!(screen.paste("Notes Pro"), ProjectReply::Handled);
+    let ProjectReply::Change(sent) = screen.key(key(KeyCode::Enter)) else {
+        panic!("the edit is sent");
+    };
+    let SetupAction::Update {
+        expected_revision, ..
+    } = &*sent
+    else {
+        panic!("the General form sends a setup update");
+    };
+    assert_eq!(*expected_revision, 4);
+    let update = *sent;
+    let change = SetupQuery::Change {
+        action: update.clone(),
+        generation: 2,
+    };
+
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "project_about_invalid".into(),
+        })),
+    );
+    assert!(!screen.general.as_ref().unwrap().stale);
+    let read = screen.next_query(20).expect("an edit re-reads the setup");
+    let mut elsewhere = stored(&project);
+    elsewhere.revision = 5;
+    screen.apply(&read, Ok(SetupView::Setup(Some(Box::new(elsewhere)))));
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(
+        general.revision, 4,
+        "a refusal that is not stale keeps the revision the form opened at"
+    );
+    assert_eq!(
+        general.error.as_deref(),
+        Some("The description is too long or has characters that can't be saved.")
+    );
+
+    let ProjectReply::Change(sent) = screen.key(key(KeyCode::Enter)) else {
+        panic!("the edit is sent again");
+    };
+    assert_eq!(
+        *sent, update,
+        "the form still saves at the revision it opened at"
+    );
+    screen.apply(&change, Err("stale_revision".into()));
+    let general = screen.general.as_ref().unwrap();
+    assert!(general.stale, "a stale refusal by error is stale too");
+    assert!(!general.busy);
+    assert_eq!(
+        general.error.as_deref(),
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
+    );
+    assert_eq!(screen.problem, None);
+    let read = screen
+        .next_query(30)
+        .expect("a stale refusal reads the setup again");
+    assert_eq!(
+        read,
+        SetupQuery::Setup {
+            project: project.clone()
+        }
+    );
+    let mut elsewhere = stored(&project);
+    elsewhere.revision = 6;
+    screen.apply(&read, Ok(SetupView::Setup(Some(Box::new(elsewhere)))));
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(general.revision, 6);
+    assert_eq!(general.name.value(), "Notes Pro");
+    assert_eq!(
+        general.error.as_deref(),
+        Some(
+            "This project changed elsewhere, but not on this form. Enter saves your edit; Esc keeps the saved one."
+        ),
+        "a change outside the form's fields names none"
+    );
+
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(screen.general.is_none(), "Esc keeps the saved one");
+    screen.key(key(KeyCode::Char('g')));
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(general.name.value(), "Notes CLI");
+    assert_eq!((general.revision, general.stale), (6, false));
+    assert_eq!(general.error, None);
+}
+
+#[test]
+fn a_stale_general_form_names_each_field_changed_since_the_owner_last_saw_it() {
+    let project = ProjectId::new("general-elsewhere").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('g')));
+    let control_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    screen.key(control_u);
+    assert_eq!(screen.paste("Notes Pro"), ProjectReply::Handled);
+    let ProjectReply::Change(sent) = screen.key(key(KeyCode::Enter)) else {
+        panic!("the edit is sent");
+    };
+    let change = SetupQuery::Change {
+        action: *sent,
+        generation: 2,
+    };
+    let stale = || {
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: crate::storage::versioned::STALE_CODE.into(),
+        }))
+    };
+
+    screen.apply(&change, stale());
+    let read = screen
+        .next_query(20)
+        .expect("a stale refusal reads the setup again");
+    let mut elsewhere = stored(&project);
+    elsewhere.revision = 5;
+    elsewhere.about = "Shared notes.".into();
+    elsewhere.platforms = vec![Platform::Website, Platform::Cli];
+    elsewhere.research.push(ResearchKind::RoadmapPlanning);
+    screen.apply(
+        &read,
+        Ok(SetupView::Setup(Some(Box::new(elsewhere.clone())))),
+    );
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(general.name.value(), "Notes Pro", "the typed draft is kept");
+    assert_eq!(general.about.value(), "Terminal-first notes.");
+    assert_eq!(general.revision, 5);
+    assert_eq!(
+        general.error.as_deref(),
+        Some(
+            "Changed elsewhere: description, platforms. Enter saves your edit over it; Esc keeps the saved one."
+        ),
+        "the owner's own name edit and the roadmap choice the form has no switch for are not named"
+    );
+
+    let ProjectReply::Change(sent) = screen.key(key(KeyCode::Enter)) else {
+        panic!("Enter saves the edit over the named fields");
+    };
+    let SetupAction::Update {
+        expected_revision,
+        setup,
+        ..
+    } = &*sent
+    else {
+        panic!("the General form sends a setup update");
+    };
+    assert_eq!(*expected_revision, 5);
+    assert_eq!(setup.about, "Terminal-first notes.");
+    assert!(
+        setup.research.contains(&ResearchKind::RoadmapPlanning),
+        "the roadmap choice saved elsewhere is kept"
+    );
+    screen.apply(&change, stale());
+    let read = screen
+        .next_query(30)
+        .expect("a second stale refusal reads the setup again");
+    elsewhere.revision = 6;
+    elsewhere.tech_stack.push("tauri".into());
+    screen.apply(&read, Ok(SetupView::Setup(Some(Box::new(elsewhere)))));
+    assert_eq!(
+        screen.general.as_ref().unwrap().error.as_deref(),
+        Some(
+            "Changed elsewhere: tech stack. Enter saves your edit over it; Esc keeps the saved one."
+        ),
+        "fields already named are compared from the setup the owner was last shown"
+    );
 }
 
 #[test]
@@ -2013,7 +2219,10 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     );
     screen.apply(
         &read,
-        Ok(SetupView::ReadPaths(vec!["/Users/owner/shared".into()])),
+        Ok(SetupView::ReadPaths(crate::project_setup::ReadPaths {
+            paths: vec!["/Users/owner/shared".into()],
+            version: 3,
+        })),
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
@@ -2033,6 +2242,7 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     assert_eq!(screen.paste(" : relative : "), ProjectReply::Handled);
     let save = SetupAction::SetReadPaths {
         project_id: project.clone(),
+        version: 3,
         paths: vec!["/Users/owner/shared".into(), "relative".into()],
     };
     assert_eq!(
@@ -2064,6 +2274,7 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     screen.folders.as_mut().unwrap().input.set("");
     let clear = SetupAction::SetReadPaths {
         project_id: project.clone(),
+        version: 3,
         paths: vec![],
     };
     assert_eq!(
@@ -2080,7 +2291,10 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     assert!(screen.folders.is_none());
     assert_eq!(screen.read_paths, None);
 
-    screen.read_paths = Some(vec![]);
+    screen.read_paths = Some(crate::project_setup::ReadPaths {
+        paths: vec![],
+        version: 4,
+    });
     screen.key(key(KeyCode::Char('f')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
@@ -2092,13 +2306,268 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     assert!(screen.folders.is_none());
 }
 
+/// Answers the screen's reads as unavailable until it asks for the read-only folders.
+/// Inputs: the screen and the time of the first read. Output: the folders read.
+fn access_view(access: AgentAccess, version: u64) -> PolicyView {
+    PolicyView {
+        access,
+        network: crate::sandbox::policy::AgentNetwork::default(),
+        levels: AgentAccess::ALL
+            .into_iter()
+            .map(|level| LevelView {
+                access: level,
+                label: level.label().to_owned(),
+                unavailable: None,
+            })
+            .collect(),
+        networks: crate::sandbox::policy::AgentNetwork::ALL
+            .into_iter()
+            .map(|network| crate::sandbox::policy::NetworkView {
+                network,
+                label: network.label().to_owned(),
+            })
+            .collect(),
+        toolchains: Vec::new(),
+        ide_git_hooks: false,
+        version,
+    }
+}
+
+fn next_access_read(screen: &mut ProjectScreen, from: i64) -> SetupQuery {
+    for now in from..from + 6 {
+        let query = screen.next_query(now).expect("a read is due");
+        if matches!(query, SetupQuery::AgentPolicy { .. }) {
+            return query;
+        }
+        screen.apply(&query, Err("trusted_connection_unavailable".into()));
+    }
+    panic!("the Settings tab reads the agent access");
+}
+
+/// An Agent access save names the version the box opened at; refused as stale it keeps the
+/// owner's level, reads the saved policy again and shows it, and Enter then saves the
+/// owner's level at the version just read (Q35).
+#[test]
+fn a_stale_access_save_keeps_the_level_and_enter_saves_it_over_the_re_read() {
+    let project = ProjectId::new("access-stale").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_access_read(&mut screen, 20);
+    screen.apply(
+        &read,
+        Ok(SetupView::AgentPolicy(access_view(
+            AgentAccess::OwnBranch,
+            3,
+        ))),
+    );
+    screen.key(key(KeyCode::Char('c')));
+    assert_eq!(screen.key(key(KeyCode::Left)), ProjectReply::Handled);
+    let save_at = |version: u64| SetupAction::SetAgentPolicy {
+        project_id: project.clone(),
+        version,
+        policy: AgentPolicy {
+            access: AgentAccess::Sandboxed,
+            toolchains: Vec::new(),
+            ide_git_hooks: false,
+            network: crate::sandbox::policy::AgentNetwork::default(),
+        },
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(3)))
+    );
+    screen.apply(
+        &SetupQuery::Change {
+            action: save_at(3),
+            generation: 2,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "stale_revision".into(),
+        })),
+    );
+    let access = screen.access.as_ref().unwrap();
+    assert!(!access.busy);
+    assert_eq!(
+        access.access,
+        AgentAccess::Sandboxed,
+        "the owner's level is kept"
+    );
+    assert_eq!(
+        access.error.as_deref(),
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
+    );
+    assert_eq!(screen.agent_policy, None);
+
+    let read = next_access_read(&mut screen, 40);
+    screen.apply(
+        &read,
+        Ok(SetupView::AgentPolicy(access_view(AgentAccess::Full, 4))),
+    );
+    let access = screen.access.as_ref().unwrap();
+    assert_eq!(access.access, AgentAccess::Sandboxed);
+    assert_eq!(
+        access.error.as_deref(),
+        Some(
+            "Saved now: Full access · no toolchains. Enter saves your edit over it; Esc keeps the saved one."
+        )
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(4))),
+        "Enter keeps the owner's level over the saved one"
+    );
+}
+
+fn next_folders_read(screen: &mut ProjectScreen, from: i64) -> SetupQuery {
+    for now in from..from + 6 {
+        let query = screen.next_query(now).expect("a read is due");
+        if matches!(query, SetupQuery::ReadPaths { .. }) {
+            return query;
+        }
+        screen.apply(&query, Err("trusted_connection_unavailable".into()));
+    }
+    panic!("the Settings tab reads the read-only folders");
+}
+
+#[test]
+fn a_stale_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
+    let project = ProjectId::new("folders-stale").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_folders_read(&mut screen, 20);
+    screen.apply(
+        &read,
+        Ok(SetupView::ReadPaths(crate::project_setup::ReadPaths {
+            paths: vec!["/Users/owner/shared".into()],
+            version: 3,
+        })),
+    );
+    screen.key(key(KeyCode::Char('f')));
+    assert_eq!(screen.paste(":/Users/owner/notes"), ProjectReply::Handled);
+    let save_at = |version: u64| SetupAction::SetReadPaths {
+        project_id: project.clone(),
+        version,
+        paths: vec!["/Users/owner/shared".into(), "/Users/owner/notes".into()],
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(3)))
+    );
+    let change = SetupQuery::Change {
+        action: save_at(3),
+        generation: 2,
+    };
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "stale_revision".into(),
+        })),
+    );
+    let folders = screen.folders.as_ref().unwrap();
+    assert!(!folders.busy);
+    assert_eq!(
+        folders.input.value(),
+        "/Users/owner/shared:/Users/owner/notes"
+    );
+    assert_eq!(
+        folders.error.as_deref(),
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
+    );
+    assert_eq!(screen.read_paths, None);
+
+    let read = next_folders_read(&mut screen, 40);
+    screen.apply(
+        &read,
+        Ok(SetupView::ReadPaths(crate::project_setup::ReadPaths {
+            paths: vec!["/Users/owner/other".into()],
+            version: 4,
+        })),
+    );
+    let folders = screen.folders.as_ref().unwrap();
+    assert_eq!(
+        folders.input.value(),
+        "/Users/owner/shared:/Users/owner/notes",
+        "the typed list is kept"
+    );
+    assert_eq!(
+        folders.error.as_deref(),
+        Some(
+            "Saved now: /Users/owner/other. Enter saves your edit over it; Esc keeps the saved one."
+        )
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(4))),
+        "Enter keeps the owner's list over the saved one"
+    );
+
+    screen.apply(
+        &SetupQuery::Change {
+            action: save_at(4),
+            generation: 3,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "read_path_not_absolute".into(),
+        })),
+    );
+    let read = next_folders_read(&mut screen, 60);
+    screen.apply(
+        &read,
+        Ok(SetupView::ReadPaths(crate::project_setup::ReadPaths {
+            paths: vec![],
+            version: 5,
+        })),
+    );
+    assert_eq!(
+        screen.folders.as_ref().unwrap().error.as_deref(),
+        Some("Type the full path of each folder, starting with /."),
+        "a refusal that is not stale keeps the version the box opened at"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(4)))
+    );
+
+    screen.apply(
+        &SetupQuery::Change {
+            action: save_at(4),
+            generation: 4,
+        },
+        Err("stale_revision".into()),
+    );
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let read = next_folders_read(&mut screen, 80);
+    screen.apply(
+        &read,
+        Ok(SetupView::ReadPaths(crate::project_setup::ReadPaths {
+            paths: vec![],
+            version: 6,
+        })),
+    );
+    assert!(screen.folders.is_none(), "Esc keeps the saved one");
+    screen.key(key(KeyCode::Char('f')));
+    let folders = screen.folders.as_ref().unwrap();
+    assert_eq!(folders.input.value(), "");
+    assert_eq!(
+        folders.error, None,
+        "a box opened afresh carries no stale note"
+    );
+}
+
 #[test]
 fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     let look = Look::plain();
     let project = ProjectId::new("hidden").unwrap();
     let mut screen = loaded(&project);
     screen.open(Tab::Settings);
-    screen.read_paths = Some(vec![]);
+    screen.read_paths = Some(crate::project_setup::ReadPaths {
+        paths: vec![],
+        version: 0,
+    });
     assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Handled);
     assert!(screen.hidden.is_none());
     assert_eq!(
@@ -2643,6 +3112,321 @@ fn a_project_sets_its_own_account_order_or_follows_its_pool() {
     assert_eq!(
         screen.key(key(KeyCode::Char('u'))),
         ProjectReply::AccountOrder(None)
+    );
+}
+
+#[test]
+fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder_its_path_starts_in()
+ {
+    use super::project::OpenRequest;
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    assert_eq!(
+        screen.project_folder(),
+        Some(std::path::PathBuf::from("/private/tmp/ca-notes-cli"))
+    );
+    screen.open(Tab::Context);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('v'))),
+        ProjectReply::Handled,
+        "nothing is listed yet"
+    );
+    screen.context = Some(ProjectContext {
+        project_id: project.clone(),
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        items: vec![
+            ContextItem {
+                path: "context/brief.md".into(),
+                kind: ContextKind::Brief,
+                bytes: 10,
+            },
+            ContextItem {
+                path: "context/documents/spec.md".into(),
+                kind: ContextKind::Document,
+                bytes: 20,
+            },
+        ],
+    });
+    let spec = OpenRequest::Context {
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        path: "context/documents/spec.md".into(),
+    };
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('v'))),
+        ProjectReply::Edit(spec.clone()),
+        "context paths start in the state folder the engine listed them from, not the project folder"
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('o'))),
+        ProjectReply::Open(spec.clone())
+    );
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert!(screen.reading);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('v'))),
+        ProjectReply::Edit(spec),
+        "the file being read opens too"
+    );
+    let look = Look::plain();
+    screen.key(key(KeyCode::Esc));
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(drawn.help.contains(&("v", "Edit file")), "{:?}", drawn.help);
+    assert!(
+        drawn.help.contains(&("o", "Open in app")),
+        "{:?}",
+        drawn.help
+    );
+
+    let mut moved = stored(&project);
+    moved.folder = "/private/tmp/ca-notes-cli/.crazyagent".into();
+    screen.setup = Some(moved);
+    assert_eq!(
+        screen.project_folder(),
+        Some(std::path::PathBuf::from("/private/tmp/ca-notes-cli")),
+        "changed files are the owner's copies in the project folder, never in the state folder"
+    );
+}
+
+#[test]
+fn shift_o_on_the_context_tab_is_in_the_key_help_and_says_why_when_the_ide_cannot_open_the_file() {
+    use crate::ide::bridge::reveal::RevealTarget;
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    let listed = |folder: &str| ProjectContext {
+        project_id: project.clone(),
+        folder: folder.into(),
+        items: vec![ContextItem {
+            path: "context/documents/spec.md".into(),
+            kind: ContextKind::Document,
+            bytes: 20,
+        }],
+    };
+    screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(
+        drawn.help.contains(&("O", "Open in IDE")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('O'))),
+        ProjectReply::Reveal(RevealTarget::Project {
+            path: ".crazyagent/context/documents/spec.md".into(),
+        })
+    );
+    assert_eq!(screen.problem, None);
+
+    screen.context = Some(listed("/private/tmp/ca-elsewhere/.crazyagent"));
+    assert_eq!(screen.key(key(KeyCode::Char('O'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("This file is outside the project folder, so the IDE can't open it."),
+        "a context folder outside the project folder has no IDE path, and the owner is told"
+    );
+
+    screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
+    screen.setup = None;
+    assert_eq!(screen.key(key(KeyCode::Char('O'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Still loading the project. Try again."),
+        "before the project folder is read the key says so instead of doing nothing"
+    );
+}
+
+#[tokio::test]
+async fn settings_plan_roadmap_now_starts_the_job() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-roadmap-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    let project = ProjectId::new("roadmap-later").unwrap();
+    let created = controller
+        .setup_project(
+            project.clone(),
+            ProjectSpec {
+                name: "Roadmap later".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "A notes app made before roadmap planning.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Cli],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        created,
+        OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+    ));
+
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let start = 1_793_000_000_000;
+    settle(&mut screen, &mut controller, start).await;
+    assert!(
+        screen
+            .jobs
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|job| job.kind != ResearchKind::RoadmapPlanning),
+        "the toggle was off, so nothing planned on its own"
+    );
+    screen.open(Tab::Settings);
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(
+        text(&drawn.rows).contains("Roadmap   Not planned   p Plan roadmap now"),
+        "{}",
+        text(&drawn.rows)
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    let mut earlier = screen.general.take().expect("the General form opens");
+    earlier.research.push(ResearchKind::MarketResearch);
+
+    let ProjectReply::Change(action) = screen.key(key(KeyCode::Char('p'))) else {
+        panic!("p asks the engine to plan");
+    };
+    assert_eq!(
+        *action,
+        SetupAction::PlanRoadmap {
+            project_id: project.clone(),
+        }
+    );
+    send(
+        &mut screen,
+        &mut controller,
+        SetupQuery::Change {
+            action: *action,
+            generation: 2,
+        },
+    )
+    .await;
+    assert_eq!(screen.problem, None);
+    settle(&mut screen, &mut controller, start + 1_000).await;
+    let planned: Vec<_> = screen
+        .jobs
+        .as_ref()
+        .unwrap()
+        .iter()
+        .filter(|job| job.kind == ResearchKind::RoadmapPlanning)
+        .map(|job| job.status)
+        .collect();
+    assert_eq!(planned.len(), 1, "one planning job is queued");
+    assert!(
+        matches!(
+            planned[0],
+            ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running
+        ),
+        "{planned:?}"
+    );
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(
+        text(&drawn.rows).contains("Roadmap   Planning"),
+        "{}",
+        text(&drawn.rows)
+    );
+
+    assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("A roadmap is already being planned for this project. Wait for it to finish.")
+    );
+    let again = serve(
+        &mut controller,
+        SetupQuery::Change {
+            action: SetupAction::PlanRoadmap {
+                project_id: project.clone(),
+            },
+            generation: 3,
+        },
+    )
+    .await;
+    assert_eq!(
+        again,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "planning_busy".into()
+        })),
+        "the engine refuses a second job while one is queued"
+    );
+    let stored = controller
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .expect("the setup is saved");
+    assert_eq!(
+        (stored.research.clone(), stored.revision),
+        (vec![ResearchKind::RoadmapPlanning], 2),
+        "the setup records planning at a new revision"
+    );
+    settle(&mut screen, &mut controller, start + 2_000).await;
+    let current = screen.setup.clone().expect("the setup is read again");
+    assert_eq!(current.revision, 2, "the screen reads the new revision");
+    assert!(
+        screen.work_kinds().is_empty(),
+        "planning is not listed as research on the Overview"
+    );
+    let Some(SetupAction::Update {
+        expected_revision,
+        setup: edited,
+        ..
+    }) = earlier.action(&current)
+    else {
+        panic!("the earlier form has an edit");
+    };
+    assert_eq!(
+        (edited.research.clone(), expected_revision),
+        (
+            vec![ResearchKind::MarketResearch, ResearchKind::RoadmapPlanning],
+            1
+        ),
+        "a form opened before Plan roadmap now keeps the planning choice"
+    );
+    let stale = serve(
+        &mut controller,
+        SetupQuery::Change {
+            action: SetupAction::Update {
+                project_id: project.clone(),
+                expected_revision,
+                name: None,
+                setup: edited,
+            },
+            generation: 4,
+        },
+    )
+    .await;
+    assert_eq!(
+        stale,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "stale_revision".into()
+        })),
+        "an edit drafted before the plan cannot cancel it"
     );
 }
 

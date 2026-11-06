@@ -19,7 +19,8 @@ const WALK_DEPTH_MAX: usize = 3;
 const ENTRIES_PER_SCAN_MAX: usize = FILES_PER_SCAN_MAX * 64;
 const RUN_SCAN_MS: i64 = 24 * HOUR_MS;
 const FINISHED_RUNS_PER_SCAN: i64 = 64;
-const LINE_TOKENS_MAX: u64 = 1_000_000_000;
+/// The most tokens one record line or one provider call counts in each field.
+pub const LINE_TOKENS_MAX: u64 = 1_000_000_000;
 const ROW_TOKENS_MAX: i64 = 1_000_000_000_000_000;
 const TOOLS_PER_READ_MAX: usize = 4096;
 const ARGUMENTS_BYTES_MAX: usize = 64 * 1024;
@@ -98,7 +99,7 @@ impl Tokens {
     }
 
     /// Caps every count at `max`. Input: the cap. Output: the capped count.
-    fn at_most(self, max: u64) -> Tokens {
+    pub fn at_most(self, max: u64) -> Tokens {
         Tokens {
             input: self.input.min(max),
             output: self.output.min(max),

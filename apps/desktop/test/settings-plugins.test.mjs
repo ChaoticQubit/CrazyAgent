@@ -12,12 +12,12 @@ const router = await import("../src/ui/router.ts");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const skill = (patch = {}) => ({ id: "skill-1", name: "frontend-design", description: "Builds polished front ends.", line: "Builds polished front ends.", scope: { kind: "global" },
-  scope_label: "For every project", enabled: true, on_here: null, source: "/Users/owner/skills/frontend-design",
+  scope_label: "For every project", enabled: true, on_here: null, version: 0, source: "/Users/owner/skills/frontend-design",
   folder: "/Users/owner/Library/CrazyAgent/plugins/skills/skill-1", refused: null, ...patch });
 const server = (patch = {}) => ({ id: "server-1", name: "github", scope: { kind: "global" }, scope_label: "For every project",
   spec: { kind: "stdio", command: "/opt/homebrew/bin/npx", args: ["-y", "@modelcontextprotocol/server-github"] },
   runs: "/opt/homebrew/bin/npx -y @modelcontextprotocol/server-github", enabled: true, status: "approved", status_label: "Approved",
-  problem: null, tools: [], checks: 0, secrets: [{ name: "GITHUB_TOKEN", saved: true }], on_here: null, ...patch });
+  problem: null, tools: [], checks: 0, secrets: [{ name: "GITHUB_TOKEN", saved: true }], on_here: null, version: 0, ...patch });
 const skillsProps = (skills, patch = {}) => ({ skills, failure: "", onAdd: forbidden, onOpen: forbidden, onToggle: forbidden, onRemove: forbidden, onRetry: forbidden, ...patch });
 const detail = (patch = {}) => ({ skill: skill(), text: "---\nname: frontend-design\ndescription: Builds polished front ends.\n---\n\n# Steps\n\n- Read the brief\n- Ship `npm run build`\n",
   files: [{ path: "SKILL.md", bytes: 812 }, { path: "references/tokens.md", bytes: 4300 }], files_more: 0, ...patch });
@@ -318,4 +318,18 @@ test("the import list shows plain loading, not ready and error states", () => {
   assert.match(renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "not_ready" }))), /Importing skills/);
   const failed = renderToStaticMarkup(createElement(ImportSkillsView, importProps({ kind: "error", code: "skill_import_home_unknown", message: api.plainError("skill_import_home_unknown") })));
   assert.match(failed, /Your home folder is unknown, so your skills can&#x27;t be found\./);
+});
+
+test("a stale skill or server change reads the list again, so the owner sees the newer state before trying again", async () => {
+  const { readFileSync } = await import("node:fs");
+  const refused = (code) => ({ kind: "error", code, message: api.plainError(code) });
+  assert.equal(plugins.readsAgain(refused("stale_revision")), true, "another window or the TUI changed the item since it was shown");
+  assert.equal(plugins.readsAgain(refused("plugin_changed")), true);
+  assert.equal(plugins.readsAgain(refused("plugin_not_found")), true);
+  assert.equal(plugins.readsAgain(refused("plugins_failed")), false, "a plain failure keeps the list as shown");
+  assert.equal(plugins.readsAgain({ kind: "not_ready" }), false);
+  assert.equal(api.plainError("stale_revision"), "This changed since you opened it. Review and save again.");
+  const source = readFileSync(new URL("../src/screens/settings/plugins.tsx", import.meta.url), "utf8");
+  assert.match(source, /else \{ setFailure\(result\.kind === "not_ready" \? NOT_READY : result\.message\); if \(readsAgain\(result\)\) reload\(\); \}/, "the list reads again");
+  assert.match(source, /if \(readsAgain\(result\)\) \{ reload\(\); onChanged\(\); \}/, "the skill detail and the list behind it read again");
 });

@@ -12,7 +12,8 @@ import { homePath } from "../settings/harnesses";
 import { accessSummary } from "./access";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_ROWS, activity, ago, changeOutcome, memoryGroups, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
+import { ACTIVITY_ROWS, activity, ago, changeOutcome, memoryGroups, researchJobs, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
+import { PlanningLine } from "./planning";
 
 const PLATFORM_LABELS: Record<string, string> = {
   website: "Website", mobile_app: "Mobile app", desktop_app: "Desktop app", cli: "CLI", api_backend: "API or backend", other: "Other",
@@ -40,8 +41,9 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   const harnesses = valueOf(data.harnesses);
   const base = `/projects/${encodeURIComponent(data.id)}`;
   const waiting = jobs.some((job) => job.status === "needs_pool") || (setup !== null && !data.assigned && setup.research.length > 0 && data.pools?.kind === "ok");
-  const rows = jobs.map((job) => ({ job, row: researchRow(job, data.now) }));
-  const allDone = jobs.length > 0 && jobs.every((job) => job.status === "done");
+  const research = researchJobs(jobs);
+  const rows = research.map((job) => ({ job, row: researchRow(job, data.now) }));
+  const allDone = research.length > 0 && research.every((job) => job.status === "done");
   const events = activity(jobs, data.name, setup?.created_ms ?? null);
   const [suggested, setSuggested] = useState(0);
   useEffect(() => {
@@ -81,7 +83,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {data.research === undefined && <p className="pj-muted" role="status">Loading research...</p>}
         {data.research?.kind === "not_ready" && <NotReady what="research progress isn't in this build." />}
         {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load research. {failureCopy(data.research)}</p>}
-        {data.research?.kind === "ok" && jobs.length === 0 && <p className="pj-muted">No research was picked for this project.</p>}
+        {data.research?.kind === "ok" && research.length === 0 && <p className="pj-muted">No research was picked for this project.</p>}
         {rows.length > 0 && <ul className="pj-rows" aria-label="Research">{rows.map(({ job, row }) => <li className="pj-research-row" key={job.id}>
           <strong className="pj-kind"><Icon name={RESEARCH_ICONS[job.kind]} size={16} />{displayText(row.title)}</strong>
           <Badge word={row.status} tone={row.tone} />
@@ -92,6 +94,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         </li>)}</ul>}
         {allDone && <p>Research finished. <button type="button" className="pj-link" onClick={() => data.navigate(`${base}/conversation`)}>Ask the master what to build first.</button></p>}
       </section>
+      <PlanningLine data={data} />
       <section className="pj-stack-s" aria-labelledby="pj-activity"><h2 id="pj-activity">Recent activity</h2>
         {events.length ? <ul className="pj-rows" aria-label="Recent activity">{(allActivity ? events : events.slice(0, ACTIVITY_ROWS)).map((event, index) => <li className="pj-activity-row" key={index}>
           <span className="pj-small pj-muted">{ago(event.at, data.now)}</span><span>{displayText(event.text)}</span></li>)}</ul>

@@ -127,5 +127,5 @@ test("the Wake button sends the team wake by agent id, never the agent register'
   assert.match(api, /call<IntentReceipt>\("desktop_team_wake_agent", \{ id, agent, generation \}\)/);
   const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
   assert.match(client, /invoke<IntentReceipt>\("desktop_team_wake_agent", \{ id, agent, generation \}\)/);
-  assert.match(client, /invoke<IntentReceipt>\("desktop_team_finished_agents", \{ id, show, generation \}\)/);
+  assert.match(client, /invoke<IntentReceipt>\("desktop_team_finished_agents", \{ id, show, version, generation \}\)/);
 });

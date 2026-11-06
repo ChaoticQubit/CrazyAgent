@@ -1082,6 +1082,40 @@ fn sizes_paths_and_harness_names_read_plainly() {
     assert_eq!(harness_name("mystery", None), "mystery");
 }
 
+#[test]
+fn new_project_toggle_defaults_on() {
+    let mut wizard = wizard();
+    assert!(
+        wizard.roadmap,
+        "a new project plans a roadmap after research by default"
+    );
+    for _ in 0..3 {
+        wizard.key(shift(KeyCode::Right));
+    }
+    assert_eq!(wizard.step, Step::Work);
+    assert_eq!(wizard.focused(), Control::Work);
+    for _ in 0..ResearchKind::ALL.len() + 2 {
+        wizard.key(key(KeyCode::Down));
+    }
+    let research = wizard.research.clone();
+    assert_eq!(wizard.key(key(KeyCode::Char(' '))), Reply::Handled);
+    assert!(!wizard.roadmap, "Space on the last row turns planning off");
+    assert_eq!(wizard.research, research, "no research toggle moved");
+    assert_eq!(wizard.key(key(KeyCode::Enter)), Reply::Handled);
+    assert!(wizard.roadmap, "Enter turns it on again");
+    wizard.key(key(KeyCode::Up));
+    wizard.key(key(KeyCode::Char(' ')));
+    assert!(
+        wizard.roadmap,
+        "a research row never changes the roadmap toggle"
+    );
+    assert!(
+        wizard
+            .research
+            .contains(&ResearchKind::ALL[ResearchKind::ALL.len() - 1])
+    );
+}
+
 /// The owner clears the research while its catalog read is still in flight and opens the
 /// harness picker on the team's only slot; the reply for no research replaces the team with
 /// one that has no slots. The picker closes with the team it was opened for, so Enter never

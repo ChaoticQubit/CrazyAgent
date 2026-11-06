@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::owner::{ProcessText, SavedText};
 use crate::protocol::ProjectId;
 
 impl OwnerController {
@@ -9,21 +10,57 @@ impl OwnerController {
     }
 
     /// Reads the owner's instructions. Input: none for the app-wide text, or the project.
-    /// Output: the text, empty when none is saved, or a `PROCESS_CODES` refusal.
-    pub async fn process_text(&self, project: Option<ProjectId>) -> Result<String, EngineError> {
+    /// Output: the text, empty when none is saved, and its version, or a `PROCESS_CODES`
+    /// refusal.
+    pub async fn process_text(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<ProcessText, EngineError> {
         self.process_client()?.process_text(project).await
     }
 
-    /// Saves the owner's instructions whole. Inputs: none for the app-wide text, or the
-    /// project, and the text. Output: what agents now receive beside what a Claude master is
-    /// sure to take, or a refusal such as `process_text_too_large`.
+    /// Saves the owner's instructions whole when no other save landed since they were read.
+    /// Inputs: none for the app-wide text, or the project; the text; the version read; and,
+    /// only for "Keep mine" after a stale reply, the older version the owner opened.
+    /// Output: the saved version with what agents now receive beside what a Claude master is
+    /// sure to take, the stale reply with the newer text, or a refusal such as
+    /// `process_text_too_large`.
     pub async fn save_process_text(
         &self,
         project: Option<ProjectId>,
         text: String,
-    ) -> Result<crate::engine::owner::ProcessSaved, EngineError> {
+        version: u64,
+        opened: Option<u64>,
+    ) -> Result<SavedText, EngineError> {
         self.process_client()?
-            .save_process_text(project, text)
+            .save_process_text(project, text, version, opened)
+            .await
+    }
+
+    /// Reads the owner's own instructions for one team agent. Inputs: the project and the
+    /// agent id. Output: the text, empty when none is saved, and its version.
+    pub async fn agent_text(
+        &self,
+        project: ProjectId,
+        agent: i64,
+    ) -> Result<ProcessText, EngineError> {
+        self.process_client()?.agent_text(project, agent).await
+    }
+
+    /// Saves the owner's own instructions for one team agent when no other save landed since
+    /// they were read. Inputs: the project, the agent id, the text, the version read and,
+    /// only for "Keep mine" after a stale reply, the older version the owner opened.
+    /// Output: the saved version, the stale reply with the newer text, or a refusal.
+    pub async fn save_agent_text(
+        &self,
+        project: ProjectId,
+        agent: i64,
+        text: String,
+        version: u64,
+        opened: Option<u64>,
+    ) -> Result<SavedText, EngineError> {
+        self.process_client()?
+            .save_agent_text(project, agent, text, version, opened)
             .await
     }
 
@@ -88,23 +125,27 @@ impl OwnerController {
     }
 
     /// Reads one project's agent instruction settings. Input: the project.
-    /// Output: the settings, the defaults when the owner never changed them.
+    /// Output: the settings, the defaults when the owner never changed them, with their
+    /// version.
     pub async fn instruction_settings(
         &self,
         project: ProjectId,
-    ) -> Result<crate::engine::owner::InstructionSettings, EngineError> {
+    ) -> Result<crate::engine::owner::InstructionView, EngineError> {
         self.process_client()?.instruction_settings(project).await
     }
 
-    /// Stores one project's agent instruction settings whole. Inputs: the project and the
-    /// settings. Output: the settings as stored.
+    /// Stores one project's agent instruction settings whole. Inputs: the project, the
+    /// settings and the version the screen read, none when it could not read the stored
+    /// settings and replaces them. Output: the settings as stored with their new version, or
+    /// `stale_revision` when they changed since that version.
     pub async fn save_instruction_settings(
         &self,
         project: ProjectId,
         settings: crate::engine::owner::InstructionSettings,
-    ) -> Result<crate::engine::owner::InstructionSettings, EngineError> {
+        version: Option<u64>,
+    ) -> Result<crate::engine::owner::InstructionView, EngineError> {
         self.process_client()?
-            .save_instruction_settings(project, settings)
+            .save_instruction_settings(project, settings, version)
             .await
     }
 

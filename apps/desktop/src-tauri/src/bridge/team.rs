@@ -92,16 +92,25 @@ impl NativeBridge {
     }
 
     /// Sets or clears the wake rule of one level: the app default, a project or one agent.
-    /// Takes the level, the rule or none to fall back to the level above, and the generation.
-    /// Returns the actual commit receipt; a cap over the bound is a plain rejection.
+    /// Takes the level, the rule or none to fall back to the level above, the version the
+    /// screen showed and the generation. Returns the actual commit receipt; a cap over the
+    /// bound and a rule changed since are plain rejections.
     pub async fn team_wake_rule(
         &mut self,
         target: RuleTarget,
         rule: Option<WakeRule>,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
-        self.team_action(TeamAction::Wake { target, rule }, generation)
-            .await
+        self.team_action(
+            TeamAction::Wake {
+                target,
+                rule,
+                version,
+            },
+            generation,
+        )
+        .await
     }
 
     /// Marks a project's owner notifications up to one id as seen, so they leave the badge.
@@ -166,32 +175,38 @@ impl NativeBridge {
     }
 
     /// Turns keeping the plan's minimum sub-agents running on or off.
-    /// Takes the project id, the switch and the client generation.
-    /// Returns the actual commit receipt.
+    /// Takes the project id, the switch, the team settings version the client read and the
+    /// client generation. Returns the actual commit receipt; a save from an older read is
+    /// refused as `stale_revision`.
     pub async fn team_keep_warm(
         &mut self,
         id: &str,
         on: bool,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
-        self.team_action(TeamAction::KeepWarm { project_id, on }, generation)
-            .await
+        let action = TeamAction::KeepWarm {
+            project_id,
+            on,
+            version,
+        };
+        self.team_action(action, generation).await
     }
 
     /// Sets the project team's task and session time limits and its sub-agent idle stop, in
     /// seconds from the listed choices, none for no limit. Takes the project id, the three
-    /// limits, the team settings revision the window read and the client generation. Returns
+    /// limits, the team settings version the client read and the client generation. Returns
     /// the actual commit receipt; a value outside the choices, or a session limit below a set
     /// task limit, is refused as `team_action_invalid` with `team_time_limits_invalid` behind
-    /// it, and a revision another client moved since is refused as `stale_revision`.
+    /// it, and a save from an older read as `stale_revision`.
     pub async fn team_time_limits(
         &mut self,
         id: &str,
         turn_secs: Option<u32>,
         session_secs: Option<u32>,
         idle_secs: Option<u32>,
-        revision: u64,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
@@ -200,21 +215,21 @@ impl NativeBridge {
             turn_secs,
             session_secs,
             idle_secs,
-            revision,
+            version,
         };
         self.team_action(action, generation).await
     }
 
     /// Sets what the live master does with the conversation when the master harness changes:
     /// `carry` hands the new harness the earlier turns and open tasks, `fresh` starts it
-    /// without them. Takes the project id, the mode, the team settings revision the window
-    /// read and the client generation. Returns the actual commit receipt, `team_action_invalid`
-    /// for any other mode, or `stale_revision` once another client moved the revision.
+    /// without them. Takes the project id, the mode, the team settings version the client read
+    /// and the client generation. Returns the actual commit receipt, `team_action_invalid` for
+    /// any other mode, or `stale_revision` for a save from an older read.
     pub async fn team_on_harness_switch(
         &mut self,
         id: &str,
         mode: &str,
-        revision: u64,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
@@ -222,7 +237,7 @@ impl NativeBridge {
         let action = TeamAction::OnHarnessSwitch {
             project_id,
             mode,
-            revision,
+            version,
         };
         self.team_action(action, generation).await
     }
@@ -278,17 +293,23 @@ impl NativeBridge {
     }
 
     /// Sets where the project's finished agents show: in the agents list and team graph, or
-    /// only in their Finished fold-out. Takes the project id, true for Show and the client
-    /// generation. Returns the actual commit receipt.
+    /// only in their Finished fold-out. Takes the project id, true for Show, the team settings
+    /// version the client read and the client generation. Returns the actual commit receipt;
+    /// a save from an older read is refused as `stale_revision`.
     pub async fn team_finished_agents(
         &mut self,
         id: &str,
         show: bool,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
-        self.team_action(TeamAction::FinishedAgents { project_id, show }, generation)
-            .await
+        let action = TeamAction::FinishedAgents {
+            project_id,
+            show,
+            version,
+        };
+        self.team_action(action, generation).await
     }
 
     /// Sets where the project's new sub-agents commit: `named`, each on its own branch
@@ -472,17 +493,23 @@ impl NativeBridge {
     }
 
     /// Turns a project's live master on or off: on, the engine keeps the master harness's own
-    /// app running in a terminal the owner types into. Takes the project id, the switch and
-    /// the client generation. Returns the actual commit receipt.
+    /// app running in a terminal the owner types into. Takes the project id, the switch, the
+    /// team settings version the client read and the client generation. Returns the actual
+    /// commit receipt; a save from an older read is refused as `stale_revision`.
     pub async fn team_live_master(
         &mut self,
         id: &str,
         on: bool,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
-        self.team_action(TeamAction::LiveMaster { project_id, on }, generation)
-            .await
+        let action = TeamAction::LiveMaster {
+            project_id,
+            on,
+            version,
+        };
+        self.team_action(action, generation).await
     }
 
     /// Pauses every agent of a project's team, or resumes it.

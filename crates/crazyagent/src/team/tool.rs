@@ -66,6 +66,12 @@ pub const MEMORY_TOOLS: [&str; 2] = [REMEMBER_TOOL, RECALL_TOOL];
 /// The team tools only an agent that leads others uses, left out of the list of a
 /// sub-agent the owner's Sub-agent depth setting keeps from leading.
 pub const LEAD_TOOLS: [&str; 3] = [SPAWN_TOOL, STOP_TOOL, MERGE_TOOL];
+pub const ASK_TOOL: &str = "ask";
+pub const RECORD_TOOL: &str = "record_answer";
+/// The owner's questions tools (DEC-099 A) a server lists after `TEAM_TOOLS`: `ask` logs a
+/// question for the owner and `record_answer` records the owner's chat message that
+/// answered one of the master's own. A sub-agent's server leaves `record_answer` out.
+pub const QUESTION_TOOLS: [&str; 2] = [ASK_TOOL, RECORD_TOOL];
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -108,6 +114,10 @@ const REMEMBER_INVALID: &str =
 const RECALL_INVALID: &str = "Not searched: give plain words on one line of up to 100 bytes, or none for the newest memories.";
 const CALL_INVALID: &str = "Not done: the engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
+const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters, at most 6 distinct one-line options of up to 200 bytes, and if you choose them a recommended answer (one of the options, or up to 200 bytes when there are none) and context of up to 4096 bytes.";
+const RECORD_INVALID: &str = "Not recorded: give the question number, the version you read (0 while it waits) and the number of the owner's chat message that answers it.";
+const ASK_KEYS: [&str; 4] = ["question", "options", "recommended", "context"];
+const RECORD_KEYS: [&str; 3] = ["question", "version", "owner_turn"];
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
 const NOT_TAKEN: &str =
@@ -146,13 +156,22 @@ const fn same_name(a: &str, b: &str) -> bool {
     }
     true
 }
+const _: () = assert!(
+    2 * (crate::questions::QUESTION_BYTES_MAX
+        + crate::questions::OPTIONS_MAX * crate::questions::OPTION_BYTES_MAX
+        + crate::questions::RECOMMENDED_BYTES_MAX
+        + crate::questions::CONTEXT_BYTES_MAX)
+        + 256
+        <= CALL_BYTES_MAX as usize
+);
 
 /// One team tool call a live master or a sub-agent made (DEC-104), as its server writes it
 /// into the mailbox for the engine to answer by the caller's place in the team: the work
 /// verbs `start_work`, `inspect_work`, `update_work`, `transfer_work` and `finish_work`,
 /// the lead verbs `spawn`, `stop` and `merge`, and `sessions`, `session`, `remember` and
-/// `recall` over past conversations and saved memory. The engine names the caller from
-/// the mailbox it read the call from, never from the call.
+/// `recall` over past conversations and saved memory, and `ask` and `record_answer` for
+/// the owner's questions log (DEC-099 A). The engine names the caller from the mailbox it
+/// read the call from, never from the call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -210,11 +229,22 @@ pub enum Call {
     Recall {
         query: String,
     },
+    Ask {
+        question: String,
+        options: Vec<String>,
+        recommended: Option<String>,
+        context: Option<String>,
+    },
+    RecordAnswer {
+        question: u64,
+        version: u64,
+        owner_turn: i64,
+    },
 }
 
 impl Call {
     /// The tool this call came from, the name the owner's tool switches use. Takes the
-    /// call. Returns one of `TEAM_TOOLS`.
+    /// call. Returns one of `TEAM_TOOLS` or `QUESTION_TOOLS`.
     pub fn name(&self) -> &'static str {
         let name = match self {
             Self::StartWork { .. } => START_WORK_TOOL,
@@ -229,8 +259,10 @@ impl Call {
             Self::Session { .. } => SESSION_TOOL,
             Self::Remember { .. } => REMEMBER_TOOL,
             Self::Recall { .. } => RECALL_TOOL,
+            Self::Ask { .. } => ASK_TOOL,
+            Self::RecordAnswer { .. } => RECORD_TOOL,
         };
-        assert!(TEAM_TOOLS.contains(&name));
+        assert!(TEAM_TOOLS.contains(&name) || QUESTION_TOOLS.contains(&name));
         name
     }
 }
@@ -285,13 +317,13 @@ struct Recorded {
     role: Option<String>,
 }
 
-/// Serves the master's `delegate` tool as an MCP server over stdio until its client closes
-/// input, and with a mailbox also its `MEMORY_TOOLS` less the ones switched off, each answered
-/// by the engine through the mailbox. Takes the client's input and output, the absolute drop
-/// file in the master's private temporary folder, the mailbox folder the engine made for a
+/// Serves the master's `delegate` and `ask` tools as an MCP server over stdio until its client
+/// closes input, and with a mailbox also its `MEMORY_TOOLS` less the ones switched off, each
+/// answered by the engine through the mailbox. Takes the client's input and output, the absolute
+/// drop file in the master's private temporary folder, the mailbox folder the engine made for a
 /// team master without its live terminal, and the tools left out. Returns an input or output
-/// failure, or a refusal when the mailbox is not a plain folder; a `delegate` call only
-/// records a proposal, which the engine admits after the turn.
+/// failure, or a refusal when the mailbox is not a plain folder; a `delegate` or `ask` call only
+/// records a proposal or question, which the engine takes after the turn.
 pub fn serve(
     input: impl BufRead,
     output: impl Write,
@@ -341,7 +373,10 @@ pub fn serve_live(
 /// Says whether every name is one of the team tools, as the engine subcommands check the
 /// tools they are told to leave out. Takes the names. Returns the answer.
 pub fn known_tools(names: &[String]) -> bool {
-    names.len() <= TEAM_TOOLS.len() && names.iter().all(|name| TEAM_TOOLS.contains(&name.as_str()))
+    names.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len()
+        && names.iter().all(|name| {
+            TEAM_TOOLS.contains(&name.as_str()) || QUESTION_TOOLS.contains(&name.as_str())
+        })
 }
 
 fn rpc(
@@ -433,6 +468,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                     "additionalProperties": false,
                 },
             })];
+            tools.extend([questions::ask_listing(), questions::record_listing()]);
             if mailbox.is_some() {
                 tools.extend(
                     MEMORY_TOOLS
@@ -441,7 +477,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                         .map(|name| spec(name)),
                 );
             }
-            assert!(tools.len() <= 1 + MEMORY_TOOLS.len());
+            assert!(tools.len() <= 3 + MEMORY_TOOLS.len());
             json!({ "tools": tools })
         }
         Some("tools/call") => match (mailbox, name) {
@@ -451,8 +487,11 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                     None => return Some(failure(id, -32602, "Unknown tool")),
                 }
             }
-            _ => match call(params, drop) {
-                Some((text, error)) => tool_result(text, error),
+            _ => match call(params, drop)
+                .map(|(text, error)| (text.to_owned(), error))
+                .or_else(|| questions::drop_call(params, drop))
+            {
+                Some((text, error)) => tool_result(&text, error),
                 None => return Some(failure(id, -32602, "Unknown tool")),
             },
         },
@@ -482,12 +521,19 @@ fn mailed(mailbox: &Path, name: &str, params: Option<&Value>, off: &[String]) ->
 /// The team tools a server lists, in `BUILTIN_TOOLS` order, without the ones left out.
 /// Takes the tools left out. Returns the MCP `tools/list` result.
 fn team_tools(off: &[String]) -> Value {
-    let tools: Vec<Value> = TEAM_TOOLS
+    let on = |name: &str| !off.iter().any(|tool| tool == name);
+    let mut tools: Vec<Value> = TEAM_TOOLS
         .iter()
-        .filter(|name| !off.iter().any(|tool| tool == *name))
+        .filter(|name| on(name))
         .map(|name| spec(name))
         .collect();
-    assert!(tools.len() <= TEAM_TOOLS.len());
+    if on(ASK_TOOL) {
+        tools.push(ask_tool());
+    }
+    if on(RECORD_TOOL) {
+        tools.push(record_tool());
+    }
+    assert!(tools.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len());
     json!({ "tools": tools })
 }
 
@@ -577,6 +623,45 @@ fn spec(name: &str) -> Value {
         other => unreachable!("{other} is not a team tool"),
     };
     json!({"name": name, "description": description, "inputSchema": schema})
+}
+
+/// The MCP entry of the `record_answer` tool, the same for every master that is given it.
+/// Output: the tool's name, description and input schema.
+pub fn record_tool() -> Value {
+    json!({
+        "name": RECORD_TOOL,
+        "description": "Record that the owner answered one of your own questions in this chat instead of in the Questions view. Name the owner's message; the engine takes the answer from that message, never from your words, and takes the question off the owner's list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "integer", "description": "The question number the ask tool gave you."},
+                "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
+                "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it."},
+            },
+            "required": ["question", "version", "owner_turn"],
+            "additionalProperties": false,
+        },
+    })
+}
+
+/// The MCP entry of the `ask` tool, the same for every master and agent that is given it.
+/// Output: the tool's name, description and input schema.
+pub fn ask_tool() -> Value {
+    json!({
+        "name": ASK_TOOL,
+        "description": "Ask the owner a question and log it in the project's questions. This is the only way to ask the owner anything, grill-me questions included: one question at a time, with the answer you recommend. The owner is notified and the tool replies with the question number. The owner's answer or dismissal comes to you once, as a message.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "One plain question for the owner."},
+                "options": {"type": "array", "items": {"type": "string"}, "maxItems": crate::questions::OPTIONS_MAX, "description": "Up to 6 short one-line answers the owner can pick from."},
+                "recommended": {"type": "string", "description": "The answer you recommend: one of the options, or a short answer when there are none."},
+                "context": {"type": "string", "description": "What the owner needs to know to answer."},
+            },
+            "required": ["question"],
+            "additionalProperties": false,
+        },
+    })
 }
 
 fn answer_live(request: &Value, mailbox: &Path, off: &[String]) -> Option<Value> {
@@ -844,7 +929,73 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(RECALL_INVALID),
         },
+        ASK_TOOL => ask_call(arguments).ok_or(ASK_INVALID),
+        RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
         _ => return None,
+    })
+}
+
+/// Reads one `ask` call: a question with its options, recommendation and context, each
+/// checked as the questions log checks it. Takes the arguments. Returns the call, or none
+/// when a part is missing, unknown or outside its bounds.
+fn ask_call(arguments: Option<&Value>) -> Option<Call> {
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !ASK_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let text = |key: &str| match arguments.get(key) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(text)) => Some(Some(text.clone())),
+        Some(_) => None,
+    };
+    let options = match arguments.get("options") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) if items.len() <= crate::questions::OPTIONS_MAX => items
+            .iter()
+            .map(|item| item.as_str().map(str::to_owned))
+            .collect::<Option<_>>()?,
+        Some(_) => return None,
+    };
+    let ask = crate::questions::Ask {
+        question: text("question")??,
+        options,
+        recommended: text("recommended")?,
+        context: text("context")?,
+    }
+    .checked()
+    .ok()?;
+    Some(Call::Ask {
+        question: ask.question,
+        options: ask.options,
+        recommended: ask.recommended,
+        context: ask.context,
+    })
+}
+
+/// Reads one `record_answer` call: the question number, the version the master read and
+/// the owner's chat message number. Takes the arguments. Returns the call, or none when a
+/// part is missing, unknown or not a number in range.
+fn record_call(arguments: Option<&Value>) -> Option<Call> {
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !RECORD_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let number = |key: &str| arguments.get(key).and_then(Value::as_u64);
+    let question = number("question").filter(|id| *id > 0)?;
+    let version = number("version")?;
+    let owner_turn = number("owner_turn")
+        .and_then(|turn| i64::try_from(turn).ok())
+        .filter(|turn| *turn > 0)?;
+    Some(Call::RecordAnswer {
+        question,
+        version,
+        owner_turn,
     })
 }
 
@@ -890,6 +1041,19 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         Call::Session { id, offset } => json!({"id": id, "offset": offset}),
         Call::Remember { text, scope } => json!({"text": text, "scope": scope.as_str()}),
         Call::Recall { query } => json!({"query": query}),
+        Call::Ask {
+            question,
+            options,
+            recommended,
+            context,
+        } => {
+            json!({"question": question, "options": options, "recommended": recommended, "context": context})
+        }
+        Call::RecordAnswer {
+            question,
+            version,
+            owner_turn,
+        } => json!({"question": question, "version": version, "owner_turn": owner_turn}),
     };
     let again = live_call(call.name(), Some(&arguments)).expect("every call names a team tool")?;
     if again != call {
@@ -1569,6 +1733,8 @@ fn remove_drop(drop: &Path) {
         let _ = std::fs::remove_file(drop);
     }
 }
+
+pub mod questions;
 
 #[cfg(all(test, unix))]
 #[path = "tool/tests.rs"]

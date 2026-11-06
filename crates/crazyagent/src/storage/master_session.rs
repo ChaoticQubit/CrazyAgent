@@ -163,6 +163,7 @@ pub(crate) enum MasterRuntimeObservation {
 pub(crate) struct PreparedMasterTurn {
     pub(crate) text: String,
     pub(crate) message: String,
+    pub(crate) owner_turn: Option<u64>,
     pub(crate) instructions: String,
     pub(crate) tools: bool,
     pub(crate) session: MasterSessionView,
@@ -2812,6 +2813,7 @@ fn bundle(
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
         message: running_message(tx, &session, turn)?,
+        owner_turn: turn.engine_request.is_none().then_some(turn.ordinal),
         instructions,
         tools,
         session,

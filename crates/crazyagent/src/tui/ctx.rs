@@ -1,3 +1,4 @@
+use super::client::questions::QuestionsQuery;
 use super::frame::Message;
 use super::glyphs::Glyphs;
 use super::seam::{AccountRow, PoolScope, ProjectCard, Request};
@@ -5,6 +6,7 @@ use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
+use crate::protocol::ProjectId;
 use crate::setup::SetupStatus;
 use crate::terminal::INPUT_BYTES_MAX;
 use ratatui::text::{Line, Span};
@@ -60,10 +62,21 @@ pub struct Store {
     pub memory: Load<usize>,
     pub setup: Load<SetupStatus>,
     pub projects_seen: Option<String>,
+    pub questions: Load<Vec<(ProjectId, u32)>>,
     pub waiting: Option<(
         Option<crate::protocol::ProjectId>,
         crate::landing::WaitingChanges,
     )>,
+}
+
+impl Store {
+    /// Counts the questions waiting for the owner in every project, for the footer badge.
+    /// Input: none. Output: the sum of the last counts read, 0 before the first read.
+    pub fn pending(&self) -> u64 {
+        self.questions.ready().map_or(0, |counts| {
+            counts.iter().map(|(_, count)| u64::from(*count)).sum()
+        })
+    }
 }
 
 impl Default for Store {
@@ -78,6 +91,7 @@ impl Default for Store {
             memory: Load::NotReady,
             setup: Load::Idle,
             projects_seen: None,
+            questions: Load::Idle,
             waiting: None,
         }
     }
@@ -85,8 +99,8 @@ impl Default for Store {
 
 /// Everything a screen needs besides its own state: look, size, engine data,
 /// the owner identity of the current trusted connection, whether loading lines
-/// are still in their quiet first 150 ms, and the queues for requests and
-/// messages.
+/// are still in their quiet first 150 ms, the owner's EDITOR, the one file waiting
+/// for it and whether it runs now, and the queues for requests and messages.
 /// Input: owned by the shell and lent to screens. Output: requests and the
 /// latest message are drained by the shell.
 pub struct Ctx {
@@ -105,6 +119,9 @@ pub struct Ctx {
     pub socket: String,
     pub home: Option<String>,
     pub prefs: Option<std::path::PathBuf>,
+    pub editor: Option<String>,
+    pub editing: Option<super::client::editor::Edit>,
+    pub editor_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub sessions_key: Option<(crate::protocol::ProjectId, char)>,
     pub shift_arrows: crate::tui::keys::ShiftArrows,
     pub shift_enter: crate::tui::keys::ShiftEnter,
@@ -142,6 +159,9 @@ impl Ctx {
             socket,
             home: None,
             prefs: None,
+            editor: None,
+            editing: None,
+            editor_running: std::sync::Arc::default(),
             sessions_key: None,
             shift_arrows: crate::tui::keys::ShiftArrows::default(),
             shift_enter: crate::tui::keys::ShiftEnter::default(),
@@ -187,6 +207,10 @@ impl Ctx {
             && queued.len() + bytes.len() <= INPUT_BYTES_MAX
         {
             queued.extend_from_slice(bytes);
+            return true;
+        }
+        let counts = |queued: &Request| matches!(queued, Request::Questions(query) if **query == QuestionsQuery::Counts);
+        if counts(&request) && self.requests.iter().any(counts) {
             return true;
         }
         let read = matches!(

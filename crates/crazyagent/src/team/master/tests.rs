@@ -465,6 +465,101 @@ fn engine_input_waits_until_the_live_masters_app_reads_keys() {
     );
 }
 
+/// The step an engine input runs before it types runs only once the master is free and held
+/// for that input, never while a turn is open or the owner types, so a delivery the step
+/// records is never left open for an input that waits. A step that answers false leaves the
+/// input waiting as `Busy`, one that fails fails it; either way nothing is typed and the
+/// master is free for the next input.
+#[test]
+fn engine_input_runs_its_step_only_right_before_it_types() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let typed = fixture.base.join("typed");
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                typed.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
+        .unwrap();
+    let input = |text: &str, now: i64, answer: Result<bool, EngineError>| {
+        let ran = std::cell::Cell::new(false);
+        let result = master_input_at_when(
+            &fixture.connection,
+            host.as_ref(),
+            None,
+            &project,
+            text,
+            now,
+            || {
+                ran.set(true);
+                answer
+            },
+        );
+        (result, ran.get())
+    };
+    let input_ms = || -> Option<i64> {
+        fixture
+            .connection
+            .query_row(
+                "SELECT input_ms FROM team_live_masters WHERE project=?1",
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    assert_eq!(
+        input("first", NOW, Ok(true)),
+        (Err(InputRefused::NoMaster), false)
+    );
+    fixture.live(Some(MASTER));
+    fixture.set("turn_open=1");
+    assert_eq!(
+        input("first", NOW, Ok(true)),
+        (Err(InputRefused::Busy), false)
+    );
+    fixture.set("turn_open=0");
+    owner_typed(&fixture.connection, MASTER, b"x", NOW - 5_000).unwrap();
+    assert_eq!(
+        input("first", NOW, Ok(true)),
+        (Err(InputRefused::OwnerTyping), false)
+    );
+
+    let later = NOW + DRAFT_ABANDONED_MS;
+    assert_eq!(
+        input("first", later, Ok(false)),
+        (Err(InputRefused::Busy), true)
+    );
+    assert_eq!(input_ms(), None, "a step that waits frees the master");
+    assert_eq!(
+        input(
+            "first",
+            later,
+            Err(EngineError("ledger_unavailable".into()))
+        ),
+        (Err(InputRefused::Failed("ledger_unavailable".into())), true)
+    );
+    assert_eq!(input_ms(), None, "a failed step frees the master");
+    assert_eq!(input("first", later, Ok(true)), (Ok(()), true));
+    assert_eq!(input_ms(), Some(later));
+    let seen = typed_until(&typed, b"first\x1b[201~\r");
+    assert_eq!(
+        seen.windows(5).filter(|window| *window == b"first").count(),
+        1,
+        "only the input whose step agreed was typed: {seen:?}"
+    );
+}
+
 #[test]
 fn owner_keys_leave_a_draft_until_enter_ctrl_c_or_ctrl_u_and_arrows_change_nothing() {
     assert_eq!(keys(b"abc"), (false, true));
@@ -804,6 +899,179 @@ fn a_planted_mailbox_call_is_checked_again_before_it_takes_effect() {
         .query_row("SELECT COUNT(*) FROM team_tasks", [], |row| row.get(0))
         .unwrap();
     assert_eq!(tasks, 0);
+}
+
+/// Appends one finished team message of the project, as the runtime keeps the chat.
+/// Inputs: the connection, the author and the text. Output: the message id.
+fn chat(connection: &Connection, author: crate::team::MessageAuthor, text: &str) -> i64 {
+    let project = ProjectId::new(PROJECT).unwrap();
+    let tx = connection.unchecked_transaction().unwrap();
+    let id = crate::team::append_message(
+        &tx,
+        &project,
+        author,
+        text,
+        crate::team::MessageState::Answered,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    id
+}
+
+/// Sends one owner chat message of the project through the owner's team Message path,
+/// which records it as an owner turn. Inputs: the connection and the text. Output: the
+/// message id.
+fn typed_turn(connection: &Connection, text: &str) -> i64 {
+    let tx = connection.unchecked_transaction().unwrap();
+    let action = crate::team::TeamAction::Message {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        text: text.into(),
+    };
+    assert_eq!(
+        crate::team::execute(&tx, &ModelAccess::default(), &action).unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    let id = tx
+        .query_row(
+            "SELECT MAX(id) FROM team_messages WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    tx.commit().unwrap();
+    id
+}
+
+#[test]
+fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
+    use crate::team::MessageAuthor;
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let folder = PathBuf::from(&fixture.setup.folder);
+    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    crate::ide::workspace::tests::add_project(&fixture.connection, PROJECT, &folder);
+    let ask =
+        json!({"question": "Ship on Friday?", "options": ["Yes", "No"], "recommended": "Yes"});
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![tool_call(1, tool::ASK_TOOL, ask.clone())],
+    );
+    assert_eq!(text(&answers[0]), (NO_MASTER, true));
+
+    let before = typed_turn(&fixture.connection, "Yes, ship it.");
+    fixture.live(Some(MASTER));
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![
+            tool_call(1, tool::ASK_TOOL, ask),
+            tool_call(
+                2,
+                tool::ASK_TOOL,
+                json!({"question": "Ship on Friday?", "options": ["Yes", "Yes"]}),
+            ),
+        ],
+    );
+    let (said, error) = text(&answers[0]);
+    assert!(!error && said.starts_with("Question 1 is logged"), "{said}");
+    let (said, error) = text(&answers[1]);
+    assert!(error && said.starts_with("Not asked:"), "{said}");
+
+    let own = chat(
+        &fixture.connection,
+        MessageAuthor::Master,
+        "The owner said yes.",
+    );
+    let unrecorded = chat(&fixture.connection, MessageAuthor::Owner, "Yes, Friday.");
+    let owner = typed_turn(&fixture.connection, "Yes, Friday.");
+    let record = |id: u64, question: u64, turn: i64| {
+        tool_call(
+            id,
+            tool::RECORD_TOOL,
+            json!({"question": question, "version": 0, "owner_turn": turn}),
+        )
+    };
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![
+            record(3, 1, before),
+            record(4, 1, own),
+            record(5, 9, owner),
+            record(6, 1, owner + 100),
+            record(9, 1, unrecorded),
+        ],
+    );
+    assert_eq!(text(&answers[0]), (TURN_REFUSED, true));
+    assert_eq!(text(&answers[1]), (TURN_REFUSED, true));
+    assert_eq!(text(&answers[4]), (TURN_REFUSED, true));
+    assert_eq!(
+        text(&answers[2]),
+        (
+            "Not recorded: you asked no question 9 in this project.",
+            true
+        )
+    );
+    assert_eq!(text(&answers[3]), (TURN_REFUSED, true));
+    let project = fixture.setup.project_id.clone();
+    assert_eq!(
+        crate::questions::pending(&fixture.connection, &project)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let answers = serve_while(&mut fixture, &mailbox, vec![record(7, 1, owner)]);
+    let recorded = format!("Recorded the owner's message {owner} as the answer to question 1.");
+    assert_eq!(text(&answers[0]), (recorded.as_str(), false));
+    let answers = serve_while(&mut fixture, &mailbox, vec![record(8, 1, owner)]);
+    assert_eq!(
+        text(&answers[0]),
+        (
+            "Not recorded: question 1 is already answered or dismissed, or changed since version 0.",
+            true
+        )
+    );
+
+    let page = crate::questions::page(&fixture.connection, &project, None).unwrap();
+    assert_eq!(page.items.len(), 1);
+    let question = &page.items[0];
+    assert_eq!(
+        (
+            question.asker.as_str(),
+            question.status,
+            question.answered_by,
+            question.answer.as_deref(),
+            question.version
+        ),
+        (
+            "master:41",
+            crate::questions::QuestionStatus::Answered,
+            Some(crate::questions::AnsweredBy::Chat),
+            Some("Yes, Friday."),
+            1
+        )
+    );
+    let messages: i64 = fixture
+        .connection
+        .query_row("SELECT COUNT(*) FROM team_messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(messages, 4);
+    let page = std::fs::read_to_string(
+        folder
+            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join("questions.md"),
+    )
+    .unwrap();
+    assert!(
+        page.contains("Answered by the owner in the master chat"),
+        "{page}"
+    );
+    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }
 
 /// Adds a sub-agent of the fixture's project with a role handle and, for a finished one, a
@@ -3792,7 +4060,11 @@ fn a_live_master_remembers_and_recalls_memories_quoted_with_who_saved_them() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(listed, tool::TEAM_TOOLS);
+    let listed_on: Vec<&str> = tool::TEAM_TOOLS
+        .into_iter()
+        .chain(tool::QUESTION_TOOLS)
+        .collect();
+    assert_eq!(listed, listed_on);
     let saved = "Saved to memory. recall finds it now, and agents started from now on get it.";
     assert_eq!(text(&answers[1]), (saved, false));
     assert_eq!(text(&answers[2]), (saved, false));

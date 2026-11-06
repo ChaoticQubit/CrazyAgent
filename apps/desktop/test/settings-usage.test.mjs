@@ -301,3 +301,52 @@ test("Settings has a Usage tab", () => {
   assert.match(settings, /\{ id: "usage", label: "Usage", icon: "trending-up" \}/);
   assert.match(settings, /tab === "usage" \? <UsageSettings \/>/);
 });
+
+test("a harness without a reader reads as usage not reported, never as zero", () => {
+  const unreported = (key, harness) => row(key, { tokens: tokens(), runs: 0, not_reported_by: harness });
+  const only = text(render({ report: { kind: "ok", value: report({
+    total: tokens(), runs: 0, lines: [], pools: [], accounts: [], days: [],
+    projects: [unreported("project-harbor", "RCLI")], agents: [unreported("master-project-harbor", "RCLI")], not_reported_by: ["RCLI"],
+  }) } }));
+  assert.match(only, /Tokens Not reported Usage not reported by RCLI/);
+  assert.match(only, /By project Name Tokens In Out Cache read Runs Last used Harbor Notes Usage not reported by RCLI 5 min ago/);
+  assert.match(only, /By agent .* Usage not reported by RCLI 5 min ago/);
+  assert.doesNotMatch(only, /No usage in this range/);
+  assert.doesNotMatch(only, /Harbor Notes 0 /);
+
+  const mixed = text(render({ report: { kind: "ok", value: report({
+    projects: [row("project-harbor", { not_reported_by: "Gemini CLI" }), unreported("project-docs", "OpenCode")],
+    not_reported_by: ["Gemini CLI", "OpenCode"],
+  }) } }));
+  assert.match(mixed, /Tokens 6\.3K 1\.2K in, 300 out/);
+  assert.match(mixed, /Not in these totals: usage not reported by Gemini CLI, OpenCode\./);
+  assert.match(mixed, /Harbor Notes 5\.5K \+ usage not reported by Gemini CLI 1\.2K 300 4K 2 5 min ago/);
+  assert.match(mixed, /project-docs Usage not reported by OpenCode 5 min ago/);
+
+  const older = text(render({ report: { kind: "ok", value: report() } }));
+  assert.doesNotMatch(older, /not reported/, "a report from an engine without the field shows plain counts");
+});
+
+test("a usage step that panicked shows one plain warning with its count and last time", () => {
+  assert.doesNotMatch(text(render()), /internal error/u);
+  const shown = text(render({ report: { kind: "ok", value: report({ health: [
+    { step: "poll", panics: 1, last_ms: NOW - 30_000, recovered_ms: null },
+    { step: "runs", panics: 4, last_ms: NOW - 3 * HOUR, recovered_ms: null },
+  ] }) } }));
+  assert.match(shown, /Checking account limits hit an internal error once since the engine started, last just now\. CrazyAgent keeps retrying; limits shown may be out of date\./u);
+  assert.match(shown, /Counting research run tokens hit an internal error 4 times since the engine started, last 3 h ago\. CrazyAgent keeps retrying; research token totals may be low\./u);
+  assert.equal(
+    usage.healthText({ step: "team", panics: 2, last_ms: NOW - 5 * MINUTE, recovered_ms: null }, NOW),
+    "Counting agent tokens hit an internal error 2 times since the engine started, last 5 min ago. CrazyAgent keeps retrying; agent and research run token totals may be low.",
+  );
+});
+
+test("a usage step kind that worked again after its last panic says when, without a retry warning", () => {
+  const line = usage.healthText({ step: "poll", panics: 1, last_ms: NOW - 3 * HOUR, recovered_ms: NOW - 2 * HOUR }, NOW);
+  assert.equal(line, "Checking account limits hit an internal error once since the engine started, last 3 h ago. It worked again 2 h ago.");
+  const shown = text(render({ report: { kind: "ok", value: report({ health: [
+    { step: "poll", panics: 1, last_ms: NOW - 3 * HOUR, recovered_ms: NOW - 2 * HOUR },
+  ] }) } }));
+  assert.ok(shown.includes(line), shown);
+  assert.doesNotMatch(shown, /keeps retrying|may be out of date/u);
+});

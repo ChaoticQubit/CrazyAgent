@@ -1,6 +1,7 @@
 use super::git::{LISTING_BYTES_MAX, OUTPUT_BYTES_MAX, Repo, failure, is_object_id};
 use super::{ChangeDiff, ChangedFile, FileKind, FileMark, FileStatus};
 use crate::engine::EngineError;
+use crate::ide::agent_config;
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,9 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 const DIFF_TEXT_BYTES_MAX: usize = 4 * 1024 * 1024;
 const PAGE_BUDGET: usize = 24 * 1024;
 const RECENT_BYTES_MAX: usize = 16 * 1024 * 1024;
-const RECENT_MAX: usize = 32;
+pub(super) const RECENT_MAX: usize = 32;
+const LISTS_BYTES_MAX: usize = 4 * 1024 * 1024;
+const LISTS_MAX: usize = 64;
 const FED_SOURCES_MAX: usize = 16;
 
 /// A change's diff computed once: its files and plain patch text, each cut into pages,
@@ -33,15 +36,63 @@ impl Computed {
     }
 }
 
-/// A change's repository with its base and head commits.
-type Key = (PathBuf, String, String);
+/// A change's repository with its base and head commits, or a file's repository, commit
+/// and path.
+pub(super) type Key = (PathBuf, String, String);
 
-/// Computed diffs with their keys, least recently read first.
-type Recent = VecDeque<(Key, Arc<Computed>)>;
+/// Values kept with their keys, least recently read first.
+pub(super) type Recent<T> = VecDeque<(Key, Arc<T>)>;
 
 /// The diffs computed for recent pages, at most `RECENT_MAX` and `RECENT_BYTES_MAX` apart
 /// from the newest.
-static RECENT: LazyLock<Mutex<Recent>> = LazyLock::new(Default::default);
+static RECENT: LazyLock<Mutex<Recent<Computed>>> = LazyLock::new(Default::default);
+
+/// The file lists of recent changes, at most `LISTS_MAX` and `LISTS_BYTES_MAX` of paths
+/// apart from the newest. They are kept apart from the diffs, so a list the IDE polls
+/// stays while larger diffs push its own diff out.
+static LISTS: LazyLock<Mutex<Recent<[ChangedFile]>>> = LazyLock::new(Default::default);
+
+/// Takes a kept value and makes it the newest. Inputs: the cache and the key. Output: the
+/// value, or None when it is not kept.
+pub(super) fn recall<T: ?Sized>(cache: &Mutex<Recent<T>>, key: &Key) -> Option<Arc<T>> {
+    let mut recent = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    let entry = recent
+        .iter()
+        .position(|(seen, _)| seen == key)
+        .and_then(|at| recent.remove(at))?;
+    let found = Arc::clone(&entry.1);
+    recent.push_back(entry);
+    Some(found)
+}
+
+/// Keeps a value as the newest, then drops the oldest ones while more than `most` are kept
+/// or their `size` passes `bytes`, never the newest. Inputs: the cache, the key, the value,
+/// the two bounds and the size of one value. Output: none.
+pub(super) fn keep<T: ?Sized>(
+    cache: &Mutex<Recent<T>>,
+    key: Key,
+    value: &Arc<T>,
+    most: usize,
+    bytes: usize,
+    size: impl Fn(&T) -> usize,
+) {
+    assert!(most > 0);
+    let mut recent = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    recent.retain(|(seen, _)| *seen != key);
+    recent.push_back((key, Arc::clone(value)));
+    while recent.len() > 1
+        && (recent.len() > most
+            || recent.iter().map(|(_, kept)| size(&**kept)).sum::<usize>() > bytes)
+    {
+        recent.pop_front();
+    }
+    assert!(recent.len() <= most);
+    assert!(
+        recent
+            .back()
+            .is_some_and(|(_, kept)| Arc::ptr_eq(kept, value))
+    );
+}
 
 /// Line counts of a change: how many paths changed and how many lines were added and
 /// removed across them, binary files counting no lines.
@@ -156,8 +207,11 @@ fn kind_of(mode: &str, binary: bool) -> FileKind {
     }
 }
 
+/// Whether a path's file name opens the same file as `name` on a case-insensitive APFS
+/// volume, as git and the IDE open it there. Inputs: the path and a lower-case ASCII name.
+/// Output: true for that file.
 fn named(path: &str, name: &str) -> bool {
-    path.rsplit('/').next() == Some(name)
+    agent_config::same_name(path.rsplit('/').next().unwrap_or(path), name)
 }
 
 /// One entry of a git tree listing: its mode, object id and path in the project.
@@ -350,6 +404,9 @@ pub(super) fn files(repo: &Repo, base: &str, head: &str) -> Result<Vec<ChangedFi
         if old_mode != "000000" && new_mode != "000000" && old_mode != new_mode {
             marks.push(FileMark::Mode);
         }
+        if agent_config::is_ide_config(path) || old_path.is_some_and(agent_config::is_ide_config) {
+            marks.push(FileMark::IdeConfig);
+        }
         files.push(ChangedFile {
             path: plain(path),
             old_path: old_path.map(plain),
@@ -464,37 +521,49 @@ fn compute(repo: &Repo, base: &str, head: &str) -> Result<Computed, EngineError>
 fn computed(repository: &Path, base: &str, head: &str) -> Result<Arc<Computed>, EngineError> {
     let key = (repository.to_path_buf(), base.to_owned(), head.to_owned());
     let lasting = is_object_id(base) && is_object_id(head);
-    if lasting {
-        let mut recent = RECENT.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(entry) = recent
-            .iter()
-            .position(|(seen, _)| *seen == key)
-            .and_then(|at| recent.remove(at))
-        {
-            let found = Arc::clone(&entry.1);
-            recent.push_back(entry);
-            return Ok(found);
-        }
+    if lasting && let Some(found) = recall(&RECENT, &key) {
+        return Ok(found);
     }
     let fresh = Arc::new(compute(&super::flow::shared(repository)?, base, head)?);
     if lasting {
-        let mut recent = RECENT.lock().unwrap_or_else(PoisonError::into_inner);
-        recent.retain(|(seen, _)| *seen != key);
-        recent.push_back((key, Arc::clone(&fresh)));
-        while recent.len() > 1
-            && (recent.len() > RECENT_MAX
-                || recent.iter().map(|(_, kept)| kept.bytes()).sum::<usize>() > RECENT_BYTES_MAX)
-        {
-            recent.pop_front();
-        }
-        assert!(recent.len() <= RECENT_MAX);
-        assert!(
-            recent
-                .back()
-                .is_some_and(|(_, kept)| Arc::ptr_eq(kept, &fresh))
+        keep(
+            &RECENT,
+            key,
+            &fresh,
+            RECENT_MAX,
+            RECENT_BYTES_MAX,
+            Computed::bytes,
         );
     }
     Ok(fresh)
+}
+
+/// Lists every file a change touches, from the recent lists, or from its diff once and
+/// kept when both sides are commit ids, whose files never change. Inputs: the repository
+/// and the two commits. Output: the files in path order.
+pub(super) fn listed(
+    repository: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Arc<[ChangedFile]>, EngineError> {
+    let key = (repository.to_path_buf(), base.to_owned(), head.to_owned());
+    let lasting = is_object_id(base) && is_object_id(head);
+    if lasting && let Some(found) = recall(&LISTS, &key) {
+        return Ok(found);
+    }
+    let fresh: Arc<[ChangedFile]> = computed(repository, base, head)?.files.clone().into();
+    if lasting {
+        keep(&LISTS, key, &fresh, LISTS_MAX, LISTS_BYTES_MAX, path_bytes);
+    }
+    Ok(fresh)
+}
+
+/// The bytes the paths of a file list hold. Input: the files. Output: the bytes.
+fn path_bytes(files: &[ChangedFile]) -> usize {
+    files
+        .iter()
+        .map(|file| file.path.len() + file.old_path.as_ref().map_or(0, String::len))
+        .sum()
 }
 
 /// Builds one page of a change's diff from the change's diff computed once, so paging

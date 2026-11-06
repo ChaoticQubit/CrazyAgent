@@ -475,6 +475,14 @@ impl Restart {
         (team, setup)
     }
 
+    /// Reads the team settings version an owner change to a project must name, as a screen
+    /// reads it from the team status. Input: the project. Output: the version.
+    fn team_settings_version(&self, project: &crate::protocol::ProjectId) -> u64 {
+        let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        database.busy_timeout(Duration::from_secs(2)).unwrap();
+        crate::team::settings_version(&database, project).unwrap()
+    }
+
     /// Applies one owner team action for project-z the way the engine does.
     /// Input: the action. Output: none; the action must apply.
     fn team_action(&self, action: crate::team::TeamAction) {
@@ -1236,6 +1244,7 @@ async fn team_agents_pass_over_an_account_whose_sign_in_was_rejected_to_the_next
         restart.team_action(TeamAction::KeepWarm {
             project_id: project.clone(),
             on: true,
+            version: restart.team_settings_version(&project),
         });
         team.tick().unwrap();
         assert_eq!(
@@ -1296,6 +1305,7 @@ async fn an_idle_team_agent_whose_account_sign_in_is_rejected_stops_and_the_next
         restart.team_action(TeamAction::KeepWarm {
             project_id: setup.project_id.clone(),
             on: true,
+            version: restart.team_settings_version(&setup.project_id),
         });
         team.tick().unwrap();
         assert_eq!(
@@ -1680,6 +1690,7 @@ async fn live_master_waits_for_restart_recheck() {
         restart.team_action(TeamAction::LiveMaster {
             project_id: setup.project_id.clone(),
             on: true,
+            version: restart.team_settings_version(&setup.project_id),
         });
         let (admission, work) = run.begin_check(&restart).await;
         for _ in 0..5 {
@@ -1813,6 +1824,7 @@ async fn live_master_starts_once_restart_recheck_passes() {
         restart.team_action(TeamAction::LiveMaster {
             project_id: setup.project_id.clone(),
             on: true,
+            version: restart.team_settings_version(&setup.project_id),
         });
         team.tick().unwrap();
         assert_eq!(

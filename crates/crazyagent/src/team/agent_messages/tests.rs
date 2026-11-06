@@ -836,6 +836,9 @@ fn an_engine_notice_shows_as_the_engines_message_when_master_messages_are_not_ke
     );
 }
 
+/// One kept message row: its id, project, agent, author, kind, text and creation time.
+type Row = (i64, String, i64, String, String, Option<String>, i64);
+
 /// B19R3-H1 (rv-code r3 of chore/b19-line): an engine store whose kept messages table was
 /// made before engine notices, with its old author check and rows, opens with the table
 /// rebuilt: every row keeps its id and values, a deleted row's id is never handed out again,
@@ -862,7 +865,6 @@ fn an_old_kept_messages_table_is_rebuilt_on_open_with_every_row_and_a_notice_rec
             DELETE FROM team_agent_messages WHERE id=4;",
         )
         .unwrap();
-    type Row = (i64, String, i64, String, String, Option<String>, i64);
     let rows = |connection: &Connection| -> Vec<Row> {
         connection
             .prepare("SELECT id,project,agent,author,kind,text,created_ms FROM team_agent_messages ORDER BY id")

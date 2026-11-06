@@ -405,7 +405,7 @@ fn verify_peer(stream: &UnixStream) -> Result<(), EngineError> {
     Ok(())
 }
 
-async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
+pub(crate) async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
 ) -> Result<Vec<u8>, EngineError> {
     let length = stream.read_u32().await.map_err(io_error)? as usize;
@@ -469,7 +469,7 @@ pub struct Engine {
     storage: Storage,
     input: Mutex<InputState>,
     timeout: Duration,
-    owner_egress: tokio::sync::RwLock<()>,
+    owner_egress: std::sync::Arc<tokio::sync::RwLock<()>>,
     dispatch_drive: tokio::sync::Mutex<()>,
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
     #[cfg(unix)]
@@ -569,7 +569,7 @@ impl Engine {
                 storage,
                 input: Mutex::default(),
                 timeout,
-                owner_egress: tokio::sync::RwLock::new(()),
+                owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
                 dispatch_drive: tokio::sync::Mutex::new(()),
                 agents: Mutex::default(),
                 #[cfg(unix)]
@@ -588,7 +588,7 @@ impl Engine {
             storage: Storage::open(path, config, false).await?,
             input: Mutex::default(),
             timeout,
-            owner_egress: tokio::sync::RwLock::new(()),
+            owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
             #[cfg(unix)]
@@ -605,7 +605,7 @@ impl Engine {
             storage: Storage::open(path, config, true).await?,
             input: Mutex::default(),
             timeout,
-            owner_egress: tokio::sync::RwLock::new(()),
+            owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
             #[cfg(unix)]

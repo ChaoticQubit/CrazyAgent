@@ -81,7 +81,7 @@ test("the Agents tab shows the paused notice, waiting agents, events and the pro
     events: {
       recent: [event(9, "question", "queued", "Proceed?")], waiting: [{ agent: 7, text: "Proceed? | 1. Yes" }],
       notifications: [note(2, "chores")], paused: true, questions: [{ agent: 7, count: 1 }],
-      wake: { app: null, project: { ...SHIPPED, hourly_cap: 5 }, agents: [], effective: { ...SHIPPED, hourly_cap: 5 }, level: "project" },
+      wake: { app: null, app_version: 0, project: { ...SHIPPED, hourly_cap: 5 }, project_version: 2, agents: [], cleared: [], effective: { ...SHIPPED, hourly_cap: 5 }, level: "project" },
     },
   };
   const markup = renderToStaticMarkup(createElement(panel.TeamEventsPanel, { projectId: "chores", status, reload: () => {} }));
@@ -102,12 +102,12 @@ test("Settings groups the notifications by project, newest project first", () =>
 
 test("the wake rule, seen and attention commands send the argument names their Rust commands take", () => {
   const client = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
-  for (const call of ['("desktop_team_events", {})', '("desktop_team_wake_rule", { target, rule, generation })', '("desktop_team_seen", { id, upto, generation })', '("desktop_team_attention", { unseen, alert })']) {
+  for (const call of ['("desktop_team_events", {})', '("desktop_team_wake_rule", { target, rule, version, generation })', '("desktop_team_seen", { id, upto, generation })', '("desktop_team_attention", { unseen, alert })']) {
     assert.ok(client.includes(call), call);
   }
   const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   for (const [command, params] of [
-    ["desktop_team_wake_rule", ["target: crazyagent::team::events::RuleTarget", "rule: Option<crazyagent::team::events::WakeRule>", "generation: u64"]],
+    ["desktop_team_wake_rule", ["target: crazyagent::team::events::RuleTarget", "rule: Option<crazyagent::team::events::WakeRule>", "version: u64", "generation: u64"]],
     ["desktop_team_seen", ["id: String", "upto: i64", "generation: u64"]],
     ["desktop_team_attention", ["unseen: u32", "alert: bool"]],
   ]) {
@@ -126,4 +126,17 @@ test("each notification shows when it came and opens the project's conversation"
   assert.match(markup, /Seen<\/span>.*note 6.*2 h ago/s);
   assert.equal(markup.match(/href="#\/projects\/p%202\/conversation"/g)?.length, 2);
   assert.match(markup, /Mark 1 as seen/);
+});
+
+test("an agent level the owner reset sends the version its Reset left, so the next change is taken", () => {
+  const wakeView = { agents: [{ agent: 3, rule: SHIPPED, version: 5 }], cleared: [{ agent: 7, version: 2 }] };
+  assert.equal(wake.agentRuleVersion(wakeView, 3), 5, "an agent with its own rule sends that rule's version");
+  assert.equal(wake.agentRuleVersion(wakeView, 7), 2, "a cleared agent level sends the version the clear left, never 0");
+  assert.equal(wake.agentRuleVersion(wakeView, 9), 0, "a level never set is at version 0");
+  const source = readFileSync(new URL("../src/screens/team/wake-rules.tsx", import.meta.url), "utf8");
+  assert.match(source, /version=\{agentRuleVersion\(events\.wake, chosen\.id\)\}/);
+  const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
+  assert.match(client, /cleared: \{ agent: number; version: number \}\[\];/);
+  const rust = readFileSync(new URL("../../../crates/crazyagent/src/team/events.rs", import.meta.url), "utf8");
+  assert.match(rust, /pub cleared: Vec<ClearedRule>,/);
 });

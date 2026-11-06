@@ -12,6 +12,7 @@ mod new_project_input;
 pub(in crate::tui) mod new_project_page;
 pub(in crate::tui) mod new_project_view;
 pub mod onboarding;
+pub(in crate::tui) mod planning_line;
 pub(in crate::tui) mod process;
 pub mod profile_form;
 pub(in crate::tui) mod project;
@@ -24,6 +25,8 @@ pub(in crate::tui) mod project_plugins;
 pub(in crate::tui) mod project_team;
 pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;
+pub(in crate::tui) mod questions;
+pub(in crate::tui) mod recovery_banner;
 pub(in crate::tui) mod sessions;
 pub mod settings;
 pub mod settings_accounts;
@@ -45,6 +48,8 @@ mod new_project_frames;
 #[cfg(all(test, unix))]
 mod new_project_tests;
 #[cfg(all(test, unix))]
+mod planning_line_tests;
+#[cfg(all(test, unix))]
 mod project_access_tests;
 #[cfg(all(test, unix))]
 mod project_frames;
@@ -52,6 +57,8 @@ mod project_frames;
 mod project_page_tests;
 #[cfg(all(test, unix))]
 mod project_tests;
+#[cfg(all(test, unix))]
+mod questions_tests;
 
 use super::ctx::Ctx;
 use super::frame::{Hint, Modal};
@@ -125,17 +132,19 @@ pub enum ProjectTab {
     Conversation,
     Agents,
     Changes,
+    Questions,
     Context,
     Settings,
 }
 
 impl ProjectTab {
     /// Every tab in order.
-    pub const ALL: [ProjectTab; 6] = [
+    pub const ALL: [ProjectTab; 7] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
         Self::Changes,
+        Self::Questions,
         Self::Context,
         Self::Settings,
     ];
@@ -148,6 +157,7 @@ impl ProjectTab {
             Self::Conversation => "Conversation",
             Self::Agents => "Agents",
             Self::Changes => "Changes",
+            Self::Questions => "Questions",
             Self::Context => "Context",
             Self::Settings => "Settings",
         }

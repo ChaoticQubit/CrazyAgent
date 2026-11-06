@@ -56,6 +56,7 @@ async fn a_pack_removal_that_does_not_commit_puts_its_skill_folders_back() {
             operation: OwnerOperation::Apply {
                 mutation: OwnerMutation::RemovePackEntry {
                     id: "superpowers".into(),
+                    version: 0,
                 },
             },
         })

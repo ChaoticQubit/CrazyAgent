@@ -25,7 +25,7 @@ test("every DEC-078 intake, GitHub and setup name has a client function", () => 
   ]) assert.match(client, new RegExp(`export function ${name}\\([^)]*\\)[^{]*\\{\\s*return invoke<[A-Za-z\\[\\]]+>\\("${command}"`), name);
   assert.match(client, /invoke<CloneReceipt>\("desktop_clone_repo", \{ fullName \}\)/);
   assert.match(client, /invoke<SetupStatus>\("desktop_run_setup", \{ pack, generation \}\)/);
-  assert.match(client, /invoke<SetupStatus>\("desktop_set_pack_entry", \{ id, on, generation \}\)/);
+  assert.match(client, /invoke<SetupStatus>\("desktop_set_pack_entry", \{ id, on, version, generation \}\)/);
 });
 
 test("without the native bridge an intake read reports the engine as unreachable, never sample data", async () => {

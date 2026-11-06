@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Context
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ⧉ Context   ☰ Settings
-───────────────────────────────────────────────────────━━━━━━━━━────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ≟ Questions   ⧉ Context   ☰ Settings
+─────────────────────────────────────────────────────────────────────━━━━━━━━━──────────────────────────────────────────
   Context                                                                                 ~/projects/fieldnotes-mobile
 
   Files                                │ research/market_research.md                                   Market research
@@ -33,4 +33,4 @@
 
 
 
- Enter Open   a Add file   o Open in editor   d Delete   m Save to memory   Shift-←→ Tabs   Esc Home             ? Help
+ Enter Open   a Add file   o Open in app   d Delete   m Save to memory   v Edit file   Shift-←→ Tabs   Esc Home  ? Help

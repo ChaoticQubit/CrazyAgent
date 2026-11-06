@@ -552,6 +552,74 @@ fn layout_is_created_once_and_each_git_exclude_line_is_written_exactly_once() {
     );
 }
 
+/// IN1-R1: before the IDE starts, the agents root of either layout leaves git in the
+/// project folder, so Stage All there never takes an agent's files past Accept, while the
+/// owner's own files, and a top-level `worktrees` folder of a project keeping its state in
+/// `.crazyagent`, stay visible.
+#[test]
+fn exclude_agents_hides_the_agents_root_of_either_layout_once() {
+    let case = case();
+    let older = case.home.join("older");
+    let newer = case.home.join("newer");
+    for (project, agents) in [
+        (&older, older.join("worktrees")),
+        (&newer, newer.join(CRAZYAGENT_DIRECTORY).join("worktrees")),
+    ] {
+        fs::create_dir_all(agents.join("agent-3")).unwrap();
+        git(project, &["init", "-q"]);
+        fs::write(agents.join("agent-3").join("work.txt"), "agent\n").unwrap();
+        fs::write(project.join("notes.txt"), "owner\n").unwrap();
+        assert!(
+            git(project, &["status", "--porcelain", "--untracked-files=all"])
+                .contains("agent-3/work.txt")
+        );
+    }
+    fs::create_dir(newer.join("worktrees")).unwrap();
+    fs::write(newer.join("worktrees").join("mine.txt"), "owner\n").unwrap();
+
+    for _ in 0..2 {
+        assert!(exclude_agents(&older).unwrap());
+        assert!(exclude_agents(&newer).unwrap());
+    }
+    let exclude = |project: &Path| {
+        fs::read_to_string(project.join(".git").join("info").join("exclude")).unwrap()
+    };
+    assert_eq!(
+        exclude(&older)
+            .lines()
+            .filter(|line| *line == "/worktrees/")
+            .count(),
+        1
+    );
+    assert!(!exclude(&older).contains(".crazyagent/"));
+    assert_eq!(
+        exclude(&newer)
+            .lines()
+            .filter(|line| *line == ".crazyagent/")
+            .count(),
+        1
+    );
+    assert!(!exclude(&newer).contains("/worktrees/"));
+    assert_eq!(
+        git(&older, &["status", "--porcelain", "--untracked-files=all"]),
+        "?? notes.txt\n"
+    );
+    assert_eq!(
+        git(&newer, &["status", "--porcelain", "--untracked-files=all"]),
+        "?? notes.txt\n?? worktrees/mine.txt\n"
+    );
+    git(&older, &["add", "-A"]);
+    assert_eq!(
+        git(&older, &["diff", "--cached", "--name-only"]),
+        "notes.txt\n"
+    );
+
+    let plain = case.home.join("plain");
+    fs::create_dir(&plain).unwrap();
+    assert!(!exclude_agents(&plain).unwrap());
+    assert!(!plain.join(".git").exists());
+}
+
 #[test]
 fn every_layout_preparation_keeps_an_existing_instructions_file_and_refuses_a_link_there() {
     let case = case();

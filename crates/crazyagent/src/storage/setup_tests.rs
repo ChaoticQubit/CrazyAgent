@@ -161,6 +161,7 @@ fn switching_an_entry_off_and_on_switches_every_item_it_added() {
     let off = SetupAction::Set {
         id: "superpowers".into(),
         on: false,
+        version: 0,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     assert!(!skills(&mut connection, root)[0].enabled);
@@ -171,10 +172,183 @@ fn switching_an_entry_off_and_on_switches_every_item_it_added() {
     let on = SetupAction::Set {
         id: "superpowers".into(),
         on: true,
+        version: 1,
     };
     assert_eq!(owner(&mut connection, root, on), Outcome::Applied);
     assert!(skills(&mut connection, root)[0].enabled);
     assert_eq!(servers(&mut connection, root)[0].status_label, "Approved");
+}
+
+#[test]
+fn stale_pack_write_is_refused() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/pack@1",
+        vec![skill(work.path(), "alpha")],
+        None,
+    )
+    .unwrap();
+    assert_eq!(status_of(&mut connection, root).version, 0);
+
+    let future = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: 1,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, future)),
+        "stale_revision"
+    );
+    assert!(skills(&mut connection, root)[0].enabled);
+    assert_eq!(status_of(&mut connection, root).version, 0);
+    let missing = SetupAction::Set {
+        id: "graphify".into(),
+        on: false,
+        version: 9,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, missing)),
+        "pack_not_installed"
+    );
+
+    let off = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: 0,
+    };
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
+    let status = status_of(&mut connection, root);
+    assert_eq!(status.version, 1);
+    assert_eq!(pack_state(&status, "superpowers"), PackState::Off);
+
+    let stale_on = SetupAction::Set {
+        id: "superpowers".into(),
+        on: true,
+        version: 0,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, stale_on)),
+        "stale_revision"
+    );
+    let stale_remove = SetupAction::Remove {
+        id: "superpowers".into(),
+        version: 0,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, stale_remove)),
+        "stale_revision"
+    );
+    let listed = skills(&mut connection, root);
+    assert_eq!(listed.len(), 1);
+    assert!(!listed[0].enabled);
+    let status = status_of(&mut connection, root);
+    assert_eq!(status.version, 1);
+    assert_eq!(pack_state(&status, "superpowers"), PackState::Off);
+
+    let remove = SetupAction::Remove {
+        id: "superpowers".into(),
+        version: 1,
+    };
+    assert_eq!(owner(&mut connection, root, remove), Outcome::Applied);
+    assert!(skills(&mut connection, root).is_empty());
+    assert_eq!(status_of(&mut connection, root).version, 2);
+}
+
+#[test]
+fn a_pack_change_and_a_plugin_screen_change_refuse_each_others_stale_saves() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/pack@1",
+        vec![skill(work.path(), "alpha")],
+        None,
+    )
+    .unwrap();
+    let shown = skills(&mut connection, root).remove(0);
+    let pack = status_of(&mut connection, root).version;
+
+    let off = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: pack,
+    };
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
+    let Err(stale_skill) = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: shown.id.clone(),
+            enabled: true,
+            version: shown.version,
+        },
+    ) else {
+        panic!("a refusal required");
+    };
+    assert_eq!(stale_skill.0, "stale_revision");
+    let listed = skills(&mut connection, root);
+    assert!(
+        !listed[0].enabled,
+        "the stale plugin screen changed nothing"
+    );
+    assert_eq!(listed[0].version, shown.version + 1);
+    assert_eq!(status_of(&mut connection, root).version, pack + 1);
+
+    let on = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: shown.id.clone(),
+            enabled: true,
+            version: listed[0].version,
+        },
+    );
+    assert!(on.is_ok());
+    assert_eq!(
+        status_of(&mut connection, root).version,
+        pack + 2,
+        "a plugin-screen change of a pack skill moves the pack version"
+    );
+    let stale_pack = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: pack + 1,
+    };
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, stale_pack)),
+        "stale_revision"
+    );
+    assert!(skills(&mut connection, root)[0].enabled);
+
+    let owned_elsewhere = owner_skill(&mut connection, root, work.path(), "beta");
+    let version = skills(&mut connection, root)
+        .into_iter()
+        .find(|view| view.id == owned_elsewhere)
+        .unwrap()
+        .version;
+    let unrelated = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: owned_elsewhere,
+            enabled: false,
+            version,
+        },
+    );
+    assert!(unrelated.is_ok());
+    assert_eq!(
+        status_of(&mut connection, root).version,
+        pack + 2,
+        "a skill no pack entry holds leaves the pack version alone"
+    );
 }
 
 #[test]
@@ -196,6 +370,7 @@ fn removing_an_entry_removes_its_items_and_the_sweep_deletes_their_folders() {
 
     let remove = SetupAction::Remove {
         id: "superpowers".into(),
+        version: 0,
     };
     assert_eq!(owner(&mut connection, root, remove), Outcome::Applied);
     assert!(skills(&mut connection, root).is_empty());
@@ -210,6 +385,7 @@ fn removing_an_entry_removes_its_items_and_the_sweep_deletes_their_folders() {
     assert_eq!(pack_state(&status, "superpowers"), PackState::Available);
     let again = SetupAction::Remove {
         id: "superpowers".into(),
+        version: 1,
     };
     assert_eq!(
         rejected_with(owner(&mut connection, root, again)),
@@ -237,6 +413,7 @@ fn a_removal_that_did_not_commit_is_put_back_by_the_sweep() {
         let tx = connection.transaction().unwrap();
         let remove = SetupAction::Remove {
             id: "superpowers".into(),
+            version: 0,
         };
         assert_eq!(
             apply_owner(&tx, &root.join("engine.db"), &remove).unwrap(),
@@ -258,6 +435,7 @@ fn unknown_and_uninstalled_entries_are_refused_without_changes_and_none_is_force
         (
             SetupAction::Remove {
                 id: "graphify".into(),
+                version: 0,
             },
             "pack_not_installed",
         ),
@@ -265,6 +443,7 @@ fn unknown_and_uninstalled_entries_are_refused_without_changes_and_none_is_force
             SetupAction::Set {
                 id: "graphify".into(),
                 on: false,
+                version: 0,
             },
             "pack_not_installed",
         ),
@@ -272,6 +451,7 @@ fn unknown_and_uninstalled_entries_are_refused_without_changes_and_none_is_force
             SetupAction::Set {
                 id: "superpowers".into(),
                 on: false,
+                version: 0,
             },
             "pack_not_installed",
         ),
@@ -290,6 +470,7 @@ fn unknown_and_uninstalled_entries_are_refused_without_changes_and_none_is_force
         (
             SetupAction::Remove {
                 id: "bad id!".into(),
+                version: 0,
             },
             "pack_unknown",
         ),
@@ -402,6 +583,7 @@ fn a_graphify_skill_already_in_the_store_reads_installed_and_is_adopted_not_inst
     let off = SetupAction::Set {
         id: "graphify".into(),
         on: false,
+        version: 0,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     assert_eq!(
@@ -555,6 +737,7 @@ fn an_owner_skill_named_like_an_entry_survives_every_new_pin_and_switch() {
     let off = SetupAction::Set {
         id: "tiger-style".into(),
         on: false,
+        version: 0,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     install(
@@ -697,20 +880,22 @@ fn a_new_pin_keeps_the_owner_switches_secrets_and_an_entry_left_off() {
         },
     )
     .unwrap();
-    let alpha = skills(&mut connection, root)[0].id.clone();
+    let alpha = skills(&mut connection, root).remove(0);
     plugins::execute(
         &mut connection,
         root,
         plugins::Command::Switch {
             project: app.clone(),
-            id: alpha,
+            id: alpha.id,
             on: false,
+            version: alpha.version,
         },
     )
     .unwrap();
     let off = SetupAction::Set {
         id: "superpowers".into(),
         on: false,
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
 
@@ -768,6 +953,7 @@ fn a_new_pin_keeps_the_owner_switches_secrets_and_an_entry_left_off() {
     let on = SetupAction::Set {
         id: "superpowers".into(),
         on: true,
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, on), Outcome::Applied);
     assert_ne!(
@@ -915,6 +1101,7 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
         effective_events(&mut connection, root, "project-1"),
         ["UserPromptSubmit"]
     );
+    let version = plugins::plugin_version(&connection, &prompt).unwrap();
     plugins::execute(
         &mut connection,
         root,
@@ -922,6 +1109,7 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
             project: crate::protocol::ProjectId::new("project-1").unwrap(),
             id: prompt.clone(),
             on: false,
+            version,
         },
     )
     .unwrap();
@@ -943,12 +1131,14 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
     let off = SetupAction::Set {
         id: "caveman".into(),
         on: false,
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     assert!(effective_events(&mut connection, root, "project-2").is_empty());
     let on = SetupAction::Set {
         id: "caveman".into(),
         on: true,
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, on), Outcome::Applied);
     assert_eq!(
@@ -968,6 +1158,7 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
     assert_eq!(folders.len(), 1);
     let remove = SetupAction::Remove {
         id: "caveman".into(),
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, remove), Outcome::Applied);
     assert!(hook_views(&mut connection, root, None).is_empty());
@@ -1005,6 +1196,7 @@ fn no_hooks_are_seeded_for_an_entry_not_installed_switched_off_or_without_hooks(
     let off = SetupAction::Set {
         id: "superpowers".into(),
         on: false,
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     seed(&mut connection, root, "superpowers", &plugin).unwrap();
@@ -1126,12 +1318,18 @@ fn hooks_seeded_for_an_adopted_owner_skill_follow_that_skill() {
         effective_events(&mut connection, root, "project-1").len(),
         2
     );
+    let version = skills(&mut connection, root)
+        .into_iter()
+        .find(|skill| skill.id == owned[0].id)
+        .unwrap()
+        .version;
     plugins::execute(
         &mut connection,
         root,
         plugins::Command::SetSkill {
             id: owned[0].id.clone(),
             enabled: false,
+            version,
         },
     )
     .unwrap();

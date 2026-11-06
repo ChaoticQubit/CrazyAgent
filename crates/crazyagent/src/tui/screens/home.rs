@@ -1158,6 +1158,7 @@ pub(in crate::tui) mod tests {
             pack: Vec::new(),
             running: false,
             notes: Vec::new(),
+            version: 0,
         }
     }
 

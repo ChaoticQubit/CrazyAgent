@@ -7,7 +7,7 @@ import {
 import type { OnboardingView } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, Notice, NotReady, PageHeader, Panel, Skeleton, StatusBadge, navigate } from "../../ui";
-import { BasicsFields, ResearchSwitches } from "../new-project/fields";
+import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "../new-project/fields";
 import { basicsErrors, editRequest, type ProjectDraft } from "../new-project/wizard";
 import { MarkdownView } from "../project/markdown";
 import { ImportMoveCommit } from "../process";
@@ -83,6 +83,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
         <p className="pj-help">Research is off for existing code. Turn on what you want; it runs on the project's pool.</p>
         <ResearchSwitches prefix="ob" catalog={catalog} value={draft.research} onChange={(research) => onDraft({ ...draft, research })} found={repo.research} />
       </fieldset>
+      {!finished && <RoadmapSwitch prefix="ob" value={draft.roadmap} onChange={(roadmap) => onDraft({ ...draft, roadmap })} />}
       {repo.documents.length > 0 && <fieldset className="pj-field">
         <legend>Project documents found</legend>
         <p className="pj-help">The mapping read these files in the repository as project documents.</p>
@@ -162,7 +163,7 @@ export function OnboardingReview({ id }: { id: string }) {
   const confirm = async () => {
     if (!draft || !saved || busy) return;
     if (Object.keys(errors).length > 0) { setShowErrors(true); document.getElementById("ob-name")?.focus(); return; }
-    const request = editRequest(saved, draft);
+    const request = editRequest(saved, draft, value?.finished ? undefined : draft.roadmap);
     setBusy(true);
     setProblem("");
     const result = await updateProjectSetup(id, request.setup, nextGeneration(), request.name, saved.revision);

@@ -270,8 +270,8 @@ pub struct PackEntry {
     pub hooks_refused: Option<String>,
 }
 
-/// Everything the setup screen shows: each dependency, each pack entry, and whether a
-/// setup run is going on now.
+/// Everything the setup screen shows: each dependency, each pack entry, whether a setup
+/// run is going on now, and the pack's version that a switch or removal names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetupStatus {
@@ -280,6 +280,7 @@ pub struct SetupStatus {
     pub running: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    pub version: u64,
 }
 
 /// One Python tool setup installs only from its bundled lock: the package, its version,
@@ -599,13 +600,14 @@ pub fn platform_pin(dep: Dependency) -> Option<Pin> {
 }
 
 /// One owner change to the default pack, as the owner mutations carry it: start setup
-/// with the ticked entries, switch an installed entry, or remove one.
+/// with the ticked entries, or switch or remove an installed entry at the pack version the
+/// screen showed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SetupAction {
     Run { pack: Vec<String> },
-    Set { id: String, on: bool },
-    Remove { id: String },
+    Set { id: String, on: bool, version: u64 },
+    Remove { id: String, version: u64 },
 }
 
 const PACK_ID_BYTES_MAX: usize = 64;
@@ -632,7 +634,7 @@ impl SetupAction {
                         .enumerate()
                         .all(|(index, id)| !pack[..index].contains(id))
             }
-            Self::Set { id, .. } | Self::Remove { id } => valid_pack_id(id),
+            Self::Set { id, .. } | Self::Remove { id, .. } => valid_pack_id(id),
         };
         if !valid {
             return Err(InstallError("pack_unknown"));

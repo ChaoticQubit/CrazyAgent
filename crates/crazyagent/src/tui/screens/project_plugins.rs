@@ -255,19 +255,20 @@ impl ProjectPlugins {
 
     fn removed(&self) -> Option<(&str, bool)> {
         self.local(self.removing.as_deref()?)
+            .map(|(name, skill, _)| (name, skill))
     }
 
-    fn local(&self, id: &str) -> Option<(&str, bool)> {
+    fn local(&self, id: &str) -> Option<(&str, bool, u64)> {
         let local = |scope: &Scope| *scope != Scope::Global;
         self.skills
             .iter()
             .find(|skill| skill.id == id && local(&skill.scope))
-            .map(|skill| (skill.name.as_str(), true))
+            .map(|skill| (skill.name.as_str(), true, skill.version))
             .or_else(|| {
                 self.servers
                     .iter()
                     .find(|server| server.id == id && local(&server.scope))
-                    .map(|server| (server.name.as_str(), false))
+                    .map(|server| (server.name.as_str(), false, server.version))
             })
     }
 
@@ -392,7 +393,7 @@ impl ProjectPlugins {
         if self.still_saving() {
             return PluginsReply::Handled;
         }
-        let (id, name, enabled, on_here) = match item {
+        let (id, name, enabled, on_here, version) = match item {
             Item::Skill(index) => {
                 let skill = &self.skills[index];
                 (
@@ -400,6 +401,7 @@ impl ProjectPlugins {
                     skill.name.clone(),
                     skill.enabled,
                     skill.on_here,
+                    skill.version,
                 )
             }
             Item::Server(index) => {
@@ -409,6 +411,7 @@ impl ProjectPlugins {
                     server.name.clone(),
                     server.enabled,
                     server.on_here,
+                    server.version,
                 )
             }
             Item::Hook(index) => {
@@ -418,6 +421,7 @@ impl ProjectPlugins {
                     hook.name.clone(),
                     hook.enabled,
                     hook.on_here,
+                    hook.version,
                 )
             }
         };
@@ -433,6 +437,7 @@ impl ProjectPlugins {
                     project: self.project.clone(),
                     id,
                     on: !on,
+                    version,
                 },
                 if on {
                     format!("{name} is off for this project.")
@@ -444,6 +449,7 @@ impl ProjectPlugins {
                 PluginChange::SetSkill {
                     id,
                     enabled: !enabled,
+                    version,
                 },
                 format!("{name} is {}.", if enabled { "off" } else { "on" }),
             ),
@@ -451,6 +457,7 @@ impl ProjectPlugins {
                 PluginChange::SetServer {
                     id,
                     enabled: !enabled,
+                    version,
                 },
                 format!("{name} is {}.", if enabled { "off" } else { "on" }),
             ),
@@ -488,16 +495,21 @@ impl ProjectPlugins {
         if self.still_saving() {
             return PluginsReply::Handled;
         }
-        let Some((name, skill)) = self.local(id).map(|(name, skill)| (name.to_owned(), skill))
+        let Some((name, skill, version)) = self
+            .local(id)
+            .map(|(name, skill, version)| (name.to_owned(), skill, version))
         else {
             return PluginsReply::Handled;
         };
         let id = id.to_owned();
         let (change, done) = if skill {
-            (PluginChange::RemoveSkill { id }, format!("Removed {name}."))
+            (
+                PluginChange::RemoveSkill { id, version },
+                format!("Removed {name}."),
+            )
         } else {
             (
-                PluginChange::RemoveServer { id },
+                PluginChange::RemoveServer { id, version },
                 format!("Removed {name} and its secrets."),
             )
         };

@@ -8,6 +8,7 @@ use crate::tui::keys::Key;
 use crate::tui::seam::Arrival;
 use crate::tui::text::{indent, row, styled, wrap};
 use crate::tui::theme::{Role, Theme};
+use crate::usage::health::{StepHealth, UsageStep};
 use crate::usage::report::{UsageReport, UsageRow};
 use crate::usage::{AccountLimits, LimitSource, LimitWindow};
 use ratatui::Frame;
@@ -145,6 +146,35 @@ pub fn poll_failure(code: &str) -> String {
             "The provider ended this sign-in. Sign in again in Accounts.".into()
         }
         other => format!("Couldn't read this account's limits ({other})."),
+    }
+}
+
+/// One plain sentence for a usage step kind that panicked since the engine started: what
+/// may be missing while it keeps failing, or when it worked again. Inputs: the step's
+/// health, now and the local offset in seconds. Output: the sentence.
+pub fn health_line(health: &StepHealth, now_ms: i64, offset: i64) -> String {
+    let (what, missing) = match health.step {
+        UsageStep::Poll => ("Checking account limits", "limits shown may be out of date"),
+        UsageStep::Team => (
+            "Counting agent tokens",
+            "agent and research run token totals may be low",
+        ),
+        UsageStep::Runs => (
+            "Counting research run tokens",
+            "research token totals may be low",
+        ),
+    };
+    let times = match health.panics {
+        1 => "once".to_owned(),
+        count => format!("{count} times"),
+    };
+    let said = format!(
+        "{what} hit an internal error {times} since the engine started, last {}.",
+        ago(health.last_ms, now_ms, offset)
+    );
+    match health.recovered_ms {
+        None => format!("{said} CrazyAgent keeps retrying; {missing}."),
+        Some(recovered) => format!("{said} It worked again {}.", ago(recovered, now_ms, offset)),
     }
 }
 
@@ -308,11 +338,18 @@ fn group(
     for row in rows.iter().take(ROWS_SHOWN) {
         let label: String = name(&row.key).chars().take(width).collect();
         let runs = if row.runs == 1 { "run" } else { "runs" };
-        lines.push(Line::raw(format!(
+        let counted = format!(
             "  {label:<width$}  {:>6} tokens  {} {runs}",
             compact(tokens(&row.tokens)),
             row.runs
-        )));
+        );
+        lines.push(Line::raw(match &row.not_reported_by {
+            None => counted,
+            Some(harness) if tokens(&row.tokens) == 0 => {
+                format!("  {label:<width$}  usage not reported by {harness}")
+            }
+            Some(harness) => format!("{counted}  + usage not reported by {harness}"),
+        }));
     }
     if rows.len() > ROWS_SHOWN {
         lines.push(styled(
@@ -362,14 +399,21 @@ pub fn summary(
     let (added, removed) = report.lines.iter().fold((0, 0), |(added, removed), row| {
         (added + row.added, removed + row.removed)
     });
-    let mut lines = vec![
-        row(
-            limit,
-            styled("Usage", Role::Accent, theme),
-            styled(range.label(), Role::Muted, theme),
-            ctx.glyphs,
-        ),
-        Line::raw(format!(
+    let unreported = report.not_reported_by.join(", ");
+    let mut lines = vec![row(
+        limit,
+        styled("Usage", Role::Accent, theme),
+        styled(range.label(), Role::Muted, theme),
+        ctx.glyphs,
+    )];
+    if tokens(total) == 0 && !unreported.is_empty() {
+        lines.push(Line::raw(format!(
+            "Usage not reported by {unreported}  Lines +{} -{}",
+            compact(added),
+            compact(removed)
+        )));
+    } else {
+        lines.push(Line::raw(format!(
             "Tokens {} ({} in, {} out)  Cache {cache}  Runs {}  Lines +{} -{}",
             compact(tokens(total)),
             compact(total.input),
@@ -377,10 +421,24 @@ pub fn summary(
             report.runs,
             compact(added),
             compact(removed)
-        )),
-    ];
+        )));
+        if !unreported.is_empty() {
+            lines.push(styled(
+                format!("Not in these totals: usage not reported by {unreported}."),
+                Role::Muted,
+                theme,
+            ));
+        }
+    }
     if let Some(partial) = partial_line(report.partial_homes) {
         lines.push(styled(partial, Role::Warning, theme));
+    }
+    for health in &report.health {
+        let role = match health.recovered_ms {
+            None => Role::Warning,
+            Some(_) => Role::Muted,
+        };
+        lines.push(styled(health_line(health, now_ms, offset), role, theme));
     }
     lines.push(Line::default());
     lines.push(styled("Account limits", Role::Heading, theme));
@@ -397,7 +455,7 @@ pub fn summary(
             2,
         ));
     }
-    if tokens(total) == 0 && report.lines.is_empty() {
+    if tokens(total) == 0 && report.lines.is_empty() && unreported.is_empty() {
         lines.push(Line::default());
         lines.push(styled(
             "No usage in this range. Runs show up a few seconds after an agent works.",

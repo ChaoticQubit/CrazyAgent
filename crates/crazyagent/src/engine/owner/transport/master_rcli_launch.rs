@@ -544,6 +544,7 @@ fallback_allowed = false
         PreparedMasterTurn {
             text: prepared.text.clone(),
             message: prepared.message.clone(),
+            owner_turn: prepared.owner_turn,
             instructions: prepared.instructions.clone(),
             tools: prepared.tools,
             session: prepared.session.clone(),

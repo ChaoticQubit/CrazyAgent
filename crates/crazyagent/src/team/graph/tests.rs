@@ -96,11 +96,11 @@ fn status() -> TeamStatus {
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         message_settings: crate::team::agent_messages::MessageSettings::default(),
-        settings_revision: 0,
         live_switch: None,
         paused: false,
         live_master: None,
         live_problem: None,
+        settings_version: 0,
         min_agents: 1,
         max_agents: 4,
         harnesses: vec![

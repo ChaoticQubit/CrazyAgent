@@ -344,6 +344,7 @@ fn finished_agents_say_whether_they_wake_and_hide_until_shown() {
             &TeamAction::FinishedAgents {
                 project_id: setup.project_id.clone(),
                 show: on,
+                version: settings_version(&tx, &setup.project_id).unwrap(),
             },
         )
         .unwrap();
@@ -990,6 +991,155 @@ fn an_empty_plan_runs_more_than_one_sub_agent_at_once() {
     team.shutdown().unwrap();
 }
 
+/// One owner team setting: its name, the change to it from a screen that read `version`,
+/// newer or older, and its value as the team status shows it.
+type Setting = (
+    &'static str,
+    fn(ProjectId, u64, bool) -> TeamAction,
+    fn(&TeamStatus) -> String,
+);
+
+/// Every owner team setting change names the team settings version the owner's screen read:
+/// one from the current version applies and moves it on by one; one from an older read is
+/// refused as stale and the newer value survives. Covers keep warm, the time limits with the
+/// idle stop, the harness switch setting, the live master switch and where finished agents
+/// show (V2SYNC-2).
+#[test]
+fn a_team_setting_saved_from_an_older_read_is_refused_and_the_newer_value_survives() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-versioned",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-versioned", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert_eq!(
+        settings_version(&connection, &project).unwrap(),
+        0,
+        "team settings nobody saved are at version 0"
+    );
+    let settings: [Setting; 5] = [
+        (
+            "keep warm",
+            |project_id, version, newer| TeamAction::KeepWarm {
+                project_id,
+                on: newer,
+                version,
+            },
+            |status| status.keep_warm.to_string(),
+        ),
+        (
+            "time limits",
+            |project_id, version, newer| TeamAction::TimeLimits {
+                project_id,
+                turn_secs: Some(if newer { 7200 } else { 3600 }),
+                session_secs: None,
+                idle_secs: Some(if newer { 3600 } else { 120 }),
+                version,
+            },
+            |status| {
+                format!(
+                    "{:?}",
+                    (
+                        status.turn_limit_secs,
+                        status.session_limit_secs,
+                        status.idle_stop_secs
+                    )
+                )
+            },
+        ),
+        (
+            "harness switch",
+            |project_id, version, newer| TeamAction::OnHarnessSwitch {
+                project_id,
+                mode: if newer {
+                    SwitchMode::Fresh
+                } else {
+                    SwitchMode::Carry
+                },
+                version,
+            },
+            |status| format!("{:?}", status.on_harness_switch),
+        ),
+        (
+            "live master",
+            |project_id, version, newer| TeamAction::LiveMaster {
+                project_id,
+                on: !newer,
+                version,
+            },
+            |status| format!("{:?}", status.live_master),
+        ),
+        (
+            "finished agents",
+            |project_id, version, newer| TeamAction::FinishedAgents {
+                project_id,
+                show: newer,
+                version,
+            },
+            |status| status.show_finished.to_string(),
+        ),
+    ];
+    for (name, change, value) in settings {
+        let read = settings_version(&connection, &project).unwrap();
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(&tx, &pool, &change(project.clone(), read, true)).unwrap(),
+            Outcome::Applied,
+            "{name}"
+        );
+        tx.commit().unwrap();
+        let newer = status(&connection, &setup).unwrap();
+        assert_eq!(newer.settings_version, read + 1, "{name}");
+        assert_eq!(
+            settings_version(&connection, &project).unwrap(),
+            read + 1,
+            "{name}"
+        );
+
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(&tx, &pool, &change(project.clone(), read, false)).unwrap(),
+            Outcome::Rejected {
+                code: STALE_CODE.into()
+            },
+            "{name}: a change from the read before the newer one"
+        );
+        tx.commit().unwrap();
+        let kept = status(&connection, &setup).unwrap();
+        assert_eq!(
+            value(&kept),
+            value(&newer),
+            "{name}: the newer value survives"
+        );
+        assert_eq!(kept.settings_version, read + 1, "{name}");
+
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(&tx, &pool, &change(project.clone(), read + 1, false)).unwrap(),
+            Outcome::Applied,
+            "{name}: the same change from the newer read applies"
+        );
+        tx.commit().unwrap();
+        let changed = status(&connection, &setup).unwrap();
+        assert_ne!(value(&changed), value(&newer), "{name}");
+        assert_eq!(changed.settings_version, read + 2, "{name}");
+    }
+}
+
 #[test]
 fn owner_actions_queue_messages_cancel_tasks_and_keep_agents_warm() {
     let (_directory, mut connection) = database();
@@ -1031,6 +1181,7 @@ fn owner_actions_queue_messages_cancel_tasks_and_keep_agents_warm() {
         TeamAction::KeepWarm {
             project_id: project.clone(),
             on: true,
+            version: settings_version(&tx, &project).unwrap(),
         },
     ] {
         assert_eq!(
@@ -1769,6 +1920,7 @@ fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
         TeamAction::KeepWarm {
             project_id: project.clone(),
             on: true,
+            version: settings_version(&tx, &project).unwrap(),
         },
     ] {
         assert_eq!(
@@ -1937,6 +2089,7 @@ fn warm_agents_ended(script: &[u8], held: bool) -> TeamStatus {
             &TeamAction::KeepWarm {
                 project_id: setup.project_id.clone(),
                 on: true,
+                version: settings_version(&tx, &setup.project_id).unwrap(),
             }
         )
         .unwrap(),
@@ -2469,6 +2622,7 @@ fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() 
                 &TeamAction::KeepWarm {
                     project_id: setup.project_id.clone(),
                     on,
+                    version: settings_version(&tx, &setup.project_id).unwrap(),
                 }
             )
             .unwrap(),
@@ -3071,6 +3225,7 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
                 &TeamAction::KeepWarm {
                     project_id: setup.project_id.clone(),
                     on,
+                    version: settings_version(&tx, &setup.project_id).unwrap(),
                 }
             )
             .unwrap(),
@@ -3215,6 +3370,7 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
             &TeamAction::FinishedAgents {
                 project_id: setup.project_id.clone(),
                 show: true,
+                version: settings_version(&tx, &setup.project_id).unwrap(),
             },
         )
         .unwrap(),
@@ -3391,12 +3547,12 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
         Some(IDLE_STOP_DEFAULT_SECS),
         "an idle sub-agent stops after 10 minutes until the owner changes it"
     );
-    let limits = |turn_secs, session_secs, idle_secs, revision| TeamAction::TimeLimits {
+    let limits = |turn_secs, session_secs, idle_secs, version| TeamAction::TimeLimits {
         project_id: project.clone(),
         turn_secs,
         session_secs,
         idle_secs,
-        revision,
+        version,
     };
     for refused in [
         limits(Some(60), None, None, 0),
@@ -3417,7 +3573,17 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
     let pool = access("team-limits", &["local-a"]);
     let tx = connection.transaction().unwrap();
     assert_eq!(
-        execute(&tx, &pool, &limits(Some(3600), Some(28_800), Some(120), 0)).unwrap(),
+        execute(
+            &tx,
+            &pool,
+            &limits(
+                Some(3600),
+                Some(28_800),
+                Some(120),
+                settings_version(&tx, &project).unwrap()
+            )
+        )
+        .unwrap(),
         Outcome::Applied
     );
     tx.commit().unwrap();
@@ -3440,7 +3606,12 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
     );
     let tx = connection.transaction().unwrap();
     assert_eq!(
-        execute(&tx, &pool, &limits(None, None, None, 1)).unwrap(),
+        execute(
+            &tx,
+            &pool,
+            &limits(None, None, None, settings_version(&tx, &project).unwrap())
+        )
+        .unwrap(),
         Outcome::Applied
     );
     tx.commit().unwrap();
@@ -3487,18 +3658,18 @@ fn a_team_settings_change_from_an_old_read_is_refused_and_the_newer_change_stays
         .unwrap();
     let project = setup.project_id.clone();
     let pool = access("team-stale", &["local-a"]);
-    let old = status(&connection, &setup).unwrap().settings_revision;
-    let limits = |session_secs, revision| TeamAction::TimeLimits {
+    let old = status(&connection, &setup).unwrap().settings_version;
+    let limits = |session_secs, version| TeamAction::TimeLimits {
         project_id: project.clone(),
         turn_secs: None,
         session_secs,
         idle_secs: Some(IDLE_STOP_DEFAULT_SECS),
-        revision,
+        version,
     };
-    let switch = |mode, revision| TeamAction::OnHarnessSwitch {
+    let switch = |mode, version| TeamAction::OnHarnessSwitch {
         project_id: project.clone(),
         mode,
-        revision,
+        version,
     };
     let tx = connection.transaction().unwrap();
     assert_eq!(
@@ -3507,8 +3678,8 @@ fn a_team_settings_change_from_an_old_read_is_refused_and_the_newer_change_stays
         "the desktop change from the current read applies"
     );
     tx.commit().unwrap();
-    let newer = status(&connection, &setup).unwrap().settings_revision;
-    assert_ne!(newer, old, "an applied change moves the revision");
+    let newer = status(&connection, &setup).unwrap().settings_version;
+    assert_ne!(newer, old, "an applied change moves the version");
     let tx = connection.transaction().unwrap();
     assert_eq!(
         execute(&tx, &pool, &limits(None, old)).unwrap(),
@@ -3528,8 +3699,8 @@ fn a_team_settings_change_from_an_old_read_is_refused_and_the_newer_change_stays
         "the desktop session limit survives and the switch setting is unchanged"
     );
     assert_eq!(
-        shown.settings_revision, newer,
-        "a refusal leaves the revision"
+        shown.settings_version, newer,
+        "a refusal leaves the version"
     );
     let tx = connection.transaction().unwrap();
     assert_eq!(
@@ -3543,7 +3714,7 @@ fn a_team_settings_change_from_an_old_read_is_refused_and_the_newer_change_stays
         (shown.session_limit_secs, shown.on_harness_switch),
         (Some(7200), SwitchMode::Fresh)
     );
-    assert_ne!(shown.settings_revision, newer);
+    assert_ne!(shown.settings_version, newer);
 }
 
 /// Fills a project's team with long history: `before` finished tasks, two queued tasks,

@@ -72,6 +72,7 @@ pub const SKILL_FILES_MAX: usize = 4096;
 pub const SKILL_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const SKILL_DEPTH_MAX: usize = 8;
 const SECTION_SLACK: usize = 512;
+const ASK_RULE_BYTES_MAX: usize = 1024;
 pub(crate) const NAME_BYTES_MAX: usize = 256;
 const DESCRIPTION_BYTES_MAX: usize = 512;
 const SKILL_LINE_DESCRIPTION_BYTES_MAX: usize = 160;
@@ -122,6 +123,7 @@ const _: () = assert!(
 const _: () = assert!(
     MASTER_INSTRUCTIONS_BYTES_MAX <= crate::adapters::codex::DEVELOPER_INSTRUCTIONS_BYTES_MAX
 );
+const _: () = assert!(INSTRUCTIONS_BYTES_MAX + ASK_RULE_BYTES_MAX <= MASTER_INSTRUCTIONS_BYTES_MAX);
 
 fn failure(code: &str) -> LaunchError {
     LaunchError(code.into(), None)
@@ -170,11 +172,13 @@ pub struct AgentContext {
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
-/// and writes into the agent's home, and the hooks the owner turned on for it.
+/// and writes into the agent's home, the hooks the owner turned on for it, and the owner's
+/// own instructions for the one team agent launched, empty for none.
 #[derive(Debug)]
 struct Process {
     project: crate::agent_home::AgentProject,
     hooks: Vec<EffectiveHook>,
+    agent: String,
 }
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
@@ -249,6 +253,7 @@ pub fn for_project(
         process: Some(Box::new(Process {
             project: home_project,
             hooks,
+            agent: String::new(),
         })),
         transcripts,
         off_tools,
@@ -422,7 +427,8 @@ pub fn for_master(
 
 /// Tells a conversation master whose tools are on what it can do and how it starts a
 /// sub-agent: its worktree is the only folder it writes, its `delegate` tool hands one task
-/// to the team, and the team plan's sub-agents, or for an empty plan the harnesses it can use.
+/// to the team, its `ask` tool is the only way it asks the owner, and the team plan's
+/// sub-agents, or for an empty plan the harnesses it can use.
 /// Input: the project setup and the harnesses with an eligible account now.
 /// Output: at most `TEAM_INDEX_BYTES_MAX` plus slack bytes.
 pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> String {
@@ -432,6 +438,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
         crate::team::tool::SERVER_NAME,
         crate::team::DELEGATIONS_PER_REPLY_MAX
     );
+    let rule = ask_rule(AskReach::ReplyEnd, false);
     if setup.team.sub_harnesses.is_empty() {
         section.push_str(&crate::team::any_harness_text(&setup.team, available));
     } else {
@@ -444,7 +451,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
                 slot.agents,
                 if slot.tools { "on" } else { "off" }
             );
-            if left > 0 || section.len() + line.len() > TEAM_INDEX_BYTES_MAX {
+            if left > 0 || section.len() + line.len() + rule.len() > TEAM_INDEX_BYTES_MAX {
                 left += 1;
                 continue;
             }
@@ -454,6 +461,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
             section.push_str(&format!("- and {left} more\n"));
         }
     }
+    section.push_str(&rule);
     assert!(section.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
     section
 }
@@ -692,13 +700,35 @@ impl AgentContext {
         self
     }
 
+    /// Adds the owner's own instructions for one team agent after the app and project text
+    /// this context writes into its home, before the instruction files section, which stays
+    /// last. Inputs: a connection to `engine.db`, the project and the agent id, above 0.
+    /// Output: the context, or `launch_context_unavailable`.
+    pub fn for_agent(
+        mut self,
+        connection: &Connection,
+        project: &ProjectId,
+        agent: i64,
+    ) -> Result<Self, LaunchError> {
+        let tx = connection.unchecked_transaction().map_err(unavailable)?;
+        let (text, _) =
+            crate::storage::agent_text::read(&tx, project, agent).map_err(unavailable)?;
+        drop(tx);
+        assert!(text.len() <= crate::agent_home::TEXT_BYTES_MAX);
+        if let Some(process) = self.process.as_mut() {
+            process.agent = text;
+        }
+        Ok(self)
+    }
+
     /// Adds the engine's own MCP server that gives a team master with tools on, running
-    /// without its live terminal, its `delegate` tool and its `remember` and `recall` tools,
-    /// answered by the engine through the mailbox folder, and the section that names those
-    /// two. Input: the absolute canonical engine executable that serves it, the absolute drop
-    /// file and mailbox in the master's private temporary folder and the team tools left out.
-    /// Output: the context, or a plain code when a path is not plain or an approved server
-    /// already uses the name.
+    /// without its live terminal, its `delegate` and `ask` tools, both taken when its reply
+    /// ends, and its `remember` and `recall` tools, answered by the engine through the
+    /// mailbox folder, and the section that names those two, and tells it to ask the owner
+    /// only with `ask`. Input: the absolute canonical engine executable that serves it, the
+    /// absolute drop file and mailbox in the master's private temporary folder and the team
+    /// tools left out. Output: the context, or a plain code when a path is not plain or an
+    /// approved server already uses the name.
     pub fn with_team_tool(
         self,
         executable: &Path,
@@ -711,14 +741,16 @@ impl AgentContext {
             crate::team::tool::SERVER_COMMAND,
             &[drop, mailbox],
             off,
+            AskReach::ReplyEnd,
         )
         .map(|context| context.with_memory_section(off))
     }
 
     /// Adds the engine's own MCP server that gives a live team master with tools on its team
-    /// tools (DEC-104), answered by the engine at once through the mailbox folder, and the
-    /// section that names them. Input: the absolute canonical engine executable, the
-    /// absolute mailbox in the master's private temporary folder and the team tools left
+    /// tools (DEC-104), answered by the engine at once through the mailbox folder, the
+    /// section that names them, and tells it to ask the owner with that server's `ask` tool
+    /// or a for me `update_work` question. Input: the absolute canonical engine executable,
+    /// the absolute mailbox in the master's private temporary folder and the team tools left
     /// out. Output: the context, or a plain code as for [`Self::with_team_tool`].
     pub fn with_live_team_tool(
         self,
@@ -731,14 +763,16 @@ impl AgentContext {
             crate::team::tool::LIVE_SERVER_COMMAND,
             &[mailbox],
             off,
+            AskReach::Live,
         )
         .map(|context| context.with_tools_section(off))
     }
 
     /// Adds the engine's own MCP server that gives a sub-agent with tools its team tools
-    /// (DEC-104), answered by the engine through the mailbox folder, and the section that
-    /// names them. Input: the absolute canonical engine executable, the absolute mailbox in
-    /// the agent's private temporary folder and the team tools left out. Output: the
+    /// (DEC-104) and the `ask` tool, answered by the engine through the mailbox folder, the
+    /// section that names them, and tells it to ask the owner with `ask` or a for me
+    /// `update_work` question. Input: the absolute canonical engine executable, the absolute
+    /// mailbox in the agent's private temporary folder and the tools left out. Output: the
     /// context, or a plain code as for [`Self::with_team_tool`].
     pub fn with_agent_team_tool(
         self,
@@ -751,6 +785,7 @@ impl AgentContext {
             crate::team::tool::AGENT_SERVER_COMMAND,
             &[mailbox],
             off,
+            AskReach::SubAgent,
         )
         .map(|context| context.with_tools_section(off))
     }
@@ -773,6 +808,7 @@ impl AgentContext {
         subcommand: &str,
         folders: &[&Path],
         off: &[String],
+        reach: AskReach,
     ) -> Result<Self, LaunchError> {
         if !crate::team::tool::known_tools(off) {
             return Err(failure("launch_context_team_tool_invalid"));
@@ -814,6 +850,14 @@ impl AgentContext {
             },
             secrets: Vec::new(),
         });
+        if !off.iter().any(|tool| tool == crate::team::tool::ASK_TOOL) {
+            let for_me = reach != AskReach::ReplyEnd
+                && !off
+                    .iter()
+                    .any(|tool| tool == crate::team::tool::UPDATE_WORK_TOOL);
+            self.instructions.push_str(&ask_rule(reach, for_me));
+        }
+        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         Ok(self)
     }
 
@@ -923,8 +967,14 @@ impl AgentContext {
             Some(process) => {
                 let harness = crate::agent_home::Harness::from_id(id)
                     .ok_or_else(|| failure("launch_harness_unsupported"))?;
-                let given = crate::agent_home::text(&process.project)
+                let mut given = crate::agent_home::text(&process.project)
                     .map_err(|problem| LaunchError(problem.0, None))?;
+                assert!(given.section_bytes <= given.text.len());
+                let section = given.text.split_off(given.text.len() - given.section_bytes);
+                given.text =
+                    crate::agent_home::with_agent(std::mem::take(&mut given.text), &process.agent);
+                given.text.push_str(&section);
+                assert!(given.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
                 crate::agent_home::prepare(home, harness, &process.project, &given)
                     .map_err(|problem| LaunchError(problem.0, None))?;
                 given
@@ -1277,6 +1327,7 @@ fn render(
                         ContextKind::Brief => "brief",
                         ContextKind::Document => "document",
                         ContextKind::Research => "research",
+                        ContextKind::Plan => "agent-written plan",
                     };
                     let line = format!("- {} ({kind}, {})\n", item.path, size(item.bytes));
                     if left > 0 || index.len() + line.len() > INDEX_BYTES_MAX {
@@ -1303,6 +1354,57 @@ fn render(
     }
     assert!(text.len() <= INSTRUCTIONS_BYTES_MAX);
     text
+}
+
+/// How the answer to an `ask` call reaches the conversation that asked: at once on a live
+/// master's own server, when the reply ends on the drop-file server, or through the master
+/// for a sub-agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AskReach {
+    Live,
+    ReplyEnd,
+    SubAgent,
+}
+
+/// Tells a conversation that holds the engine's `ask` tool how it asks the owner: with that
+/// tool, or also with a for me `update_work` question when it has the team tools section,
+/// one question per call, with its options and the one it recommends, never in reply text
+/// or with its harness's own question tools, and how the answer comes back. Input: how the
+/// answer reaches it and whether its for me `update_work` questions reach the owner too.
+/// Output: at most `ASK_RULE_BYTES_MAX` bytes of markdown.
+pub(crate) fn ask_rule(reach: AskReach, for_me: bool) -> String {
+    assert!(!for_me || reach != AskReach::ReplyEnd);
+    let back = match reach {
+        AskReach::Live => format!(
+            "The owner's answer or dismissal comes to you once as a message from the owner. If the owner answers you here in chat instead, record it with `{}`, naming the question, its version and the owner's turn.",
+            crate::team::tool::RECORD_TOOL
+        ),
+        AskReach::ReplyEnd => format!(
+            "The engine logs your questions when your reply ends, and the owner's answer or dismissal comes back to you on a later turn; after a turn that failed it can come again, so act on it once. Each turn lists your questions still open. If the owner answers one in chat instead, record it with `{}`, naming the question, version 0 and the owner's message number that list gives.",
+            crate::team::tool::RECORD_TOOL
+        ),
+        AskReach::SubAgent => "Your master sees your questions too, and CrazyAgent types the owner's answer or dismissal into your terminal once.".to_owned(),
+    };
+    let how = if for_me {
+        format!(
+            "Ask the owner a question with the `{}` tool of the `{}` MCP server, or as a for me question in `{}`; both reach the owner. Never ask in your reply text or with your harness's own question tools.",
+            crate::team::tool::ASK_TOOL,
+            crate::team::tool::SERVER_NAME,
+            crate::team::tool::UPDATE_WORK_TOOL
+        )
+    } else {
+        format!(
+            "Ask the owner a question only with the `{}` tool of the `{}` MCP server, never in your reply text and never with your harness's own question tools.",
+            crate::team::tool::ASK_TOOL,
+            crate::team::tool::SERVER_NAME
+        )
+    };
+    let rule = format!(
+        "\n## Asking the owner\n\n{how} Ask one question per call and wait for its answer before the next one. Put up to {} choices in `options`, the one you recommend in `recommended`, and what the owner needs to know in `context`. Answer what you can from the code and the project's documents first. {back}\n",
+        crate::questions::OPTIONS_MAX
+    );
+    assert!(rule.len() <= ASK_RULE_BYTES_MAX);
+    rule
 }
 
 fn skill_description(path: &Path) -> String {

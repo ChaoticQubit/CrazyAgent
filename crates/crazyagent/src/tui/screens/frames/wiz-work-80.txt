@@ -11,11 +11,11 @@
   > [ ] ◬ Design research       Patterns and references for the look
     [x] ▭ Front-end design      A first UI for the platforms you picked
     [ ] ≣ Tech stack research   Libraries, hosting and architecture options
+    [x] ☰ Roadmap               Plan a roadmap after research
 
   3 agents start, one per item. Change counts in Team.
 
   [ Back ]   [ Continue ]
-
 
 
 

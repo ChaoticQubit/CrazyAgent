@@ -13,6 +13,7 @@ export interface UsageRow {
   tokens: Tokens;
   runs: number;
   last_ms: number;
+  not_reported_by?: string | null;
 }
 
 export interface DayTokens {
@@ -47,6 +48,15 @@ export interface LimitWindow {
 
 export type WindowKind = "five_hour" | "weekly";
 
+export type UsageStep = "poll" | "team" | "runs";
+
+export interface StepHealth {
+  step: UsageStep;
+  panics: number;
+  last_ms: number;
+  recovered_ms: number | null;
+}
+
 export interface AccountLimits {
   account: string;
   plan: string | null;
@@ -76,6 +86,8 @@ export interface UsageReport {
   lines: LinesRow[];
   agent_lines: AgentLinesRow[];
   limits: AccountLimits[];
+  not_reported_by?: string[];
+  health?: StepHealth[];
   partial_homes: number;
 }
 

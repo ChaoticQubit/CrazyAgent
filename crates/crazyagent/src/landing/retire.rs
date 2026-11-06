@@ -549,12 +549,12 @@ fn linked_teammates_landed(
 
 /// Removes an agent worktree with git, never forcing it, while holding the repository so
 /// no landing step runs on it meanwhile, after checking `blocker` again under that hold,
-/// then forgets its base. An agent's own clone is fetched before the hold and removed as a
-/// folder with no git, never following a link out of it, since git keeps no record of it
-/// in the owner repository. Inputs: the store, the three paths and the time now.
-/// Output: Ok once removed, `cleanup_worktree_leftover` with the base forgotten when git
-/// deleted its record of the worktree, or a clone's folder was deleted, only part way, or
-/// the plain code that kept it.
+/// then forgets its base and its owner edits. An agent's own clone is fetched before the
+/// hold and removed as a folder with no git, never following a link out of it, since git
+/// keeps no record of it in the owner repository. Inputs: the store, the three paths and
+/// the time now. Output: Ok once removed, `cleanup_worktree_leftover` with the base and
+/// owner edits forgotten when git deleted its record of the worktree, or a clone's folder
+/// was deleted, only part way, or the plain code that kept it.
 pub(super) fn remove(
     db: &Connection,
     repository: &Path,
@@ -582,6 +582,7 @@ pub(super) fn remove(
         db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
             .map_err(unavailable)?;
         store::forget_agent_branch(db, path)?;
+        super::owner_edit::logged("forget", super::owner_edit::forget_worktree(db, worktree));
         return Ok(removed.map_err(|_| "cleanup_worktree_leftover"));
     }
     let agent = open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?;
@@ -605,6 +606,7 @@ pub(super) fn remove(
         }
         db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
             .map_err(unavailable)?;
+        super::owner_edit::logged("forget", super::owner_edit::forget_worktree(db, worktree));
         return Ok(Err("cleanup_worktree_leftover"));
     }
     if std::fs::symlink_metadata(worktree).is_ok() || std::fs::symlink_metadata(git_dir).is_ok() {
@@ -612,6 +614,7 @@ pub(super) fn remove(
     }
     db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
         .map_err(unavailable)?;
+    super::owner_edit::logged("forget", super::owner_edit::forget_worktree(db, worktree));
     store::forget_agent_branch(db, path)?;
     if let Some((branch, head)) = named
         && !drop_branch(repository, &branch, &head)?

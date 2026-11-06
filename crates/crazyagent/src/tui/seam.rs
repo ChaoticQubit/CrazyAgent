@@ -126,7 +126,10 @@ pub enum Request {
     Intake(Box<super::client::intake::IntakeJob>),
     Changes(Box<super::client::changes::ChangesQuery>),
     Process(Box<super::client::process::ProcessQuery>),
+    Recovery(Box<super::client::recovery::RecoveryQuery>),
+    Questions(Box<super::client::questions::QuestionsQuery>),
     Cleanup(Box<super::client::cleanup::CleanupQuery>),
+    Reveal(Box<super::client::ide::RevealQuery>),
     Reconnect,
 }
 
@@ -171,7 +174,10 @@ impl std::fmt::Debug for Request {
             Self::Intake(_) => "Intake",
             Self::Changes(_) => "Changes",
             Self::Process(_) => "Process",
+            Self::Recovery(_) => "Recovery",
+            Self::Questions(_) => "Questions",
             Self::Cleanup(_) => "Cleanup",
+            Self::Reveal(_) => "Reveal",
             Self::Reconnect => "Reconnect",
         })
     }

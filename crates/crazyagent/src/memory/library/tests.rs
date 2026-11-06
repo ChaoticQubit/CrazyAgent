@@ -793,7 +793,7 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     assert_eq!(
         result(
             owner
-                .forget_memory(other.clone(), entry.id.clone(), next())
+                .forget_memory(other.clone(), entry.id.clone(), entry.version, next())
                 .await
                 .unwrap()
         ),
@@ -803,7 +803,7 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     assert_eq!(
         result(
             owner
-                .forget_memory(meals.clone(), entry.id.clone(), next())
+                .forget_memory(meals.clone(), entry.id.clone(), entry.version + 1, next())
                 .await
                 .unwrap()
         ),
@@ -834,7 +834,7 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     assert_eq!(
         result(
             owner
-                .forget_memory(meals.clone(), entry.id.clone(), next())
+                .forget_memory(meals.clone(), entry.id.clone(), entry.version + 1, next())
                 .await
                 .unwrap()
         ),
@@ -966,6 +966,138 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     );
     assert!(after.items.iter().any(|item| item.text == entry.text));
     drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn memory_edit_on_a_stale_revision_is_refused() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let meals = create_project(&mut owner, "mem-stale", next()).await;
+    std::fs::write(
+        engine
+            .folder("mem-stale")
+            .join("context/research/market_research.md"),
+        "# Market\n\nFamilies plan dinners on Sundays.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        result(
+            owner
+                .save_research_to_memory(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    let opened = owner.project_memories(meals.clone(), None).await.unwrap()[0].clone();
+    assert_eq!(opened.version, 1);
+    let edit = |text: &str| ReviewDecision::Edit { text: text.into() };
+    let desktop = "Families plan dinners on Sundays and Wednesdays.";
+    let tui = "Families plan dinners.";
+
+    assert_eq!(
+        result(
+            owner
+                .review_memory(
+                    meals.clone(),
+                    opened.id.clone(),
+                    opened.version,
+                    edit(desktop),
+                    next()
+                )
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied,
+        "the first client's edit lands"
+    );
+    assert_eq!(
+        result(
+            owner
+                .review_memory(
+                    meals.clone(),
+                    opened.id.clone(),
+                    opened.version,
+                    edit(tui),
+                    next()
+                )
+                .await
+                .unwrap()
+        ),
+        rejected("knowledge_version_conflict"),
+        "an edit naming the version it opened is refused once another edit landed"
+    );
+    let current = owner.project_memories(meals.clone(), None).await.unwrap()[0].clone();
+    assert_eq!(
+        (current.version, current.text.as_str()),
+        (2, desktop),
+        "the refused edit changed nothing"
+    );
+    assert_eq!(
+        result(
+            owner
+                .forget_memory(meals.clone(), opened.id.clone(), opened.version, next())
+                .await
+                .unwrap()
+        ),
+        rejected("memory_changed"),
+        "deleting a memory edited since it was opened is refused"
+    );
+    assert_eq!(
+        result(
+            owner
+                .promote_memory(meals.clone(), opened.id.clone(), opened.version, next())
+                .await
+                .unwrap()
+        ),
+        rejected("memory_changed")
+    );
+    assert_eq!(
+        owner.project_memories(meals.clone(), None).await.unwrap(),
+        vec![current.clone()],
+        "the memory is still there, unchanged"
+    );
+
+    assert_eq!(
+        result(
+            owner
+                .review_memory(
+                    meals.clone(),
+                    opened.id.clone(),
+                    current.version,
+                    edit(tui),
+                    next()
+                )
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied,
+        "after reading the newer version, the owner's edit lands over it"
+    );
+    let kept = owner.project_memories(meals.clone(), None).await.unwrap()[0].clone();
+    assert_eq!((kept.version, kept.text.as_str()), (3, tui));
+    assert_eq!(
+        result(
+            owner
+                .forget_memory(meals.clone(), opened.id.clone(), kept.version, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    assert!(
+        owner
+            .project_memories(meals, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     engine.stop().await;
 }
 
@@ -1401,6 +1533,109 @@ async fn every_project_memory_read_for_counts_and_lists_reaches_past_one_engine_
         all.iter()
             .all(|entry| entry.status == KnowledgeStatus::Provisional && !entry.human_reviewed)
     );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// An IDE Approve or Reject on a waiting memory only asks: the memory stays waiting, the
+/// desktop's list shows the newest ask with its decision, and the owner's own Keep at that
+/// revision clears the list; an IDE decision on the reviewed revision is then stale.
+#[tokio::test]
+async fn an_ide_decision_waits_in_the_desktop_list_until_the_owner_reviews_it() {
+    use crate::ide::bridge::memory::{Decide, decide};
+    use crate::ide::bridge::{Decision, IdeReply};
+
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let meals = create_project(&mut owner, "mem-ide", next()).await;
+    std::fs::write(
+        engine
+            .folder("mem-ide")
+            .join("context/research/market_research.md"),
+        "# Market\n\nAbout 2 million households plan meals weekly.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        result(
+            owner
+                .save_research_to_memory(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    let entry = owner
+        .project_memories(meals.clone(), None)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(entry.status, KnowledgeStatus::Provisional);
+    assert!(owner.ide_asks(meals.clone()).await.unwrap().is_empty());
+
+    let runtime = engine.service.as_ref().unwrap().owner_runtime().unwrap();
+    let asked = |decision| Decide {
+        id: entry.id.clone(),
+        revision: entry.version,
+        decision,
+    };
+    for decision in [Decision::Reject, Decision::Approve] {
+        assert_eq!(
+            decide(runtime, &meals, &asked(decision)).await.unwrap(),
+            IdeReply::Ok {
+                data: serde_json::json!({ "confirm": "desktop" }),
+            }
+        );
+        let waiting = owner.ide_asks(meals.clone()).await.unwrap();
+        assert_eq!(
+            waiting
+                .iter()
+                .map(|ask| (ask.entry.id.clone(), ask.entry.version, ask.decision))
+                .collect::<Vec<_>>(),
+            [(entry.id.clone(), entry.version, decision)],
+            "the newest IDE decision on a memory is the one the desktop asks"
+        );
+        let shown = owner.project_memories(meals.clone(), None).await.unwrap();
+        assert_eq!(
+            (shown[0].status.clone(), shown[0].version),
+            (KnowledgeStatus::Provisional, entry.version),
+            "an IDE decision writes no memory"
+        );
+    }
+
+    assert_eq!(
+        result(
+            owner
+                .review_memory(
+                    meals.clone(),
+                    entry.id.clone(),
+                    entry.version,
+                    ReviewDecision::Keep,
+                    next()
+                )
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    assert!(
+        owner.ide_asks(meals.clone()).await.unwrap().is_empty(),
+        "the owner's own review clears the ask"
+    );
+    let kept = owner.project_memories(meals.clone(), None).await.unwrap();
+    assert_eq!(kept[0].status, KnowledgeStatus::Confirmed);
+    assert!(kept[0].human_reviewed);
+    assert!(matches!(
+        decide(runtime, &meals, &asked(Decision::Reject))
+            .await
+            .unwrap(),
+        IdeReply::Stale { .. }
+    ));
+    assert!(owner.ide_asks(meals.clone()).await.unwrap().is_empty());
     drop(owner);
     engine.stop().await;
 }

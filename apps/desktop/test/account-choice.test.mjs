@@ -12,6 +12,7 @@ const schedule = {
   pools: [{ id: "pool-main", strategy: "balanced" }],
   projects: [{ id: "project-a", strategy: "use_it_or_lose_it" }],
   accounts: [{ connection: "acct-1", plan: { rank: 2, reserve_percent: 10, pin: "use_last" } }],
+  version: 3,
 };
 const member = (id) => ({ id, kind: "claude", provider: "Claude", status: "signed_in", status_label: "Signed in" });
 const pool = { id: "pool-main", name: "Main", summary: "2 Claude", members: [member("acct-1"), member("acct-2")], project_count: 1 };

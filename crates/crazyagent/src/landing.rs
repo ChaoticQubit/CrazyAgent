@@ -14,9 +14,11 @@ mod flow;
 #[cfg(unix)]
 mod git;
 #[cfg(unix)]
+pub(crate) mod ide;
 mod merges;
 #[cfg(unix)]
 mod owner;
+pub mod owner_edit;
 #[cfg(unix)]
 mod retire;
 #[cfg(unix)]
@@ -194,7 +196,9 @@ pub enum FileKind {
 
 /// A property of a changed path the owner should look at before accepting: an
 /// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, a mode change, or
-/// an instruction file such as `AGENTS.md`, which changes what every agent is told.
+/// a file the IDE reads as its settings, under `.vscode` or a `*.code-workspace` file,
+/// an edit the owner made in the agent's worktree while the agent ran, or an instruction
+/// file such as `AGENTS.md`, which changes what every agent is told.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileMark {
@@ -203,6 +207,8 @@ pub enum FileMark {
     Attributes,
     Modules,
     Mode,
+    OwnerEdited,
+    IdeConfig,
     Instructions,
 }
 
@@ -289,6 +295,10 @@ pub const BRANCHES_MAX: usize = 256;
 /// The longest branch name an Accept target may have, in bytes.
 pub const BRANCH_BYTES_MAX: usize = 255;
 
+/// How long a change set store statement waits on another engine connection's write lock
+/// before it fails.
+pub(crate) const BUSY_WAIT: Duration = Duration::from_secs(5);
+
 fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
@@ -300,8 +310,7 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
         return Err(unavailable());
     }
     let db = Connection::open(runtime.join("engine.db")).map_err(|_| unavailable())?;
-    db.busy_timeout(Duration::from_secs(5))
-        .map_err(|_| unavailable())?;
+    db.busy_timeout(BUSY_WAIT).map_err(|_| unavailable())?;
     #[cfg(unix)]
     store::initialize(&db)?;
     Ok(db)
@@ -692,8 +701,10 @@ pub fn commit_deletions(
 /// Commits every change in an agent worktree as the engine, with hooks, filters and
 /// fsmonitor off, and adds it to that worktree's open change set or opens one above the
 /// commit the worktree started from, or its HEAD when no start is recorded, so commits
-/// the agent made itself land too. A failed or cancelled turn commits too. Inputs: the
-/// store, the workspace and the turn end. Output: the change set the work now belongs
+/// the agent made itself land too. A failed or cancelled turn commits too. Owner edits
+/// waiting in the worktree settle on the change set the turn end leaves open; when they
+/// cannot, they keep waiting for the next turn end and the recorded set is still returned.
+/// Inputs: the store, the workspace and the turn end. Output: the change set the work now belongs
 /// to, None when nothing is pending.
 pub fn record_turn_end(
     db: &Connection,
@@ -701,13 +712,20 @@ pub fn record_turn_end(
     turn: &TurnEnd,
 ) -> Result<Option<ChangeSetId>, EngineError> {
     #[cfg(unix)]
-    return flow::record(
-        db,
-        workspace,
-        turn,
-        &crate::worktrees::TREE_BOUNDS,
-        flow::now_ms()?,
-    );
+    {
+        let kept = flow::record(
+            db,
+            workspace,
+            turn,
+            &crate::worktrees::TREE_BOUNDS,
+            flow::now_ms()?,
+        )?;
+        owner_edit::logged(
+            "settle",
+            owner_edit::settle(db, &workspace.worktree, kept.as_ref()),
+        );
+        Ok(kept)
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, workspace, turn);
@@ -902,8 +920,9 @@ pub fn open_teammate_sets(
 /// set, first noticed against the owner's branch, only what would change on that branch
 /// (DEC-107), from the merge base of its tip and the set's head, or only what is not yet
 /// on it when the owner landed part of it outside the app; else the whole change between
-/// its base and head. Inputs: the store, the change set, that head and the page. Output:
-/// the page, or `changes_stale` once the set moved to another head.
+/// its base and head. Files the owner edited in the agent's worktree before a turn end
+/// recorded them in this change set carry `OwnerEdited`. Inputs: the store, the change set,
+/// that head and the page. Output: the page, or `changes_stale` once the set moved.
 pub fn diff(
     db: &Connection,
     id: &ChangeSetId,
@@ -917,17 +936,19 @@ pub fn diff(
         if record.head != head {
             return Err(EngineError("changes_stale".into()));
         }
-        let shown = owner::observe_for_diff(db, id).unwrap_or_else(|error| {
+        let range = owner::observe_for_diff(db, id).unwrap_or_else(|error| {
             eprintln!(
                 "landing_observe_failed cause={}",
                 crate::protocol::plain_code(&error.0)
             );
             None
         });
-        match shown {
-            Some((from, to)) => diff::page(&record.repository, &from, &to, page),
-            None => diff::page(&record.repository, &record.base, &record.head, page),
-        }
+        let mut shown = match range {
+            Some((from, to)) => diff::page(&record.repository, &from, &to, page)?,
+            None => diff::page(&record.repository, &record.base, &record.head, page)?,
+        };
+        owner_edit::mark(db, &record.worktree, &record.id, &mut shown.files)?;
+        Ok(shown)
     }
     #[cfg(not(unix))]
     {

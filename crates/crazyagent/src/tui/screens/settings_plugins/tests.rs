@@ -21,6 +21,7 @@ fn skill(name: &str, enabled: bool) -> SkillView {
         on_here: None,
         source: format!("/Users/mira/Skills/{name}"),
         folder: format!("/private/tmp/engine/skills/{name}"),
+        version: 2,
         refused: None,
     }
 }
@@ -41,6 +42,7 @@ fn server(name: &str, spec: ServerSpec, status: ServerStatus) -> ServerView {
         checks: 0,
         secrets: Vec::new(),
         on_here: None,
+        version: 2,
     }
 }
 
@@ -121,7 +123,7 @@ fn space_turns_the_focused_skill_or_server_off_and_reloads() {
     match ctx.next_request() {
         Some(Request::Settings(job)) => {
             assert!(
-                matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false }) if id == "skill-frontend-design")
+                matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false, version: 2 }) if id == "skill-frontend-design")
             );
         }
         other => panic!("change expected, got {other:?}"),
@@ -149,7 +151,7 @@ fn space_turns_the_focused_skill_or_server_off_and_reloads() {
     match ctx.next_request() {
         Some(Request::Settings(job)) => {
             assert!(
-                matches!(*job, SettingsJob::Plugin(PluginChange::SetServer { ref id, enabled: false }) if id == "server-github")
+                matches!(*job, SettingsJob::Plugin(PluginChange::SetServer { ref id, enabled: false, version: 2 }) if id == "server-github")
             );
         }
         other => panic!("change expected, got {other:?}"),
@@ -226,7 +228,7 @@ fn remove_asks_first() {
     screen.key(&Key::Enter, &mut ctx);
     match ctx.next_request() {
         Some(Request::Settings(job)) => assert!(
-            matches!(*job, SettingsJob::Plugin(PluginChange::RemoveSkill { ref id }) if id == "skill-frontend-design")
+            matches!(*job, SettingsJob::Plugin(PluginChange::RemoveSkill { ref id, version: 2 }) if id == "skill-frontend-design")
         ),
         other => panic!("a remove expected, got {other:?}"),
     }
@@ -578,9 +580,10 @@ fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
     );
     match ctx.next_request() {
         Some(Request::Settings(job)) => match *job {
-            SettingsJob::Plugin(PluginChange::Update { id, spec }) => {
+            SettingsJob::Plugin(PluginChange::Update { id, spec, version }) => {
                 assert_eq!(id, "server-github");
                 assert_eq!(spec, wanted);
+                assert_eq!(version, 2, "the edit names the version the list showed");
             }
             other => panic!("update expected, got {other:?}"),
         },
@@ -817,7 +820,7 @@ fn a_project_opens_the_skill_page_for_its_own_switch_and_goes_back_to_its_settin
     page.key(&Key::Char(' '), &mut ctx);
     match ctx.next_request() {
         Some(Request::Settings(job)) => assert!(
-            matches!(*job, SettingsJob::Plugin(PluginChange::Switch { ref project, ref id, on: false }) if project.as_str() == "tidepool" && id == "skill-frontend-design")
+            matches!(*job, SettingsJob::Plugin(PluginChange::Switch { ref project, ref id, on: false, version: 2 }) if project.as_str() == "tidepool" && id == "skill-frontend-design")
         ),
         other => panic!("a project switch expected, got {other:?}"),
     }
@@ -882,7 +885,7 @@ fn the_skill_page_renders_skill_md_and_files_and_switches_the_skill() {
     page.key(&Key::Char(' '), &mut ctx);
     match ctx.next_request() {
         Some(Request::Settings(job)) => assert!(
-            matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false }) if id == "skill-frontend-design")
+            matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false, version: 2 }) if id == "skill-frontend-design")
         ),
         other => panic!("a switch expected, got {other:?}"),
     }
@@ -1018,7 +1021,7 @@ fn a_skill_read_for_another_scope_is_ignored_and_space_on_a_project_page_never_s
     own_page.key(&Key::Char(' '), &mut ctx);
     match ctx.next_request() {
         Some(Request::Settings(job)) => assert!(
-            matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false }) if id == "skill-frontend-design"),
+            matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false, .. }) if id == "skill-frontend-design"),
             "the project's own skill is switched where it lives: {job:?}"
         ),
         other => panic!("a switch expected, got {other:?}"),

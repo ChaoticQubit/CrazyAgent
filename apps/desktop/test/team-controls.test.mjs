@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { readFileSync, readdirSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./load-source.mjs";
@@ -156,6 +157,57 @@ test("the idle stop says when an idle master stops, which no setting changes", (
   assert.match(html, /An idle master stops 15 min after its work is done and is never stopped while that work is still going\./);
 });
 
+test("two saves from one view both name the version that view read, so the second is refused instead of undoing the first", () => {
+  assert.equal(controls.settingsVersion(status()), 0, "an engine without the field names 0");
+  const view = status({ settings_version: 3, turn_limit_secs: 3600, session_limit_secs: null, idle_stop_secs: null });
+  assert.equal(controls.settingsVersion(view), 3, "the first save, a 2 h task limit, names the read");
+  assert.equal(controls.settingsVersion(view), 3, "the second save, an idle stop built from the same view's 1 h task limit before the team read returns, names the same read, which the engine now refuses as stale");
+  const source = readFileSync(new URL("../src/screens/team/controls.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /setSaved|Math\.max/, "no version from an earlier save is ever named with values the view did not read");
+  assert.match(source, /const shown = limits \?\? \{ turn: status\.turn_limit_secs \?\? null, session: status\.session_limit_secs \?\? null, idle: status\.idle_stop_secs \?\? null \};/, "the limits a change starts from are the shown status's");
+});
+
+test("every native flow that changes a team setting names the settings version it read", () => {
+  const folder = new URL("./native/", import.meta.url);
+  let calls = 0;
+  for (const file of readdirSync(folder).filter((name) => name.endsWith(".mjs"))) {
+    const source = readFileSync(new URL(file, folder), "utf8");
+    for (const call of source.matchAll(/"desktop_team_(?:keep_warm|time_limits|on_harness_switch|finished_agents|live_master)", \{[^}]*\}/g)) {
+      calls += 1;
+      assert.match(call[0], /\bversion: /, `${file}: ${call[0]}`);
+    }
+  }
+  assert.ok(calls > 0, "the native flows change a team setting");
+});
+
+test("each team setting sends the version it read, and a stale save says so and reads the team again", () => {
+  const source = readFileSync(new URL("../src/screens/team/controls.tsx", import.meta.url), "utf8");
+  for (const call of [
+    "keepTeamWarm(projectId, on, version)",
+    "setTeamTimeLimits(projectId, next.turn, next.session, next.idle, version)",
+    "setOnHarnessSwitch(projectId, mode, version)",
+    'showFinishedAgents(projectId, choice === "show", version)',
+  ]) assert.ok(source.includes(`await save((version) => ${call}`), call);
+  assert.match(source, /const result = await send\(settingsVersion\(status\)\);\s*return savedStale\(result\) \? TEAM_SETTINGS_STALE : changeNote\(result, missing\);/);
+  for (const handler of ["toggle", "limit", "chooseSwitch", "view"]) {
+    const body = source.slice(source.indexOf(`async function ${handler}(`), source.indexOf("\n  }\n", source.indexOf(`async function ${handler}(`)));
+    assert.match(body, /setNote\(message\);\s*reload\(\);$/, `${handler} reads the team again after every save, stale or not`);
+  }
+  assert.equal(controls.TEAM_SETTINGS_STALE, "Team settings changed since the controls read them, so your change was not saved. The controls now show the saved settings; make your change again.");
+  const api = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
+  const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
+  for (const [command, fields] of [
+    ["desktop_team_keep_warm", "id, on, version"],
+    ["desktop_team_time_limits", "id, turnSecs, sessionSecs, idleSecs, version"],
+    ["desktop_team_on_harness_switch", "id, mode, version"],
+    ["desktop_team_finished_agents", "id, show, version"],
+    ["desktop_team_live_master", "id, on, version"],
+  ]) {
+    assert.ok(api.includes(`call<IntentReceipt>("${command}", { ${fields}, generation: nextGeneration() })`), `${command} in api.ts`);
+    assert.ok(client.includes(`invoke<IntentReceipt>("${command}", { ${fields}, generation })`), `${command} in engine-client.ts`);
+  }
+});
+
 const coordination = await import("../src/screens/team/coordination.tsx");
 
 test("workflow nudges offer Off first, Every 10 minutes and First edit, and show Off for a project with no saved coordination settings", () => {
@@ -194,23 +246,16 @@ test("every cap, token budget, depth and landing choice is offered once, from th
   assert.deepEqual(controls.LANDING_OPTIONS.map((option) => option.value), ["lead", "owner"]);
 });
 
-test("team settings changes send the revision the window read, so the engine refuses a stale one", () => {
+test("team settings changes send the version the window read, so the engine refuses a stale one", () => {
   const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
-  const source = read("../src/screens/team/controls.tsx");
-  assert.match(source, /setTeamTimeLimits\(projectId, next\.turn, next\.session, next\.idle, status\.settings_revision \?\? 0\)/);
-  assert.match(source, /setOnHarnessSwitch\(projectId, mode, status\.settings_revision \?\? 0\)/);
-  const api = read("../src/api.ts");
-  assert.match(api, /call<IntentReceipt>\("desktop_team_time_limits", \{ id, turnSecs, sessionSecs, idleSecs, revision, generation: nextGeneration\(\) \}\)/);
-  assert.match(api, /call<IntentReceipt>\("desktop_team_on_harness_switch", \{ id, mode, revision, generation: nextGeneration\(\) \}\)/);
   const client = read("../src/engine-client.ts");
-  assert.match(client, /invoke<IntentReceipt>\("desktop_team_time_limits", \{ id, turnSecs, sessionSecs, idleSecs, revision, generation \}\)/);
-  assert.match(client, /invoke<IntentReceipt>\("desktop_team_on_harness_switch", \{ id, mode, revision, generation \}\)/);
-  assert.match(client, /settings_revision\?: number;/);
+  assert.match(client, /settings_version\?: number;/);
+  assert.doesNotMatch(client, /settings_revision/, "one settings version, no second revision");
   const lib = read("../src-tauri/src/lib.rs");
   for (const command of ["desktop_team_time_limits", "desktop_team_on_harness_switch"]) {
     const start = lib.indexOf(`fn ${command}(`);
     assert.ok(start >= 0, command);
-    assert.ok(lib.slice(start, lib.indexOf(")", start)).includes("revision: u64"), `${command} takes the revision`);
+    assert.ok(lib.slice(start, lib.indexOf(")", start)).includes("version: u64"), `${command} takes the version`);
   }
   const limits = lib.indexOf("CommandArg<'de, R> for TeamTimeLimits");
   assert.ok(limits >= 0, "the native command reads the time limits through one argument");

@@ -3,7 +3,7 @@ import {
   addHooks, addMcpServer, addSkill, approveMcpServer, checkMcpServer, importSkill, listHooks, listMcpServers, listSkills, pickFolder, plainError, removeMcpSecret,
   removeMcpServer, removeSkill, setHookEnabled, setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, skillImportScan, switchPlugin, type HookView,
   type ImportCandidate, type ImportedSkill, type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope,
-  type Result, type SkillDetail, type SkillView,
+  type Result, type SkillDetail, type SkillView, type Failure,
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
@@ -28,6 +28,13 @@ const ARGS_COPY = "Use up to 32 arguments, each on one line, with at most 4 KB f
 const URL_COPY = "Use an https address. Plain http works only for this Mac, and the address can't hold a password.";
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const NOT_READY = "This change isn't ready in this build yet.";
+
+/** Whether a refused skill or server change means what the screen shows is out of date, so it
+ * is read again: the item changed since it was shown, went away, or moved on to a newer
+ * version. Input: the refusal. Output: true to read again. */
+export function readsAgain(failure: Failure): boolean {
+  return failure.kind === "error" && /changed|not_found|stale_revision/.test(failure.code);
+}
 
 const WORDS: Record<McpServerView["status"], string> = {
   approved: "Approved", waiting_for_approval: "Needs approval", off: "Turned off", cant_start: "Can't start",
@@ -264,9 +271,12 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
   const toggle = async (skill: SkillView, on: boolean) => {
     setFailure("");
     const target = pluginSwitch(skill, projectId);
-    const result = session.noteResult<unknown>(target.project && projectId ? await switchPlugin(projectId, skill.id, on) : await setSkillEnabled(skill.id, on));
+    const result = session.noteResult<unknown>(target.project && projectId ? await switchPlugin(projectId, skill.id, on, skill.version) : await setSkillEnabled(skill.id, on, skill.version));
     if (result.kind === "ok") { session.showToast(on ? "Skill turned on." : "Skill turned off."); reload(); onChanged(); }
-    else setFailure(result.kind === "not_ready" ? NOT_READY : result.message);
+    else {
+      setFailure(result.kind === "not_ready" ? NOT_READY : result.message);
+      if (readsAgain(result)) { reload(); onChanged(); }
+    }
   };
   const title = detail.kind === "ok" ? detail.value.skill.name : "Skill";
   return <Dialog open title={title} onClose={onClose} wide footer={<Button onClick={onClose}>Close</Button>}>
@@ -728,7 +738,7 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
     const result = session.noteResult(await action());
     setBusy(null);
     if (result.kind === "ok") { session.showToast(done(result.value)); reload(); }
-    else { setFailure(result.kind === "not_ready" ? NOT_READY : result.message); if (result.kind === "error" && /changed|not_found/.test(result.code)) reload(); }
+    else { setFailure(result.kind === "not_ready" ? NOT_READY : result.message); if (readsAgain(result)) reload(); }
   }
 
   const addSkillFromChooser = async () => {
@@ -742,7 +752,7 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
 
   const toggleSkill = (skill: SkillView, on: boolean) => {
     const target = pluginSwitch(skill, projectId);
-    void act<unknown>(skill.id, () => target.project && projectId ? switchPlugin(projectId, skill.id, on) : setSkillEnabled(skill.id, on),
+    void act<unknown>(skill.id, () => target.project && projectId ? switchPlugin(projectId, skill.id, on, skill.version) : setSkillEnabled(skill.id, on, skill.version),
       () => on ? "Skill turned on." : "Skill turned off.", reloadSkills);
   };
   const addHooksFromChooser = async () => {
@@ -755,20 +765,20 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
   };
   const toggleHook = (hook: HookView, on: boolean) => {
     const target = pluginSwitch(hook, projectId);
-    void act<unknown>(hook.id, () => target.project && projectId ? switchPlugin(projectId, hook.id, on) : setHookEnabled(hook.id, on),
+    void act<unknown>(hook.id, () => target.project && projectId ? switchPlugin(projectId, hook.id, on, hook.version) : setHookEnabled(hook.id, on),
       () => on ? "Hook turned on." : "Hook turned off.", reloadHooks);
   };
   const toggleServer = (server: McpServerView, on: boolean) => {
     const target = pluginSwitch(server, projectId);
-    void act<unknown>(server.id, () => target.project && projectId ? switchPlugin(projectId, server.id, on) : setMcpServerEnabled(server.id, on),
+    void act<unknown>(server.id, () => target.project && projectId ? switchPlugin(projectId, server.id, on, server.version) : setMcpServerEnabled(server.id, on, server.version),
       () => on ? "Server turned on." : "Server turned off.", reloadServers);
   };
   const confirmRemove = () => {
     if (!removing) return;
     const item = removing;
     setRemoving(undefined);
-    if (item.kind === "skill") void act(item.skill.id, () => removeSkill(item.skill.id), () => "Skill removed.", reloadSkills);
-    else void act(item.server.id, () => removeMcpServer(item.server.id), () => "Server removed.", reloadServers);
+    if (item.kind === "skill") void act(item.skill.id, () => removeSkill(item.skill.id, item.skill.version), () => "Skill removed.", reloadSkills);
+    else void act(item.server.id, () => removeMcpServer(item.server.id, item.server.version), () => "Server removed.", reloadServers);
   };
 
   return <div className="stack">

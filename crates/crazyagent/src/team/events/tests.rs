@@ -121,6 +121,18 @@ impl Drop for Fixture {
     }
 }
 
+fn put_rule(
+    connection: &Connection,
+    target: &RuleTarget,
+    rule: Option<&WakeRule>,
+) -> Result<(), &'static str> {
+    let tx = connection.unchecked_transaction().unwrap();
+    let version = rule_version(&tx, target).unwrap();
+    let done = set_rule(&tx, target, rule, version).unwrap();
+    tx.commit().unwrap();
+    done
+}
+
 fn project() -> ProjectId {
     ProjectId::new(PROJECT).unwrap()
 }
@@ -540,6 +552,86 @@ fn a_master_reaches_only_its_own_live_sub_agents_by_name() {
         Err("team_agent_not_running")
     );
     assert_eq!(send(live.to_string(), "hi"), Ok(live));
+}
+
+/// An id form names only the agent with that id: agent 8 holding the handle `team-7` from
+/// before handles were checked cannot take agent 7's messages, and `send_to_id` types into
+/// agent 7 alone.
+#[test]
+fn an_id_form_reaches_its_own_agent_even_when_another_agent_holds_it_as_a_handle() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    for id in [7, 8] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,?2,'sub','codex',1,'idle',1,1)",
+                params![id, PROJECT],
+            )
+            .unwrap();
+        fixture.pane(&host, id, &["/bin/sh", "-c", "exec cat"]);
+    }
+    super::super::names::assign_persona(&fixture.connection, &project(), 8).unwrap();
+    fixture
+        .connection
+        .execute("UPDATE team_names SET handle='team-7' WHERE agent=8", [])
+        .unwrap();
+    for name in ["team-7", "@team-7", "7", "codex-7", "Sub-agent 7"] {
+        assert_eq!(
+            resolve(&fixture.connection, &project(), name).unwrap(),
+            Some(7),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            "team-7",
+            Said::Message,
+            "first"
+        )
+        .unwrap(),
+        Ok(7)
+    );
+    assert_eq!(
+        send_to_id(&fixture.connection, host.as_ref(), &project(), 7, "second").unwrap(),
+        Ok(())
+    );
+    for (id, refused) in [
+        (8, Ok(())),
+        (9, Err("team_agent_not_found")),
+        (0, Err("team_agent_not_found")),
+    ] {
+        assert_eq!(
+            send_to_id(&fixture.connection, host.as_ref(), &project(), id, "third").unwrap(),
+            refused,
+            "{id}"
+        );
+    }
+    assert_eq!(
+        send_to_id(
+            &fixture.connection,
+            host.as_ref(),
+            &ProjectId::new(OTHER).unwrap(),
+            7,
+            "fourth"
+        )
+        .unwrap(),
+        Err("team_agent_not_found")
+    );
+    let screen = |id: i64| {
+        String::from_utf8_lossy(&host.screen(&AgentId::team(id).unwrap()).unwrap()).into_owned()
+    };
+    let deadline = Instant::now() + WAIT;
+    while !(screen(7).contains("second") && screen(8).contains("third")) {
+        assert!(Instant::now() < deadline, "{}\n{}", screen(7), screen(8));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(screen(7).contains("first"));
+    assert!(!screen(8).contains("first") && !screen(8).contains("second"));
+    assert!(!screen(7).contains("third") && !screen(7).contains("fourth"));
 }
 
 /// A numbered name reaches that agent, never another agent whose handle was stored in that
@@ -1058,6 +1150,91 @@ fn an_escalation_is_an_unseen_notification_until_the_owner_sees_it() {
     );
 }
 
+/// A project's unseen question notifications are counted in full even when more of them
+/// wait than the app window lists, so the app can count each pending question once.
+#[test]
+fn each_project_reports_its_unseen_question_notifications_beyond_the_listed_window() {
+    let fixture = Fixture::new();
+    let asked = VIEW_NOTIFICATIONS_MAX + 5;
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    for at in 0..asked {
+        notify(
+            &tx,
+            &project(),
+            NotificationKind::Question,
+            "Which database?",
+            1 + at,
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    for at in 0..2 {
+        escalate(
+            &fixture.connection,
+            &project(),
+            "Spend on a new provider?",
+            100 + at,
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    let view = app(&fixture.connection).unwrap();
+    assert_eq!(
+        view.projects,
+        [ProjectUnseen {
+            project_id: project(),
+            unseen: asked + 2,
+            questions: asked,
+        }]
+    );
+    let listed = view
+        .notifications
+        .iter()
+        .filter(|item| item.kind == NotificationKind::Question)
+        .count() as i64;
+    assert!(listed < asked, "the window lists only {listed} of {asked}");
+}
+
+/// A Normal work question to the owner notifies with the same `question` kind as the
+/// questions log, but only the questions log's notification counts as a pending question, so
+/// the app neither drops the work question from the sidebar count nor counts it twice.
+#[test]
+fn a_work_question_alert_counts_as_unseen_but_not_as_a_pending_question() {
+    let fixture = Fixture::new();
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    notify(
+        &tx,
+        &project(),
+        NotificationKind::Question,
+        "Which database?",
+        1,
+    )
+    .unwrap();
+    let alert = notify(
+        &tx,
+        &project(),
+        NotificationKind::Question,
+        "Ada asks you: Which port?",
+        2,
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO team_owner_alerts(source,ref,since,project,agent,notification) VALUES ('question',9,2,?1,7,?2)",
+        params![PROJECT, alert],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        app(&fixture.connection).unwrap().projects,
+        [ProjectUnseen {
+            project_id: project(),
+            unseen: 2,
+            questions: 1,
+        }]
+    );
+}
+
 #[test]
 fn busy_projects_never_hide_another_projects_unseen_count_or_its_escalation() {
     let fixture = Fixture::new();
@@ -1090,6 +1267,7 @@ fn busy_projects_never_hide_another_projects_unseen_count_or_its_escalation() {
     let count = |id: &str, unseen: i64| ProjectUnseen {
         project_id: ProjectId::new(id).unwrap(),
         unseen,
+        questions: 0,
     };
     assert_eq!(
         view.projects,
@@ -1367,7 +1545,7 @@ fn with_finished_muted_a_result_ending_in_a_question_starts_no_master() {
     let fixture = Fixture::new();
     let connection = &fixture.connection;
     let ada = fixture.agent(PROJECT, "sub", "codex", "working");
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
@@ -1377,7 +1555,6 @@ fn with_finished_muted_a_result_ending_in_a_question_starts_no_master() {
             ..WakeRule::default()
         }),
     )
-    .unwrap()
     .unwrap();
     let task = fixture.task(
         ada,
@@ -1398,7 +1575,7 @@ fn a_question_muted_by_the_rule_starts_no_master_for_the_other_events() {
     let fixture = Fixture::new();
     let connection = &fixture.connection;
     let ada = fixture.agent(PROJECT, "sub", "codex", "working");
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
@@ -1408,7 +1585,6 @@ fn a_question_muted_by_the_rule_starts_no_master_for_the_other_events() {
             ..WakeRule::default()
         }),
     )
-    .unwrap()
     .unwrap();
     for (kind, text) in [
         (EventKind::Finished, "Done."),
@@ -1549,14 +1725,13 @@ fn a_kind_turned_off_is_muted_and_the_hourly_cap_pauses_auto_wake_and_tells_the_
         hourly_cap: 2,
         ..WakeRule::default()
     };
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
         },
         Some(&rule),
     )
-    .unwrap()
     .unwrap();
     record(
         connection,
@@ -1619,17 +1794,14 @@ fn a_kind_turned_off_is_muted_and_the_hourly_cap_pauses_auto_wake_and_tells_the_
         hourly_cap: 0,
         ..WakeRule::default()
     };
-    set_rule(connection, &RuleTarget::App, Some(&never))
-        .unwrap()
-        .unwrap();
-    set_rule(
+    put_rule(connection, &RuleTarget::App, Some(&never)).unwrap();
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
         },
         None,
     )
-    .unwrap()
     .unwrap();
     record(
         connection,
@@ -1711,14 +1883,13 @@ fn only_the_events_in_a_wake_are_named_and_none_while_the_hourly_cap_holds() {
         hourly_cap: 1,
         ..WakeRule::default()
     };
-    set_rule(
+    put_rule(
         connection,
         &RuleTarget::Project {
             project_id: project(),
         },
         Some(&rule),
     )
-    .unwrap()
     .unwrap();
     for at in [300, 301] {
         let tx = immediate(connection).unwrap();
@@ -1775,9 +1946,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
         hourly_cap: 1,
         ..shipped
     };
-    set_rule(connection, &RuleTarget::App, Some(&app))
-        .unwrap()
-        .unwrap();
+    put_rule(connection, &RuleTarget::App, Some(&app)).unwrap();
     assert_eq!(
         rule(connection, Some(&project()), Some(ada)).unwrap(),
         (app, RuleLevel::App)
@@ -1785,16 +1954,12 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
     let here = RuleTarget::Project {
         project_id: project(),
     };
-    set_rule(connection, &here, Some(&project_rule))
-        .unwrap()
-        .unwrap();
+    put_rule(connection, &here, Some(&project_rule)).unwrap();
     let mine = RuleTarget::Agent {
         project_id: project(),
         agent: ada,
     };
-    set_rule(connection, &mine, Some(&agent_rule))
-        .unwrap()
-        .unwrap();
+    put_rule(connection, &mine, Some(&agent_rule)).unwrap();
     assert_eq!(
         rule(connection, Some(&project()), Some(ada)).unwrap(),
         (agent_rule, RuleLevel::Agent)
@@ -1809,7 +1974,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
         ..shipped
     };
     assert_eq!(
-        set_rule(connection, &here, Some(&too_high)).unwrap(),
+        put_rule(connection, &here, Some(&too_high)),
         Err("team_wake_cap_invalid")
     );
     for target in [
@@ -1823,7 +1988,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
         },
     ] {
         assert_eq!(
-            set_rule(connection, &target, Some(&shipped)).unwrap(),
+            put_rule(connection, &target, Some(&shipped)),
             Err("team_agent_not_found")
         );
     }
@@ -1859,7 +2024,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
             .iter()
             .any(|event| event.kind == EventKind::Question && event.state == EventState::Muted)
     );
-    set_rule(connection, &mine, None).unwrap().unwrap();
+    put_rule(connection, &mine, None).unwrap();
     assert_eq!(
         rule(connection, Some(&project()), Some(ada)).unwrap(),
         (project_rule, RuleLevel::Project)
@@ -1936,6 +2101,230 @@ fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_
     let delivered = view(connection, &project()).unwrap().questions;
     assert!(delivered.is_empty(), "{delivered:?}");
     assert_eq!(node(delivered, ada), Some(0));
+}
+
+fn write_rule(
+    connection: &Connection,
+    target: &RuleTarget,
+    rule: Option<&WakeRule>,
+    version: u64,
+) -> Result<(), &'static str> {
+    let tx = connection.unchecked_transaction().unwrap();
+    let done = set_rule(&tx, target, rule, version).unwrap();
+    tx.commit().unwrap();
+    done
+}
+
+#[test]
+fn stale_team_rule_write_is_refused() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let ada = fixture.agent(PROJECT, "sub", "codex", "working");
+    let here = RuleTarget::Project {
+        project_id: project(),
+    };
+    let mine = RuleTarget::Agent {
+        project_id: project(),
+        agent: ada,
+    };
+    let quiet = WakeRule {
+        progress: false,
+        ..WakeRule::default()
+    };
+    let loud = WakeRule {
+        hourly_cap: 9,
+        ..WakeRule::default()
+    };
+    for target in [&RuleTarget::App, &here, &mine] {
+        assert_eq!(rule_version(connection, target).unwrap(), 0);
+    }
+
+    assert_eq!(write_rule(connection, &here, Some(&quiet), 0), Ok(()));
+    for version in [0, 2] {
+        assert_eq!(
+            write_rule(connection, &here, Some(&loud), version),
+            Err("stale_revision"),
+            "a save from version {version} never replaces version 1"
+        );
+    }
+    let shown = view(connection, &project()).unwrap().wake;
+    assert_eq!(
+        (shown.project, shown.project_version),
+        (Some(quiet), 1),
+        "the stale window changed nothing"
+    );
+    assert_eq!(
+        write_rule(connection, &here, None, 0),
+        Err("stale_revision"),
+        "a stale Reset is refused too"
+    );
+    assert_eq!(
+        write_rule(
+            connection,
+            &here,
+            Some(&WakeRule {
+                hourly_cap: HOURLY_CAP_MAX + 1,
+                ..quiet
+            }),
+            0
+        ),
+        Err("team_wake_cap_invalid"),
+        "a bad limit is named before the version is checked"
+    );
+    assert_eq!(write_rule(connection, &here, Some(&loud), 1), Ok(()));
+    assert_eq!(
+        view(connection, &project()).unwrap().wake.project_version,
+        2
+    );
+
+    assert_eq!(
+        rule_version(connection, &mine).unwrap(),
+        0,
+        "each level keeps its own version"
+    );
+    assert_eq!(write_rule(connection, &mine, Some(&quiet), 0), Ok(()));
+    assert_eq!(
+        write_rule(connection, &mine, Some(&loud), 0),
+        Err("stale_revision")
+    );
+    assert_eq!(
+        view(connection, &project()).unwrap().wake.agents,
+        vec![AgentRule {
+            agent: ada,
+            rule: quiet,
+            version: 1
+        }]
+    );
+    assert_eq!(write_rule(connection, &mine, None, 1), Ok(()));
+    assert!(view(connection, &project()).unwrap().wake.agents.is_empty());
+    assert_eq!(
+        rule_version(connection, &mine).unwrap(),
+        2,
+        "a cleared level keeps moving its version"
+    );
+    for version in [0, 1] {
+        assert_eq!(
+            write_rule(connection, &mine, Some(&loud), version),
+            Err("stale_revision"),
+            "a window that saw version {version} before the clear re-reads"
+        );
+    }
+    assert_eq!(write_rule(connection, &mine, Some(&loud), 2), Ok(()));
+    assert_eq!(
+        write_rule(connection, &mine, Some(&quiet), 1),
+        Err("stale_revision"),
+        "a save read before the clear never replaces the rule set after it"
+    );
+    assert_eq!(
+        view(connection, &project()).unwrap().wake.agents,
+        vec![AgentRule {
+            agent: ada,
+            rule: loud,
+            version: 3
+        }]
+    );
+
+    assert_eq!(
+        write_rule(connection, &RuleTarget::App, Some(&quiet), 0),
+        Ok(())
+    );
+    assert_eq!(
+        write_rule(connection, &RuleTarget::App, Some(&loud), 0),
+        Err("stale_revision")
+    );
+    let everywhere = app(connection).unwrap();
+    assert_eq!((everywhere.rule, everywhere.rule_version), (Some(quiet), 1));
+    assert_eq!(view(connection, &project()).unwrap().wake.app_version, 1);
+}
+
+#[test]
+fn a_cleared_agent_level_shows_its_version_so_the_owner_can_set_it_again() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let ada = fixture.agent(PROJECT, "sub", "codex", "working");
+    let bo = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let master = fixture.agent(PROJECT, "master", "codex", "working");
+    let elsewhere = fixture.agent(OTHER, "sub", "codex", "working");
+    let level = |project_id: &str, agent: i64| RuleTarget::Agent {
+        project_id: ProjectId::new(project_id).unwrap(),
+        agent,
+    };
+    let quiet = WakeRule {
+        progress: false,
+        ..WakeRule::default()
+    };
+    let loud = WakeRule {
+        hourly_cap: 9,
+        ..WakeRule::default()
+    };
+    assert!(
+        view(connection, &project())
+            .unwrap()
+            .wake
+            .cleared
+            .is_empty()
+    );
+
+    assert_eq!(
+        write_rule(connection, &level(PROJECT, ada), Some(&quiet), 0),
+        Ok(())
+    );
+    assert!(
+        view(connection, &project())
+            .unwrap()
+            .wake
+            .cleared
+            .is_empty(),
+        "a level with its own rule is listed with the rules"
+    );
+    assert_eq!(
+        write_rule(connection, &level(PROJECT, ada), None, 1),
+        Ok(())
+    );
+    assert_eq!(
+        write_rule(connection, &level(OTHER, elsewhere), Some(&quiet), 0),
+        Ok(())
+    );
+    assert_eq!(
+        write_rule(connection, &level(OTHER, elsewhere), None, 1),
+        Ok(())
+    );
+
+    let shown = view(connection, &project()).unwrap().wake;
+    assert!(shown.agents.is_empty());
+    assert_eq!(
+        shown.cleared,
+        vec![ClearedRule {
+            agent: ada,
+            version: 2
+        }],
+        "only this project's cleared sub-agent levels, never {bo}, the master {master} or another project's {elsewhere}"
+    );
+    assert_eq!(
+        write_rule(
+            connection,
+            &level(PROJECT, ada),
+            Some(&loud),
+            shown.cleared[0].version
+        ),
+        Ok(()),
+        "the version the view showed sets the cleared level again"
+    );
+    let again = view(connection, &project()).unwrap().wake;
+    assert!(again.cleared.is_empty());
+    assert_eq!(
+        again.agents,
+        vec![AgentRule {
+            agent: ada,
+            rule: loud,
+            version: 3
+        }]
+    );
+    assert_eq!(
+        write_rule(connection, &level(PROJECT, ada), Some(&quiet), 2),
+        Err("stale_revision"),
+        "the cleared version is spent once the level is set again"
+    );
 }
 
 fn event_state(connection: &Connection, id: i64) -> String {

@@ -233,9 +233,16 @@ impl NativeOwner {
                     SetupAction::RetryResearch { project_id, job } => {
                         controller.retry_research(project_id, job, generation).await
                     }
-                    SetupAction::SetReadPaths { project_id, paths } => {
+                    SetupAction::PlanRoadmap { project_id } => {
+                        controller.plan_roadmap(project_id, generation).await
+                    }
+                    SetupAction::SetReadPaths {
+                        project_id,
+                        version,
+                        paths,
+                    } => {
                         controller
-                            .set_project_read_paths(project_id, paths, generation)
+                            .set_project_read_paths(project_id, version, paths, generation)
                             .await
                     }
                     SetupAction::SetHiddenPaths { project_id, paths } => {
@@ -243,9 +250,13 @@ impl NativeOwner {
                             .set_project_hidden_paths(project_id, paths, generation)
                             .await
                     }
-                    SetupAction::SetAgentPolicy { project_id, policy } => {
+                    SetupAction::SetAgentPolicy {
+                        project_id,
+                        version,
+                        policy,
+                    } => {
                         controller
-                            .set_project_agent_policy(project_id, policy, generation)
+                            .set_project_agent_policy(project_id, version, policy, generation)
                             .await
                     }
                 }

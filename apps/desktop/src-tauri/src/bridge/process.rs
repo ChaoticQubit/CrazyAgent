@@ -1,8 +1,8 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
-    Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionSettings, OwnerClient,
-    PROCESS_CODES, ProcessSaved, UncommittedImport,
+    Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionSettings, InstructionView,
+    OwnerClient, PROCESS_CODES, ProcessText, SavedText, UncommittedImport,
 };
 use crazyagent::protocol::ProjectId;
 use std::path::PathBuf;
@@ -41,11 +41,12 @@ impl NativeBridge {
     }
 
     /// Reads the owner's instructions, run without the bridge lock. Input: none for the
-    /// app-wide text, or the project id. Output: the text, empty when none is saved.
+    /// app-wide text, or the project id. Output: the text, empty when none is saved, and the
+    /// version a save names.
     pub fn process_text(
         &self,
         project_id: Option<String>,
-    ) -> Result<Unlocked<String>, BridgeError> {
+    ) -> Result<Unlocked<ProcessText>, BridgeError> {
         let project = project(project_id)?;
         let client = self.process_client()?;
         Ok(Box::pin(async move {
@@ -53,19 +54,24 @@ impl NativeBridge {
         }))
     }
 
-    /// Saves the owner's instructions whole, run without the bridge lock. Inputs: none for
-    /// the app-wide text, or the project id, and the text. Output: once stored, what agents
-    /// now get beside what a Claude master takes.
+    /// Saves the owner's instructions whole, run without the bridge lock, when no other save
+    /// landed since they were read. Inputs: none for the app-wide text, or the project id;
+    /// the text; the version read; and only for "Keep mine" after a stale reply, the older
+    /// version the owner opened. Output: the saved version with, for app or project text,
+    /// what agents now get beside what a Claude master takes, or the stale reply with the
+    /// newer text.
     pub fn save_process_text(
         &self,
         project_id: Option<String>,
         text: String,
-    ) -> Result<Unlocked<ProcessSaved>, BridgeError> {
+        version: u64,
+        opened: Option<u64>,
+    ) -> Result<Unlocked<SavedText>, BridgeError> {
         let project = project(project_id)?;
         let client = self.process_client()?;
         Ok(Box::pin(async move {
             client
-                .save_process_text(project, text)
+                .save_process_text(project, text, version, opened)
                 .await
                 .map_err(process_error)
         }))
@@ -184,11 +190,12 @@ impl NativeBridge {
     }
 
     /// Reads one project's agent instruction settings, run without the bridge lock.
-    /// Input: the project id. Output: the settings, the defaults when never changed.
+    /// Input: the project id. Output: the settings, the defaults when never changed, with
+    /// their version.
     pub fn instruction_settings(
         &self,
         project_id: String,
-    ) -> Result<Unlocked<InstructionSettings>, BridgeError> {
+    ) -> Result<Unlocked<InstructionView>, BridgeError> {
         let project =
             project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
         let client = self.process_client()?;
@@ -213,18 +220,21 @@ impl NativeBridge {
     }
 
     /// Stores one project's agent instruction settings whole, run without the bridge lock.
-    /// Inputs: the project id and the settings. Output: the settings as stored.
+    /// Inputs: the project id, the settings and the version the page read, none when it
+    /// could not read the stored settings and replaces them. Output: the settings as stored
+    /// with their new version, or `stale_revision` when they changed since that version.
     pub fn save_instruction_settings(
         &self,
         project_id: String,
         settings: InstructionSettings,
-    ) -> Result<Unlocked<InstructionSettings>, BridgeError> {
+        version: Option<u64>,
+    ) -> Result<Unlocked<InstructionView>, BridgeError> {
         let project =
             project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
         let client = self.process_client()?;
         Ok(Box::pin(async move {
             client
-                .save_instruction_settings(project, settings)
+                .save_instruction_settings(project, settings, version)
                 .await
                 .map_err(process_error)
         }))

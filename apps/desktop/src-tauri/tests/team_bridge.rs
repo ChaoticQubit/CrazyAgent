@@ -142,7 +142,8 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         refused.rejection.as_deref(),
         Some("team_harness_not_in_plan")
     );
-    let warm = bridge.team_keep_warm(&id, true, 5).await?;
+    let version = bridge.team_status(&id).await?.settings_version;
+    let warm = bridge.team_keep_warm(&id, true, version, 5).await?;
     assert!(matches!(warm.outcome, ActionOutcome::Applied), "{warm:?}");
 
     let team = bridge.team_status(&id).await?;
@@ -237,15 +238,9 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         (None, None, Some(600)),
         "no time limit and a 10 minute idle stop until the owner sets them"
     );
+    let read = team.settings_version;
     let limited = bridge
-        .team_time_limits(
-            &id,
-            Some(3600),
-            Some(14_400),
-            None,
-            team.settings_revision,
-            15,
-        )
+        .team_time_limits(&id, Some(3600), Some(14_400), None, read, 15)
         .await?;
     assert!(
         matches!(limited.outcome, ActionOutcome::Applied),
@@ -261,13 +256,14 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         (Some(3600), Some(14_400), None),
         "an idle stop of None is Off"
     );
+    assert_eq!(team.settings_version, read + 1);
     let refused = bridge
         .team_time_limits(
             &id,
             Some(7200),
             Some(3600),
             Some(600),
-            team.settings_revision,
+            team.settings_version,
             16,
         )
         .await
@@ -277,6 +273,25 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         ("team_action_invalid", Some("team_time_limits_invalid")),
         "a session limit below the task limit is refused and names the engine's reason"
     );
+    let stale = bridge
+        .team_time_limits(&id, Some(1800), None, Some(120), read, 21)
+        .await?;
+    assert_eq!(
+        stale.rejection.as_deref(),
+        Some("stale_revision"),
+        "time limits saved from the read before the last change are refused"
+    );
+    let team = bridge.team_status(&id).await?;
+    assert_eq!(
+        (
+            team.turn_limit_secs,
+            team.session_limit_secs,
+            team.idle_stop_secs
+        ),
+        (Some(3600), Some(14_400), None),
+        "the newer limits survive a save from an older read"
+    );
+    assert_eq!(team.settings_version, read + 1);
     assert_eq!(
         bridge.team_status("absent-project").await.unwrap_err().code,
         "project_setup_missing"
@@ -488,7 +503,9 @@ async fn crowded(root: &Path) -> Result<(), Box<dyn Error>> {
         matches!(cancelled.outcome, ActionOutcome::Applied),
         "{cancelled:?}"
     );
-    let live = bridge.team_live_master(&id, false, 5).await?;
+    let live = bridge
+        .team_live_master(&id, false, team.settings_version, 5)
+        .await?;
     assert!(matches!(live.outcome, ActionOutcome::Applied), "{live:?}");
     assert!(bridge.team_status(&id).await?.paused);
     Ok(())

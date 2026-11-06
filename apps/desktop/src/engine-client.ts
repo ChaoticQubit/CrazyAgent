@@ -416,7 +416,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry" | "plan_roadmap";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -458,6 +458,7 @@ export type ResearchKind =
   | "front_end_design"
   | "tech_stack_research";
 export type ResearchStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
+export type JobKind = ResearchKind | "roadmap_planning";
 
 export interface HarnessSlot {
   harness: string;
@@ -477,7 +478,7 @@ export interface ProjectSetup {
   about: string;
   tech_stack: string[];
   platforms: Platform[];
-  research: ResearchKind[];
+  research: JobKind[];
   pool: string | null;
   team: TeamPlan | null;
   documents: string[];
@@ -511,7 +512,7 @@ export interface StoredSetup {
 export interface ResearchJob {
   id: number;
   project_id: string;
-  kind: ResearchKind;
+  kind: JobKind;
   kind_label: string;
   status: ResearchStatus;
   status_label: string;
@@ -532,7 +533,7 @@ export interface ResearchJob {
 export interface ProjectContext {
   project_id: string;
   folder: string;
-  items: { path: string; kind: "brief" | "document" | "research"; bytes: number }[];
+  items: { path: string; kind: "brief" | "document" | "research" | "plan"; bytes: number }[];
 }
 
 export interface ContextChunk {
@@ -598,6 +599,14 @@ export type MemoryDecision =
 
 export function projectMemories(id: string, after: string | null = null): Promise<MemoryItem[]> {
   return invoke<MemoryItem[]>("desktop_project_memories", { id, after });
+}
+
+/** One decision the project's IDE asked the owner to confirm: the memory at the asked
+ * version and whether to approve or reject it. */
+export type IdeAsk = MemoryItem & { decision: "approve" | "reject" };
+
+export function ideAsks(id: string): Promise<IdeAsk[]> {
+  return invoke<IdeAsk[]>("desktop_ide_asks", { id });
 }
 
 export function reviewMemory(
@@ -688,20 +697,20 @@ export function saveSelectionToMemory(id: string, path: string, text: string, ge
   return invoke<IntentReceipt>("desktop_save_selection_to_memory", { id, path, text, generation });
 }
 
-export function forgetMemory(project: string, memory: string, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_forget_memory", { project, memory, generation });
+export function forgetMemory(project: string, memory: string, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_forget_memory", { project, memory, version, generation });
 }
 
 export function deleteProjectContext(id: string, path: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_delete_project_context", { id, path, generation });
 }
 
-export function projectReadPaths(id: string): Promise<string[]> {
-  return invoke<string[]>("desktop_project_read_paths", { id });
+export function projectReadPaths(id: string): Promise<{ paths: string[]; version: number }> {
+  return invoke<{ paths: string[]; version: number }>("desktop_project_read_paths", { id });
 }
 
-export function setProjectReadPaths(id: string, paths: string[], generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+export function setProjectReadPaths(id: string, paths: string[], version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_set_project_read_paths", { id, version, paths, generation });
 }
 
 export function projectAgentPolicy(id: string): Promise<PolicyView> {
@@ -908,7 +917,6 @@ export interface TeamStatus {
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
   message_settings?: MessageSettings;
-  settings_revision?: number;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
@@ -920,6 +928,7 @@ export interface TeamStatus {
   spread_accounts?: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
+  settings_version?: number;
   min_agents: number;
   max_agents: number;
   harnesses: TeamHarness[];
@@ -1070,8 +1079,11 @@ export interface TeamEventsView {
   questions: { agent: number; count: number }[];
   wake: {
     app: WakeRule | null;
+    app_version: number;
     project: WakeRule | null;
-    agents: { agent: number; rule: WakeRule }[];
+    project_version: number;
+    agents: { agent: number; rule: WakeRule; version: number }[];
+    cleared: { agent: number; version: number }[];
     effective: WakeRule;
     level: WakeRuleLevel;
   };
@@ -1079,10 +1091,11 @@ export interface TeamEventsView {
 
 export interface AppTeamEvents {
   rule: WakeRule | null;
+  rule_version: number;
   effective: WakeRule;
   notifications: TeamNotification[];
   unseen: number;
-  projects: { project_id: string; unseen: number }[];
+  projects: { project_id: string; unseen: number; questions?: number }[];
 }
 
 export interface TeamPlanStep {
@@ -1114,19 +1127,25 @@ export function teamCancel(id: string, task: number | null, generation: number):
   return invoke<IntentReceipt>("desktop_team_cancel", { id, task, generation });
 }
 
-export function teamKeepWarm(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
+/** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id, the
+ * switch, the team settings version the screen read and a generation. Output: the engine
+ * receipt; a save from an older read is rejected as `stale_revision`. */
+export function teamKeepWarm(id: string, on: boolean, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, version, generation });
 }
 
 /** Sets the team's task, session and idle stop time limits. Inputs: the project id, the three
- * limits in seconds or null for no limit, the team settings revision read and a generation.
- * Output: the engine receipt. */
-export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, revision: number, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, revision, generation });
+ * limits in seconds or null for no limit, the team settings version the screen read and a
+ * generation. Output: the engine receipt. */
+export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, version, generation });
 }
 
-export function teamOnHarnessSwitch(id: string, mode: SwitchMode, revision: number, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, revision, generation });
+/** Sets what the live master does with the conversation when the master harness changes.
+ * Inputs: the project id, the mode, the team settings version the screen read and a
+ * generation. Output: the engine receipt. */
+export function teamOnHarnessSwitch(id: string, mode: SwitchMode, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, version, generation });
 }
 
 /** Sets when a saved master harness change reaches the running live master. Inputs: the project
@@ -1148,15 +1167,17 @@ export function teamChildLanding(id: string, mode: ChildLanding, generation: num
 }
 
 /** Sets where the project's finished agents show. Inputs: the project id, true for Show (the
- * agents list and team graph) or false for Hide (the Finished fold-out only) and a generation. */
-export function teamFinishedAgents(id: string, show: boolean, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_finished_agents", { id, show, generation });
+ * agents list and team graph) or false for Hide (the Finished fold-out only), the team
+ * settings version the screen read and a generation. */
+export function teamFinishedAgents(id: string, show: boolean, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_finished_agents", { id, show, version, generation });
 }
 
-/** Turns the project's live master on or off. Inputs: the project id, the switch and a
- * generation. Output: the commit receipt; a master with no terminal app is rejected. */
-export function teamLiveMaster(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_live_master", { id, on, generation });
+/** Turns the project's live master on or off. Inputs: the project id, the switch, the team
+ * settings version the screen read and a generation. Output: the commit receipt; a master
+ * with no terminal app is rejected. */
+export function teamLiveMaster(id: string, on: boolean, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_live_master", { id, on, version, generation });
 }
 
 export function teamPause(id: string, paused: boolean, generation: number): Promise<IntentReceipt> {
@@ -1209,6 +1230,12 @@ export function cancelResearch(id: string, job: number, generation: number): Pro
  * Inputs: project id, job id and a generation. Output: the engine receipt. */
 export function retryResearch(id: string, job: number, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_retry_research", { id, job, generation });
+}
+
+/** Queues the project's roadmap and release process planning job now.
+ * Inputs: project id and a generation. Output: the engine receipt. */
+export function planRoadmap(id: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_plan_roadmap", { id, generation });
 }
 
 /** Reads the last plain lines of one research job's output, with secrets hidden.
@@ -1416,6 +1443,7 @@ export interface SetupStatus {
   pack: PackEntry[];
   running: boolean;
   notes?: string[];
+  version: number;
 }
 
 /** Reads the projects home folder and whether the engine watches it. Output: the home. */
@@ -1479,14 +1507,16 @@ export function runSetup(pack: string[], generation: number): Promise<SetupStatu
   return invoke<SetupStatus>("desktop_run_setup", { pack, generation });
 }
 
-/** Switches one installed pack entry on or off. Inputs: its id, the state and a generation. */
-export function setPackEntry(id: string, on: boolean, generation: number): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_set_pack_entry", { id, on, generation });
+/** Switches one installed pack entry on or off. Inputs: its id, the state, the pack
+ * version shown and a generation. */
+export function setPackEntry(id: string, on: boolean, version: number, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_set_pack_entry", { id, on, version, generation });
 }
 
-/** Removes one installed pack entry and what it added. Inputs: its id and a generation. */
-export function removePackEntry(id: string, generation: number): Promise<SetupStatus> {
-  return invoke<SetupStatus>("desktop_remove_pack_entry", { id, generation });
+/** Removes one installed pack entry and what it added. Inputs: its id, the pack version
+ * shown and a generation. */
+export function removePackEntry(id: string, version: number, generation: number): Promise<SetupStatus> {
+  return invoke<SetupStatus>("desktop_remove_pack_entry", { id, version, generation });
 }
 
 /** What one node of the who-leads-whom tree stands for: the master, a harness lead the master
@@ -1586,6 +1616,19 @@ export type TerminalMessage = ArrayBuffer | TerminalFrame;
 /** Reads one project's team graph. Input: the project id. Output: nodes and task edges. */
 export function teamGraph(id: string): Promise<TeamGraph> {
   return invoke<TeamGraph>("desktop_team_graph", { id });
+}
+
+/** The project whose IDE tab a TUI "open in IDE" asked to bring forward, and the reveal
+ * that asked. */
+export interface IdeFocus {
+  project: string;
+  request: string;
+}
+
+/** Takes, once, the IDE tab a TUI "open in IDE" asked the app to show, and raises the
+ * window when there is one. Output: the project and reveal, or null when none is waiting. */
+export function ideFocus(): Promise<IdeFocus | null> {
+  return invoke<IdeFocus | null>("desktop_ide_focus");
 }
 
 /** Opens a live view of one agent's terminal. The channel gets the attach frame, the screen
@@ -1829,6 +1872,7 @@ export interface SkillView {
   scope_label: string;
   enabled: boolean;
   on_here: boolean | null;
+  version: number;
   source: string;
   folder: string;
   refused: string | null;
@@ -1840,7 +1884,8 @@ export interface SkillFile {
 }
 
 /** One hook as Settings lists it: its plugin, Claude Code event and matcher, command, where
- * it applies, its On flags and the skill or MCP server it follows. */
+ * it applies, its On flags, the skill or MCP server it follows and the version a project
+ * switch names. */
 export interface HookView {
   id: string;
   name: string;
@@ -1854,6 +1899,7 @@ export interface HookView {
   on_here: boolean | null;
   follows: string | null;
   source: string;
+  version: number;
 }
 
 export interface SkillDetail {
@@ -1905,6 +1951,7 @@ export interface McpServerView {
   checks: number;
   secrets: { name: string; saved: boolean }[];
   on_here: boolean | null;
+  version: number;
 }
 
 /** A tool's switch: on, off, or deleted (hidden; built-in tools only). */
@@ -1958,14 +2005,14 @@ export function setHookEnabled(id: string, enabled: boolean): Promise<HookView> 
   return invoke<HookView>("desktop_set_hook_enabled", { id, enabled });
 }
 
-/** Turns a skill on or off where it was added. */
-export function setSkillEnabled(id: string, enabled: boolean): Promise<SkillView> {
-  return invoke<SkillView>("desktop_set_skill_enabled", { id, enabled });
+/** Turns a skill on or off where it was added, from the version the list showed. */
+export function setSkillEnabled(id: string, enabled: boolean, version: number): Promise<SkillView> {
+  return invoke<SkillView>("desktop_set_skill_enabled", { id, enabled, version });
 }
 
 /** Removes a skill and the engine's copy of its folder. */
-export function removeSkill(id: string): Promise<void> {
-  return invoke<void>("desktop_remove_skill", { id });
+export function removeSkill(id: string, version: number): Promise<void> {
+  return invoke<void>("desktop_remove_skill", { id, version });
 }
 
 /** Reads one skill with its full SKILL.md text and file list, with a project's switch when given. */
@@ -1989,8 +2036,8 @@ export function addMcpServer(scope: PluginScope, name: string, spec: McpServerSp
 }
 
 /** Changes how an MCP server runs; it then waits for approval again. */
-export function updateMcpServer(id: string, spec: McpServerSpec): Promise<McpServerView> {
-  return invoke<McpServerView>("desktop_update_mcp_server", { id, spec });
+export function updateMcpServer(id: string, spec: McpServerSpec, version: number): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_update_mcp_server", { id, spec, version });
 }
 
 /** Approves an MCP server exactly as shown; a server that changed since is refused. */
@@ -1998,19 +2045,19 @@ export function approveMcpServer(id: string, spec: McpServerSpec): Promise<McpSe
   return invoke<McpServerView>("desktop_approve_mcp_server", { id, spec });
 }
 
-/** Turns an MCP server on or off where it was added. */
-export function setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerView> {
-  return invoke<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled });
+/** Turns an MCP server on or off where it was added, from the version the list showed. */
+export function setMcpServerEnabled(id: string, enabled: boolean, version: number): Promise<McpServerView> {
+  return invoke<McpServerView>("desktop_set_mcp_server_enabled", { id, enabled, version });
 }
 
 /** Removes an MCP server and its saved secrets. */
-export function removeMcpServer(id: string): Promise<void> {
-  return invoke<void>("desktop_remove_mcp_server", { id });
+export function removeMcpServer(id: string, version: number): Promise<void> {
+  return invoke<void>("desktop_remove_mcp_server", { id, version });
 }
 
-/** Switches a global skill or MCP server on or off for one project. */
-export function switchPlugin(projectId: string, id: string, on: boolean): Promise<void> {
-  return invoke<void>("desktop_switch_plugin", { projectId, id, on });
+/** Switches a global skill or MCP server on or off for one project, from the version the list showed. */
+export function switchPlugin(projectId: string, id: string, on: boolean, version: number): Promise<void> {
+  return invoke<void>("desktop_switch_plugin", { projectId, id, on, version });
 }
 
 /** Saves or replaces one MCP server secret. */

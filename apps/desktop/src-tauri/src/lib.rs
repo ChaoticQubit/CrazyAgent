@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod ide;
 mod updates;
 
 #[cfg(feature = "native-webdriver")]
@@ -6,8 +7,10 @@ mod native_refresh_observation;
 
 use bridge::intake::FolderSize;
 use bridge::memory::{MemoryImport, MemoryList, MemoryNote};
+use bridge::notify::Notices;
 use bridge::picker::{FolderPurpose, Pick};
-use bridge::project_setup::{MemoryItem, ResearchLog};
+use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
+use bridge::questions::{QuestionCount, QuestionPage};
 use bridge::terminal::Terminals;
 use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError, BridgeQueue,
@@ -26,6 +29,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
+use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
@@ -50,6 +54,7 @@ use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 use updates::{AvailableUpdate, InstallOutcome, UpdateProgress, UpdateSettings, UpdateState};
 
@@ -480,6 +485,20 @@ async fn desktop_project_memories(
 }
 
 #[tauri::command]
+async fn desktop_ide_asks(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+    id: String,
+) -> Result<Vec<IdeAskItem>, BridgeError> {
+    main_window(&window)?;
+    if !views.any_loaded() {
+        return Ok(Vec::new());
+    }
+    read(&state).await?.ide_asks(&id).await
+}
+
+#[tauri::command]
 async fn desktop_review_memory(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -619,12 +638,13 @@ async fn desktop_forget_memory(
     state: State<'_, NativeState>,
     project: String,
     memory: String,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .forget_memory(&project, &memory, generation)
+        .forget_memory(&project, &memory, version, generation)
         .await
 }
 
@@ -665,7 +685,7 @@ async fn desktop_project_read_paths(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
-) -> Result<Vec<String>, BridgeError> {
+) -> Result<crazyagent::project_setup::ReadPaths, BridgeError> {
     main_window(&window)?;
     read(&state).await?.project_read_paths(&id).await
 }
@@ -695,13 +715,14 @@ async fn desktop_set_project_agent_policy(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
     policy: crazyagent::sandbox::policy::AgentPolicy,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .set_project_agent_policy(&id, policy, generation)
+        .set_project_agent_policy(&id, version, policy, generation)
         .await
 }
 
@@ -721,13 +742,14 @@ async fn desktop_set_project_read_paths(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
     paths: Vec<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .set_project_read_paths(&id, paths, generation)
+        .set_project_read_paths(&id, version, paths, generation)
         .await
 }
 
@@ -851,12 +873,13 @@ async fn desktop_team_keep_warm(
     state: State<'_, NativeState>,
     id: String,
     on: bool,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_keep_warm(&id, on, generation)
+        .team_keep_warm(&id, on, version, generation)
         .await
 }
 
@@ -908,7 +931,7 @@ async fn desktop_team_time_limits(
     state: State<'_, NativeState>,
     id: String,
     limits: TeamTimeLimits,
-    revision: u64,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
@@ -919,14 +942,7 @@ async fn desktop_team_time_limits(
     } = limits;
     lock(&state)
         .await?
-        .team_time_limits(
-            &id,
-            turn_secs,
-            session_secs,
-            idle_secs,
-            revision,
-            generation,
-        )
+        .team_time_limits(&id, turn_secs, session_secs, idle_secs, version, generation)
         .await
 }
 
@@ -936,13 +952,13 @@ async fn desktop_team_on_harness_switch(
     state: State<'_, NativeState>,
     id: String,
     mode: String,
-    revision: u64,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_on_harness_switch(&id, &mode, revision, generation)
+        .team_on_harness_switch(&id, &mode, version, generation)
         .await
 }
 
@@ -1149,12 +1165,13 @@ async fn desktop_team_finished_agents(
     state: State<'_, NativeState>,
     id: String,
     show: bool,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_finished_agents(&id, show, generation)
+        .team_finished_agents(&id, show, version, generation)
         .await
 }
 
@@ -1164,12 +1181,13 @@ async fn desktop_team_live_master(
     state: State<'_, NativeState>,
     id: String,
     on: bool,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_live_master(&id, on, generation)
+        .team_live_master(&id, on, version, generation)
         .await
 }
 
@@ -1219,12 +1237,13 @@ async fn desktop_team_wake_rule(
     state: State<'_, NativeState>,
     target: crazyagent::team::events::RuleTarget,
     rule: Option<crazyagent::team::events::WakeRule>,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_wake_rule(target, rule, generation)
+        .team_wake_rule(target, rule, version, generation)
         .await
 }
 
@@ -1558,6 +1577,17 @@ async fn desktop_retry_research(
 }
 
 #[tauri::command]
+async fn desktop_plan_roadmap(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.plan_roadmap(&id, generation).await
+}
+
+#[tauri::command]
 async fn desktop_research_log(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1763,10 +1793,14 @@ async fn desktop_set_pack_entry(
     state: State<'_, NativeState>,
     id: String,
     on: bool,
+    version: u64,
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.set_pack_entry(id, on, generation).await
+    lock(&state)
+        .await?
+        .set_pack_entry(id, on, version, generation)
+        .await
 }
 
 #[tauri::command]
@@ -1774,10 +1808,14 @@ async fn desktop_remove_pack_entry(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.remove_pack_entry(id, generation).await
+    lock(&state)
+        .await?
+        .remove_pack_entry(id, version, generation)
+        .await
 }
 
 #[tauri::command]
@@ -2196,12 +2234,13 @@ async fn desktop_set_account_schedule(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     change: ScheduleChange,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .set_account_schedule(change, generation)
+        .set_account_schedule(change, version, generation)
         .await
 }
 
@@ -2346,9 +2385,13 @@ async fn desktop_set_skill_enabled(
     state: State<'_, NativeState>,
     id: String,
     enabled: bool,
+    version: u64,
 ) -> Result<SkillView, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.set_skill_enabled(id, enabled).await
+    lock(&state)
+        .await?
+        .set_skill_enabled(id, enabled, version)
+        .await
 }
 
 #[tauri::command]
@@ -2389,9 +2432,10 @@ async fn desktop_remove_skill(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.remove_skill(id).await
+    lock(&state).await?.remove_skill(id, version).await
 }
 
 #[tauri::command]
@@ -2416,9 +2460,13 @@ async fn desktop_update_mcp_server(
     state: State<'_, NativeState>,
     id: String,
     spec: ServerSpec,
+    version: u64,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.update_mcp_server(id, spec).await
+    lock(&state)
+        .await?
+        .update_mcp_server(id, spec, version)
+        .await
 }
 
 #[tauri::command]
@@ -2438,11 +2486,12 @@ async fn desktop_set_mcp_server_enabled(
     state: State<'_, NativeState>,
     id: String,
     enabled: bool,
+    version: u64,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .set_mcp_server_enabled(id, enabled)
+        .set_mcp_server_enabled(id, enabled, version)
         .await
 }
 
@@ -2451,9 +2500,10 @@ async fn desktop_remove_mcp_server(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.remove_mcp_server(id).await
+    lock(&state).await?.remove_mcp_server(id, version).await
 }
 
 #[tauri::command]
@@ -2463,9 +2513,13 @@ async fn desktop_switch_plugin(
     project_id: String,
     id: String,
     on: bool,
+    version: u64,
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.switch_plugin(project_id, id, on).await
+    lock(&state)
+        .await?
+        .switch_plugin(project_id, id, on, version)
+        .await
 }
 
 #[tauri::command]
@@ -2652,6 +2706,25 @@ async fn desktop_usage_refresh(
 }
 
 #[tauri::command]
+async fn desktop_ide_focus(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+) -> Result<Option<crazyagent::ide::bridge::reveal::RevealFocus>, BridgeError> {
+    main_window(&window)?;
+    if !views.any_loaded() {
+        return Ok(None);
+    }
+    let call = lock(&state).await?.ide_focus()?;
+    let focus = call.await?;
+    if focus.is_some() {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    Ok(focus)
+}
+
+#[tauri::command]
 async fn desktop_usage_set_reset(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2663,6 +2736,51 @@ async fn desktop_usage_set_reset(
     let call = lock(&state)
         .await?
         .usage_set_reset(account, window_kind, at_ms)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_extension_asks(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<Vec<AskView>, BridgeError> {
+    main_window(&window)?;
+    if !views.any_loaded() {
+        return Ok(Vec::new());
+    }
+    let call = lock(&state).await?.ide_extension_asks(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_extension_approve(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    id: String,
+    version: String,
+) -> Result<Approved, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .ide_extension_approve(project_id, id, version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_extension_decline(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    id: String,
+    version: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .ide_extension_decline(project_id, id, version)?;
     call.await
 }
 
@@ -2776,12 +2894,107 @@ async fn desktop_update_change(
     call.await
 }
 
+/// Shows one macOS notification for a pending question while the window is in the
+/// background, at most once per question. The text is built here from the engine's record
+/// and the project's name; the window names only the project and the question.
+#[tauri::command]
+async fn desktop_notify_question(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    notices: State<'_, Notices>,
+    project_id: String,
+    question_id: u64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    bridge::notify::available()?;
+    if window.is_focused().unwrap_or(false) {
+        return Ok(());
+    }
+    let call = read(&state)
+        .await?
+        .notified_question(project_id.clone(), question_id)?;
+    let question = call.await?;
+    let setup = read(&state).await?.project_setup(&project_id).await;
+    let name = setup.ok().flatten().map(|setup| setup.name);
+    let notice = bridge::notify::notice(name.as_deref(), &question);
+    let Some(id) = notices.claim(question.id, question.project.as_str())? else {
+        return Ok(());
+    };
+    bridge::notify::show(tauri::Manager::app_handle(&window), id, &notice)
+        .inspect_err(|_| notices.release(question.id, id))
+}
+
+#[tauri::command]
+async fn desktop_notification_target(
+    window: WebviewWindow,
+    notices: State<'_, Notices>,
+) -> Result<Option<String>, BridgeError> {
+    main_window(&window)?;
+    Ok(notices.take())
+}
+
+#[tauri::command]
+async fn desktop_system_notifications(window: WebviewWindow) -> Result<&'static str, BridgeError> {
+    main_window(&window)?;
+    Ok(bridge::notify::support())
+}
+
+#[tauri::command]
+async fn desktop_questions(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    after: Option<u64>,
+) -> Result<QuestionPage, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.questions(project_id, after)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_answer_question(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: u64,
+    version: u64,
+    option: Option<u8>,
+    text: Option<String>,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .answer_question(id, version, option, text)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_dismiss_question(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: u64,
+    version: u64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.dismiss_question(id, version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_question_counts(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<QuestionCount>, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.question_counts()?;
+    call.await
+}
+
 #[tauri::command]
 async fn desktop_process_text(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     project_id: Option<String>,
-) -> Result<String, BridgeError> {
+) -> Result<crazyagent::engine::owner::ProcessText, BridgeError> {
     main_window(&window)?;
     let call = lock(&state).await?.process_text(project_id)?;
     call.await
@@ -2793,9 +3006,110 @@ async fn desktop_save_process_text(
     state: State<'_, NativeState>,
     project_id: Option<String>,
     text: String,
-) -> Result<crazyagent::engine::owner::ProcessSaved, BridgeError> {
+    version: u64,
+    opened: Option<u64>,
+) -> Result<crazyagent::engine::owner::SavedText, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.save_process_text(project_id, text)?;
+    let call = lock(&state)
+        .await?
+        .save_process_text(project_id, text, version, opened)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_state(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    retry: bool,
+) -> Result<bridge::ide::IdeView, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.ide_state(retry)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ide_open(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    bounds: ide::Bounds,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    let bounds = bounds.checked()?;
+    let (ticket, turn) = views.begin(&project);
+    let opened = {
+        let _turn = turn.lock().await;
+        let call = read(&state).await?.ide_open(project.clone())?;
+        call.await?
+    };
+    let workbench = ide::workbench(&opened)?;
+    ide::show(&app, &window, &views, &project, workbench, bounds, ticket)
+}
+
+#[tauri::command]
+async fn desktop_ide_place(
+    window: WebviewWindow,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    bounds: ide::Bounds,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    ide::place(&app, &views, &project, bounds.checked()?)
+}
+
+#[tauri::command]
+async fn desktop_ide_hide(
+    window: WebviewWindow,
+    app: AppHandle,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    ide::hide(&app, &views, &bridge::ide::ide_project(&project_id)?)
+}
+
+#[tauri::command]
+async fn desktop_ide_close(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    let closing = views.closing(&project);
+    ide::close(&app, &views, &project)?;
+    let Some(closing) = closing else {
+        return Ok(());
+    };
+    views
+        .stop_closed(&project, closing, || async {
+            let call = read(&state).await?.ide_stop(project.clone())?;
+            call.await
+        })
+        .await
+        .map(|_| ())
+}
+
+#[tauri::command]
+async fn desktop_ide_touch(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&window)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    if !views.loaded(&project) {
+        return Ok(false);
+    }
+    let call = read(&state).await?.ide_touch(project)?;
     call.await
 }
 
@@ -2875,13 +3189,47 @@ async fn desktop_agent_instructions(
 }
 
 #[tauri::command]
+async fn desktop_recovery_banner(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<crazyagent::engine::owner::RecoveryBanner, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.recovery_banner(project_id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_instruction_settings(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     project_id: String,
-) -> Result<crazyagent::engine::owner::InstructionSettings, BridgeError> {
+) -> Result<crazyagent::engine::owner::InstructionView, BridgeError> {
     main_window(&window)?;
     let call = lock(&state).await?.instruction_settings(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_retry_recovery(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    agent: i64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.retry_recovery(agent)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_dismiss_recovery(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    action_kind: crazyagent::ledger::ActionKind,
+    id: i64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.dismiss_recovery(action_kind, id)?;
     call.await
 }
 
@@ -2902,11 +3250,12 @@ async fn desktop_save_instruction_settings(
     state: State<'_, NativeState>,
     project_id: String,
     settings: crazyagent::engine::owner::InstructionSettings,
-) -> Result<crazyagent::engine::owner::InstructionSettings, BridgeError> {
+    version: Option<u64>,
+) -> Result<crazyagent::engine::owner::InstructionView, BridgeError> {
     main_window(&window)?;
     let call = lock(&state)
         .await?
-        .save_instruction_settings(project_id, settings)?;
+        .save_instruction_settings(project_id, settings, version)?;
     call.await
 }
 
@@ -3169,7 +3518,10 @@ pub fn run() {
         .manage(NativeState(BridgeQueue::new(NativeBridge::new(socket))))
         .manage(TerminalState(Arc::new(Terminals::default())))
         .manage(UpdateState::default())
+        .manage(ide::IdeViews::default())
+        .manage(Notices::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             desktop_connect,
             desktop_status,
@@ -3250,6 +3602,7 @@ pub fn run() {
             desktop_remove_project,
             desktop_cancel_research,
             desktop_retry_research,
+            desktop_plan_roadmap,
             desktop_research_log,
             desktop_projects_home,
             desktop_set_projects_home,
@@ -3271,6 +3624,7 @@ pub fn run() {
             desktop_set_pack_entry,
             desktop_remove_pack_entry,
             desktop_project_memories,
+            desktop_ide_asks,
             desktop_review_memory,
             desktop_memories,
             desktop_memory,
@@ -3370,6 +3724,13 @@ pub fn run() {
             desktop_discard_change,
             desktop_restore_change,
             desktop_update_change,
+            desktop_questions,
+            desktop_answer_question,
+            desktop_dismiss_question,
+            desktop_question_counts,
+            desktop_notify_question,
+            desktop_notification_target,
+            desktop_system_notifications,
             desktop_process_text,
             desktop_save_process_text,
             desktop_import_instructions_file,
@@ -3379,12 +3740,24 @@ pub fn run() {
             desktop_commit_instruction_import,
             desktop_default_process,
             desktop_agent_instructions,
+            desktop_recovery_banner,
+            desktop_retry_recovery,
+            desktop_dismiss_recovery,
+            desktop_ide_state,
+            desktop_ide_open,
+            desktop_ide_place,
+            desktop_ide_hide,
+            desktop_ide_close,
+            desktop_ide_touch,
             desktop_instruction_settings,
             desktop_save_instruction_settings,
             desktop_adoption,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,
+            desktop_ide_extension_asks,
+            desktop_ide_extension_approve,
+            desktop_ide_extension_decline,
             desktop_finished_agents,
             desktop_remove_finished_agents,
             desktop_pick_folder,
@@ -3394,6 +3767,7 @@ pub fn run() {
             desktop_open_context_item,
             desktop_engine_versions,
             desktop_restart_engine,
+            desktop_ide_focus,
             desktop_update_settings,
             desktop_set_update_channel,
             desktop_check_update,
@@ -3420,6 +3794,9 @@ pub fn run() {
                     }
                 })
                 .build()?;
+            let handle = app.handle().clone();
+            app.notification()
+                .on_action(move |action| bridge::notify::performed(&handle, action))?;
             Ok(())
         });
     #[cfg(feature = "native-webdriver")]

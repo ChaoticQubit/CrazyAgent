@@ -135,10 +135,14 @@ fn a_server_removed_with_no_settle_leaves_notes_the_sweep_deletes() {
     let second = attach(&mut connection, root, &id, "OTHER_TOKEN");
     let checked = check_folder(root, &id);
 
+    let version = crate::storage::plugins::plugin_version(&connection, &id).unwrap();
     let ResultValue::Removed(references) = execute(
         &mut connection,
         root,
-        Command::RemoveServer { id: id.clone() },
+        Command::RemoveServer {
+            id: id.clone(),
+            version,
+        },
     )
     .unwrap() else {
         panic!("removed references required");
@@ -171,10 +175,14 @@ fn a_check_folder_moved_aside_before_a_crash_is_swept_and_other_folders_stay() {
     let checks = root.join(CHECK_FOLDER);
     check_folder(root, &id);
     let live = check_folder(root, &kept);
+    let version = crate::storage::plugins::plugin_version(&connection, &id).unwrap();
     let ResultValue::Removed(_) = execute(
         &mut connection,
         root,
-        Command::RemoveServer { id: id.clone() },
+        Command::RemoveServer {
+            id: id.clone(),
+            version,
+        },
     )
     .unwrap() else {
         panic!("removed references required");
@@ -316,7 +324,13 @@ fn the_next_engine_start_sweeps_what_a_crash_left_behind() {
         let id = server(&mut connection, dir.path(), "tools");
         let secret = attach(&mut connection, dir.path(), &id, "API_TOKEN");
         let checked = check_folder(dir.path(), &id);
-        execute(&mut connection, dir.path(), Command::RemoveServer { id }).unwrap();
+        let version = crate::storage::plugins::plugin_version(&connection, &id).unwrap();
+        execute(
+            &mut connection,
+            dir.path(),
+            Command::RemoveServer { id, version },
+        )
+        .unwrap();
         assert!(secret_file(dir.path(), &secret).exists());
         (secret, checked)
     };

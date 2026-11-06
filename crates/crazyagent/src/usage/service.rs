@@ -1,5 +1,7 @@
 use super::capture::{Attribution, Format, RunKind, scan_agent_home, scan_runs};
+use super::health::{UsageStep, clear, record_panic, record_recovered};
 use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
+use super::report::{mark_unreported, reports_usage};
 use super::{LimitSource, failure, record_failure, record_observation, storage};
 use crate::config::{ModelAccess, ModelConnection};
 use crate::engine::bootstrap::NativeProfileUsePurpose;
@@ -8,7 +10,7 @@ use crate::engine::{EngineError, NativeProfileCustody};
 use crate::pools::MemberKind;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,7 +123,9 @@ pub fn pool_of(
 }
 
 /// One engine's usage upkeep: it counts what every team agent and research run's records
-/// gained and polls every signed-in subscription account's limits.
+/// gained and polls every signed-in subscription account's limits. `doing` names the part
+/// of the step running now, so a panic is counted against it, and `unrecovered` holds the
+/// parts that panicked and have not completed since.
 pub struct Usage {
     db: Connection,
     team: PathBuf,
@@ -131,11 +135,14 @@ pub struct Usage {
     endpoints: (url::Url, url::Url, bool),
     polled_ms: Option<i64>,
     polls: u64,
+    doing: UsageStep,
+    unrecovered: BTreeSet<UsageStep>,
 }
 
 impl Usage {
-    /// Opens the upkeep for an engine database. Inputs: the database, the team state folder,
-    /// the live access and the harness executables by harness id. Output: the upkeep.
+    /// Opens the upkeep for an engine database and forgets the step panics a previous engine
+    /// run counted. Inputs: the database, the team state folder, the live access and the
+    /// harness executables by harness id. Output: the upkeep.
     pub fn open(
         database: &Path,
         team: &Path,
@@ -147,6 +154,7 @@ impl Usage {
             .filter(|root| root.is_absolute())
             .ok_or_else(|| failure("usage_unavailable"))?;
         let db = super::open(root)?;
+        clear(&db)?;
         let custody = std::fs::symlink_metadata(database)
             .map_err(storage)
             .and_then(|metadata| NativeProfileCustody::capture(database, &metadata));
@@ -164,6 +172,8 @@ impl Usage {
             ),
             polled_ms: None,
             polls: 0,
+            doing: UsageStep::Poll,
+            unrecovered: BTreeSet::new(),
         })
     }
 
@@ -180,6 +190,7 @@ impl Usage {
     /// readings meet a poll as fresh as the step allows. Output: done, or the store's
     /// failure.
     pub fn step(&mut self, now_ms: i64) -> Result<(), EngineError> {
+        self.doing = UsageStep::Poll;
         let access = (self.access)().unwrap_or_default();
         let refresh = refresh_requested(&self.db)?;
         let due = match self.polled_ms {
@@ -191,20 +202,44 @@ impl Usage {
         if due {
             self.polled_ms = Some(now_ms);
             self.poll_all(&access, now_ms)?;
+            self.completed(UsageStep::Poll, now_ms)?;
         }
+        self.doing = UsageStep::Team;
         self.scan_team(&access, now_ms)?;
+        self.completed(UsageStep::Team, now_ms)?;
+        self.doing = UsageStep::Runs;
         scan_runs(
             &self.db,
             |project, account| pool_of(&access, project, account),
             now_ms,
         )?;
+        self.completed(UsageStep::Runs, now_ms)
+    }
+
+    /// Marks a part that panicked earlier as working again once it completes, writing only
+    /// on that change. Inputs: the part and the time. Output: done, or `usage_unavailable`.
+    fn completed(&mut self, part: UsageStep, now_ms: i64) -> Result<(), EngineError> {
+        if self.unrecovered.contains(&part) {
+            record_recovered(&self.db, part, now_ms)?;
+            self.unrecovered.remove(&part);
+        }
         Ok(())
     }
 
     fn scan_team(&self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
-        let rows: Vec<(i64, String, String, String, Option<String>)> = {
+        type Row = (
+            i64,
+            String,
+            String,
+            String,
+            Option<String>,
+            bool,
+            Option<i64>,
+        );
+        let rows: Vec<Row> = {
             let mut statement = match self.db.prepare(
-                "SELECT id,project,role,harness,connection FROM team_agents
+                "SELECT id,project,role,harness,connection,
+                    status IN ('starting','idle','working'),stopped_ms FROM team_agents
                  WHERE role<>'teammate' AND (status IN ('starting','idle','working') OR stopped_ms>=?1)
                  ORDER BY id DESC LIMIT ?2",
             ) {
@@ -221,6 +256,8 @@ impl Usage {
                             row.get(2)?,
                             row.get(3)?,
                             row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
                         ))
                     },
                 )
@@ -228,10 +265,7 @@ impl Usage {
                 .collect::<Result<_, _>>()
                 .map_err(storage)?
         };
-        for (id, project, role, harness, connection) in rows {
-            let Some(format) = Format::of(&harness) else {
-                continue;
-            };
+        for (id, project, role, harness, connection, live, stopped_ms) in rows {
             let attribution = team_attribution(
                 id,
                 &project,
@@ -240,6 +274,16 @@ impl Usage {
                 connection.as_deref(),
                 access,
             );
+            let Some(format) = Format::of(&harness) else {
+                if !reports_usage(&harness) {
+                    let ran_ms = match (live, stopped_ms) {
+                        (false, Some(stopped)) => stopped.min(now_ms),
+                        _ => now_ms,
+                    };
+                    mark_unreported(&self.db, &attribution, ran_ms)?;
+                }
+                continue;
+            };
             let home = self
                 .team
                 .join("agents")
@@ -377,6 +421,25 @@ fn guarded(step: impl FnOnce() -> Result<(), EngineError>) -> Option<String> {
     }
 }
 
+/// Runs one upkeep step under `guarded` and counts a panic against the step kind that was
+/// running, which stays unrecovered until that kind completes again, so the usage pages can
+/// say counting is degraded. Inputs: the upkeep, the step and the time. Output: the step's
+/// problem code, none when it succeeded.
+fn counted_step(
+    usage: &mut Usage,
+    step: impl FnOnce(&mut Usage) -> Result<(), EngineError>,
+    now_ms: i64,
+) -> Option<String> {
+    let problem = guarded(|| step(usage));
+    if problem.as_deref() == Some(STEP_PANICKED) {
+        usage.unrecovered.insert(usage.doing);
+        if let Err(fault) = record_panic(&usage.db, usage.doing, now_ms) {
+            eprintln!("usage: {}", fault.0);
+        }
+    }
+    problem
+}
+
 /// The upkeep thread's log and pace. A problem code is logged when it first appears. A
 /// step that panics again right after a panic is counted, not logged, and the wait before
 /// the next step doubles up to `PANIC_PAUSE_MAX`. The default panic hook still reports
@@ -451,7 +514,9 @@ pub fn start_for_engine(
         .spawn(move || {
             let mut pace = Pace::default();
             while !flag.load(Ordering::SeqCst) {
-                let (lines, pause) = pace.after(guarded(|| usage.step(now_ms())));
+                let now = now_ms();
+                let (lines, pause) =
+                    pace.after(counted_step(&mut usage, |usage| usage.step(now), now));
                 for line in lines {
                     eprintln!("{line}");
                 }

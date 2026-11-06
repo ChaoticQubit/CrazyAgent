@@ -25,18 +25,24 @@ mod cleanup;
 mod coord;
 mod coord_questions;
 mod harnesses;
+pub mod ide;
+mod ide_extensions;
+mod ide_reveal;
 pub mod intake;
 pub mod master;
 pub mod memory;
 mod model_access;
 mod native_auth;
+pub mod notify;
 pub mod open;
 mod owner_setup;
 pub mod picker;
 mod plugins;
 mod process;
 pub mod project_setup;
+pub mod questions;
 mod queue;
+mod recovery;
 mod scheduling;
 mod team;
 pub mod terminal;
@@ -682,6 +688,9 @@ impl NativeBridge {
             ),
             OwnerMutation::RetryResearch { project_id, .. } => {
                 ("research_retry", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::PlanRoadmap { project_id } => {
+                ("plan_roadmap", Some(project_id.as_str().to_owned()), None)
             }
             OwnerMutation::RunSetup { .. } => ("run_setup", None, None),
             OwnerMutation::SetPackEntry { .. } => ("pack_set", None, None),

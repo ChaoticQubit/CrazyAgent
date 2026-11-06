@@ -1,6 +1,6 @@
 use crate::agent_home::Harness;
 use crate::config::plain_problem;
-use crate::engine::owner::AgentInstructions;
+use crate::engine::owner::{AgentInstructions, OwnerResult};
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::{
@@ -119,6 +119,7 @@ struct LiveSwitch {
     switched: Option<String>,
     saved: Option<String>,
     running: Option<String>,
+    version: u64,
 }
 
 struct Attached {
@@ -345,6 +346,7 @@ impl Team {
             action: TeamAction::LiveMaster {
                 project_id: self.project.clone(),
                 on: true,
+                version: self.switch.as_ref().map_or(0, |switch| switch.version),
             },
             generation,
         }));
@@ -373,8 +375,9 @@ impl Team {
     /// view: a good read replaces the switch, and the first one of this open turns a switch
     /// that is not on on, or checks the session of a running team's switch already on; a
     /// failed read changes nothing; an accepted change is the switch until the next read,
-    /// which is read at once, and an accepted Start all checks the session too; an Open that
-    /// opened no session is named.
+    /// which is read at once, and an accepted Start all checks the session too; a change
+    /// refused as stale reads the switch again, and any other refusal keeps the switch; an
+    /// Open that opened no session is named.
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
         &mut self,
@@ -405,6 +408,7 @@ impl Team {
                         .iter()
                         .find(|agent| agent.role == AgentRole::Master && agent.status.live())
                         .map(|agent| agent.harness.clone()),
+                    version: status.settings_version,
                 };
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
@@ -418,9 +422,28 @@ impl Team {
                 }
             }
             SetupQuery::TeamChange {
-                action: TeamAction::LiveMaster { project_id, on },
+                action:
+                    TeamAction::LiveMaster {
+                        project_id,
+                        on,
+                        version,
+                    },
                 ..
             } if *project_id == self.project => match result {
+                Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code)
+                    if code == crate::storage::versioned::STALE_CODE =>
+                {
+                    self.want = None;
+                    ctx.say(Message::warning(
+                        "The live master switch changed in another window.",
+                        plain_problem(code).unwrap_or(code.as_str()),
+                    ));
+                    self.read_switch(ctx);
+                }
+                Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => {
+                    self.want = None;
+                    self.refused = Some(code.clone());
+                }
                 Ok(view) => {
                     self.want = None;
                     let last = self.switch.take();
@@ -433,15 +456,12 @@ impl Team {
                         switched,
                         saved,
                         running,
+                        version: version + 1,
                     });
                     if let SetupView::LiveWithoutSession(why) = view {
                         ctx.say(Message::error(MASTER_NO_SESSION, &unopened(why)));
                     }
                     self.read_switch(ctx);
-                }
-                Err(code) => {
-                    self.want = None;
-                    self.refused = Some(code.clone());
                 }
             },
             SetupQuery::TeamChange {
@@ -870,15 +890,14 @@ impl Team {
             Ok(ProcessReply::Agent(view)) => Load::Ready(view.clone()),
             Ok(
                 ProcessReply::Text(_)
+                | ProcessReply::Current(_)
                 | ProcessReply::Saved(_)
                 | ProcessReply::Settings(_)
                 | ProcessReply::Adoption(_)
                 | ProcessReply::Files(_)
                 | ProcessReply::Uncommitted(_)
                 | ProcessReply::Committed(_),
-            ) => {
-                return;
-            }
+            ) => return,
             Err(code) if code == NOT_READY => Load::NotReady,
             Err(code) => Load::Failed(code.clone()),
         };

@@ -1,5 +1,6 @@
 use super::settings::connection_lost;
 use super::*;
+use crate::engine::owner::{ProcessText, SavedText};
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -10,7 +11,8 @@ mod tests;
 /// its last launch (none for the newest master), reads or saves one project's agent
 /// instruction settings, reads its workflow adoption, lists or confirms the one-time
 /// import of its own instruction files, lists the moved files still waiting for a commit or
-/// commits that move (DEC-106 and its addendum).
+/// commits that move (DEC-106 and its addendum). A save names the version it read and, only
+/// for "Keep mine" after a stale reply, the older version the owner opened.
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Process` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessQuery {
@@ -20,6 +22,8 @@ pub(in crate::tui) enum ProcessQuery {
     Save {
         project: Option<ProjectId>,
         text: String,
+        version: u64,
+        opened: Option<u64>,
     },
     ReadFile {
         path: std::path::PathBuf,
@@ -35,6 +39,7 @@ pub(in crate::tui) enum ProcessQuery {
     SaveSettings {
         project: ProjectId,
         settings: crate::engine::owner::InstructionSettings,
+        version: Option<u64>,
     },
     Adoption {
         project: ProjectId,
@@ -53,17 +58,19 @@ pub(in crate::tui) enum ProcessQuery {
     },
 }
 
-/// What one Process request returned: the text read, what a save comes to beside what a
-/// Claude master takes, what one team agent received at its last launch, one project's
-/// agent instruction settings as stored, its workflow adoption, the instruction files an
-/// import would move or moved, the moved paths still waiting for a commit with the
-/// checked-out branch, or that commit.
+/// What one Process request returned: a seed text, the saved text with its version, what a
+/// save did (saved with what it comes to beside what a Claude master takes, or stale with
+/// the newer text), what one team agent received at its last launch, one project's agent
+/// instruction settings as stored with their version, its workflow adoption, the
+/// instruction files an import would move or moved, the moved paths still waiting for a
+/// commit with the checked-out branch, or that commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
-    Saved(crate::engine::owner::ProcessSaved),
+    Current(ProcessText),
+    Saved(SavedText),
     Agent(Box<crate::engine::owner::AgentInstructions>),
-    Settings(crate::engine::owner::InstructionSettings),
+    Settings(crate::engine::owner::InstructionView),
     Adoption(Box<crate::engine::owner::Adoption>),
     Files(Vec<crate::engine::owner::ImportFile>),
     Uncommitted(crate::engine::owner::UncommittedImport),
@@ -135,9 +142,14 @@ impl NativeOwner {
             ProcessQuery::Read { project } => controller
                 .process_text(project)
                 .await
-                .map(ProcessReply::Text),
-            ProcessQuery::Save { project, text } => controller
-                .save_process_text(project, text)
+                .map(ProcessReply::Current),
+            ProcessQuery::Save {
+                project,
+                text,
+                version,
+                opened,
+            } => controller
+                .save_process_text(project, text, version, opened)
                 .await
                 .map(ProcessReply::Saved),
             ProcessQuery::ReadFile { path } => controller
@@ -153,8 +165,12 @@ impl NativeOwner {
                 .instruction_settings(project)
                 .await
                 .map(ProcessReply::Settings),
-            ProcessQuery::SaveSettings { project, settings } => controller
-                .save_instruction_settings(project, settings)
+            ProcessQuery::SaveSettings {
+                project,
+                settings,
+                version,
+            } => controller
+                .save_instruction_settings(project, settings, version)
                 .await
                 .map(ProcessReply::Settings),
             ProcessQuery::Adoption { project } => controller

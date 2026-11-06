@@ -664,10 +664,10 @@ pub(super) fn commit_deletions(
 }
 
 /// Marks a change set landed as `landed`, closes its agent's workers' open sets with it
-/// (F3, DEC-107), drops its pending ref and points the agent's worktree at the landed
-/// commit when the worktree holds nothing newer than the set. A worker set that cannot be
-/// closed now is logged by its plain code and left open, so the Accept itself never fails
-/// on it.
+/// (F3, DEC-107), drops its pending ref, forgets the owner edits settled on it and points the
+/// agent's worktree at the landed commit when the worktree holds nothing newer than the set.
+/// A worker set that cannot be closed now is logged by its plain code and left open, so the
+/// Accept itself never fails on it.
 fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
     record.landed = Some(landed.to_owned());
@@ -687,6 +687,7 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
         &pending_ref(&record.id),
         None,
     )?;
+    super::owner_edit::logged("forget", super::owner_edit::forget(db, &record.id));
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)
 }
@@ -976,15 +977,71 @@ pub(super) fn reconcile(db: &Connection) -> Result<(), EngineError> {
     store::initialize(db)?;
     for found in store::in_flight(db)? {
         let _held = hold(&found.repository);
-        let settled = store::load(db, &found.id).and_then(|mut record| settle(db, &mut record));
-        if let Err(error) = settled {
-            eprintln!(
+        let settled = store::load(db, &found.id).and_then(|mut record| {
+            let accept = matches!(record.intent, Some(Intent::Land { .. }));
+            settle(db, &mut record).map(|()| accept)
+        });
+        match settled {
+            Err(error) => eprintln!(
                 "landing_reconcile_failed cause={}",
                 crate::protocol::plain_code(&error.0)
-            );
+            ),
+            Ok(true) => list_accept(db, &found.id),
+            Ok(false) => {}
         }
     }
     Ok(())
+}
+
+/// Lists an Accept an engine stop interrupted in the action ledger once it is settled, so
+/// the recovery banner can name it until the owner dismisses it: a pending notice holding
+/// the project, the change set and whether it landed (dismissed Done) or was dropped
+/// (dismissed Failed). A notice an earlier run left for the change set is ended with the
+/// outcome it showed and replaced, in one transaction; a ledger that cannot be written
+/// logs its plain code. Inputs: the store and the change set.
+fn list_accept(db: &Connection, id: &ChangeSetId) {
+    use crate::ledger::{ActionKind, Outcome};
+    let unavailable = |_: rusqlite::Error| failure("ledger_unavailable");
+    let listed = store::load(db, id).and_then(|record| {
+        let root = db
+            .path()
+            .map(Path::new)
+            .and_then(Path::parent)
+            .ok_or_else(|| failure("ledger_unavailable"))?;
+        let ledger = crate::ledger::open(root)?;
+        let payload = serde_json::json!({
+            "project": record.project.as_str(),
+            "change_set": id.as_str(),
+            "landed": record.state == ChangeState::Accepted,
+        });
+        let held = ledger.unchecked_transaction().map_err(unavailable)?;
+        for earlier in crate::ledger::pending(&held, ActionKind::LandingAccept)? {
+            if earlier.key == id.as_str() {
+                let shown = match serde_json::from_str::<serde_json::Value>(&earlier.payload)
+                    .ok()
+                    .and_then(|notice| notice.get("landed")?.as_bool())
+                {
+                    Some(true) => Outcome::Done,
+                    Some(false) => Outcome::Failed,
+                    None => Outcome::Unknown,
+                };
+                crate::ledger::finish(&held, earlier.id, shown)?;
+            }
+        }
+        crate::ledger::begin(
+            &held,
+            ActionKind::LandingAccept,
+            id.as_str(),
+            &payload.to_string(),
+        )?;
+        held.commit().map_err(unavailable)
+    });
+    if let Err(error) = listed {
+        eprintln!(
+            "landing_ledger_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
 }
 
 /// Loads a change set for an owner action, first settling an intent a failed or stopped

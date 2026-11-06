@@ -101,10 +101,12 @@ export async function value(bridge, cmd, args) {
   return answer.value;
 }
 
-/** Serves the built frontend and forwards the page's invokes to the bridge. The only command
- * answered here is the native folder chooser, with the owner's next pick from `picks`.
- * Input: the built folder, the bridge, the picks and the call log. Output: the server and its port. */
-export async function serveApp(dist, bridge, picks, log) {
+/** Serves the built frontend and forwards the page's invokes to the bridge. The commands
+ * answered here are the native folder chooser, with the owner's next pick from `picks`, and
+ * each native-only command `local` names, whose function gives the answer from the arguments.
+ * Input: the built folder, the bridge, the picks, the call log and the local answers. Output:
+ * the server and its port. */
+export async function serveApp(dist, bridge, picks, log, local = {}) {
   const server = createServer((request, reply) => {
     if (request.method === "POST" && request.url === "/__invoke") {
       const chunks = [];
@@ -122,6 +124,13 @@ export async function serveApp(dist, bridge, picks, log) {
           assert.ok(picks.length > 0, "the page opened the folder chooser more often than the owner picks");
           answer = { value: picks.shift() };
           log.picked += 1;
+        } else if (Object.hasOwn(local, cmd)) {
+          try {
+            answer = await local[cmd](args ?? {});
+          } catch (error) {
+            answer = { failure: { code: "e2e_local_failed", message: error.message } };
+          }
+          log.answers.set(cmd, answer);
         } else {
           const asked = Date.now();
           try {

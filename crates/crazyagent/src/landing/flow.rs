@@ -2204,8 +2204,8 @@ pub(super) fn prune(db: &Connection, now: u64) -> Result<usize, EngineError> {
     Ok(pruned)
 }
 
-/// Deletes one discarded change set's ref and marks it pruned. The caller holds [`hold`]
-/// on its repository. Inputs: the store and the change set. Output: whether it was pruned
+/// Deletes one discarded change set's ref, marks it pruned and forgets the owner edits
+/// settled on it. The caller holds [`hold`] on its repository. Inputs: the store and the change set. Output: whether it was pruned
 /// now, false when it is no longer discarded or already pruned.
 fn prune_one(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
     let mut record = store::load(db, id)?;
@@ -2222,5 +2222,6 @@ fn prune_one(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
     }
     record.pruned = true;
     store::save(db, &record)?;
+    super::owner_edit::logged("forget", super::owner_edit::forget(db, &record.id));
     Ok(true)
 }

@@ -96,11 +96,13 @@ impl Pools {
             return Flow::Handled;
         }
         if let Some(change) = editor.key(key, schedule, &pool) {
+            let version = schedule.version;
             schedule.update(&change);
             let generation = ctx.next_generation();
             self.saving.push(generation);
             ctx.request(Request::Settings(Box::new(SettingsJob::SetSchedule {
                 change,
+                version,
                 generation,
             })));
         }
@@ -709,7 +711,9 @@ mod tests {
     fn sent(ctx: &mut Ctx) -> (crate::scheduling::ScheduleChange, u64) {
         match ctx.next_request() {
             Some(Request::Settings(job)) => match *job {
-                SettingsJob::SetSchedule { change, generation } => {
+                SettingsJob::SetSchedule {
+                    change, generation, ..
+                } => {
                     assert!(generation > 0);
                     (change, generation)
                 }
@@ -957,6 +961,129 @@ mod tests {
         );
         screen.key(&Key::Char('p'), &mut ctx);
         assert_eq!(change(&mut ctx), account(never(0)));
+    }
+
+    #[test]
+    fn quick_choice_edits_sent_before_any_answer_all_land_on_the_versioned_schedule() {
+        use crate::protocol::Outcome;
+        use crate::scheduling::tests::{access, database};
+        use crate::scheduling::{AccountPlan, Pin, ScheduleChange, apply, load};
+        let (_directory, mut db) = database();
+        let access = access(&["member-1"]);
+        let member = CredentialRef::new("member-1").unwrap();
+        let save = |db: &mut rusqlite::Connection, change: &ScheduleChange, version: u64| {
+            let tx = db.transaction().unwrap();
+            let outcome = apply(&tx, &access, change, version).unwrap();
+            tx.commit().unwrap();
+            outcome
+        };
+        let never = |reserve_percent| AccountPlan {
+            reserve_percent,
+            pin: Some(Pin::NeverUse),
+            ..AccountPlan::default()
+        };
+        let use_last = ScheduleChange::Account {
+            connection: member.clone(),
+            plan: AccountPlan {
+                pin: Some(Pin::UseLast),
+                ..AccountPlan::default()
+            },
+        };
+        assert_eq!(save(&mut db, &use_last, 0), Outcome::Applied);
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(load(&db).unwrap()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        screen.key(&Key::Down, &mut ctx);
+        screen.key(&Key::Down, &mut ctx);
+        while ctx.next_request().is_some() {}
+
+        let mut quick = Vec::new();
+        for key in [
+            Key::Char('p'),
+            Key::Char('>'),
+            Key::Char('>'),
+            Key::Char('>'),
+            Key::Char('<'),
+        ] {
+            screen.key(&key, &mut ctx);
+            let Some(Request::Settings(job)) = ctx.next_request() else {
+                panic!("a quick edit is sent at once");
+            };
+            let SettingsJob::SetSchedule {
+                change,
+                version,
+                generation,
+            } = *job
+            else {
+                panic!("a quick edit sends one schedule change");
+            };
+            quick.push((change, version, generation));
+        }
+        assert_eq!(
+            quick
+                .iter()
+                .map(|(_, version, _)| *version)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5],
+            "each edit names the version the edit before it makes"
+        );
+        for (change, version, _) in &quick {
+            assert_eq!(
+                save(&mut db, change, *version),
+                Outcome::Applied,
+                "a quick edit sent before any answer is never refused as stale"
+            );
+        }
+        let stored = load(&db).unwrap();
+        assert_eq!(stored.version, 6);
+        assert_eq!(
+            stored.plan(&member),
+            never(10),
+            "no quick edit is lost and Never use survives every reserve edit"
+        );
+        let (first, version, _) = &quick[0];
+        assert_eq!(
+            save(&mut db, first, *version),
+            Outcome::Rejected {
+                code: "stale_revision".into()
+            },
+            "an edit naming an old version is still refused"
+        );
+        assert_eq!(load(&db).unwrap(), stored);
+
+        for (_, _, generation) in &quick {
+            screen.arrive(
+                &settings(SettingsEvent::ScheduleSet(*generation, Ok(()))),
+                &mut ctx,
+            );
+        }
+        while ctx.next_request().is_some() {}
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(stored.clone()))),
+            &mut ctx,
+        );
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        assert!(shown.contains("Never used"), "{shown}");
+        screen.key(&Key::Char('>'), &mut ctx);
+        let Some(Request::Settings(job)) = ctx.next_request() else {
+            panic!("the next edit is sent");
+        };
+        let SettingsJob::SetSchedule {
+            change, version, ..
+        } = *job
+        else {
+            panic!("the next edit sends one schedule change");
+        };
+        assert_eq!(
+            version, stored.version,
+            "after the read-back it names the stored version"
+        );
+        assert_eq!(save(&mut db, &change, version), Outcome::Applied);
+        assert_eq!(load(&db).unwrap().plan(&member), never(15));
     }
 
     #[test]

@@ -26,9 +26,14 @@ pub(super) mod app_setup;
 pub(super) mod changes;
 mod claude_code;
 pub(super) mod cleanup;
+pub(super) mod conflict;
+pub(super) mod editor;
+pub(super) mod ide;
 pub(super) mod intake;
 pub(super) mod process;
 mod project_setup;
+pub(super) mod questions;
+pub(super) mod recovery;
 pub(super) mod settings;
 mod shell;
 pub(super) mod terminal;
@@ -59,7 +64,10 @@ enum Job {
     Intake(Box<intake::IntakeJob>),
     Changes(Box<changes::ChangesQuery>),
     Process(Box<process::ProcessQuery>),
+    Recovery(Box<recovery::RecoveryQuery>),
+    Questions(Box<questions::QuestionsQuery>),
     Cleanup(Box<cleanup::CleanupQuery>),
+    Reveal(Box<ide::RevealQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -181,7 +189,10 @@ pub(super) enum OwnerEvent {
     Intake(Box<intake::IntakeEvent>),
     Changes(Box<changes::ChangesEvent>),
     Process(Box<process::ProcessEvent>),
+    Recovery(Box<recovery::RecoveryEvent>),
+    Questions(Box<questions::QuestionsEvent>),
     Cleanup(Box<cleanup::CleanupEvent>),
+    Reveal(Box<ide::RevealEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -720,6 +731,62 @@ impl Connection {
                                 break;
                             }
                         }
+                        Job::Recovery(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.recovery(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => recovery::RecoveryEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Recovery(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Questions(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.questions(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => questions::QuestionsEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Questions(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         Job::Cleanup(query) => {
                             let event = match native.as_mut() {
                                 Some(native) => {
@@ -742,6 +809,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Cleanup(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Reveal(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.reveal(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => ide::RevealEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Reveal(Box::new(event)),
                                 })
                                 .is_err()
                             {

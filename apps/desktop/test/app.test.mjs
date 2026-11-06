@@ -5,7 +5,8 @@ import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { App, AppView, EngineOutdatedView } = await import("../src/app.tsx");
+const { App, AppView, EngineOutdatedView, ideFocusRoute } = await import("../src/app.tsx");
+const { formatRoute, parseRoute } = await import("../src/ui/router.ts");
 const state = await import("../src/state.ts");
 const { HomeView, setupSteps, needsYou, cardActivity } = await import("../src/screens/dashboard/index.tsx");
 
@@ -471,4 +472,11 @@ test("project names show direction and hidden characters as escapes in the sideb
   assert.ok(!needs.includes("‮"), needs);
   const plain = render({ projects: ok([{ id: "p-2", name: "Harbor Notes 👩‍💻", repository_count: 0 }]) });
   assert.match(plain, /<span class="name">Harbor Notes 👩‍💻<\/span>/);
+});
+
+test("a TUI open in IDE focus opens that project's IDE tab, which the router keeps", () => {
+  const route = ideFocusRoute({ project: "harbor-notes", request: "reveal-0123456789abcdef01234567" });
+  assert.deepEqual(route, { name: "project", id: "harbor-notes", tab: "ide" });
+  assert.equal(formatRoute(route), "#/projects/harbor-notes/ide");
+  assert.deepEqual(parseRoute(formatRoute(route)), route);
 });

@@ -32,6 +32,15 @@ pub struct MemoryItem {
     pub human_reviewed: bool,
 }
 
+/// One decision the IDE asked the owner to confirm: the memory at the asked version and
+/// whether to approve or reject it.
+#[derive(Debug, Serialize)]
+pub struct IdeAskItem {
+    #[serde(flatten)]
+    pub memory: MemoryItem,
+    pub decision: crazyagent::ide::bridge::Decision,
+}
+
 impl From<KnowledgeEntry> for MemoryItem {
     fn from(entry: KnowledgeEntry) -> Self {
         Self {
@@ -266,6 +275,26 @@ impl NativeBridge {
         Ok(entries.into_iter().map(MemoryItem::from).collect())
     }
 
+    /// Lists the decisions the project's IDE asked the owner to confirm on memories still
+    /// waiting at the asked version. The desktop draws the confirm, which the IDE cannot
+    /// click, and decides through `review_memory` with Keep or Reject. Takes the project id.
+    /// Returns the asks.
+    pub async fn ide_asks(&self, id: &str) -> Result<Vec<IdeAskItem>, BridgeError> {
+        let project_id = project(id)?;
+        let asks = self
+            .reader()?
+            .ide_asks(project_id)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        Ok(asks
+            .into_iter()
+            .map(|ask| IdeAskItem {
+                memory: MemoryItem::from(ask.entry),
+                decision: ask.decision,
+            })
+            .collect())
+    }
+
     /// Approves, edits, rejects or removes one memory; Keep is the one-click approval.
     /// Takes the project id, memory id, the version shown, the decision and the client generation.
     /// Returns the actual commit receipt; a stale version is a plain rejection.
@@ -325,8 +354,11 @@ impl NativeBridge {
 
     /// Reads the extra read-only folders a project's agents get beside its toolchains.
     /// Takes the project id.
-    /// Returns the folders in saved order.
-    pub async fn project_read_paths(&self, id: &str) -> Result<Vec<String>, BridgeError> {
+    /// Returns the folders in saved order and the version a change sends back.
+    pub async fn project_read_paths(
+        &self,
+        id: &str,
+    ) -> Result<crazyagent::project_setup::ReadPaths, BridgeError> {
         let paths = self
             .reader()?
             .project_read_paths(project(id)?)
@@ -392,11 +424,13 @@ impl NativeBridge {
     /// Replaces a project's extra read-only folders; the engine refuses a relative or missing
     /// path, the home folder, a credential location and the CrazyAgent data folder. Reads the
     /// folders first, so the change starts from the engine's current revision.
-    /// Takes the project id, the folders and the client generation.
-    /// Returns the actual commit receipt.
+    /// Takes the project id, the version the screen showed, the folders and the client
+    /// generation. Returns the actual commit receipt; folders changed since the screen read
+    /// them are the plain rejection `stale_revision`.
     pub async fn set_project_read_paths(
         &mut self,
         id: &str,
+        version: u64,
         paths: Vec<String>,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
@@ -408,7 +442,11 @@ impl NativeBridge {
             .map_err(|e| read_failure(&e.0))?;
         self.controller()?
             .begin_mutation(
-                OwnerMutation::SetProjectReadPaths { project_id, paths },
+                OwnerMutation::SetProjectReadPaths {
+                    project_id,
+                    version,
+                    paths,
+                },
                 generation,
             )
             .map_err(|error| caused("owner_not_ready", &error.0))?;
@@ -442,11 +480,13 @@ impl NativeBridge {
 
     /// Replaces a project's agent access level and toolchain choices; the engine refuses a
     /// level this platform cannot enforce and a malformed policy.
-    /// Takes the project id, the policy and the client generation.
-    /// Returns the actual commit receipt.
+    /// Takes the project id, the version the screen showed, the policy and the client
+    /// generation. Returns the actual commit receipt; a policy changed since the screen read
+    /// it is the plain rejection `stale_revision`.
     pub async fn set_project_agent_policy(
         &mut self,
         id: &str,
+        version: u64,
         policy: crazyagent::sandbox::policy::AgentPolicy,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
@@ -454,7 +494,11 @@ impl NativeBridge {
         let project_id = project(id)?;
         self.controller()?
             .begin_mutation(
-                OwnerMutation::SetProjectAgentPolicy { project_id, policy },
+                OwnerMutation::SetProjectAgentPolicy {
+                    project_id,
+                    version,
+                    policy,
+                },
                 generation,
             )
             .map_err(|error| caused("owner_not_ready", &error.0))?;
@@ -563,6 +607,26 @@ impl NativeBridge {
             OwnerMutation::RetryResearch {
                 project_id: project_id.clone(),
                 job,
+            },
+            project_id,
+            generation,
+        )
+        .await
+    }
+
+    /// Queues the project's roadmap and release process planning job now.
+    /// Takes the project id and the client generation.
+    /// Returns the actual commit receipt; `planning_busy` while a planning job of the
+    /// project is queued or running.
+    pub async fn plan_roadmap(
+        &mut self,
+        id: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.research_change(
+            OwnerMutation::PlanRoadmap {
+                project_id: project_id.clone(),
             },
             project_id,
             generation,

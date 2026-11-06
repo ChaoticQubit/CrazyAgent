@@ -75,6 +75,9 @@ pub fn setup_plain(code: &str) -> String {
             "CrazyAgent is not connected to the engine right now."
         }
         "home_path_invalid" => "Use a full folder path, such as /Users/you/Projects.",
+        crate::storage::versioned::STALE_CODE => {
+            "The pack changed in another window, so this was not saved. The list shows it now."
+        }
         "owner_outcome_unknown_reconcile_same_identity" => {
             "CrazyAgent did not answer in time. Try again."
         }
@@ -240,6 +243,13 @@ impl AppSetup {
         }
     }
 
+    fn pack_version(&self) -> u64 {
+        match &self.setup {
+            Load::Ready(status) => status.version,
+            _ => 0,
+        }
+    }
+
     fn picked(&self) -> Option<&PackEntry> {
         self.entries().get(self.selected)
     }
@@ -325,7 +335,11 @@ impl AppSetup {
             let on = entry.state == PackState::Off;
             let done = format!("{title} is {}.", if on { "on" } else { "off" });
             let job = AppSetupJob::Pack {
-                change: PackChange::Switch { id: entry.id, on },
+                change: PackChange::Switch {
+                    id: entry.id,
+                    on,
+                    version: self.pack_version(),
+                },
                 generation: ctx.next_generation(),
             };
             self.change(job, Sent::Done(done), ctx);
@@ -462,7 +476,12 @@ impl AppSetup {
                 ctx.say(Message::success(&done, ""));
                 self.reload(ctx);
             }
-            Err(code) => ctx.say(Message::error(&setup_plain(code), "")),
+            Err(code) => {
+                ctx.say(Message::error(&setup_plain(code), ""));
+                if code == crate::storage::versioned::STALE_CODE {
+                    self.reload(ctx);
+                }
+            }
         }
     }
 
@@ -610,7 +629,10 @@ impl AppSetup {
                 Key::Char('y') => {
                     let done = format!("Removed {id}.");
                     let job = AppSetupJob::Pack {
-                        change: PackChange::Remove { id },
+                        change: PackChange::Remove {
+                            id,
+                            version: self.pack_version(),
+                        },
                         generation: ctx.next_generation(),
                     };
                     self.change(job, Sent::Done(done), ctx);

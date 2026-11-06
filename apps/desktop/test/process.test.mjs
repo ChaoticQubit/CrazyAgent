@@ -165,13 +165,15 @@ test("every engine refusal a Process action can show has a plain sentence", () =
 test("a save a Claude master may refuse names what it takes and what agents now get, and the page shows it", () => {
   const fits = "Instructions saved. Agents started from now on get them.";
   assert.equal(client.savedMessage({ bytes: 24, claude_bytes_max: 28159 }), fits);
+  assert.equal(client.savedMessage(null), fits, "a save that reports no size shows the plain line");
   assert.equal(client.savedMessage({ bytes: 28159, claude_bytes_max: 28159 }), fits, "exactly the limit fits");
   assert.equal(client.savedMessage({ bytes: 40000, claude_bytes_max: 28159 }),
     "Instructions saved, but a project's agents now get 39.1 KB of app and project instructions and a Claude master takes only 27.5 KB. Shorten them before a Claude master's next turn.");
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/process.rs", import.meta.url), "utf8");
   assert.match(engine, /pub struct ProcessSaved \{\s*pub bytes: u32,\s*pub claude_bytes_max: u32,\s*\}/, "the engine sends the fields this page reads");
+  assert.match(engine, /Saved \{\s*version: u64,\s*size: Option<ProcessSaved>,\s*\}/, "a versioned save carries the size beside its version");
   const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
-  assert.match(source, /showToast\(savedMessage\(result\.value\)\)/, "the page shows the line for the save it made");
+  assert.match(source, /showToast\(savedMessage\(result\.value\.size\)\)/, "the page shows the line for the save it made");
 });
 
 test("unsaved instruction text survives a save reply, another client's save and a skill link", () => {
@@ -196,7 +198,7 @@ test("unsaved instruction text survives a save reply, another client's save and 
 
 function agentSettings(extra = {}) {
   return renderToStaticMarkup(createElement(view.AgentSettingsView, {
-    settings: { kind: "ok", value: client.DEFAULT_INSTRUCTION_SETTINGS }, busy: false, failure: "", onSave: never("onSave"), ...extra,
+    settings: { kind: "ok", value: { settings: client.DEFAULT_INSTRUCTION_SETTINGS, version: 0 } }, busy: false, failure: "", onSave: never("onSave"), ...extra,
   }));
 }
 
@@ -219,7 +221,7 @@ test("a project's agent settings offer every instructions mode and the transcrip
   assert.match(markup, /keep their transcript in the agent&#x27;s own home/);
   assert.doesNotMatch(markup, /Project files|Project and user files/);
   for (const choice of client.INSTRUCTION_MODES) {
-    const shown = agentSettings({ settings: { kind: "ok", value: { mode: choice.value, transcripts: false } } });
+    const shown = agentSettings({ settings: { kind: "ok", value: { settings: { mode: choice.value, transcripts: false }, version: 3 } } });
     assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${escaped(choice.label)}</`));
     assert.ok(shown.includes(html(choice.note)), choice.value);
     assert.match(shown, /role="switch"[^>]*aria-checked="false"/);
@@ -264,13 +266,31 @@ test("a project's Process page reads and saves its agent settings through the en
   assert.match(source, /<AgentSettings projectId=\{scope\.id\} \/>/);
   assert.match(source, /if \(scope\.kind === "app"\) return editor;/, "the app page has no agent settings");
   const api = readFileSync(new URL("../src/api-process.ts", import.meta.url), "utf8");
-  assert.match(api, /call<InstructionSettings>\("desktop_instruction_settings", \{ projectId \}\)/);
-  assert.match(api, /call<InstructionSettings>\("desktop_save_instruction_settings", \{ projectId, settings \}\)/);
+  assert.match(api, /call<InstructionView>\("desktop_instruction_settings", \{ projectId \}\)/);
+  assert.match(api, /call<InstructionView>\("desktop_save_instruction_settings", \{ projectId, settings, version \}\)/);
   const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   for (const command of ["desktop_instruction_settings", "desktop_save_instruction_settings"]) {
     assert.match(lib, new RegExp(`async fn ${command}\\(`));
     assert.match(lib, new RegExp(`\\n\\s+${command},\\n`), `${command} is registered`);
   }
+});
+
+test("an agent settings save names the version the page read, and a save refused as stale shows the saved settings again", () => {
+  const read = { settings: { mode: "app_only", transcripts: false, edits: "next_message" }, version: 7 };
+  assert.equal(client.settingsSaveVersion({ kind: "ok", value: read }), 7, "a save names the version read");
+  assert.equal(client.settingsSaveVersion({ kind: "error", code: "instruction_settings_invalid", message: "" }), null,
+    "unreadable settings are replaced with no version");
+  assert.equal(client.AGENT_SETTINGS_STALE,
+    "These agent settings changed since you opened them. The page now shows the saved ones; make your change again.");
+  assert.match(agentSettings({ settings: { kind: "ok", value: read }, failure: client.AGENT_SETTINGS_STALE }), /changed since you opened them/);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/process.rs", import.meta.url), "utf8");
+  const listed = engine.slice(engine.indexOf("PROCESS_CODES: &[&str] = &["), engine.indexOf("];"));
+  assert.match(listed, /"stale_revision"/, "the engine can refuse a settings save as stale");
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /saveInstructionSettings\(projectId, next, settingsSaveVersion\(settings\)\)/);
+  assert.match(source, /result\.code === "stale_revision"\) \{\s*reload\(\);\s*setFailure\(AGENT_SETTINGS_STALE\);/);
+  const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  assert.match(lib, /async fn desktop_save_instruction_settings\([^)]*version: Option<u64>/);
 });
 
 test("picking an instructions mode, the transcript switch or an edit choice saves the whole setting, never a files field", async () => {

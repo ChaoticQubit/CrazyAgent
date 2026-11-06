@@ -146,7 +146,7 @@ test("every plain bridge command is routed with its own arguments and native one
   assert.match(planned.get("desktop_project_read_paths").route.body, /^read\(state\)\s*\.await\?\s*\.project_read_paths\(&id\)\s*\.await$/, "the read-folders read never takes the bridge alone");
   assert.equal(planned.get("desktop_project_files").route?.body, "state.project_files(&id, &query).await", "the @ listing goes through the bridge queue as the app's does");
   assert.throws(() => plan(filesCommand("read(&state).await?.project_files(&id, &query).await"), impls), /awaits NativeBridge::project_files, which is not async and gives a Result/, "the stale b19 route is refused against the real bridge");
-  for (const native of ["desktop_pick_folder", "desktop_terminal_attach", "desktop_install_update", "desktop_engine_versions"]) {
+  for (const native of ["desktop_pick_folder", "desktop_terminal_attach", "desktop_install_update", "desktop_engine_versions", "desktop_submit_claude_auth_code"]) {
     assert.ok(planned.get(native).skip, `${native} needs the native app`);
   }
   assert.ok([...planned.values()].filter((entry) => entry.route).length > 100, "the bridge serves the plain commands");

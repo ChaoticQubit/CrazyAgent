@@ -276,9 +276,10 @@ test("the request carries every answer and no repositories", () => {
     spec: { name: "Harbor Notes", repositories: [] },
     setup: {
       about: "Notes for marine engineers.\n\nOther platform: Smart watch", tech_stack: ["Rust", "React"],
-      platforms: ["mobile_app", "other"], research: ["market_research"], pool: "main", team: engineTeam("codex", 1), documents: ["/d/brief.pdf"],
+      platforms: ["mobile_app", "other"], research: ["market_research", "roadmap_planning"], pool: "main", team: engineTeam("codex", 1), documents: ["/d/brief.pdf"],
     },
   });
+  assert.deepEqual(wizard.buildRequest({ ...draft, roadmap: false }).setup.research, ["market_research"]);
   assert.equal(wizard.buildRequest({ ...draft, platforms: ["website"], otherPlatform: "ignored" }).setup.about, "Notes for marine engineers.");
 });
 
@@ -357,7 +358,7 @@ test("project Settings starts from the saved project and sends nothing until som
   const draft = wizard.draftOf(stored);
   assert.deepEqual(draft, {
     name: "Harbor Notes", about: "Notes for marine engineers.", stack: ["Rust", "SQLite"], platforms: ["desktop_app"], otherPlatform: "", documents: [],
-    research: ["market_research"], pool: "main-pool", poolChosen: true, team: stored.team,
+    research: ["market_research"], roadmap: false, pool: "main-pool", poolChosen: true, team: stored.team,
   });
   assert.notEqual(draft.stack, stored.tech_stack);
   assert.equal(wizard.editRequest(stored, draft).changed, false);

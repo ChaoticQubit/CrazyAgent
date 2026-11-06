@@ -571,6 +571,146 @@ fn a_set_merged_but_not_handed_to_its_agent_says_so_and_can_be_asked_again_or_di
     assert!(text(&resolving).contains("Agent is updating"));
 }
 
+#[test]
+fn v_names_the_listed_text_file_whose_diff_is_at_the_top_for_the_editor() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(
+        !view.key(key(KeyCode::Char('v')), NOW),
+        "the list leaves v to the host"
+    );
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(!help.contains(&("v", "Edit your copy")));
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert!(view.key(key(KeyCode::Char('v')), NOW));
+    assert_eq!(view.take_edit(), None, "no diff text has arrived yet");
+    assert!(text(&view).contains(NO_FILE_SHOWN), "{}", text(&view));
+    let file = |path: &str, status: FileStatus, kind: FileKind| ChangedFile {
+        path: path.into(),
+        old_path: None,
+        status,
+        kind,
+        marks: Vec::new(),
+    };
+    let page = ChangeDiff {
+        files: vec![
+            file("src/app.rs", FileStatus::Modified, FileKind::Text),
+            file("docs/old notes.md", FileStatus::Deleted, FileKind::Text),
+            file("logo.png", FileStatus::Modified, FileKind::Binary),
+        ],
+        text: [
+            "diff --git a/src/app.rs b/src/app.rs",
+            "index 1111111..2222222 100644",
+            "--- a/src/app.rs",
+            "+++ b/src/app.rs",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+            "diff --git a/docs/old notes.md b/docs/old notes.md",
+            "deleted file mode 100644",
+            "index 3333333..0000000",
+            "--- a/docs/old notes.md\t",
+            "+++ /dev/null",
+            "@@ -1 +0,0 @@",
+            "--- a/src/app.rs",
+            "diff --git a/logo.png b/logo.png",
+            "index 4444444..5555555 100644",
+            "Binary files a/logo.png and b/logo.png differ",
+            "diff --git a/unlisted.rs b/unlisted.rs",
+            "--- a/unlisted.rs",
+            "+++ b/unlisted.rs",
+        ]
+        .join("\n"),
+        next: None,
+        truncated: false,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(page)));
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(help.contains(&("v", "Edit your copy")), "{help:?}");
+
+    let mut shown = Vec::new();
+    for top in 0..20 {
+        assert_eq!(view.diff.as_ref().unwrap().top, top);
+        assert!(view.key(key(KeyCode::Char('v')), NOW));
+        shown.push(view.take_edit());
+        assert_eq!(view.take_edit(), None, "one v opens one file once");
+        assert!(view.key(key(KeyCode::Down), NOW));
+    }
+    let app = Some("src/app.rs".to_owned());
+    let notes = Some("docs/old notes.md".to_owned());
+    let mut want = vec![app; 7];
+    want.extend(vec![notes; 7]);
+    want.extend(vec![None; 6]);
+    assert_eq!(
+        shown, want,
+        "the section at the top names the file: a deleted file by its old side, a removed line that reads like a header changes nothing, and a binary or unlisted file names none"
+    );
+    assert!(text(&view).contains(NO_FILE_SHOWN));
+
+    assert!(view.key(key(KeyCode::Esc), NOW));
+    assert!(!view.key(key(KeyCode::Char('v')), NOW));
+    assert_eq!(view.take_edit(), None);
+}
+
+#[test]
+fn shift_o_names_the_chosen_worktree_or_the_shown_file_for_the_ide() {
+    let mut view = listed(vec![
+        set('1', ChangeState::Pending),
+        set('2', ChangeState::Pending),
+    ]);
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(help.contains(&("O", "Open in IDE")), "{help:?}");
+    assert!(view.key(key(KeyCode::Down), NOW));
+    assert!(view.key(key(KeyCode::Char('O')), NOW));
+    assert_eq!(
+        view.take_reveal(),
+        Some(RevealTarget::ChangeSet {
+            id: id('2'),
+            path: None
+        })
+    );
+    assert_eq!(view.take_reveal(), None, "one O opens one target once");
+
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let page = ChangeDiff {
+        files: vec![ChangedFile {
+            path: "src/app.rs".into(),
+            old_path: None,
+            status: FileStatus::Modified,
+            kind: FileKind::Text,
+            marks: Vec::new(),
+        }],
+        text: [
+            "diff --git a/src/app.rs b/src/app.rs",
+            "index 1111111..2222222 100644",
+            "--- a/src/app.rs",
+            "+++ b/src/app.rs",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ]
+        .join("\n"),
+        next: None,
+        truncated: false,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(page)));
+    assert!(view.key(key(KeyCode::Char('O')), NOW));
+    assert_eq!(
+        view.take_reveal(),
+        Some(RevealTarget::ChangeSet {
+            id: id('2'),
+            path: Some("src/app.rs".into())
+        })
+    );
+}
+
+#[test]
+fn shift_o_with_nothing_listed_opens_nothing() {
+    let mut view = listed(Vec::new());
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(!help.iter().any(|(key, _)| *key == "O"));
+    assert!(view.key(key(KeyCode::Char('O')), NOW));
+    assert_eq!(view.take_reveal(), None);
+}
 /// A change set whose agent label carries its digit, so the list rows tell sets apart.
 /// Inputs: the digit and the state. Output: the change set.
 fn named(digit: char, state: ChangeState) -> ChangeSetView {

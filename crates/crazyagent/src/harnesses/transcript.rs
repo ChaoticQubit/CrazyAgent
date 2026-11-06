@@ -902,5 +902,40 @@ fn said(speaker: Speaker, text: String) -> Option<(Speaker, String)> {
         .then_some((speaker, text))
 }
 
+pub mod pending;
+
+/// Reads what was typed into a harness conversation after byte `offset` of its record, as
+/// `conversation_messages` reads typed messages, from at most `EXCERPT_TAIL_BYTES_MAX`
+/// bytes past the offset, never following a link. Takes the harness, the record and the
+/// offset. Returns the typed texts oldest first, or none when the record cannot be read or
+/// is now shorter than the offset.
+pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<String>> {
+    let mut file = open_plain(record)?;
+    let length = file.metadata().ok()?.len();
+    if length < offset {
+        return None;
+    }
+    let mut read = Vec::new();
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    file.take(EXCERPT_TAIL_BYTES_MAX)
+        .read_to_end(&mut read)
+        .ok()?;
+    let mut typed = Vec::new();
+    for line in read.split(|byte| *byte == b'\n') {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let said = match harness {
+            "codex" => codex_message(&value),
+            "claude-code" => claude_message(&value),
+            _ => None,
+        };
+        if let Some((Speaker::Input, text)) = said {
+            typed.push(text);
+        }
+    }
+    Some(typed)
+}
+
 #[cfg(all(test, unix))]
 mod tests;

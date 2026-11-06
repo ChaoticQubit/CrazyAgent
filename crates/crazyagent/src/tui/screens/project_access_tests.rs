@@ -1,17 +1,15 @@
-use super::project_access::{
-    AccessEdit, LOWERING_STOPS_AGENTS, NETWORK_IGNORED_UNDER_FULL, TOOLCHAIN_OFF_STOPS_AGENTS,
-    network_help, summary,
-};
 #[cfg(target_os = "macos")]
-use super::project_access::{AccessKey, FULL_ACCESS_WARNING};
+use super::project_access::FULL_ACCESS_WARNING;
+use super::project_access::{
+    AccessEdit, AccessKey, IDE_GIT_HOOKS, IDE_GIT_HOOKS_LINE, LOWERING_STOPS_AGENTS,
+    NETWORK_IGNORED_UNDER_FULL, TOOLCHAIN_OFF_STOPS_AGENTS, network_help, summary,
+};
 use crate::sandbox::policy::{
     AgentAccess, AgentNetwork, LevelView, NetworkView, PolicyView, ToolchainView,
 };
 use crate::sandbox::toolchains::Toolchain;
-#[cfg(target_os = "macos")]
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-#[cfg(target_os = "macos")]
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -51,6 +49,8 @@ fn view() -> PolicyView {
                 allowed: false,
             },
         ],
+        ide_git_hooks: false,
+        version: 0,
     }
 }
 
@@ -188,4 +188,45 @@ fn the_access_box_says_beside_the_toolchains_that_turning_one_off_stops_agents_r
         TOOLCHAIN_OFF_STOPS_AGENTS,
         "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it."
     );
+}
+
+#[test]
+fn the_access_box_saves_the_ide_hooks_switch_on_its_last_row_with_its_line() {
+    let mut edit = AccessEdit::of(&view());
+    assert!(!edit.ide_git_hooks);
+    for _ in 0..6 {
+        assert_eq!(edit.key(key(KeyCode::Down)), AccessKey::Handled);
+    }
+    assert_eq!(edit.cursor, 4);
+    let look = super::new_project_view::Look::plain();
+    let rows: Vec<String> = edit.body(&look).iter().map(|row| row.text()).collect();
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let switch = rows
+        .iter()
+        .position(|row| row.contains(IDE_GIT_HOOKS))
+        .expect("the IDE hooks row");
+    assert!(rows[switch].starts_with("> [ ] "), "{}", rows[switch]);
+    assert!(words(&rows[switch..].join(" ")).contains(IDE_GIT_HOOKS_LINE));
+    assert_eq!(IDE_GIT_HOOKS, "IDE git runs the project's hooks");
+    assert!(IDE_GIT_HOOKS_LINE.contains("never signed"));
+    assert_eq!(edit.key(key(KeyCode::Char(' '))), AccessKey::Handled);
+    assert!(edit.ide_git_hooks);
+    assert_eq!(edit.allowed, [true, false]);
+    let AccessKey::Save(policy) = edit.key(key(KeyCode::Enter)) else {
+        panic!("Enter saves");
+    };
+    assert!(policy.ide_git_hooks);
+    assert_eq!(policy.access, AgentAccess::Sandboxed);
+    assert!(policy.toolchains.is_empty());
+
+    let on = AccessEdit::of(&PolicyView {
+        ide_git_hooks: true,
+        ..view()
+    });
+    assert!(on.ide_git_hooks);
+    assert!(on.policy().ide_git_hooks);
+    let mut off = on.clone();
+    off.cursor = 4;
+    assert_eq!(off.key(key(KeyCode::Left)), AccessKey::Handled);
+    assert!(!off.policy().ide_git_hooks);
 }

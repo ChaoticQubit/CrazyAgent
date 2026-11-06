@@ -110,7 +110,13 @@ fn applied(response: OwnerResponse) -> OwnerResult {
 }
 
 async fn send(controller: &mut OwnerController, change: ScheduleChange) -> OwnerResult {
-    applied(controller.set_account_schedule(change, 1).await.unwrap())
+    let version = controller.account_schedule().await.unwrap().version;
+    applied(
+        controller
+            .set_account_schedule(change, version, 1)
+            .await
+            .unwrap(),
+    )
 }
 
 async fn edit(controller: &mut OwnerController, edit: ModelAccessEdit) -> OwnerResult {
@@ -215,6 +221,7 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
                         ..plan
                     },
                 },
+                4,
                 1,
             )
             .await
@@ -234,6 +241,7 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
             connection: reference("claude-b"),
             plan,
         }],
+        version: 4,
     };
     assert_eq!(controller.account_schedule().await.unwrap(), expected);
     let next = |connection: &str, use_last: bool| RankedAccount {

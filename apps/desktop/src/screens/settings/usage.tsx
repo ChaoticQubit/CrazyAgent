@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { accountRanking, listAccounts, poolSummaries, type Result } from "../../api";
 import {
   loadUsage, pollFailure, refreshUsage, setManualReset, usageNotReady, usageRefusal,
-  type AccountLimits, type DayTokens, type LimitWindow, type LinesRow, type Tokens, type UsageReport, type UsageRow, type WindowKind,
+  type AccountLimits, type DayTokens, type LimitWindow, type LinesRow, type StepHealth, type Tokens, type UsageReport, type UsageRow, type WindowKind,
 } from "../../api-usage";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, TextField } from "../../ui";
@@ -109,6 +109,24 @@ export function agoText(atMs: number, nowMs: number): string {
   return `${Math.floor(passed / DAY)} d ago`;
 }
 
+const STEP_WORDS: Record<StepHealth["step"], [string, string]> = {
+  poll: ["Checking account limits", "limits shown may be out of date"],
+  team: ["Counting agent tokens", "agent and research run token totals may be low"],
+  runs: ["Counting research run tokens", "research token totals may be low"],
+};
+
+/** One plain sentence for a usage step kind that panicked since the engine started: what
+ * may be missing while it keeps failing, or when it worked again. Inputs: the step's health
+ * and now. Output: the sentence. */
+export function healthText(health: StepHealth, nowMs: number): string {
+  const [what, missing] = STEP_WORDS[health.step];
+  const times = health.panics === 1 ? "once" : `${health.panics} times`;
+  const said = `${what} hit an internal error ${times} since the engine started, last ${agoText(health.last_ms, nowMs)}.`;
+  return health.recovered_ms === null
+    ? `${said} CrazyAgent keeps retrying; ${missing}.`
+    : `${said} It worked again ${agoText(health.recovered_ms, nowMs)}.`;
+}
+
 /** Where and when an account's limits were last read, and whether the last check failed.
  * Inputs: the limits and now. Output: one line, or "Not read yet". */
 export function readLine(limits: AccountLimits, nowMs: number): string {
@@ -180,16 +198,32 @@ function Tile({ label, value, detail }: { label: string; value: string; detail?:
   </div>;
 }
 
+/** The tokens one row shows: the count, the count and the harness that also ran for it
+ * without reporting usage, or only that harness when nothing was counted, never a bare zero.
+ * Inputs: the token count and that harness, if any. Output: the text. */
+export function tokenText(total: number, notReportedBy?: string | null): string {
+  if (!notReportedBy) return compactCount(total);
+  if (total === 0) return `Usage not reported by ${notReportedBy}`;
+  return `${compactCount(total)} + usage not reported by ${notReportedBy}`;
+}
+
 function Totals({ report }: { report: UsageReport }) {
   const share = cacheShare(report.total);
   const added = report.lines.reduce((sum, row) => sum + row.added, 0);
   const removed = report.lines.reduce((sum, row) => sum + row.removed, 0);
-  return <div className="usage-tiles">
-    <Tile label="Tokens" value={compactCount(totalTokens(report.total))} detail={`${compactCount(report.total.input)} in, ${compactCount(report.total.output)} out`} />
-    <Tile label="Cache" value={share === null ? "None" : `${share}%`} detail={`${compactCount(report.total.cache_read)} read, ${compactCount(report.total.cache_write)} written`} />
-    <Tile label="Runs" value={String(report.runs)} />
-    <Tile label="Lines changed" value={`+${compactCount(added)} -${compactCount(removed)}`} />
-  </div>;
+  const unreported = (report.not_reported_by ?? []).join(", ");
+  const onlyUnreported = unreported !== "" && totalTokens(report.total) === 0;
+  return <>
+    <div className="usage-tiles">
+      {onlyUnreported
+        ? <Tile label="Tokens" value="Not reported" detail={`Usage not reported by ${unreported}`} />
+        : <Tile label="Tokens" value={compactCount(totalTokens(report.total))} detail={`${compactCount(report.total.input)} in, ${compactCount(report.total.output)} out`} />}
+      <Tile label="Cache" value={share === null ? "None" : `${share}%`} detail={`${compactCount(report.total.cache_read)} read, ${compactCount(report.total.cache_write)} written`} />
+      <Tile label="Runs" value={String(report.runs)} />
+      <Tile label="Lines changed" value={`+${compactCount(added)} -${compactCount(removed)}`} />
+    </div>
+    {unreported !== "" && !onlyUnreported && <p className="muted small">Not in these totals: usage not reported by {unreported}.</p>}
+  </>;
 }
 
 function UsageTable({ title, rows, name, nowMs }: { title: string; rows: UsageRow[]; name: (key: string) => string; nowMs: number }) {
@@ -199,11 +233,15 @@ function UsageTable({ title, rows, name, nowMs }: { title: string; rows: UsageRo
       <thead><tr><th scope="col">Name</th><th scope="col">Tokens</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cache read</th><th scope="col">Runs</th><th scope="col">Last used</th></tr></thead>
       <tbody>{rows.map((row) => <tr key={row.key}>
         <th scope="row">{name(row.key)}</th>
-        <td>{compactCount(totalTokens(row.tokens))}</td>
-        <td>{compactCount(row.tokens.input)}</td>
-        <td>{compactCount(row.tokens.output)}</td>
-        <td>{compactCount(row.tokens.cache_read)}</td>
-        <td>{row.runs}</td>
+        {row.not_reported_by && totalTokens(row.tokens) === 0
+          ? <td colSpan={5}>{tokenText(0, row.not_reported_by)}</td>
+          : <>
+            <td>{tokenText(totalTokens(row.tokens), row.not_reported_by)}</td>
+            <td>{compactCount(row.tokens.input)}</td>
+            <td>{compactCount(row.tokens.output)}</td>
+            <td>{compactCount(row.tokens.cache_read)}</td>
+            <td>{row.runs}</td>
+          </>}
         <td>{agoText(row.last_ms, nowMs)}</td>
       </tr>)}</tbody>
     </table></div>
@@ -343,11 +381,12 @@ export function UsageView({ report, range, names, nowMs, failure, busy, next, on
   if (report.kind === "loading") return <div className="stack">{head}<Skeleton shape="card" count={3} /></div>;
   if (report.kind === "error") return <div className="stack">{head}<LoadError message={usageRefusal(report)} onRetry={onRetry} /></div>;
   const value = report.value;
-  const empty = totalTokens(value.total) === 0 && value.lines.length === 0;
+  const empty = totalTokens(value.total) === 0 && value.lines.length === 0 && (value.not_reported_by ?? []).length === 0;
   return <div className="stack">
     <p className="secondary">Tokens your agents used and each account's limits. Counts come from each run's own record; limits are checked every 10 minutes.</p>
     {head}
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
+    {(value.health ?? []).map((item) => <Notice key={item.step} tone={item.recovered_ms === null ? "warn" : "info"}>{healthText(item, nowMs)}</Notice>)}
     <Totals report={value} />
     <PartialNotice homes={value.partial_homes} />
     <Panel title="Account limits">

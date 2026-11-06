@@ -189,10 +189,11 @@ test("the live master switch is read from the team status, and a switch never se
   const { liveSwitch } = await import("../src/screens/project/live-master.tsx");
   const status = (patch) => ({ kind: "ok", value: teamStatus(patch) });
   assert.equal(liveSwitch(undefined, "alpha"), undefined, "not read yet");
-  assert.deepEqual(liveSwitch(status({}), "alpha"), { on: null, problem: null }, "an engine without the field reads as never set");
-  assert.deepEqual(liveSwitch(status({ live_master: null, live_problem: null }), "alpha"), { on: null, problem: null });
-  assert.deepEqual(liveSwitch(status({ live_master: true, live_problem: null }), "alpha"), { on: true, problem: null });
-  assert.deepEqual(liveSwitch(status({ live_master: false, live_problem: "No account." }), "alpha"), { on: false, problem: "No account." });
+  assert.deepEqual(liveSwitch(status({}), "alpha"), { on: null, problem: null, version: 0 }, "an engine without the field reads as never set");
+  assert.deepEqual(liveSwitch(status({ live_master: null, live_problem: null }), "alpha"), { on: null, problem: null, version: 0 });
+  assert.deepEqual(liveSwitch(status({ live_master: true, live_problem: null }), "alpha"), { on: true, problem: null, version: 0 });
+  assert.deepEqual(liveSwitch(status({ live_master: false, live_problem: "No account." }), "alpha"), { on: false, problem: "No account.", version: 0 });
+  assert.deepEqual(liveSwitch(status({ live_master: true, settings_version: 7 }), "alpha"), { on: true, problem: null, version: 7 }, "a switch change names the team settings version read");
   assert.equal(liveSwitch({ kind: "error", code: "engine_unavailable" }, "alpha"), undefined, "a failed read is not a switch never set, so it never starts the master");
   assert.equal(liveSwitch({ kind: "not_ready" }, "alpha"), undefined);
   assert.equal(liveSwitch(status({ live_master: true }), "beta"), undefined, "another project's read is not this switch");
@@ -296,9 +297,31 @@ test("a closed terminal panel detaches only the view its own attach opened", () 
 
 test("a live master area left before the start reply changes nothing on the next page", () => {
   const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
-  assert.match(source, /const turned = await setLiveMaster\(id, true\);[\s\S]*?if \(!mounted\.current\) return;\s*if \(failed\) \{/);
+  assert.match(source, /const turned = await setLiveMaster\(id, true, version\);[\s\S]*?if \(!mounted\.current\) return;\s*if \(failed\) \{/);
   assert.match(source, /mounted\.current = true;\s*return \(\) => \{ mounted\.current = false; \};/);
   assert.doesNotMatch(source, /setLiveMaster\(id, false\)|setLiveMaster\([^)]*next\)/, "nothing in the master area turns the live master off");
+});
+
+test("a live master switch from an older team read is not saved; the area says so and reads the team again", () => {
+  assert.equal(live.liveStaleNote("plant-shop"), "The team settings of plant-shop changed in another window, so your live master switch was not saved. The master area now shows the saved switch.");
+  assert.equal(live.liveStaleNote(""), "The team settings of this project changed in another window, so your live master switch was not saved. The master area now shows the saved switch.");
+  assert.ok(!live.liveStaleNote("shop\u202eevil").includes("\u202e"), "the name is shown through displayText");
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  assert.match(source, /const version = Math\.max\(engine\?\.version \?\? 0, saved\.current\);/, "the switch names the newer of the team read and this area's own last save");
+  assert.match(source, /if \(savedStale\(turned\)\) \{\s*if \(clicked\) data\.notify\(liveStaleNote\(data\.name\)\);\s*if \(!mounted\.current\) return;\s*asked\.current = false;\s*refused\.current = version;\s*setWant\(null\);\s*setLive\(\{ kind: "starting" \}\);\s*data\.reloadTeam\(\);\s*return;\s*\}/, "a stale switch drops the change, toasts only an owner's click, remembers the refused version and reads the team again");
+  assert.match(source, /\} else \{\s*saved\.current = version \+ 1;/, "an applied switch moves the version this area names next");
+  assert.match(source, /if \(autoStart\(on, asked\.current, engine\?\.version \?\? 0, refused\.current\)\) void start\(true, false\);\s*\}, \[on, data\.team\.at\]\);/, "a first open refused as stale turns the master on again from the fresh read, without a toast");
+  assert.match(source, /onStart=\{\(\) => start\(\)\}/, "Try again and a session switch are the owner's clicks, so their stale refusal toasts");
+});
+
+test("a first open refused as stale starts the live master once from the fresh read, not again from the read it was refused on", () => {
+  assert.equal(live.autoStart(null, false, 0, -1), true, "a switch never set starts on the first open");
+  assert.equal(live.autoStart(null, false, 0, 0), false, "the old read the engine refused does not start it again");
+  assert.equal(live.autoStart(null, false, 1, 0), true, "the fresh read after another window's change starts it");
+  assert.equal(live.autoStart(true, false, 1, -1), false, "a switch the owner set is not overridden");
+  assert.equal(live.autoStart(false, false, 1, -1), true, "opening the area starts a stopped master too");
+  assert.equal(live.autoStart(undefined, false, 0, -1), false, "no start before a team read arrives");
+  assert.equal(live.autoStart(null, true, 1, -1), false, "a start already asked is not sent twice");
 });
 
 test("a terminal view that connects again drops the right-click menu the old view opened, so focus never lands on it", async () => {
@@ -357,7 +380,7 @@ test("starting the live master opens the owner's default session first when none
   const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
   const read = start.indexOf("openBeforeLive(");
   const open = start.indexOf("startMaster(");
-  const on = start.indexOf("setLiveMaster(id, true)");
+  const on = start.indexOf("setLiveMaster(id, true, version)");
   assert.ok(on > 0, "start turns the live switch on");
   assert.ok(read > 0 && open > read && on > open, `the owner's Open goes out after the master read and before the switch turns on: read ${read}, open ${open}, on ${on}`);
   const state = (session) => ({ kind: "ok", value: { project_id: "alpha", ticket: "1", session } });
@@ -376,7 +399,7 @@ test("a refused or failed owner Open is named in the live master area while its 
   const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
   const open = start.indexOf("startMaster(");
   const named = start.indexOf("openProblem(");
-  const on = start.indexOf("setLiveMaster(id, true)");
+  const on = start.indexOf("setLiveMaster(id, true, version)");
   assert.ok(open > 0 && named > open && on > named, `the Open's result is read before the switch turns on: open ${open}, named ${named}, on ${on}`);
   const receipt = (fields) => ({ kind: "ok", value: { kind: "master", outcome: "applied", pending: false, rejection: null, ...fields } });
   assert.equal(live.openProblem(receipt({})), null, "an applied Open names nothing");
@@ -411,10 +434,10 @@ test("opening the area with the live switch already on still sends the owner's O
   const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
   const open = start.indexOf("startMaster(");
   const only = start.indexOf("if (!turn) return;");
-  const on = start.indexOf("setLiveMaster(id, true)");
+  const on = start.indexOf("setLiveMaster(id, true, version)");
   assert.ok(open > 0 && only > open && on > only, `a switch already on gets only the Open: open ${open}, only ${only}, on ${on}`);
   assert.match(source, /const next = onOpen\(on, asked\.current, checked\.current\);/);
-  assert.match(source, /if \(next\) void start\(next === "start"\);/);
+  assert.match(source, /if \(next === "session"\) \{\s*checked\.current = true;\s*void start\(false, false\);\s*\}/);
 });
 
 test("a failed project open or master read before the live switch is named like a refused Open (LMS2-L1)", async () => {

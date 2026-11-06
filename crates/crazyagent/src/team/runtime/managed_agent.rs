@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
-const PROJECT: &str = "dec-090";
+pub(super) const PROJECT: &str = "dec-090";
 pub(super) const AGENT: i64 = 1;
 const SIGNED_IN_CLAUDE: &str = "CRAZYAGENT_MANAGED_CLAUDE_PROFILE";
 const SIGNED_IN_CODEX: &str = "CRAZYAGENT_MANAGED_CODEX_PROFILE";
@@ -186,8 +186,8 @@ impl SignedIn {
 /// Input: the launch harness and its real executable. Output: the paths the agent and
 /// the engine's own processes use, and commands that run as the agent does.
 pub(crate) struct ManagedAgent {
-    runtime: TeamRuntime,
-    plan: Plan,
+    pub(super) runtime: TeamRuntime,
+    pub(super) plan: Plan,
     pub(crate) base: PathBuf,
     pub(crate) profile_home: PathBuf,
     pub(crate) home: PathBuf,

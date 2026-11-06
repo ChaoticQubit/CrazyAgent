@@ -321,6 +321,41 @@ test("the Intel macOS release runs a pinned, checksum-verified x86_64 bun", asyn
   }
 });
 
+test("macOS CI provisions the pinned VSCodium build the IDE server tests need from builds.json, checked on every use, before the Rust tests", async () => {
+  const root = new URL("../../", import.meta.url);
+  const manifest = JSON.parse(await readFile(new URL("crates/crazyagent/src/ide/builds.json", root), "utf8"));
+  const server = await readFile(new URL("crates/crazyagent/src/ide/server/tests.rs", root), "utf8");
+  assert(server.includes(`const BUILD: &str = "vscodium-${manifest.version}";`), "the server tests read the build that builds.json pins");
+  const all = steps(await workflow("ci.yml"), "macos");
+  const at = (found) => all.findIndex(found);
+  const read = at((step) => step.includes("name: Read the pinned IDE build"));
+  const cache = at((step) => step.includes("uses: actions/cache@") && step.includes("vscodium-reh-web"));
+  const provision = at((step) => step.includes("name: Provision the pinned IDE build"));
+  const tests = at((step) => step.includes("name: Test engine and desktop crates"));
+  assert(read >= 0 && read < cache && cache < provision && provision < tests, `${read} ${cache} ${provision} ${tests}`);
+  assert.match(all[read], /^ {6}- id: ide\n/);
+  assert.match(all[read], /readFileSync\("crates\/crazyagent\/src\/ide\/builds\.json", "utf8"\)/);
+  assert.match(all[read], /manifest\.builds\["aarch64-apple-darwin"\]/);
+  assert.match(all[read], /build\?\.url === url/, "only the official release URL is fetched");
+  assert.match(all[cache], /^ {6}- if: runner\.environment == 'github-hosted'\n/);
+  assert.match(all[cache], /key: ci-macos-vscodium-reh-web-darwin-arm64-\$\{\{ steps\.ide\.outputs\.version \}\}\n?$/);
+  const step = all[provision];
+  for (const name of ["VERSION", "URL", "SHA256", "BYTES"]) {
+    assert.match(step, new RegExp(`IDE_${name}: \\$\\{\\{ steps\\.ide\\.outputs\\.${name.toLowerCase()} \\}\\}`), name);
+  }
+  assert.match(step, /prefix="\$RUNNER_TOOL_CACHE\/vscodium-reh-web\/\$IDE_VERSION\/arm64"/);
+  assert.match(step, /\n\s+if ! echo "\$IDE_SHA256  \$work\/vscodium\.tgz" \| shasum -a 256 -s -c - 2>\/dev\/null; then\n/, "the cached archive is checked on every use");
+  assert.match(step, /--proto '=https' --proto-redir '=https'/);
+  assert.match(step, /--max-filesize "\$IDE_BYTES"/);
+  assert.match(step, /\n\s+test "\$\(stat -f %z "\$work\/vscodium\.tgz"\)" = "\$IDE_BYTES"\n/);
+  assert.match(step, /\n\s+echo "\$IDE_SHA256  \$work\/vscodium\.tgz" \| shasum -a 256 -c -\n/, "a download that does not match fails the job");
+  assert(step.indexOf("| shasum -a 256 -c -\n") < step.indexOf('cp "$work/vscodium.tgz" "$prefix/'), "only a checked archive reaches the tool cache");
+  assert.match(step, /\n\s+cp "\$work\/vscodium\.tgz" "\$prefix\/vscodium\.tgz\.\$\$"\n\s+mv "\$prefix\/vscodium\.tgz\.\$\$" "\$prefix\/vscodium\.tgz"\n/);
+  assert.match(step, /build="\.local-state\/ide-cache\/vscodium-\$IDE_VERSION"/);
+  assert.match(step, /\n\s+tar -xzf "\$work\/vscodium\.tgz" -C "\$build"\n\s+test -f "\$build\/out\/server-main\.js"/);
+  assert.match(step, /\n\s+test -f "\$build\/out\/server-main\.js"\n\s+find "\$RUNNER_TOOL_CACHE\/vscodium-reh-web" -mindepth 1 -maxdepth 1 ! -name "\$IDE_VERSION" -exec rm -rf \{\} \+$/, "once the pinned build is provisioned, the tool cache drops the archives of every other version");
+});
+
 /**
  * Reads one test exclusion list of the CI workflow's top-level env.
  * Inputs: the workflow text and the list's name. Output: the set of excluded target names,

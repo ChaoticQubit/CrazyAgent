@@ -10,7 +10,7 @@ use crazyagent::onboarding::service::{
 };
 use crazyagent::onboarding::{OnboardingView, Step, project_id_for};
 use crazyagent::plugins::Scope;
-use crazyagent::project_setup::{Platform, ProjectSetup};
+use crazyagent::project_setup::{Platform, ProjectSetup, ResearchJob, ResearchStatus};
 use crazyagent::projects_home::{FoundProject, FoundState};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::research::accounts::{AccountPick, SettingsResolver};
@@ -875,6 +875,70 @@ async fn the_projects_home_shows_an_onboarding_project_as_setting_up_and_keeps_i
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_roadmap_now_waits_until_the_onboarding_setup_is_confirmed() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let before = bench
+        .owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!before.saved(), "the setup review is still open");
+    let jobs = |jobs: Vec<ResearchJob>| -> Vec<(i64, ResearchStatus)> {
+        jobs.into_iter().map(|job| (job.id, job.status)).collect()
+    };
+    let jobs_before = jobs(bench.owner.research_jobs(project.clone()).await.unwrap());
+
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .plan_roadmap(project.clone(), bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(
+        rejection(&response).as_deref(),
+        Some("setup_unconfirmed"),
+        "{response:?}"
+    );
+    let after = bench
+        .owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.revision, before.revision, "nothing is saved");
+    assert_eq!(after.research, before.research);
+    assert!(!after.saved());
+    assert_eq!(
+        jobs(bench.owner.research_jobs(project.clone()).await.unwrap()),
+        jobs_before,
+        "no planning job is queued"
+    );
+    let entry = bench.home_entry().await;
+    assert_eq!(
+        entry.state,
+        FoundState::Onboarding,
+        "the onboarding stays unfinished: {entry:?}"
+    );
+
+    bench.save_setup(&project, &before.editable()).await;
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .plan_roadmap(project.clone(), bench.generation)
+        .await
+        .unwrap();
+    assert_ne!(
+        rejection(&response).as_deref(),
+        Some("setup_unconfirmed"),
+        "a confirmed setup plans: {response:?}"
+    );
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adding_a_repo_in_place_onboards_it_where_it_is_and_keeps_its_worktree_links() {
     let mut bench = Bench::start(|repo| {
         let side = repo.parent().unwrap().join("demo-side");
@@ -987,9 +1051,10 @@ async fn unticking_graphify_in_setup_installs_nothing_and_the_graph_is_not_insta
 async fn a_graphify_skill_switched_off_in_setup_turns_the_graph_off_until_it_is_on_again() {
     let mut bench = Bench::start(|_| {}).await;
     bench.generation += 1;
+    let version = bench.owner.setup_status().await.unwrap().version;
     let off = bench
         .owner
-        .set_pack_entry("graphify".into(), false, bench.generation)
+        .set_pack_entry("graphify".into(), false, version, bench.generation)
         .await
         .unwrap();
     assert_eq!(rejection(&off), None, "{off:?}");
@@ -998,7 +1063,7 @@ async fn a_graphify_skill_switched_off_in_setup_turns_the_graph_off_until_it_is_
     bench.generation += 1;
     let on = bench
         .owner
-        .set_pack_entry("graphify".into(), true, bench.generation)
+        .set_pack_entry("graphify".into(), true, version + 1, bench.generation)
         .await
         .unwrap();
     assert_eq!(rejection(&on), None, "{on:?}");
@@ -2274,10 +2339,12 @@ async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners
         .owner
         .set_project_agent_policy(
             project.clone(),
+            saved.version,
             AgentPolicy {
                 access: AgentAccess::Sandboxed,
                 network: crazyagent::sandbox::policy::AgentNetwork::default(),
                 toolchains: Vec::new(),
+                ide_git_hooks: false,
             },
             bench.generation,
         )

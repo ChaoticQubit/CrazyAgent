@@ -875,7 +875,10 @@ impl App {
             | OwnerEvent::Intake(_)
             | OwnerEvent::Changes(_)
             | OwnerEvent::Process(_)
+            | OwnerEvent::Recovery(_)
+            | OwnerEvent::Questions(_)
             | OwnerEvent::Cleanup(_)
+            | OwnerEvent::Reveal(_)
             | OwnerEvent::Settled(_) => {}
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {

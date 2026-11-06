@@ -37,11 +37,11 @@ pub(in crate::tui) enum AppSetupJob {
     },
 }
 
-/// One change to an installed default-pack entry.
+/// One change to an installed default-pack entry at the pack version the page showed.
 /// Input: built by the Settings setup page. Output: one engine change.
 pub(in crate::tui) enum PackChange {
-    Switch { id: String, on: bool },
-    Remove { id: String },
+    Switch { id: String, on: bool, version: u64 },
+    Remove { id: String, version: u64 },
 }
 
 /// The engine's reply to one setup page request.
@@ -120,10 +120,12 @@ impl NativeOwner {
             )),
             AppSetupJob::Pack { change, generation } => {
                 let reply = match change {
-                    PackChange::Switch { id, on } => {
-                        controller.set_pack_entry(id, on, generation).await
+                    PackChange::Switch { id, on, version } => {
+                        controller.set_pack_entry(id, on, version, generation).await
                     }
-                    PackChange::Remove { id } => controller.remove_pack_entry(id, generation).await,
+                    PackChange::Remove { id, version } => {
+                        controller.remove_pack_entry(id, version, generation).await
+                    }
                 };
                 AppSetupEvent::PackChanged(applied(reply, "pack_outcome_unknown", lost))
             }
@@ -290,6 +292,7 @@ mod tests {
                 change: PackChange::Switch {
                     id: status.pack[0].id.clone(),
                     on: true,
+                    version: status.version,
                 },
                 generation: 2,
             },

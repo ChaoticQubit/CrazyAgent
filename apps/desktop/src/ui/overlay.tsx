@@ -1,9 +1,53 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Button } from "./button";
 import { Icon, type IconName } from "./icon";
 
+let covering = 0;
+const watchers = new Set<() => void>();
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+/** Counts one open dialog, drawer or menu over the page, so a native view above the page,
+ * the IDE webview, steps aside until the last one closes. Output: the release, which counts
+ * once however often it is called. */
+export function cover(): () => void {
+  let held = true;
+  covering += 1;
+  if (covering === 1) for (const watcher of watchers) watcher();
+  return () => {
+    if (!held) return;
+    held = false;
+    covering -= 1;
+    assert(covering >= 0, "an overlay released more often than it covered");
+    if (covering === 0) for (const watcher of watchers) watcher();
+  };
+}
+
+/** Whether any dialog, drawer or menu is open over the page now. Output: true while one is. */
+export function overlayShown(): boolean {
+  return covering > 0;
+}
+
+function watch(watcher: () => void): () => void {
+  watchers.add(watcher);
+  return () => { watchers.delete(watcher); };
+}
+
+/** Follows whether any dialog, drawer or menu is open over the page. Output: true while one
+ * is, and the component renders again when that changes. */
+export function useOverlayShown(): boolean {
+  return useSyncExternalStore(watch, overlayShown, overlayShown);
+}
+
+function useCover(open: boolean) {
+  useEffect(() => (open ? cover() : undefined), [open]);
+}
+
 function useModal(open: boolean) {
   const ref = useRef<HTMLDialogElement>(null);
+  useCover(open);
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog || !open) return;
@@ -103,6 +147,7 @@ function focusLeftMenu(menu: Node, next: Node | null): boolean {
  * pointerdown or focus outside closes it. Inputs: accessible label for the button and the items. */
 export function Menu({ label, items }: { label: string; items: MenuItem[] }) {
   const [open, setOpen] = useState(false);
+  useCover(open);
   const root = useRef<HTMLSpanElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const list = useRef<HTMLDivElement>(null);

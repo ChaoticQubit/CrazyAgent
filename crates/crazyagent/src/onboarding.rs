@@ -563,6 +563,7 @@ pub(crate) fn execute(
         access,
         toolchains: Vec::new(),
         network: crate::sandbox::policy::AgentNetwork::default(),
+        ide_git_hooks: false,
     };
     crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
     let stored = crate::project_setup::load_setup(tx, &project_id)?

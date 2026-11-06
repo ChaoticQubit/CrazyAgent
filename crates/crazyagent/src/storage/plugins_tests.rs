@@ -176,7 +176,8 @@ fn a_stored_skill_description_or_source_with_hidden_characters_is_shown_escaped(
         format!("---\nname: fmt\ndescription: {}\n---\n", record.description),
     )
     .unwrap();
-    let view = skill_view(&record, store.path(), None);
+    let connection = Connection::open_in_memory().unwrap();
+    let view = skill_view(&connection, &record, store.path(), None).unwrap();
     assert_eq!(
         view.description,
         "Formats changed files.\\u{e0041}\\u{e0042}"
@@ -188,16 +189,28 @@ fn a_stored_skill_description_or_source_with_hidden_characters_is_shown_escaped(
     }
     assert_eq!(view.refused.as_deref(), Some("skill_description_hidden"));
     assert!(view.enabled, "the owner's switch is shown as it is");
+    assert_eq!(
+        view.version, 0,
+        "a skill the owner never changed is at version 0"
+    );
 
     std::fs::write(
         &skill_md,
         "---\nname: fmt\ndescription: Formats changed files.\n---\n",
     )
     .unwrap();
-    assert_eq!(skill_view(&record, store.path(), None).refused, None);
+    assert_eq!(
+        skill_view(&connection, &record, store.path(), None)
+            .unwrap()
+            .refused,
+        None
+    );
     std::fs::remove_file(&skill_md).unwrap();
     assert_eq!(
-        skill_view(&record, store.path(), None).refused.as_deref(),
+        skill_view(&connection, &record, store.path(), None)
+            .unwrap()
+            .refused
+            .as_deref(),
         Some("skill_unreadable")
     );
 }
@@ -225,6 +238,7 @@ fn removing_a_project_clears_its_plugins_so_a_reused_id_inherits_nothing() {
         },
     )
     .unwrap();
+    let version = plugin_version(&connection, &shared).unwrap();
     execute(
         &mut connection,
         root,
@@ -232,6 +246,7 @@ fn removing_a_project_clears_its_plugins_so_a_reused_id_inherits_nothing() {
             project: project.clone(),
             id: shared.clone(),
             on: false,
+            version,
         },
     )
     .unwrap();

@@ -117,6 +117,7 @@ fn first_run_status() -> SetupStatus {
         ],
         running: false,
         notes: Vec::new(),
+        version: 4,
     }
 }
 
@@ -568,14 +569,14 @@ fn settings_switch_installed_entries_and_remove_after_yes() {
     let sent = jobs(&mut shell);
     let [
         AppSetupJob::Pack {
-            change: PackChange::Switch { id, on },
+            change: PackChange::Switch { id, on, version },
             ..
         },
     ] = sent.as_slice()
     else {
         panic!("one switch required")
     };
-    assert_eq!((id.as_str(), *on), ("superpowers", false));
+    assert_eq!((id.as_str(), *on, *version), ("superpowers", false, 4));
     shell.arrive(event(AppSetupEvent::PackChanged(Ok(()))));
     assert_eq!(lead(&shell), "superpowers is off.");
     assert!(
@@ -604,13 +605,14 @@ fn settings_switch_installed_entries_and_remove_after_yes() {
     let sent = jobs(&mut shell);
     let [
         AppSetupJob::Pack {
-            change: PackChange::Remove { id },
+            change: PackChange::Remove { id, version },
             ..
         },
     ] = sent.as_slice()
     else {
         panic!("one remove required")
     };
+    assert_eq!(*version, 4);
     assert_eq!(id, "caveman");
 }
 

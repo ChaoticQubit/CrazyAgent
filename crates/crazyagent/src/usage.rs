@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 pub mod capture;
+pub mod health;
 pub mod poll;
 pub mod report;
 pub mod service;
@@ -225,7 +226,9 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(storage)?;
     add_columns(db, "weekly_polled_resets_ms", ADD_POLLED)?;
     add_columns(db, "weekly_left_out", ADD_LEFT_OUT)?;
-    db.execute_batch(capture::SCHEMA).map_err(storage)
+    db.execute_batch(capture::SCHEMA).map_err(storage)?;
+    db.execute_batch(health::SCHEMA).map_err(storage)?;
+    db.execute_batch(report::SCHEMA).map_err(storage)
 }
 
 fn add_columns(db: &Connection, last: &str, batch: &str) -> Result<(), EngineError> {

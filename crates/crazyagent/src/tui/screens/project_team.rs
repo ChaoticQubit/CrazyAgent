@@ -1249,6 +1249,32 @@ impl TeamView {
         Some((own, own.unwrap_or(fallback)))
     }
 
+    /// Gives the version of a level the last read showed: its own rule's, else for an agent
+    /// level the version its cleared rule left, else 0 for a level never set. Takes the level.
+    /// Returns the version a change of that level sends.
+    fn wake_version(&self, level: WakeLevel) -> u64 {
+        let Some(status) = self.status.as_ref() else {
+            return 0;
+        };
+        let wake = &status.events.wake;
+        match level {
+            WakeLevel::App => wake.app_version,
+            WakeLevel::Project => wake.project_version,
+            WakeLevel::Agent(id) => wake
+                .agents
+                .iter()
+                .find(|rule| rule.agent == id)
+                .map(|rule| rule.version)
+                .or_else(|| {
+                    wake.cleared
+                        .iter()
+                        .find(|level| level.agent == id)
+                        .map(|level| level.version)
+                })
+                .unwrap_or(0),
+        }
+    }
+
     fn wake_key(&mut self, key: KeyEvent) -> TeamReply {
         let Some(edit) = self.wake else {
             return TeamReply::Ignored;
@@ -1343,11 +1369,16 @@ impl TeamView {
                 agent,
             },
         };
+        let version = self.wake_version(level);
         self.changing = Some(match rule {
             Some(_) => "Wake rule saved.".to_owned(),
             None => "Wake rule reset. The rule above it applies.".to_owned(),
         });
-        TeamReply::Change(TeamAction::Wake { target, rule })
+        TeamReply::Change(TeamAction::Wake {
+            target,
+            rule,
+            version,
+        })
     }
 
     fn mark_seen(&mut self) -> TeamReply {
@@ -1492,6 +1523,7 @@ impl TeamView {
         TeamReply::Change(TeamAction::KeepWarm {
             project_id: self.project.clone(),
             on,
+            version: status.settings_version,
         })
     }
 
@@ -1515,7 +1547,7 @@ impl TeamView {
             status.session_limit_secs,
             status.idle_stop_secs,
         );
-        let revision = status.settings_revision;
+        let version = status.settings_version;
         let (turn, kept, idle) = match which {
             Limit::Task => {
                 let next = next_limit(limits, turn);
@@ -1556,7 +1588,7 @@ impl TeamView {
             turn_secs: turn,
             session_secs: kept,
             idle_secs: idle,
-            revision,
+            version,
         })
     }
 
@@ -1570,7 +1602,7 @@ impl TeamView {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        let revision = status.settings_revision;
+        let version = status.settings_version;
         let mode = match status.on_harness_switch {
             SwitchMode::Carry => SwitchMode::Fresh,
             SwitchMode::Fresh => SwitchMode::Carry,
@@ -1589,7 +1621,7 @@ impl TeamView {
         TeamReply::Change(TeamAction::OnHarnessSwitch {
             project_id: self.project.clone(),
             mode,
-            revision,
+            version,
         })
     }
 
@@ -3591,14 +3623,15 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_task_limit" => "This project has reached its task limit.".into(),
         "team_wake_cap_invalid" => "Set the hourly limit between 0 and 500 wakes.".into(),
+        "stale_revision" => {
+            "This changed in another window, so yours was not saved. The saved one shows now."
+                .into()
+        }
         "team_time_limits_invalid" => {
             "Pick a listed time limit; an agent session may not be shorter than a task.".into()
         }
         "team_agent_not_found" => "That agent is no longer part of this team.".into(),
         "team_notification_missing" => "There is no such notification to mark as seen.".into(),
-        "stale_revision" => {
-            "These settings changed elsewhere. The current ones are shown; pick again.".into()
-        }
         "team_stop_master" => "The master stops with Stop all.".into(),
         "team_teammate_not_found" => "That teammate has already ended.".into(),
         "team_cap_invalid" => "Pick a listed limit, or No limit.".into(),

@@ -1,8 +1,16 @@
 use super::*;
 use crate::engine::bootstrap::EngineService;
 use crate::project_setup::{StoredSetup, TeamPlan};
+use crate::storage::versioned::LastWriter;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+
+fn shown(text: &str, version: u64) -> ProcessText {
+    ProcessText {
+        text: text.into(),
+        version,
+    }
+}
 
 fn private_root(prefix: &str) -> tempfile::TempDir {
     let root = tempfile::Builder::new()
@@ -78,10 +86,15 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
     let app = "a".repeat(20_000);
     let own = "b".repeat(20_000);
 
-    let Ok(ProcessReply::Saved(alone)) = native
+    let Ok(ProcessReply::Saved(SavedText::Saved {
+        version: 1,
+        size: Some(alone),
+    })) = native
         .process(ProcessQuery::Save {
             project: None,
             text: app.clone(),
+            version: 0,
+            opened: None,
         })
         .await
         .result
@@ -99,10 +112,15 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
         "20,000 bytes of app text fit a Claude master"
     );
 
-    let Ok(ProcessReply::Saved(both)) = native
+    let Ok(ProcessReply::Saved(SavedText::Saved {
+        version: 1,
+        size: Some(both),
+    })) = native
         .process(ProcessQuery::Save {
             project: Some(project.clone()),
             text: own.clone(),
+            version: 0,
+            opened: None,
         })
         .await
         .result
@@ -135,10 +153,15 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
         "{warning}"
     );
 
-    let Ok(ProcessReply::Saved(again)) = native
+    let Ok(ProcessReply::Saved(SavedText::Saved {
+        version: 2,
+        size: Some(again),
+    })) = native
         .process(ProcessQuery::Save {
             project: None,
             text: app.clone(),
+            version: 1,
+            opened: None,
         })
         .await
         .result
@@ -158,14 +181,19 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
         .process(ProcessQuery::Save {
             project: Some(project.clone()),
             text: own.clone(),
+            version: 1,
+            opened: None,
         })
         .await
         .result;
     assert_eq!(
         landed,
-        Ok(ProcessReply::Saved(crate::engine::owner::ProcessSaved {
-            bytes: crate::agent_home::render("", &own).len() as u32,
-            claude_bytes_max: claude_room(),
+        Ok(ProcessReply::Saved(SavedText::Saved {
+            version: 2,
+            size: Some(crate::engine::owner::ProcessSaved {
+                bytes: crate::agent_home::render("", &own).len() as u32,
+                claude_bytes_max: claude_room(),
+            }),
         })),
         "a save that landed is reported saved though the app text cannot be read"
     );
@@ -178,6 +206,8 @@ fn a_request_without_a_trusted_connection_answers_for_its_own_query() {
     let query = ProcessQuery::Save {
         project: None,
         text: "rule".into(),
+        version: 0,
+        opened: None,
     };
     let event = ProcessEvent::unavailable(query.clone());
     assert_eq!(event.query, query);
@@ -207,7 +237,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     let read = |project: Option<ProjectId>| ProcessQuery::Read { project };
     let event = native.process(read(None)).await;
     assert_eq!(event.query, read(None));
-    assert_eq!(event.result, Ok(ProcessReply::Text(String::new())));
+    assert_eq!(event.result, Ok(ProcessReply::Current(shown("", 0))));
     for (scope, text, given) in [
         (None, "APP-RULE-51\n", ("APP-RULE-51\n", "")),
         (
@@ -216,20 +246,34 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
             ("APP-RULE-51\n", "PROJECT-RULE-52\n"),
         ),
     ] {
-        let save = ProcessQuery::Save {
+        let save = |version| ProcessQuery::Save {
             project: scope.clone(),
             text: text.into(),
+            version,
+            opened: None,
         };
         assert_eq!(
-            native.process(save).await.result,
-            Ok(ProcessReply::Saved(crate::engine::owner::ProcessSaved {
-                bytes: crate::agent_home::render(given.0, given.1).len() as u32,
-                claude_bytes_max: claude_room(),
+            native.process(save(0)).await.result,
+            Ok(ProcessReply::Saved(SavedText::Saved {
+                version: 1,
+                size: Some(crate::engine::owner::ProcessSaved {
+                    bytes: crate::agent_home::render(given.0, given.1).len() as u32,
+                    claude_bytes_max: claude_room(),
+                }),
             }))
         );
         assert_eq!(
-            native.process(read(scope)).await.result,
-            Ok(ProcessReply::Text(text.into()))
+            native.process(read(scope.clone())).await.result,
+            Ok(ProcessReply::Current(shown(text, 1)))
+        );
+        assert_eq!(
+            native.process(save(0)).await.result,
+            Ok(ProcessReply::Saved(SavedText::Stale {
+                version: 0,
+                current: shown(text, 1),
+                writer: LastWriter::Owner,
+            })),
+            "a save from a screen opened before the last save is refused with that text"
         );
     }
     assert_eq!(
@@ -346,6 +390,8 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     let over = ProcessQuery::Save {
         project: None,
         text: "a".repeat(crate::agent_home::TEXT_BYTES_MAX + 1),
+        version: 1,
+        opened: None,
     };
     assert_eq!(
         native.process(over).await.result,
@@ -353,7 +399,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     );
     assert_eq!(
         native.process(read(None)).await.result,
-        Ok(ProcessReply::Text("APP-RULE-51\n".into())),
+        Ok(ProcessReply::Current(shown("APP-RULE-51\n", 1))),
         "a refused save keeps the saved text"
     );
     service.shutdown().await.unwrap();
@@ -361,7 +407,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
-    use crate::engine::owner::InstructionSettings;
+    use crate::engine::owner::{InstructionSettings, InstructionView};
     use crate::instruction_files::Mode;
     let root = private_root("ca-tsettings-");
     let work = private_root("ca-tsettings-work-");
@@ -394,9 +440,13 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
             })
             .await
             .result,
-        Ok(ProcessReply::Settings(InstructionSettings::default())),
+        Ok(ProcessReply::Settings(InstructionView {
+            settings: InstructionSettings::default(),
+            version: 0
+        })),
         "a project the owner never changed gets both texts and keeps transcripts"
     );
+    let mut version = 0;
     let every = [Mode::ProjectOnly, Mode::AppOnly, Mode::Both]
         .into_iter()
         .flat_map(|mode| [false, true].map(|transcripts| (mode, transcripts)));
@@ -411,16 +461,34 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
                 transcripts,
                 edits,
             };
+            let saved = InstructionView {
+                settings,
+                version: version + 1,
+            };
             assert_eq!(
                 native
                     .process(ProcessQuery::SaveSettings {
                         project: project.clone(),
                         settings,
+                        version: Some(version),
                     })
                     .await
                     .result,
-                Ok(ProcessReply::Settings(settings))
+                Ok(ProcessReply::Settings(saved))
             );
+            assert_eq!(
+                native
+                    .process(ProcessQuery::SaveSettings {
+                        project: project.clone(),
+                        settings: InstructionSettings::default(),
+                        version: Some(version),
+                    })
+                    .await
+                    .result,
+                Err(crate::storage::versioned::STALE_CODE.into()),
+                "a save from the version before refuses as stale"
+            );
+            version += 1;
             assert_eq!(
                 native
                     .process(ProcessQuery::Settings {
@@ -428,7 +496,7 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
                     })
                     .await
                     .result,
-                Ok(ProcessReply::Settings(settings))
+                Ok(ProcessReply::Settings(saved))
             );
             let connection = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
             assert_eq!(

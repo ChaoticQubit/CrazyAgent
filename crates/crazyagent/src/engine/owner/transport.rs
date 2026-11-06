@@ -46,11 +46,16 @@ pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+pub(crate) mod ide;
+pub(crate) mod ide_extensions;
+pub(crate) mod ide_tab;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
 pub(crate) mod process;
 mod projects_home;
+pub(crate) mod questions;
+pub(crate) mod recovery;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod usage;
@@ -482,6 +487,9 @@ struct Authority {
     deferred: std::sync::atomic::AtomicUsize,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
+    #[cfg(unix)]
+    ide_servers: crate::ide::server::Servers,
+    ide: Arc<crate::ide::bridge::Grants>,
     reproving: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -852,11 +860,12 @@ impl Authority {
         result.and(cleanup)
     }
 
-    /// Unlinks the owner socket, both owner keys and every runner key this server made,
-    /// each only while it is still the engine's own file, and tries all of them even after
-    /// one fails. Input: none. Output: Ok, or the first failure.
+    /// Unlinks the owner socket, both owner keys, every runner key and every IDE capability
+    /// file this server made, each only while it is still the engine's own file, and tries
+    /// all of them even after one fails. Input: none. Output: Ok, or the first failure.
     fn cleanup(&self) -> Result<(), EngineError> {
         let mut result = self.root.unlink_owned(SOCKET, self.socket, true);
+        result = result.and(self.ide.revoke_all());
         match self.slots.lock() {
             Ok(slots) => {
                 for (i, slot) in slots.iter().enumerate() {
@@ -883,9 +892,19 @@ impl Authority {
     }
 }
 
+#[derive(Clone)]
 pub struct OwnerRuntimeHandle {
     engine: Arc<Engine>,
     authority: Arc<Authority>,
+}
+
+#[cfg(unix)]
+impl OwnerRuntimeHandle {
+    /// The engine's IDE servers, one per open project, all stopped when the owner server
+    /// stops. Output: the register.
+    pub fn ide_servers(&self) -> &crate::ide::server::Servers {
+        &self.authority.ide_servers
+    }
 }
 
 impl OwnerRuntimeHandle {
@@ -1089,6 +1108,54 @@ impl OwnerRuntimeHandle {
     }
 }
 
+impl OwnerRuntimeHandle {
+    /// The IDE bridge's view of this owner server: its capability grants, the engine root
+    /// that holds `ide/` and the owner socket path. Fails with `ide_unavailable` once the
+    /// server stopped or its root was replaced. Input: none. Output: the view.
+    pub(crate) fn ide(&self) -> Result<crate::ide::bridge::IdeHost<'_>, EngineError> {
+        if !self
+            .authority
+            .usable
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(failure("ide_unavailable"));
+        }
+        self.authority
+            .root
+            .verify()
+            .map_err(|_| failure("ide_unavailable"))?;
+        let root = self
+            .authority
+            .root
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| failure("ide_unavailable"))?;
+        Ok(crate::ide::bridge::IdeHost {
+            grants: &self.authority.ide,
+            root,
+            socket: self.authority.root.path.join(SOCKET),
+        })
+    }
+
+    /// Runs one domain command in this engine for the IDE bridge while the server is
+    /// usable; the bridge only builds commands for its capability's own project.
+    /// Input: the request. Output: the engine's reply, or `ide_unavailable`.
+    pub(crate) async fn ide_apply(
+        &self,
+        request: crate::protocol::WireRequest,
+    ) -> Result<crate::protocol::WireReply, EngineError> {
+        self.ide()?;
+        self.engine.apply(request).await
+    }
+
+    /// This owner server's IDE capability grants, whether or not it still runs, so a
+    /// capability can be revoked after the server stopped. Input: none. Output: the grants.
+    pub(crate) fn ide_grants(&self) -> &crate::ide::bridge::Grants {
+        &self.authority.ide
+    }
+}
+
 pub struct OwnerServer {
     listener: UnixListener,
     engine: Arc<Engine>,
@@ -1179,6 +1246,16 @@ impl OwnerServer {
             let slots: [Slot; 2] = slots
                 .try_into()
                 .map_err(|_| failure("owner_registration_count"))?;
+            let ide = Arc::new(crate::ide::bridge::Grants::default());
+            let ide_servers = crate::ide::server::Servers::new(
+                root.path
+                    .parent()
+                    .ok_or_else(|| failure("owner_root_unavailable"))?,
+                crate::ide::server::IDLE_LIMIT,
+                crate::ide::server::START_LIMIT,
+                Arc::clone(&ide),
+                root.path.join(SOCKET),
+            );
             let authority = Arc::new(Authority {
                 root,
                 socket,
@@ -1192,6 +1269,9 @@ impl OwnerServer {
                 deferred: std::sync::atomic::AtomicUsize::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
+                #[cfg(unix)]
+                ide_servers,
+                ide,
                 reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             });
             Ok::<_, EngineError>((listener, authority))
@@ -1216,6 +1296,19 @@ impl OwnerServer {
                 return Err(failure(&errors.join("; ")));
             }
         };
+        authority.ide_servers.sweep_left().await;
+        if let Ok(root) = changes::engine_root(&authority) {
+            let swept = tokio::task::spawn_blocking(move || {
+                crate::landing::open(&root).and_then(|db| crate::worktrees::lock_existing(&db))
+            })
+            .await;
+            if let Ok(Err(problem)) = swept {
+                eprintln!(
+                    "worktree_lock_sweep_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
+        }
         let server = Self {
             listener,
             engine: engine.clone(),
@@ -1248,6 +1341,22 @@ impl OwnerServer {
             tasks.terminals.spawn(async move {
                 terminal::serve(stream, auth, engine, authority, deadline).await;
             });
+            return;
+        }
+        if &auth[..4] == crate::ide::bridge::MAGIC {
+            while let Some(result) = tasks.ides.try_join_next() {
+                log_panic(&result, "owner_ide_panicked");
+            }
+            if tasks.ides.len() >= crate::ide::bridge::CONNECTIONS_MAX {
+                return;
+            }
+            let runtime = OwnerRuntimeHandle {
+                engine: self.engine.clone(),
+                authority: self.authority.clone(),
+            };
+            tasks
+                .ides
+                .spawn(crate::ide::bridge::serve(stream, auth, runtime, deadline));
             return;
         }
         if &auth[..4] == b"CAN1" {
@@ -1324,6 +1433,9 @@ impl OwnerServer {
     }
 
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
+        if let Ok(root) = changes::engine_root(&self.authority) {
+            crate::ide::fetch::on_engine_start(&root);
+        }
         let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
         let (upkeep_stop, upkeep_stopped) = oneshot::channel();
@@ -1363,6 +1475,9 @@ impl OwnerServer {
                 result=tasks.terminals.join_next(), if !tasks.terminals.is_empty() => {
                     if let Some(result)=result {log_panic(&result, "owner_terminal_panicked");}
                 }
+                result=tasks.ides.join_next(), if !tasks.ides.is_empty() => {
+                    if let Some(result)=result {log_panic(&result, "owner_ide_panicked");}
+                }
                 result=tasks.refusals.join_next(), if !tasks.refusals.is_empty() => {
                     if let Some(result)=result {log_panic(&result, "owner_refusal_panicked");}
                 }
@@ -1393,11 +1508,14 @@ impl OwnerServer {
             assert!(tasks.refusals.len() <= REFUSALS_MAX);
             assert!(tasks.custody.len() <= 1);
             assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
+            assert!(tasks.ides.len() <= crate::ide::bridge::CONNECTIONS_MAX);
         };
         drop(upkeep_stop);
         if let Some(backfill) = backfill {
             backfill.abort();
         }
+        #[cfg(unix)]
+        self.authority.ide_servers.stop_all().await;
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
             eprintln!("{}", master_dispatch_shutdown_line(&error));
         }
@@ -1409,8 +1527,10 @@ impl OwnerServer {
         tasks.custody.abort_all();
         tasks.clients.abort_all();
         tasks.terminals.abort_all();
+        tasks.ides.abort_all();
         tasks.refusals.abort_all();
         while tasks.terminals.join_next().await.is_some() {}
+        while tasks.ides.join_next().await.is_some() {}
         while handshakes.join_next().await.is_some() {}
         while tasks.custody.join_next().await.is_some() {}
         while tasks.clients.join_next().await.is_some() {}
@@ -1934,8 +2054,13 @@ enum Protocol {
     Changes,
     Cleanup,
     Usage,
+    IdeExtensions,
+    Recovery,
+    Questions,
     NativeAuth,
     Process,
+    Ide,
+    IdeTab,
     Owner,
     #[cfg(test)]
     TestPanic,
@@ -1961,8 +2086,13 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("changes", Protocol::Changes),
         ("cleanup", Protocol::Cleanup),
         ("usage", Protocol::Usage),
+        ("ide_extensions", Protocol::IdeExtensions),
+        ("recovery", Protocol::Recovery),
+        ("questions", Protocol::Questions),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
+        ("ide", Protocol::Ide),
+        ("ide_tab", Protocol::IdeTab),
     ];
     Ok(named
         .into_iter()
@@ -2024,8 +2154,11 @@ async fn serve_admitted(
             }
             Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
+            Protocol::IdeExtensions => return Ok(Some(Deferred::IdeExtensions(a))),
             Protocol::Cleanup => return Ok(Some(Deferred::Cleanup(a))),
             Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
+            Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
+            Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2036,6 +2169,13 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::Ide if ide::deferred(body) => return Ok(Some(Deferred::Ide(a))),
+            Protocol::Ide => {
+                return ide::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
             Protocol::Owner => {}
             #[cfg(test)]
             Protocol::TestPanic => panic!("owner_test_panic"),
@@ -2172,6 +2312,26 @@ async fn serve_admitted(
             let served = changes::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
         }
+        Deferred::IdeExtensions(a) => {
+            let served = ide_extensions::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
+        }
+        Deferred::Recovery(a) => {
+            let served = recovery::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served).await;
+        }
+        Deferred::Ide(a) => {
+            let served = ide::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
+        }
+        Deferred::IdeTab(a) => {
+            let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
+        }
+        Deferred::Questions(a) => {
+            let served = questions::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
+        }
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
@@ -2214,12 +2374,14 @@ impl Drop for Deferral<'_> {
 }
 
 /// The owner server's running tasks: owner and runner requests, the native auth
-/// custody channel, terminal viewers and busy refusals, each bounded by its own maximum.
+/// custody channel, terminal viewers, IDE bridge connections and busy refusals, each
+/// bounded by its own maximum.
 #[derive(Default)]
 struct Tasks {
     clients: tokio::task::JoinSet<()>,
     custody: tokio::task::JoinSet<()>,
     terminals: tokio::task::JoinSet<()>,
+    ides: tokio::task::JoinSet<()>,
     refusals: tokio::task::JoinSet<()>,
 }
 
@@ -2227,16 +2389,25 @@ struct Tasks {
 /// and then served under its own bounds: projects home disk work, GitHub calls and
 /// clones, account checks that reach the network, agent controls, which wait for an
 /// agent's process group or its host to end it, Changes requests, which run git on the
-/// owner's checkout, Cleanup requests, which size and remove finished agents' worktrees
-/// and folders, skill import scans and imports, which copy skill folders, and Usage
-/// requests, which read and write the usage store. Each carries the admission, and the
-/// projects home its validated request; the others read the request frame.
+/// owner's checkout, IDE extension approvals, which download and check a VSIX, Recovery
+/// requests, which wait for the action ledger under the owner barrier, IDE tab requests,
+/// which wait for an IDE server to start, Questions requests, which wait for the database
+/// write lock and rewrite a project's questions page, Cleanup requests, which size and
+/// remove finished agents' worktrees and folders, skill import scans and imports, which
+/// copy skill folders, and Usage requests, which read and write the usage store. Each
+/// carries the admission, and the projects home its validated request; the others read
+/// the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
     Accounts(Admission),
     Agents(Admission),
     Changes(Admission),
+    IdeExtensions(Admission),
+    Recovery(Admission),
+    Ide(Admission),
+    IdeTab(Admission),
+    Questions(Admission),
     Cleanup(Admission),
     SkillImport(Admission),
     Usage(Admission),
@@ -2278,8 +2449,13 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Changes => changes::refusal(code)?,
         Protocol::Cleanup => cleanup::refusal(code)?,
         Protocol::Usage => usage::refusal(code)?,
+        Protocol::IdeExtensions => ide_extensions::refusal(code)?,
+        Protocol::Recovery => recovery::refusal(code)?,
+        Protocol::Questions => questions::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
+        Protocol::Ide => ide::refusal(code)?,
+        Protocol::IdeTab => ide_tab::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
         Protocol::Owner => {
@@ -2543,7 +2719,7 @@ fn dispatch_config(path: &Path) -> Result<(), EngineError> {
                 .and_then(|v| v.strip_suffix(']'))
                 .ok_or_else(|| failure("dispatch_git_config_unsupported"))?
                 .to_ascii_lowercase();
-            section = if matches!(value.as_str(), "core" | "user" | "init") {
+            section = if matches!(value.as_str(), "core" | "user" | "init" | "extensions") {
                 value
             } else if value.starts_with("remote \"") && value.ends_with('"') {
                 "remote".into()
@@ -2565,6 +2741,7 @@ fn dispatch_config(path: &Path) -> Result<(), EngineError> {
             ("core", "filemode" | "logallrefupdates" | "ignorecase" | "precomposeunicode") => {
                 matches!(value, "true" | "false")
             }
+            ("extensions", "worktreeconfig") => value == "true",
             ("user", "name" | "email")
             | ("init", "defaultbranch")
             | ("remote", "url" | "fetch")
@@ -2635,9 +2812,8 @@ fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
     {
         return Err(failure("dispatch_git_backlink_or_branch_changed"));
     }
-    match std::fs::symlink_metadata(metadata.join("config.worktree")) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        _ => return Err(failure("dispatch_git_metadata_unsupported")),
+    if !crate::worktrees::remote_lock_kept(&metadata) {
+        return Err(failure("dispatch_git_metadata_unsupported"));
     }
     Ok(metadata)
 }

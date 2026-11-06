@@ -222,17 +222,20 @@ impl NativeBridge {
     }
 
     /// Deletes one project memory for good, with the saved source text only it used.
-    /// Takes the project id, the project memory id and a fresh draft generation.
-    /// Returns the intent receipt; a promoted global copy stays.
+    /// Takes the project id, the project memory id, the version shown and a fresh draft
+    /// generation. Returns the intent receipt; a memory changed since that version is
+    /// refused with `memory_changed`, and a promoted global copy stays.
     pub async fn forget_memory(
         &mut self,
         project: &str,
         memory: &str,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let action = LibraryAction::Forget {
             project_id: ProjectId::new(project).map_err(|_| failure("invalid_project"))?,
             entry_id: memory_id(memory)?,
+            version,
         };
         self.change_memory(action, generation).await
     }

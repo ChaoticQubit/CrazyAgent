@@ -695,6 +695,196 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
 }
 
 #[test]
+fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() {
+    use crate::project_setup::HarnessSlot;
+    let rule =
+        "Ask the owner a question only with the `ask` tool of the `crazyagent-team` MCP server";
+    let joint = "Ask the owner a question with the `ask` tool of the `crazyagent-team` MCP server, or as a for me question in `update_work`; both reach the owner. Never ask in your reply text";
+    assert_eq!(crate::team::tool::ASK_TOOL, "ask");
+    assert_eq!(crate::team::tool::UPDATE_WORK_TOOL, "update_work");
+    let folder = tempfile::tempdir().unwrap();
+    let mut setup = stored(folder.path());
+    let conversation = master_tools_section(&setup, &["codex"]);
+    assert_eq!(conversation.matches(rule).count(), 1, "{conversation}");
+    assert!(conversation.ends_with(&ask_rule(AskReach::ReplyEnd, false)));
+    assert!(conversation.contains("when your reply ends"));
+    assert!(conversation.contains(&format!(
+        "record it with `{}`",
+        crate::team::tool::RECORD_TOOL
+    )));
+    assert!(conversation.contains("act on it once"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let engine = Path::new("/usr/local/bin/crazyagent");
+    let record = root.join("tmp").join(crate::team::tool::DROP_FILE);
+    let mailbox = root.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
+    let fresh = |instructions: String| AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions,
+        process: None,
+        transcripts: false,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+    };
+    let start = "# Project context from CrazyAgent\n";
+    assert!(!fresh(start.into()).instructions().contains(rule));
+
+    let drop_file = fresh(start.into())
+        .with_team_tool(engine, &record, &mailbox, &[])
+        .unwrap();
+    assert_eq!(
+        drop_file.instructions(),
+        format!(
+            "{start}{}{}",
+            ask_rule(AskReach::ReplyEnd, false),
+            memory_tools_section(&[])
+        )
+    );
+
+    let live = fresh(start.into())
+        .with_live_team_tool(engine, &mailbox, &[])
+        .unwrap();
+    let told = live.instructions();
+    assert_eq!(
+        told,
+        format!(
+            "{start}{}{}",
+            ask_rule(AskReach::Live, true),
+            team_tools_section(&[])
+        )
+    );
+    assert_eq!(told.matches(joint).count(), 1, "{told}");
+    assert!(
+        !told.contains(rule),
+        "the b18 tools section's for me path is never ruled out"
+    );
+    assert!(told.contains("A for me question reaches the owner only; no agent answers it."));
+    assert!(told.contains("one question per call"));
+    assert!(told.contains("Put up to 6 choices in `options`"));
+    assert!(told.contains("the one you recommend in `recommended`"));
+    assert!(told.contains(&format!(
+        "record it with `{}`",
+        crate::team::tool::RECORD_TOOL
+    )));
+    assert_eq!(
+        live.with_live_team_tool(engine, &mailbox, &[])
+            .unwrap_err()
+            .0,
+        "launch_context_team_tool_taken",
+        "a second live server is refused before any text is added"
+    );
+
+    let unrecorded = [crate::team::tool::RECORD_TOOL.to_owned()];
+    let agent = fresh(start.into())
+        .with_agent_team_tool(engine, &mailbox, &unrecorded)
+        .unwrap();
+    let heard = agent.instructions();
+    assert_eq!(
+        heard,
+        format!(
+            "{start}{}{}",
+            ask_rule(AskReach::SubAgent, true),
+            team_tools_section(&unrecorded)
+        )
+    );
+    assert!(heard.contains("types the owner's answer or dismissal into your terminal once"));
+    assert_eq!(heard.matches(joint).count(), 1, "{heard}");
+    assert!(!heard.contains(rule));
+    assert!(!heard.contains(crate::team::tool::RECORD_TOOL));
+    let server = &agent.plugins.servers[0];
+    assert_eq!(server.name, crate::team::tool::SERVER_NAME);
+    assert_eq!(
+        server.spec,
+        ServerSpec::Stdio {
+            command: "/usr/local/bin/crazyagent".into(),
+            args: vec![
+                crate::team::tool::AGENT_SERVER_COMMAND.into(),
+                mailbox.to_str().unwrap().into(),
+                crate::team::tool::RECORD_TOOL.into(),
+            ],
+        }
+    );
+    assert_eq!(agent.read_paths(), [engine.to_path_buf()]);
+    assert_eq!(
+        agent
+            .with_agent_team_tool(engine, &mailbox, &unrecorded)
+            .unwrap_err()
+            .0,
+        "launch_context_team_tool_taken"
+    );
+    assert_eq!(
+        fresh(start.into())
+            .with_agent_team_tool(engine, Path::new("tmp/calls"), &[])
+            .unwrap_err()
+            .0,
+        "launch_context_team_tool_invalid"
+    );
+    let asks_off = fresh(start.into())
+        .with_live_team_tool(engine, &mailbox, &[crate::team::tool::ASK_TOOL.to_owned()])
+        .unwrap();
+    assert!(
+        !asks_off.instructions().contains(rule) && !asks_off.instructions().contains(joint),
+        "a server with ask off is never told to ask with it"
+    );
+    let unreported = [crate::team::tool::UPDATE_WORK_TOOL.to_owned()];
+    let reports_off = fresh(start.into())
+        .with_agent_team_tool(engine, &mailbox, &unreported)
+        .unwrap();
+    assert_eq!(
+        reports_off.instructions(),
+        format!(
+            "{start}{}{}",
+            ask_rule(AskReach::SubAgent, false),
+            team_tools_section(&unreported)
+        )
+    );
+    assert_eq!(reports_off.instructions().matches(rule).count(), 1);
+    assert!(
+        !reports_off.instructions().contains(joint),
+        "an agent with update_work off is never told to ask through it"
+    );
+
+    for (reach, for_me) in [
+        (AskReach::Live, true),
+        (AskReach::Live, false),
+        (AskReach::ReplyEnd, false),
+        (AskReach::SubAgent, true),
+        (AskReach::SubAgent, false),
+    ] {
+        assert!(ask_rule(reach, for_me).len() <= ASK_RULE_BYTES_MAX);
+        assert!(!ask_rule(reach, for_me).contains('\u{2014}'));
+    }
+    let full = fresh("x".repeat(INSTRUCTIONS_BYTES_MAX))
+        .with_live_team_tool(engine, &mailbox, &[])
+        .unwrap();
+    assert!(full.instructions().len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+    assert!(full.instructions().ends_with(&format!(
+        "{}{}",
+        ask_rule(AskReach::Live, true),
+        team_tools_section(&[])
+    )));
+
+    setup.team.sub_harnesses = (0..200)
+        .map(|index| HarnessSlot {
+            harness: format!("{index}-{}", "h".repeat(250)),
+            agents: 1,
+            tools: true,
+        })
+        .collect();
+    let crowded = master_tools_section(&setup, &[]);
+    assert!(crowded.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
+    assert!(crowded.contains(" more\n"));
+    assert!(
+        crowded.ends_with(&ask_rule(AskReach::ReplyEnd, false)),
+        "a crowded plan drops sub-agent lines, never the rule"
+    );
+}
+
+#[test]
 fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
@@ -716,6 +906,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         process: Some(Box::new(Process {
             project,
             hooks: Vec::new(),
+            agent: String::new(),
         })),
         transcripts: true,
         off_tools: Vec::new(),
@@ -1244,6 +1435,7 @@ fn context_with(
                 mode: crate::instruction_files::Mode::Both,
             },
             hooks: Vec::new(),
+            agent: String::new(),
         })),
         transcripts: true,
         off_tools,
@@ -1860,6 +2052,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
                 hook("SessionStart", None, None),
                 hook("PreToolUse", Some("Grep|Glob"), Some(5)),
             ],
+            agent: String::new(),
         })),
         transcripts: true,
         off_tools: Vec::new(),

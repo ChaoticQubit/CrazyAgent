@@ -5,6 +5,7 @@ use super::{
 };
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use crate::storage::versioned;
 use crate::terminal::{AgentId, Host, HostError, type_prompt};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -233,7 +234,8 @@ pub enum RuleLevel {
 /// Why the owner gets an app notification: the master escalated an owner-only decision,
 /// auto-wake stopped at its hourly cap, the event queue filled, or the project's token
 /// budget stopped its team; or an agent asked the owner an urgent (High) or a Normal
-/// question, or waits on the owner in its own terminal.
+/// question, an `ask` question among them that waits in the Questions view, or waits on
+/// the owner in its own terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
@@ -378,15 +380,32 @@ impl EventsStatus {
 pub struct AgentRule {
     pub agent: i64,
     pub rule: WakeRule,
+    #[serde(default)]
+    pub version: u64,
 }
 
-/// The wake rules a project's settings show: what is stored at each level and the rule in
-/// force for the project with the level it came from.
+/// One agent level the owner cleared: it has no rule of its own any more, yet its version
+/// moved on, and a change of that level sends this version back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearedRule {
+    pub agent: i64,
+    pub version: u64,
+}
+
+/// The wake rules a project's settings show: what is stored at each level with the version a
+/// change sends back, and the rule in force for the project with the level it came from. A
+/// level never set is at version 0; an agent level cleared since is listed in `cleared`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct WakeView {
     pub app: Option<WakeRule>,
+    #[serde(default)]
+    pub app_version: u64,
     pub project: Option<WakeRule>,
+    #[serde(default)]
+    pub project_version: u64,
     pub agents: Vec<AgentRule>,
+    #[serde(default)]
+    pub cleared: Vec<ClearedRule>,
     pub effective: WakeRule,
     pub level: RuleLevel,
 }
@@ -424,6 +443,8 @@ pub struct AgentQuestions {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AppEvents {
     pub rule: Option<WakeRule>,
+    #[serde(default)]
+    pub rule_version: u64,
     pub effective: WakeRule,
     pub notifications: Vec<Notification>,
     pub unseen: i64,
@@ -431,11 +452,15 @@ pub struct AppEvents {
     pub projects: Vec<ProjectUnseen>,
 }
 
-/// How many of one project's owner notifications are unseen, for its sidebar count.
+/// How many of one project's owner notifications are unseen, for its sidebar count, and how
+/// many of those are questions-log notifications, which the app counts as pending
+/// questions; a work question's alert is not one of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectUnseen {
     pub project_id: ProjectId,
     pub unseen: i64,
+    #[serde(default)]
+    pub questions: i64,
 }
 
 /// The events typed into the master in one wake, oldest first, their text and whether one
@@ -946,45 +971,56 @@ pub fn questions(
 
 const SUB_AGENT_PREFIX: &str = "Sub-agent ";
 
-/// Finds the project's live sub-agent a master names: its persona or `@handle` as the names
-/// module resolves them, or by id as `Sub-agent 7`, `<harness>-7`, `team-7` or `7`. A name
-/// in a numbered form is read only as that number, so a handle stored in that form never
-/// takes it (RV-DS-62). Takes the connection, the project and the name.
-/// Returns the team agent id, or none for an unknown name, another project's agent or a master.
+/// Finds the project's live sub-agent a master names: by id as `Sub-agent 7`,
+/// `<harness>-7`, `team-7` or `7` first, so no handle can stand for another agent's id and
+/// a name in a numbered form is read only as that number (RV-DS-62), else its persona or
+/// `@handle` as the names module resolves them. Takes the connection, the project and the
+/// name. Returns the team agent id, or none for an unknown name, another project's agent
+/// or a master.
 pub fn resolve(
     connection: &Connection,
     project: &ProjectId,
     name: &str,
 ) -> Result<Option<i64>, EngineError> {
     let name = name.trim();
-    if let Some(agent) = super::names::resolve(connection, project, name)? {
-        let sub: bool = connection
-            .query_row(
-                "SELECT role='sub' FROM team_agents WHERE id=?1 AND project=?2",
-                params![agent, project.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(error)?;
-        if sub {
-            return Ok(Some(agent));
-        }
+    if let Some(agent) = by_id_form(connection, project, name.trim_start_matches('@'))? {
+        return Ok(Some(agent));
     }
-    let name = name.trim_start_matches('@');
+    let Some(agent) = super::names::resolve(connection, project, name)? else {
+        return Ok(None);
+    };
+    let sub: bool = connection
+        .query_row(
+            "SELECT role='sub' FROM team_agents WHERE id=?1 AND project=?2",
+            params![agent, project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(sub.then_some(agent))
+}
+
+/// Finds the project's sub-agent an id form names: `Sub-agent 7`, `team-7` or `7` for any
+/// harness, `<harness>-7` only for an agent running that harness, in any letter case.
+/// Takes the connection, the project and the name with no `@`. Returns the team agent id,
+/// or none for any other name.
+fn by_id_form(
+    connection: &Connection,
+    project: &ProjectId,
+    name: &str,
+) -> Result<Option<i64>, EngineError> {
     let numbered = name
         .get(..SUB_AGENT_PREFIX.len())
         .filter(|head| head.eq_ignore_ascii_case(SUB_AGENT_PREFIX))
         .map(|_| &name[SUB_AGENT_PREFIX.len()..]);
-    let (prefix, digits) =
-        match numbered.map_or_else(|| name.rsplit_once('-'), |digits| Some(("team", digits))) {
-            Some((prefix, digits)) => (Some(prefix), digits),
-            None => (None, name),
-        };
-    let Ok(agent) = digits.parse::<i64>() else {
+    let form = match numbered {
+        Some(digits) => super::names::id_form(digits)
+            .filter(|(prefix, _)| prefix.is_none())
+            .map(|(_, agent)| (Some("team"), agent)),
+        None => super::names::id_form(name),
+    };
+    let Some((prefix, agent)) = form else {
         return Ok(None);
     };
-    if agent <= 0 || agent.to_string() != digits {
-        return Ok(None);
-    }
     let row: Option<(String, String)> = connection
         .query_row(
             "SELECT harness,role FROM team_agents WHERE id=?1 AND project=?2",
@@ -996,7 +1032,9 @@ pub fn resolve(
     let Some((harness, role)) = row else {
         return Ok(None);
     };
-    let named = prefix.is_none_or(|prefix| prefix == harness || prefix == "team");
+    let named = prefix.is_none_or(|prefix| {
+        prefix.eq_ignore_ascii_case(&harness) || prefix.eq_ignore_ascii_case("team")
+    });
     Ok((named && AgentRole::parse(&role) == Some(AgentRole::Sub)).then_some(agent))
 }
 
@@ -1068,6 +1106,88 @@ pub fn send_to(
     clear_waiting(&tx, id)?;
     tx.commit().map_err(error)?;
     Ok(Ok(id))
+}
+
+/// Types text into the terminal of exactly one sub-agent of a project, chosen by its team
+/// agent id, as `send_to_agent` types it, and keeps nothing for its Messages timeline: the
+/// caller keeps the owner's words there itself. Takes the connection, the terminal host, the
+/// project, the team agent id and the text. Returns a plain refusal code for blank or long
+/// text, an id that is no sub-agent of the project, a stopped agent or an unreachable terminal.
+pub fn send_to_id(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    id: i64,
+    text: &str,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if let Err(code) = type_to_id(connection, host, project, id, text)? {
+        return Ok(Err(code));
+    }
+    clear_waiting(connection, id)?;
+    Ok(Ok(()))
+}
+
+/// Types an engine notice into exactly one sub-agent of a project, chosen by its team agent
+/// id, as `send_to_id` types it, and keeps it in the agent's Messages timeline as the
+/// engine's, with the waiting mark cleared in the same transaction, as `send_to` keeps what
+/// the master says. Takes the connection, the terminal host, the project, the team agent id
+/// and the text. Returns the same plain refusal codes as `send_to_id`.
+pub fn send_notice_to_id(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    id: i64,
+    text: &str,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if let Err(code) = type_to_id(connection, host, project, id, text)? {
+        return Ok(Err(code));
+    }
+    assert!(id > 0, "only a sub-agent row takes a notice");
+    let tx = immediate(connection)?;
+    super::agent_messages::record(&tx, project, id, Said::Notice, text, super::now_ms())?;
+    clear_waiting(&tx, id)?;
+    tx.commit().map_err(error)?;
+    Ok(Ok(()))
+}
+
+/// Admits and types text into one sub-agent of a project by its team agent id, writing
+/// nothing to the store. Takes the connection, the terminal host, the project, the team
+/// agent id and the text. Returns Ok once its terminal took the text, or the plain refusal
+/// code of `send_to_id`.
+fn type_to_id(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    id: i64,
+    text: &str,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if text.trim().is_empty() || text.len() > SEND_BYTES_MAX {
+        return Ok(Err("team_message_invalid"));
+    }
+    let status: Option<String> = connection
+        .query_row(
+            "SELECT status FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+            params![id, project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(status) = status else {
+        return Ok(Err("team_agent_not_found"));
+    };
+    if !AgentStatus::parse(&status).is_some_and(AgentStatus::live) {
+        return Ok(Err("team_agent_not_running"));
+    }
+    let name = AgentId::team(id).map_err(EngineError::from)?;
+    match type_prompt(host, &name, text) {
+        Ok(true) => {}
+        Ok(false) => return Ok(Err("team_message_invalid")),
+        Err(HostError(code)) if code == "terminal_agent_unknown" => {
+            return Ok(Err("team_agent_not_running"));
+        }
+        Err(_) => return Ok(Err("team_agent_unreachable")),
+    }
+    Ok(Ok(()))
 }
 
 /// The most queued worker events one tick forwards to their leads.
@@ -1277,7 +1397,10 @@ pub fn escalate(
     Ok(Ok(id))
 }
 
-pub(super) fn notify(
+/// Adds one owner notification inside the caller's transaction, dropping the project's
+/// oldest ones beyond `NOTIFICATIONS_PER_PROJECT_MAX`. Inputs: the transaction, the
+/// project, the kind, the bounded text and the time. Output: the notification id.
+pub(crate) fn notify(
     tx: &Transaction<'_>,
     project: &ProjectId,
     kind: NotificationKind,
@@ -1338,32 +1461,43 @@ fn app_notifications(connection: &Connection) -> Result<Vec<Notification>, Engin
     Ok(read)
 }
 
-/// Counts the unseen notifications of each project that has any, by project id, so a
-/// project's count never depends on what fits in the app window. Takes the connection.
+/// Counts the unseen notifications of each project that has any, and the questions-log
+/// notifications among them, by project id, so a project's count never depends on what fits
+/// in the app window. A question notification a work question raised, which
+/// `team_owner_alerts` records, stays out of the questions count. Takes the connection.
 /// Returns at most `UNSEEN_PROJECTS_MAX` projects, each with a count above zero.
 fn unseen_by_project(connection: &Connection) -> Result<Vec<ProjectUnseen>, EngineError> {
     let mut statement = connection
         .prepare(
-            "SELECT project, COUNT(*) FROM team_notifications WHERE seen_ms IS NULL
-             GROUP BY project ORDER BY project LIMIT ?1",
+            "SELECT project, COUNT(*), SUM(kind = 'question' AND id NOT IN
+                 (SELECT notification FROM team_owner_alerts WHERE notification IS NOT NULL))
+             FROM team_notifications
+             WHERE seen_ms IS NULL GROUP BY project ORDER BY project LIMIT ?1",
         )
         .map_err(error)?;
-    let rows: Vec<(String, i64)> = statement
-        .query_map([UNSEEN_PROJECTS_MAX], |row| Ok((row.get(0)?, row.get(1)?)))
+    let rows: Vec<(String, i64, i64)> = statement
+        .query_map([UNSEEN_PROJECTS_MAX], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
     let projects: Vec<ProjectUnseen> = rows
         .into_iter()
-        .filter_map(|(project, unseen)| {
+        .filter_map(|(project, unseen, questions)| {
             Some(ProjectUnseen {
                 project_id: ProjectId::new(project).ok()?,
                 unseen,
+                questions,
             })
         })
         .collect();
     assert!(projects.len() as i64 <= UNSEEN_PROJECTS_MAX);
-    assert!(projects.iter().all(|item| item.unseen > 0));
+    assert!(
+        projects
+            .iter()
+            .all(|item| item.unseen > 0 && (0..=item.unseen).contains(&item.questions))
+    );
     Ok(projects)
 }
 
@@ -1696,13 +1830,13 @@ fn line_break(c: char) -> bool {
     )
 }
 
-/// Makes agent text plain for the master and the owner's timelines: square brackets and the
-/// brackets that look like them, fullwidth, white, lenticular and tortoise shell ones among
-/// them, become parentheses, so agent text can never show a `[owner]` or `[team]` tag;
-/// control characters other than line feed and tab are dropped, so one escape or carriage
-/// return never makes the master refuse a whole message; and bidirectional controls are
-/// dropped, so no text reorders what is shown around it. Takes the text. Returns it.
-pub(super) fn plain_agent_text(text: &str) -> String {
+/// Makes agent text plain for the master, the owner's timelines and IDE review comments:
+/// square brackets and the brackets that look like them, fullwidth, white, lenticular and
+/// tortoise shell ones among them, become parentheses, so agent text never shows a `[owner]`
+/// or `[team]` tag; control characters other than line feed and tab are dropped, so one escape
+/// or carriage return never makes the master refuse a whole message; and bidirectional controls
+/// are dropped, so no text reorders what is shown around it. Takes the text. Returns it.
+pub(crate) fn plain_agent_text(text: &str) -> String {
     text.chars()
         .filter(|c| (!c.is_control() || matches!(c, '\n' | '\t')) && !BIDI_CONTROLS.contains(c))
         .map(|c| {
@@ -1757,11 +1891,13 @@ pub fn screen_rows(screen: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn option(row: &str) -> Option<(usize, &str, bool)> {
+fn option(row: &str) -> Option<(usize, &str, Option<char>)> {
     let row = row.trim_start();
     let (marked, rest) = match row.chars().next() {
-        Some(marker) if MARKERS.contains(&marker) => (true, row[marker.len_utf8()..].trim_start()),
-        _ => (false, row),
+        Some(marker) if MARKERS.contains(&marker) => {
+            (Some(marker), row[marker.len_utf8()..].trim_start())
+        }
+        _ => (None, row),
     };
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
     if digits == 0 || digits > 2 {
@@ -1783,6 +1919,42 @@ fn option(row: &str) -> Option<(usize, &str, bool)> {
 /// list without a marker is not a question. Takes the screen bytes. Returns one bounded line
 /// with the question and its options, or none.
 pub fn question(screen: &[u8]) -> Option<String> {
+    choice(screen).map(|choice| choice.line())
+}
+
+/// A numbered choice an agent's app waits on, read from its screen: the question line above
+/// it, each option's text in order without its number, the selection marker on the marked
+/// option and the non-empty rows below the last option, down to the screen's end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub asked: String,
+    pub options: Vec<String>,
+    pub marker: char,
+    pub below: Vec<String>,
+}
+
+impl Choice {
+    /// The question and its numbered options as one line of at most EVENT_TEXT_BYTES_MAX
+    /// bytes. Takes the choice. Returns the line.
+    pub fn line(&self) -> String {
+        let numbered: Vec<String> = self
+            .options
+            .iter()
+            .enumerate()
+            .map(|(at, text)| format!("{}. {text}", at + 1))
+            .collect();
+        let text = one_line(
+            &format!("{} | {}", self.asked, numbered.join(" | ")),
+            EVENT_TEXT_BYTES_MAX,
+        );
+        assert!(text.len() <= EVENT_TEXT_BYTES_MAX);
+        text
+    }
+}
+
+/// Finds the choice an agent's app waits on in its screen, as `question` describes. Takes
+/// the screen bytes. Returns the question line and at least two options, or none.
+pub fn choice(screen: &[u8]) -> Option<Choice> {
     let rows: Vec<String> = screen_rows(screen)
         .into_iter()
         .map(|row| {
@@ -1796,20 +1968,23 @@ pub fn question(screen: &[u8]) -> Option<String> {
         .iter()
         .rposition(|row| option(row).is_some_and(|(number, ..)| number == 1))?;
     let mut options = Vec::new();
-    let mut marked = false;
-    for row in &rows[first..] {
+    let mut marker = None;
+    let mut last = first;
+    for (at, row) in rows.iter().enumerate().skip(first) {
         match option(row) {
-            Some((number, text, marker))
+            Some((number, text, marked))
                 if number == options.len() + 1 && options.len() < OPTIONS_MAX =>
             {
-                marked |= marker;
-                options.push(format!("{number}. {text}"));
+                marker = marker.or(marked);
+                last = at;
+                options.push(text.to_owned());
             }
             Some(_) => break,
             None => {}
         }
     }
-    if options.len() < 2 || !marked {
+    let marker = marker?;
+    if options.len() < 2 {
         return None;
     }
     let above = &rows[first.saturating_sub(QUESTION_ROWS_ABOVE)..first];
@@ -1818,12 +1993,12 @@ pub fn question(screen: &[u8]) -> Option<String> {
         .rev()
         .find(|row| row.ends_with('?'))
         .or_else(|| above.last())?;
-    let text = one_line(
-        &format!("{asked} | {}", options.join(" | ")),
-        EVENT_TEXT_BYTES_MAX,
-    );
-    assert!(text.len() <= EVENT_TEXT_BYTES_MAX);
-    Some(text)
+    Some(Choice {
+        asked: asked.clone(),
+        options,
+        marker,
+        below: rows[last + 1..].to_vec(),
+    })
 }
 
 /// Reads the wake rule in force for a project's agent: the agent's own, else the project's,
@@ -1910,6 +2085,7 @@ pub fn view(connection: &Connection, project: &ProjectId) -> Result<EventsView, 
         .iter()
         .position(|(agent, _)| *agent == 0)
         .map(|at| own.remove(at).1);
+    let cleared = cleared_levels(connection, project, &own)?;
     let (effective, level) = rule(connection, Some(project), None)?;
     let paused: bool = connection
         .query_row(
@@ -1928,16 +2104,75 @@ pub fn view(connection: &Connection, project: &ProjectId) -> Result<EventsView, 
         paused,
         wake: WakeView {
             app,
+            app_version: rule_version(connection, &RuleTarget::App)?,
             project: mine,
+            project_version: rule_version(
+                connection,
+                &RuleTarget::Project {
+                    project_id: project.clone(),
+                },
+            )?,
             agents: own
                 .into_iter()
-                .map(|(agent, rule)| AgentRule { agent, rule })
-                .collect(),
+                .map(|(agent, rule)| {
+                    let target = RuleTarget::Agent {
+                        project_id: project.clone(),
+                        agent,
+                    };
+                    Ok(AgentRule {
+                        agent,
+                        rule,
+                        version: rule_version(connection, &target)?,
+                    })
+                })
+                .collect::<Result<_, EngineError>>()?,
+            cleared,
             effective,
             level,
         },
         questions: questions(connection, project)?,
     })
+}
+
+/// Reads the agent levels a screen can edit that hold no rule of their own but whose version
+/// moved on, because the owner cleared their rule, so the next change of such a level sends
+/// the current version. Covers the sub-agents among the newest `STATUS_AGENTS_MAX` agents of
+/// the project, the ones the team status lists. Takes the connection, the project and the
+/// agent levels with a rule. Returns the levels in agent order, at most `STATUS_AGENTS_MAX`.
+fn cleared_levels(
+    connection: &Connection,
+    project: &ProjectId,
+    ruled: &[(i64, WakeRule)],
+) -> Result<Vec<ClearedRule>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id FROM (SELECT id,role FROM team_agents WHERE project=?1 ORDER BY id DESC LIMIT ?2)
+             WHERE role='sub' ORDER BY id",
+        )
+        .map_err(error)?;
+    let listed: Vec<i64> = statement
+        .query_map(params![project.as_str(), STATUS_AGENTS_MAX], |row| {
+            row.get(0)
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    let mut cleared = Vec::new();
+    for agent in listed {
+        if ruled.iter().any(|(own, _)| *own == agent) {
+            continue;
+        }
+        let target = RuleTarget::Agent {
+            project_id: project.clone(),
+            agent,
+        };
+        let version = rule_version(connection, &target)?;
+        if version > 0 {
+            cleared.push(ClearedRule { agent, version });
+        }
+    }
+    assert!(cleared.len() <= usize::try_from(STATUS_AGENTS_MAX).unwrap_or(usize::MAX));
+    Ok(cleared)
 }
 
 /// Reads what the app shows across projects: the app wake rule and the newest notifications.
@@ -1957,11 +2192,32 @@ pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
         .map_err(error)?;
     fit_app(AppEvents {
         rule,
+        rule_version: rule_version(connection, &RuleTarget::App)?,
         effective: rule.unwrap_or_default(),
         notifications: app_notifications(connection)?,
         unseen,
         projects: unseen_by_project(connection)?,
     })
+}
+
+/// Names the versioned item of one wake-rule level.
+fn rule_item(target: &RuleTarget) -> versioned::Item {
+    match target {
+        RuleTarget::App => versioned::team_rule_item(None, 0),
+        RuleTarget::Project { project_id } => versioned::team_rule_item(Some(project_id), 0),
+        RuleTarget::Agent { project_id, agent } => {
+            versioned::team_rule_item(Some(project_id), *agent)
+        }
+    }
+}
+
+/// Reads the version of one wake-rule level, 0 when the level has no rule of its own.
+/// Takes the connection and the level. Returns the version, or `versioned_unavailable`.
+pub fn rule_version(connection: &Connection, target: &RuleTarget) -> Result<u64, EngineError> {
+    if matches!(target, RuleTarget::Agent { agent, .. } if *agent <= 0) {
+        return Ok(0);
+    }
+    Ok(versioned::current(connection, &rule_item(target))?.version)
 }
 
 /// Fits the app-wide view to one owner reply: the oldest seen notifications go first, then
@@ -1997,13 +2253,16 @@ fn fit_app(mut view: AppEvents) -> Result<AppEvents, EngineError> {
     Err(error("team_events_bounds"))
 }
 
-/// Sets or clears the wake rule at one level; clearing returns that level to the level
-/// above it. Takes the connection, the level and the rule or none.
-/// Returns Ok, or `team_wake_cap_invalid` or `team_agent_not_found`.
+/// Sets or clears the wake rule at one level when the owner's screen showed its current
+/// version; clearing returns that level to the level above it and still moves its version
+/// on, so a screen read before the clear cannot save over a newer rule. Takes the
+/// transaction, the level, the rule or none and the version the screen showed.
+/// Returns Ok, or `team_wake_cap_invalid`, `team_agent_not_found` or `stale_revision`.
 pub fn set_rule(
-    connection: &Connection,
+    tx: &Transaction<'_>,
     target: &RuleTarget,
     rule: Option<&WakeRule>,
+    version: u64,
 ) -> Result<Result<(), &'static str>, EngineError> {
     if rule.is_some_and(|rule| rule.hourly_cap > HOURLY_CAP_MAX) {
         return Ok(Err("team_wake_cap_invalid"));
@@ -2012,7 +2271,7 @@ pub fn set_rule(
         RuleTarget::App => ("", 0),
         RuleTarget::Project { project_id } => (project_id.as_str(), 0),
         RuleTarget::Agent { project_id, agent } => {
-            let owned: bool = connection
+            let owned: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM team_agents WHERE id=?1 AND project=?2 AND role='sub')",
                     params![agent, project_id.as_str()],
@@ -2025,12 +2284,16 @@ pub fn set_rule(
             (project_id.as_str(), *agent)
         }
     };
+    let item = rule_item(target);
+    if versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(Err(versioned::STALE_CODE));
+    }
     match rule {
-        None => connection.execute(
+        None => tx.execute(
             "DELETE FROM team_wake_rules WHERE project=?1 AND agent=?2",
             params![project, agent],
         ),
-        Some(rule) => connection.execute(
+        Some(rule) => tx.execute(
             "INSERT INTO team_wake_rules(project,agent,question,finished,failed,change_set_ready,progress,hourly_cap)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(project,agent) DO UPDATE SET question=excluded.question, finished=excluded.finished,

@@ -1,0 +1,10 @@
+.qs-list { gap: 12px; }
+.qs-card { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
+.qs-question { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.qs-context summary { cursor: pointer; color: var(--text-3); }
+.qs-context p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.qs-options { display: grid; gap: 6px; margin: 0; padding: 0; border: 0; }
+.qs-option { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; cursor: pointer; overflow-wrap: anywhere; }
+.qs-option input { flex: none; }
+.qs-recommended { padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-3); }
+.qs-answer { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -90,6 +90,48 @@ fn the_master_counts_as_its_projects_master_and_an_agent_without_an_account_is_u
 }
 
 #[test]
+fn a_live_agent_on_a_harness_without_a_reader_is_marked_not_reported() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    db.execute_batch(
+        "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
+            connection TEXT, status TEXT, stopped_ms INTEGER);
+         INSERT INTO team_agents VALUES (1,'alpha','master','claude-code','claude-a','idle',NULL);
+         INSERT INTO team_agents VALUES (2,'alpha','sub_agent','opencode',NULL,'working',NULL);
+         INSERT INTO team_agents VALUES (3,'beta','sub_agent','gemini-cli',NULL,'stopped',0);",
+    )
+    .unwrap();
+    append(
+        &team.join("agents/agent-1/home/projects/f/s1.jsonl"),
+        &assistant("m1", 50),
+    );
+    let mut usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    usage.step(NOW).unwrap();
+    usage.step(NOW + 1).unwrap();
+    let report = crate::usage::report::report(&db, None, None, 0, NOW + 2).unwrap();
+    assert_eq!(report.total.input, 50);
+    assert_eq!(report.not_reported_by, ["OpenCode"]);
+    assert_eq!(
+        report
+            .agents
+            .iter()
+            .map(|row| (row.key.as_str(), row.not_reported_by.as_deref()))
+            .collect::<Vec<_>>(),
+        [("master-alpha", None), ("team-2", Some("OpenCode"))],
+        "a long-stopped agent is not scanned, so it is not marked"
+    );
+    let marks: i64 = db
+        .query_row("SELECT COUNT(*) FROM usage_unreported", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(marks, 1, "two steps in one hour keep one mark");
+}
+
+#[test]
 fn a_step_that_panics_ends_only_that_step_and_the_next_step_still_counts() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path().canonicalize().unwrap();
@@ -194,4 +236,92 @@ fn a_step_that_keeps_panicking_is_logged_once_and_waits_longer_each_time() {
         pace.after(panicked());
     }
     assert_eq!(pace.after(panicked()).1, PANIC_PAUSE_MAX);
+}
+
+#[test]
+fn a_panicking_step_kind_is_counted_marked_working_again_and_forgotten_on_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    db.execute_batch(
+        "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
+            connection TEXT, status TEXT, stopped_ms INTEGER);",
+    )
+    .unwrap();
+    let mut usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    for at in [NOW, NOW + 5_000] {
+        let problem = counted_step(
+            &mut usage,
+            |usage| {
+                usage.doing = UsageStep::Team;
+                panic!("a team scan broke an invariant");
+            },
+            at,
+        );
+        assert_eq!(problem.as_deref(), Some("usage_step_panicked"));
+    }
+    assert_eq!(
+        counted_step(&mut usage, |usage| usage.step(NOW + 10_000), NOW + 10_000),
+        None
+    );
+    assert_eq!(
+        usage.doing,
+        UsageStep::Runs,
+        "a whole step ends in its last part"
+    );
+    let report = crate::usage::report::report(&db, None, None, 0, NOW + 11_000).unwrap();
+    assert_eq!(
+        report.health,
+        [crate::usage::health::StepHealth {
+            step: UsageStep::Team,
+            panics: 2,
+            last_ms: NOW + 5_000,
+            recovered_ms: Some(NOW + 10_000),
+        }],
+        "a later step that completes the kind marks it working again and keeps the count"
+    );
+    assert_eq!(
+        counted_step(&mut usage, |usage| usage.step(NOW + 15_000), NOW + 15_000),
+        None
+    );
+    assert_eq!(
+        crate::usage::health::health(&db).unwrap()[0].recovered_ms,
+        Some(NOW + 10_000),
+        "the first time it worked again is kept"
+    );
+    let problem = counted_step(
+        &mut usage,
+        |usage| {
+            usage.doing = UsageStep::Team;
+            panic!("the team scan broke again");
+        },
+        NOW + 20_000,
+    );
+    assert_eq!(problem.as_deref(), Some("usage_step_panicked"));
+    assert_eq!(
+        crate::usage::health::health(&db).unwrap(),
+        [crate::usage::health::StepHealth {
+            step: UsageStep::Team,
+            panics: 3,
+            last_ms: NOW + 20_000,
+            recovered_ms: None,
+        }],
+        "a new panic makes the kind failing again"
+    );
+    assert_eq!(
+        counted_step(&mut usage, |usage| usage.step(NOW + 25_000), NOW + 25_000),
+        None
+    );
+    assert_eq!(
+        crate::usage::health::health(&db).unwrap()[0].recovered_ms,
+        Some(NOW + 25_000)
+    );
+    drop(usage);
+    Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    assert!(
+        crate::usage::health::health(&db).unwrap().is_empty(),
+        "a new engine run starts with no counted panics"
+    );
 }

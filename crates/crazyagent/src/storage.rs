@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub(crate) mod account_profile;
 pub(crate) mod accounts;
-mod harness_groups;
+pub(crate) mod harness_groups;
 mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
@@ -28,6 +28,7 @@ pub(crate) use master_session::{
     close_master_for_removal, master_resolve_ready, native_sign_in,
     validate_configured_initial_conversation_receipt,
 };
+pub(crate) mod agent_text;
 mod native_auth;
 #[cfg(all(test, unix))]
 mod native_auth_custody_tests;
@@ -36,6 +37,7 @@ pub(crate) mod setup;
 pub(crate) mod trash;
 #[cfg(unix)]
 pub(crate) use native_auth::CUSTODIAN_CODES;
+pub mod versioned;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 #[cfg(all(test, unix))]
@@ -959,6 +961,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::sandbox_settings::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::ide::bridge::memory::initialize(connection)?;
     crate::coord::ensure(connection)?;
     crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
@@ -1493,7 +1496,7 @@ fn execute(
             crate::project_setup::execute(tx, config, action, revision)
         }
         Command::ProjectsHome { action } => projects_home::execute(tx, path, action),
-        Command::AccountSchedule { change } => crate::scheduling::apply(
+        Command::AccountSchedule { change, version } => crate::scheduling::apply(
             tx,
             config
                 .settings
@@ -1501,6 +1504,7 @@ fn execute(
                 .as_ref()
                 .unwrap_or(&crate::config::ModelAccess::default()),
             change,
+            *version,
         ),
         Command::Team { action } => crate::team::execute(
             tx,
@@ -2463,6 +2467,7 @@ fn owner_read(
                 .into_iter()
                 .map(|path| path.display().to_string())
                 .collect(),
+            version: versioned::current(&tx, &versioned::read_paths_item(project_id))?.version,
         },
         OwnerRead::ProjectHiddenPaths { project_id } => OwnerData::ProjectHiddenPaths {
             project_id: project_id.clone(),
@@ -2481,7 +2486,11 @@ fn owner_read(
                 project_id: project_id.clone(),
                 policy: crate::sandbox::policy::load(&tx, project_id.as_str())
                     .map_err(error)?
-                    .view(&setup.project_folder(), &homes),
+                    .view(
+                        &setup.project_folder(),
+                        &homes,
+                        versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
+                    ),
             }
         }
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
@@ -2496,6 +2505,9 @@ fn owner_read(
                 &stored_setup(&tx, project_id)?,
                 config.settings.model_access.as_ref(),
             )?),
+        },
+        OwnerRead::IdeAsks { project_id } => OwnerData::IdeAsks {
+            asks: crate::ide::bridge::memory::asks(&tx, project_id, crate::team::now_ms())?,
         },
         OwnerRead::TeamAgentMessages {
             project_id,

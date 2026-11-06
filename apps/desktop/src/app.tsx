@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
 import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, STUCK_SIGN_IN_LINE, type EngineVersions } from "./api";
+import { ideFocus, type IdeFocus } from "./engine-client";
 import { loadTeamEvents, teamAttention } from "./api-projects";
+import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
+import { questionWatch } from "./notify";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
@@ -198,11 +201,13 @@ function useShortcuts() {
 
 export const ALERT_READ_MS = 10_000;
 
-/** Watches the owner's team notifications while the engine runs: every 10 s it reads them,
- * shows a new one as a toast, with Open to the Questions inbox for an urgent question or an
- * agent waiting in its terminal, keeps the app icon badge at the unseen count and asks for
- * attention when one is new; a Normal question only counts toward the badge. Inputs: whether the engine runs and the toast action. Output:
- * the unseen count of each project for the sidebar. */
+/** Watches the owner's team notifications and pending questions while the engine runs: every
+ * 10 s it reads them, shows a new notification as a toast, with Open to the Questions inbox
+ * for an urgent question or an agent waiting in its terminal, keeps the app icon badge at the
+ * unseen notifications plus the pending questions, and asks for attention when a notification
+ * is new; a Normal question only counts toward the badge. The same counts read drives the
+ * question notification watch, so the counts are read once per look. Inputs: whether the
+ * engine runs and the toast action. Output: what each project's sidebar flag counts. */
 function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): Map<string, number> {
   const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
   const toast = useRef(showToast);
@@ -213,18 +218,56 @@ function useTeamAlerts(running: boolean, showToast: (message: string, open?: Rou
     let last: number | null = null;
     let shown = 0;
     let timer = 0;
+    const watch = questionWatch((line) => toast.current(line));
     const read = async () => {
-      const result = await loadTeamEvents();
-      if (!live || result.kind === "not_ready") return;
+      const [result, questions] = await Promise.all([loadTeamEvents(), loadQuestionCounts()]);
+      if (!live) return;
+      const pending = questions.kind === "ok" ? pendingByProject(questions.value) : new Map<string, number>();
       if (result.kind === "ok") {
         const next = freshAlerts(last, result.value);
         last = next.last;
-        setCounts(unseenByProject(result.value));
+        const flags = withPendingQuestions(unseenByProject(result.value), unseenQuestionAlerts(result.value.projects), pending);
+        const total = [...flags.values()].reduce((sum, count) => sum + count, 0);
+        setCounts(flags);
         if (next.fresh[0]) toast.current(displayText(next.fresh[0].text), alertRoute(next.fresh[0]));
-        if (next.fresh.length > 0 || result.value.unseen !== shown) void teamAttention(result.value.unseen, next.fresh.length > 0);
-        shown = result.value.unseen;
+        if (next.fresh.length > 0 || total !== shown) void teamAttention(total, next.fresh.length > 0);
+        shown = total;
       }
-      timer = window.setTimeout(read, ALERT_READ_MS);
+      if (questions.kind === "ok") await watch.look(questions.value);
+      if (live && (result.kind !== "not_ready" || questions.kind !== "not_ready")) timer = window.setTimeout(read, ALERT_READ_MS);
+    };
+    void read();
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+      watch.stop();
+    };
+  }, [running]);
+  return counts;
+}
+
+export const IDE_FOCUS_POLL_MS = 1_000;
+
+/** The route a TUI "open in IDE" brings forward: the project's IDE tab.
+ * Input: the focus the engine handed over. Output: the route. */
+export function ideFocusRoute(focus: IdeFocus): Route {
+  return { name: "project", id: focus.project, tab: "ide" };
+}
+
+/** Brings forward the IDE tab a TUI "open in IDE" asked for: while the engine runs, every
+ * second it takes the waiting focus, if any, and opens that project's IDE tab; the engine
+ * raises the window. The desktop asks the engine only while an IDE webview is loaded, since
+ * only a loaded IDE can take a reveal. Input: whether the engine runs. */
+function useIdeFocus(running: boolean) {
+  useEffect(() => {
+    if (!running) return;
+    let live = true;
+    let timer = 0;
+    const read = async () => {
+      const focus = await ideFocus().catch(() => null);
+      if (!live) return;
+      if (focus) navigate(ideFocusRoute(focus));
+      timer = window.setTimeout(read, IDE_FOCUS_POLL_MS);
     };
     void read();
     return () => {
@@ -232,16 +275,16 @@ function useTeamAlerts(running: boolean, showToast: (message: string, open?: Rou
       window.clearTimeout(timer);
     };
   }, [running]);
-  return counts;
 }
 
-/** The desktop app: one engine session, the hash route, the app-wide shortcuts and the team
- * notification watch. */
+/** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
+ * notification and question watch and the TUI's "open in IDE" focus. */
 export function App() {
   const session = useSession();
   const route = useRoute();
   useShortcuts();
   useUpdateWatch(session.showToast);
   const alerts = useTeamAlerts(session.engine === "running", session.showToast);
+  useIdeFocus(session.engine === "running");
   return <AppView session={session} route={route} alerts={alerts} />;
 }

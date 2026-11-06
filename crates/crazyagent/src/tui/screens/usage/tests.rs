@@ -32,6 +32,7 @@ fn usage_row(key: &str) -> UsageRow {
         },
         runs: 2,
         last_ms: NOW - 5 * MINUTE,
+        not_reported_by: None,
     }
 }
 
@@ -94,6 +95,8 @@ fn report() -> UsageReport {
         }],
         agent_lines: Vec::new(),
         limits: vec![limits(Some("usage_rate_limited"))],
+        not_reported_by: Vec::new(),
+        health: Vec::new(),
         partial_homes: 0,
     }
 }
@@ -620,4 +623,143 @@ fn the_page_asks_for_its_range_and_shows_answers_failures_and_not_ready() {
     );
     assert_eq!(page.place(), Some(Place::Usage));
     assert!(matches!(page.key(&Key::Char('x'), &mut ctx), Flow::Ignored));
+}
+
+#[test]
+fn a_harness_without_a_reader_reads_as_not_reported_never_as_zero() {
+    let ctx = ctx(100, 40);
+    let unreported = |key: &str, harness: &str| UsageRow {
+        tokens: Tokens::default(),
+        runs: 0,
+        not_reported_by: Some(harness.into()),
+        ..usage_row(key)
+    };
+    let only = UsageReport {
+        total: Tokens::default(),
+        runs: 0,
+        projects: vec![unreported("project-harbor", "RCLI")],
+        pools: Vec::new(),
+        accounts: Vec::new(),
+        agents: vec![unreported("master-project-harbor", "RCLI")],
+        lines: Vec::new(),
+        not_reported_by: vec!["RCLI".into()],
+        ..report()
+    };
+    let lines = text(&summary(
+        &only,
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    assert_eq!(lines[1], "Usage not reported by RCLI  Lines +0 -0");
+    let all = lines.join("\n");
+    assert!(
+        all.contains("By project\n  Harbor Notes  usage not reported by RCLI"),
+        "{all}"
+    );
+    assert!(!all.contains("No usage in this range"), "{all}");
+    assert!(
+        !all.contains("Tokens 0") && !all.contains(" 0 tokens"),
+        "{all}"
+    );
+
+    let mixed = UsageReport {
+        projects: vec![
+            UsageRow {
+                not_reported_by: Some("Gemini CLI".into()),
+                ..usage_row("project-harbor")
+            },
+            unreported("project-docs", "OpenCode"),
+        ],
+        not_reported_by: vec!["Gemini CLI".into(), "OpenCode".into()],
+        ..report()
+    };
+    let lines = text(&summary(
+        &mixed,
+        UsageRange::Week,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    assert_eq!(
+        lines[1],
+        "Tokens 6.3K (1.2K in, 300 out)  Cache 67%  Runs 3  Lines +90 -57"
+    );
+    assert_eq!(
+        lines[2],
+        "Not in these totals: usage not reported by Gemini CLI, OpenCode."
+    );
+    let all = lines.join("\n");
+    for wanted in [
+        "  Harbor Notes    5.5K tokens  2 runs  + usage not reported by Gemini CLI",
+        "  project-docs  usage not reported by OpenCode",
+    ] {
+        assert!(all.contains(wanted), "{wanted:?} in\n{all}");
+    }
+}
+
+#[test]
+fn a_usage_step_that_panicked_shows_one_plain_line_with_its_count_and_last_time() {
+    let ctx = ctx(100, 40);
+    let healthy = text(&summary(
+        &report(),
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ))
+    .join("\n");
+    assert!(!healthy.contains("internal error"), "{healthy}");
+    let degraded = UsageReport {
+        health: vec![
+            StepHealth {
+                step: UsageStep::Poll,
+                panics: 1,
+                last_ms: NOW - 30_000,
+                recovered_ms: None,
+            },
+            StepHealth {
+                step: UsageStep::Team,
+                panics: 3,
+                last_ms: NOW - 4 * MINUTE,
+                recovered_ms: None,
+            },
+            StepHealth {
+                step: UsageStep::Runs,
+                panics: 2,
+                last_ms: NOW - 4 * MINUTE,
+                recovered_ms: Some(NOW - MINUTE),
+            },
+        ],
+        ..report()
+    };
+    let lines = text(&summary(
+        &degraded,
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    assert_eq!(
+        lines[2],
+        "Checking account limits hit an internal error once since the engine started, last just now. CrazyAgent keeps retrying; limits shown may be out of date."
+    );
+    assert_eq!(
+        lines[3],
+        "Counting agent tokens hit an internal error 3 times since the engine started, last 4 min ago. CrazyAgent keeps retrying; agent and research run token totals may be low."
+    );
+    assert_eq!(
+        lines[4],
+        "Counting research run tokens hit an internal error 2 times since the engine started, last 4 min ago. It worked again 1 min ago."
+    );
+    assert_eq!(lines[6], "Account limits");
 }

@@ -292,7 +292,10 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         |m| m.scope == ApprovedScope::Global && m.text == "Prefer plain words in every screen."
     ));
 
-    let forgotten = bridge.forget_memory(&id, &waiting[0].id, 9).await?;
+    let kept_version = waiting[0].version + 1;
+    let forgotten = bridge
+        .forget_memory(&id, &waiting[0].id, kept_version, 9)
+        .await?;
     assert!(
         matches!(forgotten.outcome, ActionOutcome::Applied),
         "{forgotten:?}"
@@ -301,7 +304,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert!(bridge.project_memories(&id, None).await?.is_empty());
     assert_eq!(
         bridge
-            .forget_memory(&id, &waiting[0].id, 10)
+            .forget_memory(&id, &waiting[0].id, kept_version, 10)
             .await?
             .rejection
             .as_deref(),

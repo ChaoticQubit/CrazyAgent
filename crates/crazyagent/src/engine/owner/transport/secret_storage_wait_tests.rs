@@ -489,8 +489,9 @@ async fn a_server_removed_while_storage_is_busy_leaves_none_of_its_secrets_on_di
     )
     .await;
 
+    let version = busy.client.plugin_server(id.clone()).await.unwrap().version;
     let (swept, sweep) = busy.occupy_storage();
-    let removed = busy.client.remove_mcp_server(id.clone()).await;
+    let removed = busy.client.remove_mcp_server(id.clone(), version).await;
     outlasted_the_owner_wait(removed, "plugins_outcome_unknown");
     settled(&swept, sweep).await;
 
@@ -555,8 +556,12 @@ async fn a_secret_file_that_cannot_be_deleted_keeps_none_of_the_others_of_a_remo
     std::fs::remove_file(&stuck).unwrap();
     std::fs::create_dir(&stuck).unwrap();
 
+    let version = busy.client.plugin_server(id.clone()).await.unwrap().version;
     assert!(
-        busy.client.remove_mcp_server(id.clone()).await.is_err(),
+        busy.client
+            .remove_mcp_server(id.clone(), version)
+            .await
+            .is_err(),
         "the owner hears that a secret file could not be deleted"
     );
     assert!(busy.client.plugin_server(id).await.is_err());
@@ -602,8 +607,9 @@ async fn a_checked_server_removed_while_storage_is_busy_leaves_no_check_folder()
     let profile = profiles.join(format!("{id}.sb"));
     std::fs::write(&profile, "(version 1)\n").unwrap();
 
+    let version = busy.client.plugin_server(id.clone()).await.unwrap().version;
     let (swept, sweep) = busy.occupy_storage();
-    let removed = busy.client.remove_mcp_server(id.clone()).await;
+    let removed = busy.client.remove_mcp_server(id.clone(), version).await;
     outlasted_the_owner_wait(removed, "plugins_outcome_unknown");
     settled(&swept, sweep).await;
 

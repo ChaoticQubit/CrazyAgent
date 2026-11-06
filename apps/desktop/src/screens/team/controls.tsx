@@ -6,6 +6,7 @@ import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, SwitchMo
 import { Button, ConfirmDialog, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
+import { savedStale } from "../project/settings";
 import { CoordinationControls } from "./coordination";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
@@ -16,6 +17,10 @@ const ANY_HARNESS = "";
 const NO_LIMIT = "off";
 const encoder = new TextEncoder();
 export const PARTIAL_LINE = "Older team history is hidden so the team fits in one view. Queued and running work stays listed.";
+
+/** What the team controls say after a save refused because the team settings changed since
+ * the controls read them, here or in another window, once they show the saved settings again. */
+export const TEAM_SETTINGS_STALE = "Team settings changed since the controls read them, so your change was not saved. The controls now show the saved settings; make your change again.";
 
 /** The harnesses a task can go to: every sub-agent harness of the team plan, once each, plus
  * "Any sub-agent" first. Inputs: the team status and a harness name lookup. Output: options. */
@@ -170,6 +175,15 @@ export function changeNote(result: Result<IntentReceipt>, missing: string): stri
   return state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the team before trying again.";
 }
 
+/** The team settings version a team change must name: the version of the team read whose
+ * values the controls show and build the change from, never one an earlier save made, so a
+ * second change before the team read returns is refused as stale instead of sending values
+ * it did not read. Input: the team status shown. Output: the version, 0 when an older engine
+ * sends none. */
+export function settingsVersion(status: Pick<TeamStatus, "settings_version">): number {
+  return status.settings_version ?? 0;
+}
+
 /** A choice the owner saved on a team control and the status value it replaced. */
 export interface Held<T> {
   choice: T;
@@ -201,8 +215,9 @@ function sameLimits(a: Limits, b: Limits): boolean {
  * task and an agent session may run, choose what a master harness switch does with the
  * conversation, choose whether finished agents stay in the list and graph or move to the
  * Finished fold-out, and hand one task straight to a sub-agent when the master should not
- * plan it. Inputs: the project id, the
- * latest team status, a harness name lookup and a reload. Output: the controls. */
+ * plan it. Each setting change names the team settings version shown; one refused as stale
+ * reads the team again. Inputs: the project id, the latest team status, a harness name lookup
+ * and a reload. Output: the controls. */
 export function TeamControls({ projectId, status, harness, reload }: {
   projectId: string;
   status: TeamStatus;
@@ -240,11 +255,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const graceTyped = backgroundShown.mode === "grace" ? graceText ?? String(backgroundShown.secs) : null;
   const subs = options.length > 1;
 
+  async function save(send: (version: number) => Promise<Result<IntentReceipt>>, missing: string): Promise<string> {
+    const result = await send(settingsVersion(status));
+    return savedStale(result) ? TEAM_SETTINGS_STALE : changeNote(result, missing);
+  }
+
   async function toggle(on: boolean) {
     const held = { choice: on, from: status.keep_warm };
     setWarm(held);
     setBusy(true);
-    const message = changeNote(await keepTeamWarm(projectId, on), "keeping agents ready");
+    const message = await save((version) => keepTeamWarm(projectId, on, version), "keeping agents ready");
     setBusy(false);
     setWarm(afterSave(held, message));
     setNote(message);
@@ -258,7 +278,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
     const held = { choice: next, from: saved };
     setLimits(held);
     setBusy(true);
-    const message = changeNote(await setTeamTimeLimits(projectId, next.turn, next.session, next.idle, status.settings_revision ?? 0), "team time limits");
+    const message = await save((version) => setTeamTimeLimits(projectId, next.turn, next.session, next.idle, version), "team time limits");
     setBusy(false);
     setLimits(afterSave(held, message));
     setNote(message);
@@ -269,7 +289,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
     const held = { choice: mode, from: switchMode(status) };
     setOnSwitch(held);
     setBusy(true);
-    const message = changeNote(await setOnHarnessSwitch(projectId, mode, status.settings_revision ?? 0), "the On harness switch setting");
+    const message = await save((version) => setOnHarnessSwitch(projectId, mode, version), "the On harness switch setting");
     setBusy(false);
     setOnSwitch(afterSave(held, message));
     setNote(message);
@@ -300,7 +320,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
     const held = { choice, from: listed };
     setFinished(held);
     setBusy(true);
-    const message = changeNote(await showFinishedAgents(projectId, choice === "show"), "choosing where finished agents show");
+    const message = await save((version) => showFinishedAgents(projectId, choice === "show", version), "choosing where finished agents show");
     setBusy(false);
     setFinished(afterSave(held, message));
     setNote(message);
