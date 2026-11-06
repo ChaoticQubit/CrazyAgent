@@ -141,7 +141,7 @@ const COPY: Record<string, string> = {
   agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
   agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
   agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
-  agent_access_lowered: "This project's agent access was lowered below what the agent started with, so it was stopped. Any changes it made are still in Changes.",
+  agent_access_lowered: "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
   agent_network_narrowed: "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
   agent_toolchain_lowered: "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
   agent_project_unreadable: "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
