@@ -66,6 +66,11 @@ const REPLY_CUT: &str = "terminal_reply_cut";
 const PLACED: &str = "#{pane_id} #{pane_pid}";
 const PANE_FIELDS: &str = "#{pane_id} #{pane_pid} #{pane_dead}";
 const CLOSE_TIME: Duration = Duration::from_secs(2);
+/// How long the processes of closed panes get to end on the hangup tmux sent them, as long
+/// as the engine gives a headless agent after its stop signal.
+const HANGUP_GRACE: Duration = Duration::from_secs(2);
+/// How long a stop goes on killing what the closed panes left in their groups.
+const GROUP_KILL_WAIT: Duration = Duration::from_secs(2);
 const LINE_BYTES_MAX: usize = 1024 * 1024;
 const REPLY_BYTES_MAX: usize = 32 * 1024 * 1024;
 const COMMAND_BYTES_MAX: usize = 256 * 1024;
@@ -1205,6 +1210,60 @@ fn pane_info(line: &[u8]) -> Option<PaneInfo> {
     })
 }
 
+/// Closes panes with one tmux command, then ends what they leave in their process groups
+/// (FINDING bridge orphan): tmux only hangs up a closing pane, which a busy Codex app-server
+/// the tools-on bridge started in the background outlives, still working on the user's
+/// account. `kill`, `kill_pane` and the server's close go through here. Takes the control,
+/// the open panes the command closes and the command. Returns the command's answer once the
+/// groups are gone.
+fn close_panes(control: &Control, panes: &[PaneInfo], line: &str) -> Result<(), HostError> {
+    let groups = pane_groups(panes);
+    let closed = control.run(line).map(drop);
+    end_groups(&groups);
+    closed
+}
+
+/// The process groups of open panes, read before they close: tmux starts each pane's first
+/// process as the leader of its own session and group, where the processes it starts in the
+/// background stay. A pane whose first process ended or leads no group of its own gives
+/// none, so a stop never signals a group it did not read from its pane. Takes the panes.
+/// Returns their groups.
+fn pane_groups(panes: &[PaneInfo]) -> Vec<rustix::process::Pid> {
+    assert!(panes.len() <= PANES_LISTED_MAX);
+    let own = rustix::process::getpgrp();
+    panes
+        .iter()
+        .filter(|pane| !pane.dead)
+        .filter_map(|pane| rustix::process::Pid::from_raw(i32::try_from(pane.pid).ok()?))
+        .filter(|leader| {
+            leader.as_raw_nonzero().get() > 1
+                && *leader != own
+                && rustix::process::getpgid(Some(*leader)) == Ok(*leader)
+        })
+        .collect()
+}
+
+/// Waits for the groups of closed panes to end on the hangup, for at most `HANGUP_GRACE`,
+/// then kills what is left until no group answers, for at most `GROUP_KILL_WAIT`. macOS
+/// answers EPERM for a group whose last member it just reaped, so only ESRCH ends a group.
+/// Takes the groups `pane_groups` read before their panes closed.
+fn end_groups(groups: &[rustix::process::Pid]) {
+    let left = |group: &rustix::process::Pid| {
+        rustix::process::test_kill_process_group(*group) != Err(rustix::io::Errno::SRCH)
+    };
+    let hung_up = Instant::now() + HANGUP_GRACE;
+    while groups.iter().any(left) && Instant::now() < hung_up {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let killed = Instant::now() + GROUP_KILL_WAIT;
+    while groups.iter().any(left) && Instant::now() < killed {
+        for group in groups.iter().filter(|group| left(group)) {
+            let _ = rustix::process::kill_process_group(*group, rustix::process::Signal::KILL);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Reads an attach's pane line: its ids, cursor, size, input modes, history size, and its
 /// screen and mouse modes. A screen or mouse flag that an older tmux leaves empty reads as
 /// off. Takes the reply lines. Returns the pane, or none for a reply of another shape.
@@ -1763,12 +1822,16 @@ impl Host for Tmux {
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
         let control = self.live_control()?;
         if self.confined.is_some() {
-            let pane = self.agent_target(&control, agent)?;
-            return control.run(&format!("kill-pane -t {pane}")).map(drop);
+            let pane = self.own_pane(agent)?;
+            let line = format!("kill-pane -t {}", pane.id);
+            return close_panes(&control, &[pane], &line);
         }
-        control
-            .run(&format!("kill-window -t {}", target(agent)))
-            .map(drop)
+        let panes = self.panes(agent)?;
+        close_panes(
+            &control,
+            &panes,
+            &format!("kill-window -t {}", target(agent)),
+        )
     }
 
     fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
@@ -1788,12 +1851,19 @@ impl Host for Tmux {
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
         let pane = self.member_pane(agent, pane)?;
-        if self.panes(agent)?.len() < 2 {
+        let panes = self.panes(agent)?;
+        if panes.len() < 2 {
             return Err(failure("terminal_pane_unknown"));
         }
-        self.live_control()?
-            .run(&format!("kill-pane -t {pane}"))
-            .map(drop)
+        let closed: Vec<PaneInfo> = panes
+            .into_iter()
+            .filter(|listed| listed.id == pane)
+            .collect();
+        close_panes(
+            &*self.live_control()?,
+            &closed,
+            &format!("kill-pane -t {pane}"),
+        )
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
@@ -1821,7 +1891,17 @@ impl Host for Tmux {
             return Ok(());
         }
         let control = self.control_with(self.starts_in.is_none())?;
-        let _ = control.run("kill-server");
+        let panes: Vec<PaneInfo> = control
+            .ask(&format!("list-panes -a -F '{PANE_FIELDS}{FORMAT_END}'"))
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter_map(|line| pane_info(line))
+                    .take(PANES_LISTED_MAX)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let _ = close_panes(&control, &panes, "kill-server");
         control.close();
         if let Ok(mut slot) = self.control.lock() {
             *slot = None;

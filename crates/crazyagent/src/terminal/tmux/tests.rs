@@ -952,7 +952,11 @@ fn close_ends_every_process_in_the_server_pane_groups() {
         .parse::<u32>()
         .unwrap();
     let (group, child) = left_in_group(pane, &started);
-    assert_eq!(host.alive().unwrap(), vec![agent], "the window holds no agent");
+    assert_eq!(
+        host.alive().unwrap(),
+        vec![agent],
+        "the window holds no agent"
+    );
 
     host.close(&[]).unwrap();
     assert!(gone(&group, child), "the outside pane's group is gone");
