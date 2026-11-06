@@ -59,10 +59,14 @@ test("New Project preselects Own branch and every level the engine knows has the
 });
 
 test("every engine refusal for agent access has its own sentence", () => {
+  const missing = new Set();
   for (const file of ["sandbox/policy.rs", "project_setup.rs", "storage.rs"]) {
     const engine = readFileSync(new URL(`../../../crates/crazyagent/src/${file}`, import.meta.url), "utf8");
-    for (const code of engine.matchAll(/"(agent_(?:access|policy)_[a-z_]+)"/g)) assert.ok(api.KNOWN_ERROR_CODES.includes(code[1]), code[1]);
+    for (const code of engine.matchAll(/"(agent_(?:access|policy|network|toolchain|project)_[a-z_]+)"/g)) {
+      if (!api.KNOWN_ERROR_CODES.includes(code[1])) missing.add(code[1]);
+    }
   }
+  assert.deepEqual([...missing], [], "every access, policy, network, toolchain and project refusal has a sentence");
 });
 
 test("Settings says beside the level choice that lowering it stops agents running above it, in both UIs", () => {
