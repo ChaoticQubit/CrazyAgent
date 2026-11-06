@@ -570,6 +570,8 @@ async fn a_move_of_a_repo_with_a_linked_worktree_asks_first_and_move_anyway_move
     assert!(!shows(&rows, "isn't offered"), "{rows:#?}");
 
     shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
+    shell.key(Key::Enter);
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Move shop anyway?"), "{rows:#?}");
     let loss = row_of(&rows, "Close editors, terminals and apps");
@@ -627,6 +629,8 @@ async fn use_where_it_is_in_the_question_sets_a_folder_without_git_up_in_place()
     shell.key(Key::Tab);
     shell.key(Key::Right);
     shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
+    shell.key(Key::Enter);
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Move notes anyway?"), "{rows:#?}");
     assert!(
@@ -674,7 +678,10 @@ async fn a_copy_of_a_linked_worktree_asks_first_and_copy_anyway_copies_it() {
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Copy shop-side anyway?"), "{rows:#?}");
     assert!(
-        shows(&rows, "The copy shares the original checkout"),
+        shows(
+            &rows,
+            "The copy keeps this folder's link to another repository's git data"
+        ),
         "{rows:#?}"
     );
     assert!(
@@ -717,13 +724,136 @@ async fn a_shared_checkout_is_the_first_data_loss_line_of_a_copy_question() {
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Copy shop-side anyway?"), "{rows:#?}");
     assert!(
-        row_of(&rows, "The copy shares the original checkout")
-            < row_of(&rows, "This folder is very large"),
+        row_of(
+            &rows,
+            "The copy keeps this folder's link to another repository's git data"
+        ) < row_of(&rows, "This folder is very large"),
         "{rows:#?}"
     );
     shell.key(Key::Esc);
     assert!(pump(&mut shell, &mut connection).await.is_empty());
     assert!(!shows(&render(&mut shell, 80, 40), "anyway?"));
+}
+
+/// Opens the Move question for a folder `make` builds under the user's outside folder,
+/// measured first through Copy so the question opens on the first Enter of Move.
+/// Takes the builder. Returns the rendered rows.
+async fn move_question(make: impl FnOnce(&Path) -> std::path::PathBuf) -> Vec<String> {
+    let mut engine = Engine::start().await;
+    engine.set_home().await;
+    let outside = engine.user().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let folder = make(&outside);
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    keys(&mut shell, &format!("{}/", folder.display()));
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
+    shell.key(Key::Left);
+    shell.key(Key::Enter);
+    render(&mut shell, 80, 40)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_of_a_linked_worktree_names_it_and_git_worktree_repair_in_it() {
+    let rows = move_question(|outside| {
+        let linked = outside.join("shop-side");
+        repo_with_worktree(&outside.join("shop"), &linked);
+        linked
+    })
+    .await;
+    assert!(shows(&rows, "Move shop-side anyway?"), "{rows:#?}");
+    assert!(
+        shows(&rows, "This folder is a git worktree of another repository"),
+        "{rows:#?}"
+    );
+    assert!(
+        !shows(&rows, "Git worktrees linked to this folder"),
+        "{rows:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_of_a_submodule_says_its_parent_no_longer_finds_it() {
+    let rows = move_question(|outside| {
+        let sub = outside.join("vendored");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../shop/.git/modules/vendored\n").unwrap();
+        sub
+    })
+    .await;
+    assert!(
+        shows(&rows, "This folder is a submodule of another repository"),
+        "{rows:#?}"
+    );
+    assert!(
+        !shows(&rows, "Git worktrees linked to this folder"),
+        "{rows:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_of_a_folder_with_unreadable_git_data_says_it_cannot_tell() {
+    let mut locked = None;
+    let rows = move_question(|outside| {
+        let folder = outside.join("guarded");
+        std::fs::create_dir_all(folder.join(".git")).unwrap();
+        std::fs::set_permissions(folder.join(".git"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        locked = Some(folder.join(".git"));
+        folder
+    })
+    .await;
+    let locked = locked.unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        shows(&rows, "CrazyAgent could not read this folder's git data"),
+        "{rows:#?}"
+    );
+    assert!(
+        !shows(&rows, "Git worktrees linked to this folder"),
+        "{rows:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_reads_the_folder_size_first_and_warns_about_unreadable_files() {
+    let mut engine = Engine::start().await;
+    engine.set_home().await;
+    let source = engine.user().join("outside").join("notes");
+    std::fs::create_dir_all(source.join("secret")).unwrap();
+    std::fs::write(source.join("README.md"), "notes\n").unwrap();
+    std::fs::set_permissions(
+        source.join("secret"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    keys(&mut shell, &format!("{}/", source.display()));
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    std::fs::set_permissions(
+        source.join("secret"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(sent, ["folder size"], "a Move reads the size first");
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Move notes anyway?"), "{rows:#?}");
+    assert!(shows(&rows, "Some files can't be read."), "{rows:#?}");
 }
 
 #[test]
@@ -738,6 +868,13 @@ fn a_soft_refusal_from_the_engine_turns_into_the_question_for_that_issue() {
     keys(&mut shell, &format!("{typed}/"));
     shell.key(Key::Tab);
     shell.key(Key::Right);
+    shell.key(Key::Enter);
+    shell.arrive(intake(
+        IntakeQuery::FolderSize {
+            path: typed.clone(),
+        },
+        Ok(IntakeView::FolderSize(10)),
+    ));
     shell.key(Key::Enter);
     shell.key(Key::Enter);
     shell.arrive(intake(

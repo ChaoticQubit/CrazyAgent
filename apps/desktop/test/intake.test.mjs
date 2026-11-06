@@ -520,6 +520,11 @@ test("each issue a folder read or an engine refusal shows names exactly one ques
     assert.deepEqual(issues("copy", size), ["git_unread"], size.kind);
   }
   assert.deepEqual(issues("move", read({}), "home_move_worktrees"), ["worktrees"]);
+  for (const [link, issue] of [["worktrees", "worktrees"], ["linked_worktree", "linked_worktree"], ["submodule", "submodule"], ["unreadable", "git_data_unread"]]) {
+    assert.deepEqual(issues("move", read({ movable: false, git_link: link })), [issue], link);
+    assert.deepEqual(issues("move", read({ movable: false, git_link: link }), "home_move_worktrees"), [issue], `${link} refused`);
+    assert.deepEqual(issues("copy", read({ movable: false, git_link: link })), [], `${link} copy`);
+  }
   assert.deepEqual(issues("copy", read({}), "home_copy_linked_checkout"), ["linked_checkout"]);
   assert.deepEqual(issues("move", read({}), "home_copy_too_large"), ["too_many"]);
   assert.deepEqual(issues("copy", read({}), "home_copy_too_large"), ["too_many"]);
@@ -543,6 +548,7 @@ test("Move anyway sends an override only for an issue the engine checks and the 
   assert.deepEqual(overrides("move", failed("folder_size_failed")), []);
   assert.deepEqual(overrides("move", read({ movable: false, bytes: null, size_problem: "folder_size_too_large" })), ["worktrees", "too_large"]);
   assert.deepEqual(overrides("move", read({}), "home_move_worktrees"), ["worktrees"]);
+  for (const link of ["linked_worktree", "submodule", "unreadable"]) assert.deepEqual(overrides("move", read({ movable: false, git_link: link })), ["worktrees"], link);
 });
 
 test("the Move anyway warnings put every data loss case first, each in the owner's exact words", () => {
@@ -564,6 +570,9 @@ test("the Move anyway warnings put every data loss case first, each in the owner
   assert.deepEqual(flat(linked), [W.close_apps, W.old_place, W.worktrees, W.same_disk]);
   assert.deepEqual(linked.find((block) => block.lines.includes(W.worktrees)).paths, ["/Users/mira/Code/shop-a", "/Users/mira/Code/shop-b"]);
   assert.deepEqual(flat(warnings("copy", read({ copyable: false, git: false }))), [W.linked_checkout, W.no_git]);
+  assert.deepEqual(flat(warnings("move", read({ movable: false, git_link: "linked_worktree" }))), [W.close_apps, W.old_place, W.linked_worktree, W.same_disk]);
+  assert.deepEqual(flat(warnings("move", read({ movable: false, git_link: "submodule" }))), [W.close_apps, W.old_place, W.submodule, W.same_disk]);
+  assert.deepEqual(flat(warnings("move", read({ movable: false, git_link: "unreadable" }))), [W.close_apps, W.old_place, W.git_data_unread, W.same_disk]);
   const shared = warnings("copy", read({ copyable: false, git: false, bytes: 42 * GB }));
   assert.deepEqual(shared[0], { loss: true, lines: [W.linked_checkout], paths: [] }, "a shared checkout is a data loss line, shown first");
   assert.deepEqual(flat(shared), [W.linked_checkout, W.large, "It is about 42 GB.", W.copy_all, W.no_git]);

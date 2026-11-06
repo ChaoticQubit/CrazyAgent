@@ -272,6 +272,26 @@ pub fn check_home(path: &Path, engine_root: &Path) -> Result<PathBuf, EngineErro
     Ok(home)
 }
 
+/// What ties a folder's git to places outside it, which a Move breaks: linked worktrees
+/// of its repository, the folder being itself a linked worktree or a submodule checkout,
+/// or a `.git` that cannot be read or told apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitLink {
+    None,
+    Worktrees,
+    LinkedWorktree,
+    Submodule,
+    Unreadable,
+}
+
+/// Tells which git link a Move of `folder` would break. Input: the folder. Output: the
+/// link, or `None` when its git, if any, is all inside it.
+pub fn git_link(folder: &Path) -> GitLink {
+    let _ = folder;
+    GitLink::None
+}
+
 /// True when moving `folder` would break git links kept outside it: the
 /// folder is a linked worktree or submodule (its `.git` is a file or a link),
 /// or its repository has linked worktrees. An unreadable `.git` counts.

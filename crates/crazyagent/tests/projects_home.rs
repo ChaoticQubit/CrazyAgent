@@ -1618,3 +1618,44 @@ fn an_unreadable_file_keeps_a_move_across_disks_from_removing_the_source() {
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(fs::read_to_string(&secret).unwrap(), "kept\n");
 }
+
+#[test]
+fn each_git_link_a_move_breaks_is_told_apart() {
+    let case = case();
+    let plain = case.sources.join("plain");
+    fs::create_dir(&plain).unwrap();
+    let repo = case.sources.join("repo");
+    let worktree = case.sources.join("repo-side");
+    repo_with_worktree(&repo, &worktree);
+    let submodule = case.sources.join("vendored");
+    fs::create_dir(&submodule).unwrap();
+    fs::write(
+        submodule.join(".git"),
+        "gitdir: ../repo/.git/modules/vendored\n",
+    )
+    .unwrap();
+    let elsewhere = case.sources.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::write(elsewhere.join(".git"), "gitdir: /var/empty/git\n").unwrap();
+    let locked = case.sources.join("locked");
+    fs::create_dir_all(locked.join(".git")).unwrap();
+    fs::set_permissions(locked.join(".git"), fs::Permissions::from_mode(0o000)).unwrap();
+    let linked = case.sources.join("linked");
+    fs::create_dir(&linked).unwrap();
+    symlink(repo.join(".git"), linked.join(".git")).unwrap();
+    let found = [
+        (&plain, GitLink::None),
+        (&repo, GitLink::Worktrees),
+        (&worktree, GitLink::LinkedWorktree),
+        (&submodule, GitLink::Submodule),
+        (&elsewhere, GitLink::Unreadable),
+        (&locked, GitLink::Unreadable),
+        (&linked, GitLink::Unreadable),
+    ]
+    .map(|(folder, want)| (folder.clone(), git_link(folder), want, git_links(folder)));
+    fs::set_permissions(locked.join(".git"), fs::Permissions::from_mode(0o755)).unwrap();
+    for (folder, got, want, links) in found {
+        assert_eq!(got, want, "{}", folder.display());
+        assert_eq!(links, want != GitLink::None, "{}", folder.display());
+    }
+}

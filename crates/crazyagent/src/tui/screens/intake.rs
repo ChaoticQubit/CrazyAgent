@@ -265,7 +265,7 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(desktop.len(), 14, "{desktop:#?}");
+        assert_eq!(desktop.len(), 17, "{desktop:#?}");
         assert!(
             desktop.remove("git_unread").is_some(),
             "the TUI reads git itself, so only the desktop says it could not"
