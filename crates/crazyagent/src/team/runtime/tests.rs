@@ -18626,6 +18626,156 @@ echo "respawn=$?" >> "$l"
 exec /bin/sleep 300
 "#;
 
+/// A stand-in Claude Code that, run as a native lead, starts one process in a session of
+/// its own, as a background dev server does, which writes its id to `left.pid` in the
+/// lead's folder; then the lead waits.
+#[cfg(target_os = "macos")]
+const LEAVING_CLAUDE: &str = r#"#!/bin/sh
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid" &
+exec /bin/sleep 300
+"#;
+
+/// A stand-in Claude Code that, run as a native lead, writes its own id to `left.pid` in the
+/// lead's folder and waits, starting nothing else.
+#[cfg(target_os = "macos")]
+const WAITING_CLAUDE: &str = r#"#!/bin/sh
+exec /usr/bin/perl -e 'open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid"
+"#;
+
+/// Starts a native lead on its own server as the lead's worker does, with a stand-in Claude
+/// Code that writes a process id to `left.pid` in the lead's folder, then ends the lead
+/// through `end`. Inputs: the stand-in and the ending, given the session, the host and the
+/// lead. Output: the ending's outcome and whether that process still ran after it; the
+/// process is killed before this returns.
+#[cfg(target_os = "macos")]
+fn ended_native_lead<T>(
+    script: &str,
+    end: impl FnOnce(AgentSession, &Arc<dyn Host>, &AgentId) -> T,
+) -> (T, bool) {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = standin_claude_runtime(&fixture, script)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let lead = AgentId::team(id).unwrap();
+    let mates_socket = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
+    let _down = LeadServersDown {
+        host: host.clone(),
+        lead: lead.clone(),
+        tmux: fixture.tmux.clone(),
+        scratch: mates_socket.parent().unwrap().to_path_buf(),
+    };
+    let home = agent_home(&runtime.state, id);
+    let context = runtime
+        .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+        .unwrap();
+    let request = plan
+        .request(AccountBinding::Subscription { home }, plan.access)
+        .unwrap();
+    let session =
+        AgentSession::start_resuming(request, plan.team_context(context), plan.pane.clone(), None)
+            .unwrap();
+    let written = plan.working_dir.join("left.pid");
+    let deadline = Instant::now() + WAIT;
+    let pid = loop {
+        let read = std::fs::read_to_string(&written)
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok());
+        match read {
+            Some(pid) => break pid,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            None => panic!("the stand-in lead never wrote {}", written.display()),
+        }
+    };
+    let process = rustix::process::Pid::from_raw(pid).unwrap();
+    let ended = end(session, &host, &lead);
+    let running = rustix::process::test_kill_process(process).is_ok();
+    let _ = rustix::process::kill_process(process, rustix::process::Signal::KILL);
+    (ended, running)
+}
+
+/// Keeper r1 F1: a native lead's pane runs in its own server with no keeper and no warden,
+/// so a stop that leaves running a process the lead started in a session of its own is
+/// never reported as confirmed. It is uncertain, which keeps the account held.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_stop_is_uncertain_while_a_process_it_started_on_its_own_still_runs() {
+    let (stopped, running) = ended_native_lead(LEAVING_CLAUDE, |session, _, _| session.stop());
+    assert!(
+        running,
+        "the lead's own process outlived the stop: {stopped:?}"
+    );
+    assert!(matches!(stopped, Err(Unstopped::Uncertain)), "{stopped:?}");
+}
+
+/// Keeper r1 F1: a native lead's pane an earlier engine left, ended with no session, is not
+/// confirmed gone while a process the lead started in a session of its own still runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_left_native_lead_s_end_is_not_confirmed_while_a_process_it_started_on_its_own_still_runs() {
+    let (ended, running) = ended_native_lead(LEAVING_CLAUDE, |session, host, lead| {
+        let AgentSession::Terminal(session) = session else {
+            panic!("the native lead runs in a terminal");
+        };
+        session.leave();
+        crate::harnesses::terminal_session::end_left_pane(host.as_ref(), lead, "test")
+    });
+    assert!(
+        running,
+        "the lead's own process outlived the end: {ended:?}"
+    );
+    assert_eq!(ended, Ok(false));
+}
+
+/// A native lead's stop that leaves nothing it started running is confirmed by a listing of
+/// the lead's processes, so its account is not kept held.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_stop_that_leaves_nothing_running_is_clean() {
+    let (stopped, running) = ended_native_lead(WAITING_CLAUDE, |session, _, _| session.stop());
+    assert!(!running, "the lead outlived its stop: {stopped:?}");
+    assert!(matches!(stopped, Ok(None)), "{stopped:?}");
+}
+
 /// A native lead's teammate starts (OP-3). The runtime prepares a native lead and starts it
 /// as the lead's worker does, on the lead's own server, so the engine writes the real
 /// teammate command. The stand-in lead splits a teammate as Claude Code 2.1.309 does, and

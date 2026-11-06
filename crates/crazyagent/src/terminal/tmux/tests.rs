@@ -306,6 +306,27 @@ fn a_confined_lead_line_takes_only_the_engines_own_keeper_back_out() {
     }
 }
 
+/// Keeper r1 KP-L3: a pane's keeper is a perl outside the sandbox, so no pane command may
+/// carry a variable that makes perl load code from elsewhere, in any letter case.
+#[test]
+fn a_pane_command_with_a_perl_load_variable_is_refused() {
+    let agent = AgentId::team(4).unwrap();
+    let command = |name: &str| InteractiveCommand {
+        argv: vec!["/usr/local/bin/claude".into()],
+        cwd: PathBuf::from("/private/tmp/project"),
+        env: vec![(name.into(), "/private/tmp/planted".into())],
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    assert!(spawn_line(&agent, &command("TERM")).is_ok());
+    for name in ["PERL5LIB", "PERL5OPT", "PERLLIB", "PERL5DB", "perl5opt"] {
+        assert_eq!(
+            spawn_line(&agent, &command(name)).map_err(|error| error.0),
+            Err("terminal_command_invalid".to_owned()),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn spawn_commands_go_through_env_with_every_argument_quoted() {
     let agent = AgentId::team(4).unwrap();
