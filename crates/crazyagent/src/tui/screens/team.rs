@@ -236,8 +236,7 @@ impl Team {
 
     /// Takes a key while the team settings are open: the settings take it first, a change
     /// goes to the engine as `SetupQuery::TeamChange`, a setup save as `SetupQuery::Change`,
-    /// and Esc the settings left alone closes them. A change or save the full request queue
-    /// refuses is said as the owner being busy. Inputs: the key and the context.
+    /// and Esc the settings left alone closes them. Inputs: the key and the context.
     /// Output: handled.
     fn settings_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(view) = self.settings.as_mut() else {
@@ -250,22 +249,15 @@ impl Team {
         };
         match reply {
             TeamReply::Change(action) => {
-                let query = SetupQuery::TeamChange {
+                let generation = ctx.next_generation();
+                ctx.request(Request::Setup(SetupQuery::TeamChange {
                     action,
-                    generation: ctx.next_generation(),
-                };
-                if !ctx.try_request(Request::Setup(query.clone())) {
-                    view.apply(&query, Err("owner_busy".into()));
-                }
+                    generation,
+                }));
             }
             TeamReply::Save(action) => {
-                let query = SetupQuery::Change {
-                    action,
-                    generation: ctx.next_generation(),
-                };
-                if !ctx.try_request(Request::Setup(query.clone())) {
-                    view.apply(&query, Err("owner_busy".into()));
-                }
+                let generation = ctx.next_generation();
+                ctx.request(Request::Setup(SetupQuery::Change { action, generation }));
             }
             TeamReply::Ignored if *key == Key::Esc => self.settings = None,
             TeamReply::Ignored | TeamReply::Handled => {}

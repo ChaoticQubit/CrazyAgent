@@ -770,11 +770,17 @@ fn validate_pool_edit(pool: &AccountPool) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Turns a pool or approval-limit refusal code into the sentence shown to the owner.
-/// Input: an engine rejection code. Output: the plain sentence for a pool or
-/// approval-limit refusal, or None for any other code.
+/// The sentence for `owner_busy`: a request the owner made was not sent because too many
+/// were already waiting, so nothing changed.
+pub const OWNER_BUSY_LINE: &str =
+    "CrazyAgent is busy with other requests. Nothing changed; try again in a moment.";
+
+/// Turns a pool, approval-limit or busy-owner refusal code into the sentence shown to the
+/// owner. Input: an engine rejection code. Output: the plain sentence for such a refusal,
+/// or None for any other code.
 pub fn plain_problem(code: &str) -> Option<&'static str> {
     match code {
+        "owner_busy" => Some(OWNER_BUSY_LINE),
         "pool_member_limit" => Some("A pool can hold up to 15 accounts"),
         "pool_needs_account" => Some(
             "A pool needs at least one account. Add another account first, or delete the pool.",

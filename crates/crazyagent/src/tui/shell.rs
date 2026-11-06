@@ -191,6 +191,18 @@ impl Shell {
         shell
     }
 
+    /// Answers each request the full request queue refused during the last event with the
+    /// failed reply that request gets, code `owner_busy`, so the screen that asked stops
+    /// waiting on it and says so. Requests refused while these replies are taken wait for
+    /// the next event. Input: none. Output: none.
+    fn answer_refused(&mut self) {
+        for request in self.ctx.take_refused() {
+            if let Some(arrival) = super::run::refused_arrival(request) {
+                self.take_arrival(arrival);
+            }
+        }
+    }
+
     /// Says whether the owner asked to quit.
     /// Input: none. Output: true once the loop should end.
     pub fn quitting(&self) -> bool {
@@ -228,6 +240,7 @@ impl Shell {
             .last_mut()
             .expect("the stack is never empty")
             .resized(ctx);
+        self.answer_refused();
     }
 
     /// True while something on screen animates, so the loop ticks.
@@ -258,6 +271,13 @@ impl Shell {
     /// Asks the top screen to refresh its data.
     /// Input: none. Output: none; requests are queued on the context.
     pub fn refresh(&mut self) {
+        self.show();
+        self.answer_refused();
+    }
+
+    /// Asks the top screen to refresh its data inside an event, which answers the requests
+    /// the full queue refuses once it ends. Input: none. Output: none.
+    fn show(&mut self) {
         let ctx = &mut self.ctx;
         self.stack
             .last_mut()
@@ -332,7 +352,7 @@ impl Shell {
             Flow::Back => {
                 if self.stack.len() > 1 {
                     self.stack.pop();
-                    self.refresh();
+                    self.show();
                 }
             }
         }
@@ -344,7 +364,7 @@ impl Shell {
         }
         self.stack.push(screen);
         assert!(self.stack.len() <= STACK_MAX);
-        self.refresh();
+        self.show();
     }
 
     fn home(&mut self) {
@@ -352,12 +372,12 @@ impl Shell {
             self.stack.first().and_then(|screen| screen.place()) == Some(Place::Home);
         if root_is_home {
             self.stack.truncate(1);
-            self.refresh();
+            self.show();
         } else {
             self.stack.clear();
             let screen = open(&Place::Home, &mut self.ctx);
             self.stack.push(screen);
-            self.refresh();
+            self.show();
         }
     }
 
@@ -374,6 +394,11 @@ impl Shell {
     /// ignores goes back.
     /// Input: the key. Output: none; check `quitting` afterwards.
     pub fn key(&mut self, key: Key) {
+        self.take_key(key);
+        self.answer_refused();
+    }
+
+    fn take_key(&mut self, key: Key) {
         if let Some(overlay) = self.overlay.take() {
             self.overlay_key(overlay, &key);
             return;
@@ -477,6 +502,11 @@ impl Shell {
     /// react, top first; only the top screen may change the stack.
     /// Input: the arrival. Output: none.
     pub fn arrive(&mut self, arrival: Arrival) {
+        self.take_arrival(arrival);
+        self.answer_refused();
+    }
+
+    fn take_arrival(&mut self, arrival: Arrival) {
         let was_ready = self.ctx.link == Link::Ready;
         match &arrival {
             Arrival::Connected(identity) => {
@@ -588,7 +618,7 @@ impl Shell {
         }
         self.apply(top_flow);
         if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected(_)) {
-            self.refresh();
+            self.show();
         }
     }
 

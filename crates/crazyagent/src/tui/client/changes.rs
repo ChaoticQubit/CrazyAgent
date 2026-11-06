@@ -78,9 +78,16 @@ impl ChangesEvent {
     /// Takes the query.
     /// Returns the event for that query.
     pub(in crate::tui) fn unavailable(query: ChangesQuery) -> Self {
+        Self::failed(query, "trusted_connection_unavailable")
+    }
+
+    /// The reply for a request that failed before it reached the engine.
+    /// Takes the query and the problem code.
+    /// Returns the event for that query.
+    pub(in crate::tui) fn failed(query: ChangesQuery, code: &str) -> Self {
         Self {
             query,
-            result: Err("trusted_connection_unavailable".into()),
+            result: Err(code.to_owned()),
         }
     }
 }

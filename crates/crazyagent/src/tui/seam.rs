@@ -70,6 +70,10 @@ pub struct AccountRow {
 /// Screens show "Not ready yet" for it instead of a failure.
 pub const NOT_READY: &str = "engine_support_not_ready";
 
+/// The problem code a request gets when the full request queue refused it, so it never
+/// reached the engine and nothing changed.
+pub const OWNER_BUSY: &str = "owner_busy";
+
 /// One engine request a screen asks the shell to send.
 /// Input: built by screens and queued with `Ctx::request`. Output: sent one at a
 /// time on the owner connection; the reply comes back as an `Arrival`.

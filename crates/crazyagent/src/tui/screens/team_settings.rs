@@ -49,26 +49,19 @@ impl TeamSettings {
     }
 
     fn change(&mut self, action: TeamAction, ctx: &mut Ctx) {
-        let query = SetupQuery::TeamChange {
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::TeamChange {
             action,
-            generation: ctx.next_generation(),
-        };
-        if !ctx.try_request(Request::Setup(query.clone())) {
-            self.view.apply(&query, Err("owner_busy".into()));
-        }
+            generation,
+        }));
     }
 
     /// Sends a project setup save from the settings, as the master harness picker gives it,
-    /// as `SetupQuery::Change`; a full request queue is said as the owner being busy.
+    /// as `SetupQuery::Change`; a full request queue answers it as the owner being busy.
     /// Takes the save and the context. Returns nothing.
     fn save(&mut self, action: SetupAction, ctx: &mut Ctx) {
-        let query = SetupQuery::Change {
-            action,
-            generation: ctx.next_generation(),
-        };
-        if !ctx.try_request(Request::Setup(query.clone())) {
-            self.view.apply(&query, Err("owner_busy".into()));
-        }
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::Change { action, generation }));
     }
 }
 

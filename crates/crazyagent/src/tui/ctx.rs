@@ -110,6 +110,7 @@ pub struct Ctx {
     pub shift_enter: crate::tui::keys::ShiftEnter,
     pub project_step: Option<(crate::protocol::ProjectId, bool)>,
     requests: VecDeque<Request>,
+    refused: Vec<Request>,
     reconnect: bool,
     message: Option<Message>,
     generation: u64,
@@ -147,6 +148,7 @@ impl Ctx {
             shift_enter: crate::tui::keys::ShiftEnter::default(),
             project_step: None,
             requests: VecDeque::new(),
+            refused: Vec::new(),
             reconnect: false,
             message: None,
             generation: 0,
@@ -161,22 +163,41 @@ impl Ctx {
         self.theme = Theme::new(self.depth, colors, appearance);
     }
 
-    /// Queues one engine request as `try_request` does, for callers that need
-    /// no answer because the refusal message already tells the owner.
+    /// Queues one engine request as `try_request` does. A request the full queue refuses
+    /// is kept until the shell answers it with the failed reply that request gets,
+    /// `owner_busy`, so the screen that asked stops waiting and says so.
     /// Input: the request. Output: none.
     pub fn request(&mut self, request: Request) {
-        self.try_request(request);
+        if let Err(request) = self.queue(request)
+            && self.refused.len() < QUEUE_MAX
+        {
+            self.refused.push(request);
+        }
+        assert!(self.refused.len() <= QUEUE_MAX);
+    }
+
+    /// Queues one engine request for a caller that handles a refusal itself.
+    /// Input: the request. Output: whether the engine will see it; false only when the
+    /// queue already holds 32 requests and this one was refused.
+    pub fn try_request(&mut self, request: Request) -> bool {
+        self.queue(request).is_ok()
+    }
+
+    /// Takes the requests the full queue refused since the last call, oldest first.
+    /// Input: none. Output: the refused requests.
+    pub fn take_refused(&mut self) -> Vec<Request> {
+        std::mem::take(&mut self.refused)
     }
 
     /// Queues one engine request; duplicates of a queued read are dropped and
     /// keystrokes for the agent terminal already waiting at the back join it.
-    /// Input: the request. Output: whether the engine will see it; false only
-    /// when the queue already holds 32 requests and this one was refused. A
-    /// joined terminal input holds at most the engine's terminal input limit.
-    pub fn try_request(&mut self, request: Request) -> bool {
+    /// Input: the request. Output: Ok when the engine will see it, or the request back
+    /// when the queue already holds 32 requests. A joined terminal input holds at most
+    /// the engine's terminal input limit.
+    fn queue(&mut self, request: Request) -> Result<(), Request> {
         if matches!(request, Request::Reconnect) {
             self.reconnect = true;
-            return true;
+            return Ok(());
         }
         if let Request::TerminalInput { agent, bytes } = &request
             && let Some(Request::TerminalInput {
@@ -187,7 +208,7 @@ impl Ctx {
             && queued.len() + bytes.len() <= INPUT_BYTES_MAX
         {
             queued.extend_from_slice(bytes);
-            return true;
+            return Ok(());
         }
         let read = matches!(
             request,
@@ -199,14 +220,14 @@ impl Ctx {
                 .iter()
                 .any(|queued| std::mem::discriminant(queued) == std::mem::discriminant(&request))
         {
-            return true;
+            return Ok(());
         }
         if self.requests.len() >= QUEUE_MAX {
             self.say(Message::error(
                 "Too many requests are waiting.",
                 "Wait a moment, then try again.",
             ));
-            return false;
+            return Err(request);
         }
         match request {
             Request::Profile => self.store.profile = Load::Loading,
@@ -223,7 +244,7 @@ impl Ctx {
         }
         self.requests.push_back(request);
         assert!(self.requests.len() <= QUEUE_MAX);
-        true
+        Ok(())
     }
 
     /// Takes the next queued request.
