@@ -5666,8 +5666,9 @@ impl Case {
     }
 
     /// Checks a change set closed as removed outside the app: discarded, marked outside,
-    /// never restorable, its pending ref gone and no action left. Inputs: the change set
-    /// and its head.
+    /// never restorable, its pending ref gone with every other engine ref but an own
+    /// clone's base ref, which the clone keeps while it lives (GA-R5), and no action left.
+    /// Inputs: the change set and its head.
     fn removed_outside(&self, id: &ChangeSetId, head: &str) {
         let view = self.view(id);
         assert_eq!(
@@ -5675,7 +5676,12 @@ impl Case {
             (ChangeState::Discarded, true, None),
             "{view:?}"
         );
-        assert_eq!(self.owner_refs("refs/crazyagent"), "");
+        let kept = if self.workspace.worktree.ends_with("agent-own") {
+            self.base_ref_only()
+        } else {
+            String::new()
+        };
+        assert_eq!(self.owner_refs("refs/crazyagent"), kept);
         assert_eq!(
             refused(restore(&self.db, id, NOW_MS)),
             "changes_restore_expired"
