@@ -4656,14 +4656,16 @@ fn dispatch_interrupted_after_send_is_not_handed_out_again_and_one_before_send_w
     assert_eq!(task(tasks[1]).0, "queued");
 }
 
-/// Reads everything typed into an agent's terminal so far, as its pane wrote it to a file.
-fn typed(fixture: &Fixture, id: i64) -> String {
+/// Reads everything typed into the pane of an agent `asking_team` started, from the log its
+/// `cat` appends to. Only those panes write it; read pastes into a harness stand-in with
+/// `pasted`.
+fn asking_pane_log(fixture: &Fixture, id: i64) -> String {
     std::fs::read_to_string(fixture.base.join(format!("typed-{id}.txt"))).unwrap_or_default()
 }
 
 /// Starts a team runtime that serves the engine's agent tools over idle sub-agents with
 /// tools, one per id, each taken over from a pane that writes what is typed into it to the
-/// file `typed` reads. Takes the fixture, whose plan must have room for the ids, and the
+/// file `asking_pane_log` reads. Takes the fixture, whose plan must have room for the ids, and the
 /// ids. Returns the terminal host and the runtime once every agent is idle.
 fn asking_team(fixture: &mut Fixture, ids: &[i64]) -> (Arc<dyn Host>, TeamRuntime) {
     fixture.setup.team.sub_harnesses[0].tools = true;
@@ -4713,16 +4715,20 @@ fn asking_team(fixture: &mut Fixture, ids: &[i64]) -> (Arc<dyn Host>, TeamRuntim
 /// answer.
 fn typed_once(fixture: &Fixture, team: &mut TeamRuntime, id: i64, answer: &str) {
     let deadline = Instant::now() + WAIT;
-    while !typed(fixture, id).contains(answer) {
-        assert!(Instant::now() < deadline, "{}", typed(fixture, id));
+    while !asking_pane_log(fixture, id).contains(answer) {
+        assert!(
+            Instant::now() < deadline,
+            "{}",
+            asking_pane_log(fixture, id)
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
     idle_ticks(team);
     assert_eq!(
-        typed(fixture, id).matches(answer).count(),
+        asking_pane_log(fixture, id).matches(answer).count(),
         1,
         "{}",
-        typed(fixture, id)
+        asking_pane_log(fixture, id)
     );
 }
 
@@ -4778,7 +4784,7 @@ fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds
     });
     typed_once(&fixture, &mut team, asker, answer);
     assert!(
-        !typed(&fixture, holder).contains(answer),
+        !asking_pane_log(&fixture, holder).contains(answer),
         "the agent holding the handle team-{asker} never gets agent {asker}'s answer"
     );
     use crate::team::agent_messages::{Speaker, read};
@@ -19786,7 +19792,11 @@ fn a_fresh_switch_whose_new_harness_ends_before_reporting_starts_fresh_again() {
         launches(f, second).len() == 2
     });
     let briefed = instructions_file(&fixture, second).unwrap();
-    assert_eq!(pasted(&fixture, second), "", "nothing is pasted into the new master");
+    assert_eq!(
+        pasted(&fixture, second),
+        "",
+        "nothing is pasted into the new master"
+    );
     assert!(!briefed.contains("You: Done."), "{briefed}");
     assert!(
         !briefed.contains("earlier harness conversation"),
