@@ -303,15 +303,20 @@ fn note_lines_carry_the_oldest_notes_that_fit_and_name_them() {
     );
     assert_eq!(carried, [3, 5]);
 
+    let half = NOTES_BYTES_MAX / 2 - NOTE_PREFIX.len() - 2;
     let long: Vec<Note> = (1..=3)
         .map(|question| Note {
             question,
-            text: "a".repeat(crate::questions::ANSWER_BYTES_MAX),
+            text: "a".repeat(half),
         })
         .collect();
     let (lines, carried) = note_lines(&long);
     assert_eq!(carried, [1, 2], "the third waits for a later turn");
-    assert!(lines.len() <= NOTES_BYTES_MAX);
+    assert_eq!(
+        lines.len(),
+        NOTES_BYTES_MAX,
+        "two notes fill the budget exactly"
+    );
     assert_eq!(lines.matches("Engine: ").count(), 2);
 }
 
