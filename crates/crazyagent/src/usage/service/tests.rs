@@ -98,10 +98,10 @@ fn a_live_agent_on_a_harness_without_a_reader_is_marked_not_reported() {
     let db = crate::usage::open(&root).unwrap();
     db.execute_batch(
         "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
-            connection TEXT, status TEXT, stopped_ms INTEGER);
-         INSERT INTO team_agents VALUES (1,'alpha','master','claude-code','claude-a','idle',NULL);
-         INSERT INTO team_agents VALUES (2,'alpha','sub_agent','opencode',NULL,'working',NULL);
-         INSERT INTO team_agents VALUES (3,'beta','sub_agent','gemini-cli',NULL,'stopped',0);",
+            connection TEXT, status TEXT, stopped_ms INTEGER, hookless INTEGER NOT NULL DEFAULT 0);
+         INSERT INTO team_agents VALUES (1,'alpha','master','claude-code','claude-a','idle',NULL,0);
+         INSERT INTO team_agents VALUES (2,'alpha','sub_agent','opencode',NULL,'working',NULL,0);
+         INSERT INTO team_agents VALUES (3,'beta','sub_agent','gemini-cli',NULL,'stopped',0,0);",
     )
     .unwrap();
     append(
