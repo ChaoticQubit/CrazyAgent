@@ -728,21 +728,7 @@ done
         let fixture = Team::new();
         let host = fixture.host();
         let mut team = fixture.runtime(&host);
-        fixture
-        .connection
-        .execute(
-            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'owner','codex',0,'hang here: write the page','queued',1)",
-            [PROJECT],
-        )
-        .unwrap();
-        let task = fixture.connection.last_insert_rowid();
-        fixture.until(&mut team, "the sub-agent hangs in its task", |f| {
-            f.sub().is_some_and(|sub| {
-                f.task(task) == ("running".into(), Some(sub), 1)
-                    && f.home_file(sub, "typed").contains("hang here")
-            })
-        });
-        let sub = fixture.sub().unwrap();
+        let (task, sub) = fixture.hung(&mut team);
         assert_eq!(fixture.launches(sub).len(), 1);
         team.shutdown().unwrap();
         drop(team);
@@ -809,21 +795,7 @@ done
         let fixture = Team::new();
         let host = fixture.host();
         let mut team = fixture.runtime(&host);
-        fixture
-        .connection
-        .execute(
-            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'owner','codex',0,'hang here: write the page','queued',1)",
-            [PROJECT],
-        )
-        .unwrap();
-        let task = fixture.connection.last_insert_rowid();
-        fixture.until(&mut team, "the sub-agent hangs in its task", |f| {
-            f.sub().is_some_and(|sub| {
-                f.task(task) == ("running".into(), Some(sub), 1)
-                    && f.home_file(sub, "typed").contains("hang here")
-            })
-        });
-        let sub = fixture.sub().unwrap();
+        let (task, sub) = fixture.hung(&mut team);
         team.shutdown().unwrap();
         drop(team);
         host.kill(&AgentId::team(sub).unwrap()).unwrap();
