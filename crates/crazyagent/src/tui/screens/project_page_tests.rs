@@ -17,6 +17,7 @@ use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, SessionId};
 use crate::tui::client::process::ProcessQuery;
+use crate::tui::client::questions::QuestionsQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::client::{Connection, OwnerEvent};
 use crate::tui::ctx::{Ctx, Load};
@@ -729,6 +730,10 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             Request::Process(query) => matches!(
                 **query,
                 ProcessQuery::PendingImport { .. } | ProcessQuery::Uncommitted { .. }
+            ),
+            Request::Questions(query) => matches!(
+                **query,
+                QuestionsQuery::Counts | QuestionsQuery::List { .. }
             ),
             other => matches!(
                 other,
