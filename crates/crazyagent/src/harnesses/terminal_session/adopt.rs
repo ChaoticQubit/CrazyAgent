@@ -228,10 +228,12 @@ fn replay(
 impl TerminalSession {
     /// Takes over an agent pane a previous engine left running, without starting the harness
     /// again. A turn still running in it is stopped with Escape, since its result can no
-    /// longer be matched to the engine's work. The launch's run time and event budget go on
-    /// counting from its start. The key and context files are removed when the session stops,
-    /// or at once when the pane cannot be taken over. Takes the host, the pane name, the
-    /// stored record and the limits. Returns the idle session, or a plain code.
+    /// longer be matched to the engine's work; a turn that does not end ends the pane, with
+    /// `launch_adopt_unsettled` once its processes are confirmed gone and
+    /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
+    /// budget go on counting from its start. The key and context files are removed when the
+    /// session stops, or at once when the pane cannot be taken over. Takes the host, the pane
+    /// name, the stored record and the limits. Returns the idle session, or a plain code.
     pub fn adopt(
         host: Arc<dyn Host>,
         agent: AgentId,
@@ -268,8 +270,12 @@ impl TerminalSession {
                 });
             }
             if !settled {
-                let _ = super::end_left_pane(host.as_ref(), &agent, "adopt");
-                return Err(failure("launch_adopt_unsettled"));
+                return Err(failure(
+                    match super::end_left_pane(host.as_ref(), &agent, "adopt") {
+                        Ok(true) => "launch_adopt_unsettled",
+                        Ok(false) | Err(_) => "launch_adopt_cleanup_uncertain",
+                    },
+                ));
             }
             replay(&mut reader, &limits, &mut events)?;
         }

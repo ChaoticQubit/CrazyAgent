@@ -249,6 +249,7 @@ pub(super) fn shown(reports: &[Report]) -> Vec<String> {
             Report::Own { end, text } => format!("Own end={end:?} text={:?}", cut(text)),
             Report::Conversation(_) => "Conversation".to_owned(),
             Report::ResumeRefused => "ResumeRefused".to_owned(),
+            Report::TakeoverUnconfirmed => "TakeoverUnconfirmed".to_owned(),
             Report::InputReady => "InputReady".to_owned(),
         })
         .collect()

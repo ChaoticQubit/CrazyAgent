@@ -436,6 +436,7 @@ enum Report {
     },
     Conversation(Resume),
     ResumeRefused,
+    TakeoverUnconfirmed,
     InputReady,
 }
 
@@ -7281,6 +7282,10 @@ impl TeamRuntime {
                     .input_ready = true;
                 Ok(false)
             }
+            Report::TakeoverUnconfirmed => {
+                self.hold_unconfirmed(id)?;
+                Ok(false)
+            }
             Report::ResumeRefused => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 worker.stopping = true;
@@ -8277,7 +8282,11 @@ fn work(
                 ..
             } = *adoption;
             AgentSession::adopt(host.clone(), agent.clone(), &record, limits).map_err(|problem| {
-                let _ = host.kill(&agent);
+                let ended = problem.0 == "launch_adopt_unsettled"
+                    || matches!(end_left_pane(host.as_ref(), &agent, "team"), Ok(true));
+                if !ended {
+                    let _ = reports.send(Report::TakeoverUnconfirmed);
+                }
                 with_code(
                     "The agent's running terminal could not be taken over",
                     Some(&problem.0),

@@ -31,6 +31,8 @@ const LET_GO: &str = "Its task or message was let go, so it is never typed twice
 const RETRY_ONCE: &str =
     "Its task or message waits for the owner's retry; if the retry fails too, it is let go";
 const RETRY_LATER: &str = "Its task or message waits until a retry resumes it";
+const UNCONFIRMED: &str =
+    "its old terminal was not confirmed stopped (launch_adopt_cleanup_uncertain)";
 
 /// Where the work an interrupted run was doing stands: still waiting for the resume to
 /// hand it back, already handed to the resumed agent, or no longer the run's to finish.
@@ -367,8 +369,9 @@ impl TeamRuntime {
     /// once the takeover settled (its worker is ready), its worker is free and its account
     /// not paused; the session is already running, so the run is resumed once the turn goes
     /// out. A takeover that fails ends the worker with nothing handed, so the run restarts
-    /// in a new pane. A task no longer waiting gives the run up. Any other agent that runs
-    /// again keeps the run waiting until it stops.
+    /// in a new pane once the old pane's processes were confirmed gone; otherwise it waits
+    /// for the owner's retry (see [`Self::hold_unconfirmed`]). A task no longer waiting gives
+    /// the run up. Any other agent that runs again keeps the run waiting until it stops.
     /// Takes the paused accounts and the run. Returns any SQLite or ledger failure.
     fn resume_in_pane(
         &mut self,
@@ -548,6 +551,20 @@ impl TeamRuntime {
             cause.unwrap_or("its harness stopped")
         );
         self.fail(&run, RunState::Resuming, &reason)
+    }
+
+    /// Holds the interrupted run of an agent whose kept pane could not be taken over and
+    /// whose processes were not confirmed gone: failed for now with that reason, its task or
+    /// message kept, so no new pane starts beside them before the owner's retry.
+    /// Takes the agent. Returns any SQLite failure.
+    pub(super) fn hold_unconfirmed(&mut self, id: i64) -> Result<(), EngineError> {
+        let project = self.workers[&id].project.clone();
+        for run in recovery::open_runs(&self.connection, &project)? {
+            if run.agent == id && run.state == RunState::Interrupted {
+                self.fail_for_now(&run, RunState::Interrupted, UNCONFIRMED)?;
+            }
+        }
+        Ok(())
     }
 
     /// Reads where the run's task or message stands. Takes the run. Returns it.
