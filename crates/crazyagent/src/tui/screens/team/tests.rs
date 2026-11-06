@@ -1259,33 +1259,41 @@ fn a_finished_agents_change_from_an_older_read_is_refused_and_the_box_reads_the_
     );
 }
 
-/// The live master switch names the team settings version the master view read; a switch the
-/// engine refuses as stale drops the owner's change and reads the switch again, and any other
-/// refusal of a start keeps the master shown as refused, never as on.
+/// The live master switch the master view sends on its read names the team settings version
+/// it read; a switch the engine refuses as stale drops that change, reads the switch again and
+/// starts the live master once more from the newer read while that read still shows it off;
+/// any other refusal of a start keeps the master shown as refused, never as on, and the next
+/// read does not start it again.
 #[test]
 fn a_live_master_switch_from_an_older_read_reads_the_switch_again() {
     use crate::project_setup::{SetupQuery, SetupView};
     let mut view = master_view(80, 24);
     requests(&mut view);
-    let mut status = finished_team();
-    status.live_master = Some(false);
-    status.settings_version = 5;
-    view.arrive(setup_reply(
-        SetupQuery::Team { project: project() },
-        Ok(SetupView::Team(Box::new(status))),
-    ));
-    requests(&mut view);
-    view.key(Key::Char('s'));
-    let sent = requests(&mut view);
-    let Some(Request::Setup(SetupQuery::TeamChange { action, generation })) = sent
-        .iter()
-        .find(|request| live_master_change(request, true))
-    else {
-        panic!("{sent:?}");
+    let read = |view: &mut Shell, version: u64| {
+        let mut status = finished_team();
+        status.live_master = Some(false);
+        status.settings_version = version;
+        view.arrive(setup_reply(
+            SetupQuery::Team { project: project() },
+            Ok(SetupView::Team(Box::new(status))),
+        ));
     };
+    let started = |view: &mut Shell| {
+        requests(view)
+            .into_iter()
+            .find_map(|request| match request {
+                Request::Setup(SetupQuery::TeamChange {
+                    action: action @ crate::team::TeamAction::LiveMaster { on: true, .. },
+                    generation,
+                }) => Some((action, generation)),
+                _ => None,
+            })
+    };
+    read(&mut view, 5);
+    let (action, generation) = started(&mut view).expect("the read starts the live master");
     assert_eq!(
         action,
-        &crate::team::TeamAction::LiveMaster {
+        crate::team::TeamAction::LiveMaster {
             project_id: project(),
             on: true,
             version: 5,
@@ -1295,7 +1303,7 @@ fn a_live_master_switch_from_an_older_read_reads_the_switch_again() {
     view.arrive(setup_reply(
         SetupQuery::TeamChange {
             action: action.clone(),
-            generation: *generation,
+            generation,
         },
         Ok(SetupView::Changed(
             crate::engine::owner::OwnerResult::Rejected {
@@ -1313,28 +1321,9 @@ fn a_live_master_switch_from_an_older_read_reads_the_switch_again() {
         "a stale switch is not resent from the old read: {sent:?}"
     );
 
-    let mut newer = finished_team();
-    newer.live_master = Some(false);
-    newer.settings_version = 6;
-    view.arrive(setup_reply(
-        SetupQuery::Team { project: project() },
-        Ok(SetupView::Team(Box::new(newer))),
-    ));
-    requests(&mut view);
-    let start = |view: &mut Shell| {
-        view.key(Key::Char('s'));
-        requests(view)
-            .into_iter()
-            .find_map(|request| match request {
-                Request::Setup(SetupQuery::TeamChange {
-                    action: action @ crate::team::TeamAction::LiveMaster { on: true, .. },
-                    generation,
-                }) => Some((action, generation)),
-                _ => None,
-            })
-            .expect("s starts the live master")
-    };
-    let (action, generation) = start(&mut view);
+    read(&mut view, 6);
+    let (action, generation) =
+        started(&mut view).expect("the newer read starts the live master once more");
     assert_eq!(
         action,
         crate::team::TeamAction::LiveMaster {
@@ -1358,15 +1347,62 @@ fn a_live_master_switch_from_an_older_read_reads_the_switch_again() {
         "an engine refusal is not shown as on: {}",
         rows[2]
     );
-    let (action, _) = start(&mut view);
-    assert_eq!(
-        action,
-        crate::team::TeamAction::LiveMaster {
-            project_id: project(),
-            on: true,
-            version: 6,
-        },
-        "a refused switch does not move the version"
+    read(&mut view, 6);
+    assert!(
+        started(&mut view).is_none(),
+        "a refused start is not sent again by the next read"
+    );
+}
+
+/// A master view retries its live master start once per open: after a second stale refusal
+/// the next read that still shows the master off starts nothing more, so two windows that
+/// keep changing the team settings never make it loop.
+#[test]
+fn a_second_stale_live_master_switch_in_one_open_is_not_retried() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    let mut view = master_view(80, 24);
+    requests(&mut view);
+    let read = |view: &mut Shell, version: u64| {
+        let mut status = finished_team();
+        status.live_master = Some(false);
+        status.settings_version = version;
+        view.arrive(setup_reply(
+            SetupQuery::Team { project: project() },
+            Ok(SetupView::Team(Box::new(status))),
+        ));
+    };
+    let started = |view: &mut Shell| {
+        requests(view)
+            .into_iter()
+            .find_map(|request| match request {
+                Request::Setup(SetupQuery::TeamChange {
+                    action: action @ crate::team::TeamAction::LiveMaster { on: true, .. },
+                    generation,
+                }) => Some((action, generation)),
+                _ => None,
+            })
+    };
+    let stale = |view: &mut Shell, action, generation| {
+        view.arrive(setup_reply(
+            SetupQuery::TeamChange { action, generation },
+            Ok(SetupView::Changed(
+                crate::engine::owner::OwnerResult::Rejected {
+                    code: crate::storage::versioned::STALE_CODE.to_owned(),
+                },
+            )),
+        ));
+    };
+    read(&mut view, 5);
+    let (action, generation) = started(&mut view).expect("the read starts the live master");
+    stale(&mut view, action, generation);
+    read(&mut view, 6);
+    let (action, generation) =
+        started(&mut view).expect("the newer read starts the live master once more");
+    stale(&mut view, action, generation);
+    read(&mut view, 7);
+    assert!(
+        started(&mut view).is_none(),
+        "a second stale switch in one open is not retried"
     );
 }
 
