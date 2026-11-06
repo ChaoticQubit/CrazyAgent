@@ -2,7 +2,7 @@ use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::project_setup::{HarnessSlot, TeamPlan};
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::{SESSION, SOCKET, Tmux, installed};
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt;
@@ -124,8 +124,8 @@ impl Drop for Fixture {
 
 /// R10-L1: an input whose typing fails after its checks passed frees the master for the
 /// next one, since its input time is cleared. With the master's pane gone, tmux answers the
-/// bracketed paste question for another pane of its server (IMP-RVDS-PR3), so the check
-/// passes and only the typing fails; the other pane gets nothing.
+/// bracketed paste question for its current window (IMP-RVDS-PR3), here the other pane, so
+/// the check passes and only the typing fails; the other pane gets nothing.
 #[test]
 fn a_failed_typing_frees_the_live_master_for_the_next_input() {
     let mut fixture = Fixture::new();
@@ -153,6 +153,23 @@ fn a_failed_typing_frees_the_live_master_for_the_next_input() {
     reads_keys(host.as_ref(), &master);
     reads_keys(host.as_ref(), &other);
     fixture.live(Some(MASTER));
+    let tmux = fixture.tmux.clone().unwrap();
+    let selected = crate::spawn_gate::status(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(fixture.base.join(FOLDER).join(SOCKET))
+            .args(["select-window", "-t"])
+            .arg(format!("{SESSION}:={other}"))
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        selected.success(),
+        "the other pane is tmux's current window"
+    );
     host.kill(&master).unwrap();
     assert!(
         host.input_live(&master).unwrap(),
@@ -222,7 +239,8 @@ fn engine_input_asks_the_host_outside_its_write_transaction() {
             .arg(fixture.base.join(FOLDER).join(SOCKET))
             .args(["display-message", "-p", "#{pid}"])
             .env_clear()
-            .stdin(Stdio::null()),
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped()),
     )
     .unwrap();
     let pid = String::from_utf8(shown.stdout).unwrap().trim().to_owned();
