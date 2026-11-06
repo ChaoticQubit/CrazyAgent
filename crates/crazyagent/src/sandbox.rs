@@ -1819,6 +1819,9 @@ impl ProjectSandbox {
         }
         let launch = launch_denies(&self.agent_home);
         text.push_str(&launch);
+        for root in self.writable_roots() {
+            text.push_str(&root_pin(root));
+        }
         for folder in &self.fixed {
             text.push_str(&format!(
                 "(deny {FIXED_WRITES} (literal \"{}\"))\n",
@@ -1844,6 +1847,9 @@ impl ProjectSandbox {
                     folder.display()
                 )) > last_write_allow
             }) && text.rfind(&launch) > last_write_allow
+                && self
+                    .writable_roots()
+                    .all(|root| text.rfind(&root_pin(root)) > last_write_allow)
                 && self.fixed.iter().all(|folder| {
                     text.rfind(&format!(
                         "(deny {FIXED_WRITES} (literal \"{}\"))",
@@ -1855,7 +1861,7 @@ impl ProjectSandbox {
                     .iter()
                     .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow)
                 && (teammates.is_empty() || text.rfind(&teammates) > last_write_allow),
-            "a read-only, fixed, shared or teammates' write deny must follow every write allow, since the last match wins"
+            "a read-only, root, fixed, shared or teammates' write deny must follow every write allow, since the last match wins"
         );
         let denied_last = |operations: &str, socket: &PathBuf| {
             text.rfind(&format!(
@@ -2823,6 +2829,16 @@ fn other_than(name: &str) -> String {
     alternatives.push(format!("{}[^/]", any_case(name)));
     assert_eq!(alternatives.len(), 2 * characters.len());
     format!("({})", alternatives.join("|"))
+}
+
+/// The Seatbelt rule that pins one writable root itself (CTX-M1): no agent may move, replace,
+/// remove or re-permission a folder it writes in. A Seatbelt rename checks only the two
+/// paths it names, so a root moved under another root and back would carry every path a
+/// rule protects below it, such as the launch files in an agent's home (LL-2), out of that
+/// rule and back. It must follow every write allow, since the last match wins. Input: the
+/// root. Output: the rule text.
+fn root_pin(root: &Path) -> String {
+    format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
 /// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no
