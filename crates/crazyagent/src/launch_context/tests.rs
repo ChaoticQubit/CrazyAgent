@@ -2446,8 +2446,14 @@ exit 0"#;
 
     let bin = home.join(STATE).join("bin");
     let mut change = sandbox.command(&profile, Path::new("/bin/sh"));
-    change.args(["-c", CHANGE, "sh"]).arg(&bin);
+    change
+        .args(["-c", CHANGE, "sh"])
+        .arg(&bin)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let changed = crate::spawn_gate::output(&mut change).unwrap();
+    assert!(changed.status.success(), "{changed:?}");
     assert_eq!(
         String::from_utf8_lossy(&changed.stdout),
         "",
@@ -2483,6 +2489,13 @@ fn each_launch_getconf_answers_its_agent_temp_folder_first_on_the_path() {
         .with_native_team(&tmux, &worktree)
         .install("claude-code", &lead, true)
         .unwrap();
+    let piped = |command: &mut std::process::Command| {
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        crate::spawn_gate::output(command).unwrap()
+    };
     let answer = |home: &Path, user: &Path, name: &str| {
         let getconf = home.join(STATE).join("bin").join("getconf");
         let metadata = fs::symlink_metadata(&getconf);
@@ -2494,7 +2507,7 @@ fn each_launch_getconf_answers_its_agent_temp_folder_first_on_the_path() {
         );
         let mut run = std::process::Command::new(&getconf);
         run.arg(name).env_clear().env("HOME", user);
-        let output = crate::spawn_gate::output(&mut run).unwrap();
+        let output = piped(&mut run);
         assert!(output.status.success(), "{name}: {output:?}");
         String::from_utf8(output.stdout).unwrap()
     };
@@ -2513,7 +2526,7 @@ fn each_launch_getconf_answers_its_agent_temp_folder_first_on_the_path() {
     );
     let mut system = std::process::Command::new("/usr/bin/getconf");
     system.arg("ARG_MAX");
-    let system = crate::spawn_gate::output(&mut system).unwrap();
+    let system = piped(&mut system);
     assert_eq!(
         answer(&agent, &agent, "ARG_MAX").into_bytes(),
         system.stdout
