@@ -150,11 +150,12 @@ pub(super) fn ended(
 /// One that never arrived waits and is typed once more. One the record cannot tell about
 /// is failed with a note, never typed again, and its intent stays pending for the owner, up
 /// to `UNKNOWN_KEPT` of each kind, marked so later starts keep it unknown without reading
-/// any record again. Input: the engine connection. Output: Ok, or a SQLite or ledger failure.
+/// any record again. Input: the engine connection. Output: Ok, `recovery_unavailable` while
+/// another writer holds the store past its wait, or another SQLite or ledger failure.
 pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
     ledger::initialize(connection)?;
-    let tx =
-        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+        .map_err(store_failure)?;
     let check = Delivered(latest(&tx, None)?);
     let now = now_ms();
     let messages = unheld(&tx, ActionKind::Message, &check)?;
@@ -174,11 +175,24 @@ pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
         failed.extend(settle_task(&tx, action, UNKNOWN_TASK, now)?);
     }
     keep_newest(&tx, &tasks.unknown)?;
-    tx.commit().map_err(error)?;
+    tx.commit().map_err(store_failure)?;
     for task in failed {
         events::task_ended(connection, task, now)?;
     }
     Ok(())
+}
+
+/// The failure to take or commit the settle transaction as a tick reports it: the plain
+/// `recovery_unavailable` for SQLite's busy and locked codes, which another writer holding
+/// the store past its wait gives, so no raw SQLite text reaches the tick; any other failure
+/// keeps its own text. Input: the SQLite failure. Output: the error.
+fn store_failure(problem: rusqlite::Error) -> EngineError {
+    match problem.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            crate::recovery::unavailable()
+        }
+        _ => error(problem),
+    }
 }
 
 /// Checks the pending deliveries of one kind against the agents' records. An intent whose
