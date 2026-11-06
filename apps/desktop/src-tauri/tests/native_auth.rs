@@ -1010,6 +1010,29 @@ async fn desktop_native_auth_open_drawer_cancels_its_sign_in_after_another_owner
         .unwrap();
         assert_ne!(retried["operation_id"], started["operation_id"]);
         bridge.team_events().await.unwrap();
+        let secret = NativeBridge::claude_auth_secret("fixture-code#fixture-state".into()).unwrap();
+        let old = [
+            bridge
+                .read_native_auth(&drawer.ticket)
+                .await
+                .err()
+                .map(|error| error.code),
+            bridge
+                .cancel_native_auth(&drawer.ticket)
+                .await
+                .err()
+                .map(|error| error.code),
+            bridge
+                .submit_claude_auth_code(&drawer.ticket, secret)
+                .await
+                .err()
+                .map(|error| error.code),
+        ];
+        assert_eq!(
+            old,
+            [Some("stale_model_access"); 3],
+            "a ticket from before a newer attempt on the same account never reads, cancels or pastes into it"
+        );
         bridge.cancel_native_auth(&again.ticket).await.unwrap();
         settle_open(&mut bridge, &again.ticket, "cancelled").await;
         bridge.remove_account("connection-z").await.unwrap();
