@@ -105,3 +105,25 @@ fn without_the_command_line_tools_cc_the_agent_path_and_variables_stay_as_they_w
     fs::remove_dir(developer.join("SDKs").join("MacOSX.sdk")).unwrap();
     assert_eq!(agent_env(&home, &homes), before);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_getconf_written_again_is_kept_and_one_that_changed_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let _scratch = ScopedTmp::make(home.path()).unwrap();
+    fs::create_dir(home.path().join(crate::launch_context::STATE)).unwrap();
+    let getconf = getconf_folder(home.path()).join(GETCONF_PROGRAM);
+    write_getconf(home.path(), false).unwrap();
+    let written = fs::read(&getconf).unwrap();
+    let again = write_getconf(home.path(), false);
+    assert!(again.is_ok(), "the same getconf written again: {again:?}");
+    assert_eq!(fs::read(&getconf).unwrap(), written);
+    let changed = [written.as_slice(), b"exit 0\n"].concat();
+    fs::write(&getconf, &changed).unwrap();
+    let refused = write_getconf(home.path(), false);
+    assert!(
+        matches!(&refused, Err(error) if error.kind() == io::ErrorKind::AlreadyExists),
+        "a changed getconf: {refused:?}"
+    );
+    assert_eq!(fs::read(&getconf).unwrap(), changed);
+}

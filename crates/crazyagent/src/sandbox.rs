@@ -2144,8 +2144,8 @@ impl ProjectSandbox {
     /// The variables every command this sandbox builds starts with: HOME, TMPDIR (the short
     /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies, the
     /// C locale and [`toolchains::agent_env`]. A harness's PATH also starts with the agent's
-    /// own `git` ([`toolchains::with_agent_git`]); an engine command's never does. Takes
-    /// whether the command is a harness. Returns the variables.
+    /// own `getconf` and `git` ([`toolchains::with_agent_git`]); an engine command's never
+    /// does. Takes whether the command is a harness. Returns the variables.
     fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
         let homes = toolchains::ToolHomes::at(&self.owner_home);
         let tmp = self.scratch.as_ref().unwrap_or(&self.agent_tmp);

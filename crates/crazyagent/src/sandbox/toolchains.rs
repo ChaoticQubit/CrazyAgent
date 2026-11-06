@@ -30,6 +30,28 @@ const NATIVE_LEAD_TMP: &str = "lead";
 /// The folder of an agent's short temp folder that holds its own `git`, and that program.
 pub(super) const GIT_FOLDER: &str = "bin";
 const GIT_PROGRAM: &str = "git";
+/// The folder of an agent's launch folder ([`crate::launch_context::STATE`]) that holds its
+/// own `getconf` ([`write_getconf`]), and that program.
+const GETCONF_FOLDER: &str = "bin";
+const GETCONF_PROGRAM: &str = "getconf";
+/// The most bytes of an agent's `getconf` script.
+#[cfg(target_os = "macos")]
+const GETCONF_SCRIPT_BYTES_MAX: usize = 8192;
+/// The script an agent's own `getconf` holds, with `@MATES@` for a native lead's teammates'
+/// home and `@SHARED@` and `@OWN@` for their temp folder and the agent's own, each quoted,
+/// the folders ending in a slash as the system answer does: DARWIN_USER_TEMP_DIR names the
+/// caller's TMPDIR, where Seatbelt lets it write, and every other call runs the system one.
+#[cfg(target_os = "macos")]
+const GETCONF_SCRIPT: &str = r#"#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = DARWIN_USER_TEMP_DIR ]; then
+  case $HOME in
+    @MATES@) printf '%s\n' @SHARED@ ;;
+    *) printf '%s\n' @OWN@ ;;
+  esac
+  exit 0
+fi
+exec /usr/bin/getconf "$@"
+"#;
 /// The xcrun shim at `/usr/bin/git`, whose cache file write Seatbelt denies (Q73).
 #[cfg(unix)]
 const GIT_SHIM: &str = "/usr/bin/git";
@@ -506,20 +528,125 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
 /// its path is not plain.
 #[cfg(unix)]
 fn git_script(git: &Path, lead: bool) -> Option<String> {
-    let text = git.to_str()?;
-    let plain = git.is_absolute()
-        && git != Path::new(GIT_SHIM)
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-+ ".contains(&byte));
-    let script = plain.then(|| {
-        GIT_SCRIPT
-            .replace("@GIT@", text)
-            .replace("@LEAD@", if lead { "1" } else { "0" })
-    })?;
+    let text = plain_path(git).filter(|_| git != Path::new(GIT_SHIM))?;
+    let script = GIT_SCRIPT
+        .replace("@GIT@", text)
+        .replace("@LEAD@", if lead { "1" } else { "0" });
     assert!(!script.contains("@GIT@") && !script.contains("@LEAD@"));
     assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
     Some(script)
+}
+
+/// A path as text a script may hold in single quotes as is: absolute and of letters,
+/// digits, spaces and `/._-+` only. Input: the path. Output: the text, or none.
+#[cfg(unix)]
+fn plain_path(path: &Path) -> Option<&str> {
+    let text = path.to_str()?;
+    let plain = path.is_absolute()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-+ ".contains(&byte));
+    plain.then_some(text)
+}
+
+/// The script of an agent's own `getconf` ([`GETCONF_SCRIPT`]). Inputs: a native lead's
+/// teammates' home, their temp folder and the agent's own. Output: the script, or none when
+/// a path is not plain or the script is too long.
+#[cfg(target_os = "macos")]
+fn getconf_script(mates: &Path, shared: &Path, own: &Path) -> Option<String> {
+    let script = GETCONF_SCRIPT
+        .replace("@MATES@", &format!("'{}'", plain_path(mates)?))
+        .replace("@SHARED@", &format!("'{}/'", plain_path(shared)?))
+        .replace("@OWN@", &format!("'{}/'", plain_path(own)?));
+    assert!(
+        ["@MATES@", "@SHARED@", "@OWN@"]
+            .iter()
+            .all(|mark| !script.contains(mark))
+    );
+    (script.len() <= GETCONF_SCRIPT_BYTES_MAX).then_some(script)
+}
+
+/// Writes the agent's own `getconf` into `bin` of the launch folder the engine has just
+/// made for one launch, which neither the agent nor a native lead's teammates may write
+/// (LL-2, TPH). context-mode makes its script folders under `getconf DARWIN_USER_TEMP_DIR`,
+/// ignoring TMPDIR, and Seatbelt denies the system answer, so this one names where the
+/// caller may write: its short temp folder, or the lead's own one in it for a native lead
+/// (T3-15/18). A research job makes its short temp folder after the install, so it calls this
+/// again then (R7-CTX F1): a launch folder that already holds this same `getconf` is kept,
+/// and one that holds anything else is refused. Inputs: the agent home and whether it leads a
+/// native team. Output: done, also when the agent has no short temp folder or a path is not
+/// plain and none is written, or the write failure.
+#[cfg(target_os = "macos")]
+pub(crate) fn write_getconf(home: &Path, native_lead: bool) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(shared) = existing_tmp(home) else {
+        return Ok(());
+    };
+    let own = if native_lead {
+        native_lead_tmp(&shared)
+    } else {
+        shared.clone()
+    };
+    let mates = crate::launch_context::mates_home(home);
+    let Some(script) = getconf_script(&mates, &shared, &own) else {
+        return Ok(());
+    };
+    let folder = getconf_folder(home);
+    let path = folder.join(GETCONF_PROGRAM);
+    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&folder) {
+        if error.kind() == io::ErrorKind::AlreadyExists && holds_getconf(&folder, &path, &script) {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32)
+        .open(&path)?;
+    file.write_all(script.as_bytes())
+        .and_then(|()| file.sync_all())?;
+    let metadata = file.metadata()?;
+    assert_eq!(metadata.mode() & 0o777, 0o700);
+    assert_eq!(metadata.len(), script.len() as u64);
+    Ok(())
+}
+
+/// Whether the launch folder already holds this exact `getconf`: `bin` a real folder and
+/// `getconf` in it a real file of mode 0700 with the script's bytes, opened without following
+/// a link. Inputs: the folder, the file and the script. Output: the answer.
+#[cfg(target_os = "macos")]
+fn holds_getconf(folder: &Path, path: &Path, script: &str) -> bool {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    if !fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir()) {
+        return false;
+    }
+    let Ok(file) = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32)
+        .open(path)
+    else {
+        return false;
+    };
+    let plain = file
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o777 == 0o700);
+    let mut held = Vec::with_capacity(script.len());
+    plain
+        && file
+            .take(GETCONF_SCRIPT_BYTES_MAX as u64 + 1)
+            .read_to_end(&mut held)
+            .is_ok()
+        && held == script.as_bytes()
+}
+
+/// The folder of the agent's launch folder that holds its own `getconf`. Input: the agent
+/// home. Output: the path, which may not exist.
+fn getconf_folder(home: &Path) -> PathBuf {
+    home.join(crate::launch_context::STATE).join(GETCONF_FOLDER)
 }
 
 /// Rewrites the agent's own `git` in its short temp folder as a lead's copy, which lets the
@@ -604,17 +731,26 @@ fn write_git(tmp: &Path, script: &str) -> io::Result<()> {
     placed
 }
 
-/// Puts the agent's own `git` (see [`make_tmp`]) at the front of a harness's search path,
-/// so the agent's git calls under Seatbelt run the real git, not the `/usr/bin/git` shim.
-/// Only a harness's own path gets it, never a command the engine runs under the profile,
-/// since the agent can change that folder. Inputs: the agent home and the path. Output:
-/// the path, unchanged when the agent has no such `git`.
+/// Puts the agent's own `getconf` (see [`write_getconf`]) and then its own `git` (see
+/// [`make_tmp`]) at the front of a harness's search path, ahead of every toolchain and
+/// system folder, so the agent's git calls under Seatbelt run the real git, not the
+/// `/usr/bin/git` shim, and context-mode makes its temp folders where the agent may write.
+/// Only a harness's own path gets them, never a command the engine runs under the profile,
+/// since the agent can change its `git` folder. Inputs: the agent home and the path.
+/// Output: the path, without each program the agent does not have.
 pub fn with_agent_git(home: &Path, path: String) -> String {
-    let Some(folder) = existing_tmp(home).map(|tmp| tmp.join(GIT_FOLDER)) else {
-        return path;
+    let path = match existing_tmp(home) {
+        Some(tmp) => in_front(&tmp.join(GIT_FOLDER), GIT_PROGRAM, path),
+        None => path,
     };
+    in_front(&getconf_folder(home), GETCONF_PROGRAM, path)
+}
+
+/// Puts a folder at the front of a search path when it holds the program as a file and its
+/// name has no `:`. Inputs: the folder, the program and the path. Output: the path.
+fn in_front(folder: &Path, program: &str, path: String) -> String {
     let present =
-        fs::symlink_metadata(folder.join(GIT_PROGRAM)).is_ok_and(|metadata| metadata.is_file());
+        fs::symlink_metadata(folder.join(program)).is_ok_and(|metadata| metadata.is_file());
     match folder.to_str() {
         Some(text) if present && !text.contains(':') => format!("{text}:{path}"),
         _ => path,

@@ -2183,16 +2183,24 @@ fn a_fresh_agent_home_starts_context_mode_from_the_engine_install_not_npx() {
     );
 }
 
-/// Starts one MCP server under the agent sandbox and completes the MCP initialize handshake
-/// and a tool listing. Inputs: the sandboxed command, with its program and arguments, and the
-/// time allowed. Output: the seconds the handshake took and the tool names.
-fn mcp_handshake(mut command: std::process::Command, limit: Duration) -> (Duration, Vec<String>) {
+/// Starts one MCP server under the agent sandbox and completes the MCP initialize handshake,
+/// a tool listing and then each given tool call in turn, quoting the end of the server's
+/// stderr when it stops answering. Inputs: the sandboxed command, with its program and
+/// arguments, the `tools/call` params to send and the time allowed for all. Output: the
+/// seconds the handshake took, the tool names and each call's reply.
+fn mcp_handshake(
+    mut command: std::process::Command,
+    calls: &[serde_json::Value],
+    limit: Duration,
+) -> (Duration, Vec<String>, Vec<serde_json::Value>) {
     use std::io::{BufRead, BufReader, Write};
     use std::process::Stdio;
+    const STDERR_TAIL_BYTES: usize = 4096;
+    let errors = tempfile::NamedTempFile::new().unwrap();
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(errors.reopen().unwrap());
     let started = std::time::Instant::now();
     let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -2208,11 +2216,21 @@ fn mcp_handshake(mut command: std::process::Command, limit: Duration) -> (Durati
     let reply = |stdin: &mut std::process::ChildStdin, request: serde_json::Value| {
         writeln!(stdin, "{request}").unwrap();
         stdin.flush().unwrap();
-        let left = limit.saturating_sub(started.elapsed());
-        let line = replies
-            .recv_timeout(left)
-            .unwrap_or_else(|_| panic!("the context-mode server answers within {limit:?}"));
-        serde_json::from_str::<serde_json::Value>(&line.unwrap()).unwrap()
+        loop {
+            let left = limit.saturating_sub(started.elapsed());
+            let line = replies.recv_timeout(left).unwrap_or_else(|_| {
+                let text = fs::read(errors.path()).unwrap_or_default();
+                let tail = &text[text.len().saturating_sub(STDERR_TAIL_BYTES)..];
+                panic!(
+                    "the context-mode server answers within {limit:?}; its stderr ends: {}",
+                    String::from_utf8_lossy(tail)
+                )
+            });
+            let answer = serde_json::from_str::<serde_json::Value>(&line.unwrap()).unwrap();
+            if answer["id"] == request["id"] {
+                break answer;
+            }
+        }
     };
     let hello = reply(
         &mut stdin,
@@ -2240,6 +2258,13 @@ fn mcp_handshake(mut command: std::process::Command, limit: Duration) -> (Durati
         &mut stdin,
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
     );
+    let mut called = Vec::with_capacity(calls.len());
+    for (at, params) in calls.iter().enumerate() {
+        called.push(reply(
+            &mut stdin,
+            serde_json::json!({"jsonrpc": "2.0", "id": 3 + at, "method": "tools/call", "params": params}),
+        ));
+    }
     let _ = child.kill();
     let _ = child.wait();
     let tools = listed["result"]["tools"]
@@ -2248,7 +2273,7 @@ fn mcp_handshake(mut command: std::process::Command, limit: Duration) -> (Durati
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect();
-    (took, tools)
+    (took, tools, called)
 }
 
 /// Finds a program on the test's own PATH without following links, as the setup pack's
@@ -2326,7 +2351,7 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
     sandbox.install(&profile).unwrap();
     let mut server = sandbox.command(&profile, Path::new(&command));
     server.args(&args);
-    let (took, tools) = mcp_handshake(server, CLAUDE_CONNECT_LIMIT);
+    let (took, tools, _) = mcp_handshake(server, &[], CLAUDE_CONNECT_LIMIT);
     assert!(
         took < CLAUDE_CONNECT_LIMIT,
         "the server answers well inside Claude Code's connect limit: {took:?}"
@@ -2339,6 +2364,214 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
         fs::read_dir(&install).unwrap().count() > 0,
         "the shared install stays in place for the next agent"
     );
+}
+
+/// T3-15/18: an agent's `ctx_execute` runs. The engine install of context-mode, started from
+/// the launch's own config under the deny-default profile the runtime builds for a tools-on
+/// agent with its short temp folder, with the harness's variables and the ones Claude Code
+/// adds for an MCP server, runs a script whose temp folder is in that short folder, where the
+/// launch's own `getconf` points context-mode, not in the per-user temp folder the profile
+/// denies.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
+    use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    const MARKER: &str = "ctx-execute-4471";
+    const CALL_LIMIT: Duration = Duration::from_secs(60);
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let (context, _connection, _install) = shared_context_mode(&base);
+    let home = private_folder(&base.join("home"));
+    let scratch = toolchains::make_tmp(&home).unwrap();
+    let installed = context.install("claude-code", &home, true).unwrap();
+    let mcp: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(STATE).join("mcp.json")).unwrap())
+            .unwrap();
+    let server = &mcp["mcpServers"]["plugin_context-mode_context-mode"];
+    let args: Vec<&str> = server["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap())
+        .collect();
+
+    let project = private_folder(&base.join("project"));
+    let tmp = private_folder(&base.join("tmp"));
+    let mut sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+        .unwrap()
+        .allow_tools(&Toolchains::grant(
+            &ToolHomes::owner().unwrap(),
+            &[Toolchain::Node],
+        ))
+        .unwrap()
+        .allow_scratch(&scratch)
+        .unwrap();
+    for read in context.read_paths() {
+        sandbox = sandbox.allow_read(read.parent().unwrap()).unwrap();
+    }
+    let profile = base.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    let mut harness = std::process::Command::new(server["command"].as_str().unwrap());
+    harness.args(&args).current_dir(&project);
+    let mut command = sandbox.wrap(&profile, &harness).unwrap();
+    command
+        .env("CLAUDE_PROJECT_DIR", &project)
+        .env("CLAUDECODE", "1");
+    for (name, value) in server["env"].as_object().into_iter().flatten() {
+        command.env(name, value.as_str().unwrap());
+    }
+    let call = serde_json::json!({
+        "name": "ctx_execute",
+        "arguments": {
+            "language": "shell",
+            "code": format!("printf '%s %s\\n' {MARKER} \"$TMPDIR\""),
+        },
+    });
+    let (_, _, replies) = mcp_handshake(command, &[call], CALL_LIMIT);
+    let reply = &replies[0];
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reply["result"]["isError"] != true
+            && text.contains(&format!("{MARKER} {}/.ctx-mode-", scratch.display())),
+        "ctx_execute runs with its temp folder in the agent's own: {reply}"
+    );
+    drop(installed);
+    toolchains::remove_tmp(&home).unwrap();
+}
+
+/// T3-15/18: under the deny-default agent profile with its short temp folder, the agent can
+/// neither change nor replace its launch's own `getconf`, add a program beside it or move its
+/// folder: the file stays the one the engine wrote.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_cannot_change_its_launch_getconf() {
+    use crate::sandbox::toolchains;
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    const CHANGE: &str = r#"printf x 2>/dev/null >> "$1/getconf" && echo changed
+printf x 2>/dev/null > "$1/getconf.new" && mv "$1/getconf.new" "$1/getconf" 2>/dev/null && echo replaced
+mkdir "$1/planted" 2>/dev/null && echo planted
+mv "$1" "$1-moved" 2>/dev/null && echo moved
+[ -f "$1/getconf" ] || echo missing
+exit 0"#;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = private_folder(&root.join("home"));
+    let scratch = toolchains::make_tmp(&home).unwrap();
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .install("claude-code", &home, true)
+        .unwrap();
+    let project = private_folder(&root.join("work"));
+    let tmp = private_folder(&root.join("tmp"));
+    let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+        .unwrap()
+        .allow_scratch(&scratch)
+        .unwrap();
+    let profile = root.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    let bin = home.join(STATE).join("bin");
+    let written = fs::read(bin.join("getconf")).ok();
+    let mut change = sandbox.command(&profile, Path::new("/bin/sh"));
+    change
+        .args(["-c", CHANGE, "sh"])
+        .arg(&bin)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let changed = crate::spawn_gate::output(&mut change).unwrap();
+    assert!(changed.status.success(), "{changed:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&changed.stdout),
+        "",
+        "the agent's getconf stays the one the engine wrote: {changed:?}"
+    );
+    assert!(written.is_some());
+    assert_eq!(fs::read(bin.join("getconf")).ok(), written);
+    drop(installed);
+    toolchains::remove_tmp(&home).unwrap();
+}
+
+/// T3-15/18: the `getconf` each launch writes into its own folder answers
+/// DARWIN_USER_TEMP_DIR with the agent's TMPDIR, ending in a slash as the system one does:
+/// the short temp folder for an agent, the lead's own folder in it for a native lead, and the
+/// shared one for that lead's teammates, whose HOME is their own home. Any other name goes to
+/// the system getconf. The folder leads the harness search path, ahead of the agent's own
+/// git, and goes with the launch's files.
+#[cfg(target_os = "macos")]
+#[test]
+fn each_launch_getconf_answers_its_agent_temp_folder_first_on_the_path() {
+    use crate::sandbox::toolchains;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let worktree = root.join("lead-worktree");
+    fs::create_dir_all(&worktree).unwrap();
+    let tmux = root.join("bin").join("tmux");
+    let agent = private_home(&root, "agent");
+    let lead = private_home(&root, "lead");
+    let agent_tmp = toolchains::make_tmp(&agent).unwrap();
+    let lead_tmp = toolchains::make_tmp(&lead).unwrap();
+    let plain = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .install("claude-code", &agent, true)
+        .unwrap();
+    let native = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_native_team(&tmux, &worktree)
+        .install("claude-code", &lead, true)
+        .unwrap();
+    let piped = |command: &mut std::process::Command| {
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        crate::spawn_gate::output(command).unwrap()
+    };
+    let answer = |home: &Path, user: &Path, name: &str| {
+        let getconf = home.join(STATE).join("bin").join("getconf");
+        let metadata = fs::symlink_metadata(&getconf);
+        assert!(
+            metadata
+                .as_ref()
+                .is_ok_and(|found| found.is_file() && found.mode() & 0o777 == 0o700),
+            "the launch writes its own getconf: {metadata:?}"
+        );
+        let mut run = std::process::Command::new(&getconf);
+        run.arg(name).env_clear().env("HOME", user);
+        let output = piped(&mut run);
+        assert!(output.status.success(), "{name}: {output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let slashed = |folder: &Path| format!("{}/\n", folder.display());
+    assert_eq!(
+        answer(&agent, &agent, "DARWIN_USER_TEMP_DIR"),
+        slashed(&agent_tmp)
+    );
+    assert_eq!(
+        answer(&lead, &lead, "DARWIN_USER_TEMP_DIR"),
+        slashed(&toolchains::native_lead_tmp(&lead_tmp))
+    );
+    assert_eq!(
+        answer(&lead, &mates_home(&lead), "DARWIN_USER_TEMP_DIR"),
+        slashed(&lead_tmp)
+    );
+    let mut system = std::process::Command::new("/usr/bin/getconf");
+    system.arg("ARG_MAX");
+    let system = piped(&mut system);
+    assert_eq!(
+        answer(&agent, &agent, "ARG_MAX").into_bytes(),
+        system.stdout
+    );
+    let bin = agent.join(STATE).join("bin");
+    let path = toolchains::with_agent_git(&agent, "/usr/bin:/bin".to_owned());
+    let entries: Vec<&str> = path.split(':').collect();
+    assert_eq!(entries.first().copied(), bin.to_str(), "{path}");
+    assert_eq!(entries[entries.len() - 2..], ["/usr/bin", "/bin"], "{path}");
+    drop(plain);
+    drop(native);
+    let path = toolchains::with_agent_git(&agent, "/usr/bin:/bin".to_owned());
+    assert!(!path.contains(bin.to_str().unwrap()), "{path}");
+    toolchains::remove_tmp(&agent).unwrap();
+    toolchains::remove_tmp(&lead).unwrap();
 }
 
 #[test]
