@@ -3742,7 +3742,7 @@ fn messages_asked(shell: &mut Shell) -> Vec<crate::project_setup::SetupQuery> {
 fn m_on_an_agent_card_opens_its_messages_in_the_right_box_and_esc_closes_it() {
     use crate::project_setup::{SetupQuery, SetupView};
     let mut team = graph();
-    team.nodes[2].id = "team-2".into();
+    team.nodes[1].id = "team-2".into();
     team.edges[0].to = "team-2".into();
     for (width, height) in [(120, 30), (80, 24)] {
         let mut shell = fresh(width, height);
