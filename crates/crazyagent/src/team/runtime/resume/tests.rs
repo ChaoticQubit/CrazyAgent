@@ -367,6 +367,7 @@ mod failed {
     /// Codex does after Escape stops a turn; any other turn, and every turn of a resumed
     /// session, even one whose note quotes that task, ends with "Done.".
     const RESUMING_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 printf '%s\n' "$*" >> "$CODEX_HOME/launches"

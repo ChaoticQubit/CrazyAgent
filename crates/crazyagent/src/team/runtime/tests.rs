@@ -4143,6 +4143,7 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
 }
 
 const RECORDING_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
@@ -4182,16 +4183,34 @@ fn reopen(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
     .unwrap()
 }
 
-/// Starts a recording live master, lets its briefing turn end and stops the engine with
-/// the master's pane left running, as a closing engine does. Returns the master's id.
+/// Starts a recording live master, lets the owner's first turn end and stops the engine
+/// with the master's pane left running, as a closing engine does. Returns the master's id.
 fn left_live_master(fixture: &Fixture, host: &Arc<dyn Host>) -> i64 {
     let mut team = live_runtime(fixture, host, RECORDING_CODEX);
     super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
-    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
+    let master = owner_first_turn(fixture, &mut team, host);
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+    master
+}
+
+/// Waits for the live master to start idle with nothing typed, since the engine types
+/// nothing before the owner's first line, then types the owner's first line into its pane
+/// and waits for that turn to end, as the owner opens a live master. Takes the fixture, the
+/// running runtime and its host. Returns the master's id.
+#[cfg(target_os = "macos")]
+fn owner_first_turn(fixture: &Fixture, team: &mut TeamRuntime, host: &Arc<dyn Host>) -> i64 {
+    fixture.until(team, "the live master starts idle", |f| {
+        live_agent(&f.connection)
+            .is_some_and(|master| f.agent_status(master).0 == AgentStatus::Idle)
+    });
+    assert_eq!(live_turns(&fixture.connection), (0, false), "nothing typed");
+    let master = masters(&fixture.connection)[0];
+    assert_eq!(live_agent(&fixture.connection), Some(master));
+    host.input(&AgentId::team(master).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(team, "the owner's first turn ends", |f| {
         live_turns(&f.connection) == (1, false)
     });
-    let master = masters(&fixture.connection)[0];
-    assert_eq!(team.shutdown().unwrap(), names(&[master]));
     master
 }
 
@@ -4949,6 +4968,7 @@ fn a_team_master_s_questions_are_logged_as_its_own_and_a_refused_one_is_noted() 
 }
 
 const ASKING_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
@@ -5004,6 +5024,7 @@ fn a_live_master_s_question_box_leaving_without_an_owner_key_is_dismissed() {
 #[cfg(target_os = "macos")]
 fn master_question_box_leaves(owner_keyed: bool) {
     let fixture = Fixture::new(1);
+    committed_project(&fixture);
     std::fs::create_dir_all(
         fixture
             .base
@@ -5015,6 +5036,7 @@ fn master_question_box_leaves(owner_keyed: bool) {
     let mut team = live_runtime(&fixture, &host, ASKING_CODEX);
     let project = fixture.setup.project_id.clone();
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    owner_first_turn(&fixture, &mut team, &host);
     let line =
         "Which database should the service use? | 1. Postgres | 2. SQLite | 3. None of the above";
     let logged = |f: &Fixture| -> Vec<(u64, String)> {
@@ -5370,10 +5392,7 @@ fn a_message_waiting_for_the_live_master_has_no_open_intent_until_it_is_typed() 
     let host = fixture.host();
     let mut team = live_runtime(&fixture, &host, RECORDING_CODEX);
     super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
-    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
-        live_turns(&f.connection) == (1, false)
-    });
-    let master = masters(&fixture.connection)[0];
+    let master = owner_first_turn(&fixture, &mut team, &host);
     fixture
         .connection
         .execute(
