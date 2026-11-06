@@ -184,7 +184,8 @@ struct Grant {
 /// through, the only network its profile allows (S4b); `network` is the project network its
 /// profile was made for, which a narrower saved choice stops it for (CS-2); `claude_display`
 /// is the project's Claude Code terminal display, read when the agent is prepared (N-D9);
-/// `task_start` is a sub-agent's Task-start reminder from its launch context (T3-15).
+/// `task_start` is a sub-agent's or master's Task-start reminder from its launch context
+/// (T3-15, DEC-116).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -331,7 +332,8 @@ impl Launch {
     }
 
     /// Gives the Task-start reminder the launch's sub-agent gets with each task, which its
-    /// teammates get too (T3-15). Takes the launch. Returns the text, if any.
+    /// teammates get too (T3-15), and its master with each owner message (DEC-116). Takes the
+    /// launch. Returns the text, if any.
     fn task_start(&self) -> Option<String> {
         match self {
             Launch::Fresh(plan, _) => plan.task_start.clone(),
@@ -1044,12 +1046,12 @@ impl TeamRuntime {
             )
             .map_err(error)?;
         let task_start = match role {
-            AgentRole::Sub => self
+            AgentRole::Sub | AgentRole::Master => self
                 .agent_layout(&project, id)
                 .ok()
                 .and_then(|layout| self.context(&project, id, role, tools, layout).ok())
                 .and_then(|context| context.task_start(launch, tools)),
-            AgentRole::Master | AgentRole::Teammate => None,
+            AgentRole::Teammate => None,
         };
         let adoption = Adoption {
             host: host.clone(),
@@ -2983,6 +2985,14 @@ impl TeamRuntime {
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         prompt.push_str(&heard);
         prompt.push_str(&format!("{speaker}:\n{text}"));
+        if author == "owner"
+            && let Some(reminder) = &self.workers[&id].starts.text
+            && crate::coord::settings::read(&self.connection, project)?.task_start
+                == crate::coord::settings::TaskStart::On
+        {
+            prompt.push_str("\n\n");
+            prompt.push_str(reminder);
+        }
         let home = agent_home(&self.state, id);
         let edit = match fresh {
             true => None,
@@ -6364,8 +6374,8 @@ impl TeamRuntime {
         }
         let context = self.context(&stored.project_id, id, role, tools, layout)?;
         let task_start = match role {
-            AgentRole::Sub => context.task_start(launch, tools),
-            AgentRole::Master | AgentRole::Teammate => None,
+            AgentRole::Sub | AgentRole::Master => context.task_start(launch, tools),
+            AgentRole::Teammate => None,
         };
         let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?;
