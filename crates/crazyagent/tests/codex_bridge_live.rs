@@ -28,9 +28,12 @@ const BUSY_TURN: &str =
     "Write the numbers from 1 to 100 in words, one per line, with no other text.";
 const STEER: &str = "Stop counting now and reply with the single word steered.";
 const NOTICE: &str = "Owner notice: the owner woke worker 7 again in its own worktree.";
+const REQUEUED: &str = "Reply with the single word requeued.";
 const PROJECT: &str = "bridge-live";
 const START: Duration = Duration::from_secs(60);
 const TURN: Duration = Duration::from_secs(400);
+const ABORT: Duration = Duration::from_secs(60);
+const ESC: &[u8] = b"\x1b";
 const GROUP_GONE: Duration = Duration::from_secs(10);
 const TURN_EVENTS: [&str; 3] = [
     r#""type":"task_started""#,
@@ -502,5 +505,135 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
             root.keep().display()
         );
     }
+    host.kill(&agent).unwrap();
+}
+
+/// b19 P2 live: the delivery tick steers a message into a working Codex agent's busy turn,
+/// where it waits for the model's step to end, and the owner's Esc in the agent's terminal
+/// aborts that turn first, so Codex drops it. The agent's receipts read the abort in its
+/// rollout and put the message back to sent, and the next tick delivers it once, in a turn
+/// of its own. Needs Codex 0.164 and a local Ollama model.
+#[test]
+fn a_steer_a_codex_turn_aborted_by_esc_dropped_goes_back_to_sent_and_comes_once_more() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-bridge-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = private(root.path());
+    let state = private(&base.join("state"));
+    let db = rusqlite::Connection::open(base.join("engine.db")).unwrap();
+    crazyagent::team::initialize(&db).unwrap();
+    crazyagent::coord::ensure(&db).unwrap();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);",
+    )
+    .unwrap();
+    db.execute("INSERT INTO projects(id,body) VALUES (?1,'{}')", [PROJECT])
+        .unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+         VALUES (?1,'sub','codex',0,'working',1,1)",
+        [PROJECT],
+    )
+    .unwrap();
+    let id = db.last_insert_rowid();
+    let home = private(&agent_home(&state, id));
+    let agent = AgentId::team(id).unwrap();
+    let (_server, host) = start_app(&base, &home, &agent);
+    greet(&home);
+    assert_eq!(codex::deliver(&home, BUSY_TURN, true), Bridged::Delivered);
+    until(TURN, "the busy turn to start", || {
+        recorded(&home, BUSY_TURN)
+    });
+
+    let project = ProjectId::new(PROJECT).unwrap();
+    let message = crazyagent::coord::send(
+        &db,
+        NewMessage {
+            project: project.clone(),
+            from: Party::Engine,
+            to: Party::Agent(id),
+            kind: MessageKind::Note,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: REQUEUED.to_owned(),
+            idempotency_key: Some(format!("p2-live-steer-{id}")),
+        },
+        now_ms(),
+    )
+    .unwrap();
+    let receipt = || -> String {
+        db.query_row(
+            "SELECT receipt FROM coord_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let awake = BTreeSet::new();
+    let reach = Reach {
+        host: Some(&host as &dyn Host),
+        owner: None,
+        state: &state,
+        asleep: &awake,
+    };
+    let mut deliveries = Deliveries::default();
+    deliveries.tick(&db, &project, now_ms(), &reach).unwrap();
+    host.input(&agent, ESC).unwrap();
+    assert_eq!(
+        receipt(),
+        "delivered",
+        "the tick steered the message into the busy turn"
+    );
+    let mark = format!("[crazyagent msg {message}]");
+    until(ABORT, "the owner's Esc to abort the busy turn", || {
+        rollout_with(&home, BUSY_TURN)
+            .is_some_and(|record| record.contains(r#""type":"turn_aborted""#))
+    });
+    if recorded(&home, &mark) {
+        panic!(
+            "the steer reached the rollout before the abort, so this run never saw Codex drop it; the test folder is kept at {}",
+            root.keep().display()
+        );
+    }
+
+    crazyagent::coord::relay::codex_receipts(&db, id, &home, now_ms()).unwrap();
+    assert_eq!(
+        receipt(),
+        "sent",
+        "the dropped steer waits for the agent's next turn"
+    );
+    deliveries
+        .tick(&db, &project, now_ms() + RETRY_MS, &reach)
+        .unwrap();
+    assert_eq!(
+        receipt(),
+        "delivered",
+        "the next tick gave the agent the message again"
+    );
+    until(TURN, "the message delivered again", || {
+        recorded(&home, &mark)
+    });
+    let record = rollout_with(&home, &mark).unwrap();
+    let lines: Vec<&str> = record.lines().collect();
+    let held: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(r#""type":"response_item""#) && line.contains(&mark))
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(held.len(), 1, "Codex holds the message once: {held:?}");
+    let abort = lines
+        .iter()
+        .position(|line| line.contains(r#""type":"turn_aborted""#))
+        .unwrap();
+    assert!(
+        abort < held[0]
+            && lines[abort..held[0]]
+                .iter()
+                .any(|line| line.contains(r#""type":"task_started""#)),
+        "the message came in a turn of its own after the abort"
+    );
     host.kill(&agent).unwrap();
 }
