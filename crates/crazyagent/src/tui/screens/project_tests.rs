@@ -820,6 +820,66 @@ fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
     }
 }
 
+/// TN-L1: every cause a process stops for under a narrowed policy reads its own sentence,
+/// word for word the same in the TUI and in the desktop's copy table. The match has no
+/// catch-all arm, so a new Narrowing fails to compile here until it is listed with its
+/// code, whatever its code's family and wherever that code is defined.
+#[test]
+fn every_narrowing_stop_reads_the_same_sentence_in_both_uis() {
+    use crate::sandbox::policy::Narrowing;
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/desktop/src/api.ts"
+    ))
+    .unwrap();
+    let start = source
+        .find("const COPY: Record<string, string> = {")
+        .unwrap();
+    let body = &source[start..];
+    let body = &body[..body.find("\n};").unwrap()];
+    let desktop: std::collections::BTreeMap<&str, &str> = body
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (code, sentence) = line.trim().split_once(": ")?;
+            Some((
+                code,
+                sentence
+                    .strip_suffix(',')?
+                    .strip_prefix('"')?
+                    .strip_suffix('"')?,
+            ))
+        })
+        .collect();
+    for narrowing in [
+        Narrowing::Access,
+        Narrowing::Network,
+        Narrowing::TurnedOff,
+        Narrowing::NotAllowed,
+        Narrowing::PolicyUnreadable,
+        Narrowing::FolderUnreadable,
+    ] {
+        let code = match narrowing {
+            Narrowing::Access => "agent_access_lowered",
+            Narrowing::Network => "agent_network_narrowed",
+            Narrowing::TurnedOff | Narrowing::NotAllowed => "agent_toolchain_lowered",
+            Narrowing::PolicyUnreadable => "agent_policy_unreadable",
+            Narrowing::FolderUnreadable => "agent_project_unreadable",
+        };
+        assert_eq!(narrowing.code(), code, "{narrowing:?} reports its code");
+        let sentence = plain_problem(code);
+        assert!(
+            !sentence.contains("(code: "),
+            "{code} has its own sentence in the TUI: {sentence}"
+        );
+        assert_eq!(
+            desktop.get(code).copied(),
+            Some(sentence.as_str()),
+            "{code} reads the same on the desktop"
+        );
+    }
+}
+
 #[test]
 fn a_memory_stands_for_itself_by_its_first_line_of_prose() {
     use super::project_view::memory_quote;
