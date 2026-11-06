@@ -4311,7 +4311,9 @@ fn rebind(
         if &bound.id != session.binding().0 {
             return Err(error("master_config_record"));
         }
-        if master_scope(&bound, &session.selection) != master_scope(config, &session.selection) {
+        if master_scope(&bound, &session.project_id, &session.selection)
+            != master_scope(config, &session.project_id, &session.selection)
+        {
             return Ok(false);
         }
     }
