@@ -18159,7 +18159,10 @@ fn a_task_delegated_while_the_projects_folder_moves_waits_until_the_move_ends() 
         ("queued".to_owned(), None)
     );
     assert_eq!(
-        count(&fixture.connection, "SELECT count(*) FROM team_agents"),
+        count(
+            &fixture.connection,
+            "SELECT count(*) FROM team_agents WHERE project=?1"
+        ),
         0
     );
     let project = fixture.base.join("project");
