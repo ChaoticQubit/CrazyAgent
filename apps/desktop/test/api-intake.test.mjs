@@ -95,7 +95,7 @@ test("each Move anyway and Copy anyway warning reads exactly as the owner asked"
   assert.deepEqual(api.ADD_WARNINGS, {
     close_apps: "Close editors, terminals and apps that use this folder first. Files saved while it moves can be lost.",
     old_place: "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working.",
-    across_disks: "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the move stops: your original stays, and a part copy may be left in your projects folder to delete.",
+    across_disks: "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.",
     same_disk: "This is a rename on the same disk; it is quick.",
     copy_all: "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete.",
     large: "This folder is very large.",
@@ -104,7 +104,7 @@ test("each Move anyway and Copy anyway warning reads exactly as the owner asked"
     unreadable: "Some files can't be read. They can't be copied, so a move across disks keeps the original in place and fails rather than leave them behind.",
     unreadable_copy: "Some files can't be read. They can't be copied, so the copy fails rather than leave them behind.",
     worktrees: "Git worktrees linked to this folder stop working until you run git worktree repair in each. Their files stay, but git there fails until repaired.",
-    linked_checkout: "The copy still uses the original repository's git data. Commits made in the copy change the original repository.",
+    linked_checkout: "The copy shares the original checkout: switching branches, staging or resetting in either one changes the other, and uncommitted work can be lost.",
     no_git: "This folder has no git history. Agents' changes can't be shown or undone with git until you run git init here.",
     git_unread: "CrazyAgent couldn't read this folder's git setup, so it can't tell what moving or copying it breaks.",
   });

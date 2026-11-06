@@ -244,6 +244,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_tui_add_warnings_match_the_desktop_map_word_for_word() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/src/api-intake.ts"
+        ))
+        .unwrap();
+        let start = source.find("export const ADD_WARNINGS = {").unwrap();
+        let body = &source[start..];
+        let body = &body[..body.find("\n} as const;").unwrap()];
+        let mut desktop: std::collections::BTreeMap<&str, &str> = body
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let (key, text) = line.trim().split_once(": ").unwrap();
+                let text = text.strip_suffix(',').unwrap_or(text);
+                (
+                    key,
+                    text.strip_prefix('"').unwrap().strip_suffix('"').unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(desktop.len(), 14, "{desktop:#?}");
+        assert!(
+            desktop.remove("git_unread").is_some(),
+            "the TUI reads git itself, so only the desktop says it could not"
+        );
+        let key = |warning: AddWarning| match warning {
+            AddWarning::CloseApps => "close_apps",
+            AddWarning::OldPlace => "old_place",
+            AddWarning::AcrossDisks => "across_disks",
+            AddWarning::SameDisk => "same_disk",
+            AddWarning::CopyAll => "copy_all",
+            AddWarning::Large => "large",
+            AddWarning::Unmeasured => "unmeasured",
+            AddWarning::TooMany => "too_many",
+            AddWarning::Unreadable => "unreadable",
+            AddWarning::UnreadableCopy => "unreadable_copy",
+            AddWarning::Worktrees => "worktrees",
+            AddWarning::LinkedCheckout => "linked_checkout",
+            AddWarning::NoGit => "no_git",
+        };
+        let tui: std::collections::BTreeMap<&str, &str> = [
+            AddWarning::CloseApps,
+            AddWarning::OldPlace,
+            AddWarning::AcrossDisks,
+            AddWarning::SameDisk,
+            AddWarning::CopyAll,
+            AddWarning::Large,
+            AddWarning::Unmeasured,
+            AddWarning::TooMany,
+            AddWarning::Unreadable,
+            AddWarning::UnreadableCopy,
+            AddWarning::Worktrees,
+            AddWarning::LinkedCheckout,
+            AddWarning::NoGit,
+        ]
+        .into_iter()
+        .map(|warning| (key(warning), warning.text()))
+        .collect();
+        assert_eq!(tui, desktop);
+    }
+
+    #[test]
     fn a_known_problem_reads_as_a_plain_sentence_and_an_unknown_one_names_its_code() {
         for code in [
             "github_device_expired",

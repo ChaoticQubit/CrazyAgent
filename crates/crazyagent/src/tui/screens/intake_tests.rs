@@ -674,10 +674,7 @@ async fn a_copy_of_a_linked_worktree_asks_first_and_copy_anyway_copies_it() {
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Copy shop-side anyway?"), "{rows:#?}");
     assert!(
-        shows(
-            &rows,
-            "The copy still uses the original repository's git data."
-        ),
+        shows(&rows, "The copy shares the original checkout"),
         "{rows:#?}"
     );
     assert!(
@@ -691,6 +688,42 @@ async fn a_copy_of_a_linked_worktree_asks_first_and_copy_anyway_copies_it() {
     assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
     assert!(home.join("shop-side").join(".git").is_file());
     assert!(linked.join(".git").is_file());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_checkout_is_the_first_data_loss_line_of_a_copy_question() {
+    let mut engine = Engine::start().await;
+    engine.set_home().await;
+    let outside = engine.user().join("outside");
+    let source = outside.join("shop");
+    let linked = outside.join("shop-side");
+    repo_with_worktree(&source, &linked);
+    std::fs::File::create(linked.join("data.bin"))
+        .unwrap()
+        .set_len(3 << 29)
+        .unwrap();
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    keys(&mut shell, &format!("{}/", linked.display()));
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Copy shop-side anyway?"), "{rows:#?}");
+    assert!(
+        row_of(&rows, "The copy shares the original checkout")
+            < row_of(&rows, "This folder is very large"),
+        "{rows:#?}"
+    );
+    shell.key(Key::Esc);
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    assert!(!shows(&render(&mut shell, 80, 40), "anyway?"));
 }
 
 #[test]

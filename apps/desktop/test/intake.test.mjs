@@ -564,6 +564,9 @@ test("the Move anyway warnings put every data loss case first, each in the owner
   assert.deepEqual(flat(linked), [W.close_apps, W.old_place, W.worktrees, W.same_disk]);
   assert.deepEqual(linked.find((block) => block.lines.includes(W.worktrees)).paths, ["/Users/mira/Code/shop-a", "/Users/mira/Code/shop-b"]);
   assert.deepEqual(flat(warnings("copy", read({ copyable: false, git: false }))), [W.linked_checkout, W.no_git]);
+  const shared = warnings("copy", read({ copyable: false, git: false, bytes: 42 * GB }));
+  assert.deepEqual(shared[0], { loss: true, lines: [W.linked_checkout], paths: [] }, "a shared checkout is a data loss line, shown first");
+  assert.deepEqual(flat(shared), [W.linked_checkout, W.large, "It is about 42 GB.", W.copy_all, W.no_git]);
   assert.deepEqual(flat(warnings("copy", read({ bytes: 42 * GB }))), [W.large, "It is about 42 GB.", W.copy_all]);
   assert.deepEqual(flat(warnings("copy", read({ bytes: null, size_problem: "folder_size_unreadable" }))), [W.unreadable_copy]);
   for (const [way, size, refused] of [
