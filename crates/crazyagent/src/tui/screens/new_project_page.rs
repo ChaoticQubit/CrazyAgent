@@ -384,7 +384,9 @@ impl NewProjectPage {
                         _ => Err("creation_outcome_unknown".to_owned()),
                     }
                 }
-                OwnerResponse::NotRecordedAtBarrier { .. } if recover => {
+                OwnerResponse::NotRecordedAtBarrier { .. }
+                    if event.retained && !matches!(creation.delivery, MutationDelivery::Retry) =>
+                {
                     creation.recovered = true;
                     creation.send(MutationDelivery::Retry, ctx);
                     return Flow::Handled;
@@ -402,10 +404,13 @@ impl NewProjectPage {
                 creation.send(MutationDelivery::Reconcile, ctx);
                 return Flow::Handled;
             }
+            Err(problem) if event.retained && problem != OWNER_BUSY => {
+                Err("creation_outcome_unknown".to_owned())
+            }
             Err(problem) => Err(problem.clone()),
         };
         if let Err(code) = outcome {
-            if creation.recovered && code == OWNER_BUSY {
+            if creation.recovered && event.retained && code == OWNER_BUSY {
                 creation.again = true;
                 ctx.say(Message::warning(
                     "Still checking whether the project was created.",

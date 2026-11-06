@@ -377,12 +377,13 @@ pub(super) fn owner_arrival(event: OwnerEvent) -> Arrival {
 /// Turns a request the full request queue refused into the reply the engine worker gives
 /// a request that failed, with `owner_busy`, so the screen that asked stops waiting on it
 /// and says so; a refused terminal attach comes back as a terminal the engine refused, so
-/// the view closes and Enter attaches again. Reads of the shared profile, pools and
-/// projects and terminal keys, sizes and detaches get none: a refused read leaves the data
-/// alone, and the message line says the queue is full.
+/// the view closes and Enter attaches again. A refused creation Reconcile or Retry stays
+/// retained: the worker never saw it and still holds that submission. Reads of the shared
+/// profile, pools and projects and terminal keys, sizes and detaches get none: a refused
+/// read leaves the data alone, and the message line says the queue is full.
 /// Input: the refused request. Output: its failed arrival, or none.
 pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
-    use super::client::{ConversationEvent, ConversationJob, CreationEvent};
+    use super::client::{ConversationEvent, ConversationJob, CreationEvent, MutationDelivery};
     use super::master_session::{Event as MasterEvent, Job as MasterJob};
     use super::seam::OWNER_BUSY;
     let busy = || OWNER_BUSY.to_owned();
@@ -421,12 +422,15 @@ pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
             query,
             result: Err(busy()),
         })),
-        Request::Creation(job) => OwnerEvent::Creation(Box::new(CreationEvent {
-            submission: job.submission,
-            operation: None,
-            result: Err(busy()),
-            retained: false,
-        })),
+        Request::Creation(job) => {
+            let retained = !matches!(job.delivery, MutationDelivery::Submit);
+            OwnerEvent::Creation(Box::new(CreationEvent {
+                submission: job.submission,
+                operation: None,
+                result: Err(busy()),
+                retained,
+            }))
+        }
         Request::Conversation(job) => OwnerEvent::Conversation(Box::new(match *job {
             ConversationJob::Read { context, .. } => ConversationEvent::Read {
                 context,

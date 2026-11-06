@@ -1853,7 +1853,8 @@ impl NativeOwner {
         let operation = self.creation_operation.clone();
         assert!(!retained || operation.is_some());
         self.creation_retry_allowed = retained
-            && matches!(&result, Ok(response) if matches!(response.as_ref(), OwnerResponse::NotRecordedAtBarrier { .. }));
+            && (self.creation_retry_allowed
+                || matches!(&result, Ok(response) if matches!(response.as_ref(), OwnerResponse::NotRecordedAtBarrier { .. })));
         if !retained {
             self.creation_pending = None;
             self.creation_operation = None;
@@ -1958,21 +1959,28 @@ impl NativeOwner {
         self.deliver_creation(delivery).await
     }
 
+    /// Sends the retained creation with this delivery. The Retry gate closes for the send and
+    /// opens again only if it was open and the engine answered `owner_busy`, which changed
+    /// nothing, so the same Retry can go out once the engine has room.
+    /// Takes the delivery. Returns the engine's response or a bounded problem code.
     async fn deliver_creation(
         &mut self,
         delivery: MutationDelivery,
     ) -> Result<OwnerResponse, String> {
-        self.creation_retry_allowed = false;
+        let allowed = std::mem::replace(&mut self.creation_retry_allowed, false);
         let controller = self
             .controller
             .as_mut()
             .ok_or("trusted_connection_unavailable")?;
-        match delivery {
+        let response = match delivery {
             MutationDelivery::Submit => controller.send_pending().await,
             MutationDelivery::Reconcile => controller.reconcile_pending().await,
             MutationDelivery::Retry => controller.retry_pending().await,
         }
-        .map_err(|e| bounded_problem(&e.0))
+        .map_err(|e| bounded_problem(&e.0));
+        self.creation_retry_allowed = allowed
+            && matches!(&response, Ok(OwnerResponse::Rejected { code }) if code == super::seam::OWNER_BUSY);
+        response
     }
 
     async fn step(
