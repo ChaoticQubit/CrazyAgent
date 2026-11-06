@@ -324,9 +324,11 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         listed_by(&served),
         [
             crate::team::tool::TOOL_NAME,
+            crate::team::tool::ASK_TOOL,
+            crate::team::tool::RECORD_TOOL,
             crate::team::tool::REMEMBER_TOOL
         ],
-        "a console master with tools remembers through the engine, less the tools switched off"
+        "a console master with tools asks the owner and remembers through the engine, less the tools switched off"
     );
     assert_eq!(std::fs::metadata(&mailbox).unwrap().mode() & 0o7777, 0o700);
     assert_eq!(

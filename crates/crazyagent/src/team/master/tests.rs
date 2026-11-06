@@ -4434,7 +4434,13 @@ fn a_reply_turn_master_remembers_and_the_project_memory_page_lists_it() {
     assert_eq!(answers.len(), 4, "{answers:#?}");
     assert_eq!(
         listed(&answers[0]),
-        [tool::TOOL_NAME, tool::REMEMBER_TOOL, tool::RECALL_TOOL]
+        [
+            tool::TOOL_NAME,
+            tool::ASK_TOOL,
+            tool::RECORD_TOOL,
+            tool::REMEMBER_TOOL,
+            tool::RECALL_TOOL
+        ]
     );
     assert_eq!(
         text(&answers[1]),
