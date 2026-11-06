@@ -58,7 +58,7 @@ test("the intake, GitHub and setup commands send the argument names their Rust c
   const client = read("src/engine-client.ts");
   for (const [command, args] of [
     ["desktop_set_projects_home", "{ path, generation }"], ["desktop_move_projects_home", "{ path, generation }"],
-    ["desktop_folder_size", "{ path }"], ["desktop_add_existing_folder", "{ source, mode, generation }"],
+    ["desktop_folder_size", "{ path }"], ["desktop_add_existing_folder", "{ source, mode, overrides, generation }"],
     ["desktop_start_onboarding", "{ path, pool, generation }"], ["desktop_onboarding", "{ id }"],
     ["desktop_github_token", "{ token }"], ["desktop_github_repos", "{ page }"], ["desktop_clone_repo", "{ fullName }"],
     ["desktop_run_setup", "{ pack, generation }"], ["desktop_set_pack_entry", "{ id, on, generation }"], ["desktop_remove_pack_entry", "{ id, generation }"],
@@ -67,7 +67,7 @@ test("the intake, GitHub and setup commands send the argument names their Rust c
   const lib = read("src-tauri/src/lib.rs");
   for (const [command, params] of [
     ["desktop_move_projects_home", ["path: String", "generation: u64"]],
-    ["desktop_add_existing_folder", ["source: String", "mode: AddMode", "generation: u64"]],
+    ["desktop_add_existing_folder", ["source: String", "mode: AddMode", "overrides: Vec<AddOverride>", "generation: u64"]],
     ["desktop_start_onboarding", ["path: String", "pool: String", "generation: u64"]],
     ["desktop_clone_repo", ["full_name: String"]],
     ["desktop_set_pack_entry", ["id: String", "on: bool", "generation: u64"]],

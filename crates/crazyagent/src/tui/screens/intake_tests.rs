@@ -472,6 +472,7 @@ async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original
     keys(&mut shell, &format!("{}/", source.display()));
     shell.key(Key::Tab);
     shell.key(Key::Right);
+    shell.key(Key::Right);
     shell.key(Key::Enter);
     assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
     let rows = render(&mut shell, 80, 24);
@@ -701,7 +702,7 @@ fn a_soft_refusal_from_the_engine_turns_into_the_question_for_that_issue() {
     let screen = open(&Place::AddFolder, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let typed = source.to_str().unwrap().to_owned();
-    keys(&mut shell, &typed);
+    keys(&mut shell, &format!("{typed}/"));
     shell.key(Key::Tab);
     shell.key(Key::Right);
     shell.key(Key::Enter);

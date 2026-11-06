@@ -1254,7 +1254,10 @@ fn a_move_anyway_past_linked_worktrees_needs_that_override_and_git_worktree_repa
             "{overrides:?}"
         );
     }
-    assert_eq!(linked_worktree_paths(&repo, 16), [worktree.clone()]);
+    assert_eq!(
+        linked_worktree_paths(&repo, 16),
+        std::slice::from_ref(&worktree)
+    );
     assert_eq!(linked_worktree_paths(&repo, 0), Vec::<PathBuf>::new());
     assert_eq!(linked_worktree_paths(&worktree, 16), Vec::<PathBuf>::new());
 
