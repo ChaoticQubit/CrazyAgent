@@ -29,14 +29,29 @@ const NOTICE: &str = "Owner notice: the owner woke worker 7 again in its own wor
 const PROJECT: &str = "bridge-live";
 const START: Duration = Duration::from_secs(60);
 const TURN: Duration = Duration::from_secs(400);
+const GROUP_GONE: Duration = Duration::from_secs(10);
 
+/// A test's private tmux server and the process group of the app's pane, read from tmux
+/// once the app started. Dropping it kills that group and waits until it is gone, so the
+/// app server the bridge started in the background never outlives the test and goes on
+/// with its turn against the shared local model, and then ends the server.
 struct Server {
     tmux: PathBuf,
     socket: PathBuf,
+    group: Option<rustix::process::Pid>,
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
+        if let Some(group) = self.group {
+            let deadline = Instant::now() + GROUP_GONE;
+            while rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH)
+                && Instant::now() < deadline
+            {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
         let _ = crazyagent::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
@@ -124,7 +139,8 @@ fn until(limit: Duration, what: &str, done: impl Fn() -> bool) {
 /// Launches a real Codex app with the engine's own command in tmux, inside the real project
 /// sandbox with only its control socket granted, and waits for its app server's socket.
 /// Input: the private base folder, the agent's private `CODEX_HOME` and its terminal id.
-/// Output: the tmux server guard and host; panics when the app never binds its socket.
+/// Output: the tmux server guard, holding the app pane's process group, and the host;
+/// panics when the app never binds its socket.
 fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
     let project = private(&base.join("project"));
     let tmp = private(&base.join("tmp"));
@@ -173,12 +189,20 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
 
     let tmux = installed(base).expect("tmux must be installed on this machine");
     let folder = base.join(FOLDER);
-    let server = Server {
+    let mut server = Server {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
+        group: None,
     };
     let host = Tmux::open(Some(tmux), &folder);
-    host.spawn(agent, &built).unwrap();
+    let pane = host.spawn(agent, &built).unwrap();
+    let leader = rustix::process::Pid::from_raw(i32::try_from(pane.pid).unwrap()).unwrap();
+    assert_eq!(
+        rustix::process::getpgid(Some(leader)),
+        Ok(leader),
+        "tmux makes the app's pane process lead its own group"
+    );
+    server.group = Some(leader);
     until(START, "the app server's control socket", || {
         std::fs::metadata(home.join(CONTROL_SOCKET))
             .is_ok_and(|socket| socket.file_type().is_socket())
