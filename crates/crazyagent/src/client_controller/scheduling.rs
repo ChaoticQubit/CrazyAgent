@@ -8,7 +8,8 @@ const SCHEDULE_ROWS_MAX: usize = SCOPED_STRATEGIES_MAX * 2 + ACCOUNT_PLANS_MAX;
 impl OwnerController {
     /// Reads the owner's account scheduling choices, following engine pages, so a schedule
     /// larger than one reply is read whole: the app strategy, pool strategies, project
-    /// overrides and account plans.
+    /// overrides and account plans, with the version of the first page, so a change made
+    /// while the later pages were read leaves the next owner change stale, never applied.
     /// Returns the stored schedule, or the engine's plain rejection code.
     pub async fn account_schedule(&mut self) -> Result<Schedule, EngineError> {
         let mut schedule = Schedule::default();
@@ -26,6 +27,9 @@ impl OwnerController {
             else {
                 return Err(EngineError("controller_read_response".into()));
             };
+            if after.is_none() {
+                schedule.version = page.version;
+            }
             schedule.strategy = page.strategy;
             schedule.pools.extend(page.pools);
             schedule.projects.extend(page.projects);
