@@ -71,6 +71,8 @@ const CLOSE_TIME: Duration = Duration::from_secs(2);
 const HANGUP_GRACE: Duration = Duration::from_secs(2);
 /// How long a stop goes on killing what the closed panes left in their groups.
 const GROUP_KILL_WAIT: Duration = Duration::from_secs(2);
+/// The most reaper threads one host keeps; a stop past it first waits for the oldest.
+const REAPERS_MAX: usize = 64;
 const LINE_BYTES_MAX: usize = 1024 * 1024;
 const REPLY_BYTES_MAX: usize = 32 * 1024 * 1024;
 const COMMAND_BYTES_MAX: usize = 256 * 1024;
@@ -99,6 +101,7 @@ pub struct Tmux {
     pin: Option<Arc<ServerPin>>,
     control: Mutex<Option<Arc<Control>>>,
     spawning: Mutex<()>,
+    reapers: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 struct Control {
@@ -161,6 +164,7 @@ impl Tmux {
             pin: None,
             control: Mutex::new(None),
             spawning: Mutex::new(()),
+            reapers: Mutex::new(Vec::new()),
         }
     }
 
@@ -187,6 +191,7 @@ impl Tmux {
             pin: None,
             control: Mutex::new(None),
             spawning: Mutex::new(()),
+            reapers: Mutex::new(Vec::new()),
         })
     }
 
@@ -1210,17 +1215,92 @@ fn pane_info(line: &[u8]) -> Option<PaneInfo> {
     })
 }
 
-/// Closes panes with one tmux command, then ends what they leave in their process groups
-/// (FINDING bridge orphan): tmux only hangs up a closing pane, which a busy Codex app-server
-/// the tools-on bridge started in the background outlives, still working on the user's
-/// account. `kill`, `kill_pane` and the server's close go through here. Takes the control,
-/// the open panes the command closes and the command. Returns the command's answer once the
-/// groups are gone.
-fn close_panes(control: &Control, panes: &[PaneInfo], line: &str) -> Result<(), HostError> {
-    let groups = pane_groups(panes);
-    let closed = control.run(line).map(drop);
-    end_groups(groups);
-    closed
+impl Tmux {
+    /// Closes panes with one tmux command, then ends what they leave in their process groups
+    /// (FINDING bridge orphan): tmux only hangs up a closing pane, which a busy Codex
+    /// app-server the tools-on bridge started in the background outlives, still working on
+    /// the user's account. `kill`, `kill_pane` and the server's close go through here. Takes
+    /// the control, the open panes the command closes and the command. Returns the command's
+    /// answer at once; a reaper ends the groups (r1 SG-L2).
+    fn close_panes(
+        &self,
+        control: &Control,
+        panes: &[PaneInfo],
+        line: &str,
+    ) -> Result<(), HostError> {
+        let groups = pane_groups(panes);
+        let closed = control.run(line).map(drop);
+        self.reap(groups);
+        closed
+    }
+
+    /// Ends groups on a thread of their own, so a caller such as the team tick never waits
+    /// out the hangup grace and stops in a row share one grace; `close` waits for every
+    /// reaper. Past `REAPERS_MAX`, or when no thread starts, the caller waits instead.
+    /// Takes the groups.
+    fn reap(&self, groups: Vec<rustix::process::Pid>) {
+        if groups.is_empty() {
+            return;
+        }
+        let Ok(mut reapers) = self.reapers.lock() else {
+            end_groups(groups);
+            return;
+        };
+        reapers.retain(|reaper| !reaper.is_finished());
+        if reapers.len() >= REAPERS_MAX {
+            let _ = reapers.remove(0).join();
+        }
+        let kept = groups.clone();
+        match std::thread::Builder::new()
+            .name("tmux-reaper".into())
+            .spawn(move || end_groups(groups))
+        {
+            Ok(reaper) => reapers.push(reaper),
+            Err(_) => end_groups(kept),
+        }
+        assert!(reapers.len() <= REAPERS_MAX);
+    }
+
+    /// Waits until every reaper this host started has ended its groups. Takes the host.
+    fn join_reapers(&self) {
+        let reapers = self
+            .reapers
+            .lock()
+            .map(|mut reapers| std::mem::take(&mut *reapers))
+            .unwrap_or_default();
+        for reaper in reapers {
+            let _ = reaper.join();
+        }
+    }
+
+    /// Ends every terminal not in `keep` and, with none kept, the server itself; `close` runs
+    /// it and then waits for the reapers. Takes the names to keep. Returns the first failure.
+    fn end_server(&self, keep: &[AgentId]) -> Result<(), HostError> {
+        if self.executable.is_none() || !self.running() {
+            return Ok(());
+        }
+        end_except(self, keep)?;
+        if !keep.is_empty() {
+            return Ok(());
+        }
+        let control = self.control_with(self.starts_in.is_none())?;
+        let panes: Vec<PaneInfo> = control
+            .ask(&format!("list-panes -a -F '{PANE_FIELDS}{FORMAT_END}'"))
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter_map(|line| pane_info(line))
+                    .take(PANES_LISTED_MAX)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let _ = self.close_panes(&control, &panes, "kill-server");
+        control.close();
+        if let Ok(mut slot) = self.control.lock() {
+            *slot = None;
+        }
+        self.forget_server()
+    }
 }
 
 /// The process groups of open panes, read before they close: tmux starts each pane's first
@@ -1245,8 +1325,10 @@ fn pane_groups(panes: &[PaneInfo]) -> Vec<rustix::process::Pid> {
 
 /// Waits for the groups of closed panes to end on the hangup, for at most `HANGUP_GRACE`,
 /// then kills what is left until no group answers, for at most `GROUP_KILL_WAIT`. macOS
-/// answers EPERM for a group whose last member it just reaped, so only ESRCH ends a group.
-/// Takes the groups `pane_groups` read before their panes closed.
+/// answers EPERM for a group whose last member it just reaped, so only ESRCH ends a group,
+/// and a group that answered ESRCH once is never tested or signalled again: its number may
+/// lead a new group by then (r1 SG-L1). Takes the groups `pane_groups` read before their
+/// panes closed.
 fn end_groups(groups: Vec<rustix::process::Pid>) {
     end_groups_with(
         groups,
@@ -1264,18 +1346,22 @@ fn end_groups_with(
     mut left: impl FnMut(rustix::process::Pid) -> bool,
     mut kill: impl FnMut(rustix::process::Pid),
 ) {
+    let mut groups = groups;
     let hung_up = Instant::now() + HANGUP_GRACE;
-    while groups.iter().any(|group| left(*group)) && Instant::now() < hung_up {
+    loop {
+        groups.retain(|group| left(*group));
+        if groups.is_empty() || Instant::now() >= hung_up {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
     let killed = Instant::now() + GROUP_KILL_WAIT;
-    while groups.iter().any(|group| left(*group)) && Instant::now() < killed {
+    while !groups.is_empty() && Instant::now() < killed {
         for group in &groups {
-            if left(*group) {
-                kill(*group);
-            }
+            kill(*group);
         }
         std::thread::sleep(Duration::from_millis(10));
+        groups.retain(|group| left(*group));
     }
 }
 
@@ -1839,10 +1925,10 @@ impl Host for Tmux {
         if self.confined.is_some() {
             let pane = self.own_pane(agent)?;
             let line = format!("kill-pane -t {}", pane.id);
-            return close_panes(&control, &[pane], &line);
+            return self.close_panes(&control, &[pane], &line);
         }
         let panes = self.panes(agent)?;
-        close_panes(
+        self.close_panes(
             &control,
             &panes,
             &format!("kill-window -t {}", target(agent)),
@@ -1874,7 +1960,7 @@ impl Host for Tmux {
             .into_iter()
             .filter(|listed| listed.id == pane)
             .collect();
-        close_panes(
+        self.close_panes(
             &*self.live_control()?,
             &closed,
             &format!("kill-pane -t {pane}"),
@@ -1898,30 +1984,9 @@ impl Host for Tmux {
     }
 
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
-        if self.executable.is_none() || !self.running() {
-            return Ok(());
-        }
-        end_except(self, keep)?;
-        if !keep.is_empty() {
-            return Ok(());
-        }
-        let control = self.control_with(self.starts_in.is_none())?;
-        let panes: Vec<PaneInfo> = control
-            .ask(&format!("list-panes -a -F '{PANE_FIELDS}{FORMAT_END}'"))
-            .map(|lines| {
-                lines
-                    .iter()
-                    .filter_map(|line| pane_info(line))
-                    .take(PANES_LISTED_MAX)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let _ = close_panes(&control, &panes, "kill-server");
-        control.close();
-        if let Ok(mut slot) = self.control.lock() {
-            *slot = None;
-        }
-        self.forget_server()
+        let ended = self.end_server(keep);
+        self.join_reapers();
+        ended
     }
 }
 

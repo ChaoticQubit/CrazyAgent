@@ -744,15 +744,18 @@ fn kill_pane_ends_only_that_pane_and_refuses_the_last_and_a_foreign_one() {
     assert_eq!(host.panes(&other).unwrap().len(), 1);
 }
 
-/// A process group a test read from a pane, killed when the test ends, so a failing check
-/// leaves no stand-in process running.
+/// A process group a test read from a pane, killed when the test ends unless the test saw
+/// it gone, so a failing check leaves no stand-in process running and a group number that
+/// answered ESRCH is never signalled (r1 SG-L1).
 #[cfg(target_os = "macos")]
-struct Group(rustix::process::Pid);
+struct Group(rustix::process::Pid, std::cell::Cell<bool>);
 
 #[cfg(target_os = "macos")]
 impl Drop for Group {
     fn drop(&mut self) {
-        let _ = rustix::process::kill_process_group(self.0, rustix::process::Signal::KILL);
+        if !self.1.get() {
+            let _ = rustix::process::kill_process_group(self.0, rustix::process::Signal::KILL);
+        }
     }
 }
 
@@ -796,7 +799,7 @@ fn left_in_group(pane: u32, started: &Path) -> (Group, rustix::process::Pid) {
         Ok(leader),
         "tmux makes a pane's first process lead its own group"
     );
-    let group = Group(leader);
+    let group = Group(leader, std::cell::Cell::new(false));
     let deadline = Instant::now() + Duration::from_secs(10);
     let child = loop {
         let written = std::fs::read_to_string(started).ok();
@@ -819,7 +822,8 @@ fn left_in_group(pane: u32, started: &Path) -> (Group, rustix::process::Pid) {
 
 /// Waits for at most ten seconds until neither the group nor its child is left; macOS
 /// answers EPERM for a group whose last member it just reaped before it answers ESRCH.
-/// Takes both. Returns whether both are gone.
+/// A gone group is marked so its guard leaves it alone. Takes both. Returns whether both
+/// are gone.
 #[cfg(target_os = "macos")]
 fn gone(group: &Group, child: rustix::process::Pid) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -827,6 +831,7 @@ fn gone(group: &Group, child: rustix::process::Pid) -> bool {
         if rustix::process::test_kill_process_group(group.0) == Err(rustix::io::Errno::SRCH)
             && rustix::process::test_kill_process(child) == Err(rustix::io::Errno::SRCH)
         {
+            group.1.set(true);
             return true;
         }
         if Instant::now() >= deadline {
@@ -992,7 +997,7 @@ fn a_group_once_gone_is_never_tested_or_signalled_again() {
     )
     .unwrap();
     let survivor_group = rustix::process::Pid::from_child(&survivor);
-    let _guard = Group(survivor_group);
+    let guard = Group(survivor_group, std::cell::Cell::new(false));
     let reaped = std::thread::spawn(move || survivor.wait());
     let calls = std::cell::RefCell::new(Vec::new());
 
@@ -1026,6 +1031,7 @@ fn a_group_once_gone_is_never_tested_or_signalled_again() {
     );
     let status = reaped.join().unwrap().unwrap();
     assert_eq!(status.signal(), Some(9), "the live group ended by KILL");
+    guard.1.set(true);
 }
 
 /// Stops in a row do not each wait out the hangup grace (r1 SG-L2): the team tick ends the
@@ -1112,6 +1118,7 @@ fn close_waits_one_hangup_grace_for_all_its_panes() {
             rustix::process::test_kill_process(*child),
             Err(rustix::io::Errno::SRCH)
         );
+        group.1.set(true);
     }
 }
 
