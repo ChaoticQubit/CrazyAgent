@@ -306,8 +306,10 @@ pub fn git_link(folder: &Path) -> GitLink {
     match std::fs::read_dir(git.join("worktrees")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GitLink::None,
         Err(_) => GitLink::Unreadable,
-        Ok(mut entries) if entries.next().is_some() => GitLink::Worktrees,
-        Ok(_) => GitLink::None,
+        Ok(mut entries) => match entries.next() {
+            Some(_) => GitLink::Worktrees,
+            None => GitLink::None,
+        },
     }
 }
 
