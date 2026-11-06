@@ -1,6 +1,10 @@
 use super::*;
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
+#[path = "../../../tests/pgid_support/mod.rs"]
+mod pgid_support;
+
 #[test]
 fn tmux_output_octal_escapes_decode_to_the_exact_bytes() {
     assert_eq!(
@@ -789,16 +793,12 @@ fn hangup_ignored_agent(cwd: &Path, started: &Path) -> InteractiveCommand {
 }
 
 /// Waits for the child of a `hangup_ignored` pane and checks that it is in the group the
-/// pane's first process leads, as tmux starts every pane. Takes the pane's first process id
-/// and the child's pid file. Returns the group, killed when dropped, and the child.
+/// pane's first process leads, once `pgid_support::pane_group` sees that process lead it.
+/// Takes the pane's first process id and the child's pid file. Returns the group, killed
+/// when dropped, and the child.
 #[cfg(target_os = "macos")]
 fn left_in_group(pane: u32, started: &Path) -> (Group, rustix::process::Pid) {
-    let leader = rustix::process::Pid::from_raw(i32::try_from(pane).unwrap()).unwrap();
-    assert_eq!(
-        rustix::process::getpgid(Some(leader)),
-        Ok(leader),
-        "tmux makes a pane's first process lead its own group"
-    );
+    let leader = pgid_support::pane_group(pane);
     let group = Group(leader, std::cell::Cell::new(false));
     let deadline = Instant::now() + Duration::from_secs(10);
     let child = loop {
