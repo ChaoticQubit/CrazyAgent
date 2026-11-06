@@ -888,6 +888,8 @@ impl ResearchRunner {
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
+        #[cfg(target_os = "macos")]
+        toolchains::write_getconf(&home, false)?;
         toolchains::prepare_cargo_home(&home, &homes)?;
         let kept = match (&self.settings, job.tools) {
             (Some((global, local)), true) => crate::config::resolve_config(global, local)

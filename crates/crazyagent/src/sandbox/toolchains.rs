@@ -528,9 +528,11 @@ fn getconf_script(mates: &Path, shared: &Path, own: &Path) -> Option<String> {
 /// (LL-2, TPH). context-mode makes its script folders under `getconf DARWIN_USER_TEMP_DIR`,
 /// ignoring TMPDIR, and Seatbelt denies the system answer, so this one names where the
 /// caller may write: its short temp folder, or the lead's own one in it for a native lead
-/// (T3-15/18). Inputs: the agent home and whether it leads a native team. Output: done, also
-/// when the agent has no short temp folder or a path is not plain and none is written, or
-/// the write failure.
+/// (T3-15/18). A research job makes its short temp folder after the install, so it calls this
+/// again then (R7-CTX F1): a launch folder that already holds this same `getconf` is kept,
+/// and one that holds anything else is refused. Inputs: the agent home and whether it leads a
+/// native team. Output: done, also when the agent has no short temp folder or a path is not
+/// plain and none is written, or the write failure.
 #[cfg(target_os = "macos")]
 pub(crate) fn write_getconf(home: &Path, native_lead: bool) -> io::Result<()> {
     use std::io::Write;
@@ -548,19 +550,54 @@ pub(crate) fn write_getconf(home: &Path, native_lead: bool) -> io::Result<()> {
         return Ok(());
     };
     let folder = getconf_folder(home);
-    fs::DirBuilder::new().mode(0o700).create(&folder)?;
+    let path = folder.join(GETCONF_PROGRAM);
+    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&folder) {
+        if error.kind() == io::ErrorKind::AlreadyExists && holds_getconf(&folder, &path, &script) {
+            return Ok(());
+        }
+        return Err(error);
+    }
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o700)
         .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32)
-        .open(folder.join(GETCONF_PROGRAM))?;
+        .open(&path)?;
     file.write_all(script.as_bytes())
         .and_then(|()| file.sync_all())?;
     let metadata = file.metadata()?;
     assert_eq!(metadata.mode() & 0o777, 0o700);
     assert_eq!(metadata.len(), script.len() as u64);
     Ok(())
+}
+
+/// Whether the launch folder already holds this exact `getconf`: `bin` a real folder and
+/// `getconf` in it a real file of mode 0700 with the script's bytes, opened without following
+/// a link. Inputs: the folder, the file and the script. Output: the answer.
+#[cfg(target_os = "macos")]
+fn holds_getconf(folder: &Path, path: &Path, script: &str) -> bool {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    if !fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir()) {
+        return false;
+    }
+    let Ok(file) = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32)
+        .open(path)
+    else {
+        return false;
+    };
+    let plain = file
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o777 == 0o700);
+    let mut held = Vec::with_capacity(script.len());
+    plain
+        && file
+            .take(GETCONF_SCRIPT_BYTES_MAX as u64 + 1)
+            .read_to_end(&mut held)
+            .is_ok()
+        && held == script.as_bytes()
 }
 
 /// The folder of the agent's launch folder that holds its own `getconf`. Input: the agent
