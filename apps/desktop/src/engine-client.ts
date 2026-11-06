@@ -1149,9 +1149,10 @@ export function teamOnHarnessSwitch(id: string, mode: SwitchMode, version: numbe
 }
 
 /** Sets when a saved master harness change reaches the running live master. Inputs: the project
- * id, the choice and a generation. Output: the engine receipt. */
-export function teamApplyHarnessSwitch(id: string, mode: SwitchApply, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, generation });
+ * id, the choice, the team settings version the screen read and a generation. Output: the
+ * engine receipt; a save from an older read is rejected as `stale_revision`. */
+export function teamApplyHarnessSwitch(id: string, mode: SwitchApply, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, version, generation });
 }
 
 /** Sets how deep sub-agents may start workers of their own. Inputs: the project id, the depth

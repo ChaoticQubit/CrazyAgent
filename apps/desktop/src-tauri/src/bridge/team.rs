@@ -244,21 +244,24 @@ impl NativeBridge {
 
     /// Sets when a saved master harness change reaches the running live master: `when_idle`
     /// switches it once it is idle, `next_start` keeps it on its harness until it starts
-    /// again. Takes the project id, the choice and the client generation. Returns the actual
-    /// commit receipt, or `team_action_invalid` for any other choice.
+    /// again. Takes the project id, the choice, the team settings version the client read and
+    /// the client generation. Returns the actual commit receipt, `team_action_invalid` for any
+    /// other choice, or `stale_revision` for a save from an older read.
     pub async fn team_apply_harness_switch(
         &mut self,
         id: &str,
         mode: &str,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         let mode = SwitchApply::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
-        self.team_action(
-            TeamAction::ApplyHarnessSwitch { project_id, mode },
-            generation,
-        )
-        .await
+        let action = TeamAction::ApplyHarnessSwitch {
+            project_id,
+            mode,
+            version,
+        };
+        self.team_action(action, generation).await
     }
 
     /// Sets how deep the project's sub-agents may start workers of their own: 1 lets only

@@ -1877,6 +1877,7 @@ fn the_apply_setting_flips_between_when_idle_and_at_the_next_start() {
         TeamReply::Change(TeamAction::ApplyHarnessSwitch {
             project_id: project(),
             mode: crate::team::SwitchApply::NextStart,
+            version: 7,
         })
     );
     let TeamReply::Change(action) = reply else {
@@ -1904,6 +1905,7 @@ fn the_apply_setting_flips_between_when_idle_and_at_the_next_start() {
         TeamReply::Change(TeamAction::ApplyHarnessSwitch {
             project_id: project(),
             mode: crate::team::SwitchApply::WhenIdle,
+            version: 7,
         })
     );
 }

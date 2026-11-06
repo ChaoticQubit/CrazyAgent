@@ -1094,13 +1094,14 @@ fn a_team_setting_saved_from_an_older_read_is_refused_and_the_newer_value_surviv
         ),
         (
             "apply harness switch",
-            |project_id, _version, newer| TeamAction::ApplyHarnessSwitch {
+            |project_id, version, newer| TeamAction::ApplyHarnessSwitch {
                 project_id,
                 mode: if newer {
                     SwitchApply::NextStart
                 } else {
                     SwitchApply::WhenIdle
                 },
+                version,
             },
             |status| format!("{:?}", status.apply_harness_switch),
         ),

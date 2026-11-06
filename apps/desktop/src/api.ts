@@ -1175,10 +1175,11 @@ export function setOnHarnessSwitch(id: string, mode: SwitchMode, version: number
 }
 
 /** Sets when a saved master harness change reaches the running live master: once it is idle, or
- * at its next start. Inputs: the project id and the choice. Output: the engine receipt, not
- * ready, or a plain error. */
-export function setApplyHarnessSwitch(id: string, mode: SwitchApply): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, generation: nextGeneration() });
+ * at its next start. Inputs: the project id, the choice and the team settings version the
+ * screen read. Output: the engine receipt, not ready, or a plain error; a save from an older
+ * read is rejected as `stale_revision`. */
+export function setApplyHarnessSwitch(id: string, mode: SwitchApply, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, version, generation: nextGeneration() });
 }
 
 /** Sets how deep sub-agents may start workers of their own: 1, 2 or 3. Inputs: the project id

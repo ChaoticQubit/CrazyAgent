@@ -725,13 +725,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 id: String,
                 mode: String,
+                version: u64,
                 generation: u64,
             }
-            let Args { id, mode, generation } = match parse(args) {
+            let Args { id, mode, version, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .team_apply_harness_switch(&id, &mode, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_apply_harness_switch(&id, &mode, version, generation) .await }.await;
             routed(result)
         }
         "desktop_team_sub_agent_depth" => {

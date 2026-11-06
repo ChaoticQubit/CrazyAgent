@@ -968,12 +968,13 @@ async fn desktop_team_apply_harness_switch(
     state: State<'_, NativeState>,
     id: String,
     mode: String,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_apply_harness_switch(&id, &mode, generation)
+        .team_apply_harness_switch(&id, &mode, version, generation)
         .await
 }
 
