@@ -178,7 +178,7 @@ function rows(database, sql, ...params) {
     return db.prepare(sql).all(...params);
   } catch (error) {
     const table = /no such table: (\w+)/.exec(error.message);
-    if (table) throw new Refused(`no_table_${table[1]}`, table[1] === "owner_questions" ? "needs QL-1" : null);
+    if (table) throw new Refused(`no_table_${table[1]}`, table[1] === "questions_log" ? "needs QL-1" : null);
     throw error;
   } finally {
     db.close();
@@ -450,7 +450,7 @@ async function main() {
     return receipt.project_id;
   };
   const question = (id) => {
-    const [row] = rows(database, "SELECT id, project, asker, status, answer, answered_by FROM owner_questions WHERE id = ?", id);
+    const [row] = rows(database, "SELECT id, project, asker, status, answer, answered_by FROM questions_log WHERE id = ?", id);
     return row ?? null;
   };
   const delivered = (id, verb) => `The owner ${verb} your question ${id} (`;
@@ -674,7 +674,7 @@ async function main() {
     await step("7", "the TUI shows the footer badge on every screen and the Questions page, and an answer there reaches the master once", ["QL-1", "QL-3"], async () => {
       if (!tmux) throw new Blocked("tmux_missing");
       const id = await ask("tui");
-      const pending = Number(rows(database, "SELECT COUNT(*) AS n FROM owner_questions WHERE status = 'pending'")[0].n);
+      const pending = Number(rows(database, "SELECT COUNT(*) AS n FROM questions_log WHERE status = 'pending'")[0].n);
       const pty = tuiPty(tmux, join(root, "tui.sock"), `'${engineBinary}' tui '${socket}'`, { ...env, TERM: "xterm-256color" });
       try {
         let home = null;
@@ -721,7 +721,7 @@ async function main() {
 
     await step("8", "a permission prompt on the master's screen is never logged, while a real question box is logged once as asked in the terminal", ["QL-1", "QL-4"], async () => {
       const control = needs(state.control, "0");
-      const terminal = () => rows(database, "SELECT id, question, status FROM owner_questions WHERE project = ? AND asker LIKE 'terminal:%'", state.project);
+      const terminal = () => rows(database, "SELECT id, question, status FROM questions_log WHERE project = ? AND asker LIKE 'terminal:%'", state.project);
       const before = terminal().length;
       show(control, CLEAR + PERMISSION);
       await pause(SCAN_MS);

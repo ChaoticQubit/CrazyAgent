@@ -517,7 +517,7 @@ fn asks_past_the_per_asker_and_project_bounds_are_refused_plainly() {
             );
         }
     }
-    let all = "SELECT COUNT(*) FROM owner_questions";
+    let all = "SELECT COUNT(*) FROM questions_log";
     assert_eq!(case.count(all), PENDING_PER_PROJECT_MAX);
     assert_eq!(
         code(ask(
@@ -871,7 +871,7 @@ fn an_engine_question_is_raised_once_and_its_answer_is_noted_without_blocking() 
     let set = raise(&case.db, &case.project, &landing, &bare("Squash cs-12?")).unwrap();
     assert_ne!(set, id);
     assert_eq!(case.get(set).asker, "engine:landing:cs-12");
-    assert_eq!(case.count("SELECT COUNT(*) FROM owner_questions"), 2);
+    assert_eq!(case.count("SELECT COUNT(*) FROM questions_log"), 2);
     assert!(case.messages().is_empty());
 
     assert_eq!(
@@ -1292,12 +1292,12 @@ fn settled_history_keeps_the_newest_and_never_drops_a_pending_question() {
         assert_eq!(dismiss(&case.db, last, 0).unwrap(), Settlement::Settled);
     }
     assert_eq!(
-        case.count("SELECT COUNT(*) FROM owner_questions"),
+        case.count("SELECT COUNT(*) FROM questions_log"),
         KEPT_PER_PROJECT_MAX
     );
     assert_eq!(case.get(kept).status, QuestionStatus::Pending);
     assert_eq!(case.get(last).status, QuestionStatus::Dismissed);
-    let oldest: i64 = case.count("SELECT MIN(id) FROM owner_questions WHERE status!='pending'");
+    let oldest: i64 = case.count("SELECT MIN(id) FROM questions_log WHERE status!='pending'");
     assert_eq!(
         oldest,
         i64::try_from(last).unwrap() - (KEPT_PER_PROJECT_MAX - 2)

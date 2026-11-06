@@ -88,7 +88,7 @@ fn shown(
     let pending = select(
         tx,
         &format!(
-            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status='pending'
+            "SELECT {COLUMNS} FROM questions_log WHERE project=?1 AND status='pending'
              ORDER BY id LIMIT ?2"
         ),
         params![project.as_str(), PENDING_PER_PROJECT_MAX],
@@ -96,7 +96,7 @@ fn shown(
     let settled = select(
         tx,
         &format!(
-            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status!='pending'
+            "SELECT {COLUMNS} FROM questions_log WHERE project=?1 AND status!='pending'
              ORDER BY id DESC LIMIT ?2"
         ),
         params![project.as_str(), SETTLED_SHOWN_MAX],

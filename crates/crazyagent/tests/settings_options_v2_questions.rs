@@ -97,7 +97,7 @@ impl Asked {
         .unwrap();
         let (status, answer, message): (String, Option<String>, Option<i64>) = db
             .query_row(
-                "SELECT status, answer, message FROM owner_questions WHERE id=?1",
+                "SELECT status, answer, message FROM questions_log WHERE id=?1",
                 params![i64::try_from(self.id).unwrap()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )

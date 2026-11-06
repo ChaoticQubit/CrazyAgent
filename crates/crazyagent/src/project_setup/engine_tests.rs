@@ -1499,7 +1499,7 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         "its agents' kept conversations go with it"
     );
     assert_eq!(
-        engine.rows("SELECT count(*) FROM owner_questions WHERE project='setup-pooled'"),
+        engine.rows("SELECT count(*) FROM questions_log WHERE project='setup-pooled'"),
         0,
         "its questions to the owner go with it"
     );
