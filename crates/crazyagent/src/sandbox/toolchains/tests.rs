@@ -66,3 +66,25 @@ fn a_folder_swapped_in_for_the_lead_s_new_temp_folder_is_refused_with_what_it_ho
         "{sealed:?}"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_getconf_written_again_is_kept_and_one_that_changed_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let _scratch = ScopedTmp::make(home.path()).unwrap();
+    fs::create_dir(home.path().join(crate::launch_context::STATE)).unwrap();
+    let getconf = getconf_folder(home.path()).join(GETCONF_PROGRAM);
+    write_getconf(home.path(), false).unwrap();
+    let written = fs::read(&getconf).unwrap();
+    let again = write_getconf(home.path(), false);
+    assert!(again.is_ok(), "the same getconf written again: {again:?}");
+    assert_eq!(fs::read(&getconf).unwrap(), written);
+    let changed = [written.as_slice(), b"exit 0\n"].concat();
+    fs::write(&getconf, &changed).unwrap();
+    let refused = write_getconf(home.path(), false);
+    assert!(
+        matches!(&refused, Err(error) if error.kind() == io::ErrorKind::AlreadyExists),
+        "a changed getconf: {refused:?}"
+    );
+    assert_eq!(fs::read(&getconf).unwrap(), changed);
+}

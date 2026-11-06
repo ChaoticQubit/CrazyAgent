@@ -796,6 +796,60 @@ fn each_codex_launch_gets_the_project_context_in_its_home_only_while_it_runs() {
     assert!(!home.join("crazyagent").exists());
 }
 
+/// R7-CTX F1: a tools-on research job's harness, under the job's own sandbox profile and
+/// environment, makes a temp folder as context-mode 1.0.169 does, under the answer of the
+/// `getconf DARWIN_USER_TEMP_DIR` its search path finds with TMPDIR unset, and that folder
+/// lands in the job's short temp folder, not in the per-user temp folder the profile denies.
+#[test]
+fn a_research_job_makes_context_mode_temp_folders_where_its_sandbox_lets_it_write() {
+    let case = case("A booking site for a bike repair shop.");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let folder = harness_folder();
+    let harness = ctx_temp_harness(folder.path());
+    let (port, _server) = hanging_endpoint();
+    let runner = Arc::new(
+        ResearchRunner::new(
+            &case.database,
+            &case.state,
+            &harness,
+            limits(Duration::from_secs(120)),
+        )
+        .unwrap(),
+    );
+    let handle = {
+        let runner = runner.clone();
+        let root = case.project.clone();
+        std::thread::spawn(move || {
+            runner
+                .run_once(&ResearchProject {
+                    id: "project-a",
+                    root: &root,
+                    account: Some(endpoint(port)),
+                })
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let home = case
+        .state
+        .join("agents")
+        .join(format!("job-{id}-1"))
+        .join("home");
+    let report = home.join("ctx-temp");
+    wait_for_file(&report, Duration::from_secs(60));
+    let made = fs::read_to_string(&report).unwrap();
+    assert!(jobs.request_cancel(id).unwrap());
+    let run = handle.join().unwrap();
+    assert_eq!(run.status, ResearchStatus::Cancelled);
+    assert!(
+        made.starts_with("made /private/tmp/ca-") && made.contains("/.ctx-mode-"),
+        "the job's context-mode temp folder lands where its sandbox lets it write: {made}"
+    );
+}
+
 #[test]
 fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
     let marker = format!("CLAUDE-CONTEXT-{}", std::process::id());
@@ -961,6 +1015,36 @@ while [ ! -e "$TMPDIR/detached" ]; do /bin/sleep 0.05; done
 {then}
 "#
         ),
+    )
+    .unwrap();
+    fs::set_permissions(&harness, fs::Permissions::from_mode(0o700)).unwrap();
+    harness
+}
+
+/// Writes a harness standing in for Codex that makes a temp folder as context-mode 1.0.169
+/// does: `getconf DARWIN_USER_TEMP_DIR` found on its search path with TMPDIR unset, then a
+/// `.ctx-mode-XXXXXX` folder made in the answer. It writes `made <folder>` or the failure to
+/// `ctx-temp` in its home and sleeps, so the test reads it while the job still runs. Takes
+/// the folder. Returns the harness.
+fn ctx_temp_harness(folder: &Path) -> PathBuf {
+    let harness = folder.canonicalize().unwrap().join("codex");
+    fs::write(
+        &harness,
+        r#"#!/bin/sh
+out="$HOME/ctx-temp"
+if answer=$(/usr/bin/env -u TMPDIR getconf DARWIN_USER_TEMP_DIR 2>&1); then
+  if made=$(/usr/bin/mktemp -d "${answer%/}/.ctx-mode-XXXXXX" 2>&1); then
+    /bin/rmdir "$made"
+    printf 'made %s\n' "$made" > "$out.part"
+  else
+    printf 'mkdtemp failed under %s: %s\n' "$answer" "$made" > "$out.part"
+  fi
+else
+  printf 'getconf failed: %s\n' "$answer" > "$out.part"
+fi
+/bin/mv "$out.part" "$out"
+exec /bin/sleep 60
+"#,
     )
     .unwrap();
     fs::set_permissions(&harness, fs::Permissions::from_mode(0o700)).unwrap();
