@@ -154,7 +154,15 @@ fn the_report_sums_ranges_groups_local_days_lines_and_limits() {
         .unwrap();
     }
 
-    let all = report(&db, None, None, 0, MIDNIGHT + DAY, &[claude_1.clone()]).unwrap();
+    let all = report(
+        &db,
+        None,
+        None,
+        0,
+        MIDNIGHT + DAY,
+        std::slice::from_ref(&claude_1),
+    )
+    .unwrap();
     assert_eq!(
         all.total,
         Tokens {
