@@ -521,23 +521,18 @@ pub fn kept_pane(argv: Vec<String>) -> Option<Vec<String>> {
 /// Takes a pane command back out of the [`KEEPER`] and the [`PANE_SHIM`], for a pane that
 /// starts in a server already running inside its sandbox, where neither can run. Input: an
 /// argv. Output: the `sandbox-exec -f <profile> <program> <arguments>` that [`kept_pane`]
-/// kept when the argv is exactly what it built, or none for any other argv.
+/// kept when keeping it again rebuilds exactly this argv, or none for any other argv.
 #[cfg(target_os = "macos")]
 pub fn unkept_pane(argv: &[String]) -> Option<Vec<String>> {
     let shim = KEEPER.len() + 3;
     let program = shim + PANE_SHIM.len();
-    if argv.len() <= program
-        || argv[..KEEPER.len()] != KEEPER[..]
-        || argv[KEEPER.len()] != SANDBOX_EXEC
-        || argv[KEEPER.len() + 1] != "-f"
-        || argv[shim..program] != PANE_SHIM[..]
+    if argv.len() <= program || argv[KEEPER.len()] != SANDBOX_EXEC || argv[KEEPER.len() + 1] != "-f"
     {
         return None;
     }
     let mut plain = argv[KEEPER.len()..shim].to_vec();
     plain.extend_from_slice(&argv[program..]);
-    assert_eq!(kept_pane(plain.clone()).as_deref(), Some(argv));
-    Some(plain)
+    (kept_pane(plain.clone()).as_deref() == Some(argv)).then_some(plain)
 }
 
 /// Builds the one command every sandboxed headless agent process starts from: `-f
