@@ -231,6 +231,29 @@ pub fn requeue_dead(db: &Connection, agent: AgentId, now: i64) -> Result<u32, En
     u32::try_from(moved).map_err(state)
 }
 
+/// Puts back to Sent one message the engine marked delivered after `after` and up to
+/// `until` (ms), the span of a Codex turn that ended aborted and dropped it before its
+/// session recorded it (b19 P2), so the agent's next turn gets it; one delivered outside
+/// the span, or whose receipt moved on, is left alone. Takes the database, the message,
+/// the span and the time in ms. Returns whether it went back.
+pub(crate) fn requeue_aborted(
+    db: &Connection,
+    id: MessageId,
+    after: i64,
+    until: i64,
+    now: i64,
+) -> Result<bool, EngineError> {
+    let moved = db
+        .execute(
+            "UPDATE coord_messages SET receipt='sent', receipt_at=?4
+             WHERE id=?1 AND to_kind='agent' AND receipt='delivered'
+             AND receipt_at>?2 AND receipt_at<=?3",
+            params![id, after, until, now],
+        )
+        .map_err(state)?;
+    Ok(moved > 0)
+}
+
 /// Finds whom a question goes to from its tags and the asker's place (Q14, Q14b), and
 /// checks a passed-on question against the one it passes on. Takes the transaction, the
 /// project, the asker, both tags and the question passed on, if any. Returns the
