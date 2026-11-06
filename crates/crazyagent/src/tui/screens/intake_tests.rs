@@ -8,6 +8,7 @@ use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::{FoundResearch, MappingFacts, MappingTry, OnboardingView, Step};
 use crate::project_setup::{ProjectSetup, ResearchKind, SetupAction, SetupQuery};
+use crate::projects_home::{AddMode, AddOverride};
 use crate::protocol::ProjectId;
 use crate::tui::client::Connection;
 use crate::tui::client::intake::{IntakeEvent, IntakeJob, IntakeQuery, IntakeView};
@@ -394,13 +395,19 @@ async fn a_large_folder_shows_its_size_and_a_warning_before_a_copy() {
     assert!(shows(&rows, "(*) Move"), "{rows:#?}");
     assert!(shows(&rows, "Goes to "), "{rows:#?}");
     shell.key(Key::Enter);
-    let rows = render(&mut shell, 80, 24);
-    assert!(shows(&rows, "won't stay at its old place"), "{rows:#?}");
-    assert!(shows(&rows, "Move it now"), "{rows:#?}");
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Move big anyway?"), "{rows:#?}");
+    assert!(shows(&rows, "This folder has no git history"), "{rows:#?}");
+    assert!(
+        shows(&rows, "This is a rename on the same disk"),
+        "{rows:#?}"
+    );
+    assert!(!shows(&rows, "This folder is very large"), "{rows:#?}");
     assert!(
         source.join("data.bin").exists(),
-        "nothing moves before the confirm"
+        "nothing moves before the answer"
     );
+    shell.key(Key::Right);
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
     assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
@@ -492,118 +499,250 @@ async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original
     );
 }
 
+fn git_in(folder: &Path, args: &[&str]) {
+    let done = crate::spawn_gate::output(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(folder)
+            .args(args),
+    )
+    .unwrap();
+    assert!(done.status.success(), "{done:?}");
+}
+
+fn repo_with_worktree(source: &Path, linked: &Path) {
+    std::fs::create_dir_all(source).unwrap();
+    std::fs::write(source.join("README.md"), "shop\n").unwrap();
+    git_in(source, &["init", "-q", "-b", "main"]);
+    git_in(source, &["add", "README.md"]);
+    git_in(
+        source,
+        &[
+            "-c",
+            "user.name=Owner",
+            "-c",
+            "user.email=owner@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+    git_in(
+        source,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            linked.to_str().unwrap(),
+        ],
+    );
+}
+
+fn row_of(rows: &[String], text: &str) -> usize {
+    rows.iter()
+        .position(|row| row.contains(text))
+        .unwrap_or_else(|| panic!("no row shows {text:?}: {rows:#?}"))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_repo_with_a_linked_worktree_is_offered_no_move_and_that_worktree_no_move_or_copy() {
+async fn a_move_of_a_repo_with_a_linked_worktree_asks_first_and_move_anyway_moves_it() {
     let mut engine = Engine::start().await;
-    engine.set_home().await;
+    let home = engine.set_home().await;
     let outside = engine.user().join("outside");
-    let plain = outside.join("notes");
     let source = outside.join("shop");
     let linked = outside.join("shop-side");
-    for folder in [&plain, &source] {
-        std::fs::create_dir_all(folder).unwrap();
-        std::fs::write(folder.join("README.md"), "shop\n").unwrap();
-    }
-    let git = |args: &[&str]| {
-        let done = crate::spawn_gate::output(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&source)
-                .args(args),
-        )
-        .unwrap();
-        assert!(done.status.success(), "{done:?}");
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["add", "README.md"]);
-    git(&[
-        "-c",
-        "user.name=Owner",
-        "-c",
-        "user.email=owner@example.invalid",
-        "commit",
-        "-q",
-        "-m",
-        "init",
-    ]);
-    git(&[
-        "worktree",
-        "add",
-        "-q",
-        "-b",
-        "side",
-        linked.to_str().unwrap(),
-    ]);
+    repo_with_worktree(&source, &linked);
     let mut ctx = screen_ctx(&engine.user());
     let screen = open(&Place::AddFolder, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let mut connection = engine.connect();
     assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
-    let typed = format!("{}/", plain.display());
+    keys(&mut shell, &format!("{}/", source.display()));
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "(*) Move"), "{rows:#?}");
+    assert!(shows(&rows, "( ) Copy"), "{rows:#?}");
+    assert!(!shows(&rows, "isn't offered"), "{rows:#?}");
+
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Move shop anyway?"), "{rows:#?}");
+    let loss = row_of(&rows, "Close editors, terminals and apps");
+    let effect = row_of(&rows, "Git worktrees linked to this folder stop working");
+    assert!(loss < effect, "{rows:#?}");
+    assert!(
+        shows(&rows, "Anything that points at the old place"),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "This is a rename on the same disk"),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, linked.canonicalize().unwrap().to_str().unwrap()),
+        "{rows:#?}"
+    );
+    let buttons = row_of(&rows, "Move anyway");
+    assert!(
+        rows[buttons].find("Use where it is") < rows[buttons].find("Move anyway"),
+        "{rows:#?}"
+    );
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    assert!(source.join(".git").is_dir());
+
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
+    assert!(home.join("shop").join(".git").is_dir());
+    assert!(!source.exists());
+    assert_eq!(
+        shell.place(),
+        Some(Place::Onboarding {
+            path: home.join("shop").to_str().unwrap().into(),
+            name: "shop".into(),
+            project: None,
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn use_where_it_is_in_the_question_sets_a_folder_without_git_up_in_place() {
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let source = engine.user().join("outside").join("notes");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("README.md"), "notes\n").unwrap();
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    keys(&mut shell, &format!("{}/", source.display()));
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Move notes anyway?"), "{rows:#?}");
+    assert!(
+        row_of(&rows, "Close editors, terminals and apps")
+            < row_of(&rows, "This folder has no git history"),
+        "{rows:#?}"
+    );
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"add existing"), "{sent:?}");
+    assert!(source.join("README.md").is_file());
+    assert!(!home.join("notes").exists());
+    assert_eq!(
+        shell.place(),
+        Some(Place::Onboarding {
+            path: source.canonicalize().unwrap().to_str().unwrap().into(),
+            name: "notes".into(),
+            project: None,
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_copy_of_a_linked_worktree_asks_first_and_copy_anyway_copies_it() {
+    let mut engine = Engine::start().await;
+    let home = engine.set_home().await;
+    let outside = engine.user().join("outside");
+    let source = outside.join("shop");
+    let linked = outside.join("shop-side");
+    repo_with_worktree(&source, &linked);
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    keys(&mut shell, &format!("{}/", linked.display()));
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    shell.key(Key::Right);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "(*) Copy"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Copy shop-side anyway?"), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "The copy still uses the original repository's git data."
+        ),
+        "{rows:#?}"
+    );
+    assert!(
+        !shows(&rows, "Close editors, terminals and apps"),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Copy anyway"), "{rows:#?}");
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"add existing"), "{sent:?}");
+    assert!(home.join("shop-side").join(".git").is_file());
+    assert!(linked.join(".git").is_file());
+}
+
+#[test]
+fn a_soft_refusal_from_the_engine_turns_into_the_question_for_that_issue() {
+    let user = tempfile::tempdir().unwrap();
+    let source = user.path().canonicalize().unwrap().join("shop");
+    std::fs::create_dir_all(source.join(".git")).unwrap();
+    let mut ctx = screen_ctx(user.path());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let typed = source.to_str().unwrap().to_owned();
     keys(&mut shell, &typed);
     shell.key(Key::Tab);
     shell.key(Key::Right);
-    let rows = render(&mut shell, 80, 24);
-    assert!(shows(&rows, "(*) Move"), "{rows:#?}");
-    assert!(!shows(&rows, "Move isn't offered"), "{rows:#?}");
-    shell.key(Key::BackTab);
-    clear(&mut shell, typed.len());
-
-    let typed = format!("{}/", source.display());
-    keys(&mut shell, &typed);
-    shell.key(Key::Tab);
-    let rows = render(&mut shell, 80, 24);
-    assert!(!shows(&rows, ") Move"), "{rows:#?}");
-    assert!(shows(&rows, "(*) Use where it is"), "{rows:#?}");
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    shell.arrive(intake(
+        IntakeQuery::AddExisting {
+            source: typed.clone(),
+            mode: AddMode::Move,
+            overrides: Vec::new(),
+            generation: 1,
+        },
+        Err("home_copy_too_large".into()),
+    ));
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Move shop anyway?"), "{rows:#?}");
     assert!(
-        shows(&rows, "Move isn't offered: this folder is linked to git"),
+        shows(
+            &rows,
+            "The folder is deeper or bigger than CrazyAgent checks"
+        ),
         "{rows:#?}"
     );
-    assert!(!shows(&rows, "Copy isn't offered"), "{rows:#?}");
-    for (key, way) in [
-        (Key::Right, "(*) Copy"),
-        (Key::Right, "(*) Use where it is"),
-        (Key::Left, "(*) Copy"),
-        (Key::Left, "(*) Use where it is"),
-        (Key::Right, "(*) Copy"),
-    ] {
-        shell.key(key);
-        let rows = render(&mut shell, 80, 24);
-        assert!(shows(&rows, way), "{rows:#?}");
-        assert!(!shows(&rows, ") Move"), "{rows:#?}");
-    }
-    shell.key(Key::BackTab);
-    clear(&mut shell, typed.len());
-
-    let typed = format!("{}/", linked.display());
-    keys(&mut shell, &typed);
-    shell.key(Key::Tab);
-    for key in [None, Some(Key::Right), Some(Key::Left)] {
-        if let Some(key) = key {
-            shell.key(key);
-        }
-        let rows = render(&mut shell, 80, 24);
-        assert!(shows(&rows, "(*) Use where it is"), "{rows:#?}");
-        assert!(!shows(&rows, ") Move"), "{rows:#?}");
-        assert!(!shows(&rows, ") Copy"), "{rows:#?}");
-        assert!(
-            shows(&rows, "Move isn't offered: this folder is linked to git"),
-            "{rows:#?}"
-        );
-        assert!(
-            shows(&rows, "Copy isn't offered: this folder is a git worktree"),
-            "{rows:#?}"
-        );
-    }
-    assert!(pump(&mut shell, &mut connection).await.is_empty());
     assert!(
-        source
-            .join(".git")
-            .join("worktrees")
-            .join("shop-side")
-            .is_dir()
+        shows(&rows, "This copies every file to the other disk"),
+        "{rows:#?}"
     );
-    assert!(linked.join("README.md").is_file());
+    assert!(shows(&rows, "Move anyway"), "{rows:#?}");
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    shell.arrive(intake(
+        IntakeQuery::AddExisting {
+            source: typed,
+            mode: AddMode::Move,
+            overrides: vec![AddOverride::TooLarge],
+            generation: 2,
+        },
+        Err("home_destination_exists".into()),
+    ));
+    let rows = render(&mut shell, 80, 40);
+    assert!(!shows(&rows, "anyway?"), "{rows:#?}");
+    assert!(shows(&rows, "already has a folder"), "{rows:#?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
