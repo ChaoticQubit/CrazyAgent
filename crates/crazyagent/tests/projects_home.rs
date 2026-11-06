@@ -235,7 +235,15 @@ fn move_renames_into_the_home_and_copy_keeps_the_source_and_its_links() {
     let case = case();
     let moved = case.sources.join("moved");
     sample(&moved);
-    let plan = plan_add(&case.home, &case.engine, text(&moved), AddMode::Move, &[]).unwrap();
+    let plan = plan_add(
+        &case.home,
+        &case.engine,
+        text(&moved),
+        AddMode::Move,
+        &[],
+        &[],
+    )
+    .unwrap();
     assert_eq!(plan.source(), moved.as_path());
     assert_eq!(plan.destination(), case.home.join("moved").as_path());
     plan.run().unwrap();
@@ -248,10 +256,17 @@ fn move_renames_into_the_home_and_copy_keeps_the_source_and_its_links() {
 
     let copied = case.sources.join("copied");
     sample(&copied);
-    plan_add(&case.home, &case.engine, text(&copied), AddMode::Copy, &[])
-        .unwrap()
-        .run()
-        .unwrap();
+    plan_add(
+        &case.home,
+        &case.engine,
+        text(&copied),
+        AddMode::Copy,
+        &[],
+        &[],
+    )
+    .unwrap()
+    .run()
+    .unwrap();
     let copy = case.home.join("copied");
     verify_tree(&copied, &copy).unwrap();
     assert_eq!(
@@ -358,10 +373,17 @@ fn special_files_are_refused_and_nothing_is_left_behind() {
     let _listener = crazyagent::spawn_gate::bind_unix_std(source.join("agent.sock")).unwrap();
     let before = names(&source);
 
-    let refused = plan_add(&case.home, &case.engine, text(&source), AddMode::Copy, &[])
-        .unwrap()
-        .run()
-        .unwrap_err();
+    let refused = plan_add(
+        &case.home,
+        &case.engine,
+        text(&source),
+        AddMode::Copy,
+        &[],
+        &[],
+    )
+    .unwrap()
+    .run()
+    .unwrap_err();
     assert_eq!(refused.0, "home_copy_special_file");
     assert_eq!(names(&case.home), Vec::<String>::new());
     assert_eq!(names(&source), before);
@@ -459,7 +481,7 @@ fn unsafe_homes_and_sources_are_refused_before_anything_changes() {
     ] {
         for mode in [AddMode::Move, AddMode::Copy] {
             assert_eq!(
-                plan_add(&case.home, &case.engine, &picked, mode, &[])
+                plan_add(&case.home, &case.engine, &picked, mode, &[], &[])
                     .unwrap_err()
                     .0,
                 code,
@@ -470,7 +492,15 @@ fn unsafe_homes_and_sources_are_refused_before_anything_changes() {
     }
     assert!(source.is_dir() && owner.is_dir() && case.engine.join("inside").is_dir());
     assert_eq!(names(&case.home), ["inner", "taken"]);
-    plan_add(&case.home, &case.engine, text(&source), AddMode::Move, &[]).unwrap();
+    plan_add(
+        &case.home,
+        &case.engine,
+        text(&source),
+        AddMode::Move,
+        &[],
+        &[],
+    )
+    .unwrap();
     assert!(source.is_dir());
 }
 
@@ -886,16 +916,31 @@ fn a_move_that_would_break_worktrees_or_another_project_is_refused_and_copy_stil
     let link = fs::read_to_string(worktree.join(".git")).unwrap();
     for source in [&repo, &worktree] {
         assert_eq!(
-            plan_add(&case.home, &case.engine, text(source), AddMode::Move, &[])
-                .unwrap_err()
-                .0,
+            plan_add(
+                &case.home,
+                &case.engine,
+                text(source),
+                AddMode::Move,
+                &[],
+                &[]
+            )
+            .unwrap_err()
+            .0,
             "home_move_worktrees",
             "{}",
             source.display()
         );
     }
     assert!(plain_problem("home_move_worktrees").is_some());
-    let copy = plan_add(&case.home, &case.engine, text(&repo), AddMode::Copy, &[]).unwrap();
+    let copy = plan_add(
+        &case.home,
+        &case.engine,
+        text(&repo),
+        AddMode::Copy,
+        &[],
+        &[],
+    )
+    .unwrap();
     assert_eq!(copy.destination(), case.home.join("repo").as_path());
 
     let outer = case.sources.join("outer");
@@ -915,6 +960,7 @@ fn a_move_that_would_break_worktrees_or_another_project_is_refused_and_copy_stil
                 &case.engine,
                 text(source),
                 AddMode::Move,
+                &[],
                 &registered
             )
             .unwrap_err()
@@ -930,6 +976,7 @@ fn a_move_that_would_break_worktrees_or_another_project_is_refused_and_copy_stil
         &case.engine,
         text(&outer),
         AddMode::Copy,
+        &[],
         &registered,
     )
     .unwrap();
@@ -941,6 +988,7 @@ fn a_move_that_would_break_worktrees_or_another_project_is_refused_and_copy_stil
         &case.engine,
         text(&plain),
         AddMode::Move,
+        &[],
         &registered,
     )
     .unwrap()
@@ -1050,10 +1098,17 @@ fn a_copy_of_a_repo_with_linked_worktrees_is_standalone_and_git_in_it_never_reac
     assert!(!linked_checkout(&repo));
     assert!(linked_checkout(&sibling) && linked_checkout(&nested));
 
-    plan_add(&case.home, &case.engine, text(&repo), AddMode::Copy, &[])
-        .unwrap()
-        .run()
-        .unwrap();
+    plan_add(
+        &case.home,
+        &case.engine,
+        text(&repo),
+        AddMode::Copy,
+        &[],
+        &[],
+    )
+    .unwrap()
+    .run()
+    .unwrap();
     let copy = case.home.join("repo");
     verify_added(&case.home, text(&repo), AddMode::Copy).unwrap();
 
@@ -1126,9 +1181,16 @@ fn a_linked_worktree_or_a_link_to_a_git_folder_is_not_copied() {
     symlink(repo.join(".git"), linked.join(".git")).unwrap();
     for source in [&sibling, &linked] {
         assert_eq!(
-            plan_add(&case.home, &case.engine, text(source), AddMode::Copy, &[])
-                .unwrap_err()
-                .0,
+            plan_add(
+                &case.home,
+                &case.engine,
+                text(source),
+                AddMode::Copy,
+                &[],
+                &[]
+            )
+            .unwrap_err()
+            .0,
             "home_copy_linked_checkout",
             "{}",
             source.display()
@@ -1140,4 +1202,474 @@ fn a_linked_worktree_or_a_link_to_a_git_folder_is_not_copied() {
     assert!(linked_checkout(&sibling) && linked_checkout(&linked));
     assert_eq!(names(&case.home), Vec::<String>::new());
     assert_eq!(worktree_paths(&repo).len(), 2);
+}
+
+const PAST_THE_USUAL_LEVELS: usize = 260;
+
+fn deep(folder: &Path, levels: usize) -> PathBuf {
+    let mut bottom = folder.to_path_buf();
+    for _ in 0..levels {
+        bottom.push("d");
+    }
+    fs::create_dir_all(&bottom).unwrap();
+    fs::write(bottom.join("bottom.txt"), "deep\n").unwrap();
+    bottom
+}
+
+fn git_fails(folder: &Path, args: &[&str]) -> bool {
+    !crazyagent::spawn_gate::status(
+        Command::new("git")
+            .arg("-C")
+            .arg(folder)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap()
+    .success()
+}
+
+#[test]
+fn a_move_anyway_past_linked_worktrees_needs_that_override_and_git_worktree_repair_mends_them() {
+    let case = case();
+    let repo = case.sources.join("repo");
+    let worktree = case.sources.join("repo-side");
+    repo_with_worktree(&repo, &worktree);
+    for overrides in [&[][..], &[AddOverride::TooLarge][..]] {
+        assert_eq!(
+            plan_add(
+                &case.home,
+                &case.engine,
+                text(&repo),
+                AddMode::Move,
+                overrides,
+                &[]
+            )
+            .unwrap_err()
+            .0,
+            "home_move_worktrees",
+            "{overrides:?}"
+        );
+    }
+    assert_eq!(
+        linked_worktree_paths(&repo, 16),
+        std::slice::from_ref(&worktree)
+    );
+    assert_eq!(linked_worktree_paths(&repo, 0), Vec::<PathBuf>::new());
+    assert_eq!(linked_worktree_paths(&worktree, 16), Vec::<PathBuf>::new());
+
+    plan_add(
+        &case.home,
+        &case.engine,
+        text(&repo),
+        AddMode::Move,
+        &[AddOverride::Worktrees],
+        &[],
+    )
+    .unwrap()
+    .run()
+    .unwrap();
+    let moved = case.home.join("repo");
+    assert!(!repo.exists() && moved.join(".git").is_dir());
+    assert!(git_fails(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]));
+    git(&moved, &["worktree", "repair", text(&worktree)]);
+    assert_eq!(
+        git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "side\n"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("README.md")).unwrap(),
+        "hello\n"
+    );
+}
+
+#[test]
+fn a_copy_anyway_of_a_linked_checkout_needs_that_override_and_keeps_its_git_link() {
+    let case = case();
+    let repo = case.sources.join("repo");
+    let sibling = case.sources.join("repo-side");
+    repo_with_worktree(&repo, &sibling);
+    for overrides in [&[][..], &[AddOverride::TooLarge][..]] {
+        assert_eq!(
+            plan_add(
+                &case.home,
+                &case.engine,
+                text(&sibling),
+                AddMode::Copy,
+                overrides,
+                &[]
+            )
+            .unwrap_err()
+            .0,
+            "home_copy_linked_checkout",
+            "{overrides:?}"
+        );
+    }
+    plan_add(
+        &case.home,
+        &case.engine,
+        text(&sibling),
+        AddMode::Copy,
+        &[AddOverride::LinkedCheckout],
+        &[],
+    )
+    .unwrap()
+    .run()
+    .unwrap();
+    let copy = case.home.join("repo-side");
+    assert_eq!(
+        fs::read_to_string(copy.join(".git")).unwrap(),
+        fs::read_to_string(sibling.join(".git")).unwrap()
+    );
+    assert!(sibling.join(".git").is_file() && sibling.join("README.md").is_file());
+    assert_eq!(worktree_paths(&repo).len(), 2);
+}
+
+#[test]
+fn a_copy_anyway_past_the_usual_levels_needs_that_override_and_leaves_nothing_without_it() {
+    let case = case();
+    let source = case.sources.join("deep");
+    let bottom = deep(&source, PAST_THE_USUAL_LEVELS);
+    for overrides in [&[][..], &[AddOverride::LinkedCheckout][..]] {
+        let refused = plan_add(
+            &case.home,
+            &case.engine,
+            text(&source),
+            AddMode::Copy,
+            overrides,
+            &[],
+        )
+        .unwrap()
+        .run()
+        .unwrap_err();
+        assert_eq!(refused.0, "home_copy_too_large", "{overrides:?}");
+        assert_eq!(names(&case.home), Vec::<String>::new());
+    }
+    plan_add(
+        &case.home,
+        &case.engine,
+        text(&source),
+        AddMode::Copy,
+        &[AddOverride::TooLarge],
+        &[],
+    )
+    .unwrap()
+    .run()
+    .unwrap();
+    let landed = case
+        .home
+        .join("deep")
+        .join(bottom.strip_prefix(&source).unwrap())
+        .join("bottom.txt");
+    assert_eq!(fs::read_to_string(landed).unwrap(), "deep\n");
+    assert!(bottom.join("bottom.txt").is_file());
+}
+
+#[test]
+fn hard_stops_stay_whatever_the_owner_overrides() {
+    let case = case();
+    let every_move = [AddOverride::Worktrees, AddOverride::TooLarge];
+    let every_copy = [AddOverride::LinkedCheckout, AddOverride::TooLarge];
+    let outer = case.sources.join("outer");
+    let project = outer.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let registered = [Registered {
+        project_id: ProjectId::new("project").unwrap(),
+        name: "project".into(),
+        folder: project.clone(),
+        repositories: vec![project.clone()],
+        onboarding: false,
+    }];
+    assert_eq!(
+        plan_add(
+            &case.home,
+            &case.engine,
+            text(&outer),
+            AddMode::Move,
+            &every_move,
+            &registered
+        )
+        .unwrap_err()
+        .0,
+        "home_move_project"
+    );
+    let taken = case.sources.join("taken");
+    sample(&taken);
+    fs::create_dir(case.home.join("taken")).unwrap();
+    let inside = case.home.join("inside");
+    fs::create_dir(&inside).unwrap();
+    let file = case.sources.join("file.txt");
+    fs::write(&file, "x").unwrap();
+    for (mode, overrides) in [
+        (AddMode::Move, &every_move[..]),
+        (AddMode::Copy, &every_copy[..]),
+    ] {
+        for (source, code) in [
+            (&taken, "home_destination_exists"),
+            (&inside, "home_source_in_home"),
+            (&case.engine, "home_source_unsafe"),
+            (&case.root, "home_source_unsafe"),
+            (&file, "home_source_not_folder"),
+        ] {
+            assert_eq!(
+                plan_add(&case.home, &case.engine, text(source), mode, overrides, &[])
+                    .unwrap_err()
+                    .0,
+                code,
+                "{mode:?} {}",
+                source.display()
+            );
+        }
+    }
+    let socketed = case.sources.join("socketed");
+    sample(&socketed);
+    let _listener = crazyagent::spawn_gate::bind_unix_std(socketed.join("agent.sock")).unwrap();
+    let refused = plan_add(
+        &case.home,
+        &case.engine,
+        text(&socketed),
+        AddMode::Copy,
+        &every_copy,
+        &[],
+    )
+    .unwrap()
+    .run()
+    .unwrap_err();
+    assert_eq!(refused.0, "home_copy_special_file");
+    assert_eq!(names(&case.home), ["inside", "taken"]);
+    assert!(taken.join("README.md").is_file() && project.is_dir());
+}
+
+#[test]
+fn an_override_the_mode_cannot_use_or_a_repeated_one_is_refused() {
+    let case = case();
+    let plain = case.sources.join("plain");
+    sample(&plain);
+    for (mode, overrides) in [
+        (AddMode::Move, vec![AddOverride::LinkedCheckout]),
+        (AddMode::Copy, vec![AddOverride::Worktrees]),
+        (
+            AddMode::Move,
+            vec![AddOverride::TooLarge, AddOverride::TooLarge],
+        ),
+        (
+            AddMode::Copy,
+            vec![
+                AddOverride::LinkedCheckout,
+                AddOverride::TooLarge,
+                AddOverride::LinkedCheckout,
+                AddOverride::TooLarge,
+            ],
+        ),
+    ] {
+        let action = HomeAction::Added {
+            source: text(&plain).into(),
+            mode,
+            overrides: overrides.clone(),
+        };
+        assert_eq!(
+            action.validate().unwrap_err().0,
+            "home_override_invalid",
+            "{mode:?} {overrides:?}"
+        );
+        assert_eq!(
+            plan_add(
+                &case.home,
+                &case.engine,
+                text(&plain),
+                mode,
+                &overrides,
+                &[]
+            )
+            .unwrap_err()
+            .0,
+            "home_override_invalid",
+            "{mode:?} {overrides:?}"
+        );
+    }
+    for (mode, overrides) in [
+        (
+            AddMode::Move,
+            vec![AddOverride::Worktrees, AddOverride::TooLarge],
+        ),
+        (
+            AddMode::Copy,
+            vec![AddOverride::LinkedCheckout, AddOverride::TooLarge],
+        ),
+        (AddMode::Move, Vec::new()),
+    ] {
+        HomeAction::Added {
+            source: text(&plain).into(),
+            mode,
+            overrides,
+        }
+        .validate()
+        .unwrap();
+    }
+    assert!(plain_problem("home_override_invalid").is_some());
+
+    let old: HomeAction =
+        serde_json::from_str(r#"{"kind":"added","source":"/a","mode":"move"}"#).unwrap();
+    assert_eq!(
+        old,
+        HomeAction::Added {
+            source: "/a".into(),
+            mode: AddMode::Move,
+            overrides: Vec::new(),
+        }
+    );
+    assert_eq!(
+        serde_json::to_string(&old).unwrap(),
+        r#"{"kind":"added","source":"/a","mode":"move"}"#
+    );
+    let asked: HomeAction = serde_json::from_str(
+        r#"{"kind":"added","source":"/a","mode":"copy","overrides":["linked_checkout","too_large"]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        asked,
+        HomeAction::Added {
+            source: "/a".into(),
+            mode: AddMode::Copy,
+            overrides: vec![AddOverride::LinkedCheckout, AddOverride::TooLarge],
+        }
+    );
+    assert!(
+        serde_json::from_str::<HomeAction>(
+            r#"{"kind":"added","source":"/a","mode":"move","overrides":["everything"]}"#
+        )
+        .is_err()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_move_anyway_across_disks_past_the_usual_levels_copies_checks_then_removes() {
+    let case = case();
+    let volume = Volume::attach();
+    let home = volume.mount.join("home");
+    fs::create_dir(&home).unwrap();
+    let source = case.sources.join("deep");
+    let bottom = deep(&source, PAST_THE_USUAL_LEVELS);
+    assert_eq!(same_volume(&source, &home), Some(false));
+    assert_eq!(same_volume(&source, &case.home), Some(true));
+    assert_eq!(same_volume(&case.root.join("missing"), &case.home), None);
+
+    let refused = plan_add(&home, &case.engine, text(&source), AddMode::Move, &[], &[])
+        .unwrap()
+        .run()
+        .unwrap_err();
+    assert_eq!(refused.0, "home_copy_too_large");
+    assert!(bottom.join("bottom.txt").is_file());
+    assert_eq!(names(&home), Vec::<String>::new());
+
+    plan_add(
+        &home,
+        &case.engine,
+        text(&source),
+        AddMode::Move,
+        &[AddOverride::TooLarge],
+        &[],
+    )
+    .unwrap()
+    .run()
+    .unwrap();
+    assert!(!source.exists());
+    let landed = home
+        .join("deep")
+        .join(bottom.strip_prefix(&source).unwrap())
+        .join("bottom.txt");
+    assert_eq!(fs::read_to_string(landed).unwrap(), "deep\n");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_unreadable_file_keeps_a_move_across_disks_from_removing_the_source() {
+    let case = case();
+    let volume = Volume::attach();
+    let home = volume.mount.join("home");
+    fs::create_dir(&home).unwrap();
+    let source = case.sources.join("guarded");
+    sample(&source);
+    let secret = source.join("src").join("secret.txt");
+    fs::write(&secret, "kept\n").unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+    let before = names(&source);
+    for overrides in [&[][..], &[AddOverride::TooLarge][..]] {
+        let refused = plan_add(
+            &home,
+            &case.engine,
+            text(&source),
+            AddMode::Move,
+            overrides,
+            &[],
+        )
+        .unwrap()
+        .run()
+        .unwrap_err();
+        assert_eq!(refused.0, "home_copy_failed", "{overrides:?}");
+        assert_eq!(names(&source), before);
+        assert!(fs::symlink_metadata(&secret).is_ok());
+        assert_eq!(names(&home), Vec::<String>::new());
+    }
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(fs::read_to_string(&secret).unwrap(), "kept\n");
+}
+
+#[test]
+fn each_git_link_a_move_breaks_is_told_apart() {
+    let case = case();
+    let plain = case.sources.join("plain");
+    fs::create_dir(&plain).unwrap();
+    let repo = case.sources.join("repo");
+    let worktree = case.sources.join("repo-side");
+    repo_with_worktree(&repo, &worktree);
+    let submodule = case.sources.join("vendored");
+    fs::create_dir(&submodule).unwrap();
+    fs::create_dir_all(repo.join(".git/modules/vendored")).unwrap();
+    fs::write(
+        submodule.join(".git"),
+        "gitdir: ../repo/.git/modules/vendored\n",
+    )
+    .unwrap();
+    let named_worktrees = case.sources.join("worktrees-sub");
+    fs::create_dir(&named_worktrees).unwrap();
+    fs::create_dir_all(repo.join(".git/modules/worktrees/tools")).unwrap();
+    fs::write(
+        named_worktrees.join(".git"),
+        "gitdir: ../repo/.git/modules/worktrees/tools\n",
+    )
+    .unwrap();
+    let gone = case.sources.join("gone-sub");
+    fs::create_dir(&gone).unwrap();
+    fs::write(gone.join(".git"), "gitdir: ../repo/.git/modules/gone\n").unwrap();
+    let elsewhere = case.sources.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::write(elsewhere.join(".git"), "gitdir: /var/empty/git\n").unwrap();
+    let locked = case.sources.join("locked");
+    fs::create_dir_all(locked.join(".git")).unwrap();
+    fs::set_permissions(locked.join(".git"), fs::Permissions::from_mode(0o000)).unwrap();
+    let linked = case.sources.join("linked");
+    fs::create_dir(&linked).unwrap();
+    symlink(repo.join(".git"), linked.join(".git")).unwrap();
+    let found = [
+        (&plain, GitLink::None),
+        (&repo, GitLink::Worktrees),
+        (&worktree, GitLink::LinkedWorktree),
+        (&submodule, GitLink::Submodule),
+        (&named_worktrees, GitLink::Submodule),
+        (&gone, GitLink::Unreadable),
+        (&elsewhere, GitLink::Unreadable),
+        (&locked, GitLink::Unreadable),
+        (&linked, GitLink::Unreadable),
+    ]
+    .map(|(folder, want)| (folder.clone(), git_link(folder), want, git_links(folder)));
+    fs::set_permissions(locked.join(".git"), fs::Permissions::from_mode(0o755)).unwrap();
+    for (folder, got, want, links) in found {
+        assert_eq!(got, want, "{}", folder.display());
+        assert_eq!(links, want != GitLink::None, "{}", folder.display());
+    }
 }

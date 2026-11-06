@@ -10533,6 +10533,151 @@ fn a_native_lead_s_relay_is_served_split_and_one_whose_mode_cannot_be_read_is_no
     );
 }
 
+/// The agent's own tool call after a Codex message's mark reads it, as its message does;
+/// a later user line, another steer the rollout records, is not the agent answering and
+/// leaves the message before it Delivered (b19 P1 r1, rv-secreview F1).
+#[test]
+fn a_codex_tool_call_after_a_mark_reads_it_and_a_later_steer_line_does_not() {
+    let fixture = Fixture::new(1);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let codex = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let send = |body: &str| {
+        let id = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(codex),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap();
+        crate::coord::mark(&fixture.connection, id, crate::coord::Receipt::Delivered, 2).unwrap();
+        id
+    };
+    let called = send("Run the check.");
+    let steered = send("Then read the log.");
+    let user = |text: String| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]}})
+    };
+    let lines = [
+        serde_json::json!({"type": "session_meta", "payload": {"id": "t", "cwd": "/repo"}}),
+        user(format!("[crazyagent msg {called}] from x: Run the check.")),
+        serde_json::json!({"type": "response_item", "payload": {"type": "function_call",
+            "name": "exec_command", "arguments": "{\"cmd\":\"make check\"}", "call_id": "c1"}}),
+        user(format!(
+            "[crazyagent msg {steered}] from x: Then read the log."
+        )),
+        user("Another steer the owner typed.".to_owned()),
+    ];
+    let rollouts = agent_home(&team.state, codex)
+        .join("sessions")
+        .join("2026")
+        .join("11")
+        .join("06");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(rollouts.join("rollout-2026-11-06T05-20-00-t.jsonl"), text).unwrap();
+    team.workers
+        .insert(codex, between_turns(&project, AgentRole::Sub, false, false));
+
+    team.serve_relays(&project);
+    let receipt = |id: i64| {
+        crate::coord::message(&fixture.connection, id)
+            .unwrap()
+            .receipt
+    };
+    assert_eq!(
+        receipt(called),
+        crate::coord::Receipt::Read,
+        "the agent's tool call answers"
+    );
+    assert_eq!(
+        receipt(steered),
+        crate::coord::Receipt::Delivered,
+        "a user line after the mark is not an answer"
+    );
+}
+
+/// A message the bridge delivered to a Codex agent turns Read once the agent's rollout
+/// holds its mark with the model's own output after it, as a Claude Code transcript does
+/// through the relay; one whose mark is followed only by a tool's output and the token
+/// count stays Delivered (bridge:136 finding, b19 P1).
+#[test]
+fn a_message_delivered_to_a_codex_agent_is_read_once_its_rollout_answered_after_its_mark() {
+    let fixture = Fixture::new(1);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let codex = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let send = |body: &str| {
+        let id = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(codex),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap();
+        crate::coord::mark(&fixture.connection, id, crate::coord::Receipt::Delivered, 2).unwrap();
+        id
+    };
+    let answered = send("Answered one.");
+    let pending = send("Seen, not yet answered.");
+    let user = |id: i64, text: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": format!("[crazyagent msg {id}] from x: {text}")}]}})
+    };
+    let lines = [
+        serde_json::json!({"type": "session_meta", "payload": {"id": "t", "cwd": "/repo"}}),
+        user(answered, "Answered one."),
+        serde_json::json!({"type": "event_msg", "payload": {"type": "user_message",
+            "message": format!("[crazyagent msg {answered}] from x: Answered one.")}}),
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "On it."}]}}),
+        user(pending, "Seen."),
+        serde_json::json!({"type": "response_item", "payload": {"type": "function_call_output",
+            "call_id": "c1", "output": "assistant"}}),
+        serde_json::json!({"type": "event_msg", "payload": {"type": "token_count", "info": null}}),
+    ];
+    let rollouts = agent_home(&team.state, codex)
+        .join("sessions")
+        .join("2026")
+        .join("11")
+        .join("06");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(rollouts.join("rollout-2026-11-06T04-30-00-t.jsonl"), text).unwrap();
+    team.workers
+        .insert(codex, between_turns(&project, AgentRole::Sub, false, false));
+
+    team.serve_relays(&project);
+    let receipt = |id: i64| {
+        crate::coord::message(&fixture.connection, id)
+            .unwrap()
+            .receipt
+    };
+    assert_eq!(receipt(answered), crate::coord::Receipt::Read);
+    assert_eq!(receipt(pending), crate::coord::Receipt::Delivered);
+}
+
 /// F2 and FAIL C: the agents the engine wakes for their messages are the project's idle
 /// sub-agents on a signed-in account between turns, kept native-lead sessions included;
 /// busy, live, stopping, endpoint (kept) agents, the master and other projects are not.

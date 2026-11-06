@@ -998,11 +998,13 @@ fn a_group_once_gone_is_never_tested_or_signalled_again() {
     .unwrap();
     let survivor_group = rustix::process::Pid::from_child(&survivor);
     let guard = Group(survivor_group, std::cell::Cell::new(false));
+    let held = [ended.id(), survivor.id()]
+        .map(|group| Ending::claim(group).expect("no path holds a new group"));
     let reaped = std::thread::spawn(move || survivor.wait());
     let calls = std::cell::RefCell::new(Vec::new());
 
     end_groups_with(
-        vec![ended_group, survivor_group],
+        held.into(),
         |group| {
             let answer = rustix::process::test_kill_process_group(group);
             calls.borrow_mut().push(("test", group, answer));
@@ -1120,6 +1122,44 @@ fn close_waits_one_hangup_grace_for_all_its_panes() {
         );
         group.1.set(true);
     }
+}
+
+/// CB-2 one signal: a close leaves a pane group another path holds to that path, as the
+/// stop that ends the pane holds its group from before the host's kill, so the host never
+/// signals that group as well. The holder then ends it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_close_leaves_a_pane_group_another_path_holds_to_that_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let started = home.path().join("child.pid");
+    let agent = AgentId::team(1).unwrap();
+    host.spawn(&agent, &hangup_ignored_agent(home.path(), &started))
+        .unwrap();
+    let pane = host.panes(&agent).unwrap().remove(0);
+    let (group, child) = left_in_group(pane.pid, &started);
+    let held = crate::harnesses::launch::Ending::claim(pane.pid)
+        .expect("no path holds the new pane's group");
+
+    host.kill(&agent).unwrap();
+    host.join_reapers();
+    let survived = rustix::process::test_kill_process(child).is_ok();
+    let ended = crate::harnesses::launch::end_pane_group(pane.pid, Some(held));
+    assert!(
+        survived,
+        "the host signalled a pane group another path holds"
+    );
+    assert!(ended, "the holder ends the group");
+    assert!(gone(&group, child), "the pane's group is gone");
 }
 
 #[cfg(target_os = "macos")]

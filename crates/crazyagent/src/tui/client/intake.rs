@@ -3,7 +3,7 @@ use super::*;
 use crate::engine::owner::{AccountSecret, OwnerResult};
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
-use crate::projects_home::{AddMode, FoundProject, ProjectsHome};
+use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::CredentialRef;
 
 #[cfg(all(test, unix))]
@@ -26,6 +26,7 @@ pub(in crate::tui) enum IntakeQuery {
     AddExisting {
         source: String,
         mode: AddMode,
+        overrides: Vec<AddOverride>,
         generation: u64,
     },
     StartOnboarding {
@@ -179,10 +180,11 @@ impl NativeOwner {
             IntakeQuery::AddExisting {
                 source,
                 mode,
+                overrides,
                 generation,
             } => IntakeView::Changed(applied(
                 controller
-                    .add_existing_folder(source, mode, generation)
+                    .add_existing_folder(source, mode, overrides, generation)
                     .await
                     .map_err(problem)?,
             )?),

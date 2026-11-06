@@ -1,7 +1,7 @@
 use super::*;
 use crate::projects_home::{
-    self as home, AddMode, AddPlan, FoundProject, HomeAction, HomeEffect, HomeWatch, MovePlan,
-    ProjectsHome, Registered,
+    self as home, AddMode, AddOverride, AddPlan, FoundProject, HomeAction, HomeEffect, HomeWatch,
+    MovePlan, ProjectsHome, Registered,
 };
 use std::ffi::OsStr;
 use std::path::{Component, PathBuf};
@@ -247,6 +247,7 @@ pub(super) fn add_plan(
     expected: &Cursor,
     source: &str,
     mode: AddMode,
+    overrides: &[AddOverride],
 ) -> Result<AddPlan, EngineError> {
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
@@ -254,7 +255,14 @@ pub(super) fn add_plan(
         return Err(error("stale_revision"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
-    home::plan_add(&saved, &engine_root(path)?, source, mode, &guarded(&tx)?)
+    home::plan_add(
+        &saved,
+        &engine_root(path)?,
+        source,
+        mode,
+        overrides,
+        &guarded(&tx)?,
+    )
 }
 
 /// Plans a MoveProjectsHome that moves the project folders and records the

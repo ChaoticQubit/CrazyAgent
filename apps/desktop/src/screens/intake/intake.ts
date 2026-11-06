@@ -1,6 +1,7 @@
+import { ADD_WARNINGS, measuredLine } from "../../api-intake";
 import { receiptState, type StoredSetup } from "../../api-projects";
 import type {
-  AddFolderMode, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, MappingFacts,
+  AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, MappingFacts,
   MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
@@ -102,12 +103,14 @@ export function joinPath(root: string, name: string): string {
 export type AddWay = "here" | AddFolderMode;
 
 /** Says what using the folder where it is, Move or Copy does; Copy shows the size first and warns
- * above 1 GB. Inputs: the way, the folder size or null while it is read, and the projects folder.
- * Output: the sentence and whether it is a warning. */
-export function sizeLine(mode: AddWay, bytes: number | null, home: string): { text: string; warn: boolean } {
+ * above 1 GB or when the folder could not be measured. Inputs: the way, the folder size or null,
+ * the projects folder and whether the size read finished without a size. Output: the sentence and
+ * whether it is a warning. */
+export function sizeLine(mode: AddWay, bytes: number | null, home: string, unmeasured = false): { text: string; warn: boolean } {
   const where = folderLabel(home);
   if (mode === "here") return { text: "Sets it up where it is. Nothing is moved or copied.", warn: false };
   if (mode === "move") return { text: `Moves the folder into ${where}. It won't stay at its old place.`, warn: false };
+  if (bytes === null && unmeasured) return { text: `CrazyAgent couldn't measure this folder. A copy puts all of it into ${where}; the original stays where it is.`, warn: true };
   if (bytes === null) return { text: "Checking the folder size...", warn: false };
   if (bytes > COPY_WARN_BYTES) {
     return { text: `This copies ${formatBytes(bytes)} into ${where}. That takes a while and uses as much disk again. Using it where it is needs no copy.`, warn: true };
@@ -123,47 +126,158 @@ export function worktreesLine(count: number): string {
   return `This folder has ${count} linked git ${many ? "worktrees" : "worktree"}. ${many ? "They stay" : "It stays"} with the original folder; the copy gets the main checkout and every branch.`;
 }
 
-/** Why Add folder offers no Move for a folder whose git worktree links a move would break. */
-export const MOVE_WITHHELD = "Move isn't offered: this folder is linked to git worktrees, and moving it would break them.";
-
-/** Why Add folder offers no Copy for a folder that is itself a linked git worktree or submodule. */
-export const COPY_WITHHELD = "Copy isn't offered: this folder is a git worktree or submodule of another repository, so a copy would still share it.";
-
 /** Why Add folder offers no Move or Copy yet while the folder read is still checking its git links. */
 export const WAYS_CHECKING = "Move and Copy are offered once CrazyAgent has checked this folder's git links.";
 
-/** Why Add folder offers no Move or Copy when the folder read failed or could not say. */
-export const WAYS_UNCHECKED = "Move and Copy aren't offered: CrazyAgent couldn't check this folder's git links.";
-
-/** Whether Add folder offers Move: only once the folder read says moving it keeps its git
- * worktree links, since the engine refuses a Move that would break them. Input: the folder
- * read, if any. Output: true only for a read with movable true. */
-export function moveOffered(size: Loaded<FolderSize> | null): boolean {
-  return size?.kind === "ok" && size.value.movable === true;
+/** Whether Add folder offers Move and Copy: once the folder read has finished, whatever it found,
+ * since what it found is asked about before anything moves. Input: the folder read, if any.
+ * Output: true once a folder is picked and its read is not loading. */
+export function waysOffered(size: Loaded<FolderSize> | null): boolean {
+  return size !== null && size.kind !== "loading";
 }
 
-/** Whether Add folder offers Copy: only once the folder read says it is not itself a linked
- * git worktree or submodule checkout, whose copy the engine refuses. Input: the folder read, if
- * any. Output: true only for a read with copyable true. */
-export function copyOffered(size: Loaded<FolderSize> | null): boolean {
-  return size?.kind === "ok" && size.value.copyable === true;
-}
-
-/** Why Add folder offers no Move or no Copy for a picked folder. Input: the folder read, if any.
- * Output: the reason lines; none when both are offered or no folder is picked. */
+/** Why Add folder offers no Move or Copy for a picked folder. Input: the folder read, if any.
+ * Output: the reason lines; one only while the read is still checking. */
 export function waysWithheld(size: Loaded<FolderSize> | null): string[] {
-  if (size === null) return [];
-  if (size.kind === "loading") return [WAYS_CHECKING];
-  if (size.kind !== "ok" || typeof size.value.movable !== "boolean" || typeof size.value.copyable !== "boolean") return [WAYS_UNCHECKED];
-  return [size.value.movable ? null : MOVE_WITHHELD, size.value.copyable ? null : COPY_WITHHELD].filter((line): line is string => line !== null);
+  return size?.kind === "loading" ? [WAYS_CHECKING] : [];
 }
 
-/** The way Add folder uses: the chosen one, or Use where it is for a Move or Copy it no longer
- * offers. Inputs: the chosen way and the folder read. Output: the way to show and add with. */
+/** The way Add folder uses: the chosen one, or Use where it is while Move and Copy wait for the
+ * folder read. Inputs: the chosen way and the folder read. Output: the way to show and add with. */
 export function addWay(mode: AddWay, size: Loaded<FolderSize> | null): AddWay {
-  if (mode === "move" && !moveOffered(size)) return "here";
-  if (mode === "copy" && !copyOffered(size)) return "here";
-  return mode;
+  return mode !== "here" && !waysOffered(size) ? "here" : mode;
+}
+
+/** Something about a folder the owner is asked about before a Move or Copy goes ahead. */
+export type AnywayIssue =
+  | "large"
+  | "too_many"
+  | "unreadable"
+  | "worktrees"
+  | "linked_worktree"
+  | "submodule"
+  | "git_data_unread"
+  | "linked_checkout"
+  | "no_git"
+  | "git_unread";
+
+const ISSUE_ORDER: AnywayIssue[] = ["large", "too_many", "unreadable", "worktrees", "linked_worktree", "submodule", "git_data_unread", "linked_checkout", "no_git", "git_unread"];
+
+const MOVE_LINK_ISSUES: AnywayIssue[] = ["worktrees", "linked_worktree", "submodule", "git_data_unread"];
+
+const REFUSED_ISSUES: Record<string, AnywayIssue> = {
+  home_copy_linked_checkout: "linked_checkout",
+  home_copy_too_large: "too_many",
+};
+
+/** The issue a Move of a folder with git links outside it is asked about: the link the read
+ * named, or linked worktrees when the read did not name one. Input: the folder read, if any.
+ * Output: the issue. */
+function moveLinkIssue(read: FolderSize | null): AnywayIssue {
+  switch (read?.git_link) {
+    case "linked_worktree":
+      return "linked_worktree";
+    case "submodule":
+      return "submodule";
+    case "unreadable":
+      return "git_data_unread";
+    default:
+      return "worktrees";
+  }
+}
+
+/** What the owner is asked about before a Move or Copy of a picked folder: what its read found
+ * for that way, plus the issue of a soft refusal the engine sent back. A Move on the same disk is
+ * a rename, so size matters only to a Copy or a Move that may cross disks. Inputs: the way, the
+ * folder read and the refusal code, if any. Output: the issues in a fixed order, none while the
+ * read is loading. */
+export function anywayIssues(way: AddFolderMode, size: Loaded<FolderSize> | null, refused: string | null): AnywayIssue[] {
+  if (size === null || size.kind === "loading") return [];
+  const found = new Set<AnywayIssue>();
+  const read = size.kind === "ok" ? size.value : null;
+  if (refused === "home_move_worktrees") found.add(moveLinkIssue(read));
+  else if (refused !== null && Object.hasOwn(REFUSED_ISSUES, refused)) found.add(REFUSED_ISSUES[refused]);
+  if (read === null || typeof read.movable !== "boolean" || typeof read.copyable !== "boolean") found.add("git_unread");
+  else if (way === "move" && !read.movable) found.add(moveLinkIssue(read));
+  else if (way === "copy" && !read.copyable) found.add("linked_checkout");
+  if (read?.git === false) found.add("no_git");
+  if (read?.size_problem === "folder_size_unreadable") found.add("unreadable");
+  const copies = way === "copy" || read?.same_volume !== true;
+  if (copies && (read?.size_problem === "folder_size_timeout" || read?.size_problem === "folder_size_too_large")) found.add("large");
+  if (copies && read?.size_problem === "folder_size_too_large") found.add("too_many");
+  if (copies && typeof read?.bytes === "number" && read.bytes > COPY_WARN_BYTES) found.add("large");
+  return ISSUE_ORDER.filter((issue) => found.has(issue));
+}
+
+/** The overrides Move anyway or Copy anyway sends: one for each issue the engine itself refuses,
+ * never for one the owner was not shown. Inputs: the way, the issues and the folder read.
+ * Output: the overrides, in the engine's order. */
+export function anywayOverrides(way: AddFolderMode, issues: AnywayIssue[], size: Loaded<FolderSize> | null): AddOverride[] {
+  const unmeasured = size?.kind === "ok" && size.value.size_problem === "folder_size_timeout";
+  const overrides: AddOverride[] = [];
+  if (way === "move" && issues.some((issue) => MOVE_LINK_ISSUES.includes(issue))) overrides.push("worktrees");
+  if (way === "copy" && issues.includes("linked_checkout")) overrides.push("linked_checkout");
+  if (issues.includes("too_many") || (issues.includes("large") && unmeasured)) overrides.push("too_large");
+  return overrides;
+}
+
+const REFUSAL_OVERRIDES: Record<string, AddOverride> = {
+  home_move_worktrees: "worktrees",
+  home_copy_linked_checkout: "linked_checkout",
+  home_copy_too_large: "too_large",
+};
+
+/** Whether an engine refusal of a Move or Copy turns into the question for that issue: only a
+ * soft refusal whose override was not already sent, so the owner is never asked twice about one
+ * issue. Inputs: the refusal code and the overrides sent. Output: true to ask. */
+export function asksAgain(code: string, sent: AddOverride[]): boolean {
+  return Object.hasOwn(REFUSAL_OVERRIDES, code) && !sent.includes(REFUSAL_OVERRIDES[code]);
+}
+
+/** One warning block of the Move anyway or Copy anyway question: whether it is about losing
+ * data, its lines in the owner's words, and the folders it names. */
+export interface AnywayWarning {
+  loss: boolean;
+  lines: string[];
+  paths: string[];
+}
+
+/** The warnings the question shows: data loss blocks first (a copy sharing another checkout's
+ * git data, a moved worktree whose git data its repository can prune, apps still using the folder,
+ * a copy across disks, a very large or deep folder, unreadable files), then the other effects (the
+ * old place, git worktrees with their folders, the folder being a submodule, git data not read, no
+ * git, git not read, a quick rename). Inputs: the way, the issues and the folder read. Output: the
+ * blocks in that order. */
+export function anywayWarnings(way: AddFolderMode, issues: AnywayIssue[], size: Loaded<FolderSize> | null): AnywayWarning[] {
+  const read = size?.kind === "ok" ? size.value : null;
+  const moving = way === "move";
+  const copyLine = moving ? ADD_WARNINGS.across_disks : ADD_WARNINGS.copy_all;
+  const block = (loss: boolean, lines: string[], paths: string[] = []): AnywayWarning => ({ loss, lines, paths });
+  const loss: AnywayWarning[] = issues.includes("linked_checkout") ? [block(true, [ADD_WARNINGS.linked_checkout])] : [];
+  if (issues.includes("linked_worktree")) loss.push(block(true, [ADD_WARNINGS.linked_worktree]));
+  if (moving) loss.push(block(true, [ADD_WARNINGS.close_apps]));
+  let copying = false;
+  if (issues.includes("large")) {
+    loss.push(block(true, [ADD_WARNINGS.large, typeof read?.bytes === "number" ? measuredLine(read.bytes) : ADD_WARNINGS.unmeasured, copyLine]));
+    copying = true;
+  }
+  if (issues.includes("too_many")) {
+    loss.push(block(true, [...(copying ? [] : [copyLine]), ADD_WARNINGS.too_many]));
+    copying = true;
+  }
+  if (moving && !copying && read?.same_volume === false) {
+    loss.push(block(true, [ADD_WARNINGS.across_disks]));
+    copying = true;
+  }
+  if (issues.includes("unreadable")) loss.push(block(true, [moving ? ADD_WARNINGS.unreadable : ADD_WARNINGS.unreadable_copy]));
+  const effects: AnywayWarning[] = moving ? [block(false, [ADD_WARNINGS.old_place])] : [];
+  if (issues.includes("worktrees")) effects.push(block(false, [ADD_WARNINGS.worktrees], read?.worktree_paths ?? []));
+  if (issues.includes("submodule")) effects.push(block(false, [ADD_WARNINGS.submodule]));
+  if (issues.includes("git_data_unread")) effects.push(block(false, [ADD_WARNINGS.git_data_unread]));
+  if (issues.includes("no_git")) effects.push(block(false, [ADD_WARNINGS.no_git]));
+  if (issues.includes("git_unread")) effects.push(block(false, [ADD_WARNINGS.git_unread]));
+  if (moving && !copying && read?.same_volume === true) effects.push(block(false, [ADD_WARNINGS.same_disk]));
+  return [...loss, ...effects];
 }
 
 /** Says how long the GitHub device code still works. Inputs: its lifetime in seconds, when it
