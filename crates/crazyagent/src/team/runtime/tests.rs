@@ -10603,6 +10603,102 @@ fn a_message_delivered_to_a_codex_agent_is_read_once_its_rollout_answered_after_
     assert_eq!(receipt(pending), crate::coord::Receipt::Delivered);
 }
 
+/// A steer the bridge delivered into a Codex turn that then ended aborted goes back to
+/// Sent when the rollout never records it, as Codex 0.164 drops a steer still pending at
+/// the abort, so the agent's next turn gets it; one the rollout records before the abort
+/// stays Delivered and is never sent twice, as do one delivered after the abort and one
+/// delivered before the session began (b19 P2).
+#[test]
+fn a_steer_an_aborted_codex_turn_dropped_goes_back_to_sent_and_a_recorded_one_stays_delivered() {
+    let fixture = Fixture::new(1);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let codex = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let delivered = |body: &str, at: i64| {
+        let id = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(codex),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap();
+        crate::coord::mark(
+            &fixture.connection,
+            id,
+            crate::coord::Receipt::Delivered,
+            at,
+        )
+        .unwrap();
+        id
+    };
+    let early = delivered("Before the session.", 1_793_233_100_000);
+    let drained = delivered("Drained before the abort.", 1_793_233_201_500);
+    let lost = delivered("Pending at the abort.", 1_793_233_204_000);
+    let later = delivered("Into the next turn.", 1_793_233_207_000);
+    let at = |second: &str| format!("2026-10-29T00:20:{second}Z");
+    let lines = [
+        serde_json::json!({"timestamp": at("00.947"), "type": "session_meta",
+            "payload": {"id": "t", "cwd": "/repo"}}),
+        serde_json::json!({"timestamp": at("00.947"), "type": "event_msg",
+            "payload": {"type": "task_started", "turn_attribution": {"turn_id": "t1"}}}),
+        serde_json::json!({"timestamp": at("02.000"), "type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text",
+            "text": format!("[crazyagent msg {drained}] from owner: Drained before the abort.")}]}}),
+        serde_json::json!({"timestamp": at("06.457"), "type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text",
+            "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose."}]}}),
+        serde_json::json!({"timestamp": at("06.459"), "type": "event_msg", "payload": {
+            "type": "turn_aborted", "turn_id": "t1", "reason": "interrupted",
+            "started_at": 1_793_233_200, "completed_at": 1_793_233_206, "duration_ms": 5512}}),
+    ];
+    let rollouts = agent_home(&team.state, codex)
+        .join("sessions")
+        .join("2026")
+        .join("10")
+        .join("29");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(rollouts.join("rollout-2026-10-29T00-20-00-t.jsonl"), text).unwrap();
+    team.workers
+        .insert(codex, between_turns(&project, AgentRole::Sub, false, false));
+
+    team.serve_relays(&project);
+    let receipt = |id: i64| {
+        crate::coord::message(&fixture.connection, id)
+            .unwrap()
+            .receipt
+    };
+    assert_eq!(
+        receipt(lost),
+        crate::coord::Receipt::Sent,
+        "the dropped steer waits for the agent's next turn"
+    );
+    assert!(
+        crate::coord::pending(&fixture.connection, codex, 64)
+            .unwrap()
+            .iter()
+            .any(|message| message.id == lost),
+        "the delivery loop sends it again"
+    );
+    for (id, what) in [
+        (drained, "the steer the rollout recorded"),
+        (later, "the steer delivered after the abort"),
+        (early, "the message delivered before the session began"),
+    ] {
+        assert_eq!(receipt(id), crate::coord::Receipt::Delivered, "{what}");
+    }
+}
+
 /// F2 and FAIL C: the agents the engine wakes for their messages are the project's idle
 /// sub-agents on a signed-in account between turns, kept native-lead sessions included;
 /// busy, live, stopping, endpoint (kept) agents, the master and other projects are not.
