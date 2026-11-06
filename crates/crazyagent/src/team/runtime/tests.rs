@@ -3187,6 +3187,81 @@ fn an_owner_line_waiting_long_for_the_masters_app_says_so_once() {
     host.close(&[]).unwrap();
 }
 
+/// R10R2-L1: the "not reading keys" line an earlier engine stored goes once the next
+/// engine types an owner line into the live master it took over, though no wait of its own
+/// began: the adopted master is briefed already, so nothing else takes the line down.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stored_not_reading_line_goes_once_a_restarted_engine_types_into_its_master() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, LIVE_CODEX).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let open = || {
+        let access = fixture.access.clone();
+        TeamRuntime::open(
+            &fixture.base.join("engine.db"),
+            &fixture.base.join("team"),
+            BTreeMap::from([("codex", codex.clone())]),
+            Box::new(move || Some(access.clone())),
+            TeamLimits::default(),
+        )
+        .unwrap()
+        .with_terminal(host.clone())
+        .unwrap()
+    };
+    let project = fixture.setup.project_id.clone();
+    let mut team = open();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master runs idle", |f| {
+        live_agent(&f.connection)
+            .is_some_and(|master| f.agent_status(master).0 == AgentStatus::Idle)
+    });
+    let master = masters(&fixture.connection)[0];
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+    let line = super::super::master::MASTER_NOT_READING;
+    assert!(super::super::master::problem(&fixture.connection, &project, Some(line)).unwrap());
+
+    let mut again = open();
+    fixture.until(
+        &mut again,
+        "the next engine takes the live master over",
+        |f| f.agent_status(master) == (AgentStatus::Idle, None) && f.recorded(master),
+    );
+    idle_ticks(&mut again);
+    assert_eq!(
+        fixture.status().live_problem.as_deref(),
+        Some(line),
+        "the adopted master keeps the stored line until something is typed"
+    );
+    let tx = fixture.connection.transaction().unwrap();
+    append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    fixture.until(&mut again, "the owner's line opens a turn", |f| {
+        live_turns(&f.connection).0 >= 1
+    });
+    idle_ticks(&mut again);
+    assert_eq!(
+        fixture.status().live_problem,
+        None,
+        "a typed line takes the stored wait line down"
+    );
+    assert_eq!(again.shutdown().unwrap(), names(&[master]));
+    host.close(&[]).unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn an_owner_line_waits_until_the_live_masters_screen_is_quiet() {
