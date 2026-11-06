@@ -1160,8 +1160,8 @@ pub fn codex_receipts(
 /// home's newest session records of the format, Claude Code transcripts
 /// (`projects/**/<session>.jsonl`) or Codex rollouts (`sessions/**/rollout-*.jsonl`), with
 /// the session's answer after it ([`answered`]), and puts back to Sent each message the
-/// Codex bridge delivered into a turn (its `turn`) that a rollout shows ended aborted, when
-/// no tail shows its mark. Reads the last `TRANSCRIPT_TAIL_BYTES` of at most
+/// Codex bridge delivered into a turn (its `turn`) whose start and aborted end both show in
+/// one rollout tail, when no tail shows its mark. Reads the last `TRANSCRIPT_TAIL_BYTES` of at most
 /// `TRANSCRIPTS_READ_MAX` files, read-only and never following a link.
 fn read_receipts(
     db: &Connection,
@@ -1217,8 +1217,9 @@ fn read_receipts(
 
 /// What the tails of a home's session records showed: the unread ids answered after their
 /// mark, every unread id whose mark shows at all, and the turns unread messages went into
-/// that a Codex rollout shows ended aborted; Codex 0.164 drops a steer still waiting when
-/// its turn aborts (b19 P2).
+/// whose start and aborted end both show in one Codex rollout tail, so a mark recorded in
+/// such a turn would show too; Codex 0.164 drops a steer still waiting when its turn aborts
+/// (b19 P2).
 #[derive(Default)]
 struct Tails {
     read: BTreeSet<MessageId>,
@@ -1255,25 +1256,50 @@ fn answered(format: Format, text: &str) -> bool {
     }
 }
 
-/// Reads the turn one Codex rollout line ends aborted, an `event_msg` `turn_aborted` with
-/// its `turn_id` as 0.164 writes it, when it is one of the wanted turns. Takes the line
-/// and the wanted turn ids. Returns that turn id, or none for any other line.
-fn aborted_turn(text: &str, wanted: &BTreeSet<&str>) -> Option<String> {
-    if wanted.is_empty() || !text.contains("\"turn_aborted\"") {
+/// One wanted Codex turn's start or aborted end, as a 0.164 rollout line records it.
+enum TurnEvent {
+    Started(String),
+    Aborted(String),
+}
+
+/// Reads the wanted turn one Codex rollout line starts or ends aborted: an `event_msg`
+/// `task_started` with its `turn_id` or `turn_attribution.turn_id` (0.164 writes the
+/// attribution only for a regular turn), or a `turn_aborted` with its `turn_id`. Takes the
+/// line and the wanted turn ids. Returns that event, or none for any other line or turn.
+fn turn_event(text: &str, wanted: &BTreeSet<&str>) -> Option<TurnEvent> {
+    if wanted.is_empty()
+        || !(text.contains("\"task_started\"") || text.contains("\"turn_aborted\""))
+    {
         return None;
     }
     let record = serde_json::from_str::<serde_json::Value>(text).ok()?;
-    if record["type"] != "event_msg" || record["payload"]["type"] != "turn_aborted" {
+    if record["type"] != "event_msg" {
         return None;
     }
-    let turn = record["payload"]["turn_id"].as_str()?;
-    wanted.contains(turn).then(|| turn.to_owned())
+    let payload = &record["payload"];
+    let kind = payload["type"].as_str()?;
+    let ids: &[&str] = match kind {
+        "task_started" => &["/turn_id", "/turn_attribution/turn_id"],
+        "turn_aborted" => &["/turn_id"],
+        _ => return None,
+    };
+    let turn = ids
+        .iter()
+        .filter_map(|id| payload.pointer(id)?.as_str())
+        .find(|turn| wanted.contains(turn))?
+        .to_owned();
+    Some(if kind == "task_started" {
+        TurnEvent::Started(turn)
+    } else {
+        TurnEvent::Aborted(turn)
+    })
 }
 
 /// Finds in one session record's tail the unread ids whose mark is followed by the
 /// session's answer ([`answered`]), the unread ids whose mark shows at all and, in a Codex
-/// rollout, the wanted turns that ended aborted ([`aborted_turn`]). Takes the record, its
-/// format, the unread ids, the turns they went into and what the tails showed so far.
+/// rollout, the wanted turns whose start and later aborted end both lie in this tail
+/// ([`turn_event`]). Takes the record, its format, the unread ids, the turns they went into
+/// and what the tails showed so far.
 fn scan_transcript(
     path: &Path,
     format: Format,
@@ -1294,6 +1320,7 @@ fn scan_transcript(
         return;
     }
     let mut seen: BTreeSet<MessageId> = BTreeSet::new();
+    let mut started: BTreeSet<String> = BTreeSet::new();
     loop {
         line.clear();
         match reader.read_until(b'\n', &mut line) {
@@ -1314,10 +1341,16 @@ fn scan_transcript(
                 }
             }
         }
-        if format == Format::Codex
-            && let Some(turn) = aborted_turn(text, wanted)
-        {
-            tails.aborted.insert(turn);
+        if format == Format::Codex {
+            match turn_event(text, wanted) {
+                Some(TurnEvent::Started(turn)) => {
+                    started.insert(turn);
+                }
+                Some(TurnEvent::Aborted(turn)) if started.contains(&turn) => {
+                    tails.aborted.insert(turn);
+                }
+                _ => {}
+            }
         }
     }
 }

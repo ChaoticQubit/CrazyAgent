@@ -10901,7 +10901,8 @@ fn an_abort_puts_back_only_what_went_into_that_turn_never_a_steer_pending_in_ano
 /// A steer delivered into a Codex turn whose start and recorded mark both scrolled out of
 /// the rollout tail before the turn's aborted end stays Delivered and is not sent twice, as
 /// the tail can no longer show a mark recorded after that start; one pending in the next
-/// turn, whose start and abort both lie in the tail, still goes back to Sent (b19 P2 r2).
+/// turn, whose start (only its `turn_id`, as 0.164 writes a turn with no attribution) and
+/// abort both lie in the tail, still goes back to Sent (b19 P2 r2).
 #[test]
 fn an_aborted_turn_whose_start_left_the_tail_keeps_its_steers_delivered() {
     let fixture = Fixture::new(1);
@@ -10964,7 +10965,7 @@ fn an_aborted_turn_whose_start_left_the_tail_keeps_its_steers_delivered() {
             "reason": "interrupted", "started_at": 1_793_233_200,
             "completed_at": 1_793_233_206, "duration_ms": 5512}}),
         serde_json::json!({"timestamp": at("06.500"), "type": "event_msg",
-            "payload": {"type": "task_started", "turn_attribution": {"turn_id": "t2"}}}),
+            "payload": {"type": "task_started", "turn_id": "t2", "turn_attribution": null}}),
         serde_json::json!({"timestamp": at("09.000"), "type": "event_msg", "payload": {
             "type": "turn_aborted", "root_turn_id": "t2", "turn_id": "t2",
             "reason": "interrupted", "started_at": 1_793_233_206,
