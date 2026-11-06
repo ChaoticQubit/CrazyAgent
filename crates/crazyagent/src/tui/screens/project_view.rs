@@ -1389,9 +1389,9 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
     help.extend([
         ("Enter", "Open report"),
         ("t", "Team"),
-        ("s", "Team settings"),
         TABS,
         ("Esc", "Home"),
+        ("s", "Team settings"),
     ]);
     if screen.pool_ready && !screen.pool.as_ref().is_some_and(|pool| pool.assigned) {
         lines.push(Row::of(

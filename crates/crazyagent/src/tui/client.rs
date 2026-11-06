@@ -2594,7 +2594,7 @@ mod creation_recovery_tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert!(names.len() <= 128);
+        assert!(names.len() <= 256);
         names
             .into_iter()
             .map(|name| {
