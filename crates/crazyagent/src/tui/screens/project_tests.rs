@@ -2574,6 +2574,46 @@ fn a_stale_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
     );
 }
 
+/// Once the research jobs are read, `p` on the Settings tab plans a roadmap and `k` opens
+/// the hidden folders box, so neither action takes the other's key.
+#[test]
+fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
+    let look = Look::plain();
+    let project = ProjectId::new("hidden").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.jobs = Some(Vec::new());
+    screen.hidden_paths = Some(vec!["/Users/owner/secret".into()]);
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Roadmap   Not planned   p Plan roadmap now"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Hidden    /Users/owner/secret   k Edit hidden folders"),
+        "{shown}"
+    );
+
+    let ProjectReply::Change(action) = screen.key(key(KeyCode::Char('p'))) else {
+        panic!("p asks the engine to plan");
+    };
+    assert_eq!(
+        *action,
+        SetupAction::PlanRoadmap {
+            project_id: project.clone(),
+        }
+    );
+    assert!(
+        screen.hidden.is_none(),
+        "p never opens the hidden folders box"
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.hidden.as_ref().unwrap().input.value(),
+        "/Users/owner/secret"
+    );
+}
+
 #[test]
 fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     let look = Look::plain();
