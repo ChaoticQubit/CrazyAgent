@@ -298,7 +298,7 @@ pub fn git_link(folder: &Path) -> GitLink {
         return GitLink::Unreadable;
     }
     if metadata.is_file() {
-        return checkout_link(&git);
+        return checkout_link(folder, &git);
     }
     if !metadata.is_dir() {
         return GitLink::Unreadable;
@@ -313,27 +313,31 @@ pub fn git_link(folder: &Path) -> GitLink {
     }
 }
 
-/// Tells a checkout apart by the git data its `.git` file names: a linked worktree's sits in
-/// `<repository>/.git/worktrees/<name>`, a submodule's under a `modules` folder of its parent's
-/// git data. Input: the `.git` file. Output: the link, `Unreadable` for any other or unread file.
-fn checkout_link(git: &Path) -> GitLink {
+/// Tells a checkout apart by the git data its `.git` file names, read from `folder` as git
+/// reads a relative path: a linked worktree's holds a `commondir` file, a submodule's is a
+/// folder without one under a `modules` folder of its parent's git data. Inputs: the folder
+/// and its `.git` file. Output: the link, `Unreadable` for any other, missing or unread data.
+fn checkout_link(folder: &Path, git: &Path) -> GitLink {
     let Some(text) = crate::platform::read_plain_file(git, PATH_BYTES_MAX as u64 + 16) else {
         return GitLink::Unreadable;
     };
     let Some(named) = text.trim_end_matches(['\n', '\r']).strip_prefix("gitdir: ") else {
         return GitLink::Unreadable;
     };
-    let named = Path::new(named);
-    if named.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("worktrees")) {
-        return GitLink::LinkedWorktree;
+    let data = folder.join(named);
+    match std::fs::symlink_metadata(data.join("commondir")) {
+        Ok(metadata) if metadata.is_file() => return GitLink::LinkedWorktree,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return GitLink::Unreadable,
     }
-    if named
+    let modules = Path::new(named)
         .components()
-        .any(|part| part.as_os_str() == std::ffi::OsStr::new("modules"))
-    {
-        return GitLink::Submodule;
+        .any(|part| part.as_os_str() == std::ffi::OsStr::new("modules"));
+    if modules && std::fs::metadata(&data).is_ok_and(|metadata| metadata.is_dir()) {
+        GitLink::Submodule
+    } else {
+        GitLink::Unreadable
     }
-    GitLink::Unreadable
 }
 
 /// True when moving `folder` would break git links kept outside it: any [`GitLink`] other

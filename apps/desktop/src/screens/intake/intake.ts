@@ -243,16 +243,18 @@ export interface AnywayWarning {
 }
 
 /** The warnings the question shows: data loss blocks first (a copy sharing another checkout's
- * git data, apps still using the folder, a copy across disks, a very large or deep folder,
- * unreadable files), then the other effects (the old place, git worktrees with their folders, the
- * folder being a worktree or submodule, git data not read, no git, git not read, a quick rename).
- * Inputs: the way, the issues and the folder read. Output: the blocks in that order. */
+ * git data, a moved worktree whose git data its repository can prune, apps still using the folder,
+ * a copy across disks, a very large or deep folder, unreadable files), then the other effects (the
+ * old place, git worktrees with their folders, the folder being a submodule, git data not read, no
+ * git, git not read, a quick rename). Inputs: the way, the issues and the folder read. Output: the
+ * blocks in that order. */
 export function anywayWarnings(way: AddFolderMode, issues: AnywayIssue[], size: Loaded<FolderSize> | null): AnywayWarning[] {
   const read = size?.kind === "ok" ? size.value : null;
   const moving = way === "move";
   const copyLine = moving ? ADD_WARNINGS.across_disks : ADD_WARNINGS.copy_all;
   const block = (loss: boolean, lines: string[], paths: string[] = []): AnywayWarning => ({ loss, lines, paths });
   const loss: AnywayWarning[] = issues.includes("linked_checkout") ? [block(true, [ADD_WARNINGS.linked_checkout])] : [];
+  if (issues.includes("linked_worktree")) loss.push(block(true, [ADD_WARNINGS.linked_worktree]));
   if (moving) loss.push(block(true, [ADD_WARNINGS.close_apps]));
   let copying = false;
   if (issues.includes("large")) {
@@ -270,7 +272,6 @@ export function anywayWarnings(way: AddFolderMode, issues: AnywayIssue[], size: 
   if (issues.includes("unreadable")) loss.push(block(true, [moving ? ADD_WARNINGS.unreadable : ADD_WARNINGS.unreadable_copy]));
   const effects: AnywayWarning[] = moving ? [block(false, [ADD_WARNINGS.old_place])] : [];
   if (issues.includes("worktrees")) effects.push(block(false, [ADD_WARNINGS.worktrees], read?.worktree_paths ?? []));
-  if (issues.includes("linked_worktree")) effects.push(block(false, [ADD_WARNINGS.linked_worktree]));
   if (issues.includes("submodule")) effects.push(block(false, [ADD_WARNINGS.submodule]));
   if (issues.includes("git_data_unread")) effects.push(block(false, [ADD_WARNINGS.git_data_unread]));
   if (issues.includes("no_git")) effects.push(block(false, [ADD_WARNINGS.no_git]));

@@ -64,16 +64,16 @@ impl AddWarning {
                 "Git worktrees linked to this folder stop working until you run git worktree repair in each. Their files stay, but git there fails until repaired."
             }
             Self::LinkedWorktree => {
-                "This folder is a git worktree of another repository. After the move, git here fails until you run git worktree repair in the moved folder."
+                "This folder is a git worktree of another repository, and that repository keeps this folder's staged changes and branch link. Right after the move, go to that repository and run git worktree repair with the moved folder's path. Until then git here may fail or seem to work, and a git worktree prune or git gc there drops those staged changes and the branch link for good; commits here that are on no branch can be lost too. The files stay."
             }
             Self::Submodule => {
-                "This folder is a submodule of another repository. After the move, the parent repository no longer finds it and git here can fail."
+                "This folder is a submodule of another repository. After the move, git here fails and the parent repository no longer finds it. Its git data stays in the parent repository, so moving the folder back brings git here back."
             }
             Self::GitDataUnread => {
                 "CrazyAgent could not read this folder's git data, so it cannot tell what a move breaks."
             }
             Self::LinkedCheckout => {
-                "The copy keeps this folder's link to another repository's git data. Where that link still reaches it, the copy shares that repository's index and current branch: switching branches, staging or resetting in either one changes the other, and uncommitted work can be lost. Where it does not, git fails in the copy."
+                "The copy keeps this folder's link to another repository's git data. Where that link still reaches it, the copy and this folder share one index and current branch: switching branches, staging or resetting in either one changes the other, and uncommitted work in either can be lost. Where it does not, git fails in the copy."
             }
             Self::NoGit => {
                 "This folder has no git history. Agents' changes can't be shown or undone with git until you run git init here."

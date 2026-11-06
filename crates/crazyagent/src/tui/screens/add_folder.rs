@@ -815,10 +815,11 @@ fn overrides(mode: AddMode, issues: &[Issue], facts: &Facts) -> Vec<AddOverride>
 }
 
 /// The warnings the question shows: data loss blocks first (a copy sharing another checkout's
-/// git data, apps still using the folder, a copy across disks, a very large or deep folder,
-/// unreadable files), then the other effects (the old place, git worktrees with their folders,
-/// the folder being a worktree or submodule, git data not read, no git, a quick rename). Takes
-/// the way, the issues and the facts. Returns the blocks in that order.
+/// git data, a moved worktree whose git data its repository can prune, apps still using the
+/// folder, a copy across disks, a very large or deep folder, unreadable files), then the other
+/// effects (the old place, git worktrees with their folders, the folder being a submodule, git
+/// data not read, no git, a quick rename). Takes the way, the issues and the facts. Returns the
+/// blocks in that order.
 fn warnings(mode: AddMode, issues: &[Issue], facts: &Facts) -> Vec<Block> {
     let moving = mode == AddMode::Move;
     let copy_line = if moving {
@@ -835,6 +836,9 @@ fn warnings(mode: AddMode, issues: &[Issue], facts: &Facts) -> Vec<Block> {
     let mut blocks = Vec::with_capacity(9);
     if issues.contains(&Issue::LinkedCheckout) {
         blocks.push(block(true, vec![text(AddWarning::LinkedCheckout)]));
+    }
+    if issues.contains(&Issue::LinkedWorktree) {
+        blocks.push(block(true, vec![text(AddWarning::LinkedWorktree)]));
     }
     if moving {
         blocks.push(block(true, vec![text(AddWarning::CloseApps)]));
@@ -883,7 +887,6 @@ fn warnings(mode: AddMode, issues: &[Issue], facts: &Facts) -> Vec<Block> {
         });
     }
     for (issue, warning) in [
-        (Issue::LinkedWorktree, AddWarning::LinkedWorktree),
         (Issue::Submodule, AddWarning::Submodule),
         (Issue::GitDataUnread, AddWarning::GitDataUnread),
     ] {
