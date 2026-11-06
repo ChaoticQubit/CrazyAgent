@@ -1,6 +1,6 @@
 use super::frame::Message;
 use super::glyphs::Glyphs;
-use super::seam::{AccountRow, PoolScope, ProjectCard, Request};
+use super::seam::{AccountRow, Arrival, PoolScope, ProjectCard, Request};
 use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::owner_profile::OwnerProfile;
@@ -110,7 +110,7 @@ pub struct Ctx {
     pub shift_enter: crate::tui::keys::ShiftEnter,
     pub project_step: Option<(crate::protocol::ProjectId, bool)>,
     requests: VecDeque<Request>,
-    refused: Vec<Request>,
+    refused: Vec<Arrival>,
     reconnect: bool,
     message: Option<Message>,
     generation: u64,
@@ -164,16 +164,17 @@ impl Ctx {
     }
 
     /// Queues one engine request as `try_request` does. A request the full queue refuses
-    /// is kept until the shell answers it with the failed reply that request gets,
-    /// `owner_busy`, so the screen that asked stops waiting and says so.
-    /// Input: the request. Output: none.
+    /// gets the failed reply that request gets from the engine worker, `owner_busy`, kept
+    /// until the shell delivers it at the end of the event, so the screen that asked stops
+    /// waiting and says so; a refused request with no reply, such as a keystroke, is dropped.
+    /// Every reply is kept, with no cap: each one stands for a request this event made, and
+    /// the shell takes them all at the end of every event. Input: the request. Output: none.
     pub fn request(&mut self, request: Request) {
         if let Err(request) = self.queue(request)
-            && self.refused.len() < QUEUE_MAX
+            && let Some(arrival) = super::run::refused_arrival(*request)
         {
-            self.refused.push(*request);
+            self.refused.push(arrival);
         }
-        assert!(self.refused.len() <= QUEUE_MAX);
     }
 
     /// Queues one engine request for a caller that handles a refusal itself.
@@ -183,9 +184,9 @@ impl Ctx {
         self.queue(request).is_ok()
     }
 
-    /// Takes the requests the full queue refused since the last call, oldest first.
-    /// Input: none. Output: the refused requests.
-    pub fn take_refused(&mut self) -> Vec<Request> {
+    /// Takes the busy replies for the requests the full queue refused since the last call,
+    /// oldest first. Input: none. Output: the replies.
+    pub fn take_refused(&mut self) -> Vec<Arrival> {
         std::mem::take(&mut self.refused)
     }
 

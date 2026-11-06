@@ -191,15 +191,13 @@ impl Shell {
         shell
     }
 
-    /// Answers each request the full request queue refused during the last event with the
-    /// failed reply that request gets, code `owner_busy`, so the screen that asked stops
-    /// waiting on it and says so. Requests refused while these replies are taken wait for
-    /// the next event. Input: none. Output: none.
+    /// Delivers the busy reply, code `owner_busy`, of each request the full request queue
+    /// refused during the last event, so the screen that asked stops waiting on it and says
+    /// so. Replies to requests refused while these are delivered wait for the next event.
+    /// Input: none. Output: none.
     fn answer_refused(&mut self) {
-        for request in self.ctx.take_refused() {
-            if let Some(arrival) = super::run::refused_arrival(request) {
-                self.take_arrival(arrival);
-            }
+        for arrival in self.ctx.take_refused() {
+            self.take_arrival(arrival);
         }
     }
 

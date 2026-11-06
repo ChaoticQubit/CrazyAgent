@@ -376,8 +376,10 @@ pub(super) fn owner_arrival(event: OwnerEvent) -> Arrival {
 
 /// Turns a request the full request queue refused into the reply the engine worker gives
 /// a request that failed, with `owner_busy`, so the screen that asked stops waiting on it
-/// and says so. Reads of the shared profile, pools and projects and terminal requests get
-/// none: a refused read leaves the data alone, and the message line says the queue is full.
+/// and says so; a refused terminal attach comes back as a terminal the engine refused, so
+/// the view closes and Enter attaches again. Reads of the shared profile, pools and
+/// projects and terminal keys, sizes and detaches get none: a refused read leaves the data
+/// alone, and the message line says the queue is full.
 /// Input: the refused request. Output: its failed arrival, or none.
 pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
     use super::client::{ConversationEvent, ConversationJob, CreationEvent};
@@ -390,11 +392,15 @@ pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
         | Request::PoolProjects
         | Request::Projects
         | Request::Reconnect
-        | Request::TerminalAttach { .. }
-        | Request::TerminalAttachPane { .. }
         | Request::TerminalInput { .. }
         | Request::TerminalResize { .. }
         | Request::TerminalDetach { .. } => return None,
+        Request::TerminalAttach { agent } | Request::TerminalAttachPane { agent, .. } => {
+            return Some(Arrival::Terminal {
+                agent,
+                frame: crate::terminal::TerminalFrame::Rejected { code: busy() },
+            });
+        }
         Request::SaveProfile { .. } => return Some(Arrival::ProfileSaved(Err(busy()))),
         Request::EditPool { .. } => return Some(Arrival::PoolEdited(Err(busy()))),
         Request::Wire { .. } => return Some(Arrival::Wire(Err(busy()))),
