@@ -132,6 +132,40 @@ fn occupy_storage(owner: &Usage) -> (PathBuf, oneshot::Receiver<Result<(), Engin
     (swept, sweep)
 }
 
+/// The ids of the stored MCP servers of one name, read once storage has answered every job
+/// queued before this call, so a change it ran after the owner stopped waiting is in.
+/// Inputs: the engine and the name. Output: the ids.
+async fn stored_servers(owner: &Usage, name: &str) -> Vec<String> {
+    let (send, settled) = oneshot::channel();
+    owner
+        .runtime()
+        .engine
+        .storage
+        .sender
+        .send(crate::storage::Job::Setup(
+            crate::storage::setup::Command::Sweep,
+            send,
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(SWEEP_TIME_MAX, settled)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let db = rusqlite::Connection::open_with_flags(
+        owner.engine_root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    db.prepare("SELECT id FROM plugin_items WHERE kind='server' AND name=?1")
+        .unwrap()
+        .query_map([name], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cleanup_removal_runs_without_the_owner_barrier_and_a_revoked_client_removes_nothing_after()
  {
@@ -275,10 +309,7 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
         tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
         "a revocation waits for the change already in flight"
     );
-    let server = tokio::time::timeout(SWEEP_TIME_MAX, added)
-        .await
-        .unwrap()
-        .unwrap_or_else(|error| panic!("the held change answered {}", error.0));
+    let answered = tokio::time::timeout(SWEEP_TIME_MAX, added).await.unwrap();
     assert!(
         !tokio::time::timeout(SWEEP_TIME_MAX, revoke)
             .await
@@ -292,9 +323,29 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
         .unwrap()
         .unwrap();
     assert!(!swept.exists());
+    let stored = stored_servers(&owner, "held-server").await;
+    let id = match answered {
+        Ok(server) => {
+            assert_eq!(
+                stored,
+                [server.id.clone()],
+                "the confirmed change is the one storage holds"
+            );
+            server.id
+        }
+        Err(error) if error.0 == "plugins_outcome_unknown" => {
+            assert_eq!(
+                stored.len(),
+                1,
+                "storage kept the change the owner wait could not confirm: {stored:?}"
+            );
+            stored[0].clone()
+        }
+        Err(error) => panic!("the held change answered {}", error.0),
+    };
 
     assert!(
-        owner.client.plugin_server(server.id).await.is_err(),
+        owner.client.plugin_server(id).await.is_err(),
         "the revoked client reads no more plugin state"
     );
     owner.stop().await;
