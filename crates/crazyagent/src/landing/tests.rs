@@ -2164,8 +2164,12 @@ fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
 #[test]
 fn agent_change_to_vscode_folder_or_workspace_file_is_flagged() {
     let case = Case::new();
-    case.edit(".vscode/extensions.json", "{\"recommendations\": []}\n");
-    case.agent_commit("Recommend nothing");
+    let recommended = case.owner_commit(
+        ".vscode/extensions.json",
+        "{\"recommendations\": []}\n",
+        "Recommend nothing",
+    );
+    case.agent(&["checkout", "-q", "--detach", &recommended]);
     case.start();
     case.agent(&["mv", ".vscode/extensions.json", "extensions.json"]);
     case.edit(
