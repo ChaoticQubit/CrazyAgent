@@ -1219,7 +1219,7 @@ fn pane_info(line: &[u8]) -> Option<PaneInfo> {
 fn close_panes(control: &Control, panes: &[PaneInfo], line: &str) -> Result<(), HostError> {
     let groups = pane_groups(panes);
     let closed = control.run(line).map(drop);
-    end_groups(&groups);
+    end_groups(groups);
     closed
 }
 
@@ -1247,18 +1247,33 @@ fn pane_groups(panes: &[PaneInfo]) -> Vec<rustix::process::Pid> {
 /// then kills what is left until no group answers, for at most `GROUP_KILL_WAIT`. macOS
 /// answers EPERM for a group whose last member it just reaped, so only ESRCH ends a group.
 /// Takes the groups `pane_groups` read before their panes closed.
-fn end_groups(groups: &[rustix::process::Pid]) {
-    let left = |group: &rustix::process::Pid| {
-        rustix::process::test_kill_process_group(*group) != Err(rustix::io::Errno::SRCH)
-    };
+fn end_groups(groups: Vec<rustix::process::Pid>) {
+    end_groups_with(
+        groups,
+        |group| rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH),
+        |group| {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        },
+    );
+}
+
+/// Ends the groups as `end_groups` describes, through `left`, which tells whether a group
+/// still answers, and `kill`, which sends it KILL. Takes the groups and both calls.
+fn end_groups_with(
+    groups: Vec<rustix::process::Pid>,
+    mut left: impl FnMut(rustix::process::Pid) -> bool,
+    mut kill: impl FnMut(rustix::process::Pid),
+) {
     let hung_up = Instant::now() + HANGUP_GRACE;
-    while groups.iter().any(left) && Instant::now() < hung_up {
+    while groups.iter().any(|group| left(*group)) && Instant::now() < hung_up {
         std::thread::sleep(Duration::from_millis(10));
     }
     let killed = Instant::now() + GROUP_KILL_WAIT;
-    while groups.iter().any(left) && Instant::now() < killed {
-        for group in groups.iter().filter(|group| left(group)) {
-            let _ = rustix::process::kill_process_group(*group, rustix::process::Signal::KILL);
+    while groups.iter().any(|group| left(*group)) && Instant::now() < killed {
+        for group in &groups {
+            if left(*group) {
+                kill(*group);
+            }
         }
         std::thread::sleep(Duration::from_millis(10));
     }

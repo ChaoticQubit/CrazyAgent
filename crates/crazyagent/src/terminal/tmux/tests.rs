@@ -962,6 +962,159 @@ fn close_ends_every_process_in_the_server_pane_groups() {
     assert!(gone(&group, child), "the outside pane's group is gone");
 }
 
+/// A group that once answered ESRCH is never tested or signalled again (r1 SG-L1): its
+/// number is free, and a new group may take it while another group of the same stop still
+/// ends. One real group ended and was reaped before the call, one real group lives until
+/// its KILL.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_group_once_gone_is_never_tested_or_signalled_again() {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let mut ended = crate::spawn_gate::spawn(
+        Command::new("/usr/bin/true")
+            .process_group(0)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let ended_group = rustix::process::Pid::from_child(&ended);
+    assert!(ended.wait().unwrap().success());
+    let mut survivor = crate::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("120")
+            .process_group(0)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let survivor_group = rustix::process::Pid::from_child(&survivor);
+    let _guard = Group(survivor_group);
+    let reaped = std::thread::spawn(move || survivor.wait());
+    let calls = std::cell::RefCell::new(Vec::new());
+
+    end_groups_with(
+        vec![ended_group, survivor_group],
+        |group| {
+            let answer = rustix::process::test_kill_process_group(group);
+            calls.borrow_mut().push(("test", group, answer));
+            answer != Err(rustix::io::Errno::SRCH)
+        },
+        |group| {
+            calls.borrow_mut().push(("kill", group, Ok(())));
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        },
+    );
+    let calls = calls.into_inner();
+    let of_ended: Vec<_> = calls
+        .iter()
+        .filter(|(_, group, _)| *group == ended_group)
+        .collect();
+    assert_eq!(
+        of_ended,
+        [&("test", ended_group, Err(rustix::io::Errno::SRCH))],
+        "the ended group is tested once and left alone"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|(kind, group, _)| *kind == "kill" && *group == survivor_group),
+        "the live group gets its KILL"
+    );
+    let status = reaped.join().unwrap().unwrap();
+    assert_eq!(status.signal(), Some(9), "the live group ended by KILL");
+}
+
+/// Stops in a row do not each wait out the hangup grace (r1 SG-L2): the team tick ends the
+/// panes of three agents whose children ignore the hangup in less than one grace, and every
+/// group is still ended.
+#[cfg(target_os = "macos")]
+#[test]
+fn stops_in_a_row_wait_less_than_one_hangup_grace() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let mut started = Vec::new();
+    for id in 1..=3 {
+        let agent = AgentId::team(id).unwrap();
+        let pid_file = home.path().join(format!("child-{id}.pid"));
+        host.spawn(&agent, &hangup_ignored_agent(home.path(), &pid_file))
+            .unwrap();
+        let pane = host.panes(&agent).unwrap().remove(0);
+        started.push((agent, left_in_group(pane.pid, &pid_file)));
+    }
+
+    let begun = Instant::now();
+    for (agent, _) in &started {
+        host.kill(agent).unwrap();
+    }
+    let took = begun.elapsed();
+    assert!(
+        took < HANGUP_GRACE,
+        "three stops took {took:?}, at least one hangup grace {HANGUP_GRACE:?}"
+    );
+    for (agent, (group, child)) in &started {
+        assert!(gone(group, *child), "the group of {agent:?} is gone");
+    }
+}
+
+/// Closing the server waits about one hangup grace for all its panes, not one per pane
+/// (r1 SG-L2), and returns only once every group is gone, as the engine's shutdown needs.
+#[cfg(target_os = "macos")]
+#[test]
+fn close_waits_one_hangup_grace_for_all_its_panes() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let mut started = Vec::new();
+    for id in 1..=3 {
+        let agent = AgentId::team(id).unwrap();
+        let pid_file = home.path().join(format!("child-{id}.pid"));
+        host.spawn(&agent, &hangup_ignored_agent(home.path(), &pid_file))
+            .unwrap();
+        let pane = host.panes(&agent).unwrap().remove(0);
+        started.push(left_in_group(pane.pid, &pid_file));
+    }
+
+    let begun = Instant::now();
+    host.close(&[]).unwrap();
+    let took = begun.elapsed();
+    assert!(
+        took < HANGUP_GRACE + GROUP_KILL_WAIT,
+        "closing three panes took {took:?}, more than one grace and kill wait"
+    );
+    for (group, child) in &started {
+        assert_eq!(
+            rustix::process::test_kill_process_group(group.0),
+            Err(rustix::io::Errno::SRCH),
+            "every group is gone once close returns"
+        );
+        assert_eq!(
+            rustix::process::test_kill_process(*child),
+            Err(rustix::io::Errno::SRCH)
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists() {
