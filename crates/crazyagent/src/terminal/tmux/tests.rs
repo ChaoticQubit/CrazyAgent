@@ -644,14 +644,15 @@ fn a_reply_tmux_cut_short_while_its_server_stalls_is_asked_again() {
 }
 
 /// Splits a pane of a test's own private tmux server, as a native harness splits its window
-/// for a teammate. Takes the server and the pane to split. Panics unless tmux splits it.
+/// for a teammate. Takes the server, the pane to split and the new pane's shell command.
+/// Panics unless tmux splits it.
 #[cfg(target_os = "macos")]
-fn split(server: &Server, pane: &str) {
+fn split(server: &Server, pane: &str, command: &str) {
     let status = crate::spawn_gate::status(
         Command::new(&server.tmux)
             .arg("-S")
             .arg(&server.socket)
-            .args(["split-window", "-d", "-t", pane, "exec /bin/sleep 60"])
+            .args(["split-window", "-d", "-t", pane, command])
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -692,7 +693,7 @@ fn kill_pane_ends_only_that_pane_and_refuses_the_last_and_a_foreign_one() {
     assert_eq!(first.len(), 1, "{first:?}");
     let kept = first[0].id.clone();
     assert!(pane_id_valid(&kept), "{kept}");
-    split(&server, &kept);
+    split(&server, &kept, "exec /bin/sleep 60");
     let panes = host.panes(&lead).unwrap();
     assert_eq!(panes.len(), 2, "{panes:?}");
     assert!(
@@ -741,6 +742,220 @@ fn kill_pane_ends_only_that_pane_and_refuses_the_last_and_a_foreign_one() {
     );
     assert_eq!(host.panes(&lead).unwrap().len(), 1);
     assert_eq!(host.panes(&other).unwrap().len(), 1);
+}
+
+/// A process group a test read from a pane, killed when the test ends, so a failing check
+/// leaves no stand-in process running.
+#[cfg(target_os = "macos")]
+struct Group(rustix::process::Pid);
+
+#[cfg(target_os = "macos")]
+impl Drop for Group {
+    fn drop(&mut self) {
+        let _ = rustix::process::kill_process_group(self.0, rustix::process::Signal::KILL);
+    }
+}
+
+/// The shell line of a pane whose first process keeps in its group a child that ignores the
+/// hangup tmux sends a closing pane, as a busy Codex app-server outlives its bridge pane.
+/// The child writes its pid to `started` once it ignores the hangup. Takes that file, whose
+/// path holds no shell syntax. Returns the line.
+#[cfg(target_os = "macos")]
+fn hangup_ignored(started: &Path) -> String {
+    let path = started.to_str().unwrap();
+    assert!(
+        path.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte)),
+        "{path}"
+    );
+    format!(
+        "/bin/sh -c 'trap \"\" HUP; echo $$ > {path}; exec /bin/sleep 120' & exec /bin/sleep 120"
+    )
+}
+
+/// An agent command that runs the `hangup_ignored` line. Takes its working folder and the
+/// child's pid file. Returns the command.
+#[cfg(target_os = "macos")]
+fn hangup_ignored_agent(cwd: &Path, started: &Path) -> InteractiveCommand {
+    InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), hangup_ignored(started)],
+        cwd: cwd.to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    }
+}
+
+/// Waits for the child of a `hangup_ignored` pane and checks that it is in the group the
+/// pane's first process leads, as tmux starts every pane. Takes the pane's first process id
+/// and the child's pid file. Returns the group, killed when dropped, and the child.
+#[cfg(target_os = "macos")]
+fn left_in_group(pane: u32, started: &Path) -> (Group, rustix::process::Pid) {
+    let leader = rustix::process::Pid::from_raw(i32::try_from(pane).unwrap()).unwrap();
+    assert_eq!(
+        rustix::process::getpgid(Some(leader)),
+        Ok(leader),
+        "tmux makes a pane's first process lead its own group"
+    );
+    let group = Group(leader);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let child = loop {
+        let written = std::fs::read_to_string(started).ok();
+        if let Some(child) = written
+            .and_then(|text| text.trim().parse::<i32>().ok())
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            break child;
+        }
+        assert!(Instant::now() < deadline, "the pane started its child");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(
+        rustix::process::getpgid(Some(child)),
+        Ok(leader),
+        "the child stays in the pane's group"
+    );
+    (group, child)
+}
+
+/// Waits for at most ten seconds until neither the group nor its child is left; macOS
+/// answers EPERM for a group whose last member it just reaped before it answers ESRCH.
+/// Takes both. Returns whether both are gone.
+#[cfg(target_os = "macos")]
+fn gone(group: &Group, child: rustix::process::Pid) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if rustix::process::test_kill_process_group(group.0) == Err(rustix::io::Errno::SRCH)
+            && rustix::process::test_kill_process(child) == Err(rustix::io::Errno::SRCH)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A stopped agent leaves nothing of its pane running (FINDING bridge orphan): a child the
+/// agent's app started in the pane's group, which ignores the hangup of the closing pane as
+/// a busy Codex app-server does, is gone with the whole group once `kill` returns.
+#[cfg(target_os = "macos")]
+#[test]
+fn kill_ends_every_process_in_the_agent_pane_group() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let started = home.path().join("child.pid");
+    let agent = AgentId::team(1).unwrap();
+    host.spawn(&agent, &hangup_ignored_agent(home.path(), &started))
+        .unwrap();
+    let pane = host.panes(&agent).unwrap().remove(0);
+    let (group, child) = left_in_group(pane.pid, &started);
+
+    host.kill(&agent).unwrap();
+    assert!(gone(&group, child), "the agent's pane group is gone");
+    assert_eq!(host.alive().unwrap(), Vec::<AgentId>::new());
+}
+
+/// An ended teammate pane leaves nothing of its group running: `kill_pane` ends the
+/// hangup-ignoring child of that pane and keeps the lead's own pane.
+#[cfg(target_os = "macos")]
+#[test]
+fn kill_pane_ends_every_process_in_that_pane_group() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let lead = AgentId::team(1).unwrap();
+    let sleeper = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 60".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&lead, &sleeper).unwrap();
+    let kept = host.panes(&lead).unwrap().remove(0).id;
+    let started = home.path().join("child.pid");
+    split(&server, &kept, &hangup_ignored(&started));
+    let teammate = host
+        .panes(&lead)
+        .unwrap()
+        .into_iter()
+        .find(|pane| pane.id != kept)
+        .unwrap();
+    let (group, child) = left_in_group(teammate.pid, &started);
+
+    host.kill_pane(&lead, &teammate.id).unwrap();
+    assert!(gone(&group, child), "the teammate pane's group is gone");
+    let left = host.panes(&lead).unwrap();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0].id, kept, "the lead's own pane stays");
+}
+
+/// Closing the server leaves nothing of any of its panes running: a window that holds no
+/// agent, which `close` ends only through the server's end, has its hangup-ignoring child
+/// gone with its group once `close` returns.
+#[cfg(target_os = "macos")]
+#[test]
+fn close_ends_every_process_in_the_server_pane_groups() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let sleeper = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 60".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &sleeper).unwrap();
+    let started = home.path().join("child.pid");
+    let opened = crate::spawn_gate::output(
+        Command::new(&server.tmux)
+            .arg("-S")
+            .arg(&server.socket)
+            .args(["new-window", "-d", "-P", "-F", "#{pane_pid}", "-t"])
+            .arg(format!("{SESSION}:"))
+            .args(["-n", "_outside", &hangup_ignored(&started)])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(opened.status.success(), "tmux opened the outside window");
+    let pane = String::from_utf8_lossy(&opened.stdout)
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    let (group, child) = left_in_group(pane, &started);
+    assert_eq!(host.alive().unwrap(), vec![agent], "the window holds no agent");
+
+    host.close(&[]).unwrap();
+    assert!(gone(&group, child), "the outside pane's group is gone");
 }
 
 #[cfg(target_os = "macos")]
