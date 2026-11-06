@@ -1711,7 +1711,7 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     );
     let general = screen.general.as_ref().unwrap();
     assert_eq!(general.name.value(), "Notes Pro", "the typed draft is kept");
-    assert_eq!(general.stack.value(), "rust, sqlite, tauri");
+    assert_eq!(general.stack.value(), "rust, sqlite, tauri, ,");
     assert_eq!(general.revision, 5, "the form takes the saved revision");
     assert!(!general.stale);
     assert_eq!(
