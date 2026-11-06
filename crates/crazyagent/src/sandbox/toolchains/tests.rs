@@ -66,3 +66,42 @@ fn a_folder_swapped_in_for_the_lead_s_new_temp_folder_is_refused_with_what_it_ho
         "{sealed:?}"
     );
 }
+
+#[test]
+fn without_the_command_line_tools_cc_the_agent_path_and_variables_stay_as_they_were() {
+    let scratch = tempfile::tempdir().unwrap();
+    let home = scratch.path().join("home");
+    let developer = scratch.path().join("developer");
+    let bin = developer.join("usr").join("bin");
+    let sdk = developer.join("SDKs").join("MacOSX.sdk");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&sdk).unwrap();
+    let homes = ToolHomes::at(&home).with_developer(&developer);
+    let proxies: String = RUSTUP_BINS
+        .iter()
+        .filter(|folder| Path::new(folder).join("cargo").is_file())
+        .map(|folder| format!("{folder}:"))
+        .collect();
+    let base = "/opt/homebrew/bin:/usr/bin:/bin";
+    let before = agent_env(&home, &homes);
+    assert_eq!(agent_path(&homes, base), format!("{proxies}{base}"));
+    assert!(before.iter().all(|(name, _)| *name != "SDKROOT"));
+
+    fs::write(bin.join("cc"), "cc fixture\n").unwrap();
+    let bin = bin.to_str().unwrap();
+    assert_eq!(
+        agent_path(&homes, base),
+        format!("{proxies}/opt/homebrew/bin:{bin}:/usr/bin:/bin")
+    );
+    assert_eq!(
+        agent_path(&homes, "/usr/bin:/bin:/usr/bin"),
+        format!("{proxies}{bin}:/usr/bin:/bin:/usr/bin")
+    );
+    assert_eq!(agent_path(&homes, "/bin"), format!("{proxies}/bin"));
+    let after = agent_env(&home, &homes);
+    assert_eq!(after[..before.len()], before[..]);
+    assert_eq!(after[before.len()..], [("SDKROOT", sdk.into_os_string())]);
+
+    fs::remove_dir(developer.join("SDKs").join("MacOSX.sdk")).unwrap();
+    assert_eq!(agent_env(&home, &homes), before);
+}

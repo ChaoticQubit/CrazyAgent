@@ -17,6 +17,11 @@ const PYTHON_HOMES: &[&str] = &[".pyenv", ".local/share/uv/python"];
 const GRAPHIFY_TOOL: &str = ".local/share/uv/tools/graphifyy";
 const CARGO_SHARED: &[&str] = &["registry", "git"];
 const RUSTUP_BINS: &[&str] = &["/opt/homebrew/opt/rustup/bin", "/usr/local/opt/rustup/bin"];
+/// Apple's Command Line Tools, whose own compilers, linkers and git an agent runs in place
+/// of the `/usr/bin` xcrun shims (R7-XCRUN).
+const DEVELOPER_TOOLS: &str = "/Library/Developer/CommandLineTools";
+/// The base path entry holding the xcrun shims the Command Line Tools' folder goes before.
+const SYSTEM_BIN: &str = "/usr/bin";
 const TMP_PARENT: &str = "/private/tmp";
 const TMP_PREFIX: &str = "ca-";
 const TMP_HASH_BYTES: usize = 8;
@@ -159,6 +164,7 @@ pub struct ToolHomes {
     home: PathBuf,
     rustup: PathBuf,
     cargo: PathBuf,
+    developer: PathBuf,
 }
 
 impl ToolHomes {
@@ -168,13 +174,22 @@ impl ToolHomes {
         Ok(Self::at(&owner_home()?))
     }
 
-    /// The tool homes inside one home folder. Input: the home. Output: the homes.
+    /// The tool homes inside one home folder, with the Command Line Tools at their system
+    /// folder. Input: the home. Output: the homes.
     pub fn at(home: &Path) -> Self {
         Self {
             home: home.to_path_buf(),
             rustup: home.join(".rustup"),
             cargo: home.join(".cargo"),
+            developer: PathBuf::from(DEVELOPER_TOOLS),
         }
+    }
+
+    /// These tool homes with the Command Line Tools looked for in `developer` instead.
+    /// Input: the folder. Output: the homes.
+    pub fn with_developer(mut self, developer: &Path) -> Self {
+        self.developer = developer.to_path_buf();
+        self
     }
 
     /// The home folder the other tool homes sit in.
@@ -344,9 +359,10 @@ fn existing(path: &Path, folder: bool) -> Option<PathBuf> {
 }
 
 /// The toolchain variables every agent process gets: a writable `CARGO_HOME` in the
-/// agent's own home, the owner's rustup home read-only in `RUSTUP_HOME`, and
-/// [`AUTO_INSTALL_ENV`]. Inputs: the agent home and the owner's tool homes. Output: the
-/// variables in order.
+/// agent's own home, the owner's rustup home read-only in `RUSTUP_HOME`,
+/// [`AUTO_INSTALL_ENV`], and `SDKROOT` at the Command Line Tools' SDK when `developer_bin`
+/// finds their `cc`, so rustc and the cc crate never ask xcrun. Inputs: the agent home and
+/// the owner's tool homes. Output: the variables in order.
 pub fn agent_env(home: &Path, homes: &ToolHomes) -> Vec<(&'static str, OsString)> {
     let mut env = vec![
         ("CARGO_HOME", home.join(".cargo").into_os_string()),
@@ -357,7 +373,27 @@ pub fn agent_env(home: &Path, homes: &ToolHomes) -> Vec<(&'static str, OsString)
             .iter()
             .map(|(name, value)| (*name, OsString::from(value))),
     );
+    env.extend(
+        developer_bin(homes)
+            .map(|_| homes.developer.join("SDKs").join("MacOSX.sdk"))
+            .filter(|sdk| sdk.is_dir())
+            .map(|sdk| ("SDKROOT", sdk.into_os_string())),
+    );
     env
+}
+
+/// The Command Line Tools' program folder when it holds `cc`. Every lookup by an xcrun shim
+/// under an agent's own home misses xcrun's cache, whose write in the per-user temp folder
+/// the sandbox denies (R7-XCRUN), so an agent runs these programs directly. Takes the tool
+/// homes. Returns the folder, none when the tools are absent.
+fn developer_bin(homes: &ToolHomes) -> Option<String> {
+    let bin = homes.developer.join("usr").join("bin");
+    if !bin.join("cc").is_file() {
+        return None;
+    }
+    bin.to_str()
+        .filter(|text| !text.contains(':'))
+        .map(str::to_owned)
 }
 
 /// The read-only folders graphify needs in an agent's sandbox when the default pack
@@ -387,9 +423,10 @@ pub fn graphify(homes: &ToolHomes) -> Vec<PathBuf> {
 }
 
 /// A tools-on agent's search path: the owner's cargo proxies and Homebrew's rustup proxies
-/// where they hold `cargo`, then `base`, then graphify's own program folder when the default
-/// pack installed it (see [`graphify`]), last so it never shadows a toolchain's `python3`.
-/// Inputs: the tool homes and the base path. Output: the joined path.
+/// where they hold `cargo`, then `base` with `developer_bin` just before its `/usr/bin`,
+/// then graphify's own program folder when the default pack installed it (see
+/// [`graphify`]), last so it never shadows a toolchain's `python3`. Inputs: the tool homes
+/// and the base path. Output: the joined path.
 pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
     let mut parts: Vec<String> = std::iter::once(homes.cargo.join("bin"))
         .chain(RUSTUP_BINS.iter().map(PathBuf::from))
@@ -400,7 +437,13 @@ pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
                 .map(str::to_owned)
         })
         .collect();
-    parts.push(base.to_owned());
+    let mut developer = developer_bin(homes);
+    for entry in base.split(':') {
+        if entry == SYSTEM_BIN {
+            parts.extend(developer.take());
+        }
+        parts.push(entry.to_owned());
+    }
     parts.extend(
         graphify(homes)
             .first()

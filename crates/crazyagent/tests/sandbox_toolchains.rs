@@ -499,6 +499,53 @@ fn an_agent_builds_and_tests_a_tiny_crate_offline_with_the_owner_toolchain() {
 }
 
 #[test]
+fn an_agent_compiles_links_and_runs_git_without_an_xcrun_cache_error() {
+    let case = case();
+    let homes = ToolHomes::owner().unwrap();
+    write(
+        &case.project.join("Cargo.toml"),
+        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    );
+    write(
+        &case.project.join("src/main.rs"),
+        "fn main() {\n    println!(\"tiny ran\");\n}\n",
+    );
+    write(
+        &case.project.join("hello.c"),
+        "int main(void) {\n    return 0;\n}\n",
+    );
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    toolchains::prepare_cargo_home(&case.home, &homes).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_tools(&Toolchains::detect(&case.project, &homes))
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap();
+    let profile = case.profiles.join("compile.sb");
+
+    let output = run(
+        &sandbox,
+        &profile,
+        "cc -o hello hello.c && ./hello && cargo run --offline && git --version",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("tiny ran"), "{stdout}");
+    assert!(stdout.contains("git version"), "{stdout}");
+    for refused in ["couldn't create cache file", "xcrun: error"] {
+        assert!(!stderr.contains(refused), "{refused}: {stderr}");
+    }
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
+#[test]
 fn a_missing_toolchain_is_never_installed_by_an_agent() {
     let case = case();
     let homes = ToolHomes::owner().unwrap();
