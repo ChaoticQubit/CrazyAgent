@@ -590,7 +590,8 @@ impl TerminalSession {
                 Err(TryRecvError::Disconnected) => {
                     self.first = None;
                     self.exited = true;
-                    self.end_group(true, None);
+                    let held = self.hold(true);
+                    self.end_group(true, held);
                     return Err(failure("launch_closed"));
                 }
             }
@@ -723,7 +724,8 @@ impl TerminalSession {
             if !alive.contains(&self.agent) {
                 self.exited = true;
                 self.turn = false;
-                self.end_group(seen, None);
+                let held = self.hold(seen);
+                self.end_group(seen, held);
                 self.queue.push_back(LaunchEvent::Exited { code: None });
             }
         }
@@ -742,7 +744,7 @@ impl TerminalSession {
                     .host
                     .alive()
                     .is_ok_and(|alive| alive.contains(&self.agent)));
-        let held = if seen { Ending::claim(self.pid) } else { None };
+        let held = self.hold(seen);
         #[cfg(target_os = "macos")]
         if seen && !self.unconfined && !stop_keeper(self.host.as_ref(), &self.agent, self.pid) {
             self.uncertain = true;
@@ -756,8 +758,9 @@ impl TerminalSession {
     /// wait. `seen` tells the pane was alive within `GROUP_FRESH`: its id then still names
     /// this pane's group, which keeps the id while any member lives. An id unseen for longer
     /// may name a reused group: it is left alone, and a group found by it is uncertain.
-    /// `held` is the stop's hold on the group, taken before the host's kill so that close
-    /// leaves the group to this session (CB-2 one signal); with none it is taken here.
+    /// `held` is this session's hold on the group, taken before the host's kill so that
+    /// close leaves the group to this session (CB-2 one signal); with none, as when the close
+    /// holds the group or just saw it end, the group is only watched (CB-2 r1 F1).
     fn end_group(&mut self, seen: bool, held: Option<Ending>) {
         if std::mem::replace(&mut self.group_ended, true) {
             return;
@@ -775,6 +778,17 @@ impl TerminalSession {
         }
         #[cfg(not(unix))]
         drop(held);
+    }
+
+    /// Takes this session's hold on its pane's group while it may still end it: the group
+    /// is not ended yet and `seen` tells the pane was alive within `GROUP_FRESH`. Output:
+    /// the hold, or none, as when another path holds the group or just saw it end.
+    fn hold(&self, seen: bool) -> Option<Ending> {
+        if seen && !self.group_ended {
+            Ending::claim(self.pid)
+        } else {
+            None
+        }
     }
 }
 

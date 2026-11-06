@@ -1339,8 +1339,9 @@ fn pane_groups(panes: &[PaneInfo]) -> Vec<Ending> {
 /// then kills what is left until no group answers, for at most `GROUP_KILL_WAIT`. macOS
 /// answers EPERM for a group whose last member it just reaped, so only ESRCH ends a group,
 /// and a group that answered ESRCH once is never tested or signalled again: its number may
-/// lead a new group by then (r1 SG-L1); its hold is dropped then. Takes the holds
-/// `pane_groups` took before their panes closed.
+/// lead a new group by then (r1 SG-L1); its hold is marked gone and dropped then, so the
+/// number stays refused to later paths (CB-2 r1 F1). Takes the holds `pane_groups` took
+/// before their panes closed.
 fn end_groups(groups: Vec<Ending>) {
     end_groups_with(
         groups,
@@ -1361,7 +1362,7 @@ fn end_groups_with(
     let mut groups = groups;
     let hung_up = Instant::now() + HANGUP_GRACE;
     loop {
-        groups.retain(|group| left(group.pid()));
+        keep_left(&mut groups, &mut left);
         if groups.is_empty() || Instant::now() >= hung_up {
             break;
         }
@@ -1373,8 +1374,21 @@ fn end_groups_with(
             kill(group.pid());
         }
         std::thread::sleep(Duration::from_millis(10));
-        groups.retain(|group| left(group.pid()));
+        keep_left(&mut groups, &mut left);
     }
+}
+
+/// Keeps the holds whose group still answers `left` and marks every other one gone, so
+/// its number stays refused to later paths once dropped (CB-2 r1 F1). Takes the holds and
+/// the test.
+fn keep_left(groups: &mut Vec<Ending>, left: &mut impl FnMut(rustix::process::Pid) -> bool) {
+    groups.retain_mut(|group| {
+        let answers = left(group.pid());
+        if !answers {
+            group.gone();
+        }
+        answers
+    });
 }
 
 /// Reads an attach's pane line: its ids, cursor, size, input modes, history size, and its
