@@ -1,7 +1,7 @@
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
-    LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id, route,
-    validate,
+    Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id,
+    route, validate,
 };
 use super::leftovers::{Lineage, Unstopped};
 use super::transcript::{TranscriptEvent, TranscriptReader};
@@ -590,7 +590,8 @@ impl TerminalSession {
                 Err(TryRecvError::Disconnected) => {
                     self.first = None;
                     self.exited = true;
-                    self.end_group(true);
+                    let held = self.hold(true);
+                    self.end_group(true, held);
                     return Err(failure("launch_closed"));
                 }
             }
@@ -723,7 +724,8 @@ impl TerminalSession {
             if !alive.contains(&self.agent) {
                 self.exited = true;
                 self.turn = false;
-                self.end_group(seen);
+                let held = self.hold(seen);
+                self.end_group(seen, held);
                 self.queue.push_back(LaunchEvent::Exited { code: None });
             }
         }
@@ -742,12 +744,13 @@ impl TerminalSession {
                     .host
                     .alive()
                     .is_ok_and(|alive| alive.contains(&self.agent)));
+        let held = self.hold(seen);
         #[cfg(target_os = "macos")]
         if seen && !self.unconfined && !stop_keeper(self.host.as_ref(), &self.agent, self.pid) {
             self.uncertain = true;
         }
         let _ = self.host.kill(&self.agent);
-        self.end_group(seen);
+        self.end_group(seen, held);
     }
 
     /// Kills what the harness left in the pane's process group once the pane is gone, as a
@@ -755,7 +758,10 @@ impl TerminalSession {
     /// wait. `seen` tells the pane was alive within `GROUP_FRESH`: its id then still names
     /// this pane's group, which keeps the id while any member lives. An id unseen for longer
     /// may name a reused group: it is left alone, and a group found by it is uncertain.
-    fn end_group(&mut self, seen: bool) {
+    /// `held` is this session's hold on the group, taken before the host's kill so that
+    /// close leaves the group to this session (CB-2 one signal); with none, as when the close
+    /// holds the group or just saw it end, the group is only watched (CB-2 r1 F1).
+    fn end_group(&mut self, seen: bool, held: Option<Ending>) {
         if std::mem::replace(&mut self.group_ended, true) {
             return;
         }
@@ -768,8 +774,20 @@ impl TerminalSession {
         }
         #[cfg(unix)]
         {
-            super::launch::kill_group(self.pid);
-            self.uncertain |= !super::launch::await_group_exit(self.pid);
+            self.uncertain |= !super::launch::end_pane_group(self.pid, held);
+        }
+        #[cfg(not(unix))]
+        drop(held);
+    }
+
+    /// Takes this session's hold on its pane's group while it may still end it: the group
+    /// is not ended yet and `seen` tells the pane was alive within `GROUP_FRESH`. Output:
+    /// the hold, or none, as when another path holds the group or just saw it end.
+    fn hold(&self, seen: bool) -> Option<Ending> {
+        if seen && !self.group_ended {
+            Ending::claim(self.pid)
+        } else {
+            None
         }
     }
 }
@@ -783,12 +801,14 @@ impl Drop for TerminalSession {
 /// Ends an agent pane no session holds, as one an earlier engine left, and every process its
 /// harness started: on macOS its keeper first empties the run's sandbox, then the window ends
 /// and every process left in the pane's process group is killed, found by the first process
-/// the host names while the pane runs. A cleanup not confirmed is reported on stderr.
-/// Inputs: the host, the pane and the owner's label, such as `research`. Output: whether
+/// the host names while the pane runs, held from before the window ends so the host's close
+/// leaves that group to this cleanup (CB-2 one signal). A cleanup not confirmed is reported
+/// on stderr. Inputs: the host, the pane and the owner's label, such as `research`. Output: whether
 /// every process was confirmed gone, or the host's failure, such as
 /// `terminal_agent_unknown` for a pane already gone.
 pub fn end_left_pane(host: &dyn Host, agent: &AgentId, owner: &str) -> Result<bool, HostError> {
     let pid = host.pane_pid(agent)?;
+    let held = pid.and_then(Ending::claim);
     #[cfg(target_os = "macos")]
     let kept = pid.is_none_or(|pid| stop_keeper(host, agent, pid));
     #[cfg(not(target_os = "macos"))]
@@ -799,12 +819,12 @@ pub fn end_left_pane(host: &dyn Host, agent: &AgentId, owner: &str) -> Result<bo
         Err(problem) => return Err(problem),
     }
     #[cfg(unix)]
-    let ended = pid.is_some_and(|pid| {
-        super::launch::kill_group(pid);
-        super::launch::await_group_exit(pid)
-    });
+    let ended = pid.is_some_and(|pid| super::launch::end_pane_group(pid, held));
     #[cfg(not(unix))]
-    let ended = pid.is_none();
+    let ended = {
+        drop(held);
+        pid.is_none()
+    };
     let confirmed = kept && ended;
     if !confirmed {
         eprintln!("{owner}_pane_cleanup_uncertain agent={}", agent.as_str());
