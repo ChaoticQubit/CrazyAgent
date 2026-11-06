@@ -553,6 +553,7 @@ async fn desktop_native_auth_source_conflict_preserves_original_operation() {
         )
         .unwrap();
         let fact = fixture.owner_fact(&original).await.fact;
+        assert_eq!(fact.phase, NativeAuthPhase::Unavailable);
         let global = fixture.root.path().join("global.toml");
         std::fs::write(&global, format!("{CATALOG}\n")).unwrap();
         let kept =
@@ -568,7 +569,7 @@ async fn desktop_native_auth_source_conflict_preserves_original_operation() {
                 .err()
                 .unwrap()
                 .code,
-            "native_profile_source_conflict"
+            "native_auth_not_active"
         );
         assert_eq!(std::fs::read_to_string(&global).unwrap(), changed);
         assert!(bridge.pending_intent().unwrap().is_none());
