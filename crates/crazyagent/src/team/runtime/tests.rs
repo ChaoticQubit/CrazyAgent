@@ -18735,16 +18735,20 @@ fn ended_native_lead<T>(
 
 /// Keeper r1 F1: a native lead's pane runs in its own server with no keeper and no warden,
 /// so a stop that leaves running a process the lead started in a session of its own is
-/// never reported as confirmed. It is uncertain, which keeps the account held.
+/// never reported as confirmed. It names what still runs in the lead's sandbox, which keeps
+/// the account held until a listing shows it ended.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_native_lead_s_stop_is_uncertain_while_a_process_it_started_on_its_own_still_runs() {
+fn a_native_lead_s_stop_names_a_process_it_started_on_its_own_that_still_runs() {
     let (stopped, running) = ended_native_lead(LEAVING_CLAUDE, |session, _, _| session.stop());
     assert!(
         running,
         "the lead's own process outlived the stop: {stopped:?}"
     );
-    assert!(matches!(stopped, Err(Unstopped::Uncertain)), "{stopped:?}");
+    assert!(
+        matches!(&stopped, Err(Unstopped::Left(left)) if left.code() == "harness_sandbox_left"),
+        "{stopped:?}"
+    );
 }
 
 /// Keeper r1 F1: a native lead's pane an earlier engine left, ended with no session, is not
