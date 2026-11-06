@@ -1,6 +1,6 @@
 use super::*;
 use crate::project_setup::{NewProjectPlan, Staged};
-use crate::projects_home::{AddMode, AddPlan, HomeEffect, MovePlan, folder_size};
+use crate::projects_home::{AddMode, AddOverride, AddPlan, HomeEffect, MovePlan, folder_size};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
@@ -201,10 +201,17 @@ async fn plan(
     }
     let expected = request.expected_revision.clone();
     let work = match mutation {
-        OwnerMutation::AddExistingFolder { source, mode } => {
-            let (source, mode): (String, AddMode) = (source.clone(), *mode);
+        OwnerMutation::AddExistingFolder {
+            source,
+            mode,
+            overrides,
+        } => {
+            let (source, mode, overrides): (String, AddMode, Vec<AddOverride>) =
+                (source.clone(), *mode, overrides.clone());
             engine
-                .owner_job(|reply| Job::HomeAddPlan(a.clone(), expected, source, mode, reply))
+                .owner_job(|reply| {
+                    Job::HomeAddPlan(a.clone(), expected, source, mode, overrides, reply)
+                })
                 .await
                 .map(Work::Add)
         }

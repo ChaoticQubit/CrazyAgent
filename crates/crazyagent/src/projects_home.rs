@@ -3,7 +3,10 @@ mod layout;
 mod platform;
 mod watch;
 
-pub use intake::{AddPlan, MovePlan, copy_tree, folder_size, move_by_copy, verify_tree};
+pub use intake::{
+    AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, MovePlan, copy_tree, folder_size,
+    move_by_copy, verify_tree,
+};
 pub use layout::{CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_from_git, prepare_layout};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
@@ -77,27 +80,81 @@ pub enum AddMode {
     Copy,
 }
 
+/// A soft refusal of one add that the owner was shown and chose to go past for
+/// that add only: a Move that breaks linked git worktrees, a Copy of a folder
+/// that is itself a linked checkout, or a copy past the usual entry and level
+/// bounds. Every other refusal stays; an add without one keeps its refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddOverride {
+    Worktrees,
+    LinkedCheckout,
+    TooLarge,
+}
+
+pub const ADD_OVERRIDES_MAX: usize = 3;
+
+/// Checks the overrides of one add: at most one of each, `worktrees` only with a Move
+/// and `linked_checkout` only with a Copy. Inputs: the mode and the overrides.
+/// Output: Ok, or `home_override_invalid`.
+fn check_overrides(mode: AddMode, overrides: &[AddOverride]) -> Result<(), EngineError> {
+    let repeated = overrides
+        .iter()
+        .enumerate()
+        .any(|(at, item)| overrides[..at].contains(item));
+    let wrong_mode = overrides.iter().any(|item| match item {
+        AddOverride::Worktrees => mode != AddMode::Move,
+        AddOverride::LinkedCheckout => mode != AddMode::Copy,
+        AddOverride::TooLarge => false,
+    });
+    if overrides.len() > ADD_OVERRIDES_MAX || repeated || wrong_mode {
+        return Err(refused("home_override_invalid"));
+    }
+    assert!(overrides.len() <= ADD_OVERRIDES_MAX);
+    Ok(())
+}
+
 /// An owner change to the projects home recorded by the engine: picking the
 /// home folder, switching to a new one and optionally moving every project
 /// folder there, or recording a folder the transport moved or copied in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HomeAction {
-    SetHome { path: String },
-    MoveHome { path: String, move_projects: bool },
-    Added { source: String, mode: AddMode },
-    Trash { path: String },
+    SetHome {
+        path: String,
+    },
+    MoveHome {
+        path: String,
+        move_projects: bool,
+    },
+    Added {
+        source: String,
+        mode: AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<AddOverride>,
+    },
+    Trash {
+        path: String,
+    },
 }
 
 impl HomeAction {
-    /// Checks the owner-supplied path text before anything touches the disk.
-    /// Input: an untrusted action. Output: Ok, or the code of the bad path.
+    /// Checks the owner-supplied path text and an add's overrides before anything
+    /// touches the disk. Input: an untrusted action. Output: Ok, or the code of the
+    /// bad path or `home_override_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
             Self::SetHome { path } | Self::MoveHome { path, .. } => {
                 path_text(path, "projects_home_path_invalid")
             }
-            Self::Added { source, .. } => path_text(source, "home_source_invalid"),
+            Self::Added {
+                source,
+                mode,
+                overrides,
+            } => {
+                path_text(source, "home_source_invalid")?;
+                check_overrides(*mode, overrides)
+            }
             Self::Trash { path } => path_text(path, "home_trash_invalid"),
         }
     }
@@ -211,20 +268,79 @@ pub fn check_home(path: &Path, engine_root: &Path) -> Result<PathBuf, EngineErro
     Ok(home)
 }
 
-/// True when moving `folder` would break git links kept outside it: the
-/// folder is a linked worktree or submodule (its `.git` is a file or a link),
-/// or its repository has linked worktrees. An unreadable `.git` counts.
-/// [`plan_add`] refuses such a Move, and the windows offer no Move for it.
-pub fn git_links(folder: &Path) -> bool {
+/// What ties a folder's git to places outside it, which a Move breaks: linked worktrees
+/// of its repository, the folder being itself a linked worktree or a submodule checkout,
+/// or a `.git` that cannot be read or told apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitLink {
+    None,
+    Worktrees,
+    LinkedWorktree,
+    Submodule,
+    Unreadable,
+}
+
+/// Tells which git link a Move of `folder` would break. Input: the folder. Output: the
+/// link, or `None` when its git, if any, is all inside it.
+pub fn git_link(folder: &Path) -> GitLink {
     let git = folder.join(".git");
-    match std::fs::symlink_metadata(&git) {
-        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-        Ok(metadata) if !metadata.is_dir() => true,
-        Ok(_) => match std::fs::read_dir(git.join("worktrees")) {
-            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-            Ok(mut entries) => entries.next().is_some(),
+    let metadata = match std::fs::symlink_metadata(&git) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return GitLink::None,
+        Err(_) => return GitLink::Unreadable,
+        Ok(metadata) => metadata,
+    };
+    if metadata.file_type().is_symlink() {
+        return GitLink::Unreadable;
+    }
+    if metadata.is_file() {
+        return checkout_link(folder, &git);
+    }
+    if !metadata.is_dir() {
+        return GitLink::Unreadable;
+    }
+    match std::fs::read_dir(git.join("worktrees")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GitLink::None,
+        Err(_) => GitLink::Unreadable,
+        Ok(mut entries) => match entries.next() {
+            Some(_) => GitLink::Worktrees,
+            None => GitLink::None,
         },
     }
+}
+
+/// Tells a checkout apart by the git data its `.git` file names, read from `folder` as git
+/// reads a relative path: a linked worktree's holds a `commondir` file, a submodule's is a
+/// folder without one under a `modules` folder of its parent's git data. Inputs: the folder
+/// and its `.git` file. Output: the link, `Unreadable` for any other, missing or unread data.
+fn checkout_link(folder: &Path, git: &Path) -> GitLink {
+    let Some(text) = crate::platform::read_plain_file(git, PATH_BYTES_MAX as u64 + 16) else {
+        return GitLink::Unreadable;
+    };
+    let Some(named) = text.trim_end_matches(['\n', '\r']).strip_prefix("gitdir: ") else {
+        return GitLink::Unreadable;
+    };
+    let data = folder.join(named);
+    match std::fs::symlink_metadata(data.join("commondir")) {
+        Ok(metadata) if metadata.is_file() => return GitLink::LinkedWorktree,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return GitLink::Unreadable,
+    }
+    let modules = Path::new(named)
+        .components()
+        .any(|part| part.as_os_str() == std::ffi::OsStr::new("modules"));
+    if modules && std::fs::metadata(&data).is_ok_and(|metadata| metadata.is_dir()) {
+        GitLink::Submodule
+    } else {
+        GitLink::Unreadable
+    }
+}
+
+/// True when moving `folder` would break git links kept outside it: any [`GitLink`] other
+/// than `None`, an unreadable `.git` included. [`plan_add`] refuses such a Move unless the
+/// owner chose to go past it.
+pub fn git_links(folder: &Path) -> bool {
+    git_link(folder) != GitLink::None
 }
 
 /// True when `folder` is itself a checkout whose git data lives in another repository:
@@ -258,6 +374,55 @@ pub fn linked_worktrees(folder: &Path) -> usize {
         .count()
 }
 
+/// The folders of the git worktrees linked to the repository in `folder`, which a Move
+/// leaves pointing at its old place. Input: the folder and how many to read. Output: each
+/// worktree folder its `.git/worktrees/<name>/gitdir` names, in name order; none without a
+/// plain `.git` folder, and unreadable entries left out.
+pub fn linked_worktree_paths(folder: &Path, max: usize) -> Vec<PathBuf> {
+    let git = folder.join(".git");
+    let plain = std::fs::symlink_metadata(&git)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if !plain || max == 0 {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(git.join("worktrees")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<std::ffi::OsString> = entries
+        .flatten()
+        .take(LINKED_WORKTREES_MAX)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.file_name())
+        .collect();
+    names.sort();
+    let paths: Vec<PathBuf> = names
+        .iter()
+        .filter_map(|name| {
+            let text = crate::platform::read_plain_file(
+                &git.join("worktrees").join(name).join("gitdir"),
+                PATH_BYTES_MAX as u64 + 1,
+            )?;
+            let named = PathBuf::from(text.trim_end_matches(['\n', '\r']));
+            let worktree = if named.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                named.parent()?.to_path_buf()
+            } else {
+                named
+            };
+            worktree.is_absolute().then_some(worktree)
+        })
+        .take(max)
+        .collect();
+    assert!(paths.len() <= max);
+    paths
+}
+
+/// Whether a folder and the projects home are on the same disk, so a Move is a quick
+/// rename rather than a copy, a check and a removal. Input: the two folders. Output: the
+/// answer, or None when either cannot be read or the platform cannot tell.
+pub fn same_volume(folder: &Path, home: &Path) -> Option<bool> {
+    Some(platform::volume(folder)? == platform::volume(home)?)
+}
+
 /// Plans bringing an existing folder into the projects home.
 /// Input: the canonical home, the engine data folder, the owner's source
 /// text, the mode and the set-up projects. Output: the real source and the
@@ -266,15 +431,19 @@ pub fn linked_worktrees(folder: &Path) -> usize {
 /// or engine data, hidden folders, names already taken in the home, a Move
 /// of a folder with git worktree links or nested with a folder or repository
 /// a project uses, and a Copy of a folder that is itself a linked worktree or
-/// submodule checkout.
+/// submodule checkout. Each override lifts exactly one soft refusal for this add:
+/// `worktrees` the git worktree links, `linked_checkout` the linked checkout, and
+/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`].
 pub fn plan_add(
     home: &Path,
     engine_root: &Path,
     source: &str,
     mode: AddMode,
+    overrides: &[AddOverride],
     registered: &[Registered],
 ) -> Result<AddPlan, EngineError> {
     path_text(source, "home_source_invalid")?;
+    check_overrides(mode, overrides)?;
     let real = real_folder(
         Path::new(source),
         "home_source_missing",
@@ -296,18 +465,26 @@ pub fn plan_add(
     }
     folder_name(name).map_err(|_| refused("home_source_name"))?;
     if mode == AddMode::Move {
-        if git_links(&real) {
+        if !overrides.contains(&AddOverride::Worktrees) && git_links(&real) {
             return Err(refused("home_move_worktrees"));
         }
         if registered.iter().any(|project| in_use(&real, project)) {
             return Err(refused("home_move_project"));
         }
     }
-    if mode == AddMode::Copy && linked_checkout(&real) {
+    if mode == AddMode::Copy
+        && !overrides.contains(&AddOverride::LinkedCheckout)
+        && linked_checkout(&real)
+    {
         return Err(refused("home_copy_linked_checkout"));
     }
+    let bounds = if overrides.contains(&AddOverride::TooLarge) {
+        FORCED_COPY_BOUNDS
+    } else {
+        COPY_BOUNDS
+    };
     let destination = destination(home, name)?;
-    Ok(AddPlan::new(real, destination, mode))
+    Ok(AddPlan::new(real, destination, mode, bounds))
 }
 
 /// Checks a name for a folder directly inside the projects home. This one rule
@@ -662,6 +839,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_copy_special_file" => "The folder holds a device or pipe file that cannot be copied.",
         "home_copy_too_large" => "The folder has too many files or levels to copy.",
+        "home_override_invalid" => {
+            "That add asked to go past a check it cannot go past. Choose the folder again."
+        }
         "home_copy_failed" | "home_move_failed" => {
             "The folder could not be added. Nothing was removed."
         }

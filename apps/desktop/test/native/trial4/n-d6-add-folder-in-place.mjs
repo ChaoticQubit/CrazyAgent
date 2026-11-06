@@ -15,7 +15,7 @@ function way(label) {
 }
 
 /** N-D6 (B-06, OP-19): an existing repo outside the projects folder, with one linked worktree,
- * is set up where it is; Add folder offers no Move for it. */
+ * is set up where it is; Add folder still offers Move for it, which asks first (DEC-115). */
 export const checks = [{
   id: "N-D6",
   op: ["OP-19"],
@@ -61,7 +61,7 @@ export const checks = [{
     const seen = `${name} (${made.repo}, linked worktree ${made.worktree}): setup page of project ${id} opened on it, .crazyagent made in place; ways offered: ${ways.join(", ")}`;
     if (!kept) throw new Error(`${seen}; but the folder or its linked worktree is no longer where it was`);
     if (copied) throw new Error(`${seen}; but ${join(home, name)} exists in the projects folder`);
-    if (ways.includes("Move")) throw new Error(`${seen}; but Move is offered for a repo with a linked worktree`);
+    if (!ways.includes("Move")) throw new Error(`${seen}; but Move is not offered, so the owner cannot move it anyway`);
     return `${seen}; nothing in ${home}`;
   },
 }];
