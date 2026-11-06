@@ -909,6 +909,114 @@ async fn desktop_native_auth_running_sign_in_is_not_reported_stuck() {
     .await;
 }
 
+/// Reads a drawer's sign-in with the drawer's own ticket until it reaches the phase, with the
+/// app-wide team alert read before each read, as the open window polls both. Inputs: the
+/// bridge, the drawer's ticket and the phase. Output: the last view.
+async fn settle_open(bridge: &mut NativeBridge, ticket: &str, phase: &str) -> Value {
+    let mut seen = Value::Null;
+    for _ in 0..120 {
+        bridge.team_events().await.unwrap();
+        seen = serde_json::to_value(bridge.read_native_auth(ticket).await.unwrap()).unwrap();
+        if seen["phase"] == phase {
+            return seen;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!(
+        "the drawer's sign-in never reached {phase}: last {} {}",
+        seen["phase"], seen["code"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_native_auth_open_drawer_cancels_its_sign_in_after_another_owner_read() {
+    run_case(|fixture| async move {
+        let running = sleeping_login(&fixture).await;
+        let mut bridge = fixture.bridge().await;
+        let drawer = inspect(&mut bridge, "connection-z").await;
+        let started = serde_json::to_value(
+            bridge
+                .start_native_auth(&drawer.ticket, NativeAuthMethod::ClaudeOfficial)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let pid = login_pid(&running).await;
+        bridge.team_events().await.unwrap();
+        let read = bridge
+            .read_native_auth(&drawer.ticket)
+            .await
+            .map_err(|error| error.code);
+        assert_eq!(
+            read.as_ref().err(),
+            None,
+            "the open drawer reads its own sign-in after the app's team alert read"
+        );
+        let read = serde_json::to_value(read.unwrap()).unwrap();
+        assert_eq!(read["operation_id"], started["operation_id"]);
+        bridge.team_events().await.unwrap();
+        let cancelling = bridge
+            .cancel_native_auth(&drawer.ticket)
+            .await
+            .map_err(|error| error.code);
+        assert_eq!(
+            cancelling.as_ref().err(),
+            None,
+            "Cancel sign-in in the open drawer reaches the engine after the app's team alert read"
+        );
+        let cancelling = serde_json::to_value(cancelling.unwrap()).unwrap();
+        assert_eq!(cancelling["operation_id"], started["operation_id"]);
+        let cancelled = settle_open(&mut bridge, &drawer.ticket, "cancelled").await;
+        assert_eq!(cancelled["operation_id"], started["operation_id"]);
+        assert_eq!(
+            fixture.owner_fact(&cancelled).await.fact.phase,
+            NativeAuthPhase::Cancelled
+        );
+        let alive = crazyagent::spawn_gate::status(
+            std::process::Command::new("/bin/kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        assert!(!alive.success(), "the cancel stops the real login child");
+        assert_eq!(bridge.status().stuck_sign_in, None);
+        assert_eq!(
+            bridge
+                .start_native_auth(&drawer.ticket, NativeAuthMethod::ClaudeOfficial)
+                .await
+                .err()
+                .map(|error| error.code),
+            Some("stale_model_access"),
+            "a ticket read before other owner reads only reads or cancels the attempt it was issued for, never starts another"
+        );
+        let other = inspect(&mut bridge, "connection-a").await;
+        bridge.team_events().await.unwrap();
+        assert_eq!(
+            bridge
+                .read_native_auth(&other.ticket)
+                .await
+                .err()
+                .map(|error| error.code),
+            Some("stale_model_access"),
+            "a ticket bound to no attempt reads nothing once other owner reads ran"
+        );
+        let again = inspect(&mut bridge, "connection-z").await;
+        let retried = serde_json::to_value(
+            bridge
+                .start_native_auth(&again.ticket, NativeAuthMethod::ClaudeOfficial)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(retried["operation_id"], started["operation_id"]);
+        bridge.team_events().await.unwrap();
+        bridge.cancel_native_auth(&again.ticket).await.unwrap();
+        settle_open(&mut bridge, &again.ticket, "cancelled").await;
+        bridge.remove_account("connection-z").await.unwrap();
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desktop() {
     run_case(|fixture| async move {
