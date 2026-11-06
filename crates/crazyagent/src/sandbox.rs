@@ -275,6 +275,10 @@ const REFUSED_VARIABLES: &[&str] = &[
     "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_SYSTEM",
     "GOOGLE_APPLICATION_CREDENTIALS",
+    "PERL5LIB",
+    "PERL5OPT",
+    "PERLLIB",
+    "PERL5DB",
 ];
 
 const REFUSED_PREFIXES: &[&str] = &[
@@ -327,7 +331,8 @@ pub const AGENT_TLS_ENV: [(&str, &str); 0] = [];
 
 /// Tells whether an environment variable name may never reach an agent process: GitHub and
 /// git credential settings, the owner's SSH agent, cloud and provider keys, tokens,
-/// secrets, passwords and the engine's own `CRAZYAGENT_` settings, including the model key
+/// secrets, passwords, the perl variables that would make a pane's keeper, a perl outside
+/// the sandbox, load other code, and the engine's own `CRAZYAGENT_` settings, including the model key
 /// name `ANTHROPIC_API_KEY`, which passes only with the local placeholder (see
 /// [`agent_variable_allowed`]). Input: the variable name. Output: true when refused.
 pub fn agent_env_refused(name: &OsStr) -> bool {
