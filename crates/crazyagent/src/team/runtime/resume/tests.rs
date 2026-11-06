@@ -393,14 +393,19 @@ e=$(printf '\033')
 open=0
 hang=0
 hung=""
+said=""
 while IFS= read -r line; do
   case "$line" in *"$e[200~"*) open=1 ;; esac
   printf '%s\n' "$line" >> "$CODEX_HOME/typed"
+  said="$said$(printf '%s' "$line" | /usr/bin/sed "s/$e\[20[01]~//g") "
   case "$line" in *"hang here"*) [ -z "$resumed" ] && [ -z "$hung" ] && hang=1 ;; esac
   case "$line" in
     *"$e[201~"*) open=0 ;;
     *) [ "$open" = 1 ] && continue ;;
   esac
+  text=$(printf '%s' "$said" | /usr/bin/tr -d '\000-\037' | /usr/bin/sed 's/\\/\\\\/g; s/"/\\"/g')
+  said=""
+  printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$text" >> "$f"
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   if [ "$hang" = 1 ]; then
     printf '{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call-1","arguments":"{\\"command\\":[\\"touch\\",\\"page.md\\"]}"}}\n' >> "$f"
