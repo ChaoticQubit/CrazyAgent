@@ -179,7 +179,11 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     connection.process(*query).unwrap();
                 }
                 Request::Questions(query)
-                    if *query == crate::tui::client::questions::QuestionsQuery::Counts =>
+                    if matches!(
+                        *query,
+                        crate::tui::client::questions::QuestionsQuery::Counts
+                            | crate::tui::client::questions::QuestionsQuery::List { .. }
+                    ) =>
                 {
                     connection.questions(*query).unwrap();
                 }
