@@ -393,8 +393,8 @@ export function loadResearch(id: string): Promise<Result<{ project_id: string; j
   return call<{ project_id: string; jobs: ResearchJob[] }>("desktop_research_jobs", { id });
 }
 
-export function loadActivity(id: string, limit: number): Promise<Result<{ project_id: string; items: ActivityItem[] }>> {
-  return call<{ project_id: string; items: ActivityItem[] }>("desktop_project_activity", { id, limit });
+export function loadActivity(id: string, limit: number): Promise<Result<{ project_id: string; items: ActivityItem[]; more: boolean }>> {
+  return call<{ project_id: string; items: ActivityItem[]; more: boolean }>("desktop_project_activity", { id, limit });
 }
 
 export function loadContext(id: string): Promise<Result<ProjectContext>> {

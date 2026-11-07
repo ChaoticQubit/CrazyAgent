@@ -1,6 +1,6 @@
 import type { IconName, Tone } from "../../ui";
 import { failureCopy, failureSentence, receiptState } from "../../api-projects";
-import type { ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
+import type { ActivityItem, ActivityKind, ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { namedFailure } from "../../api";
 import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
@@ -29,6 +29,10 @@ export function ago(at: number, now: number): string {
   if (hours < 24) return `${hours} h ago`;
   const days = Math.floor(hours / 24);
   return days === 1 ? "Yesterday" : `${days} days ago`;
+}
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
 }
 
 const PROMPT_LINE_MAX = 140;
@@ -413,24 +417,87 @@ export function planningJob(jobs: ResearchJob[]): ResearchJob | null {
   return newest;
 }
 
-/** Builds the Recent activity list from real job times.
- * Inputs: the jobs, the project name and when it was created. Output: every event, newest first. */
-export function activity(jobs: ResearchJob[], project: string, created: number | null): { at: number; text: string }[] {
-  const events: { at: number; text: string }[] = [];
-  const research = researchJobs(jobs).length;
-  if (created !== null) events.push({ at: created, text: `You created ${project} with ${research} research ${research === 1 ? "task" : "tasks"}` });
-  for (const job of jobs) {
-    if (job.started_ms !== null) events.push({ at: job.started_ms, text: `${job.kind_label} started` });
-    if (job.finished_ms === null) continue;
-    const file = job.report_path.slice(job.report_path.lastIndexOf("/") + 1);
-    if (job.status === "done") events.push({ at: job.finished_ms, text: `${job.kind_label} saved ${file}` });
-    else if (job.status === "failed") events.push({ at: job.finished_ms, text: `${job.kind_label} stopped: ${job.error?.trim() || "error"}` });
-    else if (job.status === "cancelled") events.push({ at: job.finished_ms, text: `${job.kind_label} was stopped` });
-  }
-  return events.sort((a, b) => b.at - a.at);
+export const ACTIVITY_ROWS = 8;
+
+/** The group Overview shows activity under when it serves no goal. */
+export const PROJECT_GOAL = "Project";
+
+/** The group Overview shows research under when it serves no goal, closed until opened. */
+export const RESEARCH_GOAL = "Research";
+export const RESEARCH_KEY = "research";
+const PROJECT_KEY = "project";
+const RESEARCH_KINDS: ActivityKind[] = ["research_started", "research_saved", "research_stopped"];
+
+/** The filter chips over Overview activity, All first. */
+export type ActivityFilter = "all" | "merge" | "change" | "tests" | "task" | "phase";
+export const ACTIVITY_FILTERS: { value: ActivityFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "merge", label: "Merges" },
+  { value: "change", label: "Changes" },
+  { value: "tests", label: "Tests" },
+  { value: "task", label: "Tasks" },
+  { value: "phase", label: "Phases" },
+];
+
+const FILTER_OF: Record<ActivityKind, Exclude<ActivityFilter, "all"> | null> = {
+  created: null,
+  research_started: "task",
+  research_saved: "task",
+  research_stopped: "task",
+  task_started: "task",
+  task_finished: "task",
+  changes_ready: "change",
+  accepted: "change",
+  discarded: "change",
+  conflict: "change",
+  sent_back: "change",
+  lead_merged: "merge",
+  merged_into_main: "merge",
+  undone: "merge",
+  work_started: "task",
+  work_review_ready: "task",
+  work_complete: "task",
+  work_closed: "task",
+  phase: "phase",
+  test: "tests",
+};
+
+/** The chip an event shows under besides All. Input: its kind. Output: the chip, or null for
+ * the project's creation, which shows only under All. */
+export function activityFilter(kind: ActivityKind): Exclude<ActivityFilter, "all"> | null {
+  return FILTER_OF[kind];
 }
 
-export const ACTIVITY_ROWS = 8;
+/** The goal an event is shown under. A named goal keys by its name; research with no goal goes
+ * under Research and anything else with no goal under Project, each keyed apart from a goal of
+ * that name. Input: the event. Output: the group key and its label. */
+export function activityGoal(item: ActivityItem): { key: string; goal: string } {
+  const goal = item.goal?.trim();
+  if (goal) return { key: `goal:${goal}`, goal };
+  return RESEARCH_KINDS.includes(item.kind) ? { key: RESEARCH_KEY, goal: RESEARCH_GOAL } : { key: PROJECT_KEY, goal: PROJECT_GOAL };
+}
+
+/** Project activity newest first, a later id first at the same time. Input: the events in any
+ * order. Output: a sorted copy. */
+export function newestActivity(items: ActivityItem[]): ActivityItem[] {
+  return [...items].sort((a, b) => b.at_ms - a.at_ms || b.id - a.id);
+}
+
+/** Groups project activity by the goal it serves, for Overview, as activityGoal places each
+ * event. Input: the events in any order. Output: one group per goal with its key and label, the
+ * group with the newest event first, each group's events newest first. */
+export function groupActivity(items: ActivityItem[]): { key: string; goal: string; items: ActivityItem[] }[] {
+  const groups = new Map<string, { key: string; goal: string; items: ActivityItem[] }>();
+  for (const item of newestActivity(items)) {
+    const place = activityGoal(item);
+    const group = groups.get(place.key);
+    if (group) group.items.push(item);
+    else groups.set(place.key, { ...place, items: [item] });
+  }
+  const grouped = [...groups.values()];
+  assert(grouped.reduce((sum, group) => sum + group.items.length, 0) === items.length, "every event is in exactly one group");
+  return grouped;
+}
 
 const settled: MasterTurn["phase"][] = ["succeeded", "failed", "cancelled", "uncertain", "blocked"];
 
