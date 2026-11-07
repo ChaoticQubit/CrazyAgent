@@ -388,10 +388,7 @@ pub fn summary(
     let theme = &ctx.theme;
     let total = &report.total;
     let prompt = total.input + total.cache_read + total.cache_write;
-    let cache = match (total.cache_read * 100 + prompt / 2).checked_div(prompt) {
-        Some(share) => format!("{share}%"),
-        None => "none".into(),
-    };
+    let share = (total.cache_read * 100 + prompt / 2).checked_div(prompt);
     let (added, removed) = report.lines.iter().fold((0, 0), |(added, removed), row| {
         (added + row.added, removed + row.removed)
     });
@@ -410,10 +407,21 @@ pub fn summary(
         )));
     } else {
         lines.push(Line::raw(format!(
-            "Tokens {} ({} in, {} out)  Cache {cache}  Runs {}  Lines +{} -{}",
+            "Tokens {} ({} input, {} cache write, {} output)",
             compact(total.headline()),
             compact(total.input),
-            compact(total.output),
+            compact(total.cache_write),
+            compact(total.output)
+        )));
+        let read = compact(total.cache_read);
+        lines.push(Line::raw(match share {
+            Some(share) => {
+                format!("Re-read from cache {read}: {share}% of everything read, not in Tokens")
+            }
+            None => format!("Re-read from cache {read}, not in Tokens"),
+        }));
+        lines.push(Line::raw(format!(
+            "Runs {}  Lines +{} -{}",
             report.runs,
             compact(added),
             compact(removed)
