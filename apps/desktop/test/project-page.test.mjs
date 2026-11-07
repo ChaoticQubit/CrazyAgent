@@ -881,8 +881,8 @@ test("the IDE tab replaces Context and Changes only on a qualified platform with
   const page = await import("../src/screens/project/index.tsx");
   const client = await import("../src/api-ide.ts");
   const ids = (view) => page.projectTabs(view).map((tab) => tab.id);
-  const fixed = ["overview", "conversation", "agents", "changes", "questions", "context", "process", "settings"];
-  const swapped = ["overview", "conversation", "agents", "ide", "questions", "process", "settings"];
+  const fixed = ["overview", "conversation", "agents", "changes", "questions", "context", "process", "metrics", "settings"];
+  const swapped = ["overview", "conversation", "agents", "ide", "questions", "process", "metrics", "settings"];
   assert.deepEqual(ids(undefined), fixed, "until the engine answers, the page keeps Context and Changes and names no IDE");
   assert.equal(client.ideUnavailable(undefined), null);
   const ready = ideView({ state: "ready", version: "1.143.17183", root: "/data/ide/build" });
@@ -940,9 +940,9 @@ test("routes to a replaced tab keep their target, listed beside the IDE while op
   const failed = ideView({ state: "failed", code: "ide_build_download_failed" });
   const ids = (view, route) => page.projectTabs(view, route).map((tab) => tab.id);
   const routed = (route, view) => page.routedTab(route, page.projectTabs(view, route));
-  assert.deepEqual(ids(ready, "overview"), ["overview", "conversation", "agents", "ide", "questions", "process", "settings"]);
-  assert.deepEqual(ids(ready, "changes"), ["overview", "conversation", "agents", "ide", "changes", "questions", "process", "settings"], "an open Changes is listed after the IDE");
-  assert.deepEqual(ids(ready, "context"), ["overview", "conversation", "agents", "ide", "questions", "context", "process", "settings"]);
+  assert.deepEqual(ids(ready, "overview"), ["overview", "conversation", "agents", "ide", "questions", "process", "metrics", "settings"]);
+  assert.deepEqual(ids(ready, "changes"), ["overview", "conversation", "agents", "ide", "changes", "questions", "process", "metrics", "settings"], "an open Changes is listed after the IDE");
+  assert.deepEqual(ids(ready, "context"), ["overview", "conversation", "agents", "ide", "questions", "context", "process", "metrics", "settings"]);
   assert.equal(routed("changes", ready), "changes");
   assert.equal(routed("context", ready), "context", "Overview's Review and Open report links open their file in Context");
   assert.equal(routed("ide", ready), "ide");

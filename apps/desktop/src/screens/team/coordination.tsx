@@ -77,7 +77,8 @@ export function RoleSkillsControls({ settings, skills, busy, onChoose }: {
   </div>;
 }
 
-const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "rcli" };
+/** Each coordination harness id with the name the app shows for it. */
+export const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "rcli" };
 
 /** The Sub-agent mode choices; Native only for a harness kind with native teammates. */
 export function modeOptions(native: boolean): SelectOption[] {

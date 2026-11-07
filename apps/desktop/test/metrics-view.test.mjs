@@ -91,7 +91,7 @@ test("the chart draws a stacked bar for every two hours since midnight and never
   for (const part of ["in", "cw", "out"]) assert.equal(chart.match(new RegExp(`<rect class="${part}"`, "gu")).length, 5, part);
   assert.deepEqual([...chart.matchAll(/<text class="ax"[^>]*text-anchor="middle"[^>]*>([^<]*)</gu)].map((match) => match[1]), ["00:00", "02:00", "04:00", "06:00", "08:00"]);
   assert.match(chart, /<title>00:00: 100 input<\/title>/);
-  assert.doesNotMatch(chart, /999/);
+  assert.doesNotMatch(chart, />[^<]*(999|cache read|re-read)[^<]*</iu);
   assert.match(text(markup), /Input Cache write Output Re-read from cache: 4K, not drawn/);
 });
 
@@ -102,6 +102,7 @@ test("the chart fills a week with one bar a day and labels each by its date", ()
   assert.deepEqual(bars.map((bar) => bar.tokens.input), [0, 0, 5, 0, 0, 0, 0]);
   assert.equal(view.barLabel(SINCE, DAY, 0), new Date(SINCE).toLocaleDateString(undefined, { timeZone: "UTC", month: "short", day: "numeric" }));
   assert.equal(view.barLabel(SINCE + 14 * HOUR, 2 * HOUR, 60), "15:00");
+  assert.throws(() => view.chartBars(metrics({ bucket_ms: 0 }), SINCE, NOW), /a chart bar spans time/);
 });
 
 test("By agent lists each agent's tokens in four parts, its tool counts and its share, with a total", () => {
