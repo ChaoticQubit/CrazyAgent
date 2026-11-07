@@ -38,7 +38,7 @@ fn holds(bytes: &[u8], wanted: &[u8]) -> bool {
 }
 
 /// The N-D9 display variables a running process has, read from its environment by `ps`.
-/// Input: the process id. Output: each `name=value` of the two variables it has.
+/// Input: the process id. Output: each `name=value` of the three variables it has.
 fn display_variables(pid: &str) -> Vec<String> {
     let listed = crate::spawn_gate::output(
         std::process::Command::new("/bin/ps")
@@ -51,6 +51,7 @@ fn display_variables(pid: &str) -> Vec<String> {
         .filter(|word| {
             word.starts_with("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=")
                 || word.starts_with("CLAUDE_CODE_SCROLL_SPEED=")
+                || word.starts_with("CLAUDE_CODE_NO_FLICKER=")
         })
         .map(str::to_owned)
         .collect()
@@ -137,8 +138,9 @@ fn a_real_claude_pane_at_classic_leaves_the_wheel_and_selection_to_the_view() {
 }
 
 /// N-D9 Fullscreen: the same turn in a project at the Fullscreen display answers, and while
-/// it runs its process has `CLAUDE_CODE_SCROLL_SPEED=3` and its pane is on the alternate
-/// screen with mouse reporting on, Claude Code's own view. Runs in a live window only.
+/// it runs its process has `CLAUDE_CODE_SCROLL_SPEED=3` and `CLAUDE_CODE_NO_FLICKER=1`
+/// (R8-FS) and its pane is on the alternate screen with mouse reporting on, Claude Code's
+/// own view, whatever the account's own renderer choice. Runs in a live window only.
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn a_real_claude_pane_at_fullscreen_keeps_claude_code_s_own_view() {
@@ -149,7 +151,10 @@ fn a_real_claude_pane_at_fullscreen_keeps_claude_code_s_own_view() {
     assert_eq!(end, TurnEnd::Success, "{cause:?}");
     assert!(text.contains(SUM), "{text}");
     assert!(seen.snapshots > 0, "the pane was never seen running");
-    assert_eq!(seen.variables, ["CLAUDE_CODE_SCROLL_SPEED=3"]);
+    assert_eq!(
+        seen.variables,
+        ["CLAUDE_CODE_SCROLL_SPEED=3", "CLAUDE_CODE_NO_FLICKER=1"]
+    );
     assert!(
         seen.alternate,
         "Fullscreen never drew on the alternate screen"
