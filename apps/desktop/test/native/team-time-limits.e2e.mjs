@@ -10,13 +10,15 @@ import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
 import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import "../load-source.mjs";
+
+const { TEAM_SETTINGS_STALE } = await import("../../src/screens/team/controls.tsx");
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
 const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const SETTING = "Each task may run";
-const REFUSED = "This changed since you opened it. Review and save again.";
 
 /** Holds a window's team reads while `window.__e2eHeld` is set, so the window keeps the team
  * it read before the other window's change, as a window whose next read has not come yet does.
@@ -196,7 +198,7 @@ test("Time limits: a change from a window's old read is refused, the other windo
     await kept(status, [3600, null]);
 
     await choose(second.page, session, "14400");
-    await second.me.waitFor("the refusal of the second window's change from its old read", (text) => text.includes(REFUSED));
+    await second.me.waitFor("the refusal of the second window's change from its old read", (text) => text.includes(TEAM_SETTINGS_STALE));
     await second.me.capture("stale-refused");
     await kept(status, [3600, null]);
 
