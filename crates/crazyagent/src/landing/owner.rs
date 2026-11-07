@@ -418,13 +418,13 @@ pub(super) fn land_on(
 /// None, else the caller's, and a repository other than the held one is logged and skipped.
 /// A worktree or repository it cannot reach is logged by its plain code and skipped, so
 /// one never stops the rest. Inputs: the store, the project and the repository the caller
-/// holds. Output: Ok once each was given or skipped, else `changes_unavailable` when the
-/// team records cannot be read.
+/// holds. Output: the own clones given main once each was given or skipped, else
+/// `changes_unavailable` when the team records cannot be read.
 pub(super) fn refresh_main(
     db: &Connection,
     project: &ProjectId,
     held: Option<&Path>,
-) -> Result<(), EngineError> {
+) -> Result<Vec<PathBuf>, EngineError> {
     let places = main_places(db, project)?;
     let mut by_repository: BTreeMap<&Path, Vec<&[PathBuf; 3]>> = BTreeMap::new();
     for place in &places {
@@ -433,6 +433,7 @@ pub(super) fn refresh_main(
             .or_default()
             .push(place);
     }
+    let mut given = Vec::new();
     for (repository, places) in by_repository {
         let _hold = match held {
             None => Some(hold(repository)),
@@ -442,15 +443,21 @@ pub(super) fn refresh_main(
                 continue;
             }
         };
-        give_main_in(db, project, repository, &places);
+        given.extend(give_main_in(db, project, repository, &places));
     }
-    Ok(())
+    Ok(given)
 }
 
 /// Gives one owner repository's agent worktrees the project's Land on tip as
 /// [`refresh_main`] says, logging by plain code each one it cannot reach. The caller holds
 /// the repository's hold. Inputs: the store, the project, the repository and its places.
-fn give_main_in(db: &Connection, project: &ProjectId, repository: &Path, places: &[&[PathBuf; 3]]) {
+/// Output: the own clones it gave main.
+fn give_main_in(
+    db: &Connection,
+    project: &ProjectId,
+    repository: &Path,
+    places: &[&[PathBuf; 3]],
+) -> Vec<PathBuf> {
     let tip = match land_on_branch(db, repository, project) {
         Ok(found) => found.map(|(_, tip)| tip),
         Err(error) => {
@@ -462,12 +469,15 @@ fn give_main_in(db: &Connection, project: &ProjectId, repository: &Path, places:
         }
     };
     let Some(tip) = tip else {
-        return;
+        return Vec::new();
     };
     let mut linked = false;
+    let mut clones = Vec::new();
     for [_, worktree, git_dir] in places.iter().copied() {
         let given = match flow::check_places(repository, worktree, git_dir) {
-            Ok(Layout::Clone) => clone::give_main(repository, worktree, &tip),
+            Ok(Layout::Clone) => {
+                clone::give_main(repository, worktree, &tip).map(|()| clones.push(worktree.clone()))
+            }
             Ok(Layout::Linked) => {
                 linked = true;
                 Ok(())
@@ -482,7 +492,7 @@ fn give_main_in(db: &Connection, project: &ProjectId, repository: &Path, places:
         }
     }
     if !linked {
-        return;
+        return clones;
     }
     let given = shared(repository).and_then(|repo| {
         flow::set_engine_ref(&repo, repository, clone::MAIN_REF, Some(tip.as_str()))
@@ -493,6 +503,7 @@ fn give_main_in(db: &Connection, project: &ProjectId, repository: &Path, places:
             crate::protocol::plain_code(&error.0)
         );
     }
+    clones
 }
 
 /// The repository, worktree and git folder of each agent worktree the team records for a
@@ -790,9 +801,10 @@ pub(super) fn commit_deletions(
 /// Marks a change set landed as `landed`, closes its agent's workers' open sets with it
 /// (F3, DEC-107), drops its pending ref, forgets the owner edits settled on it and points the
 /// agent's worktree at the landed commit when the worktree holds nothing newer than the set,
-/// then gives every agent worktree the new main ([`refresh_main`]). A worker set that cannot
-/// be closed now, or a main that cannot be given, is logged by its plain code and left, so
-/// the Accept itself never fails on it.
+/// then gives every agent worktree the new main ([`refresh_main`]) and tells the set's clone
+/// agent, only when its clone was given that main, that the set landed ([`tell_landed`]). A
+/// worker set that cannot be closed now, or a main that cannot be given, is logged by its
+/// plain code and left, so the Accept itself never fails on it.
 fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
     record.landed = Some(landed.to_owned());
@@ -816,7 +828,8 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)?;
     match refresh_main(db, &record.project, Some(record.repository.as_path())) {
-        Ok(()) => tell_landed(db, record, landed),
+        Ok(given) if given.contains(&record.worktree) => tell_landed(db, record, landed),
+        Ok(_) => {}
         Err(error) => eprintln!(
             "landing_main_not_refreshed code={}",
             crate::protocol::plain_code(&error.0)
