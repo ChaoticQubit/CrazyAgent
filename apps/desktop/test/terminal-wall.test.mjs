@@ -80,13 +80,13 @@ test("a wall window draws its tiles master first with Message and Stop, then fre
   assert.deepEqual(html.match(/aria-label="Stop [^"]+"/gu), ["aria-label=\"Stop a1\""]);
 });
 
-test("the wall boots from main.tsx on its own address, and Agents and Agent settings carry the button and the setting", () => {
+test("the wall boots from main.tsx on its own address, Agents carries the button and the Coordination group the setting", () => {
   assert.match(source("main.tsx"), /wallRoute\(window\.location\.hash\)/u);
   assert.match(source("main.tsx"), /<TerminalWall /u);
   assert.match(source("screens/team/index.tsx"), />Open all terminals</u);
   assert.match(source("screens/team/index.tsx"), /openTerminalWindows\(/u);
   assert.match(source("screens/project/agents.tsx"), /<TeamGraphView [^>]*perWindow=/u);
-  const controls = source("screens/team/controls.tsx");
+  const controls = source("screens/team/coordination.tsx");
   assert.match(controls, /label="Terminals per window"/u);
   assert.match(controls, /\{ value: "4", label: "4" \}, \{ value: "6", label: "6 \(default\)" \}, \{ value: "9", label: "9" \}/u);
   assert.match(controls, /How many terminals Open all terminals puts in one window\. More agents open more windows\./u);
