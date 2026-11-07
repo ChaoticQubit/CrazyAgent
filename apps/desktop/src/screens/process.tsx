@@ -100,7 +100,7 @@ export function conflictOf(stale: Extract<SavedText, { kind: "stale" }>): Confli
  * preview, the conflict, the skill the owner asked to open over unsaved text and the
  * actions. The editor is read-only while saving. Nothing reads the owner's files or saves
  * without the matching click. */
-export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, leaving = null, view = "read", all = false, given = { kind: "loading" }, subtitle = MODE_SUBTITLES.both, editNote: note = "",
+export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, leaving = null, view = "read", all = false, given = { kind: "loading" }, mode = "both", subtitle = MODE_SUBTITLES.both, editNote: note = "",
   onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onReload, onKeepMine, onOpenSkill, onLeave, onStay, onView, onAll, onUseDefault }: {
   scope: ProcessScope;
   saved: Loaded<string>;
@@ -114,6 +114,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   view?: InstructionsView;
   all?: boolean;
   given?: Loaded<string>;
+  mode?: InstructionMode | null;
   subtitle?: string;
   editNote?: string;
   onDraft: (text: string) => void;
@@ -138,7 +139,8 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   if (saved.kind === "loading") return <Skeleton shape="card" count={2} />;
   if (saved.kind === "not_ready") return <NotReady what="Instructions" />;
   if (saved.kind === "error") return <LoadError message={saved.message} onRetry={onRetry} />;
-  const invalid = processTextError(draft);
+  const invalid = processTextError(draft)
+    ?? (scope.kind === "project" && mode === "project_only" && draft.trim() === "" ? "Under Project only an empty file leaves agents with no instructions." : undefined);
   const changed = draft !== saved.value;
   const leave = <ConfirmDialog open={leaving !== null} title={`Open ${leaving?.name ?? "the skill"} without saving?`} confirmLabel="Open skill"
     cancelLabel="Keep editing" onConfirm={() => onLeave?.()} onCancel={() => onStay?.()}>
@@ -169,7 +171,9 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
               <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
                 disabled={Boolean(invalid) || !changed || busy !== null || Boolean(conflict)}>Save</Button>
               {changed && !conflict && <Button disabled={busy !== null} onClick={() => onDraft(saved.value)}>Discard edits</Button>}
-              <Button disabled={busy !== null || draft === ""} onClick={() => onUseDefault?.()}>Use app default</Button>
+              {mode === "project_only"
+                ? <span className="small muted">Project only gives agents this file alone. To use the app default, pick Both or App only under Delivery.</span>
+                : mode !== null && <Button disabled={busy !== null || draft === ""} onClick={() => onUseDefault?.()}>Use app default</Button>}
               <span className="small muted">{note}</span>
             </span>
           </form>
@@ -512,8 +516,9 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   };
   const current = settings.kind === "ok" && settings.value !== null ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS;
   const reloadSettings = () => { readSettings(); reloadGiven(); };
+  const mode = settings.kind === "ok" && settings.value !== null ? settings.value.settings.mode : null;
   const editor = <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview} conflict={conflict}
-    view={view} all={all} given={given} subtitle={MODE_SUBTITLES[current.mode]} editNote={editNote(current.edits)}
+    view={view} all={all} given={given} mode={mode} subtitle={MODE_SUBTITLES[current.mode]} editNote={editNote(current.edits)}
     onView={setView} onAll={() => setAll((old) => !old)} onUseDefault={() => setDraft("")}
     onDraft={setDraft} onSave={() => void save(null)} onImport={() => void seed("import")} onDefault={() => void seed("default")}
     onUsePreview={() => { if (preview) setDraft(preview.text); setPreview(null); }} onClosePreview={() => setPreview(null)} onRetry={reload}
