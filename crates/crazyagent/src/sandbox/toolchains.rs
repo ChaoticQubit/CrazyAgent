@@ -491,6 +491,15 @@ pub fn lead_git(tmp: &Path) -> io::Result<()> {
     }
 }
 
+/// Rewrites the agent's own `git` in its short temp folder as the free copy, which runs
+/// every git command as is: the master's at Full access (DEC-117 Q2), after [`make_tmp`]
+/// wrote the worker copy. Input: the folder `make_tmp` returned. Output: Ok, also when
+/// git is the shim and no copy is written, or the write failure.
+#[cfg(unix)]
+pub fn free_git(_tmp: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// Writes the agent's own `git` into `bin` of its short temp folder as a 0700 file of this
 /// user, replacing a copy that differs, through descriptors that never follow a link the
 /// agent left there. Inputs: the temp folder and the script. Output: done, or the refusal.
@@ -808,6 +817,12 @@ pub fn fresh_native_lead_tmp(_scratch: &Path) -> io::Result<PathBuf> {
 /// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
 #[cfg(not(unix))]
 pub fn lead_git(_tmp: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn free_git(_tmp: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 

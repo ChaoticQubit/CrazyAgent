@@ -66,3 +66,72 @@ fn a_folder_swapped_in_for_the_lead_s_new_temp_folder_is_refused_with_what_it_ho
         "{sealed:?}"
     );
 }
+
+/// Runs a git program in the test repository with no system or global config and the
+/// test's own home. Inputs: the program, the repository, the home and the arguments.
+/// Output: the program's output.
+fn git_run(program: &Path, repo: &Path, home: &Path, args: &[&str]) -> std::process::Output {
+    crate::spawn_gate::output(
+        std::process::Command::new(program)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LC_ALL", "C")
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(repo)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap()
+}
+
+/// The master at Full access gets the free copy of its own `git` (DEC-117 Q2): it merges
+/// a branch the worker copy refuses under DEC-107.
+#[test]
+fn the_free_copy_merges_another_branch_that_the_worker_copy_refuses() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&self.0);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = crate::research::runner::sandboxed_git();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+        &["checkout", "-q", "-b", "other"],
+        &["commit", "-q", "--allow-empty", "-m", "other work"],
+        &["checkout", "-q", "main"],
+    ] {
+        let done = git_run(git, repo.path(), home.path(), args);
+        assert!(done.status.success(), "{args:?} {done:?}");
+    }
+    let tmp = make_tmp(home.path()).unwrap();
+    let _removed = Removed(home.path().to_path_buf());
+    let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let refused = git_run(
+        &wrapper,
+        repo.path(),
+        home.path(),
+        &["merge", "--no-edit", "other"],
+    );
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("git merge is refused"));
+    free_git(&tmp).unwrap();
+    let merged = git_run(
+        &wrapper,
+        repo.path(),
+        home.path(),
+        &["merge", "--no-edit", "other"],
+    );
+    assert!(
+        merged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+}
