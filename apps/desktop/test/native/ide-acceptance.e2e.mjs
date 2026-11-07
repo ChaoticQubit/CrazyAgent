@@ -257,7 +257,7 @@ function workbench(page, keys, me) {
     const named = rows.some((row) => row.querySelector(".scm-provider"));
     let current = null;
     for (const row of rows) {
-      const name = row.querySelector(".scm-provider .name")?.textContent?.trim();
+      const name = row.querySelector(".scm-provider .monaco-icon-name-container")?.textContent?.trim();
       if (name) current = name;
       const editor = row.querySelector(".scm-editor");
       if (editor && editor.getClientRects().length && (!named || current === ${JSON.stringify(FOLDER)})) {
