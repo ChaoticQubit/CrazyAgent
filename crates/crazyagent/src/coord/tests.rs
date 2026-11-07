@@ -772,6 +772,75 @@ fn work_moves_through_its_transfer_table_one_version_at_a_time() {
     );
 }
 
+/// OS-8: an agent's claim on work it finished as review-ready keeps overlapping another
+/// agent that starts on the same file until the work lands, when `release_landed`
+/// releases it; then the same start overlaps nothing.
+#[cfg(unix)]
+#[test]
+fn a_review_ready_claim_keeps_overlapping_until_the_work_lands() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_work(
+        &connection,
+        &project(),
+        grace,
+        "Dependencies".into(),
+        vec!["pyproject.toml".into()],
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        finish(
+            &connection,
+            grace_work,
+            1,
+            Finish::ReviewReady,
+            "Green.".into(),
+            grace,
+            NOW,
+        )
+        .unwrap(),
+        2
+    );
+    let start = |title: &str| {
+        start_work(
+            &connection,
+            &project(),
+            ada,
+            title.into(),
+            vec!["pyproject.toml".into()],
+            NOW,
+        )
+        .unwrap()
+    };
+    let (ada_work, overlaps) = start("CLI");
+    assert_eq!(
+        overlaps.len(),
+        1,
+        "Grace's edits have not landed yet: {overlaps:?}"
+    );
+    assert_eq!(overlaps[0].theirs.agent, grace);
+    assert_eq!(overlaps[0].theirs.work, grace_work);
+    transfer(
+        &connection,
+        ada_work,
+        1,
+        Transfer::Release,
+        Party::Agent(ada),
+        NOW,
+    )
+    .unwrap();
+
+    assert_eq!(release_landed(&connection, grace, NOW).unwrap(), 1);
+    assert_eq!(held(&connection, grace, grace_work), 0);
+    let (_, overlaps) = start("CLI again");
+    assert!(
+        overlaps.is_empty(),
+        "the landed work overlaps nothing: {overlaps:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {
@@ -812,7 +881,11 @@ fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {
         "coord_work_stale"
     );
     assert_eq!(end(1, Finish::ReviewReady, "Green.", sub).unwrap(), 2);
-    assert_eq!(held(&connection, sub, work_id), 0);
+    assert_eq!(
+        held(&connection, sub, work_id),
+        1,
+        "review-ready work keeps its claims until it lands (OS-8)"
+    );
     assert_eq!(
         work(&connection, work_id).unwrap().state,
         WorkState::ReviewReady
@@ -826,6 +899,7 @@ fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {
         "coord_transfer_refused"
     );
     assert_eq!(end(2, Finish::Complete, "Reviewed.", lead).unwrap(), 3);
+    assert_eq!(held(&connection, sub, work_id), 0);
     let evidence: String = connection
         .query_row(
             "SELECT evidence FROM coord_work WHERE id=?1",
@@ -1020,6 +1094,59 @@ fn an_overlap_names_why_two_claims_meet() {
         let expected: Vec<String> = reason.into_iter().map(str::to_owned).collect();
         assert_eq!(overlap(mine, theirs), expected, "{mine} vs {theirs}");
     }
+}
+
+/// DEC-117 Q7: a claim on review-ready work never goes stale, since it holds until the work
+/// lands even after its agent's process ends, so the edit-time check still names it; a
+/// quiet agent's claim on work it is still on goes stale as before.
+#[cfg(unix)]
+#[test]
+fn a_quiet_agent_s_review_ready_claim_never_goes_stale_and_an_active_one_does() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let linus = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let claim = |who, title: &str| {
+        start_work(
+            &connection,
+            &project(),
+            who,
+            title.into(),
+            vec!["pyproject.toml".into()],
+            NOW,
+        )
+        .unwrap()
+        .0
+    };
+    let grace_work = claim(grace, "Dependencies");
+    claim(linus, "Lockfile");
+    finish(
+        &connection,
+        grace_work,
+        1,
+        Finish::ReviewReady,
+        "Green.".into(),
+        grace,
+        NOW,
+    )
+    .unwrap();
+    let now = crate::team::now_ms();
+    for quiet in [grace, linus] {
+        connection
+            .execute(
+                "INSERT INTO coord_activity(agent,last_seen) VALUES (?1,?2)
+                 ON CONFLICT(agent) DO UPDATE SET last_seen=?2",
+                params![quiet, now - 31 * MINUTE],
+            )
+            .unwrap();
+    }
+    let mut by: Vec<(AgentId, bool)> = overlapping(&connection, &project(), ada, "pyproject.toml")
+        .unwrap()
+        .iter()
+        .map(|claim| (claim.agent, claim.stale))
+        .collect();
+    by.sort();
+    assert_eq!(by, vec![(grace, false), (linus, true)]);
 }
 
 #[cfg(unix)]

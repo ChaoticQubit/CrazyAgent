@@ -39,7 +39,9 @@ pub mod tool_switches;
 pub mod watch;
 mod work;
 
-pub use claims::{breadth, covers, overlapping, overlaps_of, path_scopes, release_claims};
+pub use claims::{
+    breadth, covers, overlapping, overlaps_of, path_scopes, release_claims, release_landed,
+};
 pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread};
 pub use presence::{owner_questions, record_tool, set_waiting, snapshot, touch};
 pub use store::{ensure, forget_project, master_of, message};

@@ -6319,3 +6319,89 @@ fn files_an_instruction_file_imports_or_links_to_are_marked() {
         ]
     );
 }
+
+/// Seeds the coordination tables for OS-8: the case's sub-agent becomes engine agent 1 with
+/// a claim on README for work it finished as review-ready, beside a second agent 2.
+/// Input: the case.
+fn review_ready_claim(case: &mut Case) {
+    case.workspace.agent.id = "1".into();
+    crate::team::initialize(&case.db).unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    case.db
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (1,'project-1','sub','claude-code',1,'working',1,1),
+                    (2,'project-1','sub','claude-code',1,'working',1,1);",
+        )
+        .unwrap();
+    let now = crate::team::now_ms();
+    let (work, _) = crate::coord::start_work(
+        &case.db,
+        &case.workspace.project,
+        1,
+        "Readme".into(),
+        vec!["README".into()],
+        now,
+    )
+    .unwrap();
+    crate::coord::finish(
+        &case.db,
+        work,
+        1,
+        crate::coord::Finish::ReviewReady,
+        "Green.".into(),
+        1,
+        now,
+    )
+    .unwrap();
+}
+
+/// Starts agent 2 on README as the next agent would. Input: the case. Output: how many
+/// claims of other agents its start overlaps.
+fn second_start(case: &Case) -> usize {
+    crate::coord::start_work(
+        &case.db,
+        &case.workspace.project,
+        2,
+        "Docs".into(),
+        vec!["README".into()],
+        crate::team::now_ms(),
+    )
+    .unwrap()
+    .1
+    .len()
+}
+
+/// OS-8: a sub-agent's claim on work it finished as review-ready holds while its change set
+/// waits, so the next agent starting on the same file hears the overlap; accepting the set
+/// lands the work and releases the claim, and the same start then overlaps nothing.
+#[test]
+fn accepting_a_sub_set_releases_its_agents_review_ready_claims() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(second_start(&case), 1, "the set has not landed yet");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the landed set's claim is released");
+}
+
+/// OS-8, DEC-117 Q7: rejecting a sub-agent's change set frees the files its review-ready
+/// work claimed, so the next agent's start on them gets no overlap note.
+#[test]
+fn discarding_a_sub_set_releases_its_agents_review_ready_claims() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(second_start(&case), 1, "the set has not been rejected yet");
+    discard(&case.db, &id, &case.view(&id).head, NOW_MS).unwrap();
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the rejected set's claim is released"
+    );
+}

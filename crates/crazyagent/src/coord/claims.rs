@@ -210,6 +210,14 @@ pub fn release_claims(
     Ok(())
 }
 
+/// Releases an agent's claims on its work that waits for review or is complete, once its
+/// change set lands or is discarded, so later agents stop overlapping it (OS-8). Takes the
+/// database, the agent and the time in ms. Returns how many claims it released.
+pub fn release_landed(db: &Connection, agent: AgentId, now: i64) -> Result<usize, EngineError> {
+    let _ = (db, agent, now);
+    Ok(0)
+}
+
 /// The other agents' active claims that cover one file, for the edit-time check that
 /// warns or blocks under the "Overlapping edits" setting. A lead's and its sub-agent's
 /// claims never count against each other. Takes the database, the project, the editing

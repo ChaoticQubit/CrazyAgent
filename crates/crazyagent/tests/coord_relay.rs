@@ -553,6 +553,43 @@ fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engin
     });
 }
 
+/// OS-8, DEC-117 Q7: under Block, an edit of a file another agent's review-ready work still
+/// claims is denied, since that work has not landed; once its change set lands and
+/// `release_landed` frees the claim, the same edit goes through.
+#[test]
+fn under_overlaps_block_a_review_ready_claim_denies_the_edit_until_its_work_lands() {
+    let team = Team::new();
+    let claimed = Claimed::new(&team);
+    let work: i64 = claimed
+        .db
+        .query_row(
+            "SELECT id FROM coord_work WHERE owner_agent=?1",
+            [claimed.other],
+            |row| row.get(0),
+        )
+        .unwrap();
+    crazyagent::coord::finish(
+        &claimed.db,
+        work,
+        1,
+        crazyagent::coord::Finish::ReviewReady,
+        "Green.".to_owned(),
+        claimed.other,
+        now_ms(),
+    )
+    .unwrap();
+    let start = |path: &Path| team.start_hook("edit", None, edit(LEAD_SESSION, path));
+    claimed.denies_only_the_claimed_file(&team, start);
+    assert_eq!(
+        crazyagent::coord::release_landed(&claimed.db, claimed.other, now_ms()).unwrap(),
+        1
+    );
+    assert_eq!(
+        claimed.answered(&team, start(&claimed.repo.join("src").join("a.rs"))),
+        ""
+    );
+}
+
 /// The Block edit hook still blocks when the engine runs from an app bundle, as the macOS
 /// service runs it from `CrazyAgent.app/Contents/MacOS`, and the hook runs under the agent's
 /// Seatbelt profile with the engine granted as the team runtime grants it, so a denied
