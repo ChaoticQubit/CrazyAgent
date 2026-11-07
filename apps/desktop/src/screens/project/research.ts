@@ -1,6 +1,6 @@
 import type { IconName, Tone } from "../../ui";
 import { failureCopy, failureSentence, receiptState } from "../../api-projects";
-import type { ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
+import type { ActivityItem, ActivityKind, ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { namedFailure } from "../../api";
 import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
@@ -29,6 +29,10 @@ export function ago(at: number, now: number): string {
   if (hours < 24) return `${hours} h ago`;
   const days = Math.floor(hours / 24);
   return days === 1 ? "Yesterday" : `${days} days ago`;
+}
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
 }
 
 const PROMPT_LINE_MAX = 140;
@@ -413,24 +417,132 @@ export function planningJob(jobs: ResearchJob[]): ResearchJob | null {
   return newest;
 }
 
-/** Builds the Recent activity list from real job times.
- * Inputs: the jobs, the project name and when it was created. Output: every event, newest first. */
-export function activity(jobs: ResearchJob[], project: string, created: number | null): { at: number; text: string }[] {
-  const events: { at: number; text: string }[] = [];
-  const research = researchJobs(jobs).length;
-  if (created !== null) events.push({ at: created, text: `You created ${project} with ${research} research ${research === 1 ? "task" : "tasks"}` });
-  for (const job of jobs) {
-    if (job.started_ms !== null) events.push({ at: job.started_ms, text: `${job.kind_label} started` });
-    if (job.finished_ms === null) continue;
-    const file = job.report_path.slice(job.report_path.lastIndexOf("/") + 1);
-    if (job.status === "done") events.push({ at: job.finished_ms, text: `${job.kind_label} saved ${file}` });
-    else if (job.status === "failed") events.push({ at: job.finished_ms, text: `${job.kind_label} stopped: ${job.error?.trim() || "error"}` });
-    else if (job.status === "cancelled") events.push({ at: job.finished_ms, text: `${job.kind_label} was stopped` });
-  }
-  return events.sort((a, b) => b.at - a.at);
+export const ACTIVITY_ROWS = 8;
+
+/** The group Overview shows activity under when it serves no goal. */
+export const PROJECT_GOAL = "Project";
+
+/** The group Overview shows research under when it serves no goal, closed until opened. */
+export const RESEARCH_GOAL = "Research";
+export const RESEARCH_KEY = "research";
+const PROJECT_KEY = "project";
+const RESEARCH_KINDS: ActivityKind[] = ["research_started", "research_saved", "research_stopped"];
+
+/** The filter chips over Overview activity, All first. */
+export type ActivityFilter = "all" | "merge" | "change" | "tests" | "task" | "phase";
+export const ACTIVITY_FILTERS: { value: ActivityFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "merge", label: "Merges" },
+  { value: "change", label: "Changes" },
+  { value: "tests", label: "Tests" },
+  { value: "task", label: "Tasks" },
+  { value: "phase", label: "Phases" },
+];
+
+const FILTER_OF: Record<ActivityKind, Exclude<ActivityFilter, "all"> | null> = {
+  created: null,
+  research_started: "task",
+  research_saved: "task",
+  research_stopped: "task",
+  task_started: "task",
+  task_finished: "task",
+  changes_ready: "change",
+  accepted: "change",
+  discarded: "change",
+  conflict: "change",
+  sent_back: "change",
+  lead_merged: "merge",
+  merged_into_main: "merge",
+  undone: "merge",
+  work_started: "task",
+  work_review_ready: "task",
+  work_complete: "task",
+  work_closed: "task",
+  phase: "phase",
+  test: "tests",
+};
+
+/** The chip an event shows under besides All. Input: its kind. Output: the chip, or null for
+ * the project's creation, which shows only under All. */
+export function activityFilter(kind: ActivityKind): Exclude<ActivityFilter, "all"> | null {
+  return FILTER_OF[kind];
 }
 
-export const ACTIVITY_ROWS = 8;
+/** The goal an event is shown under. A named goal keys by its name; research with no goal goes
+ * under Research and anything else with no goal under Project, each keyed apart from a goal of
+ * that name. Input: the event. Output: the group key and its label. */
+export function activityGoal(item: ActivityItem): { key: string; goal: string } {
+  const goal = item.goal?.trim();
+  if (goal) return { key: `goal:${goal}`, goal };
+  return RESEARCH_KINDS.includes(item.kind) ? { key: RESEARCH_KEY, goal: RESEARCH_GOAL } : { key: PROJECT_KEY, goal: PROJECT_GOAL };
+}
+
+/** Project activity newest first, a later id first at the same time. Input: the events in any
+ * order. Output: a sorted copy. */
+export function newestActivity(items: ActivityItem[]): ActivityItem[] {
+  return [...items].sort((a, b) => b.at_ms - a.at_ms || b.id - a.id);
+}
+
+/** Places events the way Overview shows them among others: as activityGoal does, except that
+ * the Research or Project group of events with no goal reads "(no goal)" after its name when a
+ * named goal of that name is among the events, so the two are told apart. Input: the events
+ * shown together. Output: the placing of one of them. */
+export function goalPlacer(items: ActivityItem[]): (item: ActivityItem) => { key: string; goal: string } {
+  const named = new Set(items.map((item) => item.goal?.trim()).filter((goal): goal is string => Boolean(goal)));
+  return (item) => {
+    const place = activityGoal(item);
+    return place.key.startsWith("goal:") || !named.has(place.goal) ? place : { ...place, goal: `${place.goal} (no goal)` };
+  };
+}
+
+/** The step names a goal's phase events walk through, in the order each first showed, the step
+ * of the newest phase current and the steps before it done. A step is the phase text before its
+ * first colon, less a closing "done", or the whole text when it has no colon. Input: one goal's
+ * events in any order. Output: the steps, empty when the goal has no phase event. */
+export function phasePath(items: ActivityItem[]): { step: string; done: boolean }[] {
+  const phases = newestActivity(items).filter((item) => item.kind === "phase").reverse();
+  const name = (item: ActivityItem) => (item.text.split(":")[0] ?? "").trim().replace(/\s+done$/iu, "") || item.text.trim();
+  const steps = [...new Set(phases.map(name))];
+  const now = phases.length > 0 ? steps.indexOf(name(phases[phases.length - 1])) : -1;
+  assert(steps.length <= phases.length, "every step comes from a phase event");
+  return steps.map((step, index) => ({ step, done: index < now }));
+}
+
+/** How many steps a goal header's phase path shows at once. */
+export const PATH_STEPS_SHOWN = 4;
+
+/** The part of a phase path a goal header shows: at most `max` steps in a row that holds the
+ * current step, the last ones when the newest phase is the last step, with how many steps come
+ * before and after it. Inputs: the path from phasePath and the most steps shown. Output: the
+ * counts before and after and the steps shown. */
+export function pathWindow(steps: { step: string; done: boolean }[], max: number = PATH_STEPS_SHOWN): { before: number; steps: { step: string; done: boolean }[]; after: number } {
+  assert(max >= 1, "a path shows at least one step");
+  const current = steps.findIndex((step) => !step.done);
+  const at = current === -1 ? steps.length - 1 : current;
+  const before = Math.max(0, Math.min(at - (max - 1), steps.length - max));
+  const shown = steps.slice(before, before + max);
+  const after = steps.length - before - shown.length;
+  assert(after >= 0 && shown.length <= max, "the window stays inside the path");
+  return { before, steps: shown, after };
+}
+
+/** Groups project activity by the goal it serves, for Overview, as goalPlacer places each
+ * event among the whole read. Inputs: the events in any order and the whole read they come
+ * from, the events themselves by default. Output: one group per goal with its key and label,
+ * the group with the newest event first, each group's events newest first. */
+export function groupActivity(items: ActivityItem[], whole: ActivityItem[] = items): { key: string; goal: string; items: ActivityItem[] }[] {
+  const groups = new Map<string, { key: string; goal: string; items: ActivityItem[] }>();
+  const placed = goalPlacer(whole);
+  for (const item of newestActivity(items)) {
+    const place = placed(item);
+    const group = groups.get(place.key);
+    if (group) group.items.push(item);
+    else groups.set(place.key, { ...place, items: [item] });
+  }
+  const grouped = [...groups.values()];
+  assert(grouped.reduce((sum, group) => sum + group.items.length, 0) === items.length, "every event is in exactly one group");
+  return grouped;
+}
 
 const settled: MasterTurn["phase"][] = ["succeeded", "failed", "cancelled", "uncertain", "blocked"];
 

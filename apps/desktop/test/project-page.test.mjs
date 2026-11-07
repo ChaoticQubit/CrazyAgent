@@ -66,28 +66,6 @@ test("research polling continues only while something can still change", () => {
   assert.equal(research.shouldPoll([]), false);
 });
 
-test("recent activity is built from real job times, newest first, at most eight", () => {
-  const jobs = [
-    job("done", { kind_label: "Market research", started_ms: 2_000, finished_ms: 5_000, report_path: "context/research/market_research.md" }),
-    job("running", { id: 2, kind_label: "Design research", started_ms: 3_000 }),
-    job("failed", { id: 3, kind_label: "Competitor research", started_ms: 2_500, finished_ms: 4_000, error: "Agent output exceeded the limit" }),
-  ];
-  const activity = research.activity(jobs, "Harbor Notes", 1_000);
-  assert.deepEqual(activity.map((item) => item.text), [
-    "Market research saved market_research.md",
-    "Competitor research stopped: Agent output exceeded the limit",
-    "Design research started",
-    "Competitor research started",
-    "Market research started",
-    "You created Harbor Notes with 3 research tasks",
-  ]);
-  const many = research.activity(Array.from({ length: 10 }, (_, i) => job("running", { id: i, started_ms: 2_000 + i })), "x", 1);
-  assert.equal(many.length, 11);
-  assert.equal(many[0].at, 2_009);
-  assert.equal(many[10].at, 1);
-  assert.equal(research.ACTIVITY_ROWS, 8);
-});
-
 test("relative time reads like the design", () => {
   const now = 10 * 86_400_000;
   assert.equal(research.ago(now - 20_000, now), "Just now");
@@ -348,17 +326,6 @@ test("a log follows new lines only while the owner is near its bottom", () => {
   assert.equal(research.nearBottom({ scrollHeight: 1000, scrollTop: 700, clientHeight: 240 }), true);
   assert.equal(research.nearBottom({ scrollHeight: 1000, scrollTop: 600, clientHeight: 240 }), false);
   assert.equal(research.nearBottom({ scrollHeight: 100, scrollTop: 0, clientHeight: 240 }), true);
-});
-
-test("Recent activity shows eight rows and Show all for the rest", async () => {
-  const overview = await import("../src/screens/project/overview.tsx");
-  const jobs = Array.from({ length: 5 }, (_, i) => job("done", { id: i, kind_label: `Kind ${i}`, started_ms: 2_000 + i, finished_ms: 3_000 + i }));
-  const markup = renderToStaticMarkup(createElement(overview.OverviewTab, { data: tabData(jobs) }));
-  assert.equal(markup.match(/class="pj-activity-row"/g)?.length, 8);
-  assert.match(markup, />Show all \(10\)</);
-  const few = renderToStaticMarkup(createElement(overview.OverviewTab, { data: tabData(jobs.slice(0, 2)) }));
-  assert.equal(few.match(/class="pj-activity-row"/g)?.length, 4);
-  assert.doesNotMatch(few, />Show all/);
 });
 
 test("Thinking shows the seconds since this window sent the message", () => {

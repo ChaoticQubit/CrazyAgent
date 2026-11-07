@@ -98,7 +98,6 @@ test("the planning state reads waiting, planning, done and failed from the real 
   const jobs = [job(1, "market_research", "done"), job(2, "roadmap_planning", "running")];
   assert.deepEqual(research.researchJobs(jobs).map((item) => item.id), [1], "planning never shows as a research row");
   assert.equal(research.planningJob(jobs).id, 2);
-  assert.equal(research.activity(jobs, "Shop", 500).at(-1).text, "You created Shop with 1 research task");
 
   const line = html(planning.PlanningLineView, { view: view([job(5, "roadmap_planning", "failed")]), busy: false, problem: "", onAction: noop, onOpen: noop });
   assert.match(line, /Roadmap and release process/);
