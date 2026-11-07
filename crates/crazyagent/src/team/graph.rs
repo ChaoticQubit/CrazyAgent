@@ -153,9 +153,9 @@ pub struct OverlapEdge {
     pub stale: bool,
 }
 
-/// How the upper node of one tree pair relates to the lower one: a lead leads its worker,
-/// the master delegated to a top-level agent, and a native teammate works beside the lead
-/// whose harness split it off.
+/// How the upper node of one tree pair relates to the lower one, as in the approved mockup:
+/// the master leads a top-level agent that leads workers of its own and delegated to one
+/// that leads none, and every agent or native teammate under a lead is its teammate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Relation {
@@ -164,9 +164,11 @@ pub enum Relation {
     TeammateOf,
 }
 
-/// What one tree pair is doing now: the upper node hands the lower one an open task, one
-/// of them waits on an open question it asked the other, the upper one reviews the lower
-/// one's review-ready work, or unread messages wait between them.
+/// What one tree pair is doing now: the upper node hands the lower one an open task, the
+/// lower one waits on the owner's answer to its open question (`owner`) or one of them on
+/// an open question it asked the other, the lower one reviews a worker's review-ready work,
+/// named by its change set (coordination work) number, or unread messages wait between them.
+/// No question or message text crosses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum LiveAction {
@@ -205,7 +207,7 @@ pub struct TeamGraph {
 }
 
 /// What the graph reads beside the team status: each sub-agent's branch, the project's
-/// coordination snapshot, the agents that own review-ready work, and each asker and
+/// coordination snapshot, each review-ready change set with its owner, and each asker and
 /// recipient of an open question between agents. The default draws the tree with no
 /// branch, presence, coordination lines or live action but handoffs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -278,8 +280,9 @@ pub fn facts(
     })
 }
 
-/// Reads the agents of a project that own review-ready work, which their reviewer reads
-/// next. Takes a connection and the project. Returns the owners, or a SQLite failure.
+/// Reads a project's review-ready work, newest first, which each owner's reviewer reads
+/// next. Takes a connection and the project. Returns (owner, change set number) pairs, or a
+/// SQLite failure.
 fn review_ready(
     connection: &Connection,
     project: &ProjectId,
@@ -629,18 +632,19 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         .iter()
         .filter_map(|(asker, asked)| Some((named(asker)?, named(asked)?)))
         .collect();
-    let reviews: BTreeSet<(String, String)> = facts
-        .review_ready
-        .iter()
-        .filter_map(|(owner, _)| {
-            let agent = status.agents.iter().find(|agent| agent.id == *owner)?;
-            let reviewer = match agent.parent.filter(|lead| lead != owner) {
-                Some(lead) => named(&lead)?,
-                None => MASTER_NODE.to_owned(),
-            };
-            Some((reviewer, named(owner)?))
-        })
-        .collect();
+    let mut reviews: BTreeMap<String, i64> = BTreeMap::new();
+    for (owner, change_set) in &facts.review_ready {
+        let Some(agent) = status.agents.iter().find(|agent| agent.id == *owner) else {
+            continue;
+        };
+        let reviewer = match agent.parent.filter(|lead| lead != owner) {
+            Some(lead) => named(&lead),
+            None => Some(MASTER_NODE.to_owned()),
+        };
+        if let Some(reviewer) = reviewer {
+            reviews.entry(reviewer).or_insert(*change_set);
+        }
+    }
     let relations = relation_edges(&nodes, &edges, &messages, &waits, &reviews);
     let unique: BTreeSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
     assert_eq!(unique.len(), nodes.len());
@@ -662,17 +666,18 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
     }
 }
 
-/// The relation edge from each node's parent to it: TeammateOf, DelegatedTo under the
-/// master, else Leads, live with the newest open task handed down, else an open question
-/// either way, else the parent's review, else an unread message either way. Takes the
-/// nodes, task and message edges, (asker, asked) and (reviewer, owner) pairs by node id.
-/// Returns one edge per node but the master's.
+/// The relation edge from each node's parent to it: under the master Leads when the node
+/// leads others, else DelegatedTo, and TeammateOf under a lead; live with the newest open
+/// task handed down, else the node's open question for the owner, else an open question
+/// either way, else the node's review of its newest review-ready change set, else an unread
+/// message either way. Takes the nodes, task and message edges, (asker, asked) pairs and
+/// each reviewer's change set by node id. Returns one edge per node but the master's.
 fn relation_edges(
     nodes: &[GraphNode],
     edges: &[GraphEdge],
     messages: &[MessageEdge],
     waits: &BTreeSet<(String, String)>,
-    reviews: &BTreeSet<(String, String)>,
+    reviews: &BTreeMap<String, i64>,
 ) -> Vec<RelationEdge> {
     nodes
         .iter()
@@ -692,16 +697,18 @@ fn relation_edges(
                     task: bound_text(&edge.text, HANDOFF_TASK_BYTES_MAX),
                 })
                 .or_else(|| {
+                    (node.owner_questions > 0).then_some(LiveAction::WaitingOn { owner: true })
+                })
+                .or_else(|| {
                     waits
                         .iter()
                         .any(|(asker, asked)| pair(asker, asked))
                         .then_some(LiveAction::WaitingOn { owner: false })
                 })
                 .or_else(|| {
-                    reviews
-                        .iter()
-                        .any(|(reviewer, owner)| *reviewer == from && *owner == to)
-                        .then_some(LiveAction::Reviewing { change_set: 0 })
+                    reviews.get(&to).map(|change_set| LiveAction::Reviewing {
+                        change_set: *change_set,
+                    })
                 })
                 .or_else(|| {
                     messages
@@ -709,10 +716,13 @@ fn relation_edges(
                         .any(|edge| edge.unread > 0 && pair(&edge.from, &edge.to))
                         .then_some(LiveAction::Messaging)
                 });
-            let relation = match node.kind {
-                NodeKind::Teammate => Relation::TeammateOf,
-                _ if from == MASTER_NODE => Relation::DelegatedTo,
-                _ => Relation::Leads,
+            let leads = nodes
+                .iter()
+                .any(|other| other.parent.as_deref() == Some(to.as_str()));
+            let relation = match (from == MASTER_NODE, leads) {
+                (true, true) => Relation::Leads,
+                (true, false) => Relation::DelegatedTo,
+                (false, _) => Relation::TeammateOf,
             };
             Some(RelationEdge {
                 from,
