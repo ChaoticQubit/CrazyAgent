@@ -1692,6 +1692,37 @@ fn repository_hooks_filters_merge_drivers_textconv_and_fsmonitor_never_run() {
     assert!(ran.is_empty(), "configured commands ran: {ran:?}");
 }
 
+/// Main renamed the file the agent edited and changed it too, so git merges the agent's
+/// edit at main's new path; a merge driver the owner set for that path in the repository's
+/// own attributes never runs, and Accept refuses as for any configured command.
+#[test]
+fn accept_refuses_a_merge_driver_on_the_path_main_renamed_the_agent_s_file_to() {
+    let case = Case::new();
+    case.edit("README", "uno\ntwo\nthree\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner(&["mv", "README", "LIESMICH"]);
+    write(&case.repo.join("LIESMICH"), "one\ntwo\nTHREE\n");
+    case.owner(&["commit", "-q", "-am", "Rename README and shout three"]);
+    let marker = case.home.join("driver-ran");
+    case.owner(&[
+        "config",
+        "merge.mark.driver",
+        &format!("/usr/bin/touch {}", marker.display()),
+    ]);
+    write(
+        &case.repo.join(".git/info/attributes"),
+        "LIESMICH merge=mark\n",
+    );
+    let before = case.checkout();
+    assert_eq!(refused(case.accept(&id)), "changes_git_unsupported");
+    assert!(
+        !marker.exists(),
+        "the owner's merge driver ran at the path main renamed the agent's file to"
+    );
+    assert_eq!(case.checkout(), before);
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
+
 /// A dirty submodule in the agent's worktree does not make the worktree look unfinished, and
 /// engine git never enters it to run its configured clean filter. The filter is configured
 /// only after the setup's own git steps, so a racily clean file that the setup's git would

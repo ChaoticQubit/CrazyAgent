@@ -655,6 +655,28 @@ fn a_merge_driver_the_owner_configured_never_runs_at_a_turn_end() {
 }
 
 #[test]
+fn a_merge_driver_on_the_path_main_renamed_the_agent_s_file_to_never_runs_at_a_turn_end() {
+    let (case, recorded) = Case::build_with(true, true, false, |_, _, workspace| {
+        let root = workspace.repository.parent().unwrap();
+        let owner = |args: &[&str]| git_in(&root.join("home"), &workspace.repository, args);
+        owner(&["mv", "README", "LIESMICH"]);
+        owner(&["commit", "-q", "-m", "Rename README"]);
+        let marker = root.join("driver-ran");
+        owner(&[
+            "config",
+            "merge.mark.driver",
+            &format!("/usr/bin/touch {}", marker.display()),
+        ]);
+        owner_attributes(&workspace.repository, "LIESMICH merge=mark\n");
+    });
+    assert!(
+        !case.repo.parent().unwrap().join("driver-ran").exists(),
+        "the owner's merge driver ran at the path main renamed the agent's file to"
+    );
+    case.left_for_the_owner(recorded, "a driver on the path main renamed to");
+}
+
+#[test]
 fn an_own_branch_clone_s_set_that_conflicts_with_main_waits_for_the_owner() {
     let (case, recorded) = Case::build_with(true, true, true, |_, _, _| {});
     let head = case.agent_head();
