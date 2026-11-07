@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { loadTeamGraph, nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { loadChanges } from "../../api-changes";
@@ -138,6 +138,13 @@ export function messageProblem(draft: string): string | null {
   return BYTES.encode(draft.trim()).length > AGENT_MESSAGE_BYTES_MAX ? `Keep the message under ${AGENT_MESSAGE_BYTES_MAX} bytes.` : null;
 }
 
+/** The identity the one terminal panel is kept by: the agent's engine number when it has one,
+ * so the same agent opened from Questions and then drawn by the graph keeps one panel, its
+ * terminal and its draft; else the node id. Input: the node. Output: the key. */
+export function panelKey(node: Pick<GraphNode, "agent" | "id">): string {
+  return typeof node.agent === "number" ? `agent:${node.agent}` : `node:${node.id}`;
+}
+
 /** What the graph view shows: the read it draws, and why the latest read failed while an
  * older graph stays on screen. */
 export type GraphState = { shown: Result<TeamGraph> | undefined; stale: string | null };
@@ -184,15 +191,18 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
  * assignment lines whose badges count live tasks, waiting questions and unread messages with
  * their receipt. Unread messages between other agents arc dashed and claim overlaps arc red.
  * Drag or the arrow keys pan, a pinch, Ctrl or Cmd wheel or the buttons zoom, and Fit shows it
- * all. Activating a card opens its terminal beside the graph; its menu sends a message, stops
- * it, or opens its changes to merge. Inputs: the project id and optional harness and account
- * name lookups. Output: the graph section. */
-export function TeamGraphView({ projectId, harness, account }: {
-  projectId: string; harness?: (id: string) => string; account?: (id: string) => string;
+ * all. Activating a card opens its terminal in the one panel beside the graph, replacing the
+ * agent shown there; its menu sends a message, stops it, or opens its changes to merge. An
+ * agent opened from elsewhere shows in that panel even while the graph loads, fails or is empty,
+ * and keeps its terminal and draft when the graph then draws it.
+ * Inputs: the project id, the agent whose terminal is open and the open action, and optional
+ * harness and account name lookups. Output: the graph section. */
+export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
+  projectId: string; open: GraphNode | null; onOpen: (node: GraphNode | null) => void;
+  harness?: (id: string) => string; account?: (id: string) => string;
 }) {
   const [read, reload] = useTeamGraph(projectId);
   const graph = read.shown;
-  const [open, setOpen] = useState<string | null>(null);
   const [moved, setMoved] = useState<View | null>(null);
   const [tip, setTip] = useState<string | null>(null);
   const [element, setElement] = useState<HTMLDivElement | null>(null);
@@ -208,7 +218,6 @@ export function TeamGraphView({ projectId, harness, account }: {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    setOpen(null);
     setMoved(null);
     setTip(null);
     setActing(null);
@@ -304,21 +313,32 @@ export function TeamGraphView({ projectId, harness, account }: {
     };
   }, [element]);
 
-  if (graph === undefined) return <section className="tg" aria-busy="true" aria-label="Team graph"><Skeleton shape="card" /></section>;
-  if (graph.kind === "not_ready") return <NotReady what="The team graph" compact />;
-  if (graph.kind === "error") return <LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />;
-  const team = account ? namedAccounts(graph.value, account) : graph.value;
-  if (team.nodes.length === 0) {
-    return <EmptyState icon="users" title="No team yet" compact>
+  const side = (node: GraphNode) => <AgentSide key={panelKey(node)} projectId={projectId} node={node} harness={harness} onClose={() => onOpen(null)}>
+    <NodeMessages projectId={projectId} node={node} refresh={graph} />
+  </AgentSide>;
+  const team = graph?.kind === "ok" ? (account ? namedAccounts(graph.value, account) : graph.value) : null;
+  const status: ReactNode = graph === undefined ? <Skeleton shape="card" />
+    : graph.kind === "not_ready" ? <NotReady what="The team graph" compact />
+    : graph.kind === "error" ? <LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />
+    : team === null || team.nodes.length === 0 ? <EmptyState icon="users" title="No team yet" compact>
       Add a team in the project settings, then ask the master to build something.
-    </EmptyState>;
+    </EmptyState>
+    : null;
+  if (team === null || status !== null) {
+    return <section className="tg" aria-busy={graph === undefined || undefined} aria-label="Team graph">
+      <div key="split" className={`tg-split${open ? " with-terminal" : ""}`}>
+        {status}
+        {open && side(open)}
+      </div>
+    </section>;
   }
   const layout = layoutGraph(team);
   const content = { width: layout.width, height: layout.height };
   sizes.current = { content, port };
   const shown = moved ?? fitView(content, port);
   const cards = layoutCards(layout);
-  const openNode = cards.find((item) => item.node.id === open)?.node;
+  const openNode = open === null ? undefined : (cards.find((item) => item.node.id === open.id)
+    ?? cards.find((item) => item.node.kind !== "teammate" && item.node.terminal === open.terminal))?.node ?? open;
   const tipCard = cards.find((item) => item.node.id === tip);
   const tipId = `${ids}-tip`;
   const pan = (dx: number, dy: number) => setMoved((current) => panView(current ?? shown, dx, dy, content, port));
@@ -342,7 +362,7 @@ export function TeamGraphView({ projectId, harness, account }: {
       <Button size="small" icon="refresh-cw" onClick={reload}>Try again</Button>
     </Notice>}
     <p className="tg-hint" id={`${ids}-hint`}>Drag or use the arrow keys to move around. Pinch or Ctrl+scroll to zoom, 0 fits. Click a card to open its terminal; its menu shows its skill counts, sends a message, stops it or merges its work.</p>
-    <div className={`tg-split${openNode ? " with-terminal" : ""}`}>
+    <div key="split" className={`tg-split${openNode ? " with-terminal" : ""}`}>
       <div className="tg-stage">
         <div className="tg-tools" role="toolbar" aria-label="Graph view">
           <Button size="small" icon="minus" iconOnly="Zoom out" onClick={() => zoom(1 / ZOOM_STEP)} />
@@ -393,9 +413,9 @@ export function TeamGraphView({ projectId, harness, account }: {
               {layout.messages.map((item) => <path key={`message:${item.from}:${item.to}`} className="tg-message" d={item.path} />)}
               {layout.overlaps.map((item) => <path key={`overlap:${item.from}:${item.to}`} className={`tg-overlap${item.edge.stale ? " stale" : ""}`} d={item.path} />)}
             </svg>
-            {cards.map((item) => <GraphCard key={item.node.id} placed={item} graph={team} harness={harness} open={item.node.id === open}
+            {cards.map((item) => <GraphCard key={item.node.id} placed={item} graph={team} harness={harness} open={item.node.id === openNode?.id}
               tipId={item.node.id === tip ? tipId : null} onTip={setTip} items={menuItems(item.node, team.nodes)}
-              onOpen={setOpen} />)}
+              onOpen={() => onOpen(item.node)} />)}
             {layout.links.map((link) => <LinkBadges key={`badge:${link.from}:${link.to}`} link={link} />)}
           </div>
           {tipCard && place && <div id={tipId} role="tooltip" className={`tg-tip${place.above ? " above" : ""}`} style={{ left: place.left, top: place.top }}>
@@ -403,9 +423,7 @@ export function TeamGraphView({ projectId, harness, account }: {
           </div>}
         </div>
       </div>
-      {openNode && <AgentSide key={openNode.id} projectId={projectId} node={openNode} harness={harness} onClose={() => setOpen(null)}>
-        <NodeMessages projectId={projectId} node={openNode} refresh={graph} />
-      </AgentSide>}
+      {openNode && side(openNode)}
     </div>
     {acting?.kind === "skills" && <AgentSkillsDialog projectId={projectId} agent={acting.agent}
       label={displayText(acting.node.label)} onClose={() => setActing(null)} />}
