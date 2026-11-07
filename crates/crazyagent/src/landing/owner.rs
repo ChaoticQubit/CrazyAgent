@@ -827,9 +827,10 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
 
 /// Tells the sub-agent of an accepted set in its own clone, which the engine never resets
 /// (CC-N1), that the set landed and to start its next work from the main it was just given
-/// (OS-8): one Note from the engine keyed to the set, adding the merge while "Catch up with
-/// main" is on. A failed send or setting read is logged by its plain code and never fails
-/// the Accept. Inputs: the store, the accepted set and the landed commit. Output: none.
+/// (OS-8): one Note from the engine keyed to the set, naming no merge, since the agent's own
+/// git keeps the "Catch up with main" it launched with. A failed send is logged by its plain
+/// code and never fails the Accept. Inputs: the store, the accepted set and the landed
+/// commit. Output: none.
 fn tell_landed(db: &Connection, record: &Record, landed: &str) {
     if !flow::in_clone(record) || record.agent.kind != AgentKind::Sub {
         return;
@@ -837,20 +838,10 @@ fn tell_landed(db: &Connection, record: &Record, landed: &str) {
     let Ok(agent) = record.agent.id.parse::<i64>() else {
         return;
     };
-    let mut body = format!(
+    let body = format!(
         "Your change set landed on main as {}. If you have no newer commits, start your next work from main: git reset --hard crazyagent/main.",
         landed.get(..12).unwrap_or(landed)
     );
-    match crate::team::catch_up_main(db, &record.project) {
-        Ok(crate::team::CatchUpMain::On) => {
-            body.push_str(" If you do, run git merge crazyagent/main.")
-        }
-        Ok(crate::team::CatchUpMain::Off) => {}
-        Err(error) => eprintln!(
-            "landing_catch_up_unread code={}",
-            crate::protocol::plain_code(&error.0)
-        ),
-    }
     let note = crate::coord::NewMessage {
         project: record.project.clone(),
         from: crate::coord::Party::Engine,
