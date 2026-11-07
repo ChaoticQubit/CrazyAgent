@@ -164,11 +164,11 @@ pub enum Relation {
     TeammateOf,
 }
 
-/// What one tree pair is doing now: the upper node hands the lower one an open task, the
-/// lower one waits on the owner's answer to its open question (`owner`) or one of them on
-/// an open question it asked the other, the lower one reviews a worker's review-ready work,
-/// named by its change set (coordination work) number, or unread messages wait between them.
-/// No question or message text crosses.
+/// What one tree pair is doing now: the upper node hands the lower one a task not yet picked
+/// up, the lower one waits on the owner's answer to its open question (`owner`) or one of
+/// them on an open question it asked the other, the lower one reviews a worker's
+/// review-ready work, named by its change set (coordination work) number, or unread
+/// messages wait between them. No question or message text crosses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum LiveAction {
@@ -668,11 +668,12 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
 }
 
 /// The relation edge from each node's parent to it: under the master Leads when the node
-/// leads others, else DelegatedTo, and TeammateOf under a lead; live with the newest open
-/// task handed down, else the node's open question for the owner, else an open question
-/// either way, else the node's review of its newest review-ready change set, else an unread
-/// message either way. Takes the nodes, task and message edges, (asker, asked) pairs and
-/// each reviewer's change set by node id. Returns one edge per node but the master's.
+/// leads others, else DelegatedTo, and TeammateOf under a lead; live with the newest task
+/// handed down and not yet picked up, else the node's open question for the owner, else an
+/// open question either way, else the node's review of its newest review-ready change set,
+/// else an unread message either way. Takes the nodes, task and message edges, (asker,
+/// asked) pairs and each reviewer's change set by node id. Returns one edge per node but
+/// the master's.
 fn relation_edges(
     nodes: &[GraphNode],
     edges: &[GraphEdge],
@@ -689,11 +690,7 @@ fn relation_edges(
             let live = edges
                 .iter()
                 .rev()
-                .find(|edge| {
-                    edge.from == from
-                        && edge.to == to
-                        && matches!(edge.state, EdgeState::Sent | EdgeState::Running)
-                })
+                .find(|edge| edge.from == from && edge.to == to && edge.state == EdgeState::Sent)
                 .map(|edge| LiveAction::HandingOff {
                     task: bound_text(&edge.text, HANDOFF_TASK_BYTES_MAX),
                 })
