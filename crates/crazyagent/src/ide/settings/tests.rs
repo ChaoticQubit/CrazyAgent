@@ -84,7 +84,6 @@ fn expected_locks() -> Value {
         "terminal.integrated.initialHint": false,
         "workbench.tips.enabled": false,
         "workbench.startupEditor": "none",
-        "workbench.activity.showAccounts": false,
         "workbench.welcomePage.extraAnnouncements": false,
         "workbench.welcomePage.walkthroughs.openOnInstall": false,
         "workbench.remoteIndicator.showExtensionRecommendations": false,
@@ -93,7 +92,7 @@ fn expected_locks() -> Value {
         "extensions.ignoreRecommendations": true,
         "telemetry.telemetryLevel": "off",
         "update.mode": "none",
-        "extensions.autoUpdate": false,
+        "extensions.autoUpdate": "off",
         "extensions.autoCheckUpdates": false,
         "task.allowAutomaticTasks": "off",
     })
@@ -272,7 +271,13 @@ fn the_lock_layers_agree_and_leave_the_theme_free() {
         defaults["workbench.preferredLightColorTheme"],
         json!("CrazyAgent Light")
     );
-    assert_eq!(defaults.len(), all.len() + THEME_KEYS.len());
+    assert_eq!(
+        defaults["workbench.secondarySideBar.defaultVisibility"],
+        json!("hidden"),
+        "the empty secondary side bar, whose default container is Chat, never opens at start"
+    );
+    assert!(!all.contains_key("workbench.secondarySideBar.defaultVisibility"));
+    assert_eq!(defaults.len(), all.len() + THEME_KEYS.len() + 1);
 }
 
 #[test]

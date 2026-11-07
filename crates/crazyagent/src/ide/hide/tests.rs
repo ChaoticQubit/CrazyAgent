@@ -1,8 +1,8 @@
 use super::*;
 
-/// The pinned build's descriptors for every edited entry point, as shipped in its bundle
-/// (long preconditions cut short), with neighbors that must stay: Close Remote Connection
-/// and a command the build already keeps out of the palette.
+/// The pinned build's text at every edit, as shipped in its bundle (long preconditions and
+/// lists cut short), with neighbors that must stay: Close Remote Connection, a command the
+/// build already keeps out of the palette, and the Window node of the Settings contents.
 pub(crate) const SHIPPED: &str = concat!(
     r#"super({id:ib.REMOTE_ACTIONS_COMMAND_ID,category:e,title:H(18553,"Show Remote Menu"),f1:!0,keybinding:{weight:200,primary:2605}})"#,
     "\n",
@@ -35,6 +35,10 @@ pub(crate) const SHIPPED: &str = concat!(
     r#"super({id:"workbench.action.chat.upgradePlan",title:H(10647,"Upgrade to GitHub Copilot Pro"),category:H(10640,"Chat"),f1:!0,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
     "\n",
     r#"super({id:"workbench.action.chat.manageAdditionalSpend",title:H(10646,"Manage GitHub Copilot Budget"),category:H(10640,"Chat"),f1:!0,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
+    "\n",
+    r#"run:()=>{throw new Error('"Manage" can not be hidden')}})]}function gxt(s){return s.getBoolean(c$.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,0,!0)}function Nli(s,o){s.store(c$.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,o,0,0)}"#,
+    "\n",
+    r#"{id:"window",label:d(18304,null),settings:["window.*"],children:[{id:"window/newWindow",label:d(18283,null),settings:["window.*newwindow*"]}]},{id:"chat",label:d(18254,null),children:[{id:"chat/agent",label:d(18255,null),settings:["chat.agent.*"]}]}"#,
     "\n",
     r#"super({id:ib.CLOSE_REMOTE_COMMAND_ID,category:e,title:H(18550,"Close Remote Connection"),f1:!0,precondition:D.and(D.or(SC,mF),Jo.negate())})"#,
     "\n",
@@ -75,6 +79,10 @@ pub(crate) const HIDDEN: &str = concat!(
     r#"super({id:"workbench.action.chat.upgradePlan",title:H(10647,"Upgrade to GitHub Copilot Pro"),category:H(10640,"Chat"),f1:!1,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
     "\n",
     r#"super({id:"workbench.action.chat.manageAdditionalSpend",title:H(10646,"Manage GitHub Copilot Budget"),category:H(10640,"Chat"),f1:!1,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
+    "\n",
+    r#"run:()=>{throw new Error('"Manage" can not be hidden')}})]}function gxt(s){return!1&&s.getBoolean(c$.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,0,!0)}function Nli(s,o){s.store(c$.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,o,0,0)}"#,
+    "\n",
+    r#"{id:"window",label:d(18304,null),settings:["window.*"],children:[{id:"window/newWindow",label:d(18283,null),settings:["window.*newwindow*"]}]},{id:"chat",label:d(18254,null),hide:!0,children:[{id:"chat/agent",label:d(18255,null),settings:["chat.agent.*"]}]}"#,
     "\n",
     r#"super({id:ib.CLOSE_REMOTE_COMMAND_ID,category:e,title:H(18550,"Close Remote Connection"),f1:!0,precondition:D.and(D.or(SC,mF),Jo.negate())})"#,
     "\n",
@@ -206,7 +214,7 @@ fn a_link_or_leftover_at_the_staged_name_is_replaced_and_never_followed() {
 /// Every hiding revision, oldest first, with the digest of the edits a build installed under
 /// it carries. Changing [`EDITS`] or [`WINDOW`] changes the digest, so it needs a new row
 /// and a new [`REVISION`], or installed builds would keep the old edits.
-const REVISIONS: [(&str, &str); 2] = [
+const REVISIONS: [(&str, &str); 3] = [
     (
         "h1",
         "257622519e4a1a7d3a7bee30f97186083c9a4e14b1f5cdaaf83e3ef33347430b",
@@ -214,6 +222,10 @@ const REVISIONS: [(&str, &str); 2] = [
     (
         "h2",
         "794fd53ff124982ffacd3a829147c6f969f1df4694efa015a78fb4d62d9c22dc",
+    ),
+    (
+        "h3",
+        "97a8ce21fc87e75d1d93eb37df327c3b7bacc2e7539634e94e383a5a3e906984",
     ),
 ];
 
@@ -234,6 +246,7 @@ fn every_change_to_the_edits_names_a_new_revision() {
     let current = digest(&EDITS);
     assert_eq!(REVISIONS.last(), Some(&(REVISION, current.as_str())));
     assert_eq!(digest(&EDITS[..9]), REVISIONS[0].1);
+    assert_eq!(digest(&EDITS[..16]), REVISIONS[1].1);
     for (n, (name, sum)) in REVISIONS.iter().enumerate() {
         for (other, other_sum) in &REVISIONS[n + 1..] {
             assert_ne!(name, other);
