@@ -17,10 +17,20 @@ export function headScrolled(top: number, was = false): boolean {
 }
 
 /** The height a scrolled head gives up, kept as room under the page so the scroll range
- * never shrinks with the head and pulls the page back to the top. Inputs: the head's full
- * height, its height now and whether it is scrolled. Output: the room in whole px. */
-export function headRoom(full: number, now: number, scrolled: boolean): number {
-  return scrolled ? Math.max(0, Math.ceil(full - now)) : 0;
+ * never shrinks with the head and pulls the page back to the top. Until the head has taken
+ * its scrolled form the room holds the full height, more than the head can give up.
+ * Inputs: the head's full height, its height now, whether it is scrolled and whether it has
+ * settled. Output: the room in whole px. */
+export function headRoom(full: number, now: number, scrolled: boolean, settled = true): number {
+  if (!scrolled) return 0;
+  return settled ? Math.max(0, Math.ceil(full - now)) : Math.ceil(full);
+}
+
+/** Whether the head shows the form it was asked for and no transition of it is running.
+ * Inputs: the head element and whether it should be scrolled. Output: true when settled. */
+function headSettled(head: HTMLElement, scrolled: boolean): boolean {
+  return head.classList.contains("scrolled") === scrolled
+    && !head.getAnimations({ subtree: true }).some((animation) => animation instanceof CSSTransition);
 }
 
 /** Follows the page scroll for the project head: its scrolled form, its height as
@@ -40,7 +50,7 @@ export function useProjectHead(root: RefObject<HTMLDivElement | null>, project: 
       const height = head.offsetHeight;
       if (!was) full = height;
       page.style.setProperty("--pj-head-h", `${height}px`);
-      node.style.setProperty("--pj-head-room", `${headRoom(full, height, was)}px`);
+      node.style.setProperty("--pj-head-room", `${headRoom(full, height, was, headSettled(head, was))}px`);
     };
     const follow = () => {
       was = headScrolled(page.scrollTop, was);
@@ -49,10 +59,14 @@ export function useProjectHead(root: RefObject<HTMLDivElement | null>, project: 
     };
     follow();
     page.addEventListener("scroll", follow, { passive: true });
+    head.addEventListener("transitionend", sync);
+    head.addEventListener("transitioncancel", sync);
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync);
     observer?.observe(head);
     return () => {
       page.removeEventListener("scroll", follow);
+      head.removeEventListener("transitionend", sync);
+      head.removeEventListener("transitioncancel", sync);
       observer?.disconnect();
       page.style.removeProperty("--pj-head-h");
       node.style.removeProperty("--pj-head-room");
