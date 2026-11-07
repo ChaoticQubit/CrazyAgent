@@ -730,6 +730,23 @@ pub fn record_turn_end(
     }
 }
 
+/// Settles the claims of a project no turn end will (OS-8 r2): releases those of closed
+/// change sets whose release failed, takes back those of restored sets that did not come
+/// back, and holds a stopped or failed agent's finished claims for its open set, or
+/// releases them when nothing of it waits to land. Inputs: the store, the project and the
+/// time now. Output: Ok, or the first store failure.
+pub fn sweep_claims(db: &Connection, project: &ProjectId, now: u64) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    {
+        flow::sweep_claims(db, project, now)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project, now);
+        Err(unavailable())
+    }
+}
+
 /// The plain code of a turn-end refusal as an owner window shows it: a refusal carrying
 /// text for the agent (see [`refusal_for_agent`]) shows its code alone. Input: the
 /// refusal. Output: the plain code.

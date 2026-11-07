@@ -22,6 +22,8 @@ const LAYOUT_FOLDERS_MAX: usize = 64;
 const LINK_HEADER_BYTES_MAX: usize = 128;
 const NAME_BYTES_MAX: usize = 128;
 const SUBJECT_CHARS_MAX: usize = 72;
+/// The most closed change sets holding claims one claims sweep releases.
+const SWEPT_SETS_MAX: usize = 16;
 const PROPOSED_BYTES_MAX: usize = 1024;
 const AGENT_COMMITS_READ_MAX: usize = 200;
 const MORE_COMMITS: &str = "\n- and more commits";
@@ -2120,6 +2122,41 @@ pub(super) fn hold_agent_claims(
             })
             .map(drop),
     );
+}
+
+/// Settles a project's claims no turn end will, as [`super::sweep_claims`] says. Reads
+/// enough held sets that the open ones never crowd out `SWEPT_SETS_MAX` closed ones.
+/// Inputs: the store, the project and the time now. Output: Ok or the first failure.
+pub(super) fn sweep_claims(
+    db: &Connection,
+    project: &ProjectId,
+    now: u64,
+) -> Result<(), EngineError> {
+    let now = i64::try_from(now).map_err(|_| failure("changes_unavailable"))?;
+    let open = store::open_of(db, Some(project))?;
+    for set in crate::coord::held_sets_in(db, project, open.len() + SWEPT_SETS_MAX)? {
+        let closed = ChangeSetId::new(&set)
+            .ok()
+            .and_then(|id| store::load(db, &id).ok())
+            .is_some_and(|record| !record.is_open());
+        if closed {
+            crate::coord::release_set(db, &set, now)?;
+        }
+    }
+    for record in &open {
+        crate::coord::restore_set(db, record.id.as_str())?;
+    }
+    for agent in crate::coord::stopped_with_unheld(db, project)? {
+        let id = agent.to_string();
+        let set = open
+            .iter()
+            .find(|record| record.agent.kind == AgentKind::Sub && record.agent.id == id);
+        match set {
+            Some(record) => crate::coord::hold_for_set(db, agent, record.id.as_str())?,
+            None => crate::coord::release_unheld(db, agent, now)?,
+        };
+    }
+    Ok(())
 }
 
 /// Logs a failed claim hold or release by its plain code, so it never fails the landing

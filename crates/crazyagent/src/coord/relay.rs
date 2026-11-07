@@ -1140,7 +1140,7 @@ fn held(
             held.push(Held {
                 by: "CrazyAgent".to_owned(),
                 pattern:
-                    "too many claims in this project to check; land or close finished work first"
+                    "too many claims in this project to check; they free up as the owner accepts or discards finished change sets, or as work no agent is on is released"
                         .to_owned(),
             });
         }

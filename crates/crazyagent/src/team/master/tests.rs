@@ -1823,6 +1823,76 @@ fn the_masters_overlapping_start_work_notes_the_sub_agent_unless_overlaps_are_of
     );
 }
 
+/// Adds `count` claims `more/<i>.rs` to one unit of work, as a long backlog would. Takes the
+/// fixture, the work and the count.
+#[cfg(target_os = "macos")]
+fn add_claims(fixture: &Fixture, work: i64, count: i64) {
+    fixture
+        .connection
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?3)
+             INSERT INTO coord_claims(project,agent,work,pattern,created)
+             SELECT ?1,(SELECT owner_agent FROM coord_work WHERE id=?2),?2,'more/'||i||'.rs',?4 FROM n",
+            params![PROJECT, work, count, NOW],
+        )
+        .unwrap();
+}
+
+/// OS-8 r2 M1: the refusals for a project past what one overlap check reads, and for an
+/// agent past its own claims limit, name how claims free up now that closing work no longer
+/// frees a sub-agent's claims.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_claims_limit_refusals_name_how_claims_free_up() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    known_project(&fixture);
+    let charts = named_sub(&fixture, "charts", "working");
+    let (said, refused) = as_sub(
+        &mut fixture,
+        charts,
+        tool::START_WORK_TOOL,
+        json!({"title": "Draw the chart", "claims": ["src/ui/chart.ts"]}),
+    );
+    assert!(!refused, "{said}");
+    let charts_work = work_id(&fixture, "Draw the chart");
+    add_claims(&fixture, charts_work, 2100);
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "Restyle", "claims": ["src/ui/style.ts"]}),
+    );
+    assert!(refused, "{said}");
+    assert_eq!(
+        said,
+        "Not started: this project holds more claims than one overlap check reads; they free up as the owner accepts or discards finished change sets, or as work no agent is on is released."
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE coord_claims SET released=?1 WHERE work=?2",
+            params![NOW, charts_work],
+        )
+        .unwrap();
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "Mine", "claims": ["src/a.rs"]}),
+    );
+    assert!(!refused, "{said}");
+    add_claims(&fixture, work_id(&fixture, "Mine"), 127);
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "More", "claims": ["src/b.rs"]}),
+    );
+    assert!(refused, "{said}");
+    assert_eq!(
+        said,
+        "Not started: you hold 128 claims, the most one agent may; finish or release work you are not on, and have your finished change sets accepted or discarded, before you start more."
+    );
+}
+
 /// OS-8 Wait: under the Wait option the master's start_work on a file a running
 /// sub-agent's work claims is refused with the plan's sentence naming that agent, its work
 /// and the file, and starts nothing.

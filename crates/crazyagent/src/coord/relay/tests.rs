@@ -564,7 +564,7 @@ fn an_overlap_question_past_the_claims_one_check_reads_is_answered_as_held() {
         held(&team.db, &team.project, lead, "src/new.rs").unwrap(),
         vec![Held {
             by: "CrazyAgent".to_owned(),
-            pattern: "too many claims in this project to check; land or close finished work first"
+            pattern: "too many claims in this project to check; they free up as the owner accepts or discards finished change sets, or as work no agent is on is released"
                 .to_owned(),
         }]
     );
