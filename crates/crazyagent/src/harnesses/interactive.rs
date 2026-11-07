@@ -565,7 +565,6 @@ fn claude_environment(
     teammates: Option<&str>,
     display: ClaudeDisplay,
 ) -> Vec<(String, String)> {
-    let (display_name, display_value) = display.variable();
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR".to_owned(), home.to_owned()),
         (
@@ -578,8 +577,13 @@ fn claude_environment(
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
             "1".to_owned(),
         ),
-        (display_name.to_owned(), display_value.to_owned()),
     ];
+    environment.extend(
+        display
+            .variables()
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+    );
     if request.tools {
         environment.push(("SHELL".to_owned(), "/bin/zsh".to_owned()));
         environment.push((

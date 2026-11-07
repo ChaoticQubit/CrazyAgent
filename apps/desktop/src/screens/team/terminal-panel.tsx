@@ -273,8 +273,9 @@ export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at:
  * closed, `embedded` when a console around it owns the head, where the owner types (the
  * terminal, the message box under it, or both), `follow` when an ended terminal opens
  * again on its own, cleared, for an agent that restarts in a new pane, and the one-line
- * report of what the agent's harness loaded and invoked, shown in the head. Output: the panel. */
-export function TerminalPanel({ node, harness, onClose, embedded = false, input = "both", follow = false, reported }: {
+ * report of what the agent's harness loaded and invoked, shown in the head, and the project
+ * id a wall window attaches for. Output: the panel. */
+export function TerminalPanel({ node, harness, onClose, embedded = false, input = "both", follow = false, reported, projectId }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
@@ -282,6 +283,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
   input?: InputChoice;
   follow?: boolean;
   reported?: string;
+  projectId?: string;
 }) {
   const mode = inputMode(input);
   const following = useRef(follow);
@@ -419,7 +421,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
         unsettle();
         terminal.dispose();
       };
-      const result = await attachTerminal(name, channel, pane);
+      const result = await attachTerminal(name, channel, pane, projectId ?? null);
       if (disposed) {
         if (result.kind === "ok") void detachTerminal(name, result.value);
         return;
@@ -434,7 +436,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
       release();
       if (serial !== null) void detachTerminal(name, serial);
     };
-  }, [name, pane, round]);
+  }, [name, pane, projectId, round]);
 
   return <section className={embedded ? "tg-terminal embedded" : "tg-terminal"} aria-label={`${node.label} terminal`}>
     {!embedded && <div className="tg-terminal-head">

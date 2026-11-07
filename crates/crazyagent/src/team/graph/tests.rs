@@ -86,6 +86,7 @@ fn status() -> TeamStatus {
         budget_used: None,
         budget_reached: false,
         spread_accounts: false,
+        terminals_per_window: crate::team::TerminalsPerWindow::Six,
         show_finished: false,
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,

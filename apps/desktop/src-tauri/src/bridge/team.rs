@@ -6,6 +6,7 @@ use crazyagent::team::agent_messages::{AgentMessages, Cursor, MessageSettings};
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{
     BackgroundAtEnd, BranchMode, ChildLanding, SwitchApply, SwitchMode, TeamAction, TeamStatus,
+    TerminalsPerWindow,
 };
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
@@ -414,6 +415,32 @@ impl NativeBridge {
         let project_id = project(id)?;
         self.team_action(TeamAction::ReaskEmptyReply { project_id, on }, generation)
             .await
+    }
+
+    /// Saves how many terminals each of a project's terminal wall windows holds: 4, 6 or 9.
+    /// Takes the project id, the choice and the client generation. Returns the actual commit
+    /// receipt.
+    pub async fn team_terminals_per_window(
+        &mut self,
+        id: &str,
+        per_window: TerminalsPerWindow,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::TerminalsPerWindow {
+                project_id,
+                per_window,
+            },
+            generation,
+        )
+        .await
+    }
+
+    /// Reads how many terminals each of a project's terminal wall windows holds, the one
+    /// team setting a wall window reads. Takes the project id. Returns the choice.
+    pub async fn terminals_per_window(&self, id: &str) -> Result<TerminalsPerWindow, BridgeError> {
+        Ok(self.team_status(id).await?.terminals_per_window)
     }
 
     /// Sets the most files one new top-level folder, a folder the owner's branch does not

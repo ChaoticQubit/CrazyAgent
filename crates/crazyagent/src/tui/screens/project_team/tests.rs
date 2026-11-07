@@ -151,6 +151,7 @@ fn team() -> TeamStatus {
         budget_used: None,
         budget_reached: false,
         spread_accounts: false,
+        terminals_per_window: crate::team::TerminalsPerWindow::Six,
         show_finished: false,
         message_settings: crate::team::agent_messages::MessageSettings::default(),
         agent_branches: crate::team::BranchMode::Named,
@@ -3998,5 +3999,51 @@ fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
         ("T", "Token budget"),
     ] {
         assert!(help.contains(&pair), "{pair:?} is missing: {help:?}");
+    }
+}
+
+/// W moves Terminals per window from the shown choice to the next, 4, 6, 9 and back to 4;
+/// each choice shows on the team screen and its saved change says what Open all terminals
+/// now does (owner 2026-11-07, OS-4).
+#[test]
+fn w_moves_terminals_per_window_through_four_six_and_nine() {
+    use crate::team::TerminalsPerWindow::{Four, Nine, Six};
+    for (shown, next, count) in [(Six, Nine, 9), (Nine, Four, 4), (Four, Six, 6)] {
+        let mut status = team();
+        status.terminals_per_window = shown;
+        let mut view = TeamView::new(project());
+        let query = view.next_query(NOW).unwrap();
+        view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+        let rows = frame(&view, 120, 40);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("Terminals per window  {}", u8::from(shown)))),
+            "{}",
+            rows.join("\n")
+        );
+        let reply = view.key(press(KeyCode::Char('W')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::TerminalsPerWindow {
+                project_id: project(),
+                per_window: next
+            })
+        );
+        let TeamReply::Change(action) = reply else {
+            unreachable!();
+        };
+        view.apply(
+            &SetupQuery::TeamChange {
+                action,
+                generation: 9,
+            },
+            Ok(SetupView::Changed(OwnerResult::Applied)),
+        );
+        assert_eq!(
+            view.notice,
+            Some(Notice::plain(format!(
+                "Open all terminals now puts {count} terminals in each window."
+            )))
+        );
     }
 }

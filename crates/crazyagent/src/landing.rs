@@ -704,8 +704,9 @@ pub fn commit_deletions(
 /// the agent made itself land too. A failed or cancelled turn commits too. Owner edits
 /// waiting in the worktree settle on the change set the turn end leaves open; when they
 /// cannot, they keep waiting for the next turn end and the recorded set is still returned.
-/// Inputs: the store, the workspace and the turn end. Output: the change set the work now belongs
-/// to, None when nothing is pending.
+/// A sub-agent's claims on its ended work then hold for that set, or are released when
+/// nothing is pending. Inputs: the store, the workspace and the turn end. Output: the
+/// change set the work now belongs to, None when nothing is pending.
 pub fn record_turn_end(
     db: &Connection,
     workspace: &Workspace,
@@ -713,22 +714,35 @@ pub fn record_turn_end(
 ) -> Result<Option<ChangeSetId>, EngineError> {
     #[cfg(unix)]
     {
-        let kept = flow::record(
-            db,
-            workspace,
-            turn,
-            &crate::worktrees::TREE_BOUNDS,
-            flow::now_ms()?,
-        )?;
+        let now = flow::now_ms()?;
+        let kept = flow::record(db, workspace, turn, &crate::worktrees::TREE_BOUNDS, now)?;
         owner_edit::logged(
             "settle",
             owner_edit::settle(db, &workspace.worktree, kept.as_ref()),
         );
+        flow::hold_agent_claims(db, workspace, kept.as_ref(), now);
         Ok(kept)
     }
     #[cfg(not(unix))]
     {
         let _ = (db, workspace, turn);
+        Err(unavailable())
+    }
+}
+
+/// Settles the claims of a project no turn end will (OS-8 r2): releases those of closed
+/// change sets whose release failed, takes back those of restored sets that did not come
+/// back, and holds a stopped or failed agent's finished claims for its open set, or
+/// releases them when nothing of it waits to land. Inputs: the store, the project and the
+/// time now. Output: Ok, or the first store failure.
+pub fn sweep_claims(db: &Connection, project: &ProjectId, now: u64) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    {
+        flow::sweep_claims(db, project, now)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project, now);
         Err(unavailable())
     }
 }

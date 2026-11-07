@@ -1,4 +1,4 @@
-import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
+import { call, classifyFailure, closeProjectWalls, knownError, namedFailure, plainError, type Result } from "./api";
 import {
   allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
@@ -632,10 +632,13 @@ export function loadRemovalPreview(id: string): Promise<Result<RemovalPreview>> 
 
 /** Removes a project from CrazyAgent. Without a name its folder stays on disk; with the name the
  * owner typed, the engine stops its agents and moves its folders to the Trash, only when the name
- * is the project's exact name. Inputs: project id, a generation and the typed name or null.
- * Output: the receipt. */
-export function removeProject(id: string, generation: number, deleteName: string | null = null): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_remove_project", { id, generation, deleteName });
+ * is the project's exact name. Either way, once the engine applied the removal, the project's
+ * terminal wall windows close; one that fails to close leaves the removal as it is. Inputs:
+ * project id, a generation and the typed name or null. Output: the receipt. */
+export async function removeProject(id: string, generation: number, deleteName: string | null = null): Promise<Result<IntentReceipt>> {
+  const result = await call<IntentReceipt>("desktop_remove_project", { id, generation, deleteName });
+  if (result.kind === "ok" && receiptState(result.value).kind === "applied") await closeProjectWalls(id);
+  return result;
 }
 
 export const PAGES_MAX = 50;

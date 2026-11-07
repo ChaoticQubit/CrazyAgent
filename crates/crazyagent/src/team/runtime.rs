@@ -588,6 +588,8 @@ pub struct TeamRuntime {
     naming: Option<i64>,
     deliveries: crate::coord::delivery::Deliveries,
     adoption_failed: Option<String>,
+    claims_next: BTreeMap<ProjectId, Instant>,
+    claims_failed: Option<String>,
     reproving: Option<Arc<AtomicBool>>,
     instructions_next: BTreeMap<ProjectId, Instant>,
     instruction_restarts: BTreeMap<i64, ProjectId>,
@@ -817,6 +819,8 @@ impl TeamRuntime {
             #[cfg(unix)]
             caller_pins: BTreeMap::new(),
             adoption_failed: None,
+            claims_next: BTreeMap::new(),
+            claims_failed: None,
             reproving: None,
             instructions_next: BTreeMap::new(),
             instruction_restarts: BTreeMap::new(),
@@ -2346,6 +2350,7 @@ impl TeamRuntime {
         let master_live = self.master(project).is_some();
         super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
         self.check_adoption(project);
+        self.tend_claims(project);
         self.hand_leads(project, access)?;
         self.wake_for_messages(&stored, access, &asleep)?;
         self.instruction_edits(&stored, access, &paused)?;
@@ -2459,6 +2464,48 @@ impl TeamRuntime {
             );
         }
         self.adoption_failed = failed;
+    }
+
+    /// Settles a project's claims no turn end will, at the first step after the engine
+    /// starts and then at most once each `CLAIMS_SWEEP_EVERY`: the landing sweep holds or
+    /// releases stopped agents' finished claims and retries failed releases and restores,
+    /// and the owner is told once when the project's claims fill one overlap check. A
+    /// failure leaves the team step running and is logged once by its plain code until a
+    /// sweep succeeds again. Input: the project. Output: unit.
+    fn tend_claims(&mut self, project: &ProjectId) {
+        let due = Instant::now();
+        if self
+            .claims_next
+            .get(project)
+            .is_some_and(|next| due < *next)
+        {
+            return;
+        }
+        self.claims_next
+            .insert(project.clone(), due + CLAIMS_SWEEP_EVERY);
+        let now = now_ms();
+        let swept = u64::try_from(now)
+            .map_err(|_| EngineError("team_state_unavailable".into()))
+            .and_then(|now| crate::landing::sweep_claims(&self.connection, project, now));
+        let told =
+            crate::coord::claims_full_notice(&self.connection, project, now).and_then(|full| {
+                if full {
+                    self.note(project, CLAIMS_FULL_NOTE)
+                } else {
+                    Ok(())
+                }
+            });
+        let failed = swept
+            .and(told)
+            .err()
+            .map(|problem| crate::protocol::plain_code(&problem.0).to_owned());
+        if failed.is_some() && failed != self.claims_failed {
+            eprintln!(
+                "team claims not swept: {}",
+                failed.as_deref().unwrap_or_default()
+            );
+        }
+        self.claims_failed = failed;
     }
 
     fn sync_pool(&mut self, stored: &StoredSetup, access: &ModelAccess) -> Result<(), EngineError> {
@@ -9266,6 +9313,12 @@ const OWNER_STOPPED_TEAMMATE: &str = "The owner stopped this teammate.";
 const LEAD_ENDED_TEAMMATE: &str = "Its lead stopped, and its terminal ended with the lead's.";
 const OVER_TEAMMATE_CAP: &str = "The engine ended it: its lead ran more sub-agents than the owner's Max teammates per harness allows.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
+/// How often one project's claims are swept after the first step: often enough that a
+/// stopped agent's finished claims free up within a minute, rarely enough that the sweep's
+/// reads stay off the team step.
+const CLAIMS_SWEEP_EVERY: Duration = Duration::from_secs(30);
+/// The owner's note the first time a project's claims fill one overlap check.
+const CLAIMS_FULL_NOTE: &str = "This project holds more open file claims than one overlap check reads, so agents cannot start new claimed work and their edits of claimed files are held. Accept or discard the change sets waiting in Changes, or release work no agent is on.";
 const HANDOFF_BYTES_MAX: usize = 1000;
 
 /// Lists file names for an engine note one per line, each quoted with its quotes,
