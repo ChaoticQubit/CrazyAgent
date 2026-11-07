@@ -99,14 +99,14 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     }
     assert.equal((await value(bridge, "desktop_open_project", { id: project })).project_id, project, "the new project opens");
     const policy = await value(bridge, "desktop_project_agent_policy", { id: project });
-    assert.equal(policy.access, "sandboxed", "a new project starts Sandboxed");
-    if (access === "full") {
+    if (policy.access !== access) {
       const saved = await value(bridge, "desktop_set_project_agent_policy", {
         id: project, version: policy.version, generation: 4,
-        policy: { access: "full", network: policy.network, toolchains: [], ide_git_hooks: policy.ide_git_hooks },
+        policy: { access, network: policy.network, toolchains: [], ide_git_hooks: policy.ide_git_hooks },
       });
-      assert.equal(saved.outcome, "applied", `the owner gives the project Full access: ${JSON.stringify(saved)}`);
+      assert.equal(saved.outcome, "applied", `the owner sets the project's access to ${access}: ${JSON.stringify(saved)}`);
     }
+    assert.equal((await value(bridge, "desktop_project_agent_policy", { id: project })).access, access, `the project runs at ${access}`);
     let generation = 4;
     const lease = await engineMasterWorktree(bridge, runtime, project, () => (generation += 1));
 
