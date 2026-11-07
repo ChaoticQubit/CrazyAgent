@@ -19,10 +19,23 @@ const USAGE_MS = 60000;
 const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const TASK = "Write fruit.md with one line about apples.";
-const TILE = ["Tokens", "1.5K", "1.2K input, 0 cache write, 300 output"];
-const REREAD = ["Re-read from cache", "8K", "87% of everything read; billed far lower, not in Tokens"];
 const HEAD = ["Name", "Tokens", "Input", "Cache write", "Output", "Cache read", "Runs", "Last used"];
-const PARTS = ["1.5K", "1.2K", "0", "300", "8K"];
+const COMPACT = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+
+/** What Settings, Usage shows for runs that each counted the stand-in's one token line:
+ * 1,200 new input, no cache write, 300 output and 8,000 re-read from cache per run, in the
+ * page's compact form. Input: the number of runs. Output: { tile, reread, parts, merged },
+ * merged being the totals that would wrongly add the re-reads in. */
+function expected(runs) {
+  assert.ok(Number.isSafeInteger(runs) && runs > 0, `runs counted: ${runs}`);
+  const k = (count) => COMPACT.format(count * runs);
+  return {
+    tile: ["Tokens", k(1500), `${k(1200)} input, 0 cache write, ${k(300)} output`],
+    reread: ["Re-read from cache", k(8000), "87% of everything read; billed far lower, not in Tokens"],
+    parts: [k(1500), k(1200), "0", k(300), k(8000)],
+    merged: [k(9500), k(9200)],
+  };
+}
 
 /** The Codex stand-in the engine runs every team agent with. It keeps a conversation file as
  * Codex does and answers each turn with "done", after one token count as Codex writes it:
@@ -78,6 +91,19 @@ function taskStatus(runtime, project) {
   try {
     store.exec("PRAGMA busy_timeout = 5000");
     return store.prepare("SELECT status FROM team_tasks WHERE project=? AND prompt=?").get(project, TASK)?.status ?? null;
+  } finally {
+    store.close();
+  }
+}
+
+/** Counts the runs the engine recorded tokens for in the project, and those of its team
+ * agents: onboarding's jobs run the same stand-in, so they count beside the hand-off. Inputs:
+ * the engine root and the project. Output: { runs, team }. */
+function runsCounted(runtime, project) {
+  const store = new DatabaseSync(join(runtime, "engine.db"), { readOnly: true });
+  try {
+    store.exec("PRAGMA busy_timeout = 5000");
+    return store.prepare("SELECT COUNT(DISTINCT agent || ' ' || session) AS runs, COUNT(DISTINCT CASE WHEN agent LIKE 'team-%' THEN session END) AS team FROM usage_tokens WHERE project=?").get(project);
   } finally {
     store.close();
   }
@@ -231,19 +257,24 @@ test("Settings, Usage shows the Tokens headline with its three parts and the cac
     assert.equal(await handOff(me, page, project, runtime), "done", "the Codex sub-agent finished the task");
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/settings/usage` });
     let shown = null;
+    let counted = null;
+    let want = null;
     for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS * 20)) {
+      counted = runsCounted(runtime, project);
+      want = counted.team > 0 ? expected(counted.runs) : null;
       shown = await usageShown(page).catch(() => null);
-      if (JSON.stringify(shown?.tile) === JSON.stringify(TILE)) break;
-      assert.ok(Date.now() < deadline, `the Tokens tile never showed ${JSON.stringify(TILE)}: ${JSON.stringify(shown)}`);
+      if (want && JSON.stringify(shown?.tile) === JSON.stringify(want.tile)) break;
+      assert.ok(Date.now() < deadline, `the Tokens tile never showed the counted runs ${JSON.stringify(counted)}: ${JSON.stringify(shown)}`);
       await page.send("Page.reload", { ignoreCache: true });
     }
     await me.capture("usage-cache-line");
-    assert.deepEqual(shown.tile, TILE, "the Tokens tile shows the headline and its input, cache write and output");
-    assert.deepEqual(shown.reread, REREAD, "the cache re-reads have their own tile with their share, never added into Tokens");
+    assert.deepEqual(shown.tile, want.tile, "the Tokens tile shows the headline and its input, cache write and output");
+    assert.deepEqual(shown.reread, want.reread, "the cache re-reads have their own tile with their share, never added into Tokens");
     assert.deepEqual(shown.head, HEAD, "the By project table shows Tokens, then Input, Cache write, Output and Cache read");
     assert.ok(shown.row !== null, "the By project table has the project's row");
-    assert.deepEqual(shown.row.slice(1, 6), PARTS, `the project's row shows the headline and all four parts: ${JSON.stringify(shown.row)}`);
+    assert.deepEqual(shown.row.slice(1, 6), want.parts, `the project's row shows the headline and all four parts: ${JSON.stringify(shown.row)}`);
+    assert.equal(shown.row[6], String(counted.runs), `the project's row counts every run: ${JSON.stringify(shown.row)}`);
     const words = await me.seen();
-    assert.ok(!words.includes("9.5K") && !words.includes("9.2K"), "no total adds the cache re-reads into the tokens");
+    assert.ok(want.merged.every((total) => !words.includes(total)), `no total adds the cache re-reads into the tokens: ${JSON.stringify(want.merged)}`);
   });
 });
