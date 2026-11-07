@@ -232,19 +232,22 @@ fn groups(
 /// the tokens chart in bars `bucket_for` the range, anchored at its start, and the newest
 /// `ROWS_MAX` runs and largest `ROWS_MAX` accounts and harnesses by the headline. Inputs:
 /// the store, the project, the range start and now. Output: the metrics;
-/// `usage_request_invalid` for a range that starts after now.
+/// `usage_request_invalid` for a range that starts before the epoch or after now.
 pub fn read(
     db: &Connection,
     project: Option<&ProjectId>,
     since_ms: i64,
     now_ms: i64,
 ) -> Result<Metrics, EngineError> {
-    if since_ms > now_ms {
+    if since_ms < 0 || since_ms > now_ms {
         return Err(failure("usage_request_invalid"));
     }
+    let span_ms = now_ms
+        .checked_sub(since_ms)
+        .ok_or_else(|| failure("usage_request_invalid"))?;
     let project = project.map(ProjectId::as_str);
     let [running, tasks_waiting, tasks_done, tasks_failed] = task_counts(db, project, since_ms)?;
-    let bucket_ms = bucket_for(now_ms - since_ms);
+    let bucket_ms = bucket_for(span_ms);
     let metrics = Metrics {
         running,
         tasks_waiting,
