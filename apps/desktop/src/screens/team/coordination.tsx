@@ -1,15 +1,22 @@
 import { useState, type ReactNode } from "react";
-import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, type SkillView } from "../../api";
+import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, type Result, type SkillView } from "../../api";
+import { receiptState } from "../../api-projects";
 import { OVERLAP_CHOICES } from "../../engine-client";
-import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
+import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, IntentReceipt, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { SettingRow, changeNote } from "./controls";
+import { McpServersSetting } from "./setup-rows";
 
 export const COUNTED_TOOLS_MAX = 32;
 const COUNTED_TOOL = /^[A-Za-z0-9_*-]{1,64}$/;
+const PASSED_READS_MAX = 16;
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
 
 /** The harness kinds coordination settings are kept for, in the order they are listed. */
 export const COORD_HARNESSES: CoordHarness[] = ["claude-code", "codex", "rcli"];
@@ -138,6 +145,54 @@ export function overlapOptions(current: string): { value: string; label: string 
   return knownOverlap(current) ? known : [...known, { value: current, label: displayText(current) }];
 }
 
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const fields = value as Record<string, unknown>;
+    return `{${Object.keys(fields).sort().map((key) => `${JSON.stringify(key)}:${canonical(fields[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** One project's coordination saves: the save the next one waits for, the settings the last
+ * applied save sent, and the reads that save moved past, which a row may still show. */
+interface CoordChain {
+  tail: Promise<unknown>;
+  last: CoordSettings | null;
+  passed: string[];
+}
+
+const chains = new Map<string, CoordChain>();
+
+/** Saves one coordination change through the project's one save path, as every row that
+ * changes coordination settings does: a change waits for the save before it, and while its row
+ * still shows a read an applied save moved past, it is laid over the settings that save sent,
+ * so a quick second change never sends the first one's old value back. A read another window
+ * moved on is taken as it is. Inputs: the project id, the settings the row shows and the
+ * change. Output: the save's result. */
+export function saveCoordSettings(projectId: string, read: CoordSettings, patch: Partial<CoordSettings>): Promise<Result<IntentReceipt>> {
+  const chain = chains.get(projectId) ?? { tail: Promise.resolve(), last: null, passed: [] };
+  chains.set(projectId, chain);
+  const run = chain.tail.then(async () => {
+    const shown = canonical(read);
+    const behind = chain.last !== null && chain.passed.includes(shown);
+    if (!behind) {
+      chain.last = null;
+      chain.passed = [shown];
+    }
+    const next: CoordSettings = { ...(behind && chain.last !== null ? chain.last : read), ...patch };
+    const result = await setCoordSettings(projectId, next);
+    if (result.kind === "ok" && receiptState(result.value).kind === "applied") {
+      chain.passed = [...chain.passed, ...(chain.last === null ? [] : [canonical(chain.last)])].slice(-PASSED_READS_MAX);
+      chain.last = next;
+    }
+    assert(chain.passed.length >= 1 && chain.passed.length <= PASSED_READS_MAX, "a coordination chain keeps 1 to 16 passed reads");
+    return result;
+  });
+  chain.tail = run.catch(() => undefined);
+  return run;
+}
+
 /** A coordination change's busy flag and note, and the call that saves one change, shows its
  * note and reads the team again. Input: the reload. Output: the state and the call. */
 function useChange(reload: () => void) {
@@ -165,7 +220,7 @@ export function QuestionsSetting({ projectId, status, reload }: { projectId: str
   const { note, run } = useChange(reload);
   return <SettingRow label="Sub-agent questions go to">
     <span className="set-label" aria-hidden="true">Sub-agent questions go to</span>
-    <Segmented label="Sub-agent questions go to" value={view.settings.questions_to} onValue={(value: QuestionsTo) => void run(() => setCoordSettings(projectId, { ...view.settings, questions_to: value }), "where questions go")}
+    <Segmented label="Sub-agent questions go to" value={view.settings.questions_to} onValue={(value: QuestionsTo) => void run(() => saveCoordSettings(projectId, view.settings, { questions_to: value }), "where questions go")}
       options={[{ value: "lead", label: "Their lead" }, { value: "me", label: "Me directly" }]} />
     <span className="tg-terminal-note">A question an agent marks For: Me always reaches you; no lead or master can answer it.</span>
     <ChangeNote note={note} />
@@ -185,8 +240,8 @@ export function DeliverySetting({ projectId, row, reload }: { projectId: string;
   </SettingRow>;
 }
 
-/** The Skills and tools rows of Agent settings: the skills each team role gets, workflow
- * nudges, the Task-start reminder and the counted tools. Every option is selectable; the plan
+/** The Skills and tools rows of Agent settings: the skills each team role gets, the MCP servers
+ * agents can reach, workflow nudges, the Task-start reminder and the counted tools. Every option is selectable; the plan
  * defaults show for an older engine. Inputs: the project id, the latest team status and a
  * reload. Output: the rows. */
 export function ToolsControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
@@ -198,7 +253,7 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
   const countedCheck = countedToolsInput(countedText);
 
   const save = (patch: Partial<CoordSettings>, what: string) =>
-    run(() => setCoordSettings(projectId, { ...view.settings, ...patch }), what);
+    run(() => saveCoordSettings(projectId, view.settings, patch), what);
 
   async function saveCounted() {
     if (countedCheck.kind !== "ok") return;
@@ -212,6 +267,7 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
       <RoleSkillsControls settings={view.settings} skills={skills} busy={busy}
         onChoose={(role, chosen) => void save({ role_skills: { ...view.settings.role_skills, [role]: chosen } }, `the ${role} skills`)} />
     </SettingRow>
+    <McpServersSetting projectId={projectId} />
     <SettingRow label="Workflow nudges">
       <span className="set-label" aria-hidden="true">Workflow nudges</span>
       <Segmented label="Workflow nudges" value={view.settings.nudges} onValue={(value: Nudges) => void save({ nudges: value }, "workflow nudges")}
@@ -249,7 +305,7 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
   const view = coordination(status);
   const { note, run } = useChange(reload);
   const save = (patch: Partial<CoordSettings>, what: string) =>
-    run(() => setCoordSettings(projectId, { ...view.settings, ...patch }), what);
+    run(() => saveCoordSettings(projectId, view.settings, patch), what);
 
   return <>
     {view.harnesses.map((row) => <div className="set-harness" role="group" aria-label={HARNESS_NAMES[row.harness]} key={row.harness}>

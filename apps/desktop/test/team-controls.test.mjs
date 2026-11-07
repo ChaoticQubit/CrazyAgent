@@ -298,7 +298,7 @@ test("Settings, Team offers Apply a master harness change with When the master i
 
 test("what the master does with its conflict fixes is a choice only at Full access", () => {
   const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
-  const cards = (html) => [...html.matchAll(/<label class="radio-card"><input type="radio"[^>]*value="(merges|waits)"([^>]*)\/>/g)].map((card) => [card[1], /checked=""/.test(card[2])]);
+  const cards = (html) => [...html.matchAll(/<label class="radio-card"><input type="radio"([^>]*)\/>/g)].map((card) => [card[1].match(/value="([^"]*)"/)?.[1], /checked=""/.test(card[1])]);
   const merges = render({ master_lands: "merges" });
   assert.match(merges, /role="radiogroup" aria-label="Under Full access, merging into main"/);
   assert.deepEqual(cards(merges), [["merges", true], ["waits", false]]);

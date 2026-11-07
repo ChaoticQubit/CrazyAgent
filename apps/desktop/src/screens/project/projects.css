@@ -236,6 +236,13 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .set-row form.pj-row > label { flex: 1 0 100%; font-weight: 500; }
 .set-row form.pj-row > .tg-terminal-note { flex: 1 0 100%; }
 .set-note { position: sticky; bottom: 16px; z-index: 1; box-shadow: var(--elev-1); }
+.set-slots { display: grid; border: 1px solid var(--border); border-radius: var(--radius-panel); }
+.set-slot { display: grid; grid-template-columns: minmax(0, 1fr) max-content 64px; gap: 12px; align-items: center; padding: 6px 12px; border-top: 1px solid var(--border); }
+.set-slot:first-child { border-top: 0; }
+.set-slot.head { color: var(--text-3); font-size: 12px; line-height: 16px; }
+.set-slot .pj-stepper { height: 28px; }
+.set-slot .pj-stepper button { width: 26px; height: 26px; }
+.set-row > .set-ctl .chips { justify-content: flex-end; }
 .pj-console-actions { display: inline-flex; margin-left: auto; }
 dialog.drawer .set-row { grid-template-columns: minmax(0, 1fr) minmax(0, max-content); }
 @media (max-width: 1199px) {

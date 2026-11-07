@@ -3,11 +3,12 @@ import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, s
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
-import { Button, ConfirmDialog, Icon, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
+import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { IconName, SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { savedStale } from "../project/settings";
 import { CoordinationControls, ToolsControls } from "./coordination";
+import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, type TeamProject } from "./setup-rows";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
 export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
@@ -224,15 +225,18 @@ export interface SettingGroupInfo {
 /** The Agent settings groups on the Agents tab. */
 export type SettingGroupId = "model" | "access" | "tools" | "coord" | "limits";
 
+const MERGE_INTO_MAIN = "Under Full access, merging into main";
+const RESTARTS_FROM_MAIN = "After you accept, the agent's branch restarts from main";
+
 /** The Agent settings groups in the order the approved mockup lists them, each with its purpose
  * line and the labels of its rows in the order they show. */
 export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; about: string })[] = [
   { id: "model", title: "Model and harness", about: "Which harnesses run, on which accounts, and how many.", icon: "cpu",
-    rows: ["Master and sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"] },
+    rows: ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"] },
   { id: "access", title: "Access and merging", about: "What agents may touch, and who merges finished work.", icon: "shield-check",
-    rows: ["Agent access", "When the master resolves conflicts", "Ask me before merging into the master's branch", "Agent branches", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"] },
+    rows: ["Agent access", MERGE_INTO_MAIN, "Ask me before merging into the master's branch", "Agent branches", RESTARTS_FROM_MAIN, "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"] },
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
-    rows: ["Skills per role", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"] },
+    rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"] },
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
     rows: ["Claude Code sub-agents", "Messages to Claude Code agents", "Claude Code terminal display", "Codex sub-agents", "Messages to Codex agents", "rcli sub-agents", "Messages to rcli agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Catch up with main", "Finished agents"] },
   { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
@@ -341,16 +345,6 @@ export function ReaskSetting({ projectId, status, reload }: { projectId: string;
   </SettingRow>;
 }
 
-/** The team plan in one line: the master's harness, then each sub-agent harness with how many
- * agents it runs at once and whether its tools are off. Inputs: the team status and a harness
- * name lookup. Output: the line. */
-function teamLine(status: Pick<TeamStatus, "harnesses">, harness: (id: string) => string): string {
-  const master = status.harnesses.find((item) => item.role === "master");
-  const subs = status.harnesses.filter((item) => item.role === "sub").map((item) =>
-    `${harness(item.harness)}, ${item.agents_max} at once${item.tools ? "" : ", tools off"}`);
-  return `Master: ${master ? harness(master.harness) : "none"}. Sub-agents: ${subs.length > 0 ? subs.join("; ") : "none"}.`;
-}
-
 /** The team's actions on the Agents tab's Team view: stop or start every agent of the project,
  * and hand one task straight to a sub-agent when the master should not plan it. A team view
  * the engine shortened says so. Inputs: the project id, the latest team status, a harness name
@@ -428,15 +422,15 @@ export function TeamActions({ projectId, status, harness, reload }: {
 /** Agent settings on the Agents tab, grouped as the approved mockup shows them: Model and
  * harness, Access and merging, Skills and tools, Coordination and Limits, each a panel with its
  * purpose line, beside a list of the groups with Find a setting. Each setting change names the
- * team settings version shown; one refused as stale reads the team again. Inputs: the project
- * id, the latest team status, a harness name lookup, a reload, the app's navigate for the
- * settings kept in project Settings, and a group to open at. Output: the settings. */
-export function TeamControls({ projectId, status, harness = (id) => id, reload, navigate, group }: {
+ * team settings version shown; one refused as stale reads the team again. The harnesses and
+ * agent access are changed in place and saved as project Settings saves them. Inputs: the
+ * project id, the latest team status, a reload, the project's data for the team and access
+ * rows, and a group to open at. Output: the settings. */
+export function TeamControls({ projectId, status, reload, data, group }: {
   projectId: string;
   status: TeamStatus;
-  harness?: (id: string) => string;
   reload: () => void;
-  navigate?: (path: string) => void;
+  data?: TeamProject;
   group?: SettingGroupId | null;
 }) {
   const [warm, setWarm] = useState<Held<boolean> | null>(null);
@@ -466,7 +460,6 @@ export function TeamControls({ projectId, status, harness = (id) => id, reload, 
   const words = findWords(find);
   const kept = matchingGroups(find);
   const prefix = `set-${projectId}`;
-  const settings = `/projects/${encodeURIComponent(projectId)}/settings`;
   const save = (send: (version: number) => Promise<Result<IntentReceipt>>, missing: string) => teamSave(status, send, missing);
 
   function jump(id: string) {
@@ -664,11 +657,9 @@ export function TeamControls({ projectId, status, harness = (id) => id, reload, 
       <div className="set-groups">
         {words !== "" && kept.length === 0 && <p className="pj-muted" role="status">No setting matches "{find.trim()}".</p>}
         <SettingGroup group={model} prefix={prefix}>
-          <SettingRow label="Master and sub-agent harnesses">
-            <span className="set-label">Master and sub-agent harnesses</span>
-            {navigate && <span className="set-ctl"><Button size="small" onClick={() => navigate(`${settings}?section=team`)}>Change in Settings, Team</Button></span>}
-            <span className="tg-terminal-note">{displayText(teamLine(status, harness))} The team is kept in the project's Settings; a change reaches agents started after you save it.</span>
-          </SettingRow>
+          <MasterHarnessSetting data={data} label="Master harness" id={`${prefix}-master-harness`}
+            helper="The master plans, hands out tasks and merges. A change reaches the running master as Apply a master harness change says." />
+          <SubHarnessesSetting data={data} prefix={`${prefix}-slots`} />
           <SettingRow label="Keep sub-agents ready">
             <Switch id={`tg-warm-${projectId}`} label={`Keep ${status.min_agents} ${status.min_agents === 1 ? "sub-agent" : "sub-agents"} ready`} checked={checked}
               onChecked={(on) => void toggle(on)} disabledReason={busy ? "Saving the last change." : status.min_agents < 1 ? "The team plan keeps no sub-agents ready." : undefined} />
@@ -692,18 +683,21 @@ export function TeamControls({ projectId, status, harness = (id) => id, reload, 
           </SettingRow>
         </SettingGroup>
         <SettingGroup group={access} prefix={prefix}>
-          <SettingRow label="Agent access">
-            <span className="set-label">Agent access</span>
-            {navigate && <span className="set-ctl"><Button size="small" onClick={() => navigate(`${settings}?section=access`)}>Change in Settings, Agent access</Button></span>}
-            <span className="tg-terminal-note">Sandboxed keeps agents in their worktree. Full access lets them run as you, and lets the master merge its own conflict fixes into main.</span>
-          </SettingRow>
-          <SettingRow label="When the master resolves conflicts">
-            <span className="set-label" aria-hidden={status.master_lands ? true : undefined}>When the master resolves conflicts</span>
+          <AgentAccessSetting projectId={projectId} notify={data?.notify} reload={reload} />
+          <SettingRow label={MERGE_INTO_MAIN} wide>
+            <span className="set-label" aria-hidden={status.master_lands ? true : undefined}>{MERGE_INTO_MAIN}</span>
             {status.master_lands
-              ? <Segmented label="When the master resolves conflicts" value={masterLandsHeld ?? status.master_lands} onValue={(choice) => { if (!busy) void chooseMasterLands(choice); }}
-                options={[{ value: "merges", label: "Merge into main itself" }, { value: "waits", label: "Wait for my Accept" }]} />
+              ? <div className="radio-cards" role="radiogroup" aria-label={MERGE_INTO_MAIN}>
+                <RadioCard name={`${prefix}-merge`} value="merges" checked={(masterLandsHeld ?? status.master_lands) === "merges"}
+                  onChecked={() => { if (!busy) void chooseMasterLands("merges"); }}
+                  title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
+                  details={["Finished work lands on main as soon as the master has resolved it and its checks pass."]} />
+                <RadioCard name={`${prefix}-merge`} value="waits" checked={(masterLandsHeld ?? status.master_lands) === "waits"}
+                  onChecked={() => { if (!busy) void chooseMasterLands("waits"); }}
+                  title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
+              </div>
               : <span className="tg-terminal-note">Only at Full access.</span>}
-            <span className="tg-terminal-note">Merge lands the master's own fix of a conflict on main with no Accept from you, and closes the change sets it fixed. Activity lists each merge.</span>
+            <span className="tg-terminal-note">Each merge shows in Activity and can be undone. Sandboxed keeps today's limits.</span>
           </SettingRow>
           <SettingRow label="Ask me before merging into the master's branch">
             <span className="set-label" aria-hidden="true">Ask me before merging into the master's branch</span>
@@ -717,6 +711,10 @@ export function TeamControls({ projectId, status, harness = (id) => id, reload, 
             <Segmented label="Agent branches" value={branchMode ?? status.agent_branches ?? "named"} onValue={(choice) => { if (!busy) void branches(choice); }}
               options={[{ value: "named", label: "Named branch" }, { value: "detached", label: "Detached" }]} />
             <span className="tg-terminal-note">Named branch gives each new agent its own branch: a harness's is named after its task, crazyagent/&lt;task&gt;. Detached keeps the older detached HEAD.</span>
+          </SettingRow>
+          <SettingRow label={RESTARTS_FROM_MAIN}>
+            <span className="set-label">{RESTARTS_FROM_MAIN}</span>
+            <span className="set-ctl"><span className="badge">Always</span></span>
           </SettingRow>
           <SettingRow label="Master's branch" wide>
             <form className="pj-row" aria-label="Master's branch" onSubmit={(event) => { event.preventDefault(); void saveMasterBranch((masterBranch ?? status.master_branch ?? "").trim() || null); }}>

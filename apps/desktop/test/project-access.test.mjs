@@ -91,11 +91,17 @@ test("Settings says beside the level choice that lowering it stops agents runnin
 test("agent access saves at the version the page read, and a stale save reads the saved access again", () => {
   assert.match(settings.ACCESS_STALE, /Agent access changed since you opened it\. The page now shows the saved access/);
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  const shared = page.slice(page.indexOf("export async function saveAccess("));
+  assert.match(shared, /saveAgentPolicy\(projectId, policy, view\.version, nextGeneration\(\)\)/);
+  assert.match(shared, /if \(savedStale\(result\)\) \{\n    const fresh = await loadAgentPolicy\(projectId\);/, "the stale save reads the access and its version again");
+  assert.match(shared, /fresh\.kind === "ok" \? \{ note: ACCESS_STALE, fresh: fresh\.value \}/);
+  assert.ok(shared.indexOf("savedStale(result)") >= 0 && shared.indexOf("savedStale(result)") < shared.indexOf("failureCopy(result)"), "before the plain refusal copy");
   const save = page.slice(page.indexOf("  async function save() {\n    if (!view) return;"));
-  assert.match(save, /saveAgentPolicy\(data\.id, policyOf\(view, access, network, allowed, ideGitHooks\), view\.version, nextGeneration\(\)\)/);
-  assert.match(save, /if \(savedStale\(result\)\) \{\n      const fresh = await loadAgentPolicy\(data\.id\);/, "the stale save reads the access and its version again");
-  assert.match(save, /seed\(fresh\.value\);\n      return setNote\(ACCESS_STALE\);/);
-  assert.ok(save.indexOf("savedStale(result)") >= 0 && save.indexOf("savedStale(result)") < save.indexOf("failureCopy(result)"), "before the plain refusal copy");
+  assert.match(save, /saveAccess\(data\.id, view, policyOf\(view, access, network, allowed, ideGitHooks\)\)/);
+  assert.match(save, /if \(saved\.fresh\) seed\(saved\.fresh\);\n    setNote\(saved\.note\);/);
+  const rows = readFileSync(new URL("../src/screens/team/setup-rows.tsx", import.meta.url), "utf8");
+  assert.match(rows, /saveAccess\(projectId, view, policyOf\(view, access, view\.network, view\.toolchains\.map\(\(row\) => row\.allowed\), view\.ide_git_hooks\)\)/,
+    "Agent settings saves access through the same save, keeping the saved network and toolchains");
   const client = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
   assert.match(client, /export interface PolicyView \{[\s\S]*?\n  version: number;\n\}/);
   assert.match(client, /call<IntentReceipt>\("desktop_set_project_agent_policy", \{ id, version, policy, generation \}\)/);

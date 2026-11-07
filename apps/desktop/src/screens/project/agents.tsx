@@ -128,8 +128,7 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     {team.result === undefined && <p className="pj-muted" role="status">Loading...</p>}
     {team.result?.kind === "not_ready" && <NotReady what="the live team isn't in this build." />}
     {team.result?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team.result)}</p>}
-    {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam}
-      navigate={data.navigate} group={opened.group} />}
+    {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} reload={data.reloadTeam} data={data} group={opened.group} />}
   </div>;
   return <div className="pj-stack">
     <div className="pj-row between">{viewSwitch}</div>
