@@ -292,6 +292,19 @@ export function saveInstructionSettings(projectId: string, settings: Instruction
  * read them, once it shows the saved ones again. */
 export const AGENT_SETTINGS_STALE = "These agent settings changed since you opened them. The page now shows the saved ones; make your change again.";
 
+/** What the agent settings say after a save the engine could not confirm, once the page
+ * shows the saved ones again. */
+export const AGENT_SETTINGS_UNCONFIRMED = "CrazyAgent couldn't confirm these agent settings were saved. The page now shows the saved ones; check them before you change them again.";
+
+/** What the agent settings page does after a save: reads the settings again after one that
+ * landed or one refused as stale, and says what happened. Input: the save's result. Output:
+ * whether to read the settings again, and the failure to show, empty for none. */
+export function afterSettingsSave(result: Result<InstructionView>): { reload: boolean; failure: string } {
+  if (result.kind === "ok") return { reload: true, failure: "" };
+  if (result.kind === "error" && result.code === "stale_revision") return { reload: true, failure: AGENT_SETTINGS_STALE };
+  return { reload: false, failure: processMessage(result) };
+}
+
 /** The version an agent settings save names: the one read, or null when the stored settings
  * could not be read and the save replaces them. Input: the read. Output: the version. */
 export function settingsSaveVersion(settings: { kind: string; value?: InstructionView }): number | null {

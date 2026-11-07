@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
 import { type ImportFile, type Nudges } from "../engine-client";
 import {
-  AGENT_SETTINGS_STALE, DEFAULT_INSTRUCTION_SETTINGS, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport,
+  DEFAULT_INSTRUCTION_SETTINGS, afterSettingsSave, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport,
   defaultProcess, flagWords, importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadProcess, processMessage,
   processTextError, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionSettings,
   type InstructionView, type SavedText, type SkillEntry,
@@ -185,13 +185,10 @@ export function AgentSettings({ projectId }: { projectId: string }) {
     setBusy(true);
     const result = session.noteResult(await saveInstructionSettings(projectId, next, settingsSaveVersion(settings)));
     setBusy(false);
-    if (result.kind === "ok") {
-      session.showToast("Agent settings saved. Agents started from now on follow them.");
-      reload();
-    } else if (result.kind === "error" && result.code === "stale_revision") {
-      reload();
-      setFailure(AGENT_SETTINGS_STALE);
-    } else setFailure(processMessage(result));
+    if (result.kind === "ok") session.showToast("Agent settings saved. Agents started from now on follow them.");
+    const after = afterSettingsSave(result);
+    if (after.reload) reload();
+    setFailure(after.failure);
   };
   return <AgentSettingsView settings={settings} busy={busy} failure={failure} onSave={(next) => void store(next)} />;
 }

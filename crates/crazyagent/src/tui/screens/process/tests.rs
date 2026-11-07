@@ -922,6 +922,83 @@ fn a_stale_agent_setting_reads_the_saved_settings_again_and_the_next_change_name
     );
 }
 
+/// A settings save the engine could not confirm may have landed, so the page reads the
+/// settings and their version again before the next change, which then names that version.
+#[test]
+fn a_settings_save_the_engine_cannot_confirm_reads_the_settings_again_before_the_next_change() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let mut shell = opened(
+        Scope::Project {
+            id: project.clone(),
+            name: "Harbor Notes".into(),
+        },
+        "",
+    );
+    shell.key(Key::Ctrl('t'));
+    let unconfirmed = ProcessQuery::SaveSettings {
+        project: project.clone(),
+        settings: InstructionSettings {
+            mode: Mode::Both,
+            transcripts: false,
+            edits: EditDelivery::NextMessage,
+        },
+        version: Some(0),
+    };
+    assert_eq!(requests(&mut shell), vec![unconfirmed.clone()]);
+    shell.arrive(settings(unconfirmed, Err("process_outcome_unknown")));
+    let read = ProcessQuery::Settings {
+        project: project.clone(),
+    };
+    assert_eq!(
+        requests(&mut shell),
+        vec![read.clone()],
+        "the page reads what is really stored"
+    );
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("couldn't confirm these agent settings were saved"),
+        "{shown}"
+    );
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "no change goes out before the settings are read again"
+    );
+    let landed = InstructionSettings {
+        mode: Mode::Both,
+        transcripts: false,
+        edits: EditDelivery::NextMessage,
+    };
+    shell.arrive(settings(read, Ok(at(landed, 1))));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::Adoption {
+            project: project.clone()
+        }]
+    );
+    shell.arrive(adoption_reply(&project, Ok(no_agents(&project))));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Keep transcripts for headless Claude runs: Off"),
+        "{shown}"
+    );
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::SaveSettings {
+            project,
+            settings: InstructionSettings {
+                mode: Mode::Both,
+                transcripts: true,
+                edits: EditDelivery::NextMessage,
+            },
+            version: Some(1),
+        }],
+        "the next change names the stored version, so it is never refused as stale"
+    );
+}
+
 #[test]
 fn the_app_page_has_no_agent_settings() {
     let mut shell = opened(Scope::App, "");

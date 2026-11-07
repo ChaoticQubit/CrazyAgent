@@ -298,9 +298,26 @@ test("an agent settings save names the version the page read, and a save refused
   assert.match(listed, /"stale_revision"/, "the engine can refuse a settings save as stale");
   const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
   assert.match(source, /saveInstructionSettings\(projectId, next, settingsSaveVersion\(settings\)\)/);
-  assert.match(source, /result\.code === "stale_revision"\) \{\s*reload\(\);\s*setFailure\(AGENT_SETTINGS_STALE\);/);
+  assert.deepEqual(client.afterSettingsSave({ kind: "error", code: "stale_revision", message: "" }),
+    { reload: true, failure: client.AGENT_SETTINGS_STALE }, "a stale save reads the saved settings again and says so");
+  assert.match(source, /const after = afterSettingsSave\(result\);\s*if \(after\.reload\) reload\(\);\s*setFailure\(after\.failure\);/);
   const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(lib, /async fn desktop_save_instruction_settings\([^)]*version: Option<u64>/);
+});
+
+test("a settings save the engine cannot confirm reads the saved settings and their version again, as the TUI does", () => {
+  const read = { settings: { mode: "both", transcripts: false, edits: "next_message" }, version: 1 };
+  assert.deepEqual(client.afterSettingsSave({ kind: "ok", value: read }), { reload: true, failure: "" });
+  assert.deepEqual(client.afterSettingsSave({ kind: "error", code: "process_outcome_unknown", message: "" }),
+    { reload: true, failure: client.AGENT_SETTINGS_UNCONFIRMED }, "a save that may have landed reads what is stored before the next one");
+  const busy = { kind: "error", code: "instruction_settings_save_unavailable", message: "" };
+  assert.deepEqual(client.afterSettingsSave(busy), { reload: false, failure: client.processMessage(busy) },
+    "a save that wrote nothing keeps the settings read and says to change it again");
+  const title = "CrazyAgent couldn't confirm these agent settings were saved.";
+  const detail = "The page now shows the saved ones; check them before you change them again.";
+  assert.equal(client.AGENT_SETTINGS_UNCONFIRMED, `${title} ${detail}`);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/process.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${title}"`) && tui.includes(`"${detail}"`), "the TUI says the same");
 });
 
 test("picking an instructions mode, the transcript switch or an edit choice saves the whole setting, never a files field", async () => {
