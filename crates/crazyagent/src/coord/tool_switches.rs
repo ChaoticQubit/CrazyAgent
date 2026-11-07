@@ -15,7 +15,7 @@ const GLOBAL: &str = "";
 
 /// The engine's own tools (Q11, Q12), in the order the Plugins page lists them, each with
 /// the one line it shows.
-pub const BUILTIN_TOOLS: [(&str, &str); 12] = [
+pub const BUILTIN_TOOLS: [(&str, &str); 13] = [
     (
         "start_work",
         "Start a unit of work and claim the files, modules or domains it touches.",
@@ -49,6 +49,10 @@ pub const BUILTIN_TOOLS: [(&str, &str); 12] = [
     ("recall", "Search the memories agents may read."),
     ("sessions", "Search or list past conversations."),
     ("session", "Read one past conversation a page at a time."),
+    (
+        "log_activity",
+        "Log a new phase of the work or a finished test run to the project activity.",
+    ),
 ];
 
 /// One tool's switch: listed and callable, switched off, or deleted from the list until

@@ -481,6 +481,12 @@ pub fn team_tools_section(off: &[String]) -> String {
         }
     }
     section.push_str("Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence.\nEvery question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.\nBranches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.\n");
+    if !off
+        .iter()
+        .any(|tool| tool == crate::team::tool::ACTIVITY_TOOL)
+    {
+        section.push_str("When you start a new phase of the work (for example architecture, building, testing) or finish a test run, call log_activity with the goal it serves and one line saying what happened.\n");
+    }
     assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
     section
 }

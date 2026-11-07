@@ -15,8 +15,16 @@ pub const LISTED_BYTES_MAX: usize = 48 * 1024;
 const ACTOR_BYTES_MAX: usize = 120;
 /// The most bytes of a change set id kept with an event.
 const CHANGE_SET_BYTES_MAX: usize = 128;
-/// The most events one project keeps; the oldest go first.
+/// The most events one project keeps, split between the engine's and the owner's events
+/// and the agents' (`AGENT_LOGGED_KEPT_MAX`); the oldest of each share go first.
 const KEPT_PER_PROJECT_MAX: i64 = 10_000;
+/// The share of `KEPT_PER_PROJECT_MAX` for the phases and test runs agents log, which
+/// only push out their own oldest, never another kind of event.
+const AGENT_LOGGED_KEPT_MAX: i64 = 1_000;
+/// The most phases and test runs one caller may log in `LOGGED_WINDOW_MS`.
+pub const LOGGED_PER_WINDOW_MAX: i64 = 30;
+/// The window a caller's logged rows are counted over: one hour.
+const LOGGED_WINDOW_MS: i64 = 3_600_000;
 /// Who a research run event names as its actor.
 pub const RESEARCH_ACTOR: &str = "Research";
 /// Who an event names when the owner acted.
@@ -29,6 +37,8 @@ pub const MASTER_ACTOR: &str = "Master";
 const _: () = assert!(LISTED_BYTES_MAX + 4096 <= crate::protocol::FRAME_BYTES_MAX);
 const _: () = assert!(TEXT_BYTES_MAX + GOAL_BYTES_MAX + ACTOR_BYTES_MAX + 512 < LISTED_BYTES_MAX);
 const _: () = assert!(LIST_MAX as i64 <= KEPT_PER_PROJECT_MAX);
+const _: () = assert!(AGENT_LOGGED_KEPT_MAX > 0 && AGENT_LOGGED_KEPT_MAX < KEPT_PER_PROJECT_MAX);
+const _: () = assert!(LOGGED_PER_WINDOW_MAX > 0 && LOGGED_PER_WINDOW_MAX <= AGENT_LOGGED_KEPT_MAX);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS project_activity (
@@ -44,6 +54,14 @@ CREATE TABLE IF NOT EXISTS project_activity (
 );
 CREATE INDEX IF NOT EXISTS project_activity_at ON project_activity(project, at_ms DESC);
 CREATE TABLE IF NOT EXISTS project_activity_backfill (project TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS project_activity_logged (
+    project TEXT NOT NULL,
+    agent INTEGER NOT NULL,
+    master INTEGER NOT NULL,
+    at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS project_activity_logged_by
+    ON project_activity_logged(project, agent, master, at_ms);
 ";
 
 /// What happened in a project, one name per kind of event the engine sees.
@@ -95,6 +113,11 @@ impl ActivityKind {
         Self::Phase,
         Self::Test,
     ];
+
+    /// Whether agents log the kind themselves with `log_activity`: a phase or a test run.
+    pub fn agent_logged(self) -> bool {
+        matches!(self, Self::Phase | Self::Test)
+    }
 
     /// The stored name of the kind, the same as its JSON name.
     pub fn name(self) -> &'static str {
@@ -181,10 +204,12 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
 }
 
 /// Records one event: the actor, text and goal go through the change set subject's scrub
-/// (`shown`) and are cut to their bounds, and the project keeps its Created event and its
-/// newest `KEPT_PER_PROJECT_MAX` events in all. Takes the database, the project, the event
-/// and the time in ms. Returns the event id, or `activity_item_invalid` for an empty actor
-/// or text.
+/// (`shown`) and are cut to their bounds. The project keeps `KEPT_PER_PROJECT_MAX` events
+/// in two shares that never push each other out: its Created event with the newest other
+/// events of the engine and the owner, `KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX` in
+/// all, and the newest `AGENT_LOGGED_KEPT_MAX` phases and test runs agents logged. Takes
+/// the database, the project, the event and the time in ms. Returns the event id, or
+/// `activity_item_invalid` for an empty actor or text.
 pub fn record(
     db: &Connection,
     project: &ProjectId,
@@ -225,6 +250,16 @@ pub fn record(
     .map_err(state)?;
     let id = db.last_insert_rowid();
     assert!(id > 0);
+    let (phase, test) = (ActivityKind::Phase.name(), ActivityKind::Test.name());
+    if item.kind.agent_logged() {
+        db.execute(
+            "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
+             WHERE project=?1 AND kind IN (?3,?4) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
+            params![project.as_str(), AGENT_LOGGED_KEPT_MAX, phase, test],
+        )
+        .map_err(state)?;
+        return Ok(id);
+    }
     let created: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM project_activity WHERE project=?1 AND kind=?2",
@@ -234,15 +269,58 @@ pub fn record(
         .map_err(state)?;
     db.execute(
         "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
-         WHERE project=?1 AND kind<>?3 ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
+         WHERE project=?1 AND kind NOT IN (?3,?4,?5) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
         params![
             project.as_str(),
-            (KEPT_PER_PROJECT_MAX - created).max(0),
-            ActivityKind::Created.name()
+            (KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX - created).max(0),
+            ActivityKind::Created.name(),
+            phase,
+            test
         ],
     )
     .map_err(state)?;
     Ok(id)
+}
+
+/// Records one phase or test run a caller logged with `log_activity`, unless that caller
+/// already logged `LOGGED_PER_WINDOW_MAX` of them in the last hour; the count and the row
+/// are written in one transaction, and counts older than the hour are dropped. Takes the
+/// database, the project, the caller's id and whether it is the master, the event and the
+/// time in ms. Returns the event id, or None when the caller is over its rate.
+pub fn record_logged(
+    db: &Connection,
+    project: &ProjectId,
+    (agent, master): (i64, bool),
+    item: &NewActivity<'_>,
+    now_ms: i64,
+) -> Result<Option<i64>, EngineError> {
+    assert!(item.kind.agent_logged());
+    let tx = db.unchecked_transaction().map_err(state)?;
+    tx.execute(
+        "DELETE FROM project_activity_logged WHERE at_ms <= ?1",
+        [now_ms.saturating_sub(LOGGED_WINDOW_MS)],
+    )
+    .map_err(state)?;
+    let recent: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM project_activity_logged WHERE project=?1 AND agent=?2 AND master=?3",
+            params![project.as_str(), agent, master],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if recent >= LOGGED_PER_WINDOW_MAX {
+        tx.commit().map_err(state)?;
+        return Ok(None);
+    }
+    let id = record(&tx, project, item, now_ms)?;
+    tx.execute(
+        "INSERT INTO project_activity_logged(project,agent,master,at_ms) VALUES (?1,?2,?3,?4)",
+        params![project.as_str(), agent, master, now_ms],
+    )
+    .map_err(state)?;
+    tx.commit().map_err(state)?;
+    assert!(recent < LOGGED_PER_WINDOW_MAX);
+    Ok(Some(id))
 }
 
 /// Records one event for a writer whose own action must never fail on it: a failure is
@@ -875,7 +953,11 @@ fn known(db: &Connection, project: &ProjectId, past: &Past) -> Result<bool, Engi
 /// Clears a removed project's events and its backfill mark. Runs inside the removal's
 /// transaction. Takes the database and the project. Returns Ok or the SQLite failure.
 pub fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
-    for table in ["project_activity", "project_activity_backfill"] {
+    for table in [
+        "project_activity",
+        "project_activity_backfill",
+        "project_activity_logged",
+    ] {
         db.execute(
             &format!("DELETE FROM {table} WHERE project=?1"),
             [project.as_str()],
