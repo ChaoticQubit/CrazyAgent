@@ -170,6 +170,18 @@ impl NativeBridge {
         }))
     }
 
+    /// Reads what a launch now gives every agent of the project, as the engine renders it
+    /// for the project's mode, run without the bridge lock. Input: the project id. Output:
+    /// the text, or the code of the part the engine cannot read.
+    pub fn given_text(&self, project_id: String) -> Result<Unlocked<String>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client.given_text(project).await.map_err(process_error)
+        }))
+    }
+
     /// Reads what one team agent received at its last launch, run without the bridge lock.
     /// Inputs: the project id and the agent id, or none for the project's newest master.
     /// Output: the read-only view.

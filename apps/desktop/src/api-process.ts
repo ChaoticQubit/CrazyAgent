@@ -176,6 +176,13 @@ export function defaultProcess(): Promise<Result<string>> {
   return call<string>("desktop_default_process");
 }
 
+/** Reads the instructions a project's agents get, composed by the engine as launches compose
+ * them for the project's mode. Input: the project id. Output: the text, empty when agents get
+ * none. */
+export function loadGivenText(projectId: string): Promise<Result<string>> {
+  return call<string>("desktop_process_given", { projectId });
+}
+
 /** A skill the tags can name: its engine id, its name and its one-line description. */
 export interface SkillEntry {
   id: string;

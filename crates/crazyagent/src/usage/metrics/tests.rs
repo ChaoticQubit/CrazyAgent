@@ -1,4 +1,7 @@
 use super::*;
+use crate::config::ModelAccess;
+use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
+use crate::usage::capture::{Attribution, RunKind, count_reported};
 use crate::usage::report::ROWS_MAX;
 use rusqlite::params;
 
@@ -22,14 +25,13 @@ fn task(
     agent: i64,
     status: &str,
     prompt: &str,
-    session: Option<&str>,
     created_ms: i64,
     finished_ms: Option<i64>,
 ) -> i64 {
     db.execute(
-        "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms,finished_ms,session)
-         VALUES (?1,'owner','claude-code',1,?2,?3,?4,?5,?6,?7)",
-        params![project, prompt, status, agent, created_ms, finished_ms, session],
+        "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms,finished_ms)
+         VALUES (?1,'owner','claude-code',1,?2,?3,?4,?5,?6)",
+        params![project, prompt, status, agent, created_ms, finished_ms],
     )
     .unwrap();
     db.last_insert_rowid()
@@ -78,16 +80,7 @@ fn tasks_count_running_and_waiting_now_and_done_or_failed_in_the_range() {
         ("beta", "running", None),
         ("beta", "done", Some(MIDNIGHT + HOUR)),
     ] {
-        task(
-            &db,
-            project,
-            1,
-            status,
-            "Work",
-            None,
-            MIDNIGHT - DAY,
-            finished_ms,
-        );
+        task(&db, project, 1, status, "Work", MIDNIGHT - DAY, finished_ms);
     }
     let one = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap();
     assert_eq!(
@@ -111,137 +104,297 @@ fn tasks_count_running_and_waiting_now_and_done_or_failed_in_the_range() {
     );
 }
 
-/// A run is one agent session. It is titled by the latest team task of that agent that ran
-/// in the session, matched exactly (Claude) or as the end of a Codex rollout name; a master
-/// session or another agent's task leaves it untitled. Newest runs come first.
+const MINUTE: i64 = 60 * 1000;
+
+/// A project whose team runs Codex and Claude Code sub-agents, as onboarding stores one.
+/// Input: the project. Output: the stored setup.
+fn setup(project: &str) -> StoredSetup {
+    let slot = |harness: &str| HarnessSlot {
+        harness: harness.into(),
+        agents: 2,
+        tools: true,
+    };
+    StoredSetup {
+        project_id: ProjectId::new(project).unwrap(),
+        name: "Metrics".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![slot("codex"), slot("claude-code")],
+            min_agents: 1,
+            max_agents: 4,
+        },
+        documents: vec![],
+        folder: "/private/tmp/unused".into(),
+        created_ms: 1,
+        revision: 1,
+    }
+}
+
+/// Queues a team task through the engine's own admission, which records the master's live
+/// session on it, never the agent's. Inputs: the store, the setup, the harness, the prompt
+/// and the time. Output: the task id.
+fn admitted(db: &Connection, setup: &StoredSetup, harness: &str, prompt: &str, at: i64) -> i64 {
+    let tx = db.unchecked_transaction().unwrap();
+    let id = crate::team::admit(
+        &tx,
+        &ModelAccess::default(),
+        setup,
+        Some(harness),
+        prompt,
+        crate::team::TaskSource::Owner,
+        None,
+        at,
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    id
+}
+
+/// Starts a task on an agent with the statement the team runtime runs at a start.
+/// Inputs: the store, the task, the agent and the time.
+fn started(db: &Connection, task: i64, agent: i64, at: i64) {
+    db.execute(
+        "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL WHERE id=?1",
+        params![task, agent, at],
+    )
+    .unwrap();
+}
+
+/// Ends a running task as done with the statement the team runtime runs when its agent
+/// reports. Inputs: the store, the task and the time.
+fn finished(db: &Connection, task: i64, at: i64) {
+    db.execute(
+        "UPDATE team_tasks SET status=?2, agent=CASE WHEN ?2='queued' THEN NULL ELSE agent END, result=COALESCE(?3,result), error=?4, finished_ms=?5, output_bytes=?6 WHERE id=?1 AND status='running'",
+        params![task, "done", "Done.", None::<String>, at, 5],
+    )
+    .unwrap();
+}
+
+/// Counts tokens a team agent's harness reported in one session, through the attribution
+/// and the counting the team runtime uses; agent 0 is the project's master.
+/// Inputs: the store, the project, the agent, its harness and account, the session, the
+/// input and output tokens and the time.
+#[allow(clippy::too_many_arguments)]
+fn counted(
+    db: &Connection,
+    project: &str,
+    agent: i64,
+    harness: &str,
+    account: &str,
+    session: &str,
+    input: u64,
+    output: u64,
+    at: i64,
+) {
+    let attribution = crate::usage::service::team_attribution(
+        agent,
+        project,
+        agent == 0,
+        harness,
+        Some(account),
+        &ModelAccess::default(),
+    );
+    let tokens = Tokens {
+        input,
+        output,
+        cache_read: 0,
+        cache_write: 0,
+    };
+    count_reported(db, &attribution, tokens, session, at).unwrap();
+}
+
+/// A run is one agent session, titled by the latest task its agent ran while the run used
+/// tokens: started by the run's last counted tokens and not finished before the run's first
+/// hour. The task's session is the master's, so it never decides. Another agent's task, a
+/// master run and a run before the range get no title. Newest runs come first. The read for
+/// every project titles each project's runs by that project's tasks only.
 #[test]
-fn runs_are_agent_sessions_titled_by_their_latest_task_newest_first() {
+fn runs_are_titled_by_the_task_their_agent_ran_while_they_used_tokens_newest_first() {
     let (_directory, db) = database();
-    let rollout = "rollout-2026-11-07T00-00-00-abc123";
-    used(
+    let alpha_setup = setup("alpha");
+    let login = admitted(
         &db,
-        MIDNIGHT + HOUR,
-        "alpha",
-        "acct-a",
-        "team-7",
+        &alpha_setup,
         "claude-code",
+        "Fix the login\nwith details",
+        MIDNIGHT + 5 * MINUTE,
+    );
+    started(&db, login, 7, MIDNIGHT + 10 * MINUTE);
+    let other = admitted(
+        &db,
+        &alpha_setup,
+        "claude-code",
+        "Another agent's work",
+        MIDNIGHT,
+    );
+    started(&db, other, 9, MIDNIGHT);
+    counted(
+        &db,
+        "alpha",
+        7,
+        "claude-code",
+        "acct-a",
         "c-1",
         100,
         10,
-        5000,
-        50,
+        MIDNIGHT + 20 * MINUTE,
     );
-    used(
+    counted(
         &db,
-        MIDNIGHT + 2 * HOUR,
         "alpha",
-        "acct-a",
-        "team-7",
+        7,
         "claude-code",
+        "acct-a",
         "c-1",
         200,
         20,
-        6000,
-        0,
+        MIDNIGHT + 38 * MINUTE,
     );
-    used(
+    finished(&db, other, MIDNIGHT + 30 * MINUTE);
+    finished(&db, login, MIDNIGHT + 40 * MINUTE);
+    let checkout = admitted(
         &db,
-        MIDNIGHT + 5 * HOUR,
+        &alpha_setup,
+        "claude-code",
+        "Checkout form validation\nmore words",
+        MIDNIGHT + HOUR,
+    );
+    started(&db, checkout, 7, MIDNIGHT + HOUR + 10 * MINUTE);
+    counted(
+        &db,
         "alpha",
-        "acct-b",
-        "team-8",
-        "codex",
-        rollout,
+        7,
+        "claude-code",
+        "acct-a",
+        "c-2",
         300,
         30,
-        900,
-        0,
+        MIDNIGHT + HOUR + 30 * MINUTE,
     );
-    used(
+    finished(&db, checkout, MIDNIGHT + HOUR + 50 * MINUTE);
+    let rename = admitted(
         &db,
-        MIDNIGHT + 3 * HOUR,
-        "alpha",
-        "acct-a",
-        "master-alpha",
+        &alpha_setup,
         "claude-code",
+        "Rename the helper",
+        MIDNIGHT + 2 * HOUR,
+    );
+    started(&db, rename, 7, MIDNIGHT + 2 * HOUR + 5 * MINUTE);
+    counted(
+        &db,
+        "alpha",
+        7,
+        "claude-code",
+        "acct-a",
+        "c-3",
+        40,
+        4,
+        MIDNIGHT + 2 * HOUR + 8 * MINUTE,
+    );
+    finished(&db, rename, MIDNIGHT + 2 * HOUR + 10 * MINUTE);
+    let retry = admitted(
+        &db,
+        &alpha_setup,
+        "claude-code",
+        "Add the retry",
+        MIDNIGHT + 2 * HOUR + 20 * MINUTE,
+    );
+    started(&db, retry, 7, MIDNIGHT + 2 * HOUR + 30 * MINUTE);
+    counted(
+        &db,
+        "alpha",
+        7,
+        "claude-code",
+        "acct-a",
+        "c-4",
+        50,
+        5,
+        MIDNIGHT + 2 * HOUR + 45 * MINUTE,
+    );
+    finished(&db, retry, MIDNIGHT + 2 * HOUR + 50 * MINUTE);
+    counted(
+        &db,
+        "alpha",
+        0,
+        "claude-code",
+        "acct-a",
         "m-1",
         40,
         4,
-        0,
-        0,
+        MIDNIGHT + 3 * HOUR,
     );
-    used(
+    let rollout = "rollout-2026-11-07T04-00-00-0199aa";
+    let calendar = admitted(
         &db,
-        MIDNIGHT + 4 * HOUR,
-        "beta",
-        "acct-a",
-        "team-9",
-        "claude-code",
-        "b-1",
-        1,
-        1,
-        0,
-        0,
+        &alpha_setup,
+        "codex",
+        "Calendar API endpoints",
+        MIDNIGHT + 3 * HOUR + 50 * MINUTE,
     );
-    used(
-        &db,
-        MIDNIGHT - HOUR,
-        "alpha",
-        "acct-a",
-        "team-7",
-        "claude-code",
-        "old",
-        1,
-        1,
-        0,
-        0,
-    );
-    task(
-        &db,
-        "alpha",
-        7,
-        "done",
-        "Fix the login\nwith details",
-        Some("c-1"),
-        MIDNIGHT,
-        Some(MIDNIGHT + HOUR),
-    );
-    let newest = task(
-        &db,
-        "alpha",
-        7,
-        "done",
-        "Checkout form validation\nmore words",
-        Some("c-1"),
-        MIDNIGHT + HOUR,
-        Some(MIDNIGHT + 2 * HOUR),
-    );
-    let calendar = task(
+    started(&db, calendar, 8, MIDNIGHT + 4 * HOUR);
+    counted(
         &db,
         "alpha",
         8,
-        "running",
-        "Calendar API endpoints",
-        Some("abc123"),
-        MIDNIGHT + 4 * HOUR,
-        None,
+        "codex",
+        "acct-b",
+        rollout,
+        300,
+        30,
+        MIDNIGHT + 4 * HOUR + 30 * MINUTE,
     );
-    task(
+    counted(
         &db,
         "alpha",
-        9,
-        "done",
-        "Another agent in the same session",
-        Some("m-1"),
-        MIDNIGHT,
-        Some(MIDNIGHT + HOUR),
+        7,
+        "claude-code",
+        "acct-a",
+        "old",
+        1,
+        1,
+        MIDNIGHT - HOUR,
     );
+    let beta_docs = admitted(
+        &db,
+        &setup("beta"),
+        "claude-code",
+        "Beta docs",
+        MIDNIGHT + 3 * HOUR + 40 * MINUTE,
+    );
+    started(&db, beta_docs, 9, MIDNIGHT + 3 * HOUR + 50 * MINUTE);
+    counted(
+        &db,
+        "beta",
+        9,
+        "claude-code",
+        "acct-a",
+        "b-1",
+        1,
+        1,
+        MIDNIGHT + 4 * HOUR,
+    );
+    let sessions: Vec<Option<String>> = db
+        .prepare("SELECT session FROM team_tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(sessions.iter().all(Option::is_none), "{sessions:?}");
     let runs = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap().runs;
     let shown: Vec<_> = runs
         .iter()
         .map(|run| {
             (
                 run.agent.as_str(),
+                run.session.as_str(),
                 run.task,
                 run.title.as_deref(),
                 run.status.as_deref(),
@@ -255,25 +408,233 @@ fn runs_are_agent_sessions_titled_by_their_latest_task_newest_first() {
         [
             (
                 "team-8",
+                rollout,
                 Some(calendar),
                 Some("Calendar API endpoints"),
                 Some("running"),
-                MIDNIGHT + 5 * HOUR,
+                MIDNIGHT + 4 * HOUR + 30 * MINUTE,
                 330
             ),
-            ("master-alpha", None, None, None, MIDNIGHT + 3 * HOUR, 44),
+            (
+                "master-alpha",
+                "m-1",
+                None,
+                None,
+                None,
+                MIDNIGHT + 3 * HOUR,
+                44
+            ),
             (
                 "team-7",
-                Some(newest),
+                "c-4",
+                Some(retry),
+                Some("Add the retry"),
+                Some("done"),
+                MIDNIGHT + 2 * HOUR + 45 * MINUTE,
+                55
+            ),
+            (
+                "team-7",
+                "c-3",
+                Some(rename),
+                Some("Rename the helper"),
+                Some("done"),
+                MIDNIGHT + 2 * HOUR + 8 * MINUTE,
+                44
+            ),
+            (
+                "team-7",
+                "c-2",
+                Some(checkout),
                 Some("Checkout form validation"),
                 Some("done"),
-                MIDNIGHT + 2 * HOUR,
-                380
+                MIDNIGHT + HOUR + 30 * MINUTE,
+                330
+            ),
+            (
+                "team-7",
+                "c-1",
+                Some(login),
+                Some("Fix the login"),
+                Some("done"),
+                MIDNIGHT + 38 * MINUTE,
+                330
             ),
         ]
     );
-    assert_eq!(runs[0].session, rollout);
-    assert_eq!(runs[2].tokens.cache_read, 11_000);
+    let (beta, every): (Vec<_>, Vec<_>) = read(&db, None, MIDNIGHT, NOW)
+        .unwrap()
+        .runs
+        .into_iter()
+        .partition(|run| run.project == "beta");
+    assert_eq!(
+        every, runs,
+        "the read for every project titles alpha's runs the same"
+    );
+    let beta: Vec<_> = beta
+        .iter()
+        .map(|run| {
+            (
+                run.agent.as_str(),
+                run.task,
+                run.title.as_deref(),
+                run.last_ms,
+            )
+        })
+        .collect();
+    assert_eq!(
+        beta,
+        [(
+            "team-9",
+            Some(beta_docs),
+            Some("Beta docs"),
+            MIDNIGHT + 4 * HOUR
+        )],
+        "beta's run is titled by beta's task, never by alpha's task of the same agent id"
+    );
+}
+
+/// A run's end is when its tokens were last counted, not the start of that usage hour: a
+/// run counted at 10:58 ended at 10:58, and counting it again at 11:03 moves its end there,
+/// in the read for one project and in the read for every project.
+#[test]
+fn a_run_ends_when_its_tokens_were_last_counted_not_at_the_start_of_that_hour() {
+    let (_directory, db) = database();
+    counted(
+        &db,
+        "alpha",
+        7,
+        "claude-code",
+        "acct-a",
+        "c-1",
+        10,
+        1,
+        MIDNIGHT + 10 * HOUR + 58 * MINUTE,
+    );
+    let ended = |db: &Connection| read(db, Some(&alpha()), MIDNIGHT, NOW).unwrap().runs[0].last_ms;
+    assert_eq!(ended(&db), MIDNIGHT + 10 * HOUR + 58 * MINUTE);
+    counted(
+        &db,
+        "alpha",
+        7,
+        "claude-code",
+        "acct-a",
+        "c-1",
+        10,
+        1,
+        MIDNIGHT + 11 * HOUR + 3 * MINUTE,
+    );
+    assert_eq!(ended(&db), MIDNIGHT + 11 * HOUR + 3 * MINUTE);
+    let every = read(&db, None, MIDNIGHT, NOW).unwrap().runs;
+    assert_eq!(every[0].last_ms, MIDNIGHT + 11 * HOUR + 3 * MINUTE);
+}
+
+/// A run counted before last-use times were kept has only its usage hours, so its task
+/// window runs to the end of its last hour: the task its agent started at 10:20 titles the
+/// session counted in the 10:00 hour, and a task started at 11:05 does not. Ended stays at
+/// that hour's start, the last time known.
+#[test]
+fn a_run_counted_before_last_use_times_were_kept_is_titled_by_a_task_started_in_its_last_hour() {
+    let (_directory, db) = database();
+    let alpha_setup = setup("alpha");
+    let export = admitted(
+        &db,
+        &alpha_setup,
+        "claude-code",
+        "Fix the export",
+        MIDNIGHT + 10 * HOUR + 15 * MINUTE,
+    );
+    started(&db, export, 7, MIDNIGHT + 10 * HOUR + 20 * MINUTE);
+    finished(&db, export, MIDNIGHT + 10 * HOUR + 40 * MINUTE);
+    let later = admitted(
+        &db,
+        &alpha_setup,
+        "claude-code",
+        "Later work",
+        MIDNIGHT + 11 * HOUR,
+    );
+    started(&db, later, 7, MIDNIGHT + 11 * HOUR + 5 * MINUTE);
+    used(
+        &db,
+        MIDNIGHT + 10 * HOUR,
+        "alpha",
+        "acct-a",
+        "team-7",
+        "claude-code",
+        "c-1",
+        10,
+        1,
+        0,
+        0,
+    );
+    let runs = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap().runs;
+    let shown: Vec<_> = runs
+        .iter()
+        .map(|run| (run.task, run.title.as_deref(), run.last_ms))
+        .collect();
+    assert_eq!(
+        shown,
+        [(Some(export), Some("Fix the export"), MIDNIGHT + 10 * HOUR)]
+    );
+}
+
+/// A read whose rows would not fit one reply frame keeps the newest runs and the largest
+/// accounts and harnesses that do, within `REPORT_BYTES_MAX` encoded bytes: names at their
+/// bounds whose control characters each encode to six bytes are counted as encoded.
+#[test]
+fn a_read_too_large_for_one_reply_keeps_the_newest_runs_and_largest_groups_that_fit() {
+    let (_directory, db) = database();
+    let wide = |bytes: usize, at: usize| format!("{}{at:02}", "\u{1}".repeat(bytes - 2));
+    for at in 0..ROWS_MAX {
+        let attribution = Attribution {
+            kind: RunKind::Agent,
+            project: Some(alpha()),
+            pool: None,
+            account: None,
+            agent: wide(192, at),
+            harness: wide(128, at),
+        };
+        let tokens = Tokens {
+            input: 10 + at as u64,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+        };
+        count_reported(
+            &db,
+            &attribution,
+            tokens,
+            &wide(128, at),
+            MIDNIGHT + HOUR + at as i64 * MINUTE,
+        )
+        .unwrap();
+    }
+    let read = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap();
+    let encoded = serde_json::to_vec(&read).unwrap().len();
+    assert!(
+        encoded <= crate::usage::report::REPORT_BYTES_MAX,
+        "{encoded} bytes"
+    );
+    assert!(
+        !read.runs.is_empty() && read.runs.len() < ROWS_MAX,
+        "{}",
+        read.runs.len()
+    );
+    assert_eq!(read.runs[0].agent, wide(192, ROWS_MAX - 1));
+    assert_eq!(read.harnesses[0].key, wide(128, ROWS_MAX - 1));
+}
+
+/// A range that starts before the epoch is refused, so no span or bar start overflows.
+#[test]
+fn a_range_that_starts_before_the_epoch_is_refused() {
+    let (_directory, db) = database();
+    for since_ms in [i64::MIN, -1] {
+        assert_eq!(
+            read(&db, None, since_ms, NOW).unwrap_err().0,
+            "usage_request_invalid"
+        );
+    }
+    assert!(read(&db, None, 0, NOW).is_ok());
 }
 
 /// Accounts and harnesses rank by the headline, never by cache re-reads, and count the
@@ -505,34 +866,23 @@ fn a_range_that_starts_after_now_is_refused() {
 fn the_read_for_every_project_is_the_sum_of_each_project_and_names_who_used_what() {
     let (_directory, db) = database();
     let beta = ProjectId::new("beta").unwrap();
-    task(
-        &db,
-        "alpha",
-        7,
-        "running",
-        "Alpha work",
-        Some("s1"),
-        MIDNIGHT,
-        None,
-    );
+    task(&db, "alpha", 7, "running", "Alpha work", MIDNIGHT, None);
     task(
         &db,
         "alpha",
         8,
         "done",
         "Alpha done",
-        Some("s2"),
         MIDNIGHT,
         Some(MIDNIGHT + HOUR),
     );
-    task(&db, "beta", 9, "queued", "Beta waits", None, MIDNIGHT, None);
+    task(&db, "beta", 9, "queued", "Beta waits", MIDNIGHT, None);
     task(
         &db,
         "beta",
         10,
         "failed",
         "Beta failed",
-        Some("s4"),
         MIDNIGHT,
         Some(MIDNIGHT + 3 * HOUR),
     );

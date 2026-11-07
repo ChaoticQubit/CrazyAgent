@@ -216,6 +216,7 @@ fn main() {
         "desktop_uncommitted_instruction_import",
         "desktop_commit_instruction_import",
         "desktop_default_process",
+        "desktop_process_given",
         "desktop_agent_instructions",
         "desktop_recovery_banner",
         "desktop_retry_recovery",

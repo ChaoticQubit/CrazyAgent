@@ -1,5 +1,5 @@
 use super::capture::Tokens;
-use super::report::{ROWS_MAX, count, has_table, tokens};
+use super::report::{REPORT_BYTES_MAX, ROWS_MAX, SHARES, count, has_table, tokens};
 use super::{failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -20,9 +20,10 @@ pub struct Bucket {
     pub tokens: Tokens,
 }
 
-/// One run: one agent session, with its tokens in the range, when it last used any, and
-/// the latest team task that ran in it (its id, the prompt's first line and its status),
-/// when one did.
+/// One run: one agent session, with its tokens in the range, when they were last counted
+/// (the start of its last usage hour for a run counted before that time was kept), and the
+/// latest team task its agent ran while it used them (its id, the prompt's first line and
+/// its status), when one did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRow {
@@ -160,16 +161,34 @@ fn series(
     Ok(bars)
 }
 
-/// The latest team task of a run's agent that ran in its session: the session itself
-/// (Claude) or the end of a Codex rollout name after a `-`. Inputs: the store and the run.
-/// Output: its id, title and status, or None.
-fn run_task(db: &Connection, run: &RunRow) -> Result<Option<(i64, String, String)>, EngineError> {
+/// The latest team task the run's agent ran while the run used tokens: started by the
+/// run's last counted tokens, or by the end of its last usage hour for a run counted before
+/// last-use times were kept, and not finished before its first usage hour. The engine keeps
+/// no link from a task to its agent's harness session, only the agent and the task's start
+/// and finish. A master run, or any agent key other than `team-<id>`, has none. Inputs: the
+/// store, the run, the start of its first usage hour and the end of its window. Output: the
+/// task's id, title and status, or None.
+fn run_task(
+    db: &Connection,
+    run: &RunRow,
+    first_ms: i64,
+    until_ms: i64,
+) -> Result<Option<(i64, String, String)>, EngineError> {
+    assert!(first_ms <= until_ms);
+    assert!(run.last_ms <= until_ms);
+    let Some(agent) = run
+        .agent
+        .strip_prefix("team-")
+        .and_then(|id| id.parse::<i64>().ok())
+    else {
+        return Ok(None);
+    };
     db.query_row(
         "SELECT id,prompt,status FROM team_tasks
-         WHERE project=?1 AND 'team-'||agent=?2 AND session IS NOT NULL AND session<>''
-            AND (session=?3 OR substr(?3,-length(session)-1)='-'||session)
-         ORDER BY id DESC LIMIT 1",
-        params![run.project, run.agent, run.session],
+         WHERE project=?1 AND agent=?2 AND started_ms IS NOT NULL AND started_ms<=?4
+            AND (finished_ms IS NULL OR finished_ms>=?3)
+         ORDER BY started_ms DESC,id DESC LIMIT 1",
+        params![run.project, agent, first_ms, until_ms],
         |row| Ok((row.get(0)?, title(&row.get::<_, String>(1)?), row.get(2)?)),
     )
     .optional()
@@ -179,38 +198,48 @@ fn run_task(db: &Connection, run: &RunRow) -> Result<Option<(i64, String, String
 fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<RunRow>, EngineError> {
     let mut statement = db
         .prepare(
-            "SELECT project,agent,session,MAX(hour_ms) AS last,TOTAL(input),TOTAL(output),\
-                TOTAL(cache_read),TOTAL(cache_write)
-             FROM usage_tokens WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
-             GROUP BY project,agent,session ORDER BY last DESC,agent,session LIMIT ?3",
+            "SELECT u.project,u.agent,u.session,\
+                MAX(MAX(u.hour_ms),COALESCE(MAX(s.last_ms),0)) AS last,MIN(u.hour_ms),\
+                TOTAL(u.input),TOTAL(u.output),TOTAL(u.cache_read),TOTAL(u.cache_write),\
+                MAX(s.last_ms)
+             FROM usage_tokens u LEFT JOIN usage_seen s
+                ON s.project=u.project AND s.agent=u.agent AND s.session=u.session
+             WHERE u.hour_ms>=?2 AND (?1 IS NULL OR u.project=?1)
+             GROUP BY u.project,u.agent,u.session ORDER BY last DESC,u.agent,u.session LIMIT ?3",
         )
         .map_err(storage)?;
-    let mut runs: Vec<RunRow> = statement
+    let mut runs: Vec<(RunRow, i64, i64)> = statement
         .query_map(params![project, since_ms, ROWS_MAX as i64], |row| {
-            Ok(RunRow {
-                project: row.get(0)?,
-                agent: row.get(1)?,
-                session: row.get(2)?,
-                task: None,
-                title: None,
-                status: None,
-                last_ms: row.get(3)?,
-                tokens: tokens(row, 4)?,
-            })
+            let last_ms: i64 = row.get(3)?;
+            let seen: Option<i64> = row.get(9)?;
+            Ok((
+                RunRow {
+                    project: row.get(0)?,
+                    agent: row.get(1)?,
+                    session: row.get(2)?,
+                    task: None,
+                    title: None,
+                    status: None,
+                    last_ms,
+                    tokens: tokens(row, 5)?,
+                },
+                row.get(4)?,
+                seen.map_or(last_ms.saturating_add(HOUR_MS - 1), |_| last_ms),
+            ))
         })
         .map_err(storage)?
         .collect::<Result<_, _>>()
         .map_err(storage)?;
     if has_table(db, "team_tasks")? {
-        for run in &mut runs {
-            if let Some((task, title, status)) = run_task(db, run)? {
+        for (run, first_ms, until_ms) in &mut runs {
+            if let Some((task, title, status)) = run_task(db, run, *first_ms, *until_ms)? {
                 run.task = Some(task);
                 run.title = Some(title);
                 run.status = Some(status);
             }
         }
     }
-    Ok(runs)
+    Ok(runs.into_iter().map(|(run, _, _)| run).collect())
 }
 
 fn groups(
@@ -332,25 +361,47 @@ fn agents(
     Ok(rows)
 }
 
+/// Keeps the metrics within `REPORT_BYTES_MAX` encoded bytes so their reply fits one frame:
+/// while they are larger, runs, accounts and harnesses each keep a smaller share of
+/// `ROWS_MAX`, losing the oldest runs and the least-used accounts and harnesses first.
+/// Input: the metrics. Output: the metrics that fit, or `usage_unavailable`.
+fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
+    for share in (0..=SHARES).rev() {
+        let kept = ROWS_MAX * share / SHARES;
+        metrics.runs.truncate(kept);
+        metrics.accounts.truncate(kept);
+        metrics.harnesses.truncate(kept);
+        let encoded = serde_json::to_vec(&metrics).map_err(|_| failure("usage_unavailable"))?;
+        if encoded.len() <= REPORT_BYTES_MAX {
+            return Ok(metrics);
+        }
+    }
+    Err(failure("usage_unavailable"))
+}
+
 /// Reads the Metrics page's counts for one project, None for every project, over the range
 /// from `since_ms` to `now_ms`: tasks running and waiting now, done and failed in the range,
 /// the tokens chart in bars `bucket_for` the range, anchored at its start, the newest
 /// `ROWS_MAX` runs, and the largest `ROWS_MAX` projects, agents, accounts and harnesses by the
-/// headline. Inputs: the store, the project, the range start and now. Output: the metrics;
-/// `usage_request_invalid` for a range that starts after now.
+/// headline, fewer runs, accounts and harnesses when they would not fit one reply (`fit`).
+/// Inputs: the store, the project, the range start and now. Output: the metrics;
+/// `usage_request_invalid` for a range that starts before the epoch or after now.
 pub fn read(
     db: &Connection,
     project: Option<&ProjectId>,
     since_ms: i64,
     now_ms: i64,
 ) -> Result<Metrics, EngineError> {
-    if since_ms > now_ms {
+    if since_ms < 0 || since_ms > now_ms {
         return Err(failure("usage_request_invalid"));
     }
+    let span_ms = now_ms
+        .checked_sub(since_ms)
+        .ok_or_else(|| failure("usage_request_invalid"))?;
     let project = project.map(ProjectId::as_str);
     let [running, tasks_waiting, tasks_done, tasks_failed] = task_counts(db, project, since_ms)?;
-    let bucket_ms = bucket_for(now_ms - since_ms);
-    let metrics = Metrics {
+    let bucket_ms = bucket_for(span_ms);
+    let metrics = fit(Metrics {
         running,
         tasks_waiting,
         tasks_done,
@@ -362,7 +413,7 @@ pub fn read(
         agents: agents(db, project, since_ms)?,
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,
-    };
+    })?;
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);
     assert!(metrics.accounts.len() <= ROWS_MAX && metrics.harnesses.len() <= ROWS_MAX);

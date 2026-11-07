@@ -16,7 +16,7 @@ pub const HARNESSES_MAX: usize = 32;
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 const OFFSET_MINUTES_MAX: u32 = 14 * 60;
-const SHARES: usize = 8;
+pub(super) const SHARES: usize = 8;
 const AGENT_BYTES_MAX: usize = 192;
 const HARNESS_BYTES_MAX: usize = 128;
 

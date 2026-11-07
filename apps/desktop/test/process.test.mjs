@@ -94,7 +94,7 @@ const PROJECT = { kind: "project", id: "harbor-notes", name: "Harbor Notes" };
 
 function projectPage(extra = {}) {
   return page({
-    scope: PROJECT, view: "read", all: false, shown: "App rules.\n\nUse tdd.\n", subtitle: "App default plus this project's file",
+    scope: PROJECT, view: "read", all: false, given: { kind: "ok", value: "App rules.\n\nUse tdd.\n" }, subtitle: "App default plus this project's file",
     editNote: "Running agents get the change at their next task.", onView: never("onView"), onAll: never("onAll"), onUseDefault: never("onUseDefault"), ...extra,
   });
 }
@@ -110,8 +110,38 @@ test("a project's Process page shows the instructions as agents read them, folde
   assert.doesNotMatch(markup, /<textarea/);
   assert.doesNotMatch(markup, /Show all|Import from file|Use the CrazyAgent default process/);
   const long = Array.from({ length: 20 }, (_, index) => `Line ${index + 1}.`).join("\n");
-  assert.match(projectPage({ shown: long }), /class="pr-instr"[\s\S]*>Show all 20 lines<\/button>/);
-  assert.match(projectPage({ shown: long, all: true }), /class="pr-instr all"[\s\S]*>Show less<\/button>/);
+  assert.match(projectPage({ given: { kind: "ok", value: long } }), /class="pr-instr"[\s\S]*>Show all 20 lines<\/button>/);
+  assert.match(projectPage({ given: { kind: "ok", value: long }, all: true }), /class="pr-instr all"[\s\S]*>Show less<\/button>/);
+});
+
+const GIVEN = "# Instructions from CrazyAgent\n\n## App instructions\n\nApp rules.\n\n## Project instructions\n\nUse tdd.\n";
+const plain = (markup) => markup.replace(/<[^>]*>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ");
+
+test("As agents read it shows the text the engine gives agents, title and headings too, and says when the engine cannot read it", () => {
+  const markup = projectPage({ given: { kind: "ok", value: GIVEN } });
+  assert.match(plain(markup), /Instructions App default plus this project's file · 9 lines/);
+  assert.match(markup, /# Instructions from CrazyAgent/);
+  assert.match(markup, /## Project instructions/);
+  const failed = projectPage({ given: { kind: "error", code: "process_text_unsafe", message: "process_text_unsafe" } });
+  assert.match(failed, /role="alert"/);
+  assert.match(plain(failed), /What agents get could not be read\. The instructions file is a link or not a plain file, so CrazyAgent won't read it\. Replace it with a plain file\./);
+  assert.doesNotMatch(failed, /class="pr-instr/);
+  assert.doesNotMatch(plain(failed), /· \d+ lines/);
+  assert.match(plain(projectPage({ given: { kind: "ok", value: "" } })), /Agents get no instructions from you now\./);
+  assert.match(projectPage({ given: { kind: "loading" } }), /Reading what agents get/);
+});
+
+test("under Project only, Use app default is not offered and an empty file cannot be saved, so agents are never left with no instructions", () => {
+  const only = projectPage({ view: "edit", mode: "project_only", subtitle: "This project's file only" });
+  assert.doesNotMatch(only, />Use app default<\/button>/);
+  assert.match(plain(only), /Project only gives agents this file alone\. To use the app default, pick Both or App only under Delivery\./);
+  const empty = projectPage({ view: "edit", mode: "project_only", draft: "" });
+  assert.match(saveButton(empty), /disabled=""/);
+  assert.match(plain(empty), /Under Project only an empty file leaves agents with no instructions\./);
+  assert.match(projectPage({ view: "edit", mode: "both" }), />Use app default<\/button>/);
+  assert.doesNotMatch(projectPage({ view: "edit", mode: null }), />Use app default<\/button>/, "until Delivery is read the mode is unknown, so the button is not offered");
+  assert.doesNotMatch(saveButton(projectPage({ view: "edit", mode: "both", draft: "" })), /disabled/);
+  assert.doesNotMatch(saveButton(projectPage({ view: "edit", mode: "app_only", draft: "" })), /disabled/);
 });
 
 test("Edit shows the project's own text with Save, Use app default and when running agents get the change", () => {

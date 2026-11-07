@@ -4,9 +4,9 @@ import { loadTeamStatus } from "../api-projects";
 import { type ImportFile, type TeamStatus } from "../engine-client";
 import {
   AGENT_SETTINGS_STALE, DEFAULT_INSTRUCTION_SETTINGS, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport,
-  defaultProcess, flagWords, importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadProcess, processMessage,
+  defaultProcess, flagWords, importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadGivenText, loadProcess, processMessage,
   processTextError, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionMode,
-  type InstructionSettings, type InstructionView, type ProcessText, type SavedText, type SkillEntry, type EditDelivery,
+  type InstructionSettings, type InstructionView, type SavedText, type SkillEntry, type EditDelivery,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
 import { Button, ConfirmDialog, Dialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
@@ -48,15 +48,6 @@ const TASK_STEPS = [
 export function lineCount(text: string): number {
   const body = text.replace(/\n+$/u, "");
   return body === "" ? 0 : body.split("\n").length;
-}
-
-/** The instructions a project's agents read, as its instructions option hands them: the app
- * text, then the project's appended, or only one of them. Inputs: the option, the app text
- * and the project's text. Output: the text. */
-export function agentsRead(mode: InstructionMode, app: string, project: string): string {
-  if (mode === "app_only" || (mode === "both" && project.trim() === "")) return app;
-  if (mode === "project_only" || app.trim() === "") return project;
-  return `${app.replace(/\n+$/u, "")}\n\n${project}`;
 }
 
 /** The line a project's editor shows on when running agents get an edit. Input: the edit
@@ -109,7 +100,7 @@ export function conflictOf(stale: Extract<SavedText, { kind: "stale" }>): Confli
  * preview, the conflict, the skill the owner asked to open over unsaved text and the
  * actions. The editor is read-only while saving. Nothing reads the owner's files or saves
  * without the matching click. */
-export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, leaving = null, view = "read", all = false, shown, subtitle = MODE_SUBTITLES.both, editNote: note = "",
+export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, leaving = null, view = "read", all = false, given = { kind: "loading" }, mode = "both", subtitle = MODE_SUBTITLES.both, editNote: note = "",
   onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onReload, onKeepMine, onOpenSkill, onLeave, onStay, onView, onAll, onUseDefault }: {
   scope: ProcessScope;
   saved: Loaded<string>;
@@ -122,7 +113,8 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   leaving?: SkillEntry | null;
   view?: InstructionsView;
   all?: boolean;
-  shown?: string;
+  given?: Loaded<string>;
+  mode?: InstructionMode | null;
   subtitle?: string;
   editNote?: string;
   onDraft: (text: string) => void;
@@ -147,7 +139,8 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   if (saved.kind === "loading") return <Skeleton shape="card" count={2} />;
   if (saved.kind === "not_ready") return <NotReady what="Instructions" />;
   if (saved.kind === "error") return <LoadError message={saved.message} onRetry={onRetry} />;
-  const invalid = processTextError(draft);
+  const invalid = processTextError(draft)
+    ?? (scope.kind === "project" && mode === "project_only" && draft.trim() === "" ? "Under Project only an empty file leaves agents with no instructions." : undefined);
   const changed = draft !== saved.value;
   const leave = <ConfirmDialog open={leaving !== null} title={`Open ${leaving?.name ?? "the skill"} without saving?`} confirmLabel="Open skill"
     cancelLabel="Keep editing" onConfirm={() => onLeave?.()} onCancel={() => onStay?.()}>
@@ -155,14 +148,20 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   </ConfirmDialog>;
   if (scope.kind === "project") {
     const editing = view === "edit" || Boolean(conflict);
-    const text = shown ?? saved.value;
-    const lines = lineCount(text);
+    const lines = given.kind === "ok" ? lineCount(given.value) : 0;
+    const read = given.kind === "loading" ? <p className="small muted" role="status">Reading what agents get...</p>
+      : given.kind !== "ok" ? <Notice tone="danger" alert>{"What agents get could not be read. "}{processMessage(given)}</Notice>
+      : given.value.trim() === "" ? <Notice>Agents get no instructions from you now.</Notice>
+      : <>
+        <div className={`pr-instr${all ? " all" : ""}`}><TaggedText text={given.value} skills={skills} onOpen={onOpenSkill} /></div>
+        {lines > FOLD_LINES && <span><button type="button" className="pr-link" onClick={() => onAll?.()}>{all ? "Show less" : `Show all ${lines} lines`}</button></span>}
+      </>;
     return <div className="stack">
       {failure && <Notice tone="danger" alert>{failure}</Notice>}
       {conflict && <ConflictView conflict={conflict} busy={busy === "save"} onReload={onReload} onKeepMine={onKeepMine}>
         <TaggedText text={conflict.current} skills={skills} />
       </ConflictView>}
-      <Panel title={<div className="pr-head"><h2>Instructions</h2><p className="small muted">{subtitle} · {lines} lines</p></div>}
+      <Panel title={<div className="pr-head"><h2>Instructions</h2><p className="small muted">{subtitle}{given.kind === "ok" ? ` · ${lines} lines` : ""}</p></div>}
         actions={<Segmented label="How the instructions show" value={editing ? "edit" : "read"} options={INSTRUCTION_VIEWS} onValue={(next) => onView?.(next)} />}>
         {editing
           ? <form className="stack-small" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed && !conflict) onSave(); }}>
@@ -172,14 +171,13 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
               <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
                 disabled={Boolean(invalid) || !changed || busy !== null || Boolean(conflict)}>Save</Button>
               {changed && !conflict && <Button disabled={busy !== null} onClick={() => onDraft(saved.value)}>Discard edits</Button>}
-              <Button disabled={busy !== null || draft === ""} onClick={() => onUseDefault?.()}>Use app default</Button>
+              {mode === "project_only"
+                ? <span className="small muted">Project only gives agents this file alone. To use the app default, pick Both or App only under Delivery.</span>
+                : mode !== null && <Button disabled={busy !== null || draft === ""} onClick={() => onUseDefault?.()}>Use app default</Button>}
               <span className="small muted">{note}</span>
             </span>
           </form>
-          : <div className="stack-small">
-            <div className={`pr-instr${all ? " all" : ""}`}><TaggedText text={text} skills={skills} onOpen={onOpenSkill} /></div>
-            {lines > FOLD_LINES && <span><button type="button" className="pr-link" onClick={() => onAll?.()}>{all ? "Show less" : `Show all ${lines} lines`}</button></span>}
-          </div>}
+          : <div className="stack-small">{read}</div>}
       </Panel>
       {leave}
     </div>;
@@ -459,8 +457,8 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   const [loaded, reload] = useLoad(() => loadProcess(projectId), [projectId]);
   const saved: Loaded<string> = loaded.kind === "ok" ? { kind: "ok", value: loaded.value.text } : loaded;
   const [skills] = useLoad(() => listSkills(projectId ?? undefined), [projectId]);
-  const [appText] = useLoad<ProcessText | null>(() => projectId === null ? Promise.resolve({ kind: "ok", value: null }) : loadProcess(null), [projectId]);
-  const [settings, reloadSettings] = useLoad<InstructionView | null>(() => projectId === null ? Promise.resolve({ kind: "ok", value: null }) : loadInstructionSettings(projectId), [projectId]);
+  const [given, reloadGiven] = useLoad<string>(() => projectId === null ? Promise.resolve({ kind: "ok", value: "" }) : loadGivenText(projectId), [projectId]);
+  const [settings, readSettings] = useLoad<InstructionView | null>(() => projectId === null ? Promise.resolve({ kind: "ok", value: null }) : loadInstructionSettings(projectId), [projectId]);
   const [view, setView] = useState<InstructionsView>("read");
   const [all, setAll] = useState(false);
   const [draft, setDraft] = useState("");
@@ -506,6 +504,7 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
       setConflict(null);
       session.showToast(savedMessage(result.value.size));
       reload();
+      reloadGiven();
     }
   };
   const reloadConflict = () => {
@@ -513,11 +512,13 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     setConflict(null);
     setFailure("");
     reload();
+    reloadGiven();
   };
   const current = settings.kind === "ok" && settings.value !== null ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS;
-  const shown = savedText === null ? undefined : agentsRead(current.mode, appText.kind === "ok" && appText.value !== null ? appText.value.text : "", savedText);
+  const reloadSettings = () => { readSettings(); reloadGiven(); };
+  const mode = settings.kind === "ok" && settings.value !== null ? settings.value.settings.mode : null;
   const editor = <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview} conflict={conflict}
-    view={view} all={all} shown={shown} subtitle={MODE_SUBTITLES[current.mode]} editNote={editNote(current.edits)}
+    view={view} all={all} given={given} mode={mode} subtitle={MODE_SUBTITLES[current.mode]} editNote={editNote(current.edits)}
     onView={setView} onAll={() => setAll((old) => !old)} onUseDefault={() => setDraft("")}
     onDraft={setDraft} onSave={() => void save(null)} onImport={() => void seed("import")} onDefault={() => void seed("default")}
     onUsePreview={() => { if (preview) setDraft(preview.text); setPreview(null); }} onClosePreview={() => setPreview(null)} onRetry={reload}
