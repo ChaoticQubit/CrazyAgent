@@ -1456,7 +1456,7 @@ async fn desktop_terminal_attach(
     main_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
     let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
-    let room = terminals.0.room(&agent)?;
+    let room = terminals.0.room(window.label(), &agent)?;
     let session = lock(&state).await?.open_terminal(agent, pane).await?;
     room.attach(session, output)
 }
@@ -1472,7 +1472,7 @@ async fn desktop_terminal_input(
     let agent = bridge::terminal::agent(&agent)?;
     terminals
         .0
-        .send(&agent, TerminalRequest::Input { bytes })
+        .send(window.label(), &agent, TerminalRequest::Input { bytes })
         .await
 }
 
@@ -1487,7 +1487,7 @@ async fn desktop_terminal_prompt(
     let agent = bridge::terminal::agent(&agent)?;
     terminals
         .0
-        .send(&agent, TerminalRequest::Prompt { text })
+        .send(window.label(), &agent, TerminalRequest::Prompt { text })
         .await
 }
 
@@ -1503,7 +1503,11 @@ async fn desktop_terminal_resize(
     let agent = bridge::terminal::agent(&agent)?;
     terminals
         .0
-        .send(&agent, TerminalRequest::Resize { cols, rows })
+        .send(
+            window.label(),
+            &agent,
+            TerminalRequest::Resize { cols, rows },
+        )
         .await
 }
 
@@ -1516,7 +1520,7 @@ fn desktop_terminal_detach(
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
-    terminals.0.detach(&agent, serial)
+    terminals.0.detach(window.label(), &agent, serial)
 }
 
 #[tauri::command]
@@ -3792,7 +3796,10 @@ pub fn run() {
                 })
                 .on_page_load(|window, payload| {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
-                        window.state::<TerminalState>().0.page_started();
+                        window
+                            .state::<TerminalState>()
+                            .0
+                            .page_started(window.label());
                     }
                 })
                 .build()?;

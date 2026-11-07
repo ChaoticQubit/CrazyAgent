@@ -38,6 +38,12 @@ pub const SIZE_MIN: u16 = 2;
 pub const SIZE_MAX: u16 = 1000;
 pub const STREAM_CHUNKS_MAX: usize = 256;
 pub const VIEWERS_MAX: usize = 8;
+/// The most terminal views the desktop holds at once over every window, its main window and
+/// the terminal wall windows together.
+pub const DESKTOP_VIEWS_MAX: usize = 32;
+/// The most terminal views the engine serves at once over every agent and client: the
+/// desktop's views plus `VIEWERS_MAX` for the terminal app and other clients.
+pub const CONNECTIONS_MAX: usize = VIEWERS_MAX + DESKTOP_VIEWS_MAX;
 pub const VIEWER_BUFFER_BYTES_MAX: usize = 1024 * 1024;
 pub const SCROLLBACK_LINES: u32 = 5000;
 pub const PANES_PER_PROJECT_MAX: usize = crate::config::POOL_MEMBERS_MAX;

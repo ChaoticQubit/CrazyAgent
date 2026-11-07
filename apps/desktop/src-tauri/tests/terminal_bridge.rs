@@ -236,9 +236,11 @@ fn output_goes_to_the_window_as_raw_bytes_and_control_frames_as_json() {
 async fn typing_into_a_terminal_without_a_view_is_refused_and_detach_is_idempotent() {
     let terminals = Arc::new(Terminals::default());
     let team = AgentId::team(4).unwrap();
-    terminals.room(&team).unwrap();
+    terminals.page_started("main");
+    terminals.room("main", &team).unwrap();
     let typed = terminals
         .send(
+            "main",
             &team,
             TerminalRequest::Input {
                 bytes: b"ls\r".to_vec(),
@@ -247,37 +249,39 @@ async fn typing_into_a_terminal_without_a_view_is_refused_and_detach_is_idempote
         .await;
     assert_eq!(typed.unwrap_err().code, "terminal_not_attached");
     let empty = terminals
-        .send(&team, TerminalRequest::Input { bytes: vec![] })
+        .send("main", &team, TerminalRequest::Input { bytes: vec![] })
         .await;
     assert_eq!(empty.unwrap_err().code, "terminal_request_invalid");
     let resized = terminals
-        .send(&team, TerminalRequest::Resize { cols: 0, rows: 24 })
+        .send("main", &team, TerminalRequest::Resize { cols: 0, rows: 24 })
         .await;
     assert_eq!(resized.unwrap_err().code, "terminal_request_invalid");
-    terminals.detach(&team, u64::MAX).unwrap();
-    terminals.detach(&team, u64::MAX).unwrap();
+    terminals.detach("main", &team, u64::MAX).unwrap();
+    terminals.detach("main", &team, u64::MAX).unwrap();
 }
 
 #[test]
 fn a_view_holds_its_place_from_the_room_check_until_it_attaches_or_gives_up() {
     let terminals = Arc::new(Terminals::default());
+    terminals.page_started("main");
     let team = |n| AgentId::team(n).unwrap();
+    let past = VIEWERS_MAX as i64 + 1;
     let mut held: Vec<_> = (1..=VIEWERS_MAX as i64)
-        .map(|n| terminals.room(&team(n)))
+        .map(|n| terminals.room("main", &team(n)))
         .collect();
     assert!(held.iter().all(Result::is_ok));
     assert_eq!(
-        terminals.room(&team(9)).err().map(|e| e.code),
+        terminals.room("main", &team(past)).err().map(|e| e.code),
         Some("terminal_viewers_full"),
-        "a view still opening its connection keeps its place, so a fifth is refused before it opens one"
+        "a view still opening its connection keeps its place, so one past the window's views is refused before it opens one"
     );
     assert!(
-        terminals.room(&team(1)).is_ok(),
+        terminals.room("main", &team(1)).is_ok(),
         "a second view of the same agent replaces the first"
     );
     held.truncate(VIEWERS_MAX - 1);
     assert!(
-        terminals.room(&team(9)).is_ok(),
+        terminals.room("main", &team(past)).is_ok(),
         "a view that gave up before attaching frees its place"
     );
 }
