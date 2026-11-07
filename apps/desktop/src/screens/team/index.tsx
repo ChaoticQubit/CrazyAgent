@@ -308,7 +308,7 @@ export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
   const side = (node: GraphNode) => <AgentSide key={node.id} projectId={projectId} node={node} harness={harness} onClose={() => onOpen(null)}>
     <NodeMessages projectId={projectId} node={node} refresh={graph} />
   </AgentSide>;
-  const alone = (status: ReactNode) => open === null ? status : <>{status}{side(open)}</>;
+  const alone = (status: ReactNode) => open ? <>{status}{side(open)}</> : status;
   if (graph === undefined) return alone(<section className="tg" aria-busy="true" aria-label="Team graph"><Skeleton shape="card" /></section>);
   if (graph.kind === "not_ready") return alone(<NotReady what="The team graph" compact />);
   if (graph.kind === "error") return alone(<LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />);
