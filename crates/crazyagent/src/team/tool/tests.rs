@@ -1113,8 +1113,8 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(!known_tools(&names(&["status"])));
     assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
     assert!(known_tools(&names(&QUESTION_TOOLS)));
-    assert!(known_tools(&names(&[STOP_TOOL; 14])));
-    assert!(!known_tools(&names(&[STOP_TOOL; 15])));
+    assert!(known_tools(&names(&[STOP_TOOL; 15])));
+    assert!(!known_tools(&names(&[STOP_TOOL; 16])));
 }
 /// The words a tool name, description or schema field of the owner's Messages timeline read
 /// or its settings write would carry, lowercased.
@@ -1207,4 +1207,71 @@ fn neither_team_tool_server_offers_the_owner_s_messages_timeline_or_its_settings
         taken.iter().all(|(_, call, _)| call.is_none()),
         "a planted timeline or settings call was read as a call: {taken:?}"
     );
+}
+
+/// `log_activity` (OS-5) is listed with its goal, line and kind, left out when the owner
+/// switched it off, and keeps a call only with a goal of 1 to 120 bytes, one line of 1 to
+/// 600 bytes and a kind of phase or test, refusing anything else with a plain sentence.
+#[test]
+fn log_activity_is_listed_unless_switched_off_and_keeps_only_a_bounded_call() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let listed = |off: &[String]| -> Vec<Value> {
+        let list = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
+        let mut output = Vec::new();
+        serve_live(list, &mut output, &base, off).unwrap();
+        let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
+        answer["result"]["tools"].as_array().unwrap().clone()
+    };
+    let on = listed(&[]);
+    let entry = on.iter().find(|tool| tool["name"] == "log_activity");
+    assert!(entry.is_some(), "log_activity is listed while it is on");
+    let schema = &entry.unwrap()["inputSchema"];
+    assert_eq!(schema["required"], json!(["goal", "text", "kind"]));
+    assert_eq!(
+        schema["properties"]["kind"]["enum"],
+        json!(["phase", "test"])
+    );
+    assert_eq!(schema["additionalProperties"], json!(false));
+    let off = listed(&["log_activity".to_owned()]);
+    assert!(off.iter().all(|tool| tool["name"] != "log_activity"));
+    assert_eq!(off.len() + 1, on.len());
+
+    let call = |goal: &str, text: &str, kind: &str| {
+        live_call(
+            "log_activity",
+            Some(&json!({"goal": goal, "text": text, "kind": kind})),
+        )
+    };
+    let kept = call(&"g".repeat(120), &"t".repeat(600), "test");
+    assert!(
+        matches!(kept, Some(Ok(_))),
+        "a goal of 120 bytes and a line of 600 are kept: {kept:?}"
+    );
+    let kept = kept.unwrap().unwrap();
+    assert_eq!(kept.name(), "log_activity");
+    assert_eq!(checked(kept.clone()), Ok(kept));
+    let long_goal = "g".repeat(121);
+    let long_text = "t".repeat(601);
+    for (goal, text, kind) in [
+        ("", "Started the build", "phase"),
+        ("   ", "Started the build", "phase"),
+        (long_goal.as_str(), "Started the build", "phase"),
+        ("Build the service", "", "phase"),
+        ("Build the service", long_text.as_str(), "phase"),
+        ("Build the service", "Started\nthe build", "phase"),
+        ("Build\nthe service", "Started the build", "phase"),
+        ("Build the service", "Started the build", "review"),
+    ] {
+        let refused = call(goal, text, kind);
+        assert!(
+            matches!(refused, Some(Err(_))),
+            "{goal:?} {text:?} {kind:?} is refused: {refused:?}"
+        );
+    }
+    let no_kind = live_call(
+        "log_activity",
+        Some(&json!({"goal": "Build the service", "text": "Started the build"})),
+    );
+    assert!(matches!(no_kind, Some(Err(_))), "{no_kind:?}");
 }

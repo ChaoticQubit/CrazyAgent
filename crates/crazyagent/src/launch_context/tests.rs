@@ -2711,3 +2711,17 @@ fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
         );
     }
 }
+
+/// The team tools section asks every agent, in the plan's one sentence, to log its work
+/// phases and test runs with log_activity (OS-5), and names neither the tool nor the ask
+/// once the owner switched the tool off.
+#[test]
+fn the_team_tools_section_asks_for_log_activity_only_while_it_is_on() {
+    const ASK: &str = "When you start a new phase of the work (for example architecture, building, testing) or finish a test run, call log_activity with the goal it serves and one line saying what happened.";
+    let on = team_tools_section(&[]);
+    assert!(on.contains("\n- log_activity: "), "{on}");
+    assert_eq!(on.matches(ASK).count(), 1, "{on}");
+    assert!(on.len() <= TOOLS_SECTION_BYTES_MAX);
+    let off = team_tools_section(&["log_activity".to_owned()]);
+    assert!(!off.contains("log_activity"), "{off}");
+}

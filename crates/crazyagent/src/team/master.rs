@@ -1199,7 +1199,58 @@ fn answer_work(
         } => work::finish_work(
             connection, answering, agent, master, about, version, outcome, &evidence,
         ),
+        Call::LogActivity { goal, text, kind } => log_activity(
+            connection,
+            &answering.stored.project_id,
+            agent,
+            master,
+            &goal,
+            &text,
+            kind,
+        ),
         other => unreachable!("{} is not a work verb", other.name()),
+    }
+}
+
+/// Records one `log_activity` call in the project activity: a new phase of the work or a
+/// finished test run with the goal it serves, under Master or the sub-agent's team label,
+/// within the caller's hourly rate (`activity::record_logged`). Takes the engine database,
+/// the project, the caller, whether it is the master and the call's goal, line and kind.
+/// Returns "Logged." and false, a plain refusal and true past the rate, or a SQLite failure.
+fn log_activity(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    master: bool,
+    goal: &str,
+    text: &str,
+    kind: tool::LogKind,
+) -> Result<(String, bool), EngineError> {
+    let actor = if master {
+        crate::activity::MASTER_ACTOR.to_owned()
+    } else {
+        crate::activity::agent_actor(connection, agent)?
+    };
+    let item = crate::activity::NewActivity {
+        kind: match kind {
+            tool::LogKind::Phase => crate::activity::ActivityKind::Phase,
+            tool::LogKind::Test => crate::activity::ActivityKind::Test,
+        },
+        actor: &actor,
+        agent: (!master).then_some(agent),
+        goal: Some(goal),
+        text,
+        change_set: None,
+    };
+    match crate::activity::record_logged(connection, project, (agent, master), &item, now_ms())? {
+        Some(_) => Ok(("Logged.".to_owned(), false)),
+        None => Ok((
+            format!(
+                "Not logged: you logged {} phases or test runs in the last hour. Log the next one later.",
+                crate::activity::LOGGED_PER_WINDOW_MAX
+            ),
+            true,
+        )),
     }
 }
 

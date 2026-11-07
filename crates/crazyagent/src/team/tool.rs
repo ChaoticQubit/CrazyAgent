@@ -44,9 +44,12 @@ pub const REMEMBER_TOOL: &str = "remember";
 pub const RECALL_TOOL: &str = "recall";
 pub const SESSIONS_TOOL: &str = "sessions";
 pub const SESSION_TOOL: &str = "session";
+/// The tool an agent logs a new phase of its work or a finished test run with, to the
+/// project activity the owner reads on Overview (OS-5).
+pub const ACTIVITY_TOOL: &str = "log_activity";
 /// The team tools a live master and a sub-agent with tools get (DEC-104), in the order of
 /// `coord::tool_switches::BUILTIN_TOOLS`, which the owner switches each one by.
-pub const TEAM_TOOLS: [&str; 12] = [
+pub const TEAM_TOOLS: [&str; 13] = [
     START_WORK_TOOL,
     INSPECT_WORK_TOOL,
     UPDATE_WORK_TOOL,
@@ -59,6 +62,7 @@ pub const TEAM_TOOLS: [&str; 12] = [
     RECALL_TOOL,
     SESSIONS_TOOL,
     SESSION_TOOL,
+    ACTIVITY_TOOL,
 ];
 /// The team tools a master without its live terminal gets beside `delegate`, answered by the
 /// engine through its mailbox like a live master's.
@@ -112,6 +116,7 @@ const SESSION_INVALID: &str =
 const REMEMBER_INVALID: &str =
     "Not saved: give one plain fact of up to 2000 bytes, and a scope of project or app.";
 const RECALL_INVALID: &str = "Not searched: give plain words on one line of up to 100 bytes, or none for the newest memories.";
+const ACTIVITY_INVALID: &str = "Not logged: give the goal on one plain line of up to 120 bytes, one plain line of up to 600 bytes saying what happened, and a kind of phase or test.";
 const CALL_INVALID: &str = "Not done: the engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters, at most 6 distinct one-line options of up to 200 bytes, and if you choose them a recommended answer (one of the options, or up to 200 bytes when there are none) and context of up to 4096 bytes.";
@@ -229,6 +234,11 @@ pub enum Call {
     Recall {
         query: String,
     },
+    LogActivity {
+        goal: String,
+        text: String,
+        kind: LogKind,
+    },
     Ask {
         question: String,
         options: Vec<String>,
@@ -259,6 +269,7 @@ impl Call {
             Self::Session { .. } => SESSION_TOOL,
             Self::Remember { .. } => REMEMBER_TOOL,
             Self::Recall { .. } => RECALL_TOOL,
+            Self::LogActivity { .. } => ACTIVITY_TOOL,
             Self::Ask { .. } => ASK_TOOL,
             Self::RecordAnswer { .. } => RECORD_TOOL,
         };
@@ -289,6 +300,14 @@ pub enum Handover {
     Release,
     Handoff,
     Reopen,
+}
+
+/// What a `log_activity` call logs: a new phase of the work or a finished test run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogKind {
+    Phase,
+    Test,
 }
 
 /// Where a memory an agent saves applies: its own project, or every project of the app.
@@ -603,6 +622,14 @@ fn spec(name: &str) -> Value {
         MERGE_TOOL => (
             "Merge a finished agent's work locally, never pushed: the master merges a lead's task branch into the Master's branch, and a lead merges one of its own sub-agents' work into its own branch. The owner's settings may keep it for the owner's Accept in Changes instead; then this says so.",
             json!({"type": "object", "properties": {"agent": agent}, "required": ["agent"], "additionalProperties": false}),
+        ),
+        ACTIVITY_TOOL => (
+            "Log to the project activity the owner reads on Overview: a new phase of the work or a finished test run, with the goal it serves and one line saying what happened.",
+            json!({"type": "object", "properties": {
+                "goal": {"type": "string", "description": "The goal the work serves, such as its work title, on one line of up to 120 bytes."},
+                "text": {"type": "string", "description": "One line of up to 600 bytes saying what happened."},
+                "kind": {"type": "string", "enum": ["phase", "test"], "description": "phase for a new phase of the work, test for a finished test run."},
+            }, "required": ["goal", "text", "kind"], "additionalProperties": false}),
         ),
         SESSIONS_TOOL => (
             "Search every past master and sub-agent conversation of this project, of any age: each hit gives the conversation id, the message number and an excerpt. With no query it lists the conversations, newest first.",
@@ -929,6 +956,30 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(RECALL_INVALID),
         },
+        ACTIVITY_TOOL => {
+            let line = |key: &str, max: usize| {
+                argument(key)
+                    .filter(|line| {
+                        !line.trim().is_empty()
+                            && line.len() <= max
+                            && !line.chars().any(char::is_control)
+                    })
+                    .map(|line| line.trim().to_owned())
+            };
+            let kind = match argument("kind").map(str::trim) {
+                Some("phase") => Some(LogKind::Phase),
+                Some("test") => Some(LogKind::Test),
+                _ => None,
+            };
+            match (
+                line("goal", crate::activity::GOAL_BYTES_MAX),
+                line("text", crate::activity::TEXT_BYTES_MAX),
+                kind,
+            ) {
+                (Some(goal), Some(text), Some(kind)) => Ok(Call::LogActivity { goal, text, kind }),
+                _ => Err(ACTIVITY_INVALID),
+            }
+        }
         ASK_TOOL => ask_call(arguments).ok_or(ASK_INVALID),
         RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
         _ => return None,
@@ -1041,6 +1092,9 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         Call::Session { id, offset } => json!({"id": id, "offset": offset}),
         Call::Remember { text, scope } => json!({"text": text, "scope": scope.as_str()}),
         Call::Recall { query } => json!({"query": query}),
+        Call::LogActivity { goal, text, kind } => {
+            json!({"goal": goal, "text": text, "kind": kind})
+        }
         Call::Ask {
             question,
             options,

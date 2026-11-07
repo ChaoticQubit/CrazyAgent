@@ -4539,3 +4539,189 @@ fn a_reply_turn_master_remembers_and_the_project_memory_page_lists_it() {
     );
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }
+
+/// `log_activity` (OS-5) writes one row of the project activity with the goal the caller
+/// gave: a sub-agent's phase under its team label and the master's test run as Master.
+#[cfg(target_os = "macos")]
+#[test]
+fn log_activity_writes_one_row_with_its_goal_under_the_caller() {
+    let mut fixture = Fixture::new();
+    let agent = named_sub(&fixture, "api-fix", "working");
+    let label = crate::activity::agent_actor(&fixture.connection, agent).unwrap();
+    let phase =
+        json!({"goal": "Build the service", "text": "Started building the API", "kind": "phase"});
+    assert!(
+        matches!(tool::live_call("log_activity", Some(&phase)), Some(Ok(_))),
+        "log_activity is a team tool"
+    );
+    assert_eq!(
+        as_sub(&mut fixture, agent, "log_activity", phase),
+        ("Logged.".to_owned(), false)
+    );
+    let test_run = json!({"goal": "Build the service", "text": "Ran the API tests: 12 passed", "kind": "test"});
+    assert_eq!(
+        as_master(&mut fixture, "log_activity", test_run),
+        ("Logged.".to_owned(), false)
+    );
+    let project = ProjectId::new(PROJECT).unwrap();
+    let items = crate::activity::list(&fixture.connection, &project, 10).unwrap();
+    let logged: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                crate::activity::ActivityKind::Phase | crate::activity::ActivityKind::Test
+            )
+        })
+        .map(|item| {
+            (
+                item.kind,
+                item.actor.as_str(),
+                item.goal.as_deref(),
+                item.text.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        vec![
+            (
+                crate::activity::ActivityKind::Test,
+                "Master",
+                Some("Build the service"),
+                "Ran the API tests: 12 passed",
+            ),
+            (
+                crate::activity::ActivityKind::Phase,
+                label.as_str(),
+                Some("Build the service"),
+                "Started building the API",
+            ),
+        ]
+    );
+}
+
+/// One caller logs at most 30 phases or test runs an hour (T11 r1 M1): the 31st call gets a
+/// plain refusal and adds no row, while another caller still logs.
+#[cfg(target_os = "macos")]
+#[test]
+fn log_activity_refuses_a_caller_past_its_hourly_rate_and_another_caller_still_logs() {
+    let mut fixture = Fixture::new();
+    let agent = named_sub(&fixture, "api-fix", "working");
+    let phase = |n: usize| json!({"goal": "Build the service", "text": format!("Phase {n} of the API"), "kind": "phase"});
+    for n in 1..=30 {
+        assert_eq!(
+            as_sub(&mut fixture, agent, "log_activity", phase(n)),
+            ("Logged.".to_owned(), false),
+            "call {n} is within the rate"
+        );
+    }
+    let (said, refused) = as_sub(&mut fixture, agent, "log_activity", phase(31));
+    assert!(refused, "the 31st call in an hour is refused: {said}");
+    assert!(said.starts_with("Not logged: "), "{said}");
+    assert_eq!(
+        as_master(&mut fixture, "log_activity", phase(1)),
+        ("Logged.".to_owned(), false),
+        "the master's own rate is apart"
+    );
+    let project = ProjectId::new(PROJECT).unwrap();
+    let phases = crate::activity::list(&fixture.connection, &project, crate::activity::LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == crate::activity::ActivityKind::Phase)
+        .count();
+    assert_eq!(phases, 31, "30 of the sub-agent's and 1 of the master's");
+}
+
+/// A sub-agent's `log_activity` row is named and scrubbed by the engine on the tool path
+/// (T11 r1 F3): an `actor` argument is ignored, a local path is cut and a zero-width space
+/// shows as its escape.
+#[cfg(target_os = "macos")]
+#[test]
+fn log_activity_names_the_caller_and_scrubs_what_it_wrote_whatever_the_call_says() {
+    let mut fixture = Fixture::new();
+    let agent = named_sub(&fixture, "api-fix", "working");
+    let label = crate::activity::agent_actor(&fixture.connection, agent).unwrap();
+    assert_ne!(label, crate::activity::MASTER_ACTOR);
+    let call = json!({
+        "goal": "Ship /Users/ada/private/goal.md",
+        "text": "Ran /Users/ada/api/run_tests.sh: 12 passed\u{200b}",
+        "kind": "test",
+        "actor": "Master",
+    });
+    assert_eq!(
+        as_sub(&mut fixture, agent, "log_activity", call),
+        ("Logged.".to_owned(), false)
+    );
+    let project = ProjectId::new(PROJECT).unwrap();
+    let logged: Vec<_> =
+        crate::activity::list(&fixture.connection, &project, crate::activity::LIST_MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.kind == crate::activity::ActivityKind::Test)
+            .map(|item| (item.actor, item.goal, item.text))
+            .collect();
+    assert_eq!(
+        logged,
+        vec![(
+            label,
+            Some("Ship goal.md".to_owned()),
+            "Ran run_tests.sh: 12 passed\\u200b".to_owned()
+        )]
+    );
+}
+
+/// A `log_activity` call from a server that still lists the tool is refused once the owner
+/// switched it off for the project (T11 r1 F3): the plain switched-off answer, and no row.
+#[cfg(target_os = "macos")]
+#[test]
+fn log_activity_switched_off_is_refused_from_the_mailbox_and_logs_nothing() {
+    let mut fixture = Fixture::new();
+    known_project(&fixture);
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::tool_switches::set(
+        &fixture.connection,
+        Some(&project),
+        crate::coord::tool_switches::CRAZYAGENT_SERVER,
+        tool::ACTIVITY_TOOL,
+        crate::coord::tool_switches::Switch::Off,
+    )
+    .unwrap();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let id = format!("{:032x}", 1);
+    std::fs::write(
+        mailbox.join(format!("{id}.call")),
+        json!({"tool": tool::ACTIVITY_TOOL, "goal": "Build the service", "text": "Started building the API", "kind": "phase"})
+            .to_string(),
+    )
+    .unwrap();
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    assert_eq!(
+        serve_calls(&mut fixture.connection, &answering, MASTER, &mailbox).unwrap(),
+        1
+    );
+    let reply: Value =
+        serde_json::from_slice(&std::fs::read(mailbox.join(format!("{id}.reply"))).unwrap())
+            .unwrap();
+    assert_eq!(
+        (reply["text"].as_str(), reply["error"].as_bool()),
+        (Some(SWITCHED_OFF), Some(true))
+    );
+    let logged = crate::activity::list(&fixture.connection, &project, crate::activity::LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind.agent_logged())
+        .count();
+    assert_eq!(logged, 0, "a switched-off call logs nothing");
+}
