@@ -1470,6 +1470,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT PRIMARY KEY,
                 reask INTEGER NOT NULL CHECK(reask IN (0,1))
             );
+            CREATE TABLE IF NOT EXISTS team_wall (
+                project TEXT PRIMARY KEY,
+                per_window INTEGER NOT NULL CHECK(per_window IN (4,6,9))
+            );
             CREATE TABLE IF NOT EXISTS team_session_switches (
                 session TEXT PRIMARY KEY,
                 project TEXT NOT NULL,
