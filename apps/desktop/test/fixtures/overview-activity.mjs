@@ -28,9 +28,18 @@ async function acted(work) {
   });
 }
 
+function rowText(row) {
+  return row.querySelector(".pj-activity-text")?.firstChild?.textContent ?? "";
+}
+
 function state() {
   const section = document.querySelector("section[aria-labelledby='pj-activity']");
+  const all = (selector) => [...(section?.querySelectorAll(selector) ?? [])];
   return {
+    groups: all(".pj-activity-goal").map((group) => ({ label: group.getAttribute("aria-label"), open: group.querySelector("[aria-expanded]")?.getAttribute("aria-expanded") ?? null, rows: [...group.querySelectorAll(".pj-activity-row")].map(rowText) })),
+    timeline: all(".pj-activity-timeline .pj-activity-row").map((row) => ({ text: rowText(row), goal: row.querySelector(".pj-activity-tag")?.textContent ?? null })),
+    pressed: all("[aria-pressed=true]").map((chip) => chip.textContent),
+    view: all("[role=radio][aria-checked=true]").map((choice) => choice.textContent),
     asked: [...asked],
     waiting: replies.length,
     text: section?.innerText ?? null,
@@ -86,4 +95,13 @@ export async function unmount(ms) {
   root = null;
   await settle(ms);
   return state();
+}
+
+/** Clicks the first element matching a selector whose text has the given words. Inputs: the
+ * selector and the words. Output: the state, with missed set when nothing matched. */
+export async function click(selector, words) {
+  const target = [...document.querySelectorAll(selector)].find((element) => element.textContent.includes(words));
+  if (!target) return { ...state(), missed: `${selector} ${words}` };
+  await acted(() => target.click());
+  return { ...state(), missed: null };
 }

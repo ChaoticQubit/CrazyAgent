@@ -101,3 +101,28 @@ test("the project's creation shows under Project", () => {
   assert.match(html, /You created Harbor Notes/);
 });
 
+const KINDS = ["created", "research_started", "research_saved", "research_stopped", "task_started", "task_finished", "changes_ready", "accepted", "discarded", "conflict", "sent_back", "lead_merged", "merged_into_main", "undone", "work_started", "work_review_ready", "work_complete", "work_closed", "phase", "test"];
+
+test("every kind falls under one filter chip, and the project's creation only under All", () => {
+  assert.deepEqual(research.ACTIVITY_FILTERS.map((filter) => filter.label), ["All", "Merges", "Changes", "Tests", "Tasks", "Phases"]);
+  const under = Object.fromEntries(KINDS.map((kind) => [kind, research.activityFilter(kind)]));
+  assert.deepEqual(under, {
+    created: null, research_started: "task", research_saved: "task", research_stopped: "task", task_started: "task", task_finished: "task",
+    changes_ready: "change", accepted: "change", discarded: "change", conflict: "change", sent_back: "change",
+    lead_merged: "merge", merged_into_main: "merge", undone: "merge",
+    work_started: "task", work_review_ready: "task", work_complete: "task", work_closed: "task", phase: "phase", test: "tests",
+  });
+});
+
+test("research with no goal is its own Research group, apart from Project and from a goal named Research", () => {
+  const groups = research.groupActivity([
+    item(4, 4_000, "Research"),
+    item(3, 3_000, null, { kind: "research_saved" }),
+    item(2, 2_000, null, { kind: "created" }),
+    item(1, 1_000, "  ", { kind: "research_started" }),
+  ]);
+  assert.deepEqual(groups.map((group) => group.goal), ["Research", "Research", "Project"]);
+  assert.deepEqual(groups.map((group) => group.items.map((entry) => entry.id)), [[4], [3, 1], [2]]);
+  assert.equal(new Set(groups.map((group) => group.key)).size, 3, "each group has its own key");
+  assert.equal(groups[1].key, research.RESEARCH_KEY, "Research events with no goal share the research key");
+});
