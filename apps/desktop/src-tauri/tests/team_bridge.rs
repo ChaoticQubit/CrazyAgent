@@ -794,12 +794,10 @@ async fn terminals_per_window_choices(root: &Path) -> Result<(), Box<dyn Error>>
     let id = created.intent.project_id.clone().unwrap();
     assert_eq!(bridge.terminals_per_window(&id).await?, Six);
     assert_eq!(bridge.team_status(&id).await?.terminals_per_window, Six);
-    let mut generation = 2;
-    for choice in [Four, Nine, Six, Nine] {
+    for (generation, choice) in (2..).zip([Four, Nine, Six, Nine]) {
         let saved = bridge
             .team_terminals_per_window(&id, choice, generation)
             .await?;
-        generation += 1;
         assert!(matches!(saved.outcome, ActionOutcome::Applied), "{saved:?}");
         assert_eq!(bridge.terminals_per_window(&id).await?, choice);
         assert_eq!(bridge.team_status(&id).await?.terminals_per_window, choice);
