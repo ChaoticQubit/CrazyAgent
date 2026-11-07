@@ -93,6 +93,7 @@ fn status() -> TeamStatus {
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
         reask_empty_reply: true,
+        catch_up_main: crate::team::CatchUpMain::On,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         message_settings: crate::team::agent_messages::MessageSettings::default(),
