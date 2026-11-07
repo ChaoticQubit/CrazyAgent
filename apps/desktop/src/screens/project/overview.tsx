@@ -38,7 +38,7 @@ export function projectFolder(path: string): string {
 export const ACTIVITY_READ_MS = 5_000;
 const ACTIVITY_READ_MAX = 200;
 
-const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "bad" | "merge" }> = {
+const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "bad" | "merge"; own?: true }> = {
   created: { icon: "folder-plus", tone: "" },
   research_started: { icon: "search", tone: "" },
   research_saved: { icon: "file-text", tone: "ok" },
@@ -57,19 +57,20 @@ const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "
   work_review_ready: { icon: "list-checks", tone: "" },
   work_complete: { icon: "circle-check", tone: "ok" },
   work_closed: { icon: "circle-x", tone: "" },
-  phase: { icon: "layers", tone: "" },
-  test: { icon: "shield-check", tone: "ok" },
+  phase: { icon: "layers", tone: "", own: true },
+  test: { icon: "shield-check", tone: "", own: true },
 };
 
 /** One activity row: when, the kind's icon, what happened, Undone when it was, and who, with
- * the goal when the row stands outside its group, highlighted while fresh. Inputs: the event,
- * the time it is read against, the goal to tag it with and whether a later read brought it in.
- * Output: the row. */
+ * the goal when the row stands outside its group, highlighted while fresh. A phase or test run
+ * an agent logged reads as its own words, "<actor> noted: ...", with no tone, never as an engine
+ * event. Inputs: the event, the time it is read against, the goal to tag it with and whether a
+ * later read brought it in. Output: the row. */
 function ActivityRow({ item, now, goal, fresh = false }: { item: ActivityItem; now: number; goal?: string; fresh?: boolean }) {
   return <li className={`pj-activity-row${fresh ? " fresh" : ""}`}>
     <span className="pj-small pj-muted">{ago(item.at_ms, now)}</span>
     <span className={`pj-activity-kind ${KINDS[item.kind].tone}`}><Icon name={KINDS[item.kind].icon} size={14} /></span>
-    <span className="pj-activity-text">{displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
+    <span className="pj-activity-text">{KINDS[item.kind].own ? `${displayText(item.actor)} noted: ${displayText(item.text)}` : displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
       <span className="pj-small pj-muted pj-activity-by">{displayText(item.actor)}{goal !== undefined && <> · <span className="pj-activity-tag">{displayText(goal)}</span></>}</span></span>
   </li>;
 }
