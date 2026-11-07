@@ -508,12 +508,31 @@ export function phasePath(items: ActivityItem[]): { step: string; done: boolean 
   return steps.map((step, index) => ({ step, done: index < now }));
 }
 
+/** How many steps a goal header's phase path shows at once. */
+export const PATH_STEPS_SHOWN = 4;
+
+/** The part of a phase path a goal header shows: at most `max` steps in a row that holds the
+ * current step, the last ones when the newest phase is the last step, with how many steps come
+ * before and after it. Inputs: the path from phasePath and the most steps shown. Output: the
+ * counts before and after and the steps shown. */
+export function pathWindow(steps: { step: string; done: boolean }[], max: number = PATH_STEPS_SHOWN): { before: number; steps: { step: string; done: boolean }[]; after: number } {
+  assert(max >= 1, "a path shows at least one step");
+  const current = steps.findIndex((step) => !step.done);
+  const at = current === -1 ? steps.length - 1 : current;
+  const before = Math.max(0, Math.min(at - (max - 1), steps.length - max));
+  const shown = steps.slice(before, before + max);
+  const after = steps.length - before - shown.length;
+  assert(after >= 0 && shown.length <= max, "the window stays inside the path");
+  return { before, steps: shown, after };
+}
+
 /** Groups project activity by the goal it serves, for Overview, as goalPlacer places each
- * event. Input: the events in any order. Output: one group per goal with its key and label, the
- * group with the newest event first, each group's events newest first. */
-export function groupActivity(items: ActivityItem[]): { key: string; goal: string; items: ActivityItem[] }[] {
+ * event among the whole read. Inputs: the events in any order and the whole read they come
+ * from, the events themselves by default. Output: one group per goal with its key and label,
+ * the group with the newest event first, each group's events newest first. */
+export function groupActivity(items: ActivityItem[], whole: ActivityItem[] = items): { key: string; goal: string; items: ActivityItem[] }[] {
   const groups = new Map<string, { key: string; goal: string; items: ActivityItem[] }>();
-  const placed = goalPlacer(items);
+  const placed = goalPlacer(whole);
   for (const item of newestActivity(items)) {
     const place = placed(item);
     const group = groups.get(place.key);

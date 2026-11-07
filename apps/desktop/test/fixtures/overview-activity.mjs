@@ -122,8 +122,8 @@ export function inOverview(css) {
   document.getElementById("column").append(document.getElementById("root"));
 }
 
-/** Measures the goal headers where they are drawn. Output: the column width, each goal name's
- * width, the header parts that run past their panel's right edge and how far the page scrolls
+/** Measures the goal headers where they are drawn. Output: the column width, the width of each goal
+ * name's cell, the header parts that run past their panel's right edge and how far the page scrolls
  * sideways. */
 export function measure() {
   const column = document.getElementById("column");
@@ -133,7 +133,7 @@ export function measure() {
   });
   return {
     column: Math.round(column?.getBoundingClientRect().width ?? 0),
-    names: [...document.querySelectorAll(".pj-activity-name strong")].map((name) => Math.round(name.getBoundingClientRect().width)),
+    names: [...document.querySelectorAll(".pj-activity-name")].map((name) => Math.round(name.getBoundingClientRect().width)),
     past,
     sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
   };
