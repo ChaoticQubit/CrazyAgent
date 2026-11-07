@@ -16,11 +16,12 @@ pub enum Landed {
 /// Records one ended turn through `landing::record_turn_end` and tells whether this turn
 /// added edits or finished an update, by comparing its change set's head and state before
 /// and after, so the owner is told once for each turn that changed something rather than
-/// at every turn while a set waits. A team agent's set merged and waiting for its agent,
-/// as a turn end leaves one that conflicts with main (OS-8), is handed its resolve work
-/// at once through `start_resolve` and reported Waiting, since it waits on the agent, not
-/// the owner. Inputs: the change set store, the workspace and the turn end. Output:
-/// Nothing when no set is pending, Added or Waiting, or the refusal.
+/// at every turn while a set waits. A team agent's set that conflicts with main goes back
+/// to its agent through `catch_up` and is reported Waiting, since it waits on the agent,
+/// not the owner (OS-8); a catch-up that leaves it, or cannot run, leaves it to the owner
+/// as before, the cause logged by its plain code. Inputs: the change set store, the
+/// workspace and the turn end. Output: Nothing when no set is pending, Added or Waiting,
+/// or the refusal.
 pub fn record(
     db: &Connection,
     workspace: &Workspace,
@@ -31,30 +32,67 @@ pub fn record(
     let Some(id) = landing::record_turn_end(db, workspace, end)? else {
         return Ok(Landed::Nothing);
     };
-    let after = landing::change_set(db, &id)?.map(|(_, set)| set);
-    if after.as_ref().is_some_and(|set| {
-        set.state == ChangeState::Updating && set.waiting && set.agent.kind != AgentKind::Master
-    }) {
-        if let Err(problem) = start_resolve(db, &id) {
-            eprintln!("resolve_not_started_after_turn cause={}", problem.0);
-        }
-        return Ok(Landed::Waiting(id));
+    match catch_up(db, &id) {
+        Ok(true) => return Ok(Landed::Waiting(id)),
+        Ok(false) => {}
+        Err(problem) => eprintln!(
+            "catch_up_skipped cause={}",
+            crate::protocol::plain_code(&problem.0)
+        ),
     }
-    let after = after.map(|set| (set.head, set.state));
+    let after = landing::change_set(db, &id)?.map(|(_, set)| (set.head, set.state));
     if after.is_some() && after == before {
         return Ok(Landed::Waiting(id));
     }
     Ok(Landed::Added(id))
 }
 
+/// Sends a team agent's change set that conflicts with main back to its agent at its turn
+/// end (OS-8): once `landing::conflicts_with_main` finds the clash, the agent must be able
+/// to take its resolve task as the engine starts it, which an agent the owner stopped
+/// never is, before main is merged into its work as Ask agent to update merges it and the
+/// task starts. Inputs: the store and the change set. Output: true once the set went back
+/// to its agent, false when it waits for the owner, or the plain refusal of a step before
+/// the merge, the set then waiting for the owner too.
+fn catch_up(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
+    if !landing::conflicts_with_main(db, id)? {
+        return Ok(false);
+    }
+    let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
+    resolve_ready(db, &set_project(db, id)?, &set, Asker::Engine)?;
+    landing::update(db, id)?;
+    if let Err(problem) = start_resolve(db, id) {
+        eprintln!("resolve_not_started_after_turn cause={}", problem.0);
+    }
+    Ok(true)
+}
+
 const RESOLVE_PROMPT_BYTES_MAX: usize = crate::team::TASK_PROMPT_BYTES_MAX;
+
+/// Who starts a resolve: the owner's Ask agent to update, which may start an agent the
+/// owner stopped (AW-1), or the engine at a turn end, which never does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asker {
+    Owner,
+    Engine,
+}
+
+/// Starts the resolve work the engine hands an agent at its turn end, which never starts
+/// an agent the owner stopped: see `hand_over`. Inputs: the store and the change set.
+/// Output: Ok once started or left to the owner runtime, or a plain refusal,
+/// `team_agent_owner_stopped` for an agent the owner stopped.
+pub(crate) fn start_resolve(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+    hand_over(db, id, Asker::Engine)
+}
 
 /// Starts the work that resolves an update, right after `landing::update` merged the
 /// owner's branch into the agent's worktree: a team agent gets it through
 /// `team::admit_resolve`, and the set stops showing as waiting for its agent. A
-/// conversation master gets the prompt from the owner runtime. Inputs: the store and the
-/// change set. Output: Ok once started or left to the owner runtime, or a plain refusal.
-pub(crate) fn start_resolve(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+/// conversation master gets the prompt from the owner runtime. For the engine, an agent
+/// the owner stopped is refused in the same transaction that would admit the task, so its
+/// stop stays. Inputs: the store, the change set and who asks. Output: Ok once started or
+/// left to the owner runtime, or a plain refusal.
+fn hand_over(db: &Connection, id: &ChangeSetId, asker: Asker) -> Result<(), EngineError> {
     let project = set_project(db, id)?;
     let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
     if set.state != ChangeState::Updating {
@@ -66,10 +104,26 @@ pub(crate) fn start_resolve(db: &Connection, id: &ChangeSetId) -> Result<(), Eng
     let agent = team_agent(&set)?;
     let prompt = fitted(&landing::resolve_task_prompt(db, id)?);
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
-    crate::team::admit_resolve(&tx, &project, agent, &prompt, crate::team::now_ms())?
-        .map_err(refused)?;
+    admit(&tx, &project, agent, &prompt, asker)?.map_err(refused)?;
     tx.commit().map_err(storage)?;
     landing::resolve_handed_over(db, id)
+}
+
+/// Admits a team agent's resolve task in the caller's transaction. For the engine, an
+/// agent the owner stopped is refused before `team::admit_resolve`, which would clear
+/// that stop as the owner's own Update does (AW-1). Inputs: the transaction, the project,
+/// the agent, the prompt and who asks. Output: Ok, or the plain refusal code.
+fn admit(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    agent: i64,
+    prompt: &str,
+    asker: Asker,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if asker == Asker::Engine && crate::team::owner_stopped(tx, agent)? {
+        return Ok(Err(crate::team::OWNER_STOPPED));
+    }
+    crate::team::admit_resolve(tx, project, agent, prompt, crate::team::now_ms())
 }
 
 /// Ask agent to update: checks that the agent can take the resolve work, then merges the
@@ -92,35 +146,31 @@ pub(crate) fn update(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineEr
         return Ok(!again);
     }
     if again {
-        start_resolve(db, id)?;
+        hand_over(db, id, Asker::Owner)?;
         return Ok(false);
     }
-    resolve_ready(db, &set_project(db, id)?, &set)?;
+    resolve_ready(db, &set_project(db, id)?, &set, Asker::Owner)?;
     landing::update(db, id)?;
-    if let Err(problem) = start_resolve(db, id) {
+    if let Err(problem) = hand_over(db, id, Asker::Owner) {
         eprintln!("resolve_not_started_after_update cause={}", problem.0);
     }
     Ok(true)
 }
 
 /// Checks, before any merge, that a team agent can take its resolve work: the admission
-/// `start_resolve` makes, run with a stand-in prompt in a transaction that is rolled
-/// back. A stopped agent passes, since its pinned resolve task starts it again. Inputs:
-/// the store, the project and the change set. Output: Ok, or the plain refusal.
+/// `hand_over` makes for the same asker, run with a stand-in prompt in a transaction
+/// that is rolled back. For the owner a stopped agent passes, since its pinned resolve
+/// task starts it again; for the engine an agent the owner stopped is refused. Inputs:
+/// the store, the project, the change set and who asks. Output: Ok, or the plain refusal.
 fn resolve_ready(
     db: &Connection,
     project: &ProjectId,
     set: &landing::ChangeSetView,
+    asker: Asker,
 ) -> Result<(), EngineError> {
     let agent = team_agent(set)?;
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
-    let admitted = crate::team::admit_resolve(
-        &tx,
-        project,
-        agent,
-        "Resolve the update.\n",
-        crate::team::now_ms(),
-    )?;
+    let admitted = admit(&tx, project, agent, "Resolve the update.\n", asker)?;
     tx.rollback().map_err(storage)?;
     admitted.map_err(refused)
 }

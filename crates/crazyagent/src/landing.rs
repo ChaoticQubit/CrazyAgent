@@ -718,11 +718,9 @@ pub fn commit_deletions(
 /// the agent made itself land too. A failed or cancelled turn commits too. Owner edits
 /// waiting in the worktree settle on the change set the turn end leaves open; when they
 /// cannot, they keep waiting for the next turn end and the recorded set is still returned.
-/// A team agent's Pending set that conflicts with the tip it lands on goes back to its
-/// agent merged with conflict markers before the owner sees it (OS-8); a check or merge
-/// that cannot run refuses the turn end by its plain code, the work kept in the set.
-/// Inputs: the store, the workspace and the turn end. Output: the change set the work now belongs
-/// to, None when nothing is pending.
+/// Whether the set then goes back to its agent is the turn-end caller's, through
+/// [`conflicts_with_main`] (OS-8). Inputs: the store, the workspace and the turn end.
+/// Output: the change set the work now belongs to, None when nothing is pending.
 pub fn record_turn_end(
     db: &Connection,
     workspace: &Workspace,
@@ -741,9 +739,6 @@ pub fn record_turn_end(
             "settle",
             owner_edit::settle(db, &workspace.worktree, kept.as_ref()),
         );
-        if let Some(id) = &kept {
-            owner::catch_up(db, id)?;
-        }
         Ok(kept)
     }
     #[cfg(not(unix))]
@@ -1087,6 +1082,22 @@ pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), Eng
     #[cfg(not(unix))]
     {
         let _ = (db, id, now_ms);
+        Err(unavailable())
+    }
+}
+
+/// Tells whether an agent's change set conflicts with the tip it lands on, so its turn
+/// end can send it back to its agent before the owner sees it (OS-8). Only a Pending set
+/// of a sub-agent in a linked worktree that its own resolve task fixes is checked, and
+/// never with an owner-configured filter or merge driver on a path it changes. Inputs:
+/// the store and the change set. Output: the answer, or the plain code of a check that
+/// could not run.
+pub(crate) fn conflicts_with_main(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
+    #[cfg(unix)]
+    return owner::conflicts_with_main(db, id);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id);
         Err(unavailable())
     }
 }

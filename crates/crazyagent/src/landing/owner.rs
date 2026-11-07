@@ -1127,8 +1127,10 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
 /// The paths a change set's work conflicts on with the tip it lands on (OS-8): git's own
 /// three-way merge of its head onto that tip from where the work is measured, with no
 /// merge driver, run in the owner repository only. None while the tip cannot be read or
-/// already lies in the head's history. Inputs: the store and the change set. Output: the
-/// conflicting paths, empty for a clean merge, or the plain git code.
+/// already lies in the head's history. A path it changes that carries an owner-configured
+/// filter or merge driver, which that merge would run, is refused before it runs, as
+/// `update` refuses it. Inputs: the store and the change set. Output: the conflicting
+/// paths, empty for a clean merge, `changes_git_unsupported`, or the plain git code.
 pub(super) fn conflicts_with_tip(
     db: &Connection,
     record: &Record,
@@ -1147,37 +1149,38 @@ pub(super) fn conflicts_with_tip(
     if from == tip {
         return Ok(Vec::new());
     }
+    let paths = diff::changed_paths(&owner, &from, &record.head)?;
+    if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
+        return Err(failure("changes_git_unsupported"));
+    }
     let (_, conflicts) = merge(&owner, &from, &tip, &record.head)?;
     Ok(conflicts)
 }
 
-/// Sends an agent's change set that conflicts with the tip it lands on back to its agent
-/// at its turn end, merged with conflict markers as `update` makes it, so the owner never
-/// sees it waiting (OS-8). Only a Pending set of an agent that takes its own resolve task
-/// is checked: a master's set keeps the owner's Accept and Update, and a lead's worker
-/// while its lead merges it, or a native teammate, keeps its lead's merge, which tells the
-/// lead the files. Inputs: the store and the change set. Output: Ok, or the plain code of
-/// a check or merge that could not run.
-pub(super) fn catch_up(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+/// Tells whether an agent's change set conflicts with the tip it lands on, so its turn
+/// end can send it back to its agent before the owner sees it (OS-8). Only a Pending set
+/// of an agent that takes its own resolve task is checked: a master's set keeps the
+/// owner's Accept and Update, a lead's worker while its lead merges it, or a native
+/// teammate, keeps its lead's merge, which tells the lead the files, and an agent's own
+/// clone waits for the owner, since its git takes no merge of the engine's commit.
+/// Inputs: the store and the change set. Output: the answer, or the plain code of a
+/// check that could not run.
+pub(super) fn conflicts_with_main(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
     let record = store::load(db, id)?;
     if record.state != ChangeState::Pending
         || record.intent.is_some()
         || record.agent.kind == AgentKind::Master
+        || flow::in_clone(&record)
     {
-        return Ok(());
+        return Ok(false);
     }
     let lead = super::subagent::lead_of(db, &record.project, &record.agent, &record.repository);
     if !matches!(lead, Ok(None))
         || super::subagent::is_teammate(db, &record.project, &record.agent)?
     {
-        return Ok(());
+        return Ok(false);
     }
-    if conflicts_with_tip(db, &record)?.is_empty() {
-        return Ok(());
-    }
-    update(db, id)?;
-    assert_eq!(store::load(db, id)?.state, ChangeState::Updating);
-    Ok(())
+    Ok(!conflicts_with_tip(db, &record)?.is_empty())
 }
 
 /// Finishes or undoes owner-checkout and worktree work an engine stop interrupted, one
