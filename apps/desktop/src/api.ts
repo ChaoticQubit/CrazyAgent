@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, MasterLands, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterLands, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -1285,6 +1285,13 @@ export function setMasterLands(id: string, mode: MasterLands): Promise<Result<In
  * the project id and the switch. Output: the engine receipt, not ready, or a plain error. */
 export function setReaskEmptyReply(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_reask_empty_reply", { id, on, generation: nextGeneration() });
+}
+
+/** Sets the project's "Catch up with main" setting: on lets every agent merge the landed main,
+ * `crazyagent/main`, into its own branch and tells it to; off keeps every merge refused.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setCatchUpMain(id: string, mode: CatchUpMain): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_catch_up_main", { id, mode, generation: nextGeneration() });
 }
 
 /** Sets the most files one new top-level folder, a folder the owner's branch does not have,

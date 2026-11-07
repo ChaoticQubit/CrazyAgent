@@ -227,6 +227,12 @@ const rustList = (name) => {
   return found[1].split(",").map((item) => item.trim().replaceAll("_", "")).filter(Boolean).map(Number);
 };
 
+test("the token budget says it counts new input, cache writes and output, never cache re-reads", () => {
+  const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
+  assert.match(html, /A budget counts new input, cache writes and output; re-reads from cache are not counted/);
+  assert.doesNotMatch(html, /cache reads included/);
+});
+
 test("every cap, token budget, depth and landing choice is offered once, from the engine's own lists, and reads back", () => {
   assert.deepEqual([...controls.CAP_CHOICES], rustList("CAP_CHOICES"));
   assert.deepEqual([...controls.BUDGET_CHOICES], rustList("BUDGET_CHOICES"));

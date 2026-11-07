@@ -3658,6 +3658,151 @@ fn accept_lands_the_commits_an_own_branch_agent_made_and_leaves_its_branch_alone
     );
 }
 
+/// After an Accept, every agent clone the team records holds `refs/crazyagent/main` at the
+/// landed commit, read by the agent's own git, so a second agent merges main into its
+/// branch with plain `git merge crazyagent/main` and its next set lands with no
+/// `changes_outside_merge` (OS-8).
+#[test]
+fn every_agent_clone_holds_the_landed_main_after_an_accept() {
+    let case = Case::own_branch();
+    let second = case.repo.parent().unwrap().join("agent-two");
+    add_agent_clone(&case.repo, &second).unwrap();
+    let other = Workspace {
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-two".into(),
+            label: "Agent 2".into(),
+        },
+        git_dir: crate::agent_git::git_dir(&second),
+        worktree: second.clone(),
+        ..case.workspace.clone()
+    };
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    crate::team::initialize(&case.db).unwrap();
+    for (agent, workspace) in [(1, &case.workspace), (2, &other)] {
+        case.db
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![
+                    agent,
+                    workspace.project.as_str(),
+                    workspace.repository.to_str().unwrap(),
+                    workspace.worktree.to_str().unwrap(),
+                    workspace.git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    let main = git_in(
+        &case.home,
+        &second,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/crazyagent/main",
+        ],
+    );
+    assert_eq!(main.trim(), commit, "the second clone holds no landed main");
+    let agent = |args: &[&str]| {
+        let named = [
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+        ];
+        git_in(&case.home, &second, &[&named[..], args].concat())
+    };
+    write(&second.join("two.txt"), "second agent\n");
+    agent(&["add", "-A"]);
+    agent(&["commit", "-q", "-m", "Add two"]);
+    agent(&["merge", "-q", "--no-edit", "crazyagent/main"]);
+    assert_eq!(agent(&["rev-parse", "HEAD^2"]).trim(), commit);
+    let next = record_turn_end(&case.db, &other, &own_branch_turn())
+        .unwrap()
+        .unwrap();
+    let AcceptOutcome::Landed { commit: landed, .. } = case.accept(&next).unwrap() else {
+        panic!("the second accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["show", &format!("{landed}:README")]),
+        "one\ntwo\nthree\nfour\n"
+    );
+    assert_eq!(
+        case.owner(&["show", &format!("{landed}:two.txt")]),
+        "second agent\n"
+    );
+}
+
+/// The engine writes an agent clone's `refs/crazyagent/main` with no git run there and
+/// never through a link the agent planted on the way (CC-N1): a `refs/crazyagent` that
+/// links outside is refused and the folder it names stays empty; with the link gone the
+/// clone's own git reads the ref.
+#[test]
+fn giving_main_to_a_clone_refuses_a_link_on_the_way_and_writes_nothing_outside() {
+    let case = Case::own_branch();
+    let tip = case.tip();
+    let outside = case.repo.parent().unwrap().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let planted = case.workspace.git_dir.join("refs/crazyagent");
+    let _ = std::fs::remove_dir_all(&planted);
+    std::os::unix::fs::symlink(&outside, &planted).unwrap();
+    assert_eq!(
+        clone::give_main(&case.repo, &case.workspace.worktree, &tip).map_err(|error| error.0),
+        Err("changes_workspace_invalid".to_owned())
+    );
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    std::fs::remove_file(&planted).unwrap();
+    clone::give_main(&case.repo, &case.workspace.worktree, &tip).unwrap();
+    assert_eq!(
+        case.agent(&[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/crazyagent/main"
+        ])
+        .trim(),
+        tip
+    );
+}
+
+/// A clone that holds only its landed branch and the `refs/crazyagent/main` the engine
+/// gives it, loose or packed by the agent's own git, still retires: that ref is the
+/// engine's, rewritten at every landing, and holds no work of the agent's.
+#[test]
+fn a_clone_holding_the_engine_s_main_ref_still_retires() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    let blocker = || {
+        retire_blocker(
+            &case.db,
+            &case.repo,
+            &case.workspace.worktree,
+            &case.workspace.git_dir,
+            NOW_MS,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        blocker(),
+        None,
+        "the clone cannot retire even without the main ref"
+    );
+    case.agent(&["update-ref", "refs/crazyagent/main", &commit]);
+    assert_eq!(blocker(), None, "the loose main ref kept the clone");
+    case.agent(&["pack-refs", "--all"]);
+    assert_eq!(blocker(), None, "the packed main ref kept the clone");
+}
+
 #[test]
 fn an_own_branch_agent_resolves_an_update_on_its_branch_and_accept_lands_it() {
     let case = Case::own_branch();
@@ -5821,8 +5966,11 @@ fn at_full_access_the_master_s_merge_of_a_foreign_commit_or_a_closed_set_is_refu
     ] {
         merge_in(&case, &master, commit);
         assert_eq!(
-            refused(record_turn_end(&case.db, &master, &merge_turn())),
-            "changes_outside_merge",
+            record_turn_end(&case.db, &master, &merge_turn())
+                .err()
+                .map(|refusal| refusal.0)
+                .as_deref(),
+            Some("changes_outside_merge"),
             "the master's merge of {what} at Full access"
         );
         git_in(
@@ -5880,8 +6028,11 @@ fn at_full_access_a_sub_agent_s_or_a_lead_s_merge_of_an_open_set_is_refused() {
             .unwrap();
         merge_in(&case, agent, &open_head);
         assert_eq!(
-            refused(record_turn_end(&case.db, agent, &merge_turn())),
-            "changes_outside_merge",
+            record_turn_end(&case.db, agent, &merge_turn())
+                .err()
+                .map(|refusal| refusal.0)
+                .as_deref(),
+            Some("changes_outside_merge"),
             "{what}'s merge of an open set at Full access"
         );
     }

@@ -273,7 +273,8 @@ fn tokens(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Tokens> {
     })
 }
 
-/// The counted rows of one grouping column in the range, the largest first: every key, or
+/// The counted rows of one grouping column in the range, the largest headline first
+/// (`Tokens::headline`, cache re-reads not counted): every key, or
 /// only the given keys, at most `ROWS_MAX` of them, all read in one pass over the range.
 /// Inputs: the store, the column, whether the unattributed `''` key is listed, the project
 /// or none, the range start and the keys or none for all. Output: at most `ROWS_MAX` rows,
@@ -302,7 +303,7 @@ fn rows(
              FROM usage_tokens WHERE hour_ms>=?1 AND (?3 OR {column}<>'')
                 AND (?4 IS NULL OR project=?4) {only}
              GROUP BY {column}
-             ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_read)+TOTAL(cache_write) DESC, {column}
+             ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_write) DESC, {column}
              LIMIT ?2"
         ))
         .map_err(storage)?;

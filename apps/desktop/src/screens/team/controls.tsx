@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
@@ -238,6 +238,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
   const [masterLandsHeld, setMasterLandsHeld] = useState<MasterLands | null>(null);
   const [reask, setReask] = useState<"off" | "on" | null>(null);
+  const [catchUp, setCatchUp] = useState<"off" | "on" | null>(null);
   const [newFolder, setNewFolder] = useState<number | null>(null);
   const [background, setBackground] = useState<BackgroundAtEnd | null>(null);
   const [graceText, setGraceText] = useState<string | null>(null);
@@ -419,6 +420,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function chooseCatchUp(choice: "off" | "on") {
+    setCatchUp(choice);
+    setBusy(true);
+    const message = changeNote(await setCatchUpMain(projectId, choice), "the catch up with main setting");
+    setBusy(false);
+    setCatchUp(null);
+    setNote(message);
+    reload();
+  }
+
   async function chooseReask(choice: "off" | "on") {
     setReask(choice);
     setBusy(true);
@@ -531,7 +542,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
     <Select id={`tg-token-budget-${projectId}`} label="Token budget" value={status.token_budget == null ? NO_LIMIT : String(status.token_budget)} options={budgetOptions()}
       onValue={(value) => void budget(value)}
       helper={status.token_budget == null
-        ? "Off lets the agents use tokens as their accounts allow. A budget counts every token the Usage page counts, cache reads included, from when you set it or start the team again."
+        ? "Off lets the agents use tokens as their accounts allow. A budget counts new input, cache writes and output; re-reads from cache are not counted. It counts from when you set it or start the team again."
         : `Used ${tokenWords(status.budget_used ?? 0)} of ${tokenWords(status.token_budget)}. At the budget the engine stops every agent and notifies you.`} />
     <div className="pj-row">
       <span aria-hidden="true">Finished agents</span>
@@ -574,6 +585,12 @@ export function TeamControls({ projectId, status, harness, reload }: {
           options={[{ value: "merges", label: "Merge into main itself" }, { value: "waits", label: "Wait for my Accept" }]} />
         : <span className="tg-terminal-note">Only at Full access.</span>}
       <span className="tg-terminal-note">Merge lands the master's own fix of a conflict on main with no Accept from you, and closes the change sets it fixed. Activity lists each merge.</span>
+    </div>
+    <div className="pj-row">
+      <span aria-hidden="true">Catch up with main</span>
+      <Segmented label="Catch up with main" value={catchUp ?? (status.catch_up_main === "off" ? "off" : "on")} onValue={(choice) => { if (!busy) void chooseCatchUp(choice); }}
+        options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
+      <span className="tg-terminal-note">On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; merging another agent's branch stays refused. Off refuses every merge.</span>
     </div>
     <div className="pj-row">
       <span aria-hidden="true">Re-ask a sub-agent's empty reply</span>

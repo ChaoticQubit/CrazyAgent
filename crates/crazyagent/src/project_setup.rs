@@ -2387,7 +2387,7 @@ fn plan_roadmap(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 37] = [
+const REMOVED_WITH_PROJECT: [&str; 38] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2411,6 +2411,7 @@ const REMOVED_WITH_PROJECT: [&str; 37] = [
     "team_background",
     "team_merge_ask",
     "team_reask_empty",
+    "team_catch_up_main",
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",

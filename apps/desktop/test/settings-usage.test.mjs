@@ -81,7 +81,9 @@ test("token counts read compactly with the cache share of prompt tokens", () => 
   assert.equal(usage.compactCount(1234), "1.2K");
   assert.equal(usage.compactCount(3_400_000), "3.4M");
   assert.equal(usage.compactCount(999_950), "1M");
-  assert.equal(usage.totalTokens(tokens({ input: 1, output: 2, cache_read: 3, cache_write: 4 })), 10);
+  assert.equal(usage.headlineTokens(tokens({ input: 1, output: 2, cache_read: 3, cache_write: 4 })), 7);
+  assert.equal(usage.headlineTokens(tokens({ input: 194, output: 139_484, cache_read: 17_665_095, cache_write: 288_322 })), 428_000);
+  assert.equal(usage.totalTokens, undefined);
   assert.equal(usage.cacheShare(tokens({ input: 100, cache_read: 300, cache_write: 100 })), 60);
   assert.equal(usage.cacheShare(tokens({ output: 50 })), null);
 });
@@ -192,7 +194,7 @@ test("a sign-in the limits check cannot use says on the card what it is and what
 test("the usage page shows totals, limits with countdowns, named groups and lines changed", () => {
   const markup = render();
   const words = text(markup);
-  assert.match(words, /Tokens 6\.3K 1\.2K in, 300 out/);
+  assert.match(words, /Tokens 2\.3K 1\.2K in, 300 out/);
   assert.match(words, /Cache 67% 4K read, 800 written/);
   assert.match(words, /Runs 3/);
   assert.match(words, /Lines changed \+90 -57/);
@@ -206,7 +208,7 @@ test("the usage page shows totals, limits with countdowns, named groups and line
   assert.match(words, /Set reset time/);
   assert.doesNotMatch(words, /Use provider's time/);
   for (const title of ["By project", "By pool", "By account", "By agent", "By day", "Lines changed by project"]) assert.match(words, new RegExp(title));
-  assert.match(words, /Harbor Notes 5\.5K 1\.2K 300 4K 2 5 min ago/);
+  assert.match(words, /Harbor Notes 1\.5K 1\.2K 300 4K 2 5 min ago/);
   assert.match(words, /Main pool/);
   assert.match(words, /Agent 7/);
   assert.match(words, /Research scout/);
@@ -220,10 +222,10 @@ test("runs tied to no project or account show as Unattributed and the master as 
   const words = text(render({ report: { kind: "ok", value: report({
     projects: [row("project-harbor"), row("")], accounts: [row("")], agents: [row("master-project-harbor"), row("onboarding")],
   }) } }));
-  assert.match(words, /By project Name Tokens In Out Cache read Runs Last used Harbor Notes .* Unattributed 5\.5K/);
-  assert.match(words, /By account Name Tokens In Out Cache read Runs Last used Unattributed 5\.5K/);
-  assert.match(words, /Master, Harbor Notes 5\.5K/);
-  assert.match(words, /Onboarding 5\.5K/);
+  assert.match(words, /By project Name Tokens In Out Cache read Runs Last used Harbor Notes .* Unattributed 1\.5K/);
+  assert.match(words, /By account Name Tokens In Out Cache read Runs Last used Unattributed 1\.5K/);
+  assert.match(words, /Master, Harbor Notes 1\.5K/);
+  assert.match(words, /Onboarding 1\.5K/);
 });
 
 test("a manual reset, a failed check and a passed reset show on the account's card", () => {
@@ -318,9 +320,9 @@ test("a harness without a reader reads as usage not reported, never as zero", ()
     projects: [row("project-harbor", { not_reported_by: "Gemini CLI" }), unreported("project-docs", "OpenCode")],
     not_reported_by: ["Gemini CLI", "OpenCode"],
   }) } }));
-  assert.match(mixed, /Tokens 6\.3K 1\.2K in, 300 out/);
+  assert.match(mixed, /Tokens 2\.3K 1\.2K in, 300 out/);
   assert.match(mixed, /Not in these totals: usage not reported by Gemini CLI, OpenCode\./);
-  assert.match(mixed, /Harbor Notes 5\.5K \+ usage not reported by Gemini CLI 1\.2K 300 4K 2 5 min ago/);
+  assert.match(mixed, /Harbor Notes 1\.5K \+ usage not reported by Gemini CLI 1\.2K 300 4K 2 5 min ago/);
   assert.match(mixed, /project-docs Usage not reported by OpenCode 5 min ago/);
 
   const older = text(render({ report: { kind: "ok", value: report() } }));

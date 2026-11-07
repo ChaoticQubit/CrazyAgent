@@ -5200,6 +5200,109 @@ fn token_budget_each_choice_pauses_and_notifies_once_at_the_budget() {
     }
 }
 
+/// A token budget spends the headline count (DEC-117 Q6): new input, cache writes and
+/// output reach it, and cache re-reads, however many, never do.
+#[test]
+fn a_token_budget_spends_new_input_cache_writes_and_output_but_never_cache_reads() {
+    let (_directory, mut connection, project) = team_database("team-budget-headline");
+    crate::usage::initialize(&connection).unwrap();
+    let tokens = BUDGET_CHOICES[0];
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(tokens),
+        },
+    );
+    let now = now_ms();
+    let headline = i64::try_from(tokens).unwrap() - 1;
+    connection
+        .execute(
+            "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
+             VALUES (?1,'agent',?2,'pool-a','account-a','7','claude-code','cached',?3,?4,?5,?6)",
+            params![
+                hour_of(now),
+                project.as_str(),
+                headline - 30,
+                10,
+                i64::try_from(tokens).unwrap() * 40,
+                20
+            ],
+        )
+        .unwrap();
+    let read = budget(&connection, &project).unwrap().unwrap();
+    assert_eq!(read.used, tokens - 1);
+    assert!(!budget_stop(&connection, &project, now).unwrap());
+    used_tokens(&connection, &project, "last", now, 1, 0);
+    assert!(budget_stop(&connection, &project, now).unwrap());
+}
+
+/// The plan's known run (Task 13, T13-L1): one real capture of a Claude transcript that
+/// holds a message written three times and one that re-read 17.5 M tokens from cache spends
+/// the team's token budget by exactly the headline the usage report shows for that agent:
+/// new input, cache writes and output, once per message id.
+#[test]
+fn a_captured_run_spends_the_budget_by_the_headline_its_usage_row_shows() {
+    let (_directory, mut connection, project) = team_database("team-budget-known-run");
+    crate::usage::initialize(&connection).unwrap();
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(BUDGET_CHOICES[0]),
+        },
+    );
+    let message = |id: &str, input: u64, output: u64, read: u64, written: u64| {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"id": id, "usage": {
+                    "input_tokens": input, "output_tokens": output,
+                    "cache_read_input_tokens": read, "cache_creation_input_tokens": written
+                }}
+            })
+        )
+    };
+    let mut transcript = message("k1", 100, 70_000, 182_114, 150_000).repeat(3);
+    transcript.push_str(&message("k2", 94, 69_484, 17_482_981, 138_322));
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/f/k.jsonl");
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(&record, transcript).unwrap();
+    let now = now_ms();
+    let ken = crate::usage::capture::Attribution {
+        kind: crate::usage::capture::RunKind::Agent,
+        project: Some(project.clone()),
+        pool: None,
+        account: Some(crate::protocol::CredentialRef::new("claude-1").unwrap()),
+        agent: "team-ken".into(),
+        harness: "claude-code".into(),
+    };
+    crate::usage::capture::scan_home(
+        &connection,
+        home.path(),
+        crate::usage::capture::Format::Claude,
+        &ken,
+        now,
+    )
+    .unwrap();
+    let report = crate::usage::report::report(&connection, Some(&project), None, 0, now).unwrap();
+    let row = report
+        .agents
+        .iter()
+        .find(|row| row.key == "team-ken")
+        .unwrap();
+    assert_eq!(row.tokens.cache_read, 182_114 + 17_482_981);
+    assert_eq!(
+        row.tokens.headline(),
+        (100 + 70_000 + 150_000) + (94 + 69_484 + 138_322)
+    );
+    let read = budget(&connection, &project).unwrap().unwrap();
+    assert_eq!(read.used, row.tokens.headline());
+    assert!(!read.reached);
+}
+
 /// Inserts one agent row. Takes the connection, the project, the role, its lead and its
 /// status. Returns its id.
 fn agent_row(
@@ -5718,6 +5821,81 @@ fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
         reask_empty_reply(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
         "the choice is per project"
     );
+}
+
+/// "Catch up with main" is On for a project with no choice saved and for a store with no
+/// team tables, reads the owner's Off and On again, and the choice is per project (OS-8).
+#[test]
+fn catch_up_main_defaults_to_on_and_reads_the_saved_choice() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-catch-up").unwrap();
+    assert_eq!(
+        catch_up_main(&connection, &project).unwrap(),
+        CatchUpMain::On,
+        "On is the default"
+    );
+    for value in [CatchUpMain::Off, CatchUpMain::On, CatchUpMain::Off] {
+        set_catch_up_main(&connection, &project, value).unwrap();
+        assert_eq!(catch_up_main(&connection, &project).unwrap(), value);
+    }
+    assert_eq!(
+        catch_up_main(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        CatchUpMain::On,
+        "the choice is per project"
+    );
+    let bare = Connection::open_in_memory().unwrap();
+    assert_eq!(
+        catch_up_main(&bare, &project).unwrap(),
+        CatchUpMain::On,
+        "a store with no team tables reads On"
+    );
+}
+
+/// The owner's Catch up with main action saves Off and On again for the project and the
+/// team status shows each choice (OS-8).
+#[test]
+fn the_catch_up_with_main_action_is_saved_and_shown_in_the_team_status() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-catch-up-action",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-catch-up-action", &["local-a"]);
+    assert_eq!(
+        status(&connection, &setup).unwrap().catch_up_main,
+        CatchUpMain::On,
+        "On is the default"
+    );
+    for mode in [CatchUpMain::Off, CatchUpMain::On] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::CatchUpMain {
+                    project_id: setup.project_id.clone(),
+                    mode,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().catch_up_main, mode);
+    }
 }
 
 /// Owner 2026-11-05: under Native only the team status and graph say "Can't receive

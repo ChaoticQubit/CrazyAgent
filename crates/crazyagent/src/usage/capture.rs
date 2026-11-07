@@ -77,6 +77,14 @@ pub struct Tokens {
 }
 
 impl Tokens {
+    /// The headline count usage shows and budgets spend (DEC-117 Q6): new input, cache
+    /// writes and output. Input: the count. Output: their saturating sum.
+    pub fn headline(&self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_write)
+    }
+
     /// Adds another count, saturating. Input: the other count. Output: the sum.
     pub fn plus(self, other: Tokens) -> Tokens {
         Tokens {

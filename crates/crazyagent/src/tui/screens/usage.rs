@@ -188,10 +188,6 @@ fn refusal(code: &str) -> &'static str {
     }
 }
 
-fn tokens(row: &crate::usage::capture::Tokens) -> u64 {
-    row.input + row.output + row.cache_read + row.cache_write
-}
-
 /// Names shown in place of ids: projects, pools and accounts by id.
 #[derive(Default)]
 pub struct Names {
@@ -340,12 +336,12 @@ fn group(
         let runs = if row.runs == 1 { "run" } else { "runs" };
         let counted = format!(
             "  {label:<width$}  {:>6} tokens  {} {runs}",
-            compact(tokens(&row.tokens)),
+            compact(row.tokens.headline()),
             row.runs
         );
         lines.push(Line::raw(match &row.not_reported_by {
             None => counted,
-            Some(harness) if tokens(&row.tokens) == 0 => {
+            Some(harness) if row.tokens.headline() == 0 => {
                 format!("  {label:<width$}  usage not reported by {harness}")
             }
             Some(harness) => format!("{counted}  + usage not reported by {harness}"),
@@ -406,7 +402,7 @@ pub fn summary(
         styled(range.label(), Role::Muted, theme),
         ctx.glyphs,
     )];
-    if tokens(total) == 0 && !unreported.is_empty() {
+    if total.headline() == 0 && !unreported.is_empty() {
         lines.push(Line::raw(format!(
             "Usage not reported by {unreported}  Lines +{} -{}",
             compact(added),
@@ -415,7 +411,7 @@ pub fn summary(
     } else {
         lines.push(Line::raw(format!(
             "Tokens {} ({} in, {} out)  Cache {cache}  Runs {}  Lines +{} -{}",
-            compact(tokens(total)),
+            compact(total.headline()),
             compact(total.input),
             compact(total.output),
             report.runs,
@@ -455,7 +451,7 @@ pub fn summary(
             2,
         ));
     }
-    if tokens(total) == 0 && report.lines.is_empty() && unreported.is_empty() {
+    if total.headline() == 0 && report.lines.is_empty() && unreported.is_empty() {
         lines.push(Line::default());
         lines.push(styled(
             "No usage in this range. Runs show up a few seconds after an agent works.",
