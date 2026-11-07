@@ -194,7 +194,7 @@ test("a sign-in the limits check cannot use says on the card what it is and what
 test("the usage page shows totals, limits with countdowns, named groups and lines changed", () => {
   const markup = render();
   const words = text(markup);
-  assert.match(words, /Tokens 2\.3K 1\.2K in, 300 out/);
+  assert.match(words, /Tokens 2\.3K Re-read from cache: 4K, counted apart\./);
   assert.match(words, /Cache 67% 4K read, 800 written/);
   assert.match(words, /Runs 3/);
   assert.match(words, /Lines changed \+90 -57/);
@@ -208,7 +208,7 @@ test("the usage page shows totals, limits with countdowns, named groups and line
   assert.match(words, /Set reset time/);
   assert.doesNotMatch(words, /Use provider's time/);
   for (const title of ["By project", "By pool", "By account", "By agent", "By day", "Lines changed by project"]) assert.match(words, new RegExp(title));
-  assert.match(words, /Harbor Notes 1\.5K 1\.2K 300 4K 2 5 min ago/);
+  assert.match(words, /Harbor Notes 1\.5K 1\.2K 0 300 4K 2 5 min ago/);
   assert.match(words, /Main pool/);
   assert.match(words, /Agent 7/);
   assert.match(words, /Research scout/);
@@ -218,12 +218,26 @@ test("the usage page shows totals, limits with countdowns, named groups and line
   assert.match(words, /Check limits now/);
 });
 
+test("the Tokens tile says what was re-read from cache, counted apart, and every usage table shows all four parts with the headline first (OS-7)", () => {
+  const parts = tokens({ input: 1200, cache_write: 700, output: 300, cache_read: 9000 });
+  const markup = render({ report: { kind: "ok", value: report({
+    projects: [row("project-harbor", { tokens: parts })],
+    days: [{ day_ms: NOW - 9 * HOUR, tokens: parts }],
+  }) } });
+  const words = text(markup);
+  assert.match(words, /Tokens 2\.3K Re-read from cache: 4K, counted apart\./);
+  assert.doesNotMatch(words, /Tokens 2\.3K 1\.2K in/);
+  assert.match(words, /By project Name Tokens Input Cache write Output Cache read Runs Last used Harbor Notes 2\.2K 1\.2K 700 300 9K 2 5 min ago/);
+  assert.match(words, /By day Day Tokens Input Cache write Output Cache read .*? 2\.2K 1\.2K 700 300 9K/);
+  assert.match(markup, /<th scope="col" class="muted">Cache read<\/th>/);
+});
+
 test("runs tied to no project or account show as Unattributed and the master as its project's row", () => {
   const words = text(render({ report: { kind: "ok", value: report({
     projects: [row("project-harbor"), row("")], accounts: [row("")], agents: [row("master-project-harbor"), row("onboarding")],
   }) } }));
-  assert.match(words, /By project Name Tokens In Out Cache read Runs Last used Harbor Notes .* Unattributed 1\.5K/);
-  assert.match(words, /By account Name Tokens In Out Cache read Runs Last used Unattributed 1\.5K/);
+  assert.match(words, /By project Name Tokens Input Cache write Output Cache read Runs Last used Harbor Notes .* Unattributed 1\.5K/);
+  assert.match(words, /By account Name Tokens Input Cache write Output Cache read Runs Last used Unattributed 1\.5K/);
   assert.match(words, /Master, Harbor Notes 1\.5K/);
   assert.match(words, /Onboarding 1\.5K/);
 });
@@ -311,7 +325,7 @@ test("a harness without a reader reads as usage not reported, never as zero", ()
     projects: [unreported("project-harbor", "RCLI")], agents: [unreported("master-project-harbor", "RCLI")], not_reported_by: ["RCLI"],
   }) } }));
   assert.match(only, /Tokens Not reported Usage not reported by RCLI/);
-  assert.match(only, /By project Name Tokens In Out Cache read Runs Last used Harbor Notes Usage not reported by RCLI 5 min ago/);
+  assert.match(only, /By project Name Tokens Input Cache write Output Cache read Runs Last used Harbor Notes Usage not reported by RCLI 5 min ago/);
   assert.match(only, /By agent .* Usage not reported by RCLI 5 min ago/);
   assert.doesNotMatch(only, /No usage in this range/);
   assert.doesNotMatch(only, /Harbor Notes 0 /);
@@ -320,9 +334,9 @@ test("a harness without a reader reads as usage not reported, never as zero", ()
     projects: [row("project-harbor", { not_reported_by: "Gemini CLI" }), unreported("project-docs", "OpenCode")],
     not_reported_by: ["Gemini CLI", "OpenCode"],
   }) } }));
-  assert.match(mixed, /Tokens 2\.3K 1\.2K in, 300 out/);
+  assert.match(mixed, /Tokens 2\.3K Re-read from cache: 4K, counted apart\./);
   assert.match(mixed, /Not in these totals: usage not reported by Gemini CLI, OpenCode\./);
-  assert.match(mixed, /Harbor Notes 1\.5K \+ usage not reported by Gemini CLI 1\.2K 300 4K 2 5 min ago/);
+  assert.match(mixed, /Harbor Notes 1\.5K \+ usage not reported by Gemini CLI 1\.2K 0 300 4K 2 5 min ago/);
   assert.match(mixed, /project-docs Usage not reported by OpenCode 5 min ago/);
 
   const older = text(render({ report: { kind: "ok", value: report() } }));

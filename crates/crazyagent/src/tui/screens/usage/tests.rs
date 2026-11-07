@@ -262,8 +262,9 @@ fn the_summary_shows_totals_limits_with_countdowns_and_named_groups() {
     assert!(lines[0].starts_with("Usage") && lines[0].ends_with("Last 7 days"));
     assert_eq!(
         lines[1],
-        "Tokens 2.3K (1.2K in, 300 out)  Cache 67%  Runs 3  Lines +90 -57"
+        "Tokens 2.3K (1.2K input, 800 cache write, 300 output)  Cache 67%  Runs 3  Lines +90 -57"
     );
+    assert_eq!(lines[2], "Re-read from cache: 4K, counted apart.");
     let all = lines.join("\n");
     for wanted in [
         "  Work Claude  max  read from the provider 3 min ago",
@@ -665,6 +666,7 @@ fn a_harness_without_a_reader_reads_as_not_reported_never_as_zero() {
         !all.contains("Tokens 0") && !all.contains(" 0 tokens"),
         "{all}"
     );
+    assert!(!all.contains("Re-read from cache"), "{all}");
 
     let mixed = UsageReport {
         projects: vec![
@@ -688,10 +690,11 @@ fn a_harness_without_a_reader_reads_as_not_reported_never_as_zero() {
     ));
     assert_eq!(
         lines[1],
-        "Tokens 2.3K (1.2K in, 300 out)  Cache 67%  Runs 3  Lines +90 -57"
+        "Tokens 2.3K (1.2K input, 800 cache write, 300 output)  Cache 67%  Runs 3  Lines +90 -57"
     );
+    assert_eq!(lines[2], "Re-read from cache: 4K, counted apart.");
     assert_eq!(
-        lines[2],
+        lines[3],
         "Not in these totals: usage not reported by Gemini CLI, OpenCode."
     );
     let all = lines.join("\n");
@@ -750,16 +753,16 @@ fn a_usage_step_that_panicked_shows_one_plain_line_with_its_count_and_last_time(
         &ctx,
     ));
     assert_eq!(
-        lines[2],
+        lines[3],
         "Checking account limits hit an internal error once since the engine started, last just now. CrazyAgent keeps retrying; limits shown may be out of date."
     );
     assert_eq!(
-        lines[3],
+        lines[4],
         "Counting agent tokens hit an internal error 3 times since the engine started, last 4 min ago. CrazyAgent keeps retrying; agent and research run token totals may be low."
     );
     assert_eq!(
-        lines[4],
+        lines[5],
         "Counting research run tokens hit an internal error 2 times since the engine started, last 4 min ago. It worked again 1 min ago."
     );
-    assert_eq!(lines[6], "Account limits");
+    assert_eq!(lines[7], "Account limits");
 }
