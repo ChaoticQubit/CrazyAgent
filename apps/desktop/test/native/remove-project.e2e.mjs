@@ -216,6 +216,7 @@ test("a project set up from a folder outside the projects folder offers only Rem
     const shown = await dialog(page);
     assert.equal(shown.checked, "dashboard");
     assert.ok(!shown.text.includes(DELETE), `a project outside the projects folder has no Delete option: ${shown.text}`);
+    assert.ok(shown.text.includes("Only a project whose folders are all inside your projects folder can be deleted here."), `the dialog says why there is no Delete option: ${shown.text}`);
     await me.capture("outside-dialog");
     await me.click("Keep project", "dialog[open] button");
   });
