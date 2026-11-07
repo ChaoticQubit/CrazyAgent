@@ -523,6 +523,29 @@ pub(super) fn open_for(db: &Connection, worktree: &str) -> Result<Option<Record>
     .map_err(storage)
 }
 
+/// The most open change-set heads one project's read returns.
+const OPEN_HEADS_MAX: usize = 256;
+
+/// The heads of the project's open change sets, the ones still Pending, Conflict or
+/// Updating. Inputs: the store and the project. Output: the heads, at most
+/// `OPEN_HEADS_MAX`, or `changes_unavailable` on a SQLite failure.
+pub(super) fn open_heads(db: &Connection, project: &ProjectId) -> Result<Vec<String>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT head FROM landing_change_sets WHERE project=?1 \
+             AND state IN ('pending','conflict','updating') ORDER BY id LIMIT ?2",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![project.as_str(), OPEN_HEADS_MAX as i64], |row| {
+            row.get(0)
+        })
+        .map_err(storage)?;
+    let heads: Vec<String> = rows.collect::<Result<_, _>>().map_err(storage)?;
+    assert!(heads.len() <= OPEN_HEADS_MAX);
+    Ok(heads)
+}
+
 /// Reads the worktrees of the change sets open directly inside one folder, such as a
 /// lead's teammates' folder, in path order. Inputs: the store, the folder path ending in
 /// `/` and the most worktrees to read. Output: the worktree paths.
