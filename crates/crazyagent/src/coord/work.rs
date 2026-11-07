@@ -56,8 +56,10 @@ pub fn start_work(
 /// Changes who owns a unit of work (Concord's transfer verbs), first transition wins:
 /// Assign gives Open, Declined or the owner's own work to a running agent; the owner
 /// Accepts or Declines what was assigned; Release gives it back as Open and Handoff
-/// passes it on, both dropping the owner's claims; Reopen brings ended work back. The
-/// owner, the engine, the master and the owner's lead may Assign, Release and Reopen too.
+/// passes it on, both dropping the owner's claims; Reopen brings ended work back, its
+/// claims no longer waiting on a change set, so a set landing later frees none of the
+/// reopened work's later edits. The owner, the engine, the master and the owner's lead
+/// may Assign, Release and Reopen too.
 /// Takes the database, the work, the version the caller read, the change, who acts and
 /// the time in ms. Returns the new version, `coord_work_stale`, `coord_transfer_invalid`
 /// for the state or `coord_transfer_refused` for who acts.
@@ -139,6 +141,13 @@ pub fn transfer(
         && owner != Some(previous)
     {
         super::claims::release_claims(tx, previous, work, now)?;
+    }
+    if action == Transfer::Reopen {
+        tx.execute(
+            "DELETE FROM coord_held WHERE claim IN (SELECT id FROM coord_claims WHERE work=?1)",
+            [work],
+        )
+        .map_err(state)?;
     }
     let next = advance(tx, work, &row, state, owner, now)?;
     audit(tx, &row.project, work, by, name, version, next, now)?;
