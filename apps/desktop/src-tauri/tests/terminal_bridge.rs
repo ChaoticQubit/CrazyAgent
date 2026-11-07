@@ -10,7 +10,7 @@ use crazyagent::terminal::{
     AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
 };
 use crazyagent_desktop::bridge::terminal::{
-    Terminals, VIEWERS_MAX, agent, channel_message, pane, plain_code, request_valid,
+    Terminals, VIEWERS_MAX, agent, channel_message, graph_shows, pane, plain_code, request_valid,
 };
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::error::Error;
@@ -67,7 +67,7 @@ fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     }
 }
 
-const WALL_COMMANDS: [&str; 9] = [
+const WALL_COMMANDS: [&str; 10] = [
     "desktop_terminal_attach",
     "desktop_terminal_input",
     "desktop_terminal_prompt",
@@ -77,12 +77,43 @@ const WALL_COMMANDS: [&str; 9] = [
     "desktop_team_stop_agent",
     "desktop_team_stop_teammate",
     "desktop_terminals_per_window",
+    "desktop_extend_terminal_windows",
 ];
 
-/// Terminal wall windows reach only the terminal, graph, Stop and Terminals per window
-/// commands: their capability grants exactly those to `terminals-*` windows, the app loads
-/// it beside the main window's, and in the bindings exactly those commands admit a wall
-/// window while every other command keeps the main window guard.
+const PROJECT_WALL_COMMANDS: [&str; 5] = [
+    "desktop_team_graph",
+    "desktop_team_stop_agent",
+    "desktop_team_stop_teammate",
+    "desktop_terminals_per_window",
+    "desktop_extend_terminal_windows",
+];
+
+const WALL_GUARD: &str = "terminal_window(&window)?;";
+const PROJECT_WALL_GUARD: &str = "terminal_window_for(&window, &id)?;";
+
+/// Every `#[tauri::command]` in lib.rs with its name and body. Takes nothing. Returns the
+/// pairs in source order.
+fn command_bodies() -> Vec<(&'static str, &'static str)> {
+    include_str!("../src/lib.rs")
+        .split("#[tauri::command]")
+        .skip(1)
+        .map(|body| {
+            let name = body
+                .split("fn ")
+                .nth(1)
+                .and_then(|rest| rest.split('(').next())
+                .unwrap();
+            (name, body)
+        })
+        .collect()
+}
+
+/// Terminal wall windows reach only the terminal, graph, Stop, Terminals per window and
+/// window growth commands: their capability grants exactly those to `terminals-*` windows,
+/// the app loads it beside the main window's, and in the bindings exactly those commands
+/// admit a wall window while every other command keeps the main window guard. Each one that
+/// names a project admits a wall window only for its own project, and a wall attaches only to
+/// a terminal that project's graph shows.
 #[test]
 fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
     use serde_json::{Value, json};
@@ -110,32 +141,65 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
         conf["app"]["security"]["capabilities"],
         json!(["main-window", "terminal-wall"])
     );
-    let commands: Vec<(&str, &str)> = include_str!("../src/lib.rs")
-        .split("#[tauri::command]")
-        .skip(1)
-        .map(|body| {
-            let name = body
-                .split("fn ")
-                .nth(1)
-                .and_then(|rest| rest.split('(').next())
-                .unwrap();
-            (name, body)
-        })
-        .collect();
+    let commands = command_bodies();
     assert!(commands.len() > 100, "{}", commands.len());
+    let wall_guarded = |body: &str| body.contains(WALL_GUARD) || body.contains(PROJECT_WALL_GUARD);
     let admitted: BTreeSet<&str> = commands
         .iter()
-        .filter(|(_, body)| body.contains("terminal_window(&window)?;"))
+        .filter(|(_, body)| wall_guarded(body))
         .map(|(name, _)| *name)
         .collect();
     assert_eq!(admitted, WALL_COMMANDS.into_iter().collect());
     for (name, body) in &commands {
         assert_ne!(
-            body.contains("terminal_window(&window)?;"),
+            wall_guarded(body),
             body.contains("main_window(&window)?;"),
             "{name} has exactly one of the two window guards"
         );
     }
+    for (name, body) in &commands {
+        if PROJECT_WALL_COMMANDS.contains(name) {
+            let start = body.split_once('{').map(|(_, rest)| rest.trim_start());
+            assert!(
+                start.is_some_and(|rest| rest.starts_with(PROJECT_WALL_GUARD)),
+                "{name} admits a wall window only for its own project"
+            );
+        }
+    }
+    let attach = commands
+        .iter()
+        .find(|(name, _)| *name == "desktop_terminal_attach")
+        .unwrap()
+        .1;
+    assert!(attach.contains("id: Option<String>"), "{attach}");
+    assert!(attach.contains(PROJECT_WALL_GUARD), "{attach}");
+    assert!(
+        attach.contains("bridge::terminal::graph_shows(&graph, &agent)"),
+        "{attach}"
+    );
+}
+
+/// The wall windows do not outlive what they show: closing the main window closes every
+/// wall window, and a project removal the engine applied closes that project's walls.
+#[test]
+fn closing_main_or_removing_a_project_closes_the_wall_windows() {
+    let lib = include_str!("../src/lib.rs");
+    let setup = lib.split(".setup(|app| {").nth(1).unwrap();
+    let setup = setup.split("#[cfg(feature").next().unwrap();
+    assert!(setup.contains("main.on_window_event("), "{setup}");
+    assert!(setup.contains("tauri::WindowEvent::Destroyed"), "{setup}");
+    assert!(setup.contains("close_walls(&handle, None)"), "{setup}");
+    let remove = command_bodies()
+        .into_iter()
+        .find(|(name, _)| *name == "desktop_remove_project")
+        .unwrap()
+        .1;
+    assert!(remove.contains("app: AppHandle"), "{remove}");
+    assert!(
+        remove.contains("ActionOutcome::Applied")
+            && remove.contains("close_walls(&app, Some(&project))"),
+        "{remove}"
+    );
 }
 
 #[test]
@@ -415,6 +479,11 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     );
     assert!(graph.nodes.iter().all(|n| !n.kind.agent()));
     assert!(graph.edges.is_empty());
+    let mut shown = graph.clone();
+    shown.nodes[0].terminal = Some(AgentId::team(4)?);
+    assert!(graph_shows(&shown, &AgentId::team(4)?));
+    assert!(!graph_shows(&shown, &AgentId::team(5)?));
+    assert!(!graph_shows(&graph, &AgentId::team(4)?));
 
     let handed = bridge
         .team_delegate(&id, Some("codex".into()), "Write chores.md".into(), 2)

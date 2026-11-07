@@ -69,6 +69,35 @@ pub fn wall_prefix(project: &ProjectId) -> String {
     format!("{WALL_PREFIX}{:016x}-", hasher.finish())
 }
 
+/// Whether a window may act on one project: the main window on any project, a terminal wall
+/// window only on the project its label was made for. Takes the window label and the project.
+/// Returns the answer.
+pub fn window_admits(label: &str, _project: &ProjectId) -> bool {
+    window_label_valid(label)
+}
+
+/// The terminal wall windows to close among the open windows: every wall window, or only one
+/// project's. Takes the open window labels and the project, if any. Returns those labels in
+/// the order given.
+pub fn walls_to_close<'a>(
+    _labels: impl IntoIterator<Item = &'a str>,
+    _project: Option<&ProjectId>,
+) -> Vec<&'a str> {
+    Vec::new()
+}
+
+/// The project name a wall window's title shows, for the windows a growing wall opens.
+/// Takes the title. Returns the name before " · Terminals ", or "Project" without one.
+pub fn wall_title_name(title: &str) -> String {
+    title.to_owned()
+}
+
+/// Whether a project's team graph shows a terminal, so a wall window attaches only to its own
+/// project's agents. Takes the graph and the terminal name. Returns the answer.
+pub fn graph_shows(_graph: &TeamGraph, _agent: &AgentId) -> bool {
+    true
+}
+
 /// Checks a pane id the window sent for a native teammate's view, such as `%12`. Takes the
 /// text. Returns the pane id, or `terminal_pane_invalid`.
 pub fn pane(text: &str) -> Result<String, BridgeError> {
@@ -827,6 +856,71 @@ mod tests {
             "settings",
         ] {
             assert!(!window_label_valid(label), "{label:?}");
+        }
+    }
+
+    /// A wall window reaches only the project its label was made for; the main window reaches
+    /// every project, and any other window none.
+    #[test]
+    fn a_wall_window_acts_only_on_the_project_its_label_was_made_for() {
+        let larkspur = ProjectId::new("larkspur").unwrap();
+        let other = ProjectId::new("other.project:2").unwrap();
+        for page in [1, WINDOWS_MAX] {
+            assert!(window_admits(&wall_label(&larkspur, page), &larkspur));
+            assert!(!window_admits(&wall_label(&larkspur, page), &other));
+            assert!(!window_admits(&wall_label(&other, page), &larkspur));
+        }
+        assert!(window_admits("main", &larkspur));
+        assert!(window_admits("main", &other));
+        let past = format!("{}9", wall_prefix(&larkspur));
+        for label in ["settings", "", past.as_str()] {
+            assert!(!window_admits(label, &larkspur), "{label:?}");
+        }
+    }
+
+    /// Closing the main window closes every wall window and nothing else; removing a project
+    /// closes only that project's wall windows.
+    #[test]
+    fn closing_main_closes_every_wall_and_removing_a_project_closes_only_its_walls() {
+        let larkspur = ProjectId::new("larkspur").unwrap();
+        let other = ProjectId::new("other.project:2").unwrap();
+        let (first, second, third) = (
+            wall_label(&larkspur, 1),
+            wall_label(&larkspur, 2),
+            wall_label(&other, 1),
+        );
+        let open = [
+            "main",
+            first.as_str(),
+            "settings",
+            third.as_str(),
+            second.as_str(),
+        ];
+        assert_eq!(
+            walls_to_close(open, None),
+            vec![first.as_str(), third.as_str(), second.as_str()]
+        );
+        assert_eq!(
+            walls_to_close(open, Some(&larkspur)),
+            vec![first.as_str(), second.as_str()]
+        );
+        assert_eq!(walls_to_close(open, Some(&other)), vec![third.as_str()]);
+        assert!(walls_to_close(["main", "settings"], None).is_empty());
+    }
+
+    /// A wall that opens the next window titles it with the project name its own title shows.
+    #[test]
+    fn a_grown_wall_keeps_the_project_name_its_title_shows() {
+        assert_eq!(
+            wall_title_name("Larkspur Booking \u{b7} Terminals 2 of 3"),
+            "Larkspur Booking"
+        );
+        assert_eq!(
+            wall_title_name("A \u{b7} Terminals of B \u{b7} Terminals 1 of 1"),
+            "A \u{b7} Terminals of B"
+        );
+        for title in ["CrazyAgent", "", " \u{b7} Terminals 1 of 1"] {
+            assert_eq!(wall_title_name(title), "Project", "{title:?}");
         }
     }
 }

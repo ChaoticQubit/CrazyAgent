@@ -84,7 +84,7 @@ test("the wall boots from main.tsx on its own address, Agents carries the button
   assert.match(source("main.tsx"), /wallRoute\(window\.location\.hash\)/u);
   assert.match(source("main.tsx"), /<TerminalWall /u);
   assert.match(source("screens/team/index.tsx"), />Open all terminals</u);
-  assert.match(source("screens/team/index.tsx"), /openTerminalWindows\(/u);
+  assert.match(source("screens/team/index.tsx"), /openTerminalWindows\(projectId, name, windows, true\)/u);
   assert.match(source("screens/project/agents.tsx"), /<TeamGraphView [^>]*perWindow=/u);
   const controls = source("screens/team/coordination.tsx");
   assert.match(controls, /label="Terminals per window"/u);
@@ -94,6 +94,24 @@ test("the wall boots from main.tsx on its own address, Agents carries the button
   for (const command of ["desktop_team_terminals_per_window", "desktop_terminals_per_window", "desktop_open_terminal_windows"]) {
     assert.ok(api.includes(`"${command}"`), command);
   }
+});
+
+test("the wall grows itself: each wall window asks the bridge for its project's windows as its team grows, and main's Agents view no longer does", () => {
+  const wall = source("screens/terminals/index.tsx");
+  assert.match(wall, /extendTerminalWindows\(projectId, pages\.length\)/u);
+  assert.match(wall, /\[projectId, extend\]/u);
+  const agents = source("screens/team/index.tsx");
+  assert.doesNotMatch(agents, /openTerminalWindows\([^)]*false\)/u);
+  assert.doesNotMatch(agents, /\bwalled\b/u);
+  assert.match(source("api.ts"), /call<void>\("desktop_extend_terminal_windows", \{ id, count \}\)/u);
+});
+
+test("a wall tile attaches naming its own project, so the bridge can refuse a terminal of another project", () => {
+  assert.match(source("screens/terminals/index.tsx"), /<TerminalPanel node=\{node\} projectId=\{projectId\} embedded input="both" \/>/u);
+  const panel = source("screens/team/terminal-panel.tsx");
+  assert.match(panel, /projectId\?: string;/u);
+  assert.match(panel, /attachTerminal\(name, channel, pane, projectId \?\? null\)/u);
+  assert.match(source("api.ts"), /call<number>\("desktop_terminal_attach", \{ agent, pane, output, id: project \}\)/u);
 });
 
 test("a native teammate's pane, which shares its lead's terminal, takes no tile of its own, so no tile replaces another", () => {
