@@ -10,6 +10,7 @@ import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
 import { INTERNALS, POLL_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { SUB_LABEL, engineMasterWorktree, masterConflictFix } from "./master-lease.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SHOWN_MS = 10000;
@@ -41,10 +42,11 @@ function ownerRepo(folder) {
 }
 
 /** Boots a test engine and the app's bridge, makes the owner's project, optionally at Full
- * access, where the master merges its own changes by default, serves the built app and runs
- * the case's steps on a page. Inputs: the test, the
- * access level (sandboxed or full) and the steps, called with the case's handles. Output:
- * none; every leftover is removed unless E2E_EVIDENCE keeps it. */
+ * access, where the master merges its own conflict fixes by default, has the engine lease
+ * the master's worktree through one master turn, serves the built app and runs the case's
+ * steps on a page. Inputs: the test, the access level (sandboxed or full) and the steps,
+ * called with the case's handles. Output: none; every leftover is removed unless
+ * E2E_EVIDENCE keeps it. */
 async function withProject(t, access, steps) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -56,7 +58,6 @@ async function withProject(t, access, steps) {
   const home = join(root, "home");
   const projects = join(root, "projects");
   const repo = join(root, "repos", "seed-service");
-  const worktree = join(root, "agents", MASTER);
   for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, repo, join(root, "agents")]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   const start = ownerRepo(repo);
   const provider = await closedPort();
@@ -104,7 +105,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       });
       assert.equal(saved.outcome, "applied", `the owner gives the project Full access: ${JSON.stringify(saved)}`);
     }
-    git(repo, "worktree", "add", "-q", "--detach", worktree, "HEAD");
+    let generation = 4;
+    const lease = await engineMasterWorktree(bridge, runtime, project, () => (generation += 1));
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
@@ -122,17 +124,18 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           await me.waitFor(words, (text) => text.includes(words));
         };
         const masterTurn = (text) => {
-          writeFileSync(join(worktree, "README.md"), text);
-          const made = spawnSync(bridgeBinary, ["master-turn-end", runtime, project, MASTER, MASTER_LABEL, repo, worktree, join(repo, ".git", "worktrees", MASTER), PROMPT], { encoding: "utf8", env: { ...env } });
+          if (text !== null) writeFileSync(join(lease.worktree, "README.md"), text);
+          const made = spawnSync(bridgeBinary, ["master-turn-end", runtime, project, MASTER, MASTER_LABEL, repo, lease.worktree, lease.gitDir, PROMPT], { encoding: "utf8", env: { ...env } });
           assert.equal(made.status, 0, `the engine ends the master's turn: ${made.stderr}`);
           const [id, how] = made.stdout.trim().split(" ");
           assert.match(id, /^[0-9a-f]{32}$/, "an edited master worktree makes a change set");
           return { id, how };
         };
         const changes = () => value(bridge, "desktop_changes", { projectId: project });
+        const masterFix = () => masterConflictFix({ bridgeBinary, env, runtime, project, root, repo, start, lease, changes, masterTurn });
         const status = () => value(bridge, "desktop_team_status", { id: project });
         const activity = async () => (await value(bridge, "desktop_project_activity", { id: project, limit: 50 })).items;
-        await steps({ me, page, open, masterTurn, changes, status, activity, repo, start });
+        await steps({ me, page, open, masterFix, changes, status, activity, repo });
         assert.equal(await page.evaluate("document.visibilityState"), "visible", "the page stayed visible");
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
@@ -161,13 +164,13 @@ function mergeRow(page, words) {
   return page.evaluate(`(() => { const row = [...document.querySelectorAll(".pj-activity-row")].find((node) => node.innerText.includes(${JSON.stringify(words)})); return row ? { text: row.querySelector(".pj-activity-text")?.innerText ?? "", button: row.querySelector("button")?.textContent ?? null } : null; })()`);
 }
 
-test("Undo on Overview reverts the master's merge into main and the row shows Undone", { timeout: 600000 }, async (t) => {
-  await withProject(t, "full", async ({ me, page, open, masterTurn, changes, status, activity, repo, start }) => {
-    assert.equal((await status()).master_lands, "merges", "at Full access the master merges its own changes");
-    const { id, how } = masterTurn("# Seed service\n\nServes seeds over HTTP.\n");
-    assert.equal(how, "landed", "the master merged into main");
+test("Undo on Overview asks naming the branch, reverts the master's merge into main and the row shows Undone", { timeout: 600000 }, async (t) => {
+  await withProject(t, "full", async ({ me, page, open, masterFix, changes, status, activity, repo }) => {
+    assert.equal((await status()).master_lands, "merges", "at Full access the master merges its own conflict fixes");
+    const { id, how, tip } = await masterFix();
+    assert.equal(how, "landed", "the master merged its conflict fix into main");
     const merged = git(repo, "rev-parse", "HEAD");
-    assert.notEqual(merged, start, "main moved");
+    assert.notEqual(merged, tip, "main moved");
     assert.ok(!(await changes()).some((set) => set.id === id && set.state === "pending"), "nothing waits in Changes");
 
     const words = `The master merged its changes into main: ${PROMPT}`;
@@ -175,6 +178,9 @@ test("Undo on Overview reverts the master's merge into main and the row shows Un
     assert.equal((await mergeRow(page, words))?.button, "Undo", "the master's merge row offers Undo");
     await me.capture("undo-before");
     await me.click("Undo", ".pj-activity-row button");
+    await me.waitFor("the confirm naming the branch", (text) => text.includes("Undo this merge on main?") && text.includes("Later commits stay."));
+    await me.capture("undo-confirm");
+    await me.click("Undo merge", "dialog[open] button");
     const clicked = Date.now();
     for (;;) {
       const row = await mergeRow(page, words);
@@ -183,15 +189,16 @@ test("Undo on Overview reverts the master's merge into main and the row shows Un
       await pause(POLL_MS);
     }
     t.diagnostic(`the row showed Undone after ${Date.now() - clicked} ms`);
-    await me.waitFor("the undo note", (text) => text.includes("Undid the merge. main is back to how it was before it."));
+    await me.waitFor("the undo note", (text) => text.includes("Undid the merge with one new commit on main. Later commits stay."));
     await me.capture("undo-after");
 
-    assert.equal(git(repo, "show", "HEAD:README.md"), "# Seed service", "main is back as it was before the merge");
-    assert.equal(readFileSync(join(repo, "README.md"), "utf8"), "# Seed service\n", "the owner's files are back too");
+    assert.equal(git(repo, "show", "HEAD:seeds.txt"), "pear", "main is back as it was before the merge");
+    assert.equal(readFileSync(join(repo, "seeds.txt"), "utf8"), "pear\n", "the owner's files are back too");
     assert.equal(git(repo, "rev-parse", "HEAD^"), merged, "the undo is one commit on top of the merge");
     assert.equal(git(repo, "log", "-1", "--format=%s"), `Undo: ${PROMPT}`);
     assert.equal(git(repo, "status", "--porcelain"), "", "the checkout is clean");
     const rows = (await activity()).filter((item) => item.change_set === id);
     assert.deepEqual(rows.map((item) => [item.kind, item.undone]), [["undone", false], ["merged_into_main", true]], "one Undone row and the merge marked undone");
+    assert.ok(rows[0].text.endsWith(`This also reverted the changes of ${SUB_LABEL}`), `the Undone row says the closed set's work was reverted too: ${rows[0].text}`);
   });
 });
