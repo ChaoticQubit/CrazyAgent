@@ -251,6 +251,16 @@ fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<Run
     Ok(runs.into_iter().map(|(run, _, _)| run).collect())
 }
 
+/// The first `NAMES_MAX` names of a list in name order, once each, and how many more there
+/// were. Input: the names. Output: the names kept and the count of the rest.
+fn capped(mut names: Vec<String>) -> (Vec<String>, u64) {
+    names.sort();
+    names.dedup();
+    let more = names.len().saturating_sub(NAMES_MAX);
+    names.truncate(NAMES_MAX);
+    (names, more as u64)
+}
+
 fn groups(
     db: &Connection,
     column: &str,
@@ -302,6 +312,9 @@ fn groups(
         if let Some(&at) = index.get(&key) {
             rows[at].projects.push(name);
         }
+    }
+    for row in &mut rows {
+        (row.projects, row.more_projects) = capped(std::mem::take(&mut row.projects));
     }
     Ok(rows)
 }
@@ -366,22 +379,22 @@ fn agents(
         }
     }
     for row in &mut rows {
-        row.harnesses.sort();
-        row.harnesses.dedup();
-        row.accounts.sort();
-        row.accounts.dedup();
+        (row.harnesses, row.more_harnesses) = capped(std::mem::take(&mut row.harnesses));
+        (row.accounts, row.more_accounts) = capped(std::mem::take(&mut row.accounts));
     }
     Ok(rows)
 }
 
 /// Keeps the metrics within `REPORT_BYTES_MAX` encoded bytes so their reply fits one frame:
-/// while they are larger, runs, accounts and harnesses each keep a smaller share of
-/// `ROWS_MAX`, losing the oldest runs and the least-used accounts and harnesses first.
+/// while they are larger, runs, projects, agents, accounts and harnesses each keep a smaller
+/// share of `ROWS_MAX`, losing the oldest runs and the least-used rows first.
 /// Input: the metrics. Output: the metrics that fit, or `usage_unavailable`.
 fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
     for share in (0..=SHARES).rev() {
         let kept = ROWS_MAX * share / SHARES;
         metrics.runs.truncate(kept);
+        metrics.projects.truncate(kept);
+        metrics.agents.truncate(kept);
         metrics.accounts.truncate(kept);
         metrics.harnesses.truncate(kept);
         let encoded = serde_json::to_vec(&metrics).map_err(|_| failure("usage_unavailable"))?;
@@ -396,7 +409,7 @@ fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
 /// from `since_ms` to `now_ms`: tasks running and waiting now, done and failed in the range,
 /// the tokens chart in bars `bucket_for` the range, anchored at its start, the newest
 /// `ROWS_MAX` runs, and the largest `ROWS_MAX` projects, agents, accounts and harnesses by the
-/// headline, fewer runs, accounts and harnesses when they would not fit one reply (`fit`).
+/// headline, fewer of each when they would not fit one reply (`fit`).
 /// Inputs: the store, the project, the range start and now. Output: the metrics;
 /// `usage_request_invalid` for a range that starts before the epoch or after now.
 pub fn read(
@@ -434,6 +447,20 @@ pub fn read(
     assert!(metrics.agents.iter().all(|row| {
         row.harnesses.is_sorted() && row.accounts.is_sorted() && !row.harnesses.is_empty()
     }));
+    assert!(
+        metrics
+            .agents
+            .iter()
+            .all(|row| { row.harnesses.len() <= NAMES_MAX && row.accounts.len() <= NAMES_MAX })
+    );
+    assert!(
+        metrics
+            .projects
+            .iter()
+            .chain(&metrics.accounts)
+            .chain(&metrics.harnesses)
+            .all(|row| row.projects.len() <= NAMES_MAX)
+    );
     assert!(metrics.runs.iter().all(|run| {
         run.title
             .as_ref()
