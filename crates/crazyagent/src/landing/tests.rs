@@ -6638,12 +6638,12 @@ fn activity_of(case: &Case, id: &ChangeSetId) -> Vec<crate::activity::ActivityIt
         .collect()
 }
 
-#[test]
-fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_master_lands_is_merges()
-{
-    use crate::activity::ActivityKind;
+/// Makes the HackerBlog shape: the case's agent's set conflicts with the owner's fourth
+/// line on main, then the master, at Full access with Merge into main itself, merges that
+/// set's head and keeps both lines in its own turn. Input: the case. Output: the conflicted
+/// set, the master's fix and the README the fix holds.
+fn master_fixing_a_conflict(case: &Case) -> (ChangeSetId, ChangeSetId, &'static str) {
     use crate::sandbox::policy::AgentAccess;
-    let case = Case::new();
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
     let sub = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -6656,12 +6656,8 @@ fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_mast
         case.accept(&sub).unwrap(),
         AcceptOutcome::Conflict { .. }
     ));
-    let other = numbered_agent(&case, 3);
-    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
-    write(&other.worktree.join("NOTES"), "unrelated\n");
-    let unrelated = turn_of(&case, &other, "Write notes");
-    let master = master_at_work(&case);
-    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
+    let master = master_at_work(case);
+    master_may_land(case, AgentAccess::Full, crate::team::MasterLands::Merges);
     let sub_head = case.view(&sub).head;
     let resolved = "one\ntwo\nthree\nfour from the owner\nfour from the agent\n";
     let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
@@ -6678,7 +6674,20 @@ fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_mast
         "-m",
         "Take both fourth lines",
     ]);
-    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    let fix = turn_of(case, &master, "Resolve the README conflict");
+    (sub, fix, resolved)
+}
+
+#[test]
+fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_master_lands_is_merges()
+{
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(&other.worktree.join("NOTES"), "unrelated\n");
+    let unrelated = turn_of(&case, &other, "Write notes");
 
     assert_eq!(
         land_master_set(&case.db, &case.home, &unrelated).unwrap(),
@@ -6720,17 +6729,37 @@ fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_mast
 }
 
 #[test]
-fn a_master_set_that_conflicts_with_main_lands_nothing() {
+fn an_ordinary_master_set_waits_for_the_owner_under_merges() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
     let master = master_at_work(&case);
     master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
-    write(
-        &master.worktree.join("README"),
-        "one\ntwo\nthree\nmaster four\n",
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let edit = turn_of(&case, &master, "Add four");
+    let tip = case.tip();
+
+    assert_eq!(
+        land_master_set(&case.db, &case.home, &edit).unwrap(),
+        None,
+        "a master set that closes no other set waits for the owner's Accept"
     );
-    let fix = turn_of(&case, &master, "Add four");
-    let tip = case.owner_commit("README", "one\ntwo\nthree\nowner four\n", "Owner four");
+    assert_eq!(case.view(&edit).state, ChangeState::Pending);
+    assert_eq!(case.tip(), tip, "main does not move");
+    assert!(
+        activity_of(&case, &edit).is_empty(),
+        "nothing merged, so no activity row"
+    );
+}
+
+#[test]
+fn a_master_fix_that_conflicts_with_main_lands_nothing() {
+    let case = Case::new();
+    let (sub, fix, _) = master_fixing_a_conflict(&case);
+    let tip = case.owner_commit(
+        "README",
+        "one\ntwo\nthree\nfour from the owner\nowner five\n",
+        "Owner adds five",
+    );
     let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
     assert_eq!(
         outcome,
@@ -6739,6 +6768,8 @@ fn a_master_set_that_conflicts_with_main_lands_nothing() {
         })
     );
     assert_eq!(case.tip(), tip, "main does not move");
+    assert_eq!(case.view(&fix).state, ChangeState::Pending);
+    assert_eq!(case.view(&sub).state, ChangeState::Conflict);
     assert!(
         activity_of(&case, &fix)
             .iter()
@@ -6752,10 +6783,7 @@ fn a_master_set_waits_for_the_owner_under_waits_or_below_full_access() {
     use crate::sandbox::policy::AgentAccess;
     use crate::team::MasterLands;
     let case = Case::new();
-    let master = master_at_work(&case);
-    master_may_land(&case, AgentAccess::Full, MasterLands::Waits);
-    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
-    let fix = turn_of(&case, &master, "Add four");
+    let (sub, fix, _) = master_fixing_a_conflict(&case);
     let tip = case.tip();
     for (access, lands) in [
         (AgentAccess::Full, MasterLands::Waits),
@@ -6769,6 +6797,7 @@ fn a_master_set_waits_for_the_owner_under_waits_or_below_full_access() {
             "{access:?} with {lands:?} leaves the set to the owner"
         );
         assert_eq!(case.view(&fix).state, ChangeState::Pending);
+        assert_eq!(case.view(&sub).state, ChangeState::Conflict);
         assert_eq!(case.tip(), tip, "main does not move");
     }
 }
@@ -6889,4 +6918,77 @@ fn an_accept_that_made_no_commit_and_a_set_still_open_have_nothing_to_undo() {
         std::fs::read_to_string(case.repo.join("README")).unwrap(),
         "one\ntwo\nthree\nfour\n"
     );
+}
+
+#[test]
+fn a_master_merge_whose_covered_set_cannot_close_is_still_listed_as_landed() {
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+    let tip = case.tip();
+    let log = case.repo.join(".git/logs").join(flow::pending_ref(&sub));
+    std::fs::create_dir_all(&log).unwrap();
+
+    let outcome = land_master_set(&case.db, &case.home, &fix);
+
+    assert!(
+        matches!(outcome, Ok(Some(AcceptOutcome::Landed { .. }))),
+        "main moved, so the master's note says it merged: {outcome:?}"
+    );
+    assert_ne!(case.tip(), tip, "main moved");
+    assert_eq!(case.owner(&["show", "main:README"]), resolved);
+    assert_eq!(case.view(&fix).state, ChangeState::Accepted);
+    let rows = activity_of(&case, &fix);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.kind == ActivityKind::MergedIntoMain)
+            .count(),
+        1,
+        "the landed merge is listed once: {rows:?}"
+    );
+}
+
+#[test]
+fn a_master_merge_an_engine_stop_cut_short_settles_as_the_masters_merge() {
+    use crate::activity::ActivityKind;
+    for step in [owner::Step::FilesWritten, owner::Step::BranchMoved] {
+        let case = Case::new();
+        let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+        let head = case.view(&fix).head;
+        let stopped = owner::accept_to(
+            &case.db,
+            &case.home,
+            &fix,
+            &head,
+            None,
+            None,
+            owner::By::Master,
+            &|at| at == step,
+        );
+        assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
+
+        assert_eq!(
+            refused(case.accept(&fix)),
+            "changes_stale",
+            "the next owner action finishes the merge: {step:?}"
+        );
+
+        assert!(store::in_flight(&case.db).unwrap().is_empty(), "{step:?}");
+        assert_eq!(case.owner(&["show", "main:README"]), resolved, "{step:?}");
+        assert_eq!(case.view(&fix).state, ChangeState::Accepted, "{step:?}");
+        assert_eq!(
+            case.view(&sub).state,
+            ChangeState::Accepted,
+            "the covered set closes: {step:?}"
+        );
+        let rows: Vec<_> = activity_of(&case, &fix)
+            .into_iter()
+            .map(|row| (row.kind, row.actor))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![(ActivityKind::MergedIntoMain, "Master".to_owned())],
+            "listed as the master's merge, not an Accept: {step:?}"
+        );
+    }
 }

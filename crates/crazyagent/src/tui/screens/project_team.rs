@@ -735,7 +735,7 @@ impl TeamView {
                 TeamReply::Handled
             }
             KeyCode::Char('g') => self.ask_before_merge(),
-            KeyCode::Char('W') => self.master_lands(),
+            KeyCode::Char('E') => self.master_lands(),
             KeyCode::Char('R') => self.reask_empty_reply(),
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('B') => self.background_at_end(),
@@ -3392,7 +3392,7 @@ impl TeamView {
             ("m", "Master's branch"),
             ("L", "Land on"),
             ("g", "Ask before merge"),
-            ("W", "Master merges"),
+            ("E", "Master merges"),
             ("R", "Re-ask empty reply"),
             ("F", "New folder limit"),
             ("B", "Background commands"),
