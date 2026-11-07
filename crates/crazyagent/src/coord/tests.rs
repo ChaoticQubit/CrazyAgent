@@ -1469,7 +1469,7 @@ fn under_wait_two_agents_never_wait_on_each_other_and_the_owner_hears_once() {
     assert_eq!(works_owned(&connection, grace), 2);
     assert_eq!(
         wait_cycle_notices(&connection, &project(), NOW).unwrap(),
-        vec![(grace.min(ada), grace.max(ada), "src/parser.rs".to_owned())]
+        vec![(grace, ada, "src/parser.rs".to_owned())]
     );
     assert!(
         wait_cycle_notices(&connection, &project(), NOW)
@@ -1511,7 +1511,7 @@ fn under_wait_a_ring_of_three_waits_never_closes() {
     start_on(&connection, lin, "src/parser.rs").expect("the third wait would close the ring");
     assert_eq!(
         wait_cycle_notices(&connection, &project(), NOW).unwrap(),
-        vec![(lin.min(ada), lin.max(ada), "src/parser.rs".to_owned())]
+        vec![(lin, ada, "src/parser.rs".to_owned())]
     );
 }
 
@@ -1540,6 +1540,71 @@ fn under_wait_a_chain_past_the_walk_bound_goes_ahead_as_under_warn() {
         }
     }
     assert_eq!(went_ahead, vec![0]);
+}
+
+/// OS-8 Wait, T9-FU: a start whose wait would close a cycle goes ahead without the file
+/// another agent's live claim holds, so that holder keeps editing it and the starter's
+/// edits of it stay refused; the start's other files are claimed, its overlap says the file
+/// was left out, and the owner hears who started and who holds the file.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_cycle_fallback_leaves_the_held_file_to_its_holder() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/parser.rs").unwrap();
+    start_on(&connection, ada, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, grace, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    let (work, overlaps) = start_work(
+        &connection,
+        &project(),
+        ada,
+        "Fix both".into(),
+        vec!["src/parser.rs".into(), "src/main.rs".into()],
+        NOW,
+    )
+    .expect("waiting on Grace, who waits on Ada, would close a cycle");
+    assert_eq!(
+        overlaps
+            .iter()
+            .map(|overlap| (
+                overlap.theirs.work,
+                overlap.mine.pattern.as_str(),
+                overlap.left_out
+            ))
+            .collect::<Vec<_>>(),
+        vec![(grace_work, "src/parser.rs", true)]
+    );
+    let claimed: Vec<String> = connection
+        .prepare("SELECT pattern FROM coord_claims WHERE work=?1 ORDER BY pattern")
+        .unwrap()
+        .query_map([work], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(claimed, vec!["src/main.rs".to_owned()]);
+    let live = |who: AgentId| -> Vec<AgentId> {
+        overlapping(&connection, &project(), who, "src/parser.rs")
+            .unwrap()
+            .into_iter()
+            .filter(|claim| !claim.stale)
+            .map(|claim| claim.agent)
+            .collect()
+    };
+    assert_eq!(
+        live(grace),
+        Vec::<AgentId>::new(),
+        "Grace keeps editing her own file"
+    );
+    assert_eq!(live(ada), vec![grace], "Ada's edits of it stay refused");
+    assert_eq!(
+        wait_cycle_notices(&connection, &project(), NOW).unwrap(),
+        vec![(ada, grace, "src/parser.rs".to_owned())]
+    );
 }
 
 /// OS-8 Wait is at least as strong as Block: a start on a file another agent's folder or

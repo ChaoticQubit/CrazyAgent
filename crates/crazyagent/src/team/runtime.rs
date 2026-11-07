@@ -3012,12 +3012,7 @@ impl TeamRuntime {
         {
             let first = crate::team::events::label(&self.connection, first)?;
             let second = crate::team::events::label(&self.connection, second)?;
-            self.note(
-                project,
-                &format!(
-                    "{first} and {second} would have waited on each other under Overlapping edits Wait, so a start on {file} went ahead with only an overlap warning. Check that their edits of it do not clash."
-                ),
-            )?;
+            self.note(project, &wait_cycle_note(&first, &second, &file))?;
         }
         Ok(())
     }
@@ -9345,6 +9340,15 @@ const CLAIMS_SWEEP_EVERY: Duration = Duration::from_secs(30);
 /// The owner's note the first time a project's claims fill one overlap check.
 const CLAIMS_FULL_NOTE: &str = "This project holds more open file claims than one overlap check reads, so agents cannot start new claimed work and their edits of claimed files are held. Accept or discard the change sets waiting in Changes, or release work no agent is on.";
 const HANDOFF_BYTES_MAX: usize = 1000;
+
+/// The owner's note of two agents whose waits under Wait would have closed a cycle (OS-8).
+/// Inputs: the labels of the agent whose start went ahead and of the one holding the file,
+/// and the file. Output: the note.
+fn wait_cycle_note(starter: &str, holder: &str, file: &str) -> String {
+    format!(
+        "{starter} and {holder} would have waited on each other under Overlapping edits Wait, so a start on {file} went ahead with only an overlap warning. Check that their edits of it do not clash."
+    )
+}
 
 /// Lists file names for an engine note one per line, each quoted with its quotes,
 /// backslashes, newlines and other control characters escaped, so no name an agent chose

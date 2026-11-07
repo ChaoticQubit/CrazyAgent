@@ -507,6 +507,7 @@ pub(super) fn overlaps_for(
                     mine: claim.clone(),
                     theirs: theirs.clone(),
                     reasons: vec![reason],
+                    left_out: false,
                 });
             }
         }
@@ -536,6 +537,7 @@ pub(super) fn all_overlaps(
                     mine: mine.clone(),
                     theirs: theirs.clone(),
                     reasons: vec![reason],
+                    left_out: false,
                 });
             }
         }
@@ -562,6 +564,7 @@ pub fn overlaps_of(
                     mine: overlap.theirs,
                     theirs: overlap.mine,
                     reasons: overlap.reasons,
+                    left_out: overlap.left_out,
                 })
             } else {
                 None

@@ -779,6 +779,7 @@ fn coordination_shows_presence_waits_unread_messages_and_overlaps_between_shown_
             mine,
             theirs,
             reasons: vec![reason.into()],
+            left_out: false,
         }
     };
     let facts = GraphFacts {
@@ -894,6 +895,7 @@ fn coordination_edges_stay_within_their_caps() {
                     mine: claim(*a, *a, false),
                     theirs: claim(*b, *b, false),
                     reasons: vec!["same folder src".into()],
+                    left_out: false,
                 })
                 .collect(),
             questions_for_owner: Vec::new(),

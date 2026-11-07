@@ -300,12 +300,15 @@ pub struct Claim {
 }
 
 /// Two active claims of different agents that may touch the same thing, with the plain
-/// reasons (same file, same folder, shared module or domain).
+/// reasons (same file, same folder, shared module or domain). `left_out` marks a start's
+/// file that a cycle of waits under Wait left out of its work, so its holder keeps it (OS-8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Overlap {
     pub mine: Claim,
     pub theirs: Claim,
     pub reasons: Vec<String>,
+    #[serde(default)]
+    pub left_out: bool,
 }
 
 /// What the graph, the Process page and the inbox show for one agent; `waits_for` is the

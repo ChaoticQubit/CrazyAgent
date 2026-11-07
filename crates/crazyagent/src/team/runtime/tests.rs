@@ -22465,3 +22465,14 @@ fn a_grant_that_fails_after_a_profile_wait_drops_the_wait_record() {
         "the earlier profile wait is not the newest grant answer"
     );
 }
+
+/// OS-8 Wait, T9-FU: the owner's note of a cycle of waits says the start went ahead without
+/// the file, that its holder keeps editing it and how long the starter's edits of it stay
+/// refused.
+#[test]
+fn the_wait_cycle_note_says_who_keeps_editing_the_file() {
+    assert_eq!(
+        wait_cycle_note("Ada (@api)", "Grace (@ui)", "src/parser.rs"),
+        "Ada (@api) and Grace (@ui) would have waited on each other under Overlapping edits Wait, so Ada (@api)'s start went ahead without src/parser.rs: Grace (@ui) keeps editing it, and Ada (@api)'s edits of it stay refused until Grace (@ui)'s work on it lands or is discarded."
+    );
+}
