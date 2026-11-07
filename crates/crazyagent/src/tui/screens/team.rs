@@ -3,6 +3,7 @@ use crate::config::plain_problem;
 use crate::engine::owner::{AgentInstructions, OwnerResult};
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
+use crate::team::graph::RelationEdge;
 use crate::team::{
     AgentRole, AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamAction,
     TeamGraph,
@@ -1875,6 +1876,12 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
             ])
         }
     }
+}
+
+/// The words one tree line shows: the live action while it happens, else the relation.
+/// Input: the engine's relation edge. Output: the label.
+fn edge_label(_edge: &RelationEdge) -> String {
+    String::new()
 }
 
 /// Says whether a terminal code means the agent's terminal ended for good.

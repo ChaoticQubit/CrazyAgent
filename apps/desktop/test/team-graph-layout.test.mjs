@@ -122,6 +122,41 @@ test("solid links run from each lead to those it leads and carry live tasks, que
   assert.deepEqual(bad.links.map((link) => link.questions), [0, 0, 0, 0]);
 });
 
+test("each link shows its pair's label first in its badge row, live while an action happens", () => {
+  const related = {
+    ...team,
+    relations: [
+      { from: "m", to: "team-2", relation: "delegated_to", live: { action: "handing_off", task: "Task 7" } },
+      { from: "team-2", to: "team-3", relation: "leads", live: null },
+      { from: "team-4", to: "teammate-4-12", relation: "teammate_of", live: { action: "messaging" } },
+      { from: "gone", to: "team-4", relation: "leads", live: null },
+    ],
+  };
+  const layout = graph.layoutGraph(related);
+  assert.deepEqual(layout.links.map((link) => [link.from, link.to, link.label, link.live]), [
+    ["team-2", "team-3", "leads", false],
+    ["m", "team-2", "handing off: Task 7", true],
+    ["team-4", "teammate-4-12", "messaging", true],
+    ["m", "team-4", "", false],
+  ], "a pair the engine names from another lead has no label");
+  assert.deepEqual(graph.layoutGraph(team).links.map((link) => [link.label, link.live]), [["", false], ["", false], ["", false], ["", false]],
+    "an engine that sends no relations draws no labels");
+  const live = renderToStaticMarkup(createElement(view.LinkBadges, { link: layout.links[1] }));
+  assert.match(live, /aria-label="handing off: Task 7, 1 live task, 2 questions waiting"/);
+  assert.match(live, /<span class="tg-edge-label live"><span class="tg-clip">handing off: Task 7<\/span><\/span><span class="tg-badge">/);
+  const standing = renderToStaticMarkup(createElement(view.LinkBadges, { link: layout.links[0] }));
+  assert.match(standing, /aria-label="leads"/);
+  assert.match(standing, /<span class="tg-edge-label"><span class="tg-clip">leads<\/span><\/span><\/span>$/);
+  assert.equal(renderToStaticMarkup(createElement(view.LinkBadges, { link: layout.links[3] })), "", "a link with no label and no counts draws nothing");
+  const hostile = graph.layoutGraph({ ...related, relations: [{ from: "m", to: "team-2", relation: "leads", live: { action: "handing_off", task: "Fix‮ it" } }] });
+  assert.match(renderToStaticMarkup(createElement(view.LinkBadges, { link: hostile.links[1] })), /handing off: Fix\\u202e it/, "a direction mark in a task shows as an escape");
+  assert.equal(graph.BADGE_WIDTH, graph.CARD_WIDTH, "a badge row is as wide as its card, so a long label never reaches a sibling's row");
+  assertApart(layout.links.map(badgeBox), "badge rows");
+  for (const box of layout.links.map(badgeBox)) assert.ok(graph.layoutCards(layout).every((item) => !overlaps(box, item)), "a badge row never covers a card");
+  const legend = renderToStaticMarkup(createElement(view.EdgeLegend));
+  for (const word of ["leads", "delegated to", "teammate of", "live action, while it happens"]) assert.ok(legend.includes(word), `the legend names ${word}: ${legend}`);
+});
+
 test("unread messages ride their lead's link or arc dashed, and claim overlaps arc between the two cards", () => {
   const layout = graph.layoutGraph(talk);
   assert.equal(card(layout, "m").y, graph.MARGIN + graph.ARC_RISE, "arcs get room above the master");

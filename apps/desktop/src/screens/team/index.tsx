@@ -90,7 +90,7 @@ export function GraphCard({ placed, graph, harness, open, tipId, items, onOpen, 
   </div>;
 }
 
-function LinkBadges({ link }: { link: Link }) {
+export function LinkBadges({ link }: { link: Link }) {
   const label = badgeLabel(link);
   if (!label) return null;
   return <span className="tg-badges" role="img" aria-label={label} title={label}

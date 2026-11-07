@@ -1,5 +1,6 @@
 use crate::engine::owner::AgentInstructions;
 use crate::protocol::{CredentialRef, ProjectId};
+use crate::team::graph::{LiveAction, Relation, RelationEdge};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
 use crate::terminal::{AgentId, TerminalFrame};
 use crate::tui::client::OwnerEvent;
@@ -255,6 +256,103 @@ fn the_tree_draws_who_leads_whom_and_the_tasks_from_a_team_graph() {
     let drawn: Vec<String> = rows[2..22].iter().map(|row| chars(row, 2, 32)).collect();
     assert_eq!(drawn, expected);
     assert!(rows[0].contains("Tidepool  /  Team"), "{}", rows[0]);
+}
+
+fn relation(from: &str, to: &str, relation: Relation, live: Option<LiveAction>) -> RelationEdge {
+    RelationEdge {
+        from: from.into(),
+        to: to.into(),
+        relation,
+        live,
+    }
+}
+
+#[test]
+fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
+    let mut team = graph();
+    team.relations = vec![
+        relation(
+            "master",
+            "agent-2",
+            Relation::DelegatedTo,
+            Some(LiveAction::HandingOff {
+                task: "Fix the login bug\nThe token expires early.".into(),
+            }),
+        ),
+        relation("agent-2", "agent-3", Relation::Leads, None),
+        relation("master", "agent-5", Relation::DelegatedTo, None),
+    ];
+    let mut shell = fresh(80, 24);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    let rows = render(&mut shell);
+    let mut expected = Vec::new();
+    for line in [
+        "> ▸ Master  Working",
+        "  │  ChatGPT Pro - main",
+        "  │  • handing off: Fix the…",
+        "  ├─ ▸ claude-1  Working",
+        "  │  │  Claude Max - work",
+        "  │  │  leads",
+        "  │  └─ ◌ claude-2  Waiting…",
+        "  │  delegated to",
+        "  └─ ▸ codex-1  Starting",
+        "     ChatGPT Plus",
+        "",
+        "  Tasks",
+        "  ▸ claude-1  Fix the login…",
+        "  ✓ codex-1  Write tests",
+    ] {
+        expected.push(format!("│{line:<28}│"));
+    }
+    let drawn: Vec<String> = rows[3..17].iter().map(|row| chars(row, 2, 32)).collect();
+    assert_eq!(
+        drawn, expected,
+        "each agent's line from its lead is labelled on the lead's stem just above it"
+    );
+    let label = |relation, live| {
+        super::edge_label(&RelationEdge {
+            from: "a".into(),
+            to: "b".into(),
+            relation,
+            live,
+        })
+    };
+    assert_eq!(label(Relation::Leads, None), "leads");
+    assert_eq!(label(Relation::DelegatedTo, None), "delegated to");
+    assert_eq!(label(Relation::TeammateOf, None), "teammate of");
+    assert_eq!(
+        label(
+            Relation::DelegatedTo,
+            Some(LiveAction::HandingOff {
+                task: "\n  Fix\tthe   login bug\nThe token expires early.".into()
+            })
+        ),
+        "handing off: Fix the login bug"
+    );
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::HandingOff {
+                task: " \n\t ".into()
+            })
+        ),
+        "handing off: Untitled task"
+    );
+    assert_eq!(
+        label(Relation::Leads, Some(LiveAction::Messaging)),
+        "messaging"
+    );
+    assert_eq!(
+        label(Relation::DelegatedTo, Some(LiveAction::WaitingOn)),
+        "waiting on"
+    );
+    assert_eq!(
+        label(Relation::TeammateOf, Some(LiveAction::Reviewing)),
+        "reviewing"
+    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
-import { HOOKLESS_WORDS, type GraphEdge, type GraphEdgeState, type GraphNode, type MessageEdge, type OverlapEdge, type Presence, type Receipt, type TeamAgentStatus, type TeamGraph } from "../../engine-client";
+import { HOOKLESS_WORDS, type GraphEdge, type GraphEdgeState, type GraphNode, type MessageEdge, type OverlapEdge, type Presence, type Receipt, type RelationEdge, type TeamAgentStatus, type TeamGraph } from "../../engine-client";
 import type { Tone } from "../../ui";
 
 export const CARD_WIDTH = 216;
@@ -322,6 +322,12 @@ export function layoutGraph(graph: TeamGraph): GraphLayout {
  * Output: the cards in drawing order. */
 export function layoutCards(layout: GraphLayout): PlacedCard[] {
   return layout.cards;
+}
+
+/** The words one graph line shows: the live action while it happens, else the relation.
+ * Input: the engine's relation edge. Output: the label, empty when there is none. */
+export function edgeLabel(_edge: RelationEdge): string {
+  return "";
 }
 
 /** What a link's badges say to a screen reader. Input: the counts. Output: one phrase, empty
