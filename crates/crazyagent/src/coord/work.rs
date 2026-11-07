@@ -147,7 +147,7 @@ pub fn transfer(
             "DELETE FROM coord_held WHERE claim IN (SELECT id FROM coord_claims WHERE work=?1)",
             [work],
         )
-        .map_err(state)?;
+        .map_err(super::store::state)?;
     }
     let next = advance(tx, work, &row, state, owner, now)?;
     audit(tx, &row.project, work, by, name, version, next, now)?;
