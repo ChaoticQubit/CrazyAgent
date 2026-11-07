@@ -23,6 +23,7 @@ pub struct ResearchJobs {
 pub struct ProjectActivity {
     pub project_id: String,
     pub items: Vec<ActivityItem>,
+    pub more: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -179,20 +180,21 @@ impl NativeBridge {
 
     /// Lists what happened in a project, newest first, as the Overview shows it.
     /// Takes the project id and the most events to return.
-    /// Returns the events.
+    /// Returns the events and whether older ones were left out.
     pub async fn project_activity(
         &self,
         id: &str,
         limit: usize,
     ) -> Result<ProjectActivity, BridgeError> {
-        let items = self
+        let listed = self
             .reader()?
             .project_activity(project(id)?, limit)
             .await
             .map_err(|e| read_failure(&e.0))?;
         bounded(ProjectActivity {
             project_id: id.into(),
-            items,
+            items: listed.items,
+            more: listed.more,
         })
     }
 

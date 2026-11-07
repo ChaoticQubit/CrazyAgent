@@ -1073,7 +1073,8 @@ async fn team_plans_take_a_master_only_harness_as_the_master_but_never_as_a_team
 }
 
 /// The owner reads a project's activity through the engine: a research run the runner
-/// claimed is listed, and a limit outside 1 to `LIST_MAX` is refused.
+/// claimed is listed above the project's creation, a read cut by its limit says so, and a
+/// limit outside 1 to `LIST_MAX` is refused.
 #[tokio::test]
 async fn owner_reads_the_project_activity_through_the_engine() {
     let engine = Engine::start().await;
@@ -1096,7 +1097,9 @@ async fn owner_reads_the_project_activity_through_the_engine() {
         .unwrap()
         .unwrap();
 
-    let items = owner.project_activity(project.clone(), 50).await.unwrap();
+    let read = owner.project_activity(project.clone(), 50).await.unwrap();
+    assert!(!read.more, "every event fits");
+    let items = read.items;
 
     let seen: Vec<(crate::activity::ActivityKind, &str, &str)> = items
         .iter()
@@ -1104,11 +1107,24 @@ async fn owner_reads_the_project_activity_through_the_engine() {
         .collect();
     assert_eq!(
         seen,
-        vec![(
-            crate::activity::ActivityKind::ResearchStarted,
-            "Research",
-            "Research started: Market research"
-        )]
+        vec![
+            (
+                crate::activity::ActivityKind::ResearchStarted,
+                "Research",
+                "Research started: Market research"
+            ),
+            (
+                crate::activity::ActivityKind::Created,
+                "Owner",
+                "You created Meal planner"
+            ),
+        ]
+    );
+    let newest = owner.project_activity(project.clone(), 1).await.unwrap();
+    assert_eq!(newest.items.len(), 1);
+    assert!(
+        newest.more,
+        "a read cut by its limit says older events were left out"
     );
     for limit in [0, crate::activity::LIST_MAX + 1] {
         let refused = owner

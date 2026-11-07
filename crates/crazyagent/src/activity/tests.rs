@@ -290,3 +290,130 @@ fn a_removed_project_loses_its_events_and_backfills_again() {
         .unwrap();
     assert_eq!(marked, 0);
 }
+
+#[test]
+fn a_new_project_records_once_that_the_owner_created_it() {
+    let (_folder, mut db) = db();
+    let id = ProjectId::new("activity-new").unwrap();
+    let spec = crate::protocol::ProjectSpec {
+        name: "Harbor Notes".into(),
+        repositories: vec![],
+    };
+    let tx = db.transaction().unwrap();
+    assert_eq!(
+        crate::storage::create_project(&tx, &id, &spec).unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let created = |db: &Connection| -> Vec<(ActivityKind, String, Option<String>, String)> {
+        list(db, &id, 50)
+            .unwrap()
+            .into_iter()
+            .map(|item| (item.kind, item.actor, item.goal, item.text))
+            .collect()
+    };
+    let once = vec![(
+        ActivityKind::Created,
+        OWNER_ACTOR.to_owned(),
+        None,
+        "You created Harbor Notes".to_owned(),
+    )];
+    assert_eq!(created(&db), once);
+    let tx = db.transaction().unwrap();
+    assert_ne!(
+        crate::storage::create_project(&tx, &id, &spec).unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    initialize(&db).unwrap();
+    assert_eq!(
+        created(&db),
+        once,
+        "a refused create and a restart add nothing"
+    );
+}
+
+#[test]
+fn a_project_made_before_events_gets_one_created_event_from_its_setup() {
+    let (_folder, db) = db();
+    crate::project_setup::initialize(&db).unwrap();
+    let setup = serde_json::json!({"name": "Harbor Notes", "created_ms": 1_000});
+    db.execute(
+        "INSERT INTO project_setups VALUES (?1,?2)",
+        params![PROJECT, setup.to_string()],
+    )
+    .unwrap();
+    initialize(&db).unwrap();
+    initialize(&db).unwrap();
+    assert!(
+        !backfill_created(&db, &project()).unwrap(),
+        "it has one already"
+    );
+    let created = |project: &ProjectId| -> Vec<(i64, String, String)> {
+        list(&db, project, 50)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.kind == ActivityKind::Created)
+            .map(|item| (item.at_ms, item.actor, item.text))
+            .collect()
+    };
+    assert_eq!(
+        created(&project()),
+        vec![(
+            1_000,
+            OWNER_ACTOR.to_owned(),
+            "You created Harbor Notes".to_owned()
+        )]
+    );
+    let other = ProjectId::new(OTHER).unwrap();
+    assert!(!backfill_created(&db, &other).unwrap());
+    assert_eq!(
+        created(&other),
+        vec![],
+        "a project with no saved setup has no creation time"
+    );
+}
+
+#[test]
+fn a_read_says_when_older_events_were_left_out_by_the_limit_or_the_byte_bound() {
+    let (_folder, db) = db();
+    let line = "x".repeat(TEXT_BYTES_MAX);
+    for at_ms in 0..3 {
+        let item = NewActivity {
+            kind: ActivityKind::Phase,
+            actor: "Master",
+            agent: None,
+            goal: None,
+            text: &line,
+            change_set: None,
+        };
+        record(&db, &project(), &item, at_ms).unwrap();
+    }
+    let all = listed(&db, &project(), 3).unwrap();
+    assert_eq!((all.items.len(), all.more), (3, false));
+    let newest = listed(&db, &project(), 2).unwrap();
+    assert_eq!(
+        newest
+            .items
+            .iter()
+            .map(|item| item.at_ms)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    assert!(newest.more, "the limit left one out");
+    for at_ms in 3..200 {
+        let item = NewActivity {
+            kind: ActivityKind::Phase,
+            actor: "Master",
+            agent: None,
+            goal: None,
+            text: &line,
+            change_set: None,
+        };
+        record(&db, &project(), &item, at_ms).unwrap();
+    }
+    let cut = listed(&db, &project(), LIST_MAX).unwrap();
+    assert!(cut.items.len() < 200, "{}", cut.items.len());
+    assert!(cut.more, "the byte bound left the rest out");
+    assert_eq!(cut.items, list(&db, &project(), LIST_MAX).unwrap());
+}

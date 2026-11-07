@@ -1188,6 +1188,8 @@ pub enum OwnerData {
     ProjectActivity {
         project_id: ProjectId,
         items: Vec<crate::activity::ActivityItem>,
+        #[serde(default)]
+        more: bool,
     },
     TeamStatus {
         status: Box<crate::team::TeamStatus>,

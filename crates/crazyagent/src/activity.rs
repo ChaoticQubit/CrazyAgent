@@ -170,7 +170,7 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
         let Ok(project) = ProjectId::new(&project) else {
             continue;
         };
-        if let Err(error) = backfill(db, &project) {
+        if let Err(error) = backfill(db, &project).and_then(|_| backfill_created(db, &project)) {
             eprintln!(
                 "activity_backfill_failed cause={}",
                 crate::protocol::plain_code(&error.0)
@@ -400,6 +400,21 @@ pub fn list(
     project: &ProjectId,
     limit: usize,
 ) -> Result<Vec<ActivityItem>, EngineError> {
+    listed(db, project, limit).map(|read| read.items)
+}
+
+/// One read of a project's events: the newest that fit, and whether older ones were left
+/// out by the limit or the byte bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listed {
+    pub items: Vec<ActivityItem>,
+    pub more: bool,
+}
+
+/// Lists a project's events as `list` does and says whether older ones were left out.
+/// Takes the database, the project and the limit, 1 to `LIST_MAX`. Returns the read, or
+/// `activity_limit_invalid`.
+pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<Listed, EngineError> {
     if limit == 0 || limit > LIST_MAX {
         return Err(failure("activity_limit_invalid"));
     }
@@ -411,7 +426,7 @@ pub fn list(
         .map_err(state)?;
     let rows = statement
         .query_map(
-            params![project.as_str(), i64::try_from(limit).map_err(state)?],
+            params![project.as_str(), i64::try_from(limit + 1).map_err(state)?],
             |row| {
                 Ok((
                     row.get::<_, String>(2)?,
@@ -431,21 +446,27 @@ pub fn list(
         .map_err(state)?;
     let mut items = Vec::new();
     let mut bytes = 0;
+    let mut more = false;
     for row in rows {
         let (kind, mut item) = row.map_err(state)?;
         let Some(kind) = ActivityKind::parse(&kind) else {
             continue;
         };
+        if items.len() == limit {
+            more = true;
+            break;
+        }
         item.kind = kind;
         let size = serde_json::to_vec(&item).map_err(state)?.len() + 1;
         if bytes + size > LISTED_BYTES_MAX {
+            more = true;
             break;
         }
         bytes += size;
         items.push(item);
     }
     assert!(items.len() <= limit && bytes <= LISTED_BYTES_MAX);
-    Ok(items)
+    Ok(Listed { items, more })
 }
 
 /// One event found in the project's older records by `backfill`.
@@ -456,6 +477,72 @@ struct Past {
     goal: Option<String>,
     text: String,
     change_set: Option<String>,
+}
+
+/// The line of a project's Created event. Takes the project's name. Returns the line.
+pub fn created_text(name: &str) -> String {
+    format!("You created {name}")
+}
+
+/// Records that the owner created a project, in the transaction that creates it; a
+/// failure is logged by its plain code, so creating never fails on it. Takes the database,
+/// the project, its name and the time in ms.
+pub fn note_created(db: &Connection, project: &ProjectId, name: &str, now_ms: i64) {
+    let text = created_text(name);
+    let item = NewActivity {
+        kind: ActivityKind::Created,
+        actor: OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text: &text,
+        change_set: None,
+    };
+    note(db, project, &item, now_ms);
+}
+
+/// Brings in the Created event of a project that has none, at its saved setup's creation
+/// time and with its name, so a project made before the engine recorded events still shows
+/// when it began; a project that has one, or has no saved setup, is left alone. Takes the
+/// database and the project. Returns whether it added one, or the SQLite failure.
+pub fn backfill_created(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    let created: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_activity WHERE project=?1 AND kind=?2)",
+            params![project.as_str(), ActivityKind::Created.name()],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if created || !has_table(db, "project_setups")? {
+        return Ok(false);
+    }
+    let body: Option<String> = db
+        .query_row(
+            "SELECT body FROM project_setups WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(state)?;
+    let setup = body.and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok());
+    let field = |key: &str| setup.as_ref().and_then(|setup| setup.get(key));
+    let name = field("name").and_then(serde_json::Value::as_str);
+    let at_ms = field("created_ms")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|at_ms| *at_ms >= 0);
+    let (Some(name), Some(at_ms)) = (name, at_ms) else {
+        return Ok(false);
+    };
+    let text = created_text(name);
+    let item = NewActivity {
+        kind: ActivityKind::Created,
+        actor: OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text: &text,
+        change_set: None,
+    };
+    record(db, project, &item, at_ms)?;
+    Ok(true)
 }
 
 /// Brings in, once per project, what happened before the engine recorded events: the
