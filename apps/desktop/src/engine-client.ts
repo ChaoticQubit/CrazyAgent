@@ -1600,8 +1600,8 @@ export type Relation = "leads" | "delegated_to" | "teammate_of";
 export type LiveAction =
   | { action: "handing_off"; task: string }
   | { action: "messaging" }
-  | { action: "waiting_on" }
-  | { action: "reviewing" };
+  | { action: "waiting_on"; owner: boolean }
+  | { action: "reviewing"; change_set: number };
 
 /** The one relation edge of a tree pair, from the node that leads to the node it leads,
  * with the pair's live action while one holds. */

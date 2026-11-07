@@ -172,8 +172,8 @@ pub enum Relation {
 pub enum LiveAction {
     HandingOff { task: String },
     Messaging,
-    WaitingOn,
-    Reviewing,
+    WaitingOn { owner: bool },
+    Reviewing { change_set: i64 },
 }
 
 /// The one relation edge of a tree pair, from the node that leads to the node it leads,
@@ -212,7 +212,7 @@ pub struct TeamGraph {
 pub struct GraphFacts {
     pub branches: BTreeMap<i64, String>,
     pub coord: Option<Snapshot>,
-    pub review_ready: BTreeSet<i64>,
+    pub review_ready: Vec<(i64, i64)>,
     pub asking: BTreeSet<(i64, i64)>,
 }
 
@@ -283,17 +283,17 @@ pub fn facts(
 fn review_ready(
     connection: &Connection,
     project: &ProjectId,
-) -> Result<BTreeSet<i64>, EngineError> {
+) -> Result<Vec<(i64, i64)>, EngineError> {
     let mut statement = connection
         .prepare(
-            "SELECT owner_agent FROM coord_work
+            "SELECT owner_agent,id FROM coord_work
              WHERE project=?1 AND state='review_ready' AND owner_agent IS NOT NULL
-             ORDER BY updated DESC LIMIT ?2",
+             ORDER BY updated DESC, id DESC LIMIT ?2",
         )
         .map_err(error)?;
     let rows = statement
         .query_map(params![project.as_str(), RELATION_SCAN_MAX], |row| {
-            row.get(0)
+            Ok((row.get(0)?, row.get(1)?))
         })
         .map_err(error)?;
     rows.collect::<Result<_, _>>().map_err(error)
@@ -632,7 +632,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
     let reviews: BTreeSet<(String, String)> = facts
         .review_ready
         .iter()
-        .filter_map(|owner| {
+        .filter_map(|(owner, _)| {
             let agent = status.agents.iter().find(|agent| agent.id == *owner)?;
             let reviewer = match agent.parent.filter(|lead| lead != owner) {
                 Some(lead) => named(&lead)?,
@@ -695,13 +695,13 @@ fn relation_edges(
                     waits
                         .iter()
                         .any(|(asker, asked)| pair(asker, asked))
-                        .then_some(LiveAction::WaitingOn)
+                        .then_some(LiveAction::WaitingOn { owner: false })
                 })
                 .or_else(|| {
                     reviews
                         .iter()
                         .any(|(reviewer, owner)| *reviewer == from && *owner == to)
-                        .then_some(LiveAction::Reviewing)
+                        .then_some(LiveAction::Reviewing { change_set: 0 })
                 })
                 .or_else(|| {
                     messages
