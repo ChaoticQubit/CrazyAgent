@@ -4142,6 +4142,7 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     assert!(host.alive().unwrap().is_empty());
 }
 
+#[cfg(target_os = "macos")]
 const RECORDING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
@@ -4169,6 +4170,7 @@ done
 
 const INTERRUPTED: &str = "Ship the release notes";
 
+#[cfg(target_os = "macos")]
 fn reopen(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
     let access = fixture.access.clone();
     TeamRuntime::open(
@@ -4185,6 +4187,7 @@ fn reopen(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
 
 /// Starts a recording live master, lets the owner's first turn end and stops the engine
 /// with the master's pane left running, as a closing engine does. Returns the master's id.
+#[cfg(target_os = "macos")]
 fn left_live_master(fixture: &Fixture, host: &Arc<dyn Host>) -> i64 {
     let mut team = live_runtime(fixture, host, RECORDING_CODEX);
     super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
@@ -4248,6 +4251,7 @@ fn interrupted_message(fixture: &Fixture, agent: i64) -> i64 {
 
 /// Counts the typed lines holding `text` in every Codex rollout under the fixture's folder,
 /// skipping folders the running agents remove while it reads.
+#[cfg(target_os = "macos")]
 fn typed_count(fixture: &Fixture, text: &str) -> usize {
     let mut folders = vec![fixture.base.clone()];
     let mut count = 0;
@@ -4974,6 +4978,7 @@ fn a_team_master_s_questions_are_logged_as_its_own_and_a_refused_one_is_noted() 
     );
 }
 
+#[cfg(target_os = "macos")]
 const ASKING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
