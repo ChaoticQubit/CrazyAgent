@@ -26,11 +26,11 @@ export function scratchBase(home) {
   return SCRATCH;
 }
 
-/** N-D35 (DEC-115 addendum): a scratch repo with a linked worktree is offered Move; the question
+/** N-D37 (DEC-115 addendum): a scratch repo with a linked worktree is offered Move; the question
  * shows the data loss warning before Move anyway, and Move anyway moves it into the projects
  * folder, where git worktree repair mends the worktree. The repo is moved back out afterwards. */
 export const checks = [{
-  id: "N-D35",
+  id: "N-D37",
   op: ["OP-19"],
   title: "Move anyway moves a repo the engine used to refuse, after clear warnings",
   why: "owner: \"ask the user ... do you still want to move it ... yes ... move it forcefully\"",

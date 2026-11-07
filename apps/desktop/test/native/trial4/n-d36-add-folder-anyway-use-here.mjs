@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { click, shown, text, texts } from "../settings-steps.mjs";
 import { appCall, stamp } from "../trial4-projects.mjs";
-import { scratchBase } from "./n-d35-add-folder-move-anyway.mjs";
+import { scratchBase } from "./n-d37-add-folder-move-anyway.mjs";
 
 const UI_MS = 30000;
 const START_MS = 120000;
