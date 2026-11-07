@@ -2517,6 +2517,67 @@ fn the_master_s_own_git_is_the_free_copy_only_at_full_access() {
     }
 }
 
+/// With "Catch up with main" on, the default, a sub-agent's own `git` merges
+/// `crazyagent/main`; with it off the agent gets the strict worker copy that refuses main
+/// too (OS-8).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sub_agent_s_own_git_merges_main_only_while_catch_up_with_main_is_on() {
+    for (value, flag) in [
+        (crate::team::CatchUpMain::On, "main=1"),
+        (crate::team::CatchUpMain::Off, "main=0"),
+    ] {
+        let fixture = Fixture::new(1);
+        let bin = fixture.base.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::team::set_catch_up_main(&fixture.connection, &fixture.setup.project_id, value)
+            .unwrap();
+        assert_eq!(
+            fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+            1
+        );
+        let owner_access = fixture.access.clone();
+        let runtime = TeamRuntime::open(
+            &fixture.base.join("engine.db"),
+            &fixture.base.join("team"),
+            BTreeMap::from([("codex", codex)]),
+            Box::new(move || Some(owner_access.clone())),
+            TeamLimits::default(),
+        )
+        .unwrap();
+        let account = TeamAccount {
+            connection: reference(ENDPOINT),
+            reach: TeamReach::Endpoint {
+                base_url: "http://127.0.0.1:11434/v1".into(),
+                model: "qwen2.5:0.5b".into(),
+            },
+        };
+        runtime
+            .prepare(
+                &fixture.setup,
+                1,
+                AgentRole::Sub,
+                "codex",
+                false,
+                &account,
+                false,
+                crate::agent_git::Layout::Linked,
+            )
+            .unwrap();
+        let home = agent_home(&runtime.state, 1);
+        let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
+        let script = std::fs::read_to_string(scratch.join("bin").join("git")).unwrap();
+        let _ = crate::sandbox::toolchains::remove_tmp(&home);
+        assert!(
+            script.lines().any(|line| line == flag),
+            "the sub-agent's git with {value:?} lacks {flag}"
+        );
+    }
+}
+
 /// A team agent whose delegation engine sits in an app bundle, as the macOS service runs it
 /// from `CrazyAgent.app/Contents/MacOS`, can start that engine under its installed profile
 /// for its team tools, relay hooks and monitor, with tools on or off, while another bundle's

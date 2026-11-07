@@ -1341,6 +1341,20 @@ fn the_team_tools_section_lists_each_tool_left_on_with_the_tags_and_the_branch_r
     assert!(some.len() < all.len());
 }
 
+/// While "Catch up with main" is on, the default, the team tools section tells each agent
+/// to bring a moved main into its own branch with `git merge crazyagent/main` (OS-8).
+#[test]
+fn the_team_tools_section_tells_agents_to_merge_crazyagent_main_while_catch_up_is_on() {
+    let section = team_tools_section(&[]);
+    assert!(
+        section.contains(
+            "When main has moved on, bring it into your branch with git merge crazyagent/main before you finish."
+        ),
+        "{section}"
+    );
+    assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
+}
+
 #[test]
 fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
     let directory = tempfile::tempdir().unwrap();

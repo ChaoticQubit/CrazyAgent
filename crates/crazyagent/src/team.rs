@@ -3595,6 +3595,36 @@ pub fn reask_empty_reply(
     Ok(reask.unwrap_or_else(reask_default))
 }
 
+/// The owner's "Catch up with main" setting (OS-8): `On`, the default, lets every agent's
+/// own `git` merge `crazyagent/main`, the project's landed main, into its own branch and
+/// tells it to; `Off` keeps the DEC-107 refusal of every merge and says nothing of main.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatchUpMain {
+    #[default]
+    On,
+    Off,
+}
+
+/// Reads a project's "Catch up with main" setting. Takes a connection and the project.
+/// Returns the setting.
+pub fn catch_up_main(
+    _connection: &Connection,
+    _project: &ProjectId,
+) -> Result<CatchUpMain, EngineError> {
+    Ok(CatchUpMain::Off)
+}
+
+/// Saves a project's "Catch up with main" setting. Takes a connection, the project and
+/// the setting. Returns done.
+pub fn set_catch_up_main(
+    _connection: &Connection,
+    _project: &ProjectId,
+    _value: CatchUpMain,
+) -> Result<(), EngineError> {
+    Ok(())
+}
+
 /// The most files one new top-level folder, a folder the owner's branch does not have,
 /// may gain in one of the project's change sets before the engine refuses the set
 /// (DEC-107); `NEW_FOLDER_FILES_DEFAULT` until the owner picks another. Takes a connection

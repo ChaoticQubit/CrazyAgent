@@ -5720,6 +5720,34 @@ fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
     );
 }
 
+/// "Catch up with main" is On for a project with no choice saved and for a store with no
+/// team tables, reads the owner's Off and On again, and the choice is per project (OS-8).
+#[test]
+fn catch_up_main_defaults_to_on_and_reads_the_saved_choice() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-catch-up").unwrap();
+    assert_eq!(
+        catch_up_main(&connection, &project).unwrap(),
+        CatchUpMain::On,
+        "On is the default"
+    );
+    for value in [CatchUpMain::Off, CatchUpMain::On, CatchUpMain::Off] {
+        set_catch_up_main(&connection, &project, value).unwrap();
+        assert_eq!(catch_up_main(&connection, &project).unwrap(), value);
+    }
+    assert_eq!(
+        catch_up_main(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        CatchUpMain::On,
+        "the choice is per project"
+    );
+    let bare = Connection::open_in_memory().unwrap();
+    assert_eq!(
+        catch_up_main(&bare, &project).unwrap(),
+        CatchUpMain::On,
+        "a store with no team tables reads On"
+    );
+}
+
 /// Owner 2026-11-05: under Native only the team status and graph say "Can't receive
 /// messages" on a tools-off Codex sub-agent of a keyless endpoint account, which runs a kept
 /// session with no bridge, and on no other agent: not one on a signed-in profile, woken per
