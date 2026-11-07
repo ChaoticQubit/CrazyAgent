@@ -280,7 +280,8 @@ fn validate_dispatch(
     let admission = dispatch.admission();
     let command = &dispatch.work.command;
     if let Err(refused) = validate_scope(tx, config, sources, admission, command)
-        && held_scope(tx, config, sources, command).is_none()
+        && (refused.0 != "native_profile_source_conflict"
+            || held_scope(tx, config, sources, command).is_none())
     {
         return Err(refused);
     }

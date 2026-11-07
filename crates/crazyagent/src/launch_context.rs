@@ -546,12 +546,13 @@ impl AgentContext {
     }
 
     /// Builds the Task-start reminder the first turn of each task carries while the setting
-    /// is On (T3-15): for Claude Code the ToolSearch select string of the context-mode tools
-    /// left on, the one its "Tools to use" section gives, and the approved skills by their
-    /// Skill tool names; for Codex those tools on their MCP server and the skills' SKILL.md.
-    /// Skills past the bound are named as the rest of the Skills section. Inputs: the harness
-    /// id and the launch's tools switch. Output: at most `TASK_START_BYTES_MAX` bytes, or None
-    /// with tools off, for another harness, or with no context-mode tool and no skill to name.
+    /// is On (T3-15), as firm rules (DEC-116): for Claude Code the ToolSearch select string of
+    /// the context-mode tools left on, the one its "Tools to use" section gives, and the
+    /// approved skills by their Skill tool names; for Codex those tools on their MCP server
+    /// and the skills' SKILL.md; for both the graphify query before any source read. Skills
+    /// past the bound are named as the rest of the Skills section. Inputs: the harness id and
+    /// the launch's tools switch. Output: at most `TASK_START_BYTES_MAX` bytes, or None with
+    /// tools off, for another harness, or with no context-mode tool and no skill to name.
     pub fn task_start(&self, harness: &str, tools: bool) -> Option<String> {
         const MORE: &str = ", and the other skills in the Skills section";
         let id = crate::harnesses::spec(harness)
@@ -572,26 +573,28 @@ impl AgentContext {
         if context_mode {
             text.push_str(&match claude {
                 true => format!(
-                    "run ToolSearch with `select:{}` and use those context-mode tools",
+                    "run ToolSearch with `select:{}` and run every command, test, search or file read whose output is not short and fixed through those context-mode tools (Bash only for short fixed output, state changes and edits)",
                     names.join(",")
                 ),
                 false => format!(
-                    "use the `{}` tools of the `{CONTEXT_MODE_DECLARED}` MCP server",
+                    "run every command, test, search or file read whose output is not short and fixed through the `{}` tools of the `{CONTEXT_MODE_DECLARED}` MCP server (the shell only for short fixed output, state changes and edits)",
                     names.join("`, `")
                 ),
             });
-            text.push_str(
-                " for any command, test, search or file read whose output may pass 20 lines",
-            );
+            text.push_str(match self.plugins.skills.is_empty() {
+                true => ", and ",
+                false => ", ",
+            });
         }
+        text.push_str(
+            "query the project graph with `graphify query \"<question>\"` before you read or search source",
+        );
         if !self.plugins.skills.is_empty() {
-            if context_mode {
-                text.push_str(", and ");
-            }
+            text.push_str(", and ");
             text.push_str(match claude {
-                true => "call the Skill tool for each of these skills that fits this task: ",
+                true => "check these skills and call the Skill tool for each one that applies: ",
                 false => {
-                    "read the SKILL.md of each of these skills that fits this task and follow it: "
+                    "check these skills and read and follow the SKILL.md of each one that applies: "
                 }
             });
             let room = TASK_START_BYTES_MAX.saturating_sub(text.len() + MORE.len() + 1);
@@ -931,8 +934,9 @@ impl AgentContext {
     /// Writes this context into one agent's private home for one launch of `harness`.
     /// Input: the harness id ("codex" or "claude-code"), the agent's 0700 home (its
     /// CODEX_HOME or CLAUDE_CONFIG_DIR) and the tools switch; with tools off no skill or
-    /// MCP server is given. Output: the guard holding the files and the harness arguments,
-    /// or `launch_home_busy` while another launch uses the home.
+    /// MCP server is given. On macOS the files hold the agent's own `getconf`
+    /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
+    /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
     pub fn install(
         &self,
         harness: &str,
@@ -1005,7 +1009,7 @@ impl AgentContext {
         if id == "codex" {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
-            remove_copies(home);
+            remove_copies(home)?;
             let mut developer = self.instructions.clone();
             if tools {
                 developer.push_str(&tool_use_section(
@@ -1107,6 +1111,9 @@ impl AgentContext {
                 instructions.into_os_string(),
             ]);
         }
+        #[cfg(target_os = "macos")]
+        crate::sandbox::toolchains::write_getconf(home, installed.native.is_some())
+            .map_err(|_| failure("launch_context_unwritable"))?;
         assert!(installed.files.as_ref().is_some_and(|files| {
             files.home == home && files.removals().iter().all(|path| path.starts_with(home))
         }));
@@ -1237,14 +1244,15 @@ impl InstalledFiles {
 impl Drop for Installed {
     /// Deletes the launch's files, then releases the home lock on its open file
     /// description, so a process that shares it, such as a child another thread is
-    /// starting, can never keep the home busy after the launch ends.
+    /// starting, can never keep the home busy after the launch ends. Codex skills it cannot
+    /// remove stay for the next Codex launch, which refuses to start with them.
     fn drop(&mut self) {
         if let Some(files) = &self.files {
             for path in files.removals() {
                 remove(&path);
             }
             if files.codex {
-                remove_copies(&files.home);
+                let _ = remove_copies(&files.home);
             }
         }
         #[cfg(unix)]
@@ -1430,11 +1438,12 @@ fn short_description(text: &str, bytes: usize) -> String {
     short
 }
 
-/// Tells a tools-on launch when to use the tools it has (18.15.1): the context-mode tools
-/// left on, by the names its harness gives them, graphify on the project graph and the
-/// approved skills by the names the skills index uses. Inputs: whether the harness is Claude
-/// Code, the launch's servers, the tools switched off and the first approved skill's name,
-/// none without skills. Output: at most `TOOL_USE_BYTES_MAX` bytes of markdown.
+/// Tells a tools-on launch the rules for the tools it has (18.15.1), as firm rules for every
+/// task (DEC-116): the context-mode tools left on, by the names its harness gives them, for
+/// all output that is not short and fixed, a graphify query before any source read and a
+/// check of the approved skills by the names the skills index uses. Inputs: whether the
+/// harness is Claude Code, the launch's servers, the tools switched off and the first
+/// approved skill's name, none without skills. Output: at most `TOOL_USE_BYTES_MAX` bytes.
 fn tool_use_section(
     claude: bool,
     servers: &[LaunchServer],
@@ -1442,7 +1451,7 @@ fn tool_use_section(
     skill: Option<&str>,
 ) -> String {
     let mut section = String::from(
-        "\n## Tools to use\n\nThe owner's instructions and the sections above come first. This section only names the tools this launch has as you call them; where other instructions name one another way, use the name here.\n\n",
+        "\n## Tools to use\n\nThe owner's instructions and the sections above come first. These rules apply to every task; this section names the tools this launch has as you call them, and where other instructions name one another way, use the name here.\n\n",
     );
     let names = context_mode_names(claude, off_tools);
     let context_mode = servers
@@ -1451,27 +1460,27 @@ fn tool_use_section(
     if context_mode && !names.is_empty() {
         let listed: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
         section.push_str(&format!(
-            "- context-mode: run every command, test, search, file read or web fetch whose output may pass 20 lines through {}",
+            "- context-mode: run every command, test, search, file read or web fetch whose output is not short and fixed through {}",
             listed.join(", ")
         ));
         section.push_str(&match claude {
             true => format!(
-                ", and keep Bash for short fixed output, edits and git. They load on demand: first run ToolSearch with `select:{}`.\n",
+                ". Use Bash only for short fixed output, state changes and edits. These tools load on demand: first run ToolSearch with `select:{}`.\n",
                 names.join(",")
             ),
             false => format!(
-                " of the `{CONTEXT_MODE_DECLARED}` MCP server, and keep the shell for short fixed output, edits and git.\n"
+                " of the `{CONTEXT_MODE_DECLARED}` MCP server. Use the shell only for short fixed output, state changes and edits.\n"
             ),
         });
     }
-    section.push_str("- graphify: when `graphify-out/graph.json` is in your worktree, run `graphify query \"<question>\"` in the shell before you read or edit code, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part.\n");
+    section.push_str("- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report.\n");
     if let Some(name) = skill {
         section.push_str(&match claude {
             true => format!(
-                "- Skills: before each task, call the Skill tool for every skill in the Skills section below that fits, by its name there, such as `crazyagent:{}`. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or plain `NAME` is `crazyagent:NAME` here.\n",
+                "- Skills: before each task, check the Skills section below and call the Skill tool for every skill there that applies, by its name there, such as `crazyagent:{}`. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or plain `NAME` is `crazyagent:NAME` here.\n",
                 clip(name, NAME_BYTES_MAX)
             ),
-            false => "- Skills: before each task, read the SKILL.md of every skill in the Skills section below that fits and follow it. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or `crazyagent:NAME` is the one listed as NAME there.\n".to_owned(),
+            false => "- Skills: before each task, check the Skills section below, then read the SKILL.md of every skill there that applies and follow it. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or `crazyagent:NAME` is the one listed as NAME there.\n".to_owned(),
         });
     }
     assert!(section.len() <= TOOL_USE_BYTES_MAX);
@@ -1509,7 +1518,7 @@ fn skills_index(folder: &Path, skills: &[EffectiveSkill], skill_tool: bool) -> S
         false => SKILL_FILE_USE,
     };
     let mut index = format!(
-        "\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. {using}\n\n"
+        "\n## Skills\n\nThe owner approved these skills for this project. Check this list before every task and use every skill here that applies to it. {using}\n\n"
     );
     let mut left = 0;
     for skill in skills {
@@ -1766,35 +1775,99 @@ pub fn lock_only(home: &Path) -> Result<Installed, LaunchError> {
 /// keep while their marker matches, so Codex installs them fresh at its next start (LL2S-1).
 /// It never resolves `skills` by path, because the agent may have replaced that folder with
 /// a link: each entry is moved up into the verified home through descriptors and removed
-/// there. A `skills` that is not a real folder of this user is left alone. Input: the
-/// validated agent home.
+/// there. A `skills` that is not a real folder of this user is left alone. An entry that does
+/// not move has the flags that pin it cleared and is moved once more (CTX-M1 r1). Input: the
+/// validated agent home. Output: Ok, or `launch_context_skills_kept` when an entry is still
+/// there, so Codex never starts with what the agent left in it.
 #[cfg(unix)]
-fn remove_copies(home: &Path) {
+fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let Ok(parent) = rustix::fs::open(home, folder, Mode::empty()) else {
-        return;
+        return Ok(());
     };
     let Ok(skills) = rustix::fs::openat(&parent, "skills", folder, Mode::empty()) else {
-        return;
+        return Ok(());
     };
     if !rustix::fs::fstat(&skills)
         .is_ok_and(|stat| stat.st_uid == rustix::process::geteuid().as_raw())
     {
-        return;
+        return Ok(());
     }
     for (entry, kind) in [(STATE, "skills"), (CODEX_SYSTEM_SKILLS, "system")] {
-        let parked = format!(".{STATE}-{kind}-{}", std::process::id());
-        remove(&home.join(&parked));
-        if rustix::fs::renameat(&skills, entry, &parent, parked.as_str()).is_ok() {
-            remove(&home.join(&parked));
+        let name = format!(".{STATE}-{kind}-{}", std::process::id());
+        let parked = home.join(&name);
+        let move_up = || {
+            remove(&parked);
+            rustix::fs::renameat(&skills, entry, &parent, name.as_str()).is_ok()
+        };
+        let mut moved = move_up();
+        if !moved && held(&skills, entry) {
+            clear_flags(home, &skills, entry);
+            moved = move_up();
+        }
+        if moved {
+            remove(&parked);
+        } else if held(&skills, entry) {
+            return Err(failure("launch_context_skills_kept"));
+        }
+    }
+    Ok(())
+}
+
+/// Leaves skill copies in place where descriptor-relative removal does not exist; no
+/// launch reaches this, because the home lock is refused first. Input: unused. Output: Ok.
+#[cfg(not(unix))]
+fn remove_copies(_home: &Path) -> Result<(), LaunchError> {
+    Ok(())
+}
+
+/// Whether `entry` is still in `skills`, read without following a link. A read that fails
+/// for any reason but absence counts as present, so a removal is never taken for done.
+/// Inputs: the open `skills` folder and the entry's name. Output: the answer.
+#[cfg(unix)]
+fn held(skills: &std::os::fd::OwnedFd, entry: &str) -> bool {
+    !matches!(
+        rustix::fs::statat(skills, entry, rustix::fs::AtFlags::SYMLINK_NOFOLLOW),
+        Err(rustix::io::Errno::NOENT)
+    )
+}
+
+/// Clears the user flags that keep an entry from moving, immutable and append only, from the
+/// `skills` folder and from its entry, which an agent could set before its profile denied it
+/// (CTX-M1 r1). A path is changed only while it is a folder or file of this user, never a
+/// link, and every other flag is kept. Inputs: the home, the open `skills` folder and the
+/// entry's name.
+#[cfg(target_os = "macos")]
+fn clear_flags(home: &Path, skills: &std::os::fd::OwnedFd, entry: &str) {
+    use nix::sys::stat::FileFlag;
+    use rustix::fs::{AtFlags, FileType};
+    let pinning = FileFlag::UF_IMMUTABLE | FileFlag::UF_APPEND;
+    let user = rustix::process::geteuid().as_raw();
+    let folder = home.join("skills");
+    for (path, stat) in [
+        (folder.clone(), rustix::fs::fstat(skills)),
+        (
+            folder.join(entry),
+            rustix::fs::statat(skills, entry, AtFlags::SYMLINK_NOFOLLOW),
+        ),
+    ] {
+        let Ok(stat) = stat else {
+            continue;
+        };
+        let flags = FileFlag::from_bits_retain(stat.st_flags);
+        if stat.st_uid == user
+            && FileType::from_raw_mode(stat.st_mode) != FileType::Symlink
+            && flags.intersects(pinning)
+        {
+            let _ = nix::unistd::chflags(path.as_path(), flags.difference(pinning));
         }
     }
 }
 
-/// Leaves skill copies in place where descriptor-relative removal does not exist; no
-/// launch reaches this, because the home lock is refused first. Input: unused.
-#[cfg(not(unix))]
-fn remove_copies(_home: &Path) {}
+/// Leaves flags alone where no flag an agent may set keeps an entry from moving. Inputs:
+/// unused.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn clear_flags(_home: &Path, _skills: &std::os::fd::OwnedFd, _entry: &str) {}
 
 fn remove(path: &Path) {
     match fs::symlink_metadata(path) {

@@ -161,6 +161,7 @@ pub(crate) enum Job {
         Cursor,
         String,
         crate::projects_home::AddMode,
+        Vec<crate::projects_home::AddOverride>,
         oneshot::Sender<Result<crate::projects_home::AddPlan, EngineError>>,
     ),
     HomeMovePlan(
@@ -555,11 +556,11 @@ impl Storage {
                                 &control,
                             ));
                         }
-                        Job::HomeAddPlan(admission, expected, source, mode, reply) => {
+                        Job::HomeAddPlan(admission, expected, source, mode, overrides, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &source, mode)
+                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &source, mode, &overrides)
                             };
                             let _ = reply.send(result);
                         }

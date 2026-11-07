@@ -1878,3 +1878,52 @@ fn removing_a_project_forgets_its_coordination_and_leaves_other_projects() {
         (0, 1, 1)
     );
 }
+
+/// b19 P2 r2: a coordination database made before `coord_messages.turn` gets the column
+/// when the engine opens it, every message kept as it was, and a second open changes
+/// nothing.
+#[cfg(unix)]
+#[test]
+fn a_database_made_before_the_turn_column_gets_it_on_open_and_keeps_its_messages() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE coord_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                from_kind TEXT NOT NULL,
+                from_agent INTEGER,
+                to_kind TEXT NOT NULL,
+                to_agent INTEGER,
+                kind TEXT NOT NULL,
+                q_for TEXT,
+                q_severity TEXT,
+                work INTEGER,
+                reply_to INTEGER,
+                body TEXT NOT NULL,
+                idem_key TEXT,
+                receipt TEXT NOT NULL,
+                created INTEGER NOT NULL,
+                receipt_at INTEGER NOT NULL,
+                UNIQUE(from_agent, idem_key)
+            );
+            INSERT INTO coord_messages(project,from_kind,to_kind,to_agent,kind,body,receipt,created,receipt_at)
+            VALUES ('coord-units','engine','agent',7,'note','kept','delivered',1,2);",
+        )
+        .unwrap();
+    let row = |connection: &Connection| -> rusqlite::Result<(String, i64, Option<String>)> {
+        connection.query_row(
+            "SELECT receipt, receipt_at, turn FROM coord_messages WHERE body='kept'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+    };
+    for _ in 0..2 {
+        ensure(&connection).unwrap();
+        assert_eq!(
+            row(&connection).ok(),
+            Some(("delivered".to_owned(), 2, None)),
+            "the open added the turn column and kept the message"
+        );
+    }
+}

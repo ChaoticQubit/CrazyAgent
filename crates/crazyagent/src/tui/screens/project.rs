@@ -2734,7 +2734,19 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "agent_access_unavailable" => "That access level can't run agents on this computer.",
         crate::setup::AGENT_GIT_NEEDS_TOOLS => crate::setup::plain_reason(code),
         "agent_policy_invalid" => "Each toolchain can be listed once.",
-        "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access.",
+        "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access. Try again.",
+        "agent_access_lowered" => {
+            "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it."
+        }
+        "agent_network_narrowed" => {
+            "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network."
+        }
+        "agent_toolchain_lowered" => {
+            "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it."
+        }
+        "agent_project_unreadable" => {
+            "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again."
+        }
         "read_path_missing" => "One of those folders doesn't exist on this computer.",
         "read_path_not_folder" => "One of those paths is a file. Add folders only.",
         "read_path_holds_home" => {

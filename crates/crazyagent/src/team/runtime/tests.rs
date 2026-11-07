@@ -8188,7 +8188,7 @@ fn send_own_rules_bounds_a_kept_lead_s_own_turn_by_the_session_time_left() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_tools_on_sub_agent_s_task_turn_carries_the_task_start_reminder_only_while_it_is_on() {
-    const REMINDER: &str = "Task start reminder: before you work on this task, read the SKILL.md of each of these skills that fits this task and follow it: `meal-tips`.";
+    const REMINDER: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and read and follow the SKILL.md of each one that applies: `meal-tips`.";
     let mut fixture = Fixture::new(1);
     fixture.setup.team.sub_harnesses[0].tools = true;
     fixture
@@ -8240,6 +8240,241 @@ fn a_tools_on_sub_agent_s_task_turn_carries_the_task_start_reminder_only_while_i
     assert!(
         !second.contains("Task start reminder"),
         "Off gives none: {second}"
+    );
+}
+
+/// DEC-116: while the Task-start reminder is On, its default, a tools-on master's turn for an
+/// owner message carries the reminder naming its approved skill once, as a sub-agent's task
+/// turn does; after the owner sets it Off, its next turn carries none.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_master_s_owner_turn_carries_the_task_start_reminder_only_while_it_is_on() {
+    use crate::protocol::Outcome;
+    use crate::team::TeamAction;
+    const REMINDER: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and read and follow the SKILL.md of each one that applies: `meal-tips`.";
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    approve_skills(&fixture, &["meal-tips"]);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    let project = fixture.setup.project_id.clone();
+    let say = |fixture: &mut Fixture, text: &str| {
+        let tx = fixture.connection.transaction().unwrap();
+        assert_eq!(
+            crate::team::execute(
+                &tx,
+                &fixture.access,
+                &TeamAction::Message {
+                    project_id: project.clone(),
+                    text: text.into(),
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+    };
+    let replies = |f: &Fixture| {
+        f.status()
+            .messages
+            .iter()
+            .filter(|message| message.author == MessageAuthor::Master)
+            .count()
+    };
+
+    say(&mut fixture, "Plan the page");
+    fixture.until(&mut team, "the master answers the first message", |f| {
+        replies(f) == 1
+    });
+    let master = masters(&fixture.connection)[0];
+    let first = typed(&fixture, master);
+    assert!(first.contains("Plan the page"), "{first}");
+    assert_eq!(
+        first.matches(REMINDER).count(),
+        1,
+        "the owner's turn carries the reminder once: {first}"
+    );
+
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            task_start: crate::coord::settings::TaskStart::Off,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    say(&mut fixture, "Plan the title");
+    fixture.until(&mut team, "the master answers the second message", |f| {
+        replies(f) == 2
+    });
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    let second = &text[first.len()..];
+    assert!(second.contains("Plan the title"), "{second}");
+    assert!(
+        !second.contains("Task start reminder"),
+        "Off gives none: {second}"
+    );
+}
+
+/// DEC-116: while the Task-start reminder is On, an owner message the engine types into a
+/// tools-on live master's pane carries the reminder naming its approved skill once; after
+/// the owner sets it Off, the next typed owner message carries none.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_live_master_s_typed_owner_message_carries_the_task_start_reminder_only_while_it_is_on()
+ {
+    const REMINDER: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and read and follow the SKILL.md of each one that applies: `meal-tips`.";
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    approve_skills(&fixture, &["meal-tips"]);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the live master's first turn ends", |f| {
+        typed(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+    });
+    let first = typed(&fixture, master);
+    assert_eq!(
+        first.matches(REMINDER).count(),
+        1,
+        "the typed owner message carries the reminder once: {first}"
+    );
+
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            task_start: crate::coord::settings::TaskStart::Off,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tell_master(&fixture, "Plan the title");
+    fixture.until(&mut team, "the live master's second turn ends", |f| {
+        typed(f, master).contains("Plan the title") && live_turns(&f.connection) == (2, false)
+    });
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    let second = &text[first.len()..];
+    assert!(
+        !second.contains("Task start reminder"),
+        "Off gives none: {second}"
+    );
+}
+
+/// OP4-L1: the Task-start reminder never cuts the owner's instruction edit. An owner message
+/// typed into a tools-on live master beside a pending edit whose whole change block fits
+/// beside it, with no room left for the reminder, arrives whole with the whole block, and
+/// the reminder is left out. Every typed line stays short: the stand-in's pane reads in
+/// canonical mode, which never completes a line past its line bound.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_s_reminder_is_left_out_when_only_the_owner_message_and_its_edit_fit() {
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    approve_skills(&fixture, &["meal-tips"]);
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the live master's first turn ends", |f| {
+        typed(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+    });
+    let first = typed(&fixture, master);
+    assert!(first.contains("Task start reminder"), "{first}");
+
+    let edited = format!(
+        "{EDITED_TEXT}\n## Pages\n\n{}\n",
+        "Keep each page short and plain.\n".repeat(256)
+    );
+    crate::agent_home::save_app(&fixture.base, &edited).unwrap();
+    let home = agent_home(&fixture.base.join("team"), master);
+    let block = crate::instruction_files::edit_for(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &home,
+        "codex",
+    )
+    .unwrap()
+    .expect("the edit is pending")
+    .message_within(crate::team::master::INPUT_TEXT_MAX)
+    .expect("the whole block fits the input limit");
+    assert!(!block.contains(SECTIONS_CUT_LINE), "{block}");
+    let room = crate::team::master::INPUT_TEXT_MAX - block.len() - "[owner] ".len() - 1;
+    assert!(
+        (1..=crate::team::MESSAGE_BYTES_MAX).contains(&room),
+        "the owner message fits its own bound: {room}"
+    );
+    let mut message = String::from("Plan the title");
+    while message.len() < room {
+        let left = room - message.len();
+        match left {
+            1 => message.push('x'),
+            _ => {
+                message.push('\n');
+                message.push_str(&"x".repeat((left - 1).min(63)));
+            }
+        }
+    }
+    assert_eq!(message.len(), room);
+    tell_master(&fixture, &message);
+    fixture.until(&mut team, "the live master's second turn ends", |f| {
+        typed(f, master).contains(&message) && live_turns(&f.connection) == (2, false)
+    });
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    let second = &text[first.len()..];
+    assert!(
+        second.contains(block.trim_end()),
+        "the whole change block arrives: {second}"
+    );
+    assert!(!second.contains(SECTIONS_CUT_LINE), "{second}");
+    assert!(
+        second.contains(&format!("[owner] {message}")),
+        "the owner message arrives whole"
+    );
+    assert!(
+        !second.contains("Task start reminder"),
+        "the reminder that does not fit is left out: {second}"
     );
 }
 
@@ -9461,6 +9696,18 @@ struct LevelRun {
 /// level. Output: the run, once the script has finished.
 #[cfg(target_os = "macos")]
 fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
+    agent_at_level_running(access, &[])
+}
+
+/// Starts one tools-on sub-agent as [`agent_at_level`] does, whose stand-in script also runs
+/// `extra` in its working folder before it finishes. Inputs: the level and the script lines,
+/// which record their own exit codes in `codes.txt`. Output: the run, once the script has
+/// finished.
+#[cfg(target_os = "macos")]
+fn agent_at_level_running(
+    access: crate::sandbox::policy::AgentAccess,
+    extra: &[String],
+) -> LevelRun {
     let mut fixture = Fixture::new(1);
     fixture.setup.team.sub_harnesses[0].tools = true;
     fixture
@@ -9523,7 +9770,7 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
     let git = format!(
         "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
     );
-    let script = [
+    let mut lines = vec![
         "#!/bin/sh".to_owned(),
         "echo 'Written by the agent.' > page.md".to_owned(),
         "cargo build --offline -q > /dev/null 2>&1; echo build=$? >> codes.txt".to_owned(),
@@ -9540,10 +9787,13 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
             "echo x > {} 2> /dev/null; echo outside=$? >> codes.txt",
             quoted(&outside.join("planted"))
         ),
+    ];
+    lines.extend(extra.iter().cloned());
+    lines.extend([
         "echo done=0 >> codes.txt".to_owned(),
         "exec /bin/sleep 300".to_owned(),
-    ]
-    .join("\n");
+    ]);
+    let script = lines.join("\n");
     let bin = fixture.base.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let codex = bin.join("codex");
@@ -10111,6 +10361,167 @@ impl LevelRun {
                 f.agent_status(member).0 == AgentStatus::Stopped
             });
     }
+}
+
+/// The lines an agent runs to move one folder it may write out of the way, change a file
+/// below it that its profile protects, and move it back (CTX-M1). Each step records its exit
+/// code in `codes.txt` as `<name>_away`, `<name>_write` and `<name>_back`. Inputs: the step
+/// name, the folder, where to move it and the protected file below it, as shell words.
+/// Output: the script lines.
+#[cfg(target_os = "macos")]
+fn moved_root_lines(name: &str, root: &str, away: &str, file: &str) -> Vec<String> {
+    vec![
+        format!("mv {root} {away} 2> /dev/null; echo {name}_away=$? >> codes.txt"),
+        format!(
+            "printf 'planted = 1\\n' >> {away}/{file} 2> /dev/null; echo {name}_write=$? >> codes.txt"
+        ),
+        format!(
+            "if [ -d {away} ]; then mv {away} {root} 2> /dev/null; fi; echo {name}_back=$? >> codes.txt"
+        ),
+    ]
+}
+
+/// The lines an agent runs for the work it does in the folders it may write (CTX-M1): make,
+/// change and remove a file in its home and in its working folder, make both again with
+/// `mkdir -p`, and see `mkdir` of its home answer that it exists. Each records its exit code
+/// in `codes.txt`. Input: the home as a shell word. Output: the script lines.
+#[cfg(target_os = "macos")]
+fn own_folder_lines(home: &str) -> Vec<String> {
+    vec![
+        format!(
+            "printf a > {home}/note.txt && printf b >> {home}/note.txt && rm {home}/note.txt; echo home_files=$? >> codes.txt"
+        ),
+        "printf a > scratch.txt && printf b >> scratch.txt && rm scratch.txt; echo work_files=$? >> codes.txt".to_owned(),
+        format!("mkdir -p {home} \"$(pwd -P)\"; echo mkdir_roots=$? >> codes.txt"),
+        format!(
+            "/bin/mkdir {home} 2>&1 | /usr/bin/grep -q 'File exists'; echo home_exists=$? >> codes.txt"
+        ),
+    ]
+}
+
+/// The lines an agent runs to set the user immutable flag on a folder it must not pin, then
+/// clear it so the run goes on (CTX-M1 r1). The first records its exit code in `codes.txt`
+/// as `<name>_flags`. Inputs: the step name and the folder, as a shell word. Output: the
+/// script lines.
+#[cfg(target_os = "macos")]
+fn flag_lines(name: &str, folder: &str) -> Vec<String> {
+    vec![
+        format!("/usr/bin/chflags uchg {folder} 2> /dev/null; echo {name}_flags=$? >> codes.txt"),
+        format!("/usr/bin/chflags nouchg {folder} 2> /dev/null"),
+    ]
+}
+
+/// CTX-M1: a Sandboxed agent, in the profile the engine starts it in, cannot move its own
+/// home into its worktree to change a launch file its profile protects there (LL-2) and move
+/// it back, nor move its worktree away from the engine's links, nor set the immutable flag on
+/// its home, its `skills` folder or Codex's `skills/.system` (CTX-M1 r1), while it still
+/// makes, changes and removes files in its home and worktree and builds the project.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_agent_cannot_move_its_home_or_worktree_away_but_still_works_in_them() {
+    let mut extra = moved_root_lines(
+        "home",
+        "\"$CODEX_HOME\"",
+        "\"$PWD\"/home-away",
+        "config.toml",
+    );
+    extra.push("c=$(pwd -P)".to_owned());
+    extra.extend(moved_root_lines(
+        "worktree",
+        "\"$c\"",
+        "\"$CODEX_HOME\"/worktree-away",
+        ".git",
+    ));
+    extra.extend(own_folder_lines("\"$CODEX_HOME\""));
+    extra.push(
+        "mkdir -p \"$CODEX_HOME\"/skills/.system/planted; echo system_made=$? >> codes.txt"
+            .to_owned(),
+    );
+    extra.extend(flag_lines("home", "\"$CODEX_HOME\""));
+    extra.extend(flag_lines("skills", "\"$CODEX_HOME\"/skills"));
+    extra.extend(flag_lines("system", "\"$CODEX_HOME\"/skills/.system"));
+    let mut run = agent_at_level_running(crate::sandbox::policy::AgentAccess::Sandboxed, &extra);
+    let home = agent_home(&run.fixture.base.join("team"), run.member);
+    let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    let link = std::fs::read_to_string(run.worktree.join(".git")).unwrap();
+    assert_ne!(run.code("home_away"), 0, "{:?}", run.codes);
+    assert!(!config.contains("planted"), "{config}");
+    assert_ne!(run.code("worktree_away"), 0, "{:?}", run.codes);
+    assert!(!link.contains("planted"), "{link}");
+    for name in ["home_flags", "skills_flags", "system_flags"] {
+        assert_ne!(run.code(name), 0, "{name}: {:?}", run.codes);
+    }
+    for name in [
+        "build",
+        "home_files",
+        "work_files",
+        "mkdir_roots",
+        "home_exists",
+        "system_made",
+    ] {
+        assert_eq!(run.code(name), 0, "{name}: {:?}", run.codes);
+    }
+    run.stop();
+}
+
+/// CTX-M1: an Own branch agent, in the profile the engine starts it in, cannot move its own
+/// home into its clone to change a launch file its profile protects there (LL-2) and move it
+/// back, nor move its clone into its home to point the clone's store elsewhere, while it
+/// still makes, changes and removes files in its home and clone, builds the project, commits
+/// and lists and prunes the clone's worktrees.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_own_branch_agent_cannot_move_its_home_or_clone_away_but_still_works_in_them() {
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let mut extra = moved_root_lines(
+        "home",
+        "\"$CODEX_HOME\"",
+        "\"$PWD\"/home-away",
+        "config.toml",
+    );
+    extra.push("c=$(pwd -P)".to_owned());
+    extra.extend(moved_root_lines(
+        "clone",
+        "\"$c\"",
+        "\"$CODEX_HOME\"/clone-away",
+        ".git/objects/info/alternates",
+    ));
+    extra.extend(own_folder_lines("\"$CODEX_HOME\""));
+    extra.extend([
+        format!("{git} worktree list > /dev/null 2>&1; echo worktree_list=$? >> codes.txt"),
+        format!("{git} worktree prune > /dev/null 2>&1; echo worktree_prune=$? >> codes.txt"),
+        format!("{git} status --porcelain > /dev/null 2>&1; echo git_status=$? >> codes.txt"),
+    ]);
+    let mut run = agent_at_level_running(crate::sandbox::policy::AgentAccess::OwnBranch, &extra);
+    let home = agent_home(&run.fixture.base.join("team"), run.member);
+    let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    let alternates = run
+        .worktree
+        .join(".git")
+        .join("objects")
+        .join("info")
+        .join("alternates");
+    let store = std::fs::read_to_string(&alternates).unwrap_or_default();
+    assert_ne!(run.code("home_away"), 0, "{:?}", run.codes);
+    assert!(!config.contains("planted"), "{config}");
+    assert_ne!(run.code("clone_away"), 0, "{:?}", run.codes);
+    assert!(!store.contains("planted"), "{store}");
+    for name in [
+        "build",
+        "commit",
+        "home_files",
+        "work_files",
+        "mkdir_roots",
+        "home_exists",
+        "worktree_list",
+        "worktree_prune",
+        "git_status",
+    ] {
+        assert_eq!(run.code(name), 0, "{name}: {:?}", run.codes);
+    }
+    run.stop();
 }
 
 #[cfg(target_os = "macos")]
@@ -11887,6 +12298,488 @@ fn a_native_lead_s_relay_is_served_split_and_one_whose_mode_cannot_be_read_is_no
     assert!(
         !roster(unread).exists() && !lead_roster(unread).exists(),
         "a lead whose mode cannot be read is skipped, never served in the single layout"
+    );
+}
+
+/// The agent's own tool call after a Codex message's mark reads it, as its message does;
+/// a later user line, another steer the rollout records, is not the agent answering and
+/// leaves the message before it Delivered (b19 P1 r1, rv-secreview F1).
+#[test]
+fn a_codex_tool_call_after_a_mark_reads_it_and_a_later_steer_line_does_not() {
+    let fixture = Fixture::new(1);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let codex = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let send = |body: &str| {
+        let id = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(codex),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap();
+        crate::coord::mark(&fixture.connection, id, crate::coord::Receipt::Delivered, 2).unwrap();
+        id
+    };
+    let called = send("Run the check.");
+    let steered = send("Then read the log.");
+    let user = |text: String| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]}})
+    };
+    let lines = [
+        serde_json::json!({"type": "session_meta", "payload": {"id": "t", "cwd": "/repo"}}),
+        user(format!("[crazyagent msg {called}] from x: Run the check.")),
+        serde_json::json!({"type": "response_item", "payload": {"type": "function_call",
+            "name": "exec_command", "arguments": "{\"cmd\":\"make check\"}", "call_id": "c1"}}),
+        user(format!(
+            "[crazyagent msg {steered}] from x: Then read the log."
+        )),
+        user("Another steer the owner typed.".to_owned()),
+    ];
+    let rollouts = agent_home(&team.state, codex)
+        .join("sessions")
+        .join("2026")
+        .join("11")
+        .join("06");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(rollouts.join("rollout-2026-11-06T05-20-00-t.jsonl"), text).unwrap();
+    team.workers
+        .insert(codex, between_turns(&project, AgentRole::Sub, false, false));
+
+    team.serve_relays(&project);
+    let receipt = |id: i64| {
+        crate::coord::message(&fixture.connection, id)
+            .unwrap()
+            .receipt
+    };
+    assert_eq!(
+        receipt(called),
+        crate::coord::Receipt::Read,
+        "the agent's tool call answers"
+    );
+    assert_eq!(
+        receipt(steered),
+        crate::coord::Receipt::Delivered,
+        "a user line after the mark is not an answer"
+    );
+}
+
+/// A message the bridge delivered to a Codex agent turns Read once the agent's rollout
+/// holds its mark with the model's own output after it, as a Claude Code transcript does
+/// through the relay; one whose mark is followed only by a tool's output and the token
+/// count stays Delivered (bridge:136 finding, b19 P1).
+#[test]
+fn a_message_delivered_to_a_codex_agent_is_read_once_its_rollout_answered_after_its_mark() {
+    let fixture = Fixture::new(1);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let codex = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let send = |body: &str| {
+        let id = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(codex),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap();
+        crate::coord::mark(&fixture.connection, id, crate::coord::Receipt::Delivered, 2).unwrap();
+        id
+    };
+    let answered = send("Answered one.");
+    let pending = send("Seen, not yet answered.");
+    let user = |id: i64, text: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": format!("[crazyagent msg {id}] from x: {text}")}]}})
+    };
+    let lines = [
+        serde_json::json!({"type": "session_meta", "payload": {"id": "t", "cwd": "/repo"}}),
+        user(answered, "Answered one."),
+        serde_json::json!({"type": "event_msg", "payload": {"type": "user_message",
+            "message": format!("[crazyagent msg {answered}] from x: Answered one.")}}),
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "On it."}]}}),
+        user(pending, "Seen."),
+        serde_json::json!({"type": "response_item", "payload": {"type": "function_call_output",
+            "call_id": "c1", "output": "assistant"}}),
+        serde_json::json!({"type": "event_msg", "payload": {"type": "token_count", "info": null}}),
+    ];
+    let rollouts = agent_home(&team.state, codex)
+        .join("sessions")
+        .join("2026")
+        .join("11")
+        .join("06");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(rollouts.join("rollout-2026-11-06T04-30-00-t.jsonl"), text).unwrap();
+    team.workers
+        .insert(codex, between_turns(&project, AgentRole::Sub, false, false));
+
+    team.serve_relays(&project);
+    let receipt = |id: i64| {
+        crate::coord::message(&fixture.connection, id)
+            .unwrap()
+            .receipt
+    };
+    assert_eq!(receipt(answered), crate::coord::Receipt::Read);
+    assert_eq!(receipt(pending), crate::coord::Receipt::Delivered);
+}
+
+/// A steer the bridge delivered into a Codex turn that then ended aborted goes back to
+/// Sent when the rollout never records it, as Codex 0.164 drops a steer still pending at
+/// the abort, so the agent's next turn gets it; one the rollout records before the abort
+/// stays Delivered and is never sent twice, as do one delivered into the next turn and one
+/// into a turn the rollout never shows aborted (b19 P2).
+#[test]
+fn a_steer_an_aborted_codex_turn_dropped_goes_back_to_sent_and_a_recorded_one_stays_delivered() {
+    let fixture = Fixture::new(1);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let codex = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let delivered = |body: &str, at: i64, turn: &str| {
+        let id = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(codex),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap();
+        crate::coord::mark(
+            &fixture.connection,
+            id,
+            crate::coord::Receipt::Delivered,
+            at,
+        )
+        .unwrap();
+        fixture
+            .connection
+            .execute(
+                "UPDATE coord_messages SET turn=?2 WHERE id=?1",
+                rusqlite::params![id, turn],
+            )
+            .unwrap();
+        id
+    };
+    let early = delivered("Before the session.", 1_793_233_100_000, "t0");
+    let drained = delivered("Drained before the abort.", 1_793_233_201_500, "t1");
+    let lost = delivered("Pending at the abort.", 1_793_233_204_000, "t1");
+    let later = delivered("Into the next turn.", 1_793_233_207_000, "t2");
+    let at = |second: &str| format!("2026-10-29T00:20:{second}Z");
+    let lines = [
+        serde_json::json!({"timestamp": at("00.947"), "type": "session_meta",
+            "payload": {"id": "t", "cwd": "/repo"}}),
+        serde_json::json!({"timestamp": at("00.947"), "type": "event_msg",
+            "payload": {"type": "task_started", "turn_attribution": {"turn_id": "t1"}}}),
+        serde_json::json!({"timestamp": at("02.000"), "type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text",
+            "text": format!("[crazyagent msg {drained}] from owner: Drained before the abort.")}]}}),
+        serde_json::json!({"timestamp": at("06.457"), "type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text",
+            "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose."}]}}),
+        serde_json::json!({"timestamp": at("06.459"), "type": "event_msg", "payload": {
+            "type": "turn_aborted", "turn_id": "t1", "reason": "interrupted",
+            "started_at": 1_793_233_200, "completed_at": 1_793_233_206, "duration_ms": 5512}}),
+    ];
+    let rollouts = agent_home(&team.state, codex)
+        .join("sessions")
+        .join("2026")
+        .join("10")
+        .join("29");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(rollouts.join("rollout-2026-10-29T00-20-00-t.jsonl"), text).unwrap();
+    team.workers
+        .insert(codex, between_turns(&project, AgentRole::Sub, false, false));
+
+    team.serve_relays(&project);
+    let receipt = |id: i64| {
+        crate::coord::message(&fixture.connection, id)
+            .unwrap()
+            .receipt
+    };
+    assert_eq!(
+        receipt(lost),
+        crate::coord::Receipt::Sent,
+        "the dropped steer waits for the agent's next turn"
+    );
+    assert!(
+        crate::coord::pending(&fixture.connection, codex, 64)
+            .unwrap()
+            .iter()
+            .any(|message| message.id == lost),
+        "the delivery loop sends it again"
+    );
+    for (id, what) in [
+        (drained, "the steer the rollout recorded"),
+        (later, "the steer delivered after the abort"),
+        (
+            early,
+            "the message delivered into a turn that never aborted",
+        ),
+    ] {
+        assert_eq!(receipt(id), crate::coord::Receipt::Delivered, "{what}");
+    }
+}
+
+/// b19 P2 r2: an abort puts back only what the bridge delivered into that very turn. A
+/// steer still pending in another thread's running turn (a sub-agent rollout in the same
+/// `CODEX_HOME`) and one that went into the thread's next turn stay Delivered and are not
+/// sent twice, though both were marked while the aborted turn ran; one pending in the
+/// aborted turn itself still goes back to Sent.
+#[test]
+fn an_abort_puts_back_only_what_went_into_that_turn_never_a_steer_pending_in_another() {
+    let fixture = Fixture::new(1);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let codex = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let delivered = |body: &str, at: i64, turn: &str| {
+        let id = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(codex),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap();
+        crate::coord::mark(
+            &fixture.connection,
+            id,
+            crate::coord::Receipt::Delivered,
+            at,
+        )
+        .unwrap();
+        fixture
+            .connection
+            .execute(
+                "UPDATE coord_messages SET turn=?2 WHERE id=?1",
+                rusqlite::params![id, turn],
+            )
+            .unwrap();
+        id
+    };
+    let lost = delivered("Pending at the abort.", 1_793_233_204_500, "t1");
+    let elsewhere = delivered("Pending in the sub-agent's turn.", 1_793_233_204_000, "s1");
+    let next = delivered("Pending in the next turn.", 1_793_233_206_000, "t2");
+    let at = |second: &str| format!("2026-10-29T00:20:{second}Z");
+    let main = [
+        serde_json::json!({"timestamp": at("00.947"), "type": "session_meta",
+            "payload": {"id": "t", "cwd": "/repo"}}),
+        serde_json::json!({"timestamp": at("00.947"), "type": "event_msg",
+            "payload": {"type": "task_started", "turn_attribution": {"turn_id": "t1"}}}),
+        serde_json::json!({"timestamp": at("06.457"), "type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text",
+            "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose."}]}}),
+        serde_json::json!({"timestamp": at("06.459"), "type": "event_msg", "payload": {
+            "type": "turn_aborted", "root_turn_id": "t1", "turn_id": "t1",
+            "reason": "interrupted", "started_at": 1_793_233_200,
+            "completed_at": 1_793_233_206, "duration_ms": 5512}}),
+        serde_json::json!({"timestamp": at("06.500"), "type": "event_msg",
+            "payload": {"type": "task_started", "turn_attribution": {"turn_id": "t2"}}}),
+    ];
+    let sub_agent = [
+        serde_json::json!({"timestamp": at("00.950"), "type": "session_meta",
+            "payload": {"id": "s", "cwd": "/repo", "source": {"subagent": "review"}}}),
+        serde_json::json!({"timestamp": at("01.000"), "type": "event_msg",
+            "payload": {"type": "task_started", "turn_attribution": {"turn_id": "s1"}}}),
+    ];
+    let rollouts = agent_home(&team.state, codex)
+        .join("sessions")
+        .join("2026")
+        .join("10")
+        .join("29");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    for (name, lines) in [
+        ("rollout-2026-10-29T00-20-00-t.jsonl", &main[..]),
+        ("rollout-2026-10-29T00-20-00-s.jsonl", &sub_agent[..]),
+    ] {
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        std::fs::write(rollouts.join(name), text).unwrap();
+    }
+    team.workers
+        .insert(codex, between_turns(&project, AgentRole::Sub, false, false));
+
+    team.serve_relays(&project);
+    let receipt = |id: i64| {
+        crate::coord::message(&fixture.connection, id)
+            .unwrap()
+            .receipt
+    };
+    let pending: Vec<i64> = crate::coord::pending(&fixture.connection, codex, 64)
+        .unwrap()
+        .iter()
+        .map(|message| message.id)
+        .collect();
+    assert_eq!(
+        receipt(lost),
+        crate::coord::Receipt::Sent,
+        "the steer the aborted turn dropped waits for the agent's next turn"
+    );
+    for (id, what) in [
+        (
+            elsewhere,
+            "the steer pending in the sub-agent thread's running turn",
+        ),
+        (next, "the steer pending in the turn after the abort"),
+    ] {
+        assert_eq!(receipt(id), crate::coord::Receipt::Delivered, "{what}");
+        assert!(!pending.contains(&id), "{what} is not sent twice");
+    }
+}
+
+/// A steer delivered into a Codex turn whose start and recorded mark both scrolled out of
+/// the rollout tail before the turn's aborted end stays Delivered and is not sent twice, as
+/// the tail can no longer show a mark recorded after that start; one pending in the next
+/// turn, whose start (only its `turn_id`, as 0.164 writes a turn with no attribution) and
+/// abort both lie in the tail, still goes back to Sent (b19 P2 r2).
+#[test]
+fn an_aborted_turn_whose_start_left_the_tail_keeps_its_steers_delivered() {
+    let fixture = Fixture::new(1);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let codex = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let delivered = |body: &str, at: i64, turn: &str| {
+        let id = crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(codex),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap();
+        crate::coord::mark(
+            &fixture.connection,
+            id,
+            crate::coord::Receipt::Delivered,
+            at,
+        )
+        .unwrap();
+        fixture
+            .connection
+            .execute(
+                "UPDATE coord_messages SET turn=?2 WHERE id=?1",
+                rusqlite::params![id, turn],
+            )
+            .unwrap();
+        id
+    };
+    let recorded = delivered("Recorded long before the abort.", 1_793_233_201_500, "t1");
+    let lost = delivered("Pending at the next abort.", 1_793_233_208_000, "t2");
+    let at = |second: &str| format!("2026-10-29T00:20:{second}Z");
+    let mut lines = vec![
+        serde_json::json!({"timestamp": at("00.947"), "type": "session_meta",
+            "payload": {"id": "t", "cwd": "/repo"}}),
+        serde_json::json!({"timestamp": at("00.947"), "type": "event_msg",
+            "payload": {"type": "task_started", "turn_attribution": {"turn_id": "t1"}}}),
+        serde_json::json!({"timestamp": at("02.000"), "type": "response_item", "payload": {
+            "type": "message", "role": "user", "content": [{"type": "input_text",
+            "text": format!("[crazyagent msg {recorded}] from owner: Recorded long before the abort.")}]}}),
+    ];
+    lines.extend((0..3).map(|n| {
+        serde_json::json!({"timestamp": at("03.000"), "type": "event_msg",
+            "payload": {"type": "agent_reasoning", "text": format!("{n}{}", "x".repeat(400_000))}})
+    }));
+    lines.extend([
+        serde_json::json!({"timestamp": at("06.459"), "type": "event_msg", "payload": {
+            "type": "turn_aborted", "root_turn_id": "t1", "turn_id": "t1",
+            "reason": "interrupted", "started_at": 1_793_233_200,
+            "completed_at": 1_793_233_206, "duration_ms": 5512}}),
+        serde_json::json!({"timestamp": at("06.500"), "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "t2", "turn_attribution": null}}),
+        serde_json::json!({"timestamp": at("09.000"), "type": "event_msg", "payload": {
+            "type": "turn_aborted", "root_turn_id": "t2", "turn_id": "t2",
+            "reason": "interrupted", "started_at": 1_793_233_206,
+            "completed_at": 1_793_233_209, "duration_ms": 2500}}),
+    ]);
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    let mark = text.find(&format!("[crazyagent msg {recorded}]")).unwrap();
+    assert!(
+        text.len() - mark > 1024 * 1024,
+        "t1's start and the recorded mark lie before the rollout's last MiB"
+    );
+    let rollouts = agent_home(&team.state, codex)
+        .join("sessions")
+        .join("2026")
+        .join("10")
+        .join("29");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    std::fs::write(rollouts.join("rollout-2026-10-29T00-20-00-t.jsonl"), text).unwrap();
+    team.workers
+        .insert(codex, between_turns(&project, AgentRole::Sub, false, false));
+
+    team.serve_relays(&project);
+    let receipt = |id: i64| {
+        crate::coord::message(&fixture.connection, id)
+            .unwrap()
+            .receipt
+    };
+    let pending: Vec<i64> = crate::coord::pending(&fixture.connection, codex, 64)
+        .unwrap()
+        .iter()
+        .map(|message| message.id)
+        .collect();
+    assert_eq!(
+        receipt(lost),
+        crate::coord::Receipt::Sent,
+        "the steer the next turn's abort dropped waits for the agent's next turn"
+    );
+    assert!(pending.contains(&lost), "the delivery loop sends it again");
+    assert_eq!(
+        receipt(recorded),
+        crate::coord::Receipt::Delivered,
+        "the steer whose mark left the tail with its turn's start stays Delivered"
+    );
+    assert!(
+        !pending.contains(&recorded),
+        "the steer whose mark left the tail is not sent twice"
     );
 }
 
@@ -19639,7 +20532,10 @@ fn a_task_delegated_while_the_projects_folder_moves_waits_until_the_move_ends() 
         ("queued".to_owned(), None)
     );
     assert_eq!(
-        count(&fixture.connection, "SELECT count(*) FROM team_agents"),
+        count(
+            &fixture.connection,
+            "SELECT count(*) FROM team_agents WHERE project=?1"
+        ),
         0
     );
     let project = fixture.base.join("project");
@@ -19753,27 +20649,30 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
     assert_eq!(
         count(
             &fixture.connection,
-            "SELECT attempts FROM team_tasks WHERE prompt='Wait for the move'"
+            "SELECT attempts FROM team_tasks WHERE project=?1 AND prompt='Wait for the move'"
         ),
         0
     );
     assert_eq!(
         count(
             &fixture.connection,
-            &format!("SELECT keep_warm FROM team_settings WHERE project='{PROJECT}'")
+            "SELECT keep_warm FROM team_settings WHERE project=?1"
         ),
         1,
         "the owner's Keep warm switch stays on"
     );
     assert_eq!(
-        count(&fixture.connection, "SELECT count(*) FROM team_agents"),
+        count(
+            &fixture.connection,
+            "SELECT count(*) FROM team_agents WHERE project=?1"
+        ),
         1,
         "no agent starts while the move holds the folder"
     );
     assert_eq!(
         count(
             &fixture.connection,
-            "SELECT count(*) FROM team_messages WHERE text LIKE '%could not%' OR text LIKE '%turned off%'"
+            "SELECT count(*) FROM team_messages WHERE project=?1 AND (text LIKE '%could not%' OR text LIKE '%turned off%')"
         ),
         0,
         "nothing tells the owner a start failed"
@@ -19789,14 +20688,14 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
             task_of(f, "Wait for the move").0 == "running"
                 && count(
                     &f.connection,
-                    "SELECT count(*) FROM team_agents WHERE role='master'",
+                    "SELECT count(*) FROM team_agents WHERE project=?1 AND role='master'",
                 ) == 2
         },
     );
     assert_eq!(
         count(
             &fixture.connection,
-            &format!("SELECT keep_warm FROM team_settings WHERE project='{PROJECT}'")
+            "SELECT keep_warm FROM team_settings WHERE project=?1"
         ),
         1
     );
@@ -19973,6 +20872,160 @@ tmux -S "$s" respawn-pane -k -t "$p" -- "cd '$PWD' && env CLAUDECODE=1 CLAUDE_CO
 echo "respawn=$?" >> "$l"
 exec /bin/sleep 300
 "#;
+
+/// A stand-in Claude Code that, run as a native lead, starts one process in a session of
+/// its own, as a background dev server does, which writes its id to `left.pid` in the
+/// lead's folder; then the lead waits.
+#[cfg(target_os = "macos")]
+const LEAVING_CLAUDE: &str = r#"#!/bin/sh
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid" &
+exec /bin/sleep 300
+"#;
+
+/// A stand-in Claude Code that, run as a native lead, writes its own id to `left.pid` in the
+/// lead's folder and waits, starting nothing else.
+#[cfg(target_os = "macos")]
+const WAITING_CLAUDE: &str = r#"#!/bin/sh
+exec /usr/bin/perl -e 'open(my $out, ">", "$ARGV[0].part") or die; print $out "$$\n"; close($out); rename("$ARGV[0].part", $ARGV[0]) or die; exec "/bin/sleep", "300"' "$PWD/left.pid"
+"#;
+
+/// Starts a native lead on its own server as the lead's worker does, with a stand-in Claude
+/// Code that writes a process id to `left.pid` in the lead's folder, then ends the lead
+/// through `end`. Inputs: the stand-in and the ending, given the session, the host and the
+/// lead. Output: the ending's outcome and whether that process still ran after it; the
+/// process is killed before this returns.
+#[cfg(target_os = "macos")]
+fn ended_native_lead<T>(
+    script: &str,
+    end: impl FnOnce(AgentSession, &Arc<dyn Host>, &AgentId) -> T,
+) -> (T, bool) {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = standin_claude_runtime(&fixture, script)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let lead = AgentId::team(id).unwrap();
+    let mates_socket = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
+    let _down = LeadServersDown {
+        host: host.clone(),
+        lead: lead.clone(),
+        tmux: fixture.tmux.clone(),
+        scratch: mates_socket.parent().unwrap().to_path_buf(),
+    };
+    let home = agent_home(&runtime.state, id);
+    let context = runtime
+        .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+        .unwrap();
+    let request = plan
+        .request(AccountBinding::Subscription { home }, plan.access)
+        .unwrap();
+    let session =
+        AgentSession::start_resuming(request, plan.team_context(context), plan.pane.clone(), None)
+            .unwrap();
+    let written = plan.working_dir.join("left.pid");
+    let deadline = Instant::now() + WAIT;
+    let pid = loop {
+        let read = std::fs::read_to_string(&written)
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok());
+        match read {
+            Some(pid) => break pid,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            None => panic!("the stand-in lead never wrote {}", written.display()),
+        }
+    };
+    let process = rustix::process::Pid::from_raw(pid).unwrap();
+    let ended = end(session, &host, &lead);
+    let running = rustix::process::test_kill_process(process).is_ok();
+    let _ = rustix::process::kill_process(process, rustix::process::Signal::KILL);
+    (ended, running)
+}
+
+/// Keeper r1 F1: a native lead's pane runs in its own server with no keeper and no warden,
+/// so a stop that leaves running a process the lead started in a session of its own is
+/// never reported as confirmed. It names what still runs in the lead's sandbox, which keeps
+/// the account held until a listing shows it ended.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_stop_names_a_process_it_started_on_its_own_that_still_runs() {
+    let (stopped, running) = ended_native_lead(LEAVING_CLAUDE, |session, _, _| session.stop());
+    assert!(
+        running,
+        "the lead's own process outlived the stop: {stopped:?}"
+    );
+    assert!(
+        matches!(&stopped, Err(Unstopped::Left(left)) if left.code() == "harness_sandbox_left"),
+        "{stopped:?}"
+    );
+}
+
+/// Keeper r1 F1: a native lead's pane an earlier engine left, ended with no session, is not
+/// confirmed gone while a process the lead started in a session of its own still runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_left_native_lead_s_end_is_not_confirmed_while_a_process_it_started_on_its_own_still_runs() {
+    let (ended, running) = ended_native_lead(LEAVING_CLAUDE, |session, host, lead| {
+        let AgentSession::Terminal(session) = session else {
+            panic!("the native lead runs in a terminal");
+        };
+        session.leave();
+        crate::harnesses::terminal_session::end_left_pane(host.as_ref(), lead, "test")
+    });
+    assert!(
+        running,
+        "the lead's own process outlived the end: {ended:?}"
+    );
+    assert_eq!(ended, Ok(false));
+}
+
+/// A native lead's stop that leaves nothing it started running is confirmed by a listing of
+/// the lead's processes, so its account is not kept held.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_stop_that_leaves_nothing_running_is_clean() {
+    let (stopped, running) = ended_native_lead(WAITING_CLAUDE, |session, _, _| session.stop());
+    assert!(!running, "the lead outlived its stop: {stopped:?}");
+    assert!(matches!(stopped, Ok(None)), "{stopped:?}");
+}
 
 /// A native lead's teammate starts (OP-3). The runtime prepares a native lead and starts it
 /// as the lead's worker does, on the lead's own server, so the engine writes the real
@@ -20250,6 +21303,170 @@ fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_sess
             "a teammate's {attempt} write in its lead's config home succeeded: {attempts}"
         );
     }
+}
+
+/// CTX-M1: in the profiles the engine starts a native lead and its teammates in, the lead
+/// cannot move its own home into its worktree to change a launch file its profile protects
+/// there (LL-2) and move it back, and no teammate can do so with the home all its teammates
+/// share, to plant settings or a launch file the others load. Both still make, change and
+/// remove files in their homes and in the folders they work in, and make each again with
+/// `mkdir -p`.
+#[cfg(target_os = "macos")]
+#[test]
+fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_in_it() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let home = agent_home(&runtime.state, id);
+    let mates = crate::launch_context::mates_home(&home);
+    let state = crate::launch_context::STATE;
+    let context = plan.team_context(
+        runtime
+            .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+            .unwrap(),
+    );
+    let _installed = context.install("claude-code", &home, true).unwrap();
+    assert!(home.join(state).is_dir(), "the lead's launch folder");
+    assert!(mates.is_dir(), "the teammates' home");
+    let work = plan.working_dir.clone();
+    let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let settings = std::fs::read(home.join("settings.json")).ok();
+    let quoted = |path: &Path| {
+        let text = path.to_str().unwrap();
+        assert!(!text.contains('\''));
+        format!("'{text}'")
+    };
+
+    let tmp = home.parent().unwrap().join("tmp");
+    let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
+    let teams = home.join(crate::sandbox::CLAUDE_TEAM_SHARED[0]);
+    let mut tried = Vec::new();
+    for (who, profile, own, folder, pinned) in [
+        (
+            "lead",
+            plan.sandbox_profile.clone(),
+            &home,
+            &work,
+            vec![("home", &home)],
+        ),
+        (
+            "teammate",
+            agent_teammates_profile(&runtime.state, id),
+            &mates,
+            &probe,
+            vec![
+                ("home", &mates),
+                ("teams", &teams),
+                ("tmp", &tmp),
+                ("mailbox", &mailbox),
+            ],
+        ),
+    ] {
+        let away = quoted(&folder.join("home-away"));
+        let mut lines = moved_root_lines("home", &quoted(own), &away, "settings.json");
+        lines.extend(moved_root_lines(
+            "state",
+            &quoted(own),
+            &away,
+            &format!("{state}/planted"),
+        ));
+        lines.extend(own_folder_lines(&quoted(own)));
+        for (name, path) in &pinned {
+            assert!(path.is_dir(), "{who}: {name} is made before it runs");
+            lines.extend(flag_lines(name, &quoted(path.as_path())));
+        }
+        let output = crate::spawn_gate::output(
+            Command::new(crate::sandbox::SANDBOX_EXEC)
+                .arg("-f")
+                .arg(&profile)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(lines.join("\n"))
+                .current_dir(folder)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", own)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(folder.join("codes.txt")).unwrap_or_default();
+        let pinned: Vec<&str> = pinned.iter().map(|(name, _)| *name).collect();
+        tried.push((who, text, output, pinned));
+    }
+    let report: Vec<String> = tried
+        .iter()
+        .map(|(who, text, _, _)| format!("{who}: {}", text.replace('\n', " ")))
+        .collect();
+    for (who, text, output, pinned) in &tried {
+        let code = |name: &str| {
+            text.lines()
+                .filter_map(|line| line.split_once('='))
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.parse::<i32>().unwrap())
+                .unwrap_or_else(|| panic!("{who}: {name} missing: {report:?} {output:?}"))
+        };
+        assert_ne!(code("home_away"), 0, "{who}: {report:?}");
+        assert_ne!(code("state_away"), 0, "{who}: {report:?}");
+        for name in pinned {
+            assert_ne!(
+                code(format!("{name}_flags").as_str()),
+                0,
+                "{who} {name}: {report:?}"
+            );
+        }
+        for name in ["home_files", "work_files", "mkdir_roots", "home_exists"] {
+            assert_eq!(code(name), 0, "{who} {name}: {report:?}");
+        }
+    }
+    assert_eq!(std::fs::read(home.join("settings.json")).ok(), settings);
+    assert!(!home.join(state).join("planted").exists());
+    let shared = std::fs::read_to_string(mates.join("settings.json")).unwrap_or_default();
+    assert!(!shared.contains("planted"), "{shared}");
+    assert!(!mates.join(state).join("planted").exists());
 }
 
 /// A native lead's teammates run in their own home and only read the lead's (TPH-2 C). A

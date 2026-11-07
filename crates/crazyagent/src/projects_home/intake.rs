@@ -6,8 +6,26 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const ENTRIES_MAX: u64 = 4_000_000;
-const DEPTH_MAX: usize = 256;
+/// How many entries and folder levels a copy, its check or a size read goes through
+/// before it stops with `home_copy_too_large`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyBounds {
+    pub entries: u64,
+    pub depth: usize,
+}
+
+pub const COPY_BOUNDS: CopyBounds = CopyBounds {
+    entries: 4_000_000,
+    depth: 256,
+};
+
+pub const FORCED_COPY_BOUNDS: CopyBounds = CopyBounds {
+    entries: 16_000_000,
+    depth: 512,
+};
+
+const ENTRIES_MAX: u64 = COPY_BOUNDS.entries;
+const DEPTH_MAX: usize = COPY_BOUNDS.depth;
 const CHUNK_BYTES: usize = 64 * 1024;
 const DEADLINE_EVERY: u64 = 1024;
 const GITDIR_FILE_BYTES_MAX: u64 = 4096;
@@ -19,16 +37,24 @@ pub struct AddPlan {
     source: PathBuf,
     destination: PathBuf,
     mode: AddMode,
+    bounds: CopyBounds,
 }
 
 impl AddPlan {
-    pub(super) fn new(source: PathBuf, destination: PathBuf, mode: AddMode) -> Self {
+    pub(super) fn new(
+        source: PathBuf,
+        destination: PathBuf,
+        mode: AddMode,
+        bounds: CopyBounds,
+    ) -> Self {
         assert!(source.is_absolute() && destination.is_absolute());
         assert_ne!(source, destination);
+        assert!(bounds == COPY_BOUNDS || bounds == FORCED_COPY_BOUNDS);
         Self {
             source,
             destination,
             mode,
+            bounds,
         }
     }
 
@@ -54,11 +80,16 @@ impl AddPlan {
             AddMode::Move => match fs::rename(&self.source, &self.destination) {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
-                    move_by_copy(&self.source, &self.destination)
+                    move_within(&self.source, &self.destination, self.bounds)
                 }
                 Err(_) => Err(refused("home_move_failed")),
             },
-            AddMode::Copy => copy_into(&self.source, &self.destination, Copying::Standalone),
+            AddMode::Copy => copy_into(
+                &self.source,
+                &self.destination,
+                Copying::Standalone,
+                self.bounds,
+            ),
         }
     }
 }
@@ -98,7 +129,12 @@ impl MovePlan {
     pub fn run(self) -> Result<(), EngineError> {
         let mut moved: Vec<&String> = Vec::with_capacity(self.folders.len());
         for name in &self.folders {
-            let step = AddPlan::new(self.from.join(name), self.to.join(name), AddMode::Move);
+            let step = AddPlan::new(
+                self.from.join(name),
+                self.to.join(name),
+                AddMode::Move,
+                COPY_BOUNDS,
+            );
             if let Err(mut failure) = step.run() {
                 if failure.0 == "home_move_source_left" {
                     failure = match restore(&self.to.join(name), &self.from.join(name)) {
@@ -107,8 +143,12 @@ impl MovePlan {
                     };
                 }
                 for back in moved.into_iter().rev() {
-                    let undo =
-                        AddPlan::new(self.to.join(back), self.from.join(back), AddMode::Move);
+                    let undo = AddPlan::new(
+                        self.to.join(back),
+                        self.from.join(back),
+                        AddMode::Move,
+                        COPY_BOUNDS,
+                    );
                     if undo.run().is_err() {
                         return Err(refused("home_move_partial"));
                     }
@@ -128,7 +168,14 @@ impl MovePlan {
 /// `home_copy_unverified` with the source untouched, or `home_move_source_left`
 /// when the folder landed but part of the source could not be deleted.
 pub fn move_by_copy(source: &Path, destination: &Path) -> Result<(), EngineError> {
-    copy_into(source, destination, Copying::Exact)?;
+    move_within(source, destination, COPY_BOUNDS)
+}
+
+/// `move_by_copy` within the given bounds: the source is removed only after every
+/// entry of the copy matched it. Inputs: the source, the destination and the bounds.
+/// Output: as `move_by_copy`.
+fn move_within(source: &Path, destination: &Path, bounds: CopyBounds) -> Result<(), EngineError> {
+    copy_into(source, destination, Copying::Exact, bounds)?;
     make_writable(source)
         .and_then(|()| fs::remove_dir_all(source))
         .map_err(|_| refused("home_move_source_left"))
@@ -214,7 +261,12 @@ enum Copying {
     Standalone,
 }
 
-fn copy_into(source: &Path, destination: &Path, how: Copying) -> Result<(), EngineError> {
+fn copy_into(
+    source: &Path,
+    destination: &Path,
+    how: Copying,
+    bounds: CopyBounds,
+) -> Result<(), EngineError> {
     let parent = destination
         .parent()
         .ok_or_else(|| refused("home_copy_failed"))?;
@@ -225,10 +277,14 @@ fn copy_into(source: &Path, destination: &Path, how: Copying) -> Result<(), Engi
         token.iter().map(|b| format!("{b:02x}")).collect::<String>()
     ));
     let result = match how {
-        Copying::Exact => copy_tree(source, &staging).and_then(|()| verify_tree(source, &staging)),
-        Copying::Standalone => {
-            copy_entries(source, &staging, &|path, kind| left_out(source, path, kind))
-        }
+        Copying::Exact => copy_entries(source, &staging, &|_, _| false, bounds)
+            .and_then(|()| verify_within(source, &staging, bounds)),
+        Copying::Standalone => copy_entries(
+            source,
+            &staging,
+            &|path, kind| left_out(source, path, kind),
+            bounds,
+        ),
     }
     .and_then(|()| {
         if fs::symlink_metadata(destination).is_ok() {
@@ -264,7 +320,7 @@ fn make_writable(root: &Path) -> std::io::Result<()> {
 /// `home_copy_special_file` for devices, pipes or sockets, and
 /// `home_copy_too_large` past the entry or depth bound.
 pub fn copy_tree(source: &Path, target: &Path) -> Result<(), EngineError> {
-    copy_entries(source, target, &|_, _| false)
+    copy_entries(source, target, &|_, _| false, COPY_BOUNDS)
 }
 
 /// The skip rule of a standalone copy, asked for each entry below the source root.
@@ -343,12 +399,13 @@ fn gitdir_inside(root: &Path, folder: &Path, file: &Path) -> bool {
 }
 
 /// Copies a folder tree without following links, leaving out each entry `skip` names.
-/// Inputs: a real source folder, a target path that does not exist yet and the skip
-/// rule. Output: as `copy_tree`.
+/// Inputs: a real source folder, a target path that does not exist yet, the skip rule
+/// and the bounds. Output: as `copy_tree`.
 fn copy_entries(
     source: &Path,
     target: &Path,
     skip: &dyn Fn(&Path, fs::FileType) -> bool,
+    bounds: CopyBounds,
 ) -> Result<(), EngineError> {
     let failed = |_| refused("home_copy_failed");
     let root = fs::symlink_metadata(source).map_err(failed)?;
@@ -363,7 +420,7 @@ fn copy_entries(
     while let Some((from, to, depth)) = stack.pop() {
         for entry in fs::read_dir(&from).map_err(failed)? {
             entries += 1;
-            if entries > ENTRIES_MAX {
+            if entries > bounds.entries {
                 return Err(refused("home_copy_too_large"));
             }
             let entry = entry.map_err(failed)?;
@@ -378,7 +435,7 @@ fn copy_entries(
                 let link = fs::read_link(&path).map_err(failed)?;
                 copy_link(&path, link, &copy).map_err(failed)?;
             } else if kind.is_dir() {
-                if depth + 1 > DEPTH_MAX {
+                if depth + 1 > bounds.depth {
                     return Err(refused("home_copy_too_large"));
                 }
                 fs::create_dir(&copy).map_err(failed)?;
@@ -396,7 +453,7 @@ fn copy_entries(
     for (folder, permissions) in folders.into_iter().rev() {
         fs::set_permissions(&folder, permissions).map_err(failed)?;
     }
-    assert!(entries <= ENTRIES_MAX);
+    assert!(entries <= bounds.entries);
     Ok(())
 }
 
@@ -405,6 +462,12 @@ fn copy_entries(
 /// kinds, permission bits, symlink targets and file bytes; otherwise
 /// `home_copy_unverified`.
 pub fn verify_tree(source: &Path, copy: &Path) -> Result<(), EngineError> {
+    verify_within(source, copy, COPY_BOUNDS)
+}
+
+/// `verify_tree` within the given bounds. Inputs: the source, the copy and the bounds.
+/// Output: as `verify_tree`.
+fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<(), EngineError> {
     let differs = || refused("home_copy_unverified");
     let mut stack = vec![(source.to_path_buf(), copy.to_path_buf(), 0usize)];
     let mut entries = 0u64;
@@ -432,7 +495,7 @@ pub fn verify_tree(source: &Path, copy: &Path) -> Result<(), EngineError> {
             }
             continue;
         }
-        if depth > DEPTH_MAX {
+        if depth > bounds.depth {
             return Err(differs());
         }
         let names = |folder: &Path| -> Result<Vec<std::ffi::OsString>, EngineError> {
@@ -449,7 +512,7 @@ pub fn verify_tree(source: &Path, copy: &Path) -> Result<(), EngineError> {
         }
         for name in left_names {
             entries += 1;
-            if entries > ENTRIES_MAX {
+            if entries > bounds.entries {
                 return Err(differs());
             }
             stack.push((left.join(&name), right.join(&name), depth + 1));

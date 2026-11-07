@@ -9,7 +9,7 @@ use crate::tui::keys::Key;
 use crate::tui::screens::Flow;
 use crate::tui::screens::app_setup::size;
 use crate::tui::screens::new_project::harness_name;
-use crate::tui::seam::{Arrival, Request};
+use crate::tui::seam::{Arrival, OWNER_BUSY, Request};
 use crate::tui::text::{cut, styled, wrap};
 use crate::tui::theme::Role;
 use ratatui::text::Line;
@@ -182,6 +182,9 @@ impl Cleanup {
                         "Could not confirm what cleanup did.",
                         words(code),
                     )),
+                    Err(code) if code == OWNER_BUSY => {
+                        ctx.say(Message::warning("Nothing was removed.", words(code)))
+                    }
                     Err(code) => ctx.say(Message::warning(
                         "Cleanup kept an agent and stopped there.",
                         words(code),

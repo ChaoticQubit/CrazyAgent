@@ -18,7 +18,7 @@ use crate::tui::client::{
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::{Arrival, PoolChange, Request};
+use crate::tui::seam::{Arrival, OWNER_BUSY, PoolChange, Request};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -212,8 +212,20 @@ struct Creation {
     pool: Option<CredentialRef>,
     access: AgentAccess,
     recovered: bool,
+    delivery: MutationDelivery,
+    again: bool,
     assigning: bool,
     finished: bool,
+}
+
+impl Creation {
+    /// Sends the submission with this delivery and remembers it, so a busy reply can send the
+    /// same delivery again. Takes the delivery and the context. Returns nothing.
+    fn send(&mut self, delivery: MutationDelivery, ctx: &mut Ctx) {
+        self.delivery = delivery;
+        self.again = false;
+        send_creation(&self.submission, delivery, ctx);
+    }
 }
 
 fn send_creation(submission: &CreationSubmission, delivery: MutationDelivery, ctx: &mut Ctx) {
@@ -347,6 +359,8 @@ impl NewProjectPage {
             pool,
             access: self.wizard.access,
             recovered: false,
+            delivery: MutationDelivery::Submit,
+            again: false,
             assigning: false,
             finished: false,
         });
@@ -370,14 +384,16 @@ impl NewProjectPage {
                         _ => Err("creation_outcome_unknown".to_owned()),
                     }
                 }
-                OwnerResponse::NotRecordedAtBarrier { .. } if recover => {
+                OwnerResponse::NotRecordedAtBarrier { .. }
+                    if event.retained && !matches!(creation.delivery, MutationDelivery::Retry) =>
+                {
                     creation.recovered = true;
-                    send_creation(&creation.submission, MutationDelivery::Retry, ctx);
+                    creation.send(MutationDelivery::Retry, ctx);
                     return Flow::Handled;
                 }
                 OwnerResponse::OutcomeUnknown { .. } if recover => {
                     creation.recovered = true;
-                    send_creation(&creation.submission, MutationDelivery::Reconcile, ctx);
+                    creation.send(MutationDelivery::Reconcile, ctx);
                     return Flow::Handled;
                 }
                 OwnerResponse::Rejected { code } => Err(code.clone()),
@@ -385,12 +401,23 @@ impl NewProjectPage {
             },
             Err(_) if recover => {
                 creation.recovered = true;
-                send_creation(&creation.submission, MutationDelivery::Reconcile, ctx);
+                creation.send(MutationDelivery::Reconcile, ctx);
                 return Flow::Handled;
+            }
+            Err(problem) if event.retained && problem != OWNER_BUSY => {
+                Err("creation_outcome_unknown".to_owned())
             }
             Err(problem) => Err(problem.clone()),
         };
         if let Err(code) = outcome {
+            if creation.recovered && event.retained && code == OWNER_BUSY {
+                creation.again = true;
+                ctx.say(Message::warning(
+                    "Still checking whether the project was created.",
+                    "CrazyAgent is busy with other requests. It checks again in a moment.",
+                ));
+                return Flow::Handled;
+            }
             self.creation = None;
             self.wizard.failed(&code);
             return Flow::Handled;
@@ -456,7 +483,20 @@ impl NewProjectPage {
         Flow::Replace(Box::new(page))
     }
 
+    /// Sends a recovering creation's last delivery again after a busy reply: its first
+    /// outcome is unknown, so it is never dropped and never sent as a new project.
+    /// Takes the context. Returns nothing.
+    fn again(&mut self, ctx: &mut Ctx) {
+        if let Some(creation) = self.creation.as_mut().filter(|creation| creation.again) {
+            let delivery = creation.delivery;
+            creation.send(delivery, ctx);
+        }
+    }
+
     fn carry(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> bool {
+        if matches!(arrival, Arrival::Owner(_)) {
+            self.again(ctx);
+        }
         let Some(creation) = &self.creation else {
             return false;
         };
@@ -629,6 +669,7 @@ impl Screen for NewProjectPage {
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
+        self.again(ctx);
         ctx.request(Request::Pools);
         if self.wizard.harnesses.is_none() {
             self.ask_harnesses(false, ctx);

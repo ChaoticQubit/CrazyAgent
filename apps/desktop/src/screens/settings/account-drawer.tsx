@@ -4,7 +4,7 @@ import { useAppSession, type ProjectRow } from "../../state";
 import { Button, Drawer, Notice, ProviderMark, StatusBadge, TextField } from "../../ui";
 import { displayText } from "../conversation";
 import { nameError } from "./add-account";
-import { cancelSignIn, signOut, SignInPanel, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
+import { cancelSignIn, signOut, SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
 /** Joins names for a sentence: "A", "A and B", "A, B and C". Input: the names. Output: the text. */
 export function andList(names: readonly string[]): string {
@@ -87,17 +87,24 @@ export function InUseNotice({ used, projects, pending, onStop }: {
   </span></Notice>;
 }
 
-function SignInAgain({ account, onSignedIn }: { account: AccountView; onSignedIn: () => void }) {
+function SignInAgain({ account, onSignedIn, onStarted }: { account: AccountView; onSignedIn: () => void; onStarted: () => void }) {
   const provider = account.provider as SubscriptionProvider;
   const signIn = useSignIn(account.id);
   const stage = signInStage(signIn.state, provider);
   const signedIn = stage.kind === "signed_in";
   const reported = useRef(false);
+  const attempt = signInRunning(signIn.state) ? signIn.state?.operation?.operation_id : undefined;
+  const started = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!signedIn || reported.current) return;
     reported.current = true;
     onSignedIn();
   }, [signedIn, onSignedIn]);
+  useEffect(() => {
+    if (!attempt || started.current === attempt) return;
+    started.current = attempt;
+    onStarted();
+  }, [attempt, onStarted]);
   return <SignInPanel provider={provider} method={provider === "claude" ? "claude_official" : "codex_device_code"} state={signIn.state}
     onStart={(method) => void signIn.start(method)} onCancel={() => void signIn.cancel()} onCheck={() => void signIn.check()}
     onClaudeCode={signIn.sendClaudeCode} />;
@@ -226,7 +233,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
         <span><Button icon="log-out" pending={signingOut} pendingLabel="Signing out..." onClick={() => void signOutAccount(false)}>Sign out</Button></span>}
       {inUse !== undefined && <InUseNotice used={inUse} projects={session.projects.kind === "ok" ? session.projects.value : undefined}
         pending={signingOut} onStop={() => void signOutAccount(true)} />}
-      {subscription && signingIn && <SignInAgain account={account} onSignedIn={() => { onChanged({ ...account, status: "signed_in", status_label: "Signed in" }); }} />}
+      {subscription && signingIn && <SignInAgain account={account} onStarted={() => onChanged()} onSignedIn={() => { onChanged({ ...account, status: "signed_in", status_label: "Signed in" }); }} />}
       {account.method === "url" && <div className="stack-small">
         <span><Button icon="refresh-cw" pending={checking} pendingLabel="Checking..." onClick={() => void check()}>Check again</Button></span>
         {checkLine && <p role="status">{checkLine}</p>}

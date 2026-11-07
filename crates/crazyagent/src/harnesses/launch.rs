@@ -395,6 +395,128 @@ pub(crate) fn kill_group(group: u32) {
     let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
 }
 
+/// How long a group its holder saw end stays refused to every later claim: past
+/// `GROUP_FRESH` and the keeper's wait, so a session that saw its pane alive just before
+/// another path ended the group finds the number refused and only watches it (CB-2 r1 F1).
+const ENDED_REFUSED: Duration = Duration::from_secs(10);
+
+/// The process groups some path is ending now, with no time, and those a holder saw end,
+/// with the time it saw that, so a pane's stop and the terminal host's close never both
+/// signal one group (CB-2 one signal) and no later path claims a number that may lead a
+/// new group by then (CB-2 r1 F1).
+static ENDING: std::sync::Mutex<std::collections::BTreeMap<u32, Option<Instant>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// One path's hold on ending a process group: while it lives every other path leaves the
+/// group alone. Dropping it frees the number, or, once its holder saw the group answer
+/// ESRCH, keeps it refused for `ENDED_REFUSED`, as it may lead a new group by then.
+pub(crate) struct Ending {
+    group: u32,
+    gone: bool,
+}
+
+impl Ending {
+    /// Takes the hold on a process group. Input: the group id, a pid above 1. Output: the
+    /// hold, or none while another path holds that group or a holder saw it end within
+    /// `ENDED_REFUSED`.
+    pub(crate) fn claim(group: u32) -> Option<Self> {
+        assert!(group > 1 && i32::try_from(group).is_ok());
+        let mut ending = ENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ending.retain(|_, ended| ended.is_none_or(|at| at.elapsed() < ENDED_REFUSED));
+        if ending.contains_key(&group) {
+            return None;
+        }
+        ending.insert(group, None);
+        Some(Self { group, gone: false })
+    }
+
+    /// The group this hold names. Output: its id as a pid.
+    #[cfg(unix)]
+    pub(crate) fn pid(&self) -> rustix::process::Pid {
+        i32::try_from(self.group)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("a held group id is a pid above 1")
+    }
+
+    /// Records that the group answered ESRCH, so dropping this hold keeps its number
+    /// refused for `ENDED_REFUSED` instead of freeing it.
+    #[cfg(unix)]
+    pub(crate) fn gone(&mut self) {
+        self.gone = true;
+    }
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        let mut ending = ENDING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.gone {
+            ending.insert(self.group, Some(Instant::now()));
+        } else {
+            ending.remove(&self.group);
+        }
+    }
+}
+
+/// Ends a pane's process group once its pane is gone, from the one path that holds it
+/// (CB-2 one signal): KILL every 10 ms while the group answers, for at most
+/// `GROUP_EXIT_WAIT`, testing it before each KILL, so a group that answered ESRCH is never
+/// signalled again, as its number may lead a new group by then. macOS answers EPERM for a
+/// group whose last member it just reaped, so only ESRCH ends it. A group another path
+/// holds or a holder just saw end, as the terminal host's close of that pane, is only
+/// watched and never claimed here (CB-2 r1 F1). Inputs: the group id and this path's hold,
+/// none to only watch. Output: whether the group is gone.
+#[cfg(unix)]
+pub(crate) fn end_pane_group(group: u32, held: Option<Ending>) -> bool {
+    let Some(pid) = i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return true;
+    };
+    end_pane_group_with(
+        held,
+        GROUP_EXIT_WAIT,
+        || rustix::process::test_kill_process_group(pid) != Err(rustix::io::Errno::SRCH),
+        || {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        },
+    )
+}
+
+/// Ends a group as `end_pane_group` describes, through `left`, which tells whether the
+/// group still answers, and `kill`, which sends it KILL, called only with a hold. The hold
+/// is dropped on return, marked gone when the group answered ESRCH. Inputs: the hold, the
+/// longest wait and both calls. Output: whether the group is gone.
+#[cfg(unix)]
+fn end_pane_group_with(
+    mut held: Option<Ending>,
+    wait: Duration,
+    mut left: impl FnMut() -> bool,
+    mut kill: impl FnMut(),
+) -> bool {
+    let deadline = Instant::now() + wait;
+    loop {
+        if !left() {
+            if let Some(held) = held.as_mut() {
+                held.gone();
+            }
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        if held.is_some() {
+            kill();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Waits until no process of a killed agent's group is left, killing again
 /// any member that is still there. Takes the group id; returns once the group
 /// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as

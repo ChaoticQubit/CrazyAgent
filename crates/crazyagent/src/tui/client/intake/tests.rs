@@ -111,6 +111,7 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
         .intake(IntakeJob::Query(IntakeQuery::AddExisting {
             source,
             mode: AddMode::Copy,
+            overrides: Vec::new(),
             generation: 2,
         }))
         .await;
