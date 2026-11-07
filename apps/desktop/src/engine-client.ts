@@ -926,6 +926,7 @@ export interface TeamStatus {
   budget_used?: number | null;
   budget_reached?: boolean;
   spread_accounts?: boolean;
+  terminals_per_window?: 4 | 6 | 9;
   live_master?: boolean | null;
   live_problem?: string | null;
   settings_version?: number;
