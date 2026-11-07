@@ -162,6 +162,16 @@ test("every engine refusal a Process action can show has a plain sentence", () =
   assert.equal(client.processMessage({ kind: "not_ready" }), "Instructions aren't ready in this build yet.");
 });
 
+test("a save the engine store keeps busy says nothing was saved and to save again, as the TUI does", () => {
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/process.rs", import.meta.url), "utf8");
+  for (const code of ["process_save_unavailable", "instruction_settings_save_unavailable"]) {
+    assert.ok(client.PROCESS_REFUSALS.includes(code), code);
+    const text = client.processMessage({ kind: "error", code, message: "" });
+    assert.match(text, /nothing was saved\. (Save|Make the change) again\.$/, code);
+    assert.ok(tui.includes(`"${code}" => "${text}"`), `${code} reads the same in the TUI`);
+  }
+});
+
 test("a save a Claude master may refuse names what it takes and what agents now get, and the page shows it", () => {
   const fits = "Instructions saved. Agents started from now on get them.";
   assert.equal(client.savedMessage({ bytes: 24, claude_bytes_max: 28159 }), fits);

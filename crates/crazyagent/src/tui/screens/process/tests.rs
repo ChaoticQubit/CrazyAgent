@@ -345,6 +345,37 @@ fn a_save_the_full_queue_refuses_leaves_the_page_ready_to_save_again() {
 }
 
 #[test]
+fn a_save_the_store_keeps_busy_says_nothing_was_saved_and_the_same_ctrl_s_saves_again() {
+    let mut shell = opened(Scope::App, "Use tdd.");
+    shell.key(Key::End);
+    typed(&mut shell, " Always.");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Use tdd. Always.".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    shell.arrive(reply(save.clone(), Err("process_save_unavailable")));
+    let shown = screen(&mut shell);
+    let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("nothing was saved. Save again."), "{shown}");
+    assert!(
+        shown.contains("Not saved yet"),
+        "a refused save keeps the draft"
+    );
+    shell.key(Key::Ctrl('s'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![save.clone()],
+        "the same Ctrl-S saves again"
+    );
+    shell.arrive(saved(save, 16));
+    assert!(!screen(&mut shell).contains("Not saved yet"));
+}
+
+#[test]
 fn a_first_read_the_full_queue_refuses_offers_a_retry_instead_of_loading_forever() {
     let mut ctx = ctx(80, 24);
     let mut filled = 0;
@@ -759,13 +790,20 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         version: Some(version),
     };
     assert_eq!(requests(&mut shell), vec![refused.clone()]);
-    shell.arrive(settings(refused, Err("instruction_settings_unavailable")));
+    shell.arrive(settings(
+        refused,
+        Err("instruction_settings_save_unavailable"),
+    ));
     let shown = screen(&mut shell);
+    let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
     assert!(
         shown.contains("Keep transcripts for headless Claude runs: On"),
         "{shown}"
     );
-    assert!(shown.contains("couldn't be read"), "{shown}");
+    assert!(
+        flat.contains("nothing was saved. Make the change again."),
+        "{shown}"
+    );
 }
 
 #[cfg(unix)]
