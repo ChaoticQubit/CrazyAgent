@@ -465,8 +465,10 @@ pub fn tmp_path(home: &Path) -> PathBuf {
 
 /// Makes the agent's short temp folder with mode 0700, or reuses the one this user already
 /// owns there and makes it private again, and writes the agent's own `git` into it (see
-/// [`with_agent_git`]); a `git` that cannot be written is logged and the agent keeps the
-/// system one. Input: the agent home. Output: the folder, or a refusal when the path is a
+/// [`with_agent_git`]) as the worker copy that refuses `crazyagent/main` too, which
+/// [`catch_up_git`] widens while "Catch up with main" is on, so a copy that cannot be
+/// widened keeps the refusal; a `git` that cannot be written is logged and the agent keeps
+/// the system one. Input: the agent home. Output: the folder, or a refusal when the path is a
 /// link, a file or another user's folder.
 #[cfg(unix)]
 pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
@@ -486,7 +488,7 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     if let Some(script) = git_script(
         crate::research::runner::sandboxed_git(),
         GitCopy::Worker,
-        true,
+        false,
     ) && let Err(error) = write_git(&path, &script)
     {
         eprintln!("agent_git_not_written kind={:?}", error.kind());
@@ -564,16 +566,16 @@ pub fn free_git(tmp: &Path) -> io::Result<()> {
     }
 }
 
-/// Rewrites the agent's own `git` in its short temp folder as the worker copy that also
-/// refuses `crazyagent/main`, for a project with "Catch up with main" off, after
-/// [`make_tmp`] wrote the copy that merges it. Input: the folder `make_tmp` returned.
-/// Output: Ok, also when git is the shim and no copy is written, or the write failure.
+/// Rewrites the agent's own `git` in its short temp folder as the worker copy that merges
+/// `crazyagent/main`, for a project with "Catch up with main" on, after [`make_tmp`] wrote
+/// the copy that refuses it. Input: the folder `make_tmp` returned. Output: Ok, also when
+/// git is the shim and no copy is written, or the write failure.
 #[cfg(unix)]
-pub fn strict_git(tmp: &Path) -> io::Result<()> {
+pub fn catch_up_git(tmp: &Path) -> io::Result<()> {
     match git_script(
         crate::research::runner::sandboxed_git(),
         GitCopy::Worker,
-        false,
+        true,
     ) {
         Some(script) => write_git(tmp, &script),
         None => Ok(()),
@@ -909,7 +911,7 @@ pub fn free_git(_tmp: &Path) -> io::Result<()> {
 
 /// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
 #[cfg(not(unix))]
-pub fn strict_git(_tmp: &Path) -> io::Result<()> {
+pub fn catch_up_git(_tmp: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 

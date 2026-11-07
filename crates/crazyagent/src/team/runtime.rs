@@ -6662,8 +6662,8 @@ impl TeamRuntime {
                 false
             }
         };
-        if !catch_up && let Err(error) = toolchains::strict_git(&scratch) {
-            eprintln!("agent_strict_git_not_written kind={:?}", error.kind());
+        if catch_up && let Err(error) = toolchains::catch_up_git(&scratch) {
+            eprintln!("agent_catch_up_git_not_written kind={:?}", error.kind());
         }
         if leads && let Err(error) = toolchains::lead_git(&scratch, catch_up) {
             eprintln!("agent_lead_git_not_written kind={:?}", error.kind());

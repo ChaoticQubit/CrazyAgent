@@ -181,6 +181,7 @@ fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
     }
     let tmp = make_tmp(home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
+    catch_up_git(&tmp).unwrap();
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
     let merged = git_run(
         &wrapper,
@@ -241,6 +242,7 @@ fn the_worker_copy_refuses_a_crazyagent_main_that_is_not_the_engine_s_ref() {
     }
     let tmp = make_tmp(home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
+    catch_up_git(&tmp).unwrap();
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
     let before = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
     for name in ["crazyagent/main", "refs/crazyagent/main"] {
@@ -301,8 +303,9 @@ fn the_copy_every_agent_gets_first_refuses_crazyagent_main() {
     assert!(!stderr.contains("crazyagent/main"), "{stderr}");
 }
 
-/// With "Catch up with main" off, the strict copy of an agent's own `git` refuses
-/// `crazyagent/main` too, with the reason the worker copy gave before the setting.
+/// With "Catch up with main" off, the agent keeps the copy of its own `git` that
+/// [`make_tmp`] wrote, which refuses `crazyagent/main` too, with the reason the worker copy
+/// gave before the setting.
 #[test]
 fn the_strict_copy_refuses_crazyagent_main_with_the_plain_reason() {
     struct Removed(PathBuf);
@@ -327,7 +330,6 @@ fn the_strict_copy_refuses_crazyagent_main_with_the_plain_reason() {
     }
     let tmp = make_tmp(home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
-    strict_git(&tmp).unwrap();
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
     let refused = git_run(
         &wrapper,
