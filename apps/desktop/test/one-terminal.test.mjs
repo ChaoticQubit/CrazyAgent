@@ -59,3 +59,20 @@ test("an agent waiting on you that the graph does not draw opens in the same one
   assert.deepEqual(seen.clients, ["team-1"], JSON.stringify(seen));
   assert.deepEqual(seen.detaches, ["team-5"], JSON.stringify(seen));
 });
+
+test("Open terminal in Waiting on you opens the one panel while the team graph is loading, failed, not in the build or empty", async () => {
+  for (const graph of ["pending", "error", "not_ready", "empty"]) {
+    const seen = await withPage(async ({ evaluate, send }) => {
+      await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+      await evaluate(fixture);
+      await evaluate(`Fixture.mount(0, ${JSON.stringify(graph)})`);
+      assert.equal(await evaluate("Fixture.until(() => document.querySelector('[aria-label=\"Waiting on you in their terminal\"]') !== null)"), true, `${graph}: the inbox drew`);
+      assert.equal(await evaluate("Fixture.openWaiting('Ada')"), true, `${graph}: Open terminal on Ada`);
+      await evaluate("Fixture.until(() => Fixture.shown().panels.includes('Ada terminal') && Fixture.shown().live > 0)");
+      return evaluate("Fixture.shown()");
+    });
+    assert.deepEqual(seen.panels, ["Ada terminal"], `${graph}: ${JSON.stringify(seen)}`);
+    assert.equal(seen.xterms, 1, `${graph}: ${JSON.stringify(seen)}`);
+    assert.deepEqual(seen.clients, ["team-1"], `${graph}: ${JSON.stringify(seen)}`);
+  }
+});

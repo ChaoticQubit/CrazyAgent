@@ -9,7 +9,7 @@ import { AgentsTab } from "../../src/screens/project/agents.tsx";
 import { teamStatus } from "./team-status.mjs";
 
 let root = null;
-const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], callbacks: new Map(), next: new Map(), delayMs: 0 };
+const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok" };
 
 const node = (id, kind, extra = {}) => ({
   id, kind, parent: null, label: id, harness: "codex", status: "working", status_label: "Working", account: null, terminal: null, ...extra,
@@ -47,15 +47,25 @@ function deliver(channel, message) {
   callback({ index, message });
 }
 
-/** Answers the bridge calls the Agents tab and its terminal panels make: the team graph, the
- * Questions inbox, and terminal attach and detach, which the engine counts as attached
- * terminal clients. An attach answers after `delayMs`, as the engine does once tmux attached,
- * and its channel then says attached. Every other call is refused, as an engine without it
- * would. */
+/** The team graph read the engine gives for a graph mode: the team ("ok"), a team with no
+ * agents ("empty"), a read that never answers ("pending"), a failed read ("error") or a build
+ * without the graph ("not_ready"). Input: the mode. Output: the read's answer. */
+function graphRead(mode) {
+  if (mode === "pending") return new Promise(() => {});
+  if (mode === "error") return Promise.reject({ code: "engine_unreachable", message: "The engine isn't running." });
+  if (mode === "not_ready") return Promise.reject("Command desktop_team_graph not found");
+  return Promise.resolve(mode === "empty" ? { ...TEAM, nodes: [] } : TEAM);
+}
+
+/** Answers the bridge calls the Agents tab and its terminal panels make: the team graph as
+ * its mode reads, the Questions inbox, and terminal attach and detach, which the engine counts
+ * as attached terminal clients. An attach answers after `delayMs`, as the engine does once
+ * tmux attached, and its channel then says attached. Every other call is refused, as an
+ * engine without it would. */
 function bridge() {
   window.__TAURI_INTERNALS__ = {
     invoke: async (command, args) => {
-      if (command === "desktop_team_graph") return TEAM;
+      if (command === "desktop_team_graph") return graphRead(engine.graph);
       if (command === "desktop_coord_questions") return INBOX;
       if (command === "desktop_terminal_attach") {
         engine.attaches.push(args.agent);
@@ -83,10 +93,11 @@ function bridge() {
 }
 
 /** Mounts the Agents tab of project alpha on a fresh page, as the project page shows it, with
- * the engine answering each terminal attach after the given delay. Input: the delay in ms. */
-export function mount(delayMs = 0) {
+ * the engine answering each terminal attach after the given delay and the team graph read as
+ * the given mode. Inputs: the delay in ms and the graph mode. */
+export function mount(delayMs = 0, graph = "ok") {
   root?.unmount();
-  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], callbacks: new Map(), next: new Map(), delayMs });
+  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], callbacks: new Map(), next: new Map(), delayMs, graph });
   bridge();
   document.head.innerHTML = "";
   for (const text of [styles, projectStyles, teamStyles, xtermStyles]) {
