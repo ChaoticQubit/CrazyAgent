@@ -306,7 +306,7 @@ fn unavailable() -> EngineError {
 /// Records one action on a change set in its project's activity at the time the set last
 /// changed, with its sub-agent for the goal; a failure is logged by its plain code, so the
 /// action itself never fails on it. Inputs: the store, the change set, the kind of event
-/// (Accepted, Conflict, Discarded, SentBack or Undone) and who acted.
+/// (Accepted, Conflict, Discarded or SentBack) and who acted.
 #[cfg(unix)]
 fn note_change(
     db: &Connection,
@@ -326,9 +326,40 @@ fn note_change(
         ActivityKind::SentBack => {
             format!("Sent the changes of {label} back to take in the newer work: {line}")
         }
-        ActivityKind::Undone => format!("Undid the changes of {label}: {line}"),
         _ => unreachable!("note_change takes a change set action"),
     };
+    note_text(db, record, kind, by, &text);
+}
+
+/// Records the Undone row of a finished undo, naming the sets its merge closed whose work
+/// it reverted too; a failure is logged by its plain code. Inputs: the store, the undone
+/// set, the labels of those sets and who undid it.
+#[cfg(unix)]
+fn note_undo(db: &Connection, record: &store::Record, closed: &[String], by: &str) {
+    let mut text = format!(
+        "Undid the changes of {}: {}",
+        record.agent.label, record.prompt_line
+    );
+    if !closed.is_empty() {
+        text.push_str(&format!(
+            ". This also reverted the changes of {}",
+            closed.join(", ")
+        ));
+    }
+    note_text(db, record, crate::activity::ActivityKind::Undone, by, &text);
+}
+
+/// Records one row about a change set with its words, at the time the set last changed and
+/// with its sub-agent for the goal; a failure is logged by its plain code. Inputs: the
+/// store, the change set, the kind of event, who acted and the words.
+#[cfg(unix)]
+fn note_text(
+    db: &Connection,
+    record: &store::Record,
+    kind: crate::activity::ActivityKind,
+    by: &str,
+    text: &str,
+) {
     let agent = match record.agent.kind {
         AgentKind::Sub => record.agent.id.parse().ok(),
         AgentKind::Master => None,
@@ -338,7 +369,7 @@ fn note_change(
         actor: by,
         agent,
         goal: None,
-        text: &text,
+        text,
         change_set: Some(record.id.as_str()),
     };
     let at = i64::try_from(record.updated_ms).unwrap_or(i64::MAX);

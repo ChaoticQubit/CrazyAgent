@@ -35,7 +35,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     waiting INTEGER NOT NULL DEFAULT 0 CHECK(waiting IN (0,1)),
     outside INTEGER NOT NULL DEFAULT 0 CHECK(outside IN (0,1)),
     made INTEGER NOT NULL DEFAULT 0 CHECK(made IN (0,1)),
-    undone TEXT
+    undone TEXT,
+    landed_on TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
@@ -55,8 +56,8 @@ CREATE INDEX IF NOT EXISTS landing_agent_branches_repository
 
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
-    restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone";
-const ADDED_COLUMNS: [(&str, &str); 5] = [
+    restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone,landed_on";
+const ADDED_COLUMNS: [(&str, &str); 6] = [
     ("message", "message TEXT NOT NULL DEFAULT ''"),
     (
         "waiting",
@@ -71,12 +72,14 @@ const ADDED_COLUMNS: [(&str, &str); 5] = [
         "made INTEGER NOT NULL DEFAULT 0 CHECK(made IN (0,1))",
     ),
     ("undone", "undone TEXT"),
+    ("landed_on", "landed_on TEXT"),
 ];
 
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
 /// an engine start can finish or undo it. `Land` moves the owner's `reference` from
 /// `old` to the squash commit `new`, `master` when it is the master landing its own set;
-/// `Reset` points the agent's worktree at `target`.
+/// `Reset` points the agent's worktree at `target`; `Undo` moves `reference` from `old` to
+/// the commit `new` that reverts the set's landed commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Intent {
@@ -90,11 +93,16 @@ pub(super) enum Intent {
     Reset {
         target: String,
     },
+    Undo {
+        reference: String,
+        old: String,
+        new: String,
+    },
 }
 
 /// One stored change set with everything the engine needs to act on it. `made` says the
-/// set's own Accept committed `landed`, so an undo may revert it; `undone` is the commit
-/// that reverted it.
+/// set's own Accept committed `landed`, so an undo may revert it, on `landed_on`, the ref
+/// that Accept moved; `undone` is the commit that reverted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Record {
     pub(super) id: ChangeSetId,
@@ -124,6 +132,7 @@ pub(super) struct Record {
     pub(super) outside: bool,
     pub(super) made: bool,
     pub(super) undone: Option<String>,
+    pub(super) landed_on: Option<String>,
 }
 
 impl Record {
@@ -307,6 +316,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         outside: row.get::<_, bool>(26)?,
         made: row.get::<_, bool>(27)?,
         undone: row.get(28)?,
+        landed_on: row.get(29)?,
     })
 }
 
@@ -338,7 +348,7 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
     db.execute(
         &format!(
             "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29) \
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30) \
              ON CONFLICT(id) DO UPDATE SET {updates}"
         ),
         params![
@@ -371,6 +381,7 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
             record.outside,
             record.made,
             record.undone,
+            record.landed_on,
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {
@@ -668,6 +679,24 @@ pub(super) fn open_of(
         Some(project) => collect(db, &format!("{open} AND project=?1"), [project.as_str()]),
         None => collect(db, open, rusqlite::params![]),
     }
+}
+
+/// Reads the other change sets of a project that closed as landed in the commit a set's
+/// own Accept made, as a master's merge closes the sets its head holds. Inputs: the store,
+/// the project, that commit and the set that made it. Output: the sets.
+pub(super) fn closed_in(
+    db: &Connection,
+    project: &ProjectId,
+    landed: &str,
+    maker: &ChangeSetId,
+) -> Result<Vec<Record>, EngineError> {
+    let closed = collect(
+        db,
+        "project=?1 AND landed=?2 AND id<>?3 AND state='accepted' AND made=0",
+        [project.as_str(), landed, maker.as_str()],
+    )?;
+    assert!(closed.iter().all(|record| record.id != *maker));
+    Ok(closed)
 }
 
 /// Reads the discarded change sets whose restore window ended by `now` and whose ref

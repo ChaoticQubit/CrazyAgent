@@ -1920,6 +1920,7 @@ pub(super) fn record(
             outside: false,
             made: false,
             undone: None,
+            landed_on: None,
             files: 0,
             added: 0,
             removed: 0,
