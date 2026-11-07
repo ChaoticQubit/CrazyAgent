@@ -571,7 +571,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
       <span aria-hidden="true">Catch up with main</span>
       <Segmented label="Catch up with main" value={catchUp ?? (status.catch_up_main === "off" ? "off" : "on")} onValue={(choice) => { if (!busy) void chooseCatchUp(choice); }}
         options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
-      <span className="tg-terminal-note">On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; merging another agent's branch stays refused. Off refuses every merge.</span>
+      <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off refuses that merge. Merging another agent's branch stays refused either way.</span>
     </div>
     <div className="pj-row">
       <span aria-hidden="true">Re-ask a sub-agent's empty reply</span>

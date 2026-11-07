@@ -6652,16 +6652,7 @@ impl TeamRuntime {
                 super::nesting(&self.connection, &stored.project_id)
                     .is_ok_and(|nested| depth < nested.depth)
             });
-        let catch_up = match super::catch_up_main(&self.connection, &stored.project_id) {
-            Ok(value) => value == super::CatchUpMain::On,
-            Err(problem) => {
-                eprintln!(
-                    "agent_catch_up_unread code={}",
-                    crate::protocol::plain_code(&problem.0)
-                );
-                false
-            }
-        };
+        let catch_up = context.catch_up_main();
         if catch_up && let Err(error) = toolchains::catch_up_git(&scratch) {
             eprintln!("agent_catch_up_git_not_written kind={:?}", error.kind());
         }
