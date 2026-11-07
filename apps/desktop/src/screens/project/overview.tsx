@@ -13,7 +13,7 @@ import { homePath } from "../settings/harnesses";
 import { accessSummary } from "./access";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_FILTERS, ACTIVITY_ROWS, RESEARCH_KEY, activityFilter, activityGoal, ago, changeOutcome, groupActivity, memoryGroups, newestActivity, type ActivityFilter, researchJobs, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
+import { ACTIVITY_FILTERS, ACTIVITY_ROWS, RESEARCH_KEY, activityFilter, ago, changeOutcome, goalPlacer, groupActivity, memoryGroups, newestActivity, phasePath, type ActivityFilter, researchJobs, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
 import { PlanningLine } from "./planning";
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -62,10 +62,11 @@ const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "
 };
 
 /** One activity row: when, the kind's icon, what happened, Undone when it was, and who, with
- * the goal when the row stands outside its group. Inputs: the event, the time it is read
- * against and the goal to tag it with. Output: the row. */
-function ActivityRow({ item, now, goal }: { item: ActivityItem; now: number; goal?: string }) {
-  return <li className="pj-activity-row">
+ * the goal when the row stands outside its group, highlighted while fresh. Inputs: the event,
+ * the time it is read against, the goal to tag it with and whether a later read brought it in.
+ * Output: the row. */
+function ActivityRow({ item, now, goal, fresh = false }: { item: ActivityItem; now: number; goal?: string; fresh?: boolean }) {
+  return <li className={`pj-activity-row${fresh ? " fresh" : ""}`}>
     <span className="pj-small pj-muted">{ago(item.at_ms, now)}</span>
     <span className={`pj-activity-kind ${KINDS[item.kind].tone}`}><Icon name={KINDS[item.kind].icon} size={14} /></span>
     <span className="pj-activity-text">{displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
@@ -73,13 +74,25 @@ function ActivityRow({ item, now, goal }: { item: ActivityItem; now: number; goa
   </li>;
 }
 
+/** The steps a goal's phase events walk through, done ones checked and the current one marked,
+ * as the mockup's goal header shows them. Input: the goal's events. Output: the path, or nothing
+ * when the goal has no phase event. */
+function PhasePath({ items }: { items: ActivityItem[] }) {
+  const steps = phasePath(items);
+  if (steps.length === 0) return null;
+  const now = steps.findIndex((step) => !step.done);
+  return <span className="pj-activity-path" aria-label="Phases">{steps.map((step, index) =>
+    <span key={step.step} className={step.done ? "done" : index === now ? "now" : undefined}>{step.done ? `✓ ${step.step}` : step.step}</span>)}</span>;
+}
+
 /** The project's activity grouped by goal, newest goal first: a header that closes and opens the
- * goal, up to eight rows per open goal with when, what, and who, and Show all (N) for a longer
- * goal. A read the engine cut counts with a plus. Inputs: the events, whether older ones were
- * left out, the time they are read against, the group keys shown in full, the closed group keys
- * and the Show all and close or open actions. Output: the groups. */
-export function ActivityGroups({ items, more, now, expanded, closed, onShowAll, onToggle }: {
-  items: ActivityItem[]; more: boolean; now: number; expanded: string[]; closed: string[]; onShowAll: (key: string) => void; onToggle: (key: string) => void;
+ * goal with its phase path, up to eight rows per open goal with when, what, and who, and Show all
+ * (N) for a longer goal. A read the engine cut counts with a plus. Inputs: the events, whether
+ * older ones were left out, the time they are read against, the group keys shown in full, the
+ * closed group keys, the ids a later read brought in and the Show all and close or open
+ * actions. Output: the groups. */
+export function ActivityGroups({ items, more, now, expanded, closed, fresh = [], onShowAll, onToggle }: {
+  items: ActivityItem[]; more: boolean; now: number; expanded: string[]; closed: string[]; fresh?: number[]; onShowAll: (key: string) => void; onToggle: (key: string) => void;
 }) {
   return <div className="pj-stack-s">{groupActivity(items).map((group) => {
     const open = !closed.includes(group.key);
@@ -88,29 +101,40 @@ export function ActivityGroups({ items, more, now, expanded, closed, onShowAll, 
     return <section className="pj-panel pj-activity-goal" aria-label={group.goal} key={group.key}>
       <button type="button" className="pj-activity-head" aria-expanded={open} onClick={() => onToggle(group.key)}>
         <span className="pj-activity-name"><Icon name={open ? "chevron-down" : "chevron-right"} size={16} /><strong className="ellipsis">{displayText(group.goal)}</strong></span>
-        <span className="pj-small pj-muted">{count} {count === "1" ? "item" : "items"}, latest {ago(group.items[0].at_ms, now).toLowerCase()}</span>
+        <span className="pj-activity-sub pj-small pj-muted"><PhasePath items={group.items} /><span>{count} {count === "1" ? "item" : "items"} · latest {ago(group.items[0].at_ms, now).toLowerCase()}</span></span>
       </button>
-      {open && <ul className="pj-activity-list" aria-label={`${group.goal} activity`}>{(all ? group.items : group.items.slice(0, ACTIVITY_ROWS)).map((item) => <ActivityRow key={item.id} item={item} now={now} />)}</ul>}
+      {open && <ul className="pj-activity-list" aria-label={`${group.goal} activity`}>{(all ? group.items : group.items.slice(0, ACTIVITY_ROWS)).map((item) => <ActivityRow key={item.id} item={item} now={now} fresh={fresh.includes(item.id)} />)}</ul>}
       {open && !all && group.items.length > ACTIVITY_ROWS && <button type="button" className="pj-link pj-activity-more" onClick={() => onShowAll(group.key)}>Show all ({count})</button>}
     </section>;
   })}</div>;
 }
 
-/** The project's activity as one list, newest first, each row tagged with its goal. Inputs: the
- * events and the time they are read against. Output: the list. */
-export function ActivityTimeline({ items, now }: { items: ActivityItem[]; now: number }) {
+/** The project's activity as one list, newest first, each row tagged with its goal as By goal
+ * names it. Inputs: the events, the time they are read against and the ids a later read brought
+ * in. Output: the list. */
+export function ActivityTimeline({ items, now, fresh = [] }: { items: ActivityItem[]; now: number; fresh?: number[] }) {
+  const placed = goalPlacer(items);
   return <section className="pj-panel pj-activity-timeline" aria-label="Activity timeline">
-    <ul className="pj-activity-list">{newestActivity(items).map((item) => <ActivityRow key={item.id} item={item} now={now} goal={activityGoal(item).goal} />)}</ul>
+    <ul className="pj-activity-list">{newestActivity(items).map((item) => <ActivityRow key={item.id} item={item} now={now} goal={placed(item).goal} fresh={fresh.includes(item.id)} />)}</ul>
   </section>;
 }
 
 const VIEWS: { value: "goal" | "time"; label: string }[] = [{ value: "goal", label: "By goal" }, { value: "time", label: "Timeline" }];
 
 /** What Recent activity draws: the last good read, whether the engine left older events out of
- * it, when it was read, and why the latest read failed while an older one stays on screen. */
-type ActivityRead = { shown: Result<ActivityItem[]> | undefined; more: boolean; at: number; stale: string | null };
+ * it, when it was read, why the latest read failed while an older one stays on screen, and the
+ * ids that read brought in after an earlier good one. */
+type ActivityRead = { shown: Result<ActivityItem[]> | undefined; more: boolean; at: number; stale: string | null; fresh: number[] };
 
-const UNREAD: ActivityRead = { shown: undefined, more: false, at: 0, stale: null };
+const UNREAD: ActivityRead = { shown: undefined, more: false, at: 0, stale: null, fresh: [] };
+
+/** The ids of a read that an earlier good read did not hold. Inputs: the earlier read and the
+ * new events. Output: the new ids, none after no earlier good read. */
+function freshIds(previous: ActivityRead, items: ActivityItem[]): number[] {
+  if (previous.shown?.kind !== "ok") return [];
+  const seen = new Set(previous.shown.value.map((item) => item.id));
+  return items.filter((item) => !seen.has(item.id)).map((item) => item.id);
+}
 
 /** Reads one project's activity now and again each interval while the window is visible, one
  * read at a time. A failed refresh keeps the last good read and says why. Inputs: the project
@@ -127,7 +151,7 @@ function useActivity(projectId: string, every: number, load: typeof loadActivity
         if (!current) return;
         const at = Date.now();
         setRead((previous) => result.kind === "ok" || previous.shown?.kind !== "ok"
-          ? { shown: result.kind === "ok" ? { kind: "ok", value: result.value.items } : result, more: result.kind === "ok" && result.value.more === true, at, stale: null }
+          ? { shown: result.kind === "ok" ? { kind: "ok", value: result.value.items } : result, more: result.kind === "ok" && result.value.more === true, at, stale: null, fresh: result.kind === "ok" ? freshIds(previous, result.value.items) : [] }
           : { ...previous, stale: result.kind === "error" ? failureCopy(result) : "Activity isn't in this build." });
         if (result.kind === "not_ready") return;
       }
@@ -154,6 +178,7 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
   useEffect(() => {
     setExpanded([]);
     setClosed([RESEARCH_KEY]);
+    setFilter("all");
   }, [projectId]);
   const shown = read.shown;
   const items = shown?.kind === "ok" ? shown.value : [];
@@ -173,10 +198,10 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
       className={`pj-chip-toggle${filter === option.value ? " on" : ""}`} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>{option.label}</button>)}</div>}
     {items.length > 0 && visible.length === 0 && <p className="pj-muted">Nothing under {chip} yet.</p>}
     {visible.length > 0 && (view === "goal"
-      ? <ActivityGroups items={visible} more={read.more} now={read.at} expanded={expanded} closed={closed}
+      ? <ActivityGroups items={visible} more={read.more} now={read.at} expanded={expanded} closed={closed} fresh={read.fresh}
         onShowAll={(key) => setExpanded((open) => [...open, key])}
         onToggle={(key) => setClosed((keys) => keys.includes(key) ? keys.filter((other) => other !== key) : [...keys, key])} />
-      : <ActivityTimeline items={visible} now={read.at} />)}
+      : <ActivityTimeline items={visible} now={read.at} fresh={read.fresh} />)}
     {shown?.kind === "ok" && read.more && <p className="pj-small pj-muted">Older activity isn't shown here.</p>}
   </section>;
 }

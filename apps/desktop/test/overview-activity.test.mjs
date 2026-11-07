@@ -122,7 +122,7 @@ test("research with no goal is its own Research group, apart from Project and fr
     item(2, 2_000, null, { kind: "created" }),
     item(1, 1_000, "  ", { kind: "research_started" }),
   ]);
-  assert.deepEqual(groups.map((group) => group.goal), ["Research", "Research", "Project"]);
+  assert.deepEqual(groups.map((group) => group.goal), ["Research", "Research (no goal)", "Project"]);
   assert.deepEqual(groups.map((group) => group.items.map((entry) => entry.id)), [[4], [3, 1], [2]]);
   assert.equal(new Set(groups.map((group) => group.key)).size, 3, "each group has its own key");
   assert.equal(groups[1].key, research.RESEARCH_KEY, "Research events with no goal share the research key");

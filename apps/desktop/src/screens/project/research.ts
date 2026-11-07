@@ -483,13 +483,39 @@ export function newestActivity(items: ActivityItem[]): ActivityItem[] {
   return [...items].sort((a, b) => b.at_ms - a.at_ms || b.id - a.id);
 }
 
-/** Groups project activity by the goal it serves, for Overview, as activityGoal places each
+/** Places events the way Overview shows them among others: as activityGoal does, except that
+ * the Research or Project group of events with no goal reads "(no goal)" after its name when a
+ * named goal of that name is among the events, so the two are told apart. Input: the events
+ * shown together. Output: the placing of one of them. */
+export function goalPlacer(items: ActivityItem[]): (item: ActivityItem) => { key: string; goal: string } {
+  const named = new Set(items.map((item) => item.goal?.trim()).filter((goal): goal is string => Boolean(goal)));
+  return (item) => {
+    const place = activityGoal(item);
+    return place.key.startsWith("goal:") || !named.has(place.goal) ? place : { ...place, goal: `${place.goal} (no goal)` };
+  };
+}
+
+/** The step names a goal's phase events walk through, in the order each first showed, the step
+ * of the newest phase current and the steps before it done. A step is the phase text before its
+ * first colon, less a closing "done", or the whole text when it has no colon. Input: one goal's
+ * events in any order. Output: the steps, empty when the goal has no phase event. */
+export function phasePath(items: ActivityItem[]): { step: string; done: boolean }[] {
+  const phases = newestActivity(items).filter((item) => item.kind === "phase").reverse();
+  const name = (item: ActivityItem) => (item.text.split(":")[0] ?? "").trim().replace(/\s+done$/iu, "") || item.text.trim();
+  const steps = [...new Set(phases.map(name))];
+  const now = phases.length > 0 ? steps.indexOf(name(phases[phases.length - 1])) : -1;
+  assert(steps.length <= phases.length, "every step comes from a phase event");
+  return steps.map((step, index) => ({ step, done: index < now }));
+}
+
+/** Groups project activity by the goal it serves, for Overview, as goalPlacer places each
  * event. Input: the events in any order. Output: one group per goal with its key and label, the
  * group with the newest event first, each group's events newest first. */
 export function groupActivity(items: ActivityItem[]): { key: string; goal: string; items: ActivityItem[] }[] {
   const groups = new Map<string, { key: string; goal: string; items: ActivityItem[] }>();
+  const placed = goalPlacer(items);
   for (const item of newestActivity(items)) {
-    const place = activityGoal(item);
+    const place = placed(item);
     const group = groups.get(place.key);
     if (group) group.items.push(item);
     else groups.set(place.key, { ...place, items: [item] });
