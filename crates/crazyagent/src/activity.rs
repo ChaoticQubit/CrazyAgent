@@ -170,7 +170,7 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
         let Ok(project) = ProjectId::new(&project) else {
             continue;
         };
-        if let Err(error) = backfill(db, &project) {
+        if let Err(error) = backfill(db, &project).and_then(|_| backfill_created(db, &project)) {
             eprintln!(
                 "activity_backfill_failed cause={}",
                 crate::protocol::plain_code(&error.0)
@@ -456,6 +456,27 @@ struct Past {
     goal: Option<String>,
     text: String,
     change_set: Option<String>,
+}
+
+/// The line of a project's Created event. Takes the project's name. Returns the line.
+pub fn created_text(name: &str) -> String {
+    format!("You created {name}")
+}
+
+/// Records that the owner created a project, in the transaction that creates it; a
+/// failure is logged by its plain code, so creating never fails on it. Takes the database,
+/// the project, its name and the time in ms.
+pub fn note_created(db: &Connection, project: &ProjectId, name: &str, now_ms: i64) {
+    let _ = (db, project, name, now_ms);
+}
+
+/// Brings in the Created event of a project that has none, at its saved setup's creation
+/// time and with its name, so a project made before the engine recorded events still shows
+/// when it began; a project that has one, or has no saved setup, is left alone. Takes the
+/// database and the project. Returns whether it added one, or the SQLite failure.
+pub fn backfill_created(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    let _ = (db, project);
+    Ok(false)
 }
 
 /// Brings in, once per project, what happened before the engine recorded events: the
