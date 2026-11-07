@@ -843,6 +843,122 @@ fn a_review_ready_claim_keeps_overlapping_until_the_work_lands() {
     );
 }
 
+/// The two change set ids the hold rows below use.
+#[cfg(unix)]
+const SETS: [&str; 2] = [
+    "0123456789abcdef0123456789abcdef",
+    "fedcba9876543210fedcba9876543210",
+];
+
+/// Grace's review-ready work on pyproject.toml with its claim held for the first set.
+#[cfg(unix)]
+fn held_review(connection: &Connection) -> (AgentId, WorkId) {
+    let grace = agent(connection, "sub", None);
+    let (work_id, _) = start_work(
+        connection,
+        &project(),
+        grace,
+        "Dependencies".into(),
+        vec!["pyproject.toml".into()],
+        NOW,
+    )
+    .unwrap();
+    finish(
+        connection,
+        work_id,
+        1,
+        Finish::ReviewReady,
+        "Green.".into(),
+        grace,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(hold_for_set(connection, grace, SETS[0]).unwrap(), 1);
+    (grace, work_id)
+}
+
+/// OS-8: reopening ended work takes its claim off the change set that held it, so that set
+/// landing later frees none of the reopened work's later edits, which the next set holds.
+#[cfg(unix)]
+#[test]
+fn reopened_work_s_claims_wait_on_the_next_change_set_not_the_earlier_one() {
+    let connection = db();
+    let (grace, work_id) = held_review(&connection);
+    assert_eq!(
+        transfer(
+            &connection,
+            work_id,
+            2,
+            Transfer::Reopen,
+            Party::Agent(grace),
+            NOW,
+        )
+        .unwrap(),
+        3
+    );
+    finish(
+        &connection,
+        work_id,
+        3,
+        Finish::ReviewReady,
+        "Green again.".into(),
+        grace,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        hold_for_set(&connection, grace, SETS[1]).unwrap(),
+        1,
+        "the reopened work's claim waits on the next set"
+    );
+    assert_eq!(
+        release_set(&connection, SETS[0], NOW).unwrap(),
+        0,
+        "the earlier set's landing frees none of the later edits"
+    );
+    assert_eq!(held(&connection, grace, work_id), 1);
+    assert_eq!(release_set(&connection, SETS[1], NOW).unwrap(), 1);
+    assert_eq!(held(&connection, grace, work_id), 0);
+}
+
+/// A change-set hold names its set: an empty set id stops at the assertion.
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "!set.is_empty()")]
+fn holding_claims_for_no_change_set_trips_the_assertion() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let _ = hold_for_set(&connection, grace, "");
+}
+
+/// A set's release frees exactly the claims it marked: a hold row marked released while
+/// its claim still holds is a broken store, and the release stops at its assertion.
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "a set's release frees exactly the claims it marked")]
+fn a_release_meeting_a_released_hold_on_a_held_claim_trips_the_assertion() {
+    let connection = db();
+    held_review(&connection);
+    connection
+        .execute("UPDATE coord_held SET released=?1", [NOW])
+        .unwrap();
+    let _ = release_set(&connection, SETS[0], NOW);
+}
+
+/// A restore takes back exactly the claims its set released: a released hold row whose
+/// claim already holds is a broken store, and the restore stops at its assertion.
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "a restore takes back exactly the claims its set released")]
+fn a_restore_meeting_a_released_hold_on_a_held_claim_trips_the_assertion() {
+    let connection = db();
+    held_review(&connection);
+    connection
+        .execute("UPDATE coord_held SET released=?1", [NOW])
+        .unwrap();
+    let _ = restore_set(&connection, SETS[0]);
+}
+
 #[cfg(unix)]
 #[test]
 fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {
