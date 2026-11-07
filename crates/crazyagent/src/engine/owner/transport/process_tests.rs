@@ -719,8 +719,10 @@ fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_sav
     use crate::instruction_files::{EditDelivery, Mode};
     let (_directory, root) = root();
     let folder = root.join("project");
-    fs::create_dir_all(&folder).unwrap();
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
     let project = with_project(&root, &folder);
+    save(&root, None, "App rule.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
     let fresh = instruction_settings(&root, &project, None).unwrap();
     assert_eq!(
         fresh,
@@ -1164,6 +1166,181 @@ fn the_text_agents_get_is_the_engines_render_for_the_projects_mode() {
     assert_eq!(
         given(&root, &unknown).unwrap_err().0,
         "process_project_unknown"
+    );
+}
+
+/// The refusal a save gets when the project's agents would get no instructions after it.
+const NONE_GIVEN_CODE: &str = "process_instructions_would_be_empty";
+
+/// Saves one project's Delivery mode at the version read, keeping its other settings.
+/// Inputs: the engine root, the project and the mode. Output: what the save answered.
+fn switch(
+    root: &Path,
+    project: &ProjectId,
+    mode: crate::instruction_files::Mode,
+) -> Result<InstructionView, EngineError> {
+    let read = instruction_settings(root, project, None).unwrap();
+    let settings = InstructionSettings {
+        mode,
+        ..read.settings
+    };
+    instruction_settings(root, project, Some((settings, Some(read.version))))
+}
+
+/// A Delivery switch after which the project's agents would get no instructions at all is
+/// refused by the engine, whichever client sends it, and changes nothing: Project only on
+/// an empty project file, App only on an empty app text. A change that keeps the mode, and
+/// a switch to a mode whose text is there, still save.
+#[test]
+fn a_delivery_switch_that_leaves_agents_no_instructions_is_refused() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    let fresh = instruction_settings(&root, &project, None).unwrap();
+    let quiet = InstructionSettings {
+        transcripts: !fresh.settings.transcripts,
+        ..fresh.settings
+    };
+    let kept = instruction_settings(&root, &project, Some((quiet, Some(fresh.version)))).unwrap();
+    assert_eq!(kept.settings, quiet, "a change that keeps the mode saves");
+
+    save(&root, None, "App rule.\n", 0).unwrap();
+    let before = instruction_settings(&root, &project, None).unwrap();
+    let given_before = given(&root, &project).unwrap();
+    assert_eq!(given_before, crate::agent_home::render("App rule.\n", ""));
+    assert_eq!(
+        switch(&root, &project, Mode::ProjectOnly),
+        Err(EngineError(NONE_GIVEN_CODE.into())),
+        "Project only on an empty project file"
+    );
+    assert_eq!(instruction_settings(&root, &project, None).unwrap(), before);
+    assert_eq!(given(&root, &project).unwrap(), given_before);
+
+    save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    assert_eq!(
+        switch(&root, &project, Mode::ProjectOnly)
+            .unwrap()
+            .settings
+            .mode,
+        Mode::ProjectOnly,
+        "Project only saves once the project file has text"
+    );
+    assert!(
+        matches!(
+            save(&root, None, "", 1),
+            Ok(SavedText::Saved { version: 2, .. })
+        ),
+        "an app text no agent of the project reads may be cleared"
+    );
+    let before = instruction_settings(&root, &project, None).unwrap();
+    assert_eq!(
+        switch(&root, &project, Mode::AppOnly),
+        Err(EngineError(NONE_GIVEN_CODE.into())),
+        "App only on an empty app text"
+    );
+    assert_eq!(instruction_settings(&root, &project, None).unwrap(), before);
+    assert_eq!(
+        given(&root, &project).unwrap(),
+        crate::agent_home::render("", "Project rule.\n")
+    );
+}
+
+/// An app text save after which a project's agents would get no instructions at all is
+/// refused and keeps the saved text and its version: a blank app text under App only, or
+/// under Both on an empty project file. With the project's own text there, the app text
+/// may be cleared.
+#[test]
+fn an_app_text_save_that_leaves_agents_no_instructions_is_refused() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, None, "App rule.\n", 0).unwrap();
+    switch(&root, &project, Mode::AppOnly).unwrap();
+    for blank in ["", " \n\n"] {
+        assert_eq!(
+            save(&root, None, blank, 1),
+            Err(EngineError(NONE_GIVEN_CODE.into())),
+            "App only: {blank:?}"
+        );
+    }
+    assert_eq!(read(&root, None).unwrap(), shown("App rule.\n", 1));
+
+    switch(&root, &project, Mode::Both).unwrap();
+    assert_eq!(
+        save(&root, None, "", 1),
+        Err(EngineError(NONE_GIVEN_CODE.into())),
+        "Both on an empty project file"
+    );
+    assert_eq!(read(&root, None).unwrap(), shown("App rule.\n", 1));
+    assert_eq!(
+        given(&root, &project).unwrap(),
+        crate::agent_home::render("App rule.\n", "")
+    );
+
+    save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    assert!(
+        matches!(
+            save(&root, None, "", 1),
+            Ok(SavedText::Saved { version: 2, .. })
+        ),
+        "with the project's own text the app text may be cleared"
+    );
+    assert_eq!(
+        given(&root, &project).unwrap(),
+        crate::agent_home::render("", "Project rule.\n")
+    );
+}
+
+/// A project text save after which the project's agents would get no instructions at all
+/// is refused by the engine, which knows the mode even when the page could not read it: a
+/// blank text under Project only, or under Both with an empty app text. A project text the
+/// mode does not give may be cleared.
+#[test]
+fn a_project_text_save_that_leaves_agents_no_instructions_is_refused() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    switch(&root, &project, Mode::ProjectOnly).unwrap();
+    assert_eq!(
+        save(&root, Some(project.clone()), "", 1),
+        Err(EngineError(NONE_GIVEN_CODE.into())),
+        "Project only"
+    );
+    assert_eq!(
+        read(&root, Some(project.clone())).unwrap(),
+        shown("Project rule.\n", 1)
+    );
+
+    switch(&root, &project, Mode::Both).unwrap();
+    assert_eq!(
+        save(&root, Some(project.clone()), "\n", 1),
+        Err(EngineError(NONE_GIVEN_CODE.into())),
+        "Both with an empty app text"
+    );
+    assert_eq!(
+        given(&root, &project).unwrap(),
+        crate::agent_home::render("", "Project rule.\n")
+    );
+
+    save(&root, None, "App rule.\n", 0).unwrap();
+    switch(&root, &project, Mode::AppOnly).unwrap();
+    assert!(
+        matches!(
+            save(&root, Some(project.clone()), "", 1),
+            Ok(SavedText::Saved { version: 2, .. })
+        ),
+        "App only does not give the project text, so it may be cleared"
+    );
+    assert_eq!(
+        given(&root, &project).unwrap(),
+        crate::agent_home::render("App rule.\n", "")
     );
 }
 

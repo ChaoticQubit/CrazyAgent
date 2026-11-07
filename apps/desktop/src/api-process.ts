@@ -31,6 +31,7 @@ const REFUSALS: Record<string, string> = {
   process_import_missing: "That file no longer exists. Pick another one.",
   process_import_unsafe: "That file isn't a plain file you own, so CrazyAgent won't read it.",
   process_import_unreadable: "That file couldn't be read. Check it, then try again.",
+  process_instructions_would_be_empty: "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first.",
   process_import_outside: "That file links outside the project folder, so it stays where it is.",
   process_import_unmovable: "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.",
   process_request_invalid: "CrazyAgent couldn't read that path. Pick the file again.",

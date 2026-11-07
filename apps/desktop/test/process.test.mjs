@@ -528,3 +528,10 @@ test("the skills dialog shows an agent's counts, a hookless agent's too, or says
   assert.match(body(9), /This agent is older than the agents the Process page lists, so its counts are not shown\./);
   assert.match(body(2, { kind: "error", code: "process_adoption_unavailable", message: "" }), /Workflow adoption couldn&#x27;t be read\. Try again\./);
 });
+
+test("a save the engine refuses because agents would get no instructions says so in one sentence under Delivery", () => {
+  const refused = client.processMessage({ kind: "error", code: "process_instructions_would_be_empty", message: "" });
+  assert.equal(refused, "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first.");
+  assert.ok(client.PROCESS_REFUSALS.includes("process_instructions_would_be_empty"));
+  assert.match(agentSettings({ failure: refused }), /class="notice danger" role="alert">.*That would leave agents with no instructions, so nothing was saved; write the instructions they should get first\./s);
+});
