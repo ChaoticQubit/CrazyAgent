@@ -81,3 +81,34 @@ test("Timeline lists every event newest first with its goal, and the chips filte
     { text: "Market research saved", goal: "Research" },
   ]);
 });
+
+test("rows a later read brings in are marked fresh, and the first read marks none", { timeout: 60_000 }, async () => {
+  const older = { kind: "ok", value: { project_id: "alpha", items: ITEMS.slice(0, 6), more: false } };
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    return evaluate(`(async () => {
+      await Fixture.mount("alpha");
+      const first = await Fixture.reply(${JSON.stringify(older)});
+      await Fixture.wait(450);
+      const later = await Fixture.reply(${JSON.stringify(ok)});
+      return { first, later };
+    })()`);
+  });
+  assert.deepEqual(seen.first.fresh, []);
+  assert.deepEqual(seen.later.fresh, ["Ada finished Login"]);
+});
+
+test("a project switch puts the chips back on All and keeps the view", { timeout: 60_000 }, async () => {
+  const seen = await steps(`
+    const timeline = await Fixture.click("[role=radio]", "Timeline");
+    const merges = await Fixture.click("button[aria-pressed]", "Merges");
+    await Fixture.move("beta");
+    let moved = await Fixture.reply(${JSON.stringify(ok)});
+    if (moved.waiting > 0) moved = await Fixture.reply(${JSON.stringify(ok)});
+    return { timeline, merges, moved };
+  `);
+  assert.equal(seen.timeline.missed, null);
+  assert.deepEqual(seen.merges.pressed, ["Merges"]);
+  assert.deepEqual(seen.moved.pressed, ["All"]);
+  assert.deepEqual(seen.moved.view, ["Timeline"]);
+});

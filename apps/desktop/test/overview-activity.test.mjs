@@ -78,7 +78,7 @@ test("Overview reads every project event, not the research jobs", async () => {
 
 test("a goal named Project is its own group, apart from events with no goal", () => {
   const groups = research.groupActivity([item(2, 2_000, "Project"), item(1, 1_000, null)]);
-  assert.deepEqual(groups.map((group) => group.goal), ["Project", "Project"]);
+  assert.deepEqual(groups.map((group) => group.goal), ["Project", "Project (no goal)"]);
   assert.equal(new Set(groups.map((group) => group.key)).size, 2, "the two groups have different keys");
   assert.deepEqual(groups.map((group) => group.items.map((entry) => entry.id)), [[2], [1]]);
 });
@@ -87,10 +87,10 @@ test("a read the engine cut counts each goal with a plus", () => {
   const now = 10 * 60_000;
   const items = Array.from({ length: 10 }, (_, i) => item(100 + i, now - i * 60_000, "Build the service"));
   const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: true, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
-  assert.match(html, /10\+ items, latest just now/);
+  assert.match(html, /10\+ items · latest just now/);
   assert.match(html, />Show all \(10\+\)</);
   const whole = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
-  assert.match(whole, /10 items, latest just now/);
+  assert.match(whole, /10 items · latest just now/);
 });
 
 test("the project's creation shows under Project", () => {
@@ -126,4 +126,43 @@ test("research with no goal is its own Research group, apart from Project and fr
   assert.deepEqual(groups.map((group) => group.items.map((entry) => entry.id)), [[4], [3, 1], [2]]);
   assert.equal(new Set(groups.map((group) => group.key)).size, 3, "each group has its own key");
   assert.equal(groups[1].key, research.RESEARCH_KEY, "Research events with no goal share the research key");
+});
+
+test("a goal's header shows its phase path, done steps checked and the latest step current", () => {
+  const now = 10 * 60_000;
+  const phase = (id, at, text) => item(id, at, "Build the service", { kind: "phase", text });
+  const items = [
+    phase(3, now, "Building: endpoints are in"),
+    phase(2, now - 60_000, "Architecture done: one adapter"),
+    phase(1, now - 2 * 60_000, "Architecture: adapter drafted"),
+    item(4, now - 5 * 60_000, "Write the docs", { text: "You accepted the guide" }),
+  ];
+  assert.equal(typeof research.phasePath, "function", "the phase path is read from the goal's phase events");
+  assert.deepEqual(research.phasePath(items.slice(0, 3)), [{ step: "Architecture", done: true }, { step: "Building", done: false }]);
+  assert.deepEqual(research.phasePath([]), []);
+  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
+  assert.match(html, /<span class="pj-activity-path"[^>]*><span class="done">✓ Architecture<\/span><span class="now">Building<\/span><\/span>/);
+  assert.equal(html.match(/class="pj-activity-path"/g)?.length, 1, "a goal with no phase shows no path");
+  assert.match(html, /3 items · latest just now/);
+  assert.match(html, /1 item · latest 5 min ago/i);
+});
+
+test("a goal named Project or Research is told apart from the events with no goal, in groups and in Timeline", () => {
+  const items = [
+    item(4, 4_000, "Research"),
+    item(3, 3_000, null, { kind: "research_saved", text: "Market research saved" }),
+    item(2, 2_000, "Project"),
+    item(1, 1_000, null),
+  ];
+  assert.deepEqual(research.groupActivity(items).map((group) => group.goal), ["Research", "Research (no goal)", "Project", "Project (no goal)"]);
+  assert.deepEqual(research.groupActivity([item(1, 1_000, null)]).map((group) => group.goal), ["Project"], "with no goal of that name the mockup label stays");
+  const html = renderToStaticMarkup(createElement(overview.ActivityTimeline, { items, now: 4_000 }));
+  assert.deepEqual([...html.matchAll(/class="pj-activity-tag">([^<]*)</g)].map((found) => found[1]), ["Research", "Research (no goal)", "Project", "Project (no goal)"]);
+});
+
+test("a fresh row's highlight runs only when the owner allows motion", async () => {
+  const { readFileSync } = await import("node:fs");
+  const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
+  assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.pj-activity-row\.fresh \{ animation: /);
+  assert.equal(css.match(/\.pj-activity-row\.fresh/g)?.length, 1, "no fresh rule outside the motion query");
 });

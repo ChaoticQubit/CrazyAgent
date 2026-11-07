@@ -39,6 +39,7 @@ function state() {
     groups: all(".pj-activity-goal").map((group) => ({ label: group.getAttribute("aria-label"), open: group.querySelector("[aria-expanded]")?.getAttribute("aria-expanded") ?? null, rows: [...group.querySelectorAll(".pj-activity-row")].map(rowText) })),
     timeline: all(".pj-activity-timeline .pj-activity-row").map((row) => ({ text: rowText(row), goal: row.querySelector(".pj-activity-tag")?.textContent ?? null })),
     pressed: all("[aria-pressed=true]").map((chip) => chip.textContent),
+    fresh: all(".pj-activity-row.fresh").map(rowText),
     view: all("[role=radio][aria-checked=true]").map((choice) => choice.textContent),
     asked: [...asked],
     waiting: replies.length,
