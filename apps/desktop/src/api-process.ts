@@ -296,12 +296,14 @@ export const AGENT_SETTINGS_STALE = "These agent settings changed since you open
  * shows the saved ones again. */
 export const AGENT_SETTINGS_UNCONFIRMED = "CrazyAgent couldn't confirm these agent settings were saved. The page now shows the saved ones; check them before you change them again.";
 
-/** What the agent settings page does after a save: reads the settings again after one that
- * landed or one refused as stale, and says what happened. Input: the save's result. Output:
- * whether to read the settings again, and the failure to show, empty for none. */
+/** What the agent settings page does after a save: reads the settings and their version again
+ * after one that landed, one refused as stale or one the engine could not confirm, which may
+ * have landed, and says what happened. Input: the save's result. Output: whether to read the
+ * settings again, and the failure to show, empty for none. */
 export function afterSettingsSave(result: Result<InstructionView>): { reload: boolean; failure: string } {
   if (result.kind === "ok") return { reload: true, failure: "" };
   if (result.kind === "error" && result.code === "stale_revision") return { reload: true, failure: AGENT_SETTINGS_STALE };
+  if (result.kind === "error" && result.code === "process_outcome_unknown") return { reload: true, failure: AGENT_SETTINGS_UNCONFIRMED };
   return { reload: false, failure: processMessage(result) };
 }
 

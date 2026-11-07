@@ -173,8 +173,8 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
 }
 
 /** A project's agent settings: reads them from the engine and saves each change at once at
- * the version read; a save refused because they changed since reads them again and says so.
- * Input: the project id. */
+ * the version read; a save refused because they changed since, or one the engine could not
+ * confirm, reads them again and says so, as `afterSettingsSave` decides. Input: the project id. */
 export function AgentSettings({ projectId }: { projectId: string }) {
   const session = useAppSession();
   const [settings, reload] = useLoad(() => loadInstructionSettings(projectId), [projectId]);

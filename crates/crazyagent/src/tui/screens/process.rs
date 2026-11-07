@@ -796,7 +796,8 @@ impl ProcessPage {
                 ));
             }
             (ProcessQuery::SaveSettings { project, .. }, Err(code))
-                if code == crate::storage::versioned::STALE_CODE =>
+                if code == crate::storage::versioned::STALE_CODE
+                    || code == "process_outcome_unknown" =>
             {
                 self.settings = None;
                 self.send(
@@ -805,10 +806,16 @@ impl ProcessPage {
                     },
                     ctx,
                 );
-                ctx.say(Message::warning(
-                    "These agent settings changed since you opened them.",
-                    "The page now shows the saved ones; make your change again.",
-                ));
+                ctx.say(match code == crate::storage::versioned::STALE_CODE {
+                    true => Message::warning(
+                        "These agent settings changed since you opened them.",
+                        "The page now shows the saved ones; make your change again.",
+                    ),
+                    false => Message::warning(
+                        "CrazyAgent couldn't confirm these agent settings were saved.",
+                        "The page now shows the saved ones; check them before you change them again.",
+                    ),
+                });
             }
             (ProcessQuery::SaveSettings { .. }, Err(code)) => {
                 ctx.say(Message::error(&message(code), ""));
