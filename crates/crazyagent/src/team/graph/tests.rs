@@ -1380,20 +1380,15 @@ fn relations_name_each_pair_and_a_live_handoff_overrides_then_falls_back() {
     assert_eq!(
         relations(&shown),
         [
-            (
-                "master",
-                "team-3",
-                Relation::DelegatedTo,
-                handing("Task 11")
-            ),
+            ("master", "team-3", Relation::Leads, handing("Task 11")),
             ("team-3", "teammate-3-12", Relation::TeammateOf, None),
-            ("team-3", "team-7", Relation::Leads, handing("Task 15")),
-            ("team-7", "team-8", Relation::Leads, handing("Task 16")),
+            ("team-3", "team-7", Relation::TeammateOf, handing("Task 15")),
+            ("team-7", "team-8", Relation::TeammateOf, handing("Task 16")),
             ("master", "team-4", Relation::DelegatedTo, None),
             ("master", "team-5", Relation::DelegatedTo, None),
             ("master", "team-6", Relation::DelegatedTo, None),
         ],
-        "the master delegates to each top-level agent, a lead leads its workers and its pane teammate, and an open task hands off over an unread message"
+        "as in the approved mockup the master leads an agent that leads workers and delegates to one that leads none, every agent under a lead is its teammate, and an open task hands off over an unread message"
     );
     let pairs: BTreeSet<(&str, &str)> = shown
         .relations
@@ -1444,11 +1439,16 @@ fn waits_reviews_and_messages_show_on_their_pair_under_a_handoff() {
         .prompt
         .clone_from(&long);
     let mut facts = GraphFacts {
-        coord: unread(vec![(Party::Agent(6), Party::Agent(2), 1, Receipt::Sent)]),
-        review_ready: BTreeSet::from([4, 6, 8]),
+        coord: Some(Snapshot {
+            questions_for_owner: vec![question(1, Party::Agent(5)), question(2, Party::Engine)],
+            ..unread(vec![(Party::Agent(6), Party::Agent(2), 1, Receipt::Sent)]).unwrap()
+        }),
+        review_ready: vec![(8, 21), (7, 20), (4, 22), (8, 19)],
         asking: BTreeSet::from([(7, 3), (8, 7), (5, 2), (99, 3)]),
         ..none()
     };
+    let waiting = |owner| Some(LiveAction::WaitingOn { owner });
+    let reviewing = |change_set| Some(LiveAction::Reviewing { change_set });
     let cut = handing(&long[..HANDOFF_TASK_BYTES_MAX]);
     assert_eq!(
         relations(&graph(&status, &facts))
@@ -1460,11 +1460,11 @@ fn waits_reviews_and_messages_show_on_their_pair_under_a_handoff() {
             ("team-3", "teammate-3-12", None),
             ("team-3", "team-7", handing("Task 15")),
             ("team-7", "team-8", cut),
-            ("master", "team-4", Some(LiveAction::Reviewing)),
-            ("master", "team-5", Some(LiveAction::WaitingOn)),
-            ("master", "team-6", Some(LiveAction::Reviewing)),
+            ("master", "team-4", None),
+            ("master", "team-5", waiting(true)),
+            ("master", "team-6", Some(LiveAction::Messaging)),
         ],
-        "the newest open task hands off over a wait and a review, the master reviews a top-level agent and answers its question, and a review shows over a message"
+        "the newest open task hands off over a wait and a review, an agent with a question for the owner waits on the owner's answer over its question to the master, the master's own review of a top-level agent sits on no line, and a message shows alone"
     );
 
     finish(&mut status, &[11, 15, 16, 17]);
@@ -1477,27 +1477,30 @@ fn waits_reviews_and_messages_show_on_their_pair_under_a_handoff() {
     assert_eq!(
         rested(&facts),
         [
+            reviewing(20),
             None,
+            waiting(false),
+            waiting(false),
             None,
-            Some(LiveAction::WaitingOn),
-            Some(LiveAction::WaitingOn),
-            Some(LiveAction::Reviewing),
-            Some(LiveAction::WaitingOn),
-            Some(LiveAction::Reviewing),
-        ],
-        "a wait on the lead shows once the handoff ends, over the worker's review"
-    );
-    facts.asking.remove(&(8, 7));
-    facts.review_ready.remove(&6);
-    assert_eq!(
-        rested(&facts)[3..],
-        [
-            Some(LiveAction::Reviewing),
-            Some(LiveAction::Reviewing),
-            Some(LiveAction::WaitingOn),
+            waiting(true),
             Some(LiveAction::Messaging),
         ],
-        "the lead reviews its worker once the question is answered, and a reviewed agent falls back to its unread message"
+        "a lead reviewing its worker's change set shows on the line down to that lead, and a wait between two agents shows over the review"
+    );
+    facts.asking.remove(&(7, 3));
+    facts.coord.as_mut().unwrap().questions_for_owner.clear();
+    assert_eq!(
+        rested(&facts),
+        [
+            reviewing(20),
+            None,
+            reviewing(21),
+            waiting(false),
+            None,
+            waiting(false),
+            Some(LiveAction::Messaging),
+        ],
+        "once answered, the worker's line names the newest change set it reviews, and an agent whose owner question is answered still waits on the master"
     );
 }
 
@@ -1581,8 +1584,8 @@ fn relation_facts_read_review_ready_work_and_open_questions_between_agents() {
 
     assert_eq!(
         review_ready(&connection, &project).unwrap(),
-        BTreeSet::from([sub]),
-        "only this project's review-ready work counts, not active work"
+        [(sub, reviewed)],
+        "only this project's review-ready work counts, with its change set number, not active work"
     );
     assert_eq!(
         asking(&connection, &project).unwrap(),
@@ -1605,7 +1608,7 @@ fn relation_facts_read_review_ready_work_and_open_questions_between_agents() {
             review_ready(&connection, &project).unwrap(),
             asking(&connection, &project).unwrap()
         ),
-        (BTreeSet::new(), BTreeSet::from([(lead, master)])),
+        (Vec::new(), BTreeSet::from([(lead, master)])),
         "an answered question and completed work leave the facts"
     );
 }
