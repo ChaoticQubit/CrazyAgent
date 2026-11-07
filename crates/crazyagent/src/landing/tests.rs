@@ -5636,6 +5636,118 @@ fn a_lead_may_merge_its_own_workers_tip_and_is_refused_for_any_other_branch() {
     assert_eq!(case.view(&id).state, ChangeState::Pending);
 }
 
+/// The master's worktree as the engine leases it, in the case's store: the project and
+/// its repository admitted, and a master bootstrap lease checked out on its own
+/// `crazyagent/` branch, the only HEAD a master change set is recorded from. Input: the
+/// case. Output: the master's workspace.
+fn master_agent(case: &Case) -> Workspace {
+    use crate::protocol::{Outcome, ProjectSpec, SessionId, TaskId};
+    let engine = case.repo.parent().unwrap().join("engine");
+    let project = &case.workspace.project;
+    crate::storage::initialize_authority_schemas(&case.db).unwrap();
+    let repository = case.repo.to_str().unwrap();
+    let spec = ProjectSpec {
+        name: "Project one".into(),
+        repositories: vec![repository.into()],
+    };
+    let task = TaskId::new("master-bootstrap-1").unwrap();
+    let session = SessionId::new("session-1").unwrap();
+    let tx = case.db.unchecked_transaction().unwrap();
+    assert_eq!(
+        crate::storage::create_project(&tx, project, &spec).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        crate::worktrees::admit(&tx, project, repository).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        crate::worktrees::reserve_master_bootstrap(
+            &tx, &engine, project, &task, &session, repository
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    crate::worktrees::provision(&case.db, &task, repository).unwrap();
+    let Outcome::Worktrees { leases } = crate::worktrees::leases(&case.db, &task).unwrap() else {
+        panic!("the bootstrap task holds its lease");
+    };
+    assert_eq!(leases.len(), 1);
+    let git_dir = crate::worktrees::lease_git_dir(&case.db, &leases[0]).unwrap();
+    Workspace {
+        agent: ChangeAgent {
+            kind: AgentKind::Master,
+            id: "master-1".into(),
+            label: "Master".into(),
+        },
+        worktree: PathBuf::from(&leases[0].path),
+        git_dir,
+        ..case.workspace.clone()
+    }
+}
+
+/// The owner asks the master to resolve the conflicts and merge (DEC-117 Q2). At Full
+/// access the master's merge of an open change set into its own work passes its turn,
+/// and accepting the master's set lands the merged work; below Full access the same merge
+/// is refused as outside work (DEC-107).
+#[test]
+fn a_master_turn_merging_an_open_change_set_passes_only_at_full_access() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let sub_set = case.turn(TurnOutcome::Succeeded).unwrap();
+    let sub_head = case.view(&sub_set).head;
+    let master = master_agent(&case);
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
+    in_master(&[
+        "-c",
+        "user.name=Master",
+        "-c",
+        "user.email=master@example.invalid",
+        "merge",
+        "-q",
+        "--no-ff",
+        "--no-edit",
+        &sub_head,
+    ]);
+    assert_eq!(in_master(&["rev-parse", "HEAD^2"]).trim(), sub_head);
+    let save = |access| {
+        crate::sandbox::policy::save(
+            &case.db,
+            "project-1",
+            &AgentPolicy {
+                access,
+                ..AgentPolicy::default()
+            },
+        )
+        .unwrap()
+    };
+    save(AgentAccess::OwnBranch);
+    assert_eq!(
+        refused(record_turn_end(&case.db, &master, &merge_turn())),
+        "changes_outside_merge"
+    );
+    save(AgentAccess::Full);
+    let master_set = record_turn_end(&case.db, &master, &merge_turn())
+        .unwrap()
+        .expect("the master's merge makes its change set");
+    case.accept(&master_set).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n",
+        "accepting the master's set lands the merged change set's work"
+    );
+}
+
 impl Case {
     fn observe(&self) {
         observe(&self.db, Some(&self.workspace.project)).unwrap();
