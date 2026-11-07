@@ -117,7 +117,7 @@ function useActivity(projectId: string): ActivityRead {
   return read;
 }
 
-function RecentActivity({ projectId }: { projectId: string }) {
+export function RecentActivity({ projectId }: { projectId: string; every?: number; read?: unknown }) {
   const read = useActivity(projectId);
   const [expanded, setExpanded] = useState<string[]>([]);
   useEffect(() => setExpanded([]), [projectId]);

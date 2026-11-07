@@ -75,3 +75,29 @@ test("Overview reads every project event, not the research jobs", async () => {
   assert.ok(source.includes("loadActivity("), "Overview reads the engine activity");
   assert.equal(typeof research.activity, "undefined", "the research-only activity list is gone");
 });
+
+test("a goal named Project is its own group, apart from events with no goal", () => {
+  const groups = research.groupActivity([item(2, 2_000, "Project"), item(1, 1_000, null)]);
+  assert.deepEqual(groups.map((group) => group.goal), ["Project", "Project"]);
+  assert.equal(new Set(groups.map((group) => group.key)).size, 2, "the two groups have different keys");
+  assert.deepEqual(groups.map((group) => group.items.map((entry) => entry.id)), [[2], [1]]);
+});
+
+test("a read the engine cut counts each goal with a plus", () => {
+  const now = 10 * 60_000;
+  const items = Array.from({ length: 10 }, (_, i) => item(100 + i, now - i * 60_000, "Build the service"));
+  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: true, now, expanded: [], onShowAll: () => {} }));
+  assert.match(html, /10\+ items, latest just now/);
+  assert.match(html, />Show all \(10\+\)</);
+  const whole = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], onShowAll: () => {} }));
+  assert.match(whole, /10 items, latest just now/);
+});
+
+test("the project's creation shows under Project", () => {
+  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, {
+    items: [item(1, 0, null, { kind: "created", text: "You created Harbor Notes" })], more: false, now: 0, expanded: [], onShowAll: () => {},
+  }));
+  assert.match(html, /aria-label="Project"/);
+  assert.match(html, /You created Harbor Notes/);
+});
+
