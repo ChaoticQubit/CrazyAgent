@@ -11,9 +11,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio::sync::mpsc;
 
-pub const VIEWERS_MAX: usize = 4;
+pub const VIEWERS_MAX: usize = 9;
 pub const VIEWS_MAX: usize = crazyagent::terminal::DESKTOP_VIEWS_MAX;
 pub const WINDOWS_MAX: usize = 8;
+const WALL_PREFIX: &str = "terminals-";
+const WALL_DIGEST_DIGITS: usize = 16;
+
+const _: () = assert!(WINDOWS_MAX < 10);
+const _: () = assert!(VIEWERS_MAX <= VIEWS_MAX);
 const REQUESTS_MAX: usize = 64;
 const CODE_BYTES_MAX: usize = 64;
 
@@ -27,14 +32,41 @@ pub fn agent(text: &str) -> Result<AgentId, BridgeError> {
 /// window or a terminal wall window, `terminals-` with 16 lowercase hex digits of its
 /// project and its page number from 1 to `WINDOWS_MAX`. Takes the label. Returns the answer.
 pub fn window_label_valid(label: &str) -> bool {
-    label == "main"
+    if label == "main" {
+        return true;
+    }
+    let Some((digest, page)) = label
+        .strip_prefix(WALL_PREFIX)
+        .and_then(|rest| rest.split_once('-'))
+    else {
+        return false;
+    };
+    digest.len() == WALL_DIGEST_DIGITS
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && page.len() == 1
+        && page
+            .parse::<usize>()
+            .is_ok_and(|page| (1..=WINDOWS_MAX).contains(&page))
 }
 
 /// The label of one terminal wall window. Takes the project id and the page number.
 /// Returns `terminals-<16 hex digits of the project>-<page>`.
 pub fn wall_label(project: &ProjectId, page: usize) -> String {
-    let _ = (project, page);
-    "main".to_owned()
+    assert!((1..=WINDOWS_MAX).contains(&page));
+    let label = format!("{}{page}", wall_prefix(project));
+    assert!(window_label_valid(&label));
+    label
+}
+
+/// The start every terminal wall window label of one project shares. Takes the project id.
+/// Returns `terminals-<16 hex digits of the project>-`, which never carries the id's text.
+pub fn wall_prefix(project: &ProjectId) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    project.as_str().hash(&mut hasher);
+    format!("{WALL_PREFIX}{:016x}-", hasher.finish())
 }
 
 /// Checks a pane id the window sent for a native teammate's view, such as `%12`. Takes the
@@ -177,19 +209,13 @@ struct Viewer {
 }
 
 #[derive(Default)]
-struct Views {
-    next: u64,
+struct Window {
     viewers: HashMap<AgentId, Viewer>,
     opening: HashMap<AgentId, u64>,
     cleared: u64,
 }
 
-impl Views {
-    #[cfg(test)]
-    fn serial(&self, _window: &str, agent: &AgentId) -> Option<u64> {
-        self.viewers.get(agent).map(|viewer| viewer.serial)
-    }
-
+impl Window {
     fn held(&self) -> usize {
         let opening = self
             .opening
@@ -198,50 +224,89 @@ impl Views {
             .count();
         self.viewers.len() + opening
     }
+}
 
-    fn admits(&self, agent: &AgentId) -> bool {
-        self.viewers.contains_key(agent)
-            || self.opening.contains_key(agent)
-            || self.held() < VIEWERS_MAX
+#[derive(Default)]
+struct Views {
+    next: u64,
+    windows: HashMap<String, Window>,
+}
+
+impl Views {
+    #[cfg(test)]
+    fn serial(&self, window: &str, agent: &AgentId) -> Option<u64> {
+        let viewer = self.windows.get(window)?.viewers.get(agent)?;
+        Some(viewer.serial)
     }
 
-    /// Makes one opened place the agent's view. A place older than a view of the same agent
-    /// that opened after it never replaces that view, so a closed panel's late attach cannot
-    /// take over the newer one, and a place taken before the last page load never lands.
-    /// Takes the agent, the place's serial and its request queue.
-    /// Returns unit, `terminal_view_replaced` or `terminal_viewers_full`.
+    fn held(&self) -> usize {
+        self.windows.values().map(Window::held).sum()
+    }
+
+    fn window(&self, window: &str) -> Result<&Window, BridgeError> {
+        self.windows
+            .get(window)
+            .ok_or_else(|| failure("terminal_window_closed"))
+    }
+
+    /// Whether a window has room for a view of the agent: one it already shows or is
+    /// opening, or a free place in the window and in all windows together. Takes the window
+    /// label and the agent. Returns unit, `terminal_window_closed` or `terminal_viewers_full`.
+    fn admits(&self, window: &str, agent: &AgentId) -> Result<(), BridgeError> {
+        let shown = self.window(window)?;
+        let room = shown.viewers.contains_key(agent)
+            || shown.opening.contains_key(agent)
+            || (shown.held() < VIEWERS_MAX && self.held() < VIEWS_MAX);
+        if room {
+            Ok(())
+        } else {
+            Err(failure("terminal_viewers_full"))
+        }
+    }
+
+    /// Makes one opened place the agent's view in its window. A place older than a view of
+    /// the same agent in that window that opened after it never replaces that view, so a
+    /// closed panel's late attach cannot take over the newer one, and a place taken before
+    /// the window's last page load never lands. Takes the window label, the agent, the
+    /// place's serial and its request queue. Returns unit, `terminal_window_closed`,
+    /// `terminal_view_replaced` or `terminal_viewers_full`.
     fn install(
         &mut self,
-        _window: &str,
+        window: &str,
         agent: &AgentId,
         serial: u64,
         requests: mpsc::Sender<TerminalRequest>,
     ) -> Result<(), BridgeError> {
-        let newer = serial <= self.cleared
-            || self.opening.get(agent).is_some_and(|open| *open > serial)
-            || self
+        let shown = self.window(window)?;
+        let newer = serial <= shown.cleared
+            || shown.opening.get(agent).is_some_and(|open| *open > serial)
+            || shown
                 .viewers
                 .get(agent)
                 .is_some_and(|viewer| viewer.serial > serial);
         if newer {
             return Err(failure("terminal_view_replaced"));
         }
-        if !self.admits(agent) {
-            return Err(failure("terminal_viewers_full"));
+        self.admits(window, agent)?;
+        let shown = self
+            .windows
+            .get_mut(window)
+            .ok_or_else(|| failure("terminal_window_closed"))?;
+        if shown.opening.get(agent) == Some(&serial) {
+            shown.opening.remove(agent);
         }
-        if self.opening.get(agent) == Some(&serial) {
-            self.opening.remove(agent);
-        }
-        self.viewers
+        shown
+            .viewers
             .insert(agent.clone(), Viewer { serial, requests });
-        assert!(self.held() <= VIEWERS_MAX);
+        assert!(shown.held() <= VIEWERS_MAX);
+        assert!(self.held() <= VIEWS_MAX);
         Ok(())
     }
 }
 
-/// One view's place among the window's views, taken before its engine connection opens
-/// so views still opening count toward `VIEWERS_MAX`. Attaching turns it into the view;
-/// dropping it first gives the place back.
+/// One view's place among its window's views, taken before its engine connection opens
+/// so views still opening count toward `VIEWERS_MAX` and `VIEWS_MAX`. Attaching turns it
+/// into the view; dropping it first gives the place back.
 pub struct Reservation {
     terminals: Arc<Terminals>,
     window: String,
@@ -252,9 +317,10 @@ pub struct Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         if let Ok(mut views) = self.terminals.0.lock()
-            && views.opening.get(&self.agent) == Some(&self.serial)
+            && let Some(shown) = views.windows.get_mut(&self.window)
+            && shown.opening.get(&self.agent) == Some(&self.serial)
         {
-            views.opening.remove(&self.agent);
+            shown.opening.remove(&self.agent);
         }
     }
 }
@@ -301,9 +367,10 @@ impl Reservation {
     }
 }
 
-/// The window's live terminal views, at most one per agent and `VIEWERS_MAX` in all.
-/// Typing and resizing go through here without waiting on the owner bridge lock.
-/// A dropped view sends the engine a detach; the agent keeps running.
+/// The live terminal views of every window that shows terminals: the main window and the
+/// terminal wall windows, at most one view per agent in a window, `VIEWERS_MAX` in one
+/// window and `VIEWS_MAX` in all. Typing and resizing go through here without waiting on
+/// the owner bridge lock. A dropped view sends the engine a detach; the agent keeps running.
 #[derive(Default)]
 pub struct Terminals(Mutex<Views>);
 
@@ -312,22 +379,27 @@ impl Terminals {
         self.0.lock().map_err(|_| failure("terminal_state_failed"))
     }
 
-    /// Checks for room and takes a place for one more view in the same step, before its
-    /// connection opens. Takes the terminal name; a second view of the same agent replaces
-    /// the first. Returns the held place, or `terminal_viewers_full`.
+    /// Checks for room and takes a place for one more view in a window in the same step,
+    /// before its connection opens. Takes the window label and the terminal name; a second
+    /// view of the same agent in the window replaces the first. Returns the held place,
+    /// `terminal_window_closed` or `terminal_viewers_full`.
     pub fn room(
         self: &Arc<Self>,
         window: &str,
         agent: &AgentId,
     ) -> Result<Reservation, BridgeError> {
+        assert!(window_label_valid(window));
         let mut views = self.views()?;
-        if !views.admits(agent) {
-            return Err(failure("terminal_viewers_full"));
-        }
+        views.admits(window, agent)?;
         views.next += 1;
         let serial = views.next;
-        views.opening.insert(agent.clone(), serial);
-        assert!(views.held() <= VIEWERS_MAX);
+        views
+            .windows
+            .get_mut(window)
+            .ok_or_else(|| failure("terminal_window_closed"))?
+            .opening
+            .insert(agent.clone(), serial);
+        assert!(views.held() <= VIEWS_MAX);
         Ok(Reservation {
             terminals: Arc::clone(self),
             window: window.to_owned(),
@@ -336,12 +408,12 @@ impl Terminals {
         })
     }
 
-    /// Queues one input, prompt or resize request for an attached agent terminal.
-    /// Takes the terminal name and the request.
+    /// Queues one input, prompt or resize request for an agent terminal a window shows.
+    /// Takes the window label, the terminal name and the request.
     /// Returns once queued in order, or a plain code for a bad request or no view.
     pub async fn send(
         &self,
-        _window: &str,
+        window: &str,
         agent: &AgentId,
         request: TerminalRequest,
     ) -> Result<(), BridgeError> {
@@ -350,8 +422,9 @@ impl Terminals {
         }
         let requests = self
             .views()?
-            .viewers
-            .get(agent)
+            .windows
+            .get(window)
+            .and_then(|shown| shown.viewers.get(agent))
             .map(|viewer| viewer.requests.clone())
             .ok_or_else(|| failure("terminal_not_attached"))?;
         requests
@@ -360,45 +433,57 @@ impl Terminals {
             .map_err(|_| failure("terminal_not_attached"))
     }
 
-    /// Closes the window's view of one agent terminal; the agent keeps running.
-    /// Takes the terminal name and the serial its attach returned; a view with another
-    /// serial is a newer one and stays, and an agent without that view is already detached.
-    /// Returns nothing.
-    pub fn detach(&self, _window: &str, agent: &AgentId, serial: u64) -> Result<(), BridgeError> {
+    /// Closes a window's view of one agent terminal; the agent keeps running.
+    /// Takes the window label, the terminal name and the serial its attach returned; a view
+    /// with another serial is a newer one and stays, and an agent without that view is
+    /// already detached. Returns nothing.
+    pub fn detach(&self, window: &str, agent: &AgentId, serial: u64) -> Result<(), BridgeError> {
         let mut views = self.views()?;
-        if views
-            .viewers
-            .get(agent)
-            .is_some_and(|viewer| viewer.serial == serial)
+        if let Some(shown) = views.windows.get_mut(window)
+            && shown
+                .viewers
+                .get(agent)
+                .is_some_and(|viewer| viewer.serial == serial)
         {
-            views.viewers.remove(agent);
+            shown.viewers.remove(agent);
         }
         Ok(())
     }
 
-    /// Ends every view of the page the main webview is leaving, as a reload or a new page
-    /// load starts: that page can no longer read or detach its views, so they would hold the
-    /// viewer slots for good. Dropping a view closes its request queue, which detaches it
-    /// from the engine, and an attach the old page still had opening is refused when it
-    /// lands. Takes nothing. Returns nothing.
-    pub fn page_started(&self, _window: &str) {
+    /// Ends every view of the page a window is leaving, as its first load, a reload or a new
+    /// page load starts, and makes the window ready to show views: the old page can no
+    /// longer read or detach its views, so they would hold the viewer slots for good.
+    /// Dropping a view closes its request queue, which detaches it from the engine, and an
+    /// attach the old page still had opening is refused when it lands. Other windows' views
+    /// stay. Takes the window label. Returns nothing.
+    pub fn page_started(&self, window: &str) {
+        assert!(window_label_valid(window));
         if let Ok(mut views) = self.0.lock() {
-            views.viewers.clear();
-            views.opening.clear();
-            views.cleared = views.next;
-            assert_eq!(views.held(), 0);
+            let next = views.next;
+            let shown = views.windows.entry(window.to_owned()).or_default();
+            shown.viewers.clear();
+            shown.opening.clear();
+            shown.cleared = next;
+            assert_eq!(shown.held(), 0);
         }
     }
 
     /// Ends every view of a window that closed and forgets the window, so an attach it still
-    /// had opening is refused when it lands. Takes the window label. Returns nothing.
-    pub fn window_closed(&self, _window: &str) {}
+    /// had opening is refused when it lands and the window takes no new view. Takes the
+    /// window label. Returns nothing.
+    pub fn window_closed(&self, window: &str) {
+        if let Ok(mut views) = self.0.lock() {
+            views.windows.remove(window);
+            assert!(!views.windows.contains_key(window));
+        }
+    }
 
-    fn forget(&self, _window: &str, agent: &AgentId, serial: u64) {
+    fn forget(&self, window: &str, agent: &AgentId, serial: u64) {
         if let Ok(mut views) = self.0.lock()
-            && views.viewers.get(agent).is_some_and(|v| v.serial == serial)
+            && let Some(shown) = views.windows.get_mut(window)
+            && shown.viewers.get(agent).is_some_and(|v| v.serial == serial)
         {
-            views.viewers.remove(agent);
+            shown.viewers.remove(agent);
         }
     }
 }
@@ -676,9 +761,10 @@ mod tests {
         terminals
             .views()
             .unwrap()
-            .install(WALL, &team(1), place.serial, requests.clone())
+            .install(WALL, &team(1), place.serial, requests)
             .unwrap();
         let late = terminals.room(WALL, &team(2)).unwrap();
+        let (requests, _late_queue) = mpsc::channel(1);
 
         terminals.window_closed(WALL);
 
