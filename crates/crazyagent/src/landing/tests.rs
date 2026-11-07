@@ -1182,6 +1182,38 @@ fn update_merges_the_owner_branch_into_the_agent_worktree_with_conflict_markers(
 }
 
 #[test]
+fn recording_a_turn_end_alone_never_merges_main_into_the_agent_s_work() {
+    let case = Case::new();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    case.edit("README", "one\ntwo\nthree, the agent's\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(
+        case.view(&id).state,
+        ChangeState::Pending,
+        "the turn-end caller decides whether a set goes back to its agent"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        "one\ntwo\nthree, the agent's\n"
+    );
+
+    let case = Case::own_branch();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    case.edit("README", "one\ntwo\nthree, the agent's\n");
+    let head = case.agent_commit("Change the third line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(
+        (case.view(&id).state, case.view(&id).head),
+        (ChangeState::Pending, head.clone())
+    );
+    assert_eq!(
+        (case.agent_head(), case.agent(&["status", "--porcelain"])),
+        (head, String::new()),
+        "the engine never runs git in the agent's own clone (CC-N1)"
+    );
+}
+
+#[test]
 fn update_refuses_while_the_agent_has_unrecorded_changes() {
     let case = Case::new();
     case.edit("README", "one\ntwo\nthree\nfour\n");
@@ -1658,6 +1690,37 @@ fn repository_hooks_filters_merge_drivers_textconv_and_fsmonitor_never_run() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert!(ran.is_empty(), "configured commands ran: {ran:?}");
+}
+
+/// Main renamed the file the agent edited and changed it too, so git merges the agent's
+/// edit at main's new path; a merge driver the owner set for that path in the repository's
+/// own attributes never runs, and Accept refuses as for any configured command.
+#[test]
+fn accept_refuses_a_merge_driver_on_the_path_main_renamed_the_agent_s_file_to() {
+    let case = Case::new();
+    case.edit("README", "uno\ntwo\nthree\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner(&["mv", "README", "LIESMICH"]);
+    write(&case.repo.join("LIESMICH"), "one\ntwo\nTHREE\n");
+    case.owner(&["commit", "-q", "-am", "Rename README and shout three"]);
+    let marker = case.home.join("driver-ran");
+    case.owner(&[
+        "config",
+        "merge.mark.driver",
+        &format!("/usr/bin/touch {}", marker.display()),
+    ]);
+    write(
+        &case.repo.join(".git/info/attributes"),
+        "LIESMICH merge=mark\n",
+    );
+    let before = case.checkout();
+    assert_eq!(refused(case.accept(&id)), "changes_git_unsupported");
+    assert!(
+        !marker.exists(),
+        "the owner's merge driver ran at the path main renamed the agent's file to"
+    );
+    assert_eq!(case.checkout(), before);
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
 }
 
 /// A dirty submodule in the agent's worktree does not make the worktree look unfinished, and
@@ -6089,6 +6152,42 @@ fn a_master_turn_merging_an_open_change_set_passes_only_at_full_access() {
         std::fs::read_to_string(case.repo.join("README")).unwrap(),
         "one\ntwo\nthree\nfour\n",
         "accepting the master's set lands the merged change set's work"
+    );
+}
+
+/// A master's change set that conflicts with main waits for the owner at its turn end, as
+/// before OS-8: the engine never merges main into the master's leased worktree.
+#[test]
+fn a_master_s_set_that_conflicts_with_main_waits_for_the_owner_at_its_turn_end() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    std::fs::write(
+        master.worktree.join("README"),
+        "one\ntwo\nthree, the master's\n",
+    )
+    .unwrap();
+    let recorded =
+        crate::landing_turns::record(&case.db, &master, &merge_turn()).map_err(|problem| problem.0);
+    let Ok(crate::landing_turns::Landed::Added(id)) = recorded else {
+        panic!("the master's turn kept no change set: {recorded:?}");
+    };
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(
+        std::fs::read_to_string(master.worktree.join("README")).unwrap(),
+        "one\ntwo\nthree, the master's\n",
+        "the engine merged main into the master's work at its turn end"
+    );
+    assert!(
+        matches!(case.accept(&id).unwrap(), AcceptOutcome::Conflict { .. }),
+        "the master's set clashes with main"
     );
 }
 

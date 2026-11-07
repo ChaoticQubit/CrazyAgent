@@ -85,6 +85,18 @@ pub(super) fn owner_identity(
     Ok((read("user.name")?, read("user.email")?))
 }
 
+/// The paths a merge of a change set onto a tip can touch: those the agent changed and
+/// those main changed since the set's merge base, each side of a rename apart, so the
+/// path git merges an edit at after main renamed the file is checked too. Inputs: the
+/// repository, the merge base, the tip and the set's head. Output: the paths, sorted once.
+fn merge_paths(repo: &Repo, from: &str, tip: &str, head: &str) -> Result<Vec<String>, EngineError> {
+    let mut paths = diff::changed_paths(repo, from, head)?;
+    paths.extend(diff::changed_paths(repo, from, tip)?);
+    paths.sort_unstable();
+    paths.dedup();
+    Ok(paths)
+}
+
 /// Says whether any path has a filter attribute, or a merge attribute naming a driver,
 /// in any of the trees, reading attributes from each tree and the repository's own
 /// info/attributes. Inputs: the repository, the paths and the trees. Output: true when
@@ -917,7 +929,7 @@ pub(super) fn accept_to(
     let (reference, tip, target) = landing_target(db, &owner, &repository, named.as_deref())?;
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let from = measured_from(db, &owner, &record, &tip)?;
-    let paths = diff::changed_paths(&owner, &from, &record.head)?;
+    let paths = merge_paths(&owner, &from, &tip, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
     }
@@ -1096,7 +1108,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     };
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let from = measured_from(db, &owner, &record, &tip)?;
-    let paths = diff::changed_paths(&owner, &from, &record.head)?;
+    let paths = merge_paths(&owner, &from, &tip, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
     }
@@ -1122,6 +1134,65 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     flow::reset_agent(&agent, &merged)?;
     record.intent = None;
     store::save(db, &record)
+}
+
+/// The paths a change set's work conflicts on with the tip it lands on (OS-8): git's own
+/// three-way merge of its head onto that tip from where the work is measured, with no
+/// merge driver, run in the owner repository only. None while the tip cannot be read or
+/// already lies in the head's history. A path it changes that carries an owner-configured
+/// filter or merge driver, which that merge would run, is refused before it runs, as
+/// `update` refuses it. Inputs: the store and the change set. Output: the conflicting
+/// paths, empty for a clean merge, `changes_git_unsupported`, or the plain git code.
+pub(super) fn conflicts_with_tip(
+    db: &Connection,
+    record: &Record,
+) -> Result<Vec<String>, EngineError> {
+    let owner = Repo::open(&record.repository, &record.repository.join(".git"), None)?;
+    let Some(tip) = landing_tip(
+        db,
+        &owner,
+        &record.repository,
+        &record.project,
+        &record.agent,
+    ) else {
+        return Ok(Vec::new());
+    };
+    let from = measured_from(db, &owner, record, &tip)?;
+    if from == tip {
+        return Ok(Vec::new());
+    }
+    let paths = merge_paths(&owner, &from, &tip, &record.head)?;
+    if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
+        return Err(failure("changes_git_unsupported"));
+    }
+    let (_, conflicts) = merge(&owner, &from, &tip, &record.head)?;
+    Ok(conflicts)
+}
+
+/// Tells whether an agent's change set conflicts with the tip it lands on, so its turn
+/// end can send it back to its agent before the owner sees it (OS-8). Only a Pending set
+/// of an agent that takes its own resolve task is checked: a master's set keeps the
+/// owner's Accept and Update, a lead's worker while its lead merges it, or a native
+/// teammate, keeps its lead's merge, which tells the lead the files, and an agent's own
+/// clone waits for the owner, since its git takes no merge of the engine's commit.
+/// Inputs: the store and the change set. Output: the answer, or the plain code of a
+/// check that could not run.
+pub(super) fn conflicts_with_main(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
+    let record = store::load(db, id)?;
+    if record.state != ChangeState::Pending
+        || record.intent.is_some()
+        || record.agent.kind == AgentKind::Master
+        || flow::in_clone(&record)
+    {
+        return Ok(false);
+    }
+    let lead = super::subagent::lead_of(db, &record.project, &record.agent, &record.repository);
+    if !matches!(lead, Ok(None))
+        || super::subagent::is_teammate(db, &record.project, &record.agent)?
+    {
+        return Ok(false);
+    }
+    Ok(!conflicts_with_tip(db, &record)?.is_empty())
 }
 
 /// Finishes or undoes owner-checkout and worktree work an engine stop interrupted, one
@@ -1427,7 +1498,7 @@ fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Ju
         }
         return whole(&from);
     }
-    let paths = diff::changed_paths(owner, &from, &record.head)?;
+    let paths = merge_paths(owner, &from, tip, &record.head)?;
     if uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
         return whole(&from);
     }

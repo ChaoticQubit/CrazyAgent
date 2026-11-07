@@ -3164,8 +3164,7 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
     let sets = crate::landing::list(&db, &fixture.setup.project_id).unwrap();
     assert_eq!(sets.len(), 1, "{sets:?}");
     assert_eq!(sets[0].agent.id, member.id.to_string());
-    crate::landing::update(&db, &sets[0].id).unwrap();
-    crate::landing_turns::start_resolve(&db, &sets[0].id).unwrap();
+    assert!(crate::landing_turns::update(&db, &sets[0].id).unwrap());
     let prompt = crate::landing::resolve_task_prompt(&db, &sets[0].id).unwrap();
     let resolve: i64 = fixture
         .connection
