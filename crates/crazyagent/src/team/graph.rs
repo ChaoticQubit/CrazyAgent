@@ -280,18 +280,18 @@ pub fn facts(
     })
 }
 
-/// Reads a project's review-ready work, newest first, which each owner's reviewer reads
-/// next. Takes a connection and the project. Returns (owner, change set number) pairs, or a
-/// SQLite failure.
+/// Reads a project's review-ready work, which each owner's reviewer reads next: each owner
+/// once with its newest change set, newest first, at most `RELATION_SCAN_MAX` owners. Takes a
+/// connection and the project. Returns (owner, change set number) pairs, or a SQLite failure.
 fn review_ready(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<Vec<(i64, i64)>, EngineError> {
     let mut statement = connection
         .prepare(
-            "SELECT owner_agent,id FROM coord_work
+            "SELECT owner_agent,id,MAX(updated) AS last FROM coord_work
              WHERE project=?1 AND state='review_ready' AND owner_agent IS NOT NULL
-             ORDER BY updated DESC, id DESC LIMIT ?2",
+             GROUP BY owner_agent ORDER BY last DESC, id DESC LIMIT ?2",
         )
         .map_err(error)?;
     let rows = statement
@@ -303,8 +303,9 @@ fn review_ready(
 }
 
 /// Reads each asker and recipient of a project's open questions between two agents, one
-/// neither replied to nor ended. Takes a connection and the project. Returns the pairs as
-/// (asker, recipient), or a SQLite failure.
+/// neither replied to nor ended: each pair once, newest first, at most `RELATION_SCAN_MAX`
+/// pairs. Takes a connection and the project. Returns the pairs as (asker, recipient), or a
+/// SQLite failure.
 fn asking(
     connection: &Connection,
     project: &ProjectId,
@@ -315,7 +316,7 @@ fn asking(
              WHERE project=?1 AND kind='question' AND from_kind='agent' AND to_kind='agent'
              AND from_agent IS NOT NULL AND to_agent IS NOT NULL
              AND receipt NOT IN ('replied','failed','expired')
-             ORDER BY id DESC LIMIT ?2",
+             GROUP BY from_agent,to_agent ORDER BY MAX(id) DESC LIMIT ?2",
         )
         .map_err(error)?;
     let rows = statement
