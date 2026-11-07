@@ -104,6 +104,7 @@ test("the project's creation shows under Project", () => {
 const KINDS = ["created", "research_started", "research_saved", "research_stopped", "task_started", "task_finished", "changes_ready", "accepted", "discarded", "conflict", "sent_back", "lead_merged", "merged_into_main", "undone", "work_started", "work_review_ready", "work_complete", "work_closed", "phase", "test"];
 
 test("every kind falls under one filter chip, and the project's creation only under All", () => {
+  assert.ok(Array.isArray(research.ACTIVITY_FILTERS) && typeof research.activityFilter === "function", "the chips and their rule come from research.ts");
   assert.deepEqual(research.ACTIVITY_FILTERS.map((filter) => filter.label), ["All", "Merges", "Changes", "Tests", "Tasks", "Phases"]);
   const under = Object.fromEntries(KINDS.map((kind) => [kind, research.activityFilter(kind)]));
   assert.deepEqual(under, {
