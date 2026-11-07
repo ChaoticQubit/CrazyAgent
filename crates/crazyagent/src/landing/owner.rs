@@ -1315,7 +1315,7 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                     .code
                     == 0;
             if moved || tip.as_deref() == Some(new.as_str()) {
-                finish(db, record, &new, ENGINE_ACTOR)?;
+                finish(db, record, &new, By::Named(ENGINE_ACTOR))?;
             } else {
                 record.intent = None;
                 store::save(db, record)?;
@@ -1624,8 +1624,8 @@ fn observe_one(
         Judged::Landed => {
             record.outside = true;
             let by = match against {
-                Against::Owner => OWNER_ACTOR,
-                Against::Lead(_) => ENGINE_ACTOR,
+                Against::Owner => By::Named(OWNER_ACTOR),
+                Against::Lead(_) => By::Named(ENGINE_ACTOR),
             };
             finish(db, &mut record, tip, by)?;
             assert!(!record.is_open());
