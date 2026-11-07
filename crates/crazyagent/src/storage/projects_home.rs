@@ -265,31 +265,8 @@ pub(super) fn add_plan(
     )
 }
 
-/// What a Delete everything would take: the project's name, its folders and the projects home.
-pub(crate) type DeleteTarget = (String, Vec<PathBuf>, Option<PathBuf>);
-
 /// A checked Delete everything: the plan with the project's research jobs, or the refusal code.
 pub(crate) type DeletePlanned = Result<(home::DeletePlan, Vec<i64>), String>;
-
-/// What a Delete everything of a project would take, read in one transaction: the project's
-/// name, its folder followed by every repository it declares, and the canonical projects
-/// home. Inputs: the transaction and the project. Output: None for an unknown project, else
-/// the name, the folders and the home, None while no home is set or it cannot be resolved.
-pub(crate) fn delete_target(
-    tx: &Transaction<'_>,
-    project: &ProjectId,
-) -> Result<Option<DeleteTarget>, EngineError> {
-    let Some(found) = guarded(tx)?
-        .into_iter()
-        .find(|registered| &registered.project_id == project)
-    else {
-        return Ok(None);
-    };
-    let mut folders = vec![found.folder];
-    folders.extend(found.repositories);
-    let home = home::load(tx)?.and_then(|saved| std::fs::canonicalize(saved).ok());
-    Ok(Some((found.name, folders, home)))
-}
 
 /// Why a Delete everything of a project is refused before anything stops: the refusal code
 /// and the sentence the remove dialog shows, which names the other project or the research.
@@ -321,42 +298,142 @@ pub(crate) struct DeleteChecked {
 }
 
 /// Checks a Delete everything of a project in one transaction, for the remove preview and
-/// the engine's plan alike. Inputs: the transaction and the project. Output: None for an
-/// unknown project, else what the delete would take and whether it may go.
+/// the engine's plan alike: the platform must qualify (`delete_platform_unqualified`), a
+/// projects home must be set, every folder must be a real folder strictly inside it, and
+/// nothing [`delete_blocked`] names may hold it back. Inputs: the transaction and the
+/// project. Output: None for an unknown project, else what the delete would take and
+/// whether it may go.
 pub(crate) fn delete_check(
     tx: &Transaction<'_>,
     project: &ProjectId,
 ) -> Result<Option<DeleteChecked>, EngineError> {
-    let Some((name, folders, home)) = delete_target(tx, project)? else {
+    let projects = guarded(tx)?;
+    let Some(found) = projects
+        .iter()
+        .find(|registered| &registered.project_id == project)
+    else {
         return Ok(None);
     };
+    let mut folders = vec![found.folder.clone()];
+    folders.extend(found.repositories.iter().cloned());
+    let home = home::load(tx)?.and_then(|saved| std::fs::canonicalize(saved).ok());
     let planned = match home {
+        _ if !home::delete_offered() => Err(DeleteRefusal::plain("delete_platform_unqualified")),
         None => Err(DeleteRefusal::plain("projects_home_unset")),
-        Some(home) => home::plan_delete(&home, &folders)
-            .map(|moved| (home, moved))
-            .map_err(|refusal| DeleteRefusal::plain(&refusal.0)),
+        Some(home) => match home::plan_delete(&home, &folders) {
+            Err(refusal) => Err(DeleteRefusal::plain(&refusal.0)),
+            Ok(moved) => match delete_blocked(tx, project, &projects, &moved)? {
+                Some(refusal) => Err(refusal),
+                None => Ok((home, moved)),
+            },
+        },
     };
     Ok(Some(DeleteChecked {
-        name,
+        name: found.name.clone(),
         folders,
         planned,
     }))
 }
 
+/// Names what holds a Delete everything back that can change while it waits: a projects
+/// home move still pending (`home_move_in_progress`), another registered project using one
+/// of the folders, its own folder or a repository it declares, nested either way
+/// (`delete_shared_folder`, naming that project), or research of the project queued,
+/// running or waiting for a pool (`delete_research_running`). Inputs: the transaction, the
+/// project, every guarded project and the folders the delete would move. Output: the
+/// refusal, or None.
+fn delete_blocked(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    projects: &[Registered],
+    moved: &[PathBuf],
+) -> Result<Option<DeleteRefusal>, EngineError> {
+    if pending_move(tx)?.is_some() {
+        return Ok(Some(DeleteRefusal::plain("home_move_in_progress")));
+    }
+    let shared = projects.iter().find(|other| {
+        &other.project_id != project && moved.iter().any(|folder| home::in_use(folder, other))
+    });
+    if let Some(other) = shared {
+        return Ok(Some(DeleteRefusal {
+            code: "delete_shared_folder".into(),
+            reason: format!(
+                "{} uses a folder of this project, so deleting it would delete that project's files too. Remove it from the dashboard instead.",
+                other.name
+            ),
+        }));
+    }
+    let research: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM research_jobs
+             WHERE project=?1 AND status IN ('queued','running','needs_pool')",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    assert!(research >= 0);
+    if research > 0 {
+        let jobs = if research == 1 {
+            "1 job".to_owned()
+        } else {
+            format!("{research} jobs")
+        };
+        return Ok(Some(DeleteRefusal {
+            code: "delete_research_running".into(),
+            reason: format!(
+                "Its research is still queued or running ({jobs}). Cancel it or let it finish, then delete the project."
+            ),
+        }));
+    }
+    Ok(None)
+}
+
+/// Checks again, after the agent wait and just before the first folder moves, what can
+/// change while a Delete everything waits. Inputs: the transaction, the project and the
+/// folders the delete would move. Output: the refusal code, or None.
+pub(crate) fn delete_recheck(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    moved: &[PathBuf],
+) -> Result<Option<String>, EngineError> {
+    let projects = guarded(tx)?;
+    Ok(delete_blocked(tx, project, &projects, moved)?.map(|refusal| refusal.code))
+}
+
+/// Forgets a Delete everything's plan once its exchange ended, whatever its outcome, so a
+/// projects home move may go again; with no exchange, as the engine starts, it forgets every
+/// plan an earlier engine process left. Inputs: the connection and the exchange. Output: Ok,
+/// or any SQLite failure.
+pub(super) fn delete_settle(db: &Connection, exchange: Option<u64>) -> Result<(), EngineError> {
+    match exchange {
+        Some(exchange) => db.execute(
+            "DELETE FROM projects_delete_pending WHERE exchange=?1",
+            [i64::try_from(exchange).map_err(error)?],
+        ),
+        None => db.execute("DELETE FROM projects_delete_pending", []),
+    }
+    .map_err(error)?;
+    Ok(())
+}
+
 const DELETE_ROWS_MAX: i64 = 100_000;
 
 /// Plans a Delete everything before the owner transport moves anything: the owner's grant
-/// and revision, the project, its exact name and every folder inside the projects home are
-/// checked, then Stop all is recorded in the same write, so the runtime stops the project's
-/// agents while the transport waits. Inputs: the connection, database path, admission and the
-/// DeleteProject request. Output: the plan with the project's research jobs, or the refusal
-/// code, with nothing written on a refusal.
+/// and revision, the project, its exact name and [`delete_check`] are checked, then Stop all
+/// and the plan's hold on projects home moves are recorded in the same write, so the runtime
+/// stops the project's agents while the transport waits and no move starts until the
+/// exchange settles. Inputs: the connection, database path, admission, the DeleteProject
+/// request and the transport exchange running it. Output: the plan with the project's
+/// research jobs, or the refusal code, with nothing written on a refusal.
 pub(super) fn delete_plan(
     db: &mut Connection,
     path: &Path,
     a: &Admission,
     request: &OwnerRequest,
+    exchange: u64,
 ) -> Result<DeletePlanned, EngineError> {
+    let exchange = i64::try_from(exchange).map_err(error)?;
+    assert!(exchange > 0);
     let OwnerOperation::Apply {
         mutation: OwnerMutation::DeleteProject { project_id, name },
     } = &request.operation
@@ -370,18 +447,16 @@ pub(super) fn delete_plan(
     if owner_revision(&tx)? != request.expected_revision.value() {
         return Ok(Err("stale_revision".into()));
     }
-    let Some((stored, folders, home)) = delete_target(&tx, project_id)? else {
+    let Some(checked) = delete_check(&tx, project_id)? else {
         return Ok(Err("invalid_project".into()));
     };
-    if &stored != name {
+    if &checked.name != name {
         return Ok(Err("delete_name_mismatch".into()));
     }
-    let Some(home) = home else {
-        return Ok(Err("projects_home_unset".into()));
+    let home = match checked.planned {
+        Ok((home, _)) => home,
+        Err(refusal) => return Ok(Err(refusal.code)),
     };
-    if let Err(refusal) = home::plan_delete(&home, &folders) {
-        return Ok(Err(refusal.0));
-    }
     let ids = |sql: &str| -> Result<Vec<i64>, EngineError> {
         let mut statement = tx.prepare(sql).map_err(error)?;
         let rows = statement
@@ -394,12 +469,17 @@ pub(super) fn delete_plan(
     let agents = ids("SELECT id FROM team_agents WHERE project=?1 ORDER BY id LIMIT ?2")?;
     let research = ids("SELECT id FROM research_jobs WHERE project=?1 ORDER BY id LIMIT ?2")?;
     crate::team::pause(&tx, project_id, crate::team::now_ms())?;
+    tx.execute(
+        "INSERT INTO projects_delete_pending(exchange) VALUES (?1)",
+        [exchange],
+    )
+    .map_err(error)?;
     tx.commit().map_err(error)?;
     let plan = home::DeletePlan {
         database: path.to_path_buf(),
         project: project_id.clone(),
         home,
-        folders,
+        folders: checked.folders,
         agents,
     };
     Ok(Ok((plan, research)))
@@ -415,7 +495,8 @@ pub(super) fn delete_plan(
 /// Input: the connection, database path, owner admission, the revision the
 /// owner saw, the new home, the request and the transport exchange that will
 /// run the move. Output: the checked plan, or the refusal code
-/// (`home_move_in_progress` while another move is pending, or the code
+/// (`home_move_in_progress` while another move is pending,
+/// `home_move_delete_in_progress` while a Delete everything is planned, or the code
 /// `agent_work_inside` names while agent work is inside the home).
 pub(super) fn move_plan(
     db: &mut Connection,
@@ -436,6 +517,16 @@ pub(super) fn move_plan(
     }
     if pending_move(&tx)?.is_some() {
         return Err(error("home_move_in_progress"));
+    }
+    let deleting: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects_delete_pending)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if deleting {
+        return Err(error("home_move_delete_in_progress"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
     if let Some(code) = agent_work_inside(&tx, &saved)? {

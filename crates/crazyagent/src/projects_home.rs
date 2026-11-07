@@ -248,7 +248,7 @@ fn overlaps(left: &Path, right: &Path) -> bool {
 /// or a repository it declares, each compared as recorded and, when it
 /// resolves, at its canonical path, so one declared through a link counts.
 /// Input: a canonical folder and the project. Output: whether it is in use.
-fn in_use(real: &Path, project: &Registered) -> bool {
+pub(crate) fn in_use(real: &Path, project: &Registered) -> bool {
     assert!(real.is_absolute());
     std::iter::once(&project.folder)
         .chain(&project.repositories)
@@ -655,8 +655,8 @@ pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, Eng
 /// is proven, which in V2 is macOS (DEC-118 addendum). Windows and Linux offer Remove from
 /// dashboard only until a qualification row per platform exists. Input: the platform name as
 /// `std::env::consts::OS` gives it. Output: the answer.
-pub fn delete_qualified_on(_os: &str) -> bool {
-    true
+pub fn delete_qualified_on(os: &str) -> bool {
+    os == "macos"
 }
 
 /// Tells whether Delete everything is offered on the platform this engine runs on.
@@ -693,15 +693,17 @@ impl DeletePlan {
 
     /// Runs the plan with a bounded wait and a mover: no folder moves while an agent of the
     /// project runs (`delete_agents_running` past the wait), the folders are checked again
-    /// just before the first move, and a later folder that fails leaves the earlier ones
-    /// moved (`delete_trash_partial`). Inputs: the wait and the mover. Output: the outcome.
+    /// just before the first move, with any other project using one of them, research of the
+    /// project not finished or a pending home move refusing as the plan did, and a later
+    /// folder that fails leaves the earlier ones moved (`delete_trash_partial`). Inputs: the
+    /// wait and the mover. Output: the outcome.
     pub(crate) fn run_with(
         &self,
         wait: std::time::Duration,
         mover: &dyn Fn(&Path) -> Result<(), EngineError>,
     ) -> Result<(), String> {
         let unavailable = |_| "delete_unavailable".to_owned();
-        let db = rusqlite::Connection::open_with_flags(
+        let mut db = rusqlite::Connection::open_with_flags(
             &self.database,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
@@ -726,6 +728,11 @@ impl DeletePlan {
             std::thread::sleep(DELETE_POLL);
         }
         let folders = plan_delete(&self.home, &self.folders).map_err(|refusal| refusal.0)?;
+        if let Some(code) = crate::storage::delete_recheck(&mut db, &self.project, &folders)
+            .map_err(|_| "delete_unavailable".to_owned())?
+        {
+            return Err(code);
+        }
         for (moved, folder) in folders.iter().enumerate() {
             if mover(folder).is_err() {
                 return Err(if moved == 0 {
@@ -1000,6 +1007,15 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "Only a project whose folders are all inside your projects folder can be deleted here. Remove it from the dashboard instead."
         }
         "delete_name_mismatch" => "Type the project's name exactly as shown to delete it.",
+        "delete_shared_folder" => {
+            "Another project uses one of its folders, so deleting it would delete that project's files too. Remove it from the dashboard instead."
+        }
+        "delete_research_running" => {
+            "Its research is still queued or running. Cancel it or let it finish, then delete the project. Nothing was deleted."
+        }
+        "delete_platform_unqualified" => {
+            "Delete everything is only on macOS for now. Remove the project from the dashboard instead."
+        }
         "delete_unavailable" => {
             "The engine could not check the project's agents. Nothing was deleted."
         }
@@ -1055,6 +1071,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_move_in_progress" => {
             "Your projects folder is still being moved. Try again when it finishes."
+        }
+        "home_move_delete_in_progress" => {
+            "A project in your projects folder is being deleted. Try again when it finishes. Nothing was moved."
         }
         "home_move_agent_work" => {
             "Agents still have work in projects in this folder, and moving it would cut them off from it. Land their changes and remove those agents first. An agent whose change you discarded can be removed 7 days later, when the change can no longer be restored. Nothing was moved."

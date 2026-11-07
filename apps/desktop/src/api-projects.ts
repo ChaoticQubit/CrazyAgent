@@ -290,6 +290,17 @@ const copy: Record<string, string> = {
   conversation_text_bounds: "Messages can be up to 8192 bytes.",
   unavailable: "The engine couldn't do this right now. Try again.",
   rejected: "The engine refused this change.",
+  delete_shared_folder: "Another project uses one of its folders, so deleting it would delete that project's files too. Remove it from the dashboard instead.",
+  delete_research_running: "Its research is still queued or running. Cancel it or let it finish, then delete the project. Nothing was deleted.",
+  delete_platform_unqualified: "Delete everything is only on macOS for now. Remove the project from the dashboard instead.",
+  delete_outside_home: "Only a project whose folders are all inside your projects folder can be deleted here. Remove it from the dashboard instead.",
+  delete_name_mismatch: "Type the project's name exactly as shown to delete it.",
+  delete_agents_running: "Its agents didn't stop in time, so nothing was deleted. They stay stopped; try again.",
+  delete_trash_partial: "Some of its folders are in the Trash and the rest couldn't be moved. The project stays listed; try again.",
+  delete_unavailable: "The engine couldn't check the project's agents. Nothing was deleted.",
+  home_trash_failed: "The folder couldn't be moved to the Trash. Nothing was deleted.",
+  home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
+  project_delete_interrupted: "Deleting the project stopped part way. Check the Trash and the project list before trying again.",
 };
 
 /** Plain sentence for one engine failure, never opaque.
@@ -620,6 +631,7 @@ export type RemovalPreview = {
   name: string;
   folders: string[];
   can_delete: boolean;
+  blocked: string | null;
   running: string[];
   open_change_sets: number;
   losses: { id: number; label: string; code: string }[];

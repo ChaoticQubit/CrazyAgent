@@ -556,8 +556,8 @@ type Help = Vec<(&'static str, &'static str)>;
 
 /// Draws the remove ask: Remove from dashboard, which keeps every file, and Delete everything
 /// when the engine's preview allows it, with the folders it moves to the Trash, what would be
-/// lost and the name typed so far. Inputs: the screen, the box's inner width and the look.
-/// Output: the box rows and the help keys.
+/// lost and the name typed so far, or else the engine's reason it is not offered. Inputs: the
+/// screen, the box's inner width and the look. Output: the box rows and the help keys.
 fn remove_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> (Vec<Row>, Help) {
     assert!(inner >= REMOVE_BOX_MIN - 4);
     let removal = screen.removal.as_ref();
@@ -624,7 +624,15 @@ fn remove_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> (Vec<Row>, H
                 typed,
             ));
         }
-        Some(_) => {}
+        Some(removal) => {
+            let blocked = removal.blocked.as_deref().unwrap_or_default();
+            if !blocked.is_empty() {
+                body.push(Row::default());
+                for line in wrap_words(blocked, inner - 4) {
+                    body.push(indented(&line, look.muted));
+                }
+            }
+        }
     }
     body.push(Row::default());
     let send = if everything {

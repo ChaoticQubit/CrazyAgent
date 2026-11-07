@@ -86,9 +86,11 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// effect is recorded as Applied or as Rejected with the refusal code. A home
 /// move then sends a settle job for this exchange's pending move: one whose
 /// record did not finish it (a stale grant, a slow barrier, a failed record)
-/// is finished from disk, and one whose disk work never ran is forgotten. The
-/// exchange number is unique within the engine process; engine start finishes
-/// any move left by an earlier process before serving.
+/// is finished from disk, and one whose disk work never ran is forgotten. A Delete
+/// everything stops the project's IDE server before its wait and moves, and then
+/// sends a settle job that forgets its plan, so projects home moves may go again.
+/// The exchange number is unique within the engine process; engine start finishes
+/// any move and forgets any delete plan left by an earlier process before serving.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -110,6 +112,12 @@ pub(super) async fn serve(
         &request.operation,
         OwnerOperation::Apply {
             mutation: OwnerMutation::MoveProjectsHome { .. }
+        }
+    );
+    let deleting = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::DeleteProject { .. }
         }
     );
     let (step, deadline, ran) = match planned {
@@ -135,6 +143,10 @@ pub(super) async fn serve(
             };
             match admitted {
                 Ok(Ok(())) => {
+                    #[cfg(unix)]
+                    if let Work::Delete(plan, _) = &work {
+                        authority.ide_servers.stop(&plan.project).await;
+                    }
                     let interrupted = work.interrupted();
                     let step = tokio::task::spawn_blocking(move || work.run())
                         .await
@@ -190,6 +202,13 @@ pub(super) async fn serve(
             .await
     {
         eprintln!("projects_home_move_not_settled cause={}", e.0);
+    }
+    if deleting
+        && let Err(e) = engine
+            .owner_job(|reply| Job::DeleteSettle(exchange, reply))
+            .await
+    {
+        eprintln!("project_delete_not_settled cause={}", e.0);
     }
     answered.map_err(|_| failure(UNKNOWN))?
 }
@@ -253,7 +272,7 @@ async fn plan(
             let request = Box::new(request.clone());
             return Ok(
                 match engine
-                    .owner_job(|reply| Job::DeletePlan(a.clone(), request, reply))
+                    .owner_job(|reply| Job::DeletePlan(a.clone(), request, exchange, reply))
                     .await?
                 {
                     Ok((plan, research)) => Planned::Work(Work::Delete(plan, research)),

@@ -131,21 +131,20 @@ pub fn removal_loss(
 
 /// Reads what removing a project would do, before anything stops: its stored name and
 /// folders, whether Delete everything may move them (every folder a real folder strictly
-/// inside the projects home), its running agents, its open change sets and each agent's
-/// loss. Inputs: the store, the project and the time now. Output: the preview, or
+/// inside the projects home and nothing holding the delete back) and why not, its running
+/// agents, its open change sets and each agent's loss. Inputs: the store, the project and the time now. Output: the preview, or
 /// `invalid_project` for a project the engine does not know.
 pub fn removal_preview(
     db: &mut Connection,
     project: &ProjectId,
     now_ms: i64,
 ) -> Result<RemovalPreview, EngineError> {
-    let (name, folders, home) = crate::storage::delete_target(db, project)?
+    let checked = crate::storage::delete_check(db, project)?
         .ok_or_else(|| EngineError("invalid_project".into()))?;
-    let moved = home.and_then(|home| crate::projects_home::plan_delete(&home, &folders).ok());
-    let can_delete = moved.as_ref().is_some_and(|moved| !moved.is_empty());
-    let shown = match moved {
-        Some(moved) if can_delete => moved,
-        _ => folders,
+    let (can_delete, shown, blocked) = match checked.planned {
+        Ok((_, moved)) if !moved.is_empty() => (true, moved, None),
+        Ok(_) => (false, checked.folders, None),
+        Err(refusal) => (false, checked.folders, Some(refusal.reason)),
     };
     let running: Vec<String> = {
         let mut statement = db
@@ -170,13 +169,13 @@ pub fn removal_preview(
         )
         .map_err(unavailable)?;
     Ok(RemovalPreview {
-        name,
+        name: checked.name,
         folders: shown
             .iter()
             .map(|folder| folder.to_string_lossy().into_owned())
             .collect(),
         can_delete,
-        blocked: None,
+        blocked,
         running,
         open_change_sets: u32::try_from(open).unwrap_or(u32::MAX),
         losses: removal_loss(db, project, now_ms)?,

@@ -38,8 +38,9 @@ export function lossLines(preview: RemovalPreview): string[] {
 }
 
 /** The remove dialog's body. Inputs: the preview, the picked choice, the typed name, whether a
- * removal is running and the change, confirm and cancel handlers. Output: the choices, the loss
- * list and the name box, then Keep project and the button that sends the picked choice. */
+ * removal is running and the change, confirm and cancel handlers. Output: the choices, why
+ * Delete everything is not offered when the engine refuses it, the loss list and the name box,
+ * then Keep project and the button that sends the picked choice. */
 export function RemoveDialogView({ preview, choice, typed, pending, onChoice, onTyped, onConfirm, onCancel }: {
   preview: RemovalPreview | null;
   choice: RemoveChoice;
@@ -71,6 +72,7 @@ export function RemoveDialogView({ preview, choice, typed, pending, onChoice, on
         </span>
       </label>}
     </div>
+    {preview && !offered && preview.blocked && <p className="pj-note" role="note">{displayText(preview.blocked)}</p>}
     {preview && everything && <>
       <div className="pj-field">
         <span className="pj-label">Moves to the Trash</span>

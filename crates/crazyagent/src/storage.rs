@@ -186,8 +186,10 @@ pub(crate) enum Job {
     DeletePlan(
         Admission,
         Box<OwnerRequest>,
+        u64,
         oneshot::Sender<Result<projects_home::DeletePlanned, EngineError>>,
     ),
+    DeleteSettle(u64, oneshot::Sender<Result<(), EngineError>>),
     DeleteRecord(
         Admission,
         Box<OwnerRequest>,
@@ -315,6 +317,9 @@ impl Storage {
                 if !readonly {
                     if let Err(e) = projects_home::settle_pending(&mut connection, &path, None, true) {
                         eprintln!("projects_home_move_not_settled cause={}", e.0);
+                    }
+                    if let Err(e) = projects_home::delete_settle(&connection, None) {
+                        eprintln!("project_delete_not_settled cause={}", e.0);
                     }
                     home_watch.restart(&connection);
                 }
@@ -619,11 +624,19 @@ impl Storage {
                                 home_watch.restart(&connection);
                             }
                         }
-                        Job::DeletePlan(admission, request, reply) => {
+                        Job::DeletePlan(admission, request, exchange, reply) => {
                             let result = if readonly {
                                 Err(error("project_setup_readonly"))
                             } else {
-                                projects_home::delete_plan(&mut connection, &path, &admission, &request)
+                                projects_home::delete_plan(&mut connection, &path, &admission, &request, exchange)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::DeleteSettle(exchange, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::delete_settle(&connection, Some(exchange))
                             };
                             let _ = reply.send(result);
                         }
@@ -2171,15 +2184,27 @@ enum Effect<'a> {
     Delete(&'a Result<(), String>),
 }
 
-/// Reads what a Delete everything of a project would take: its name, its folder and the
-/// repositories it declares, and the canonical projects home. Inputs: the engine store and
-/// the project. Output: None for an unknown project, else the name, folders and home.
-pub(crate) fn delete_target(
+/// Checks what a Delete everything of a project would take and whether it may go, for the
+/// remove preview. Inputs: the engine store and the project. Output: None for an unknown
+/// project, else its name, its stored folders and the planned folders or the refusal.
+pub(crate) fn delete_check(
     db: &mut Connection,
     project: &ProjectId,
-) -> Result<Option<projects_home::DeleteTarget>, EngineError> {
+) -> Result<Option<projects_home::DeleteChecked>, EngineError> {
     let tx = db.transaction().map_err(error)?;
-    projects_home::delete_target(&tx, project)
+    projects_home::delete_check(&tx, project)
+}
+
+/// Checks again, after a Delete everything's agent wait, what can change while it waits.
+/// Inputs: the engine store, read-only is enough, the project and the folders it would
+/// move. Output: the refusal code, or None.
+pub(crate) fn delete_recheck(
+    db: &mut Connection,
+    project: &ProjectId,
+    moved: &[std::path::PathBuf],
+) -> Result<Option<String>, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    projects_home::delete_recheck(&tx, project, moved)
 }
 
 /// Plans a New Project before the owner transport builds its folder.
