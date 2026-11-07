@@ -145,16 +145,34 @@ fn series(
     Ok(bars)
 }
 
-/// The latest team task of a run's agent that ran in its session: the session itself
-/// (Claude) or the end of a Codex rollout name after a `-`. Inputs: the store and the run.
-/// Output: its id, title and status, or None.
-fn run_task(db: &Connection, run: &RunRow) -> Result<Option<(i64, String, String)>, EngineError> {
+/// The latest team task the run's agent ran while the run used tokens: started by the
+/// run's last counted tokens, or by the end of its last usage hour for a run counted before
+/// last-use times were kept, and not finished before its first usage hour. The engine keeps
+/// no link from a task to its agent's harness session, only the agent and the task's start
+/// and finish. A master run, or any agent key other than `team-<id>`, has none. Inputs: the
+/// store, the run, the start of its first usage hour and the end of its window. Output: the
+/// task's id, title and status, or None.
+fn run_task(
+    db: &Connection,
+    run: &RunRow,
+    first_ms: i64,
+    until_ms: i64,
+) -> Result<Option<(i64, String, String)>, EngineError> {
+    assert!(first_ms <= until_ms);
+    assert!(run.last_ms <= until_ms);
+    let Some(agent) = run
+        .agent
+        .strip_prefix("team-")
+        .and_then(|id| id.parse::<i64>().ok())
+    else {
+        return Ok(None);
+    };
     db.query_row(
         "SELECT id,prompt,status FROM team_tasks
-         WHERE project=?1 AND 'team-'||agent=?2 AND session IS NOT NULL AND session<>''
-            AND (session=?3 OR substr(?3,-length(session)-1)='-'||session)
-         ORDER BY id DESC LIMIT 1",
-        params![run.project, run.agent, run.session],
+         WHERE project=?1 AND agent=?2 AND started_ms IS NOT NULL AND started_ms<=?4
+            AND (finished_ms IS NULL OR finished_ms>=?3)
+         ORDER BY started_ms DESC,id DESC LIMIT 1",
+        params![run.project, agent, first_ms, until_ms],
         |row| Ok((row.get(0)?, title(&row.get::<_, String>(1)?), row.get(2)?)),
     )
     .optional()
@@ -165,40 +183,47 @@ fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<Run
     let mut statement = db
         .prepare(
             "SELECT u.project,u.agent,u.session,\
-                MAX(MAX(u.hour_ms),COALESCE(MAX(s.last_ms),0)) AS last,TOTAL(u.input),\
-                TOTAL(u.output),TOTAL(u.cache_read),TOTAL(u.cache_write)
+                MAX(MAX(u.hour_ms),COALESCE(MAX(s.last_ms),0)) AS last,MIN(u.hour_ms),\
+                TOTAL(u.input),TOTAL(u.output),TOTAL(u.cache_read),TOTAL(u.cache_write),\
+                MAX(s.last_ms)
              FROM usage_tokens u LEFT JOIN usage_seen s
                 ON s.project=u.project AND s.agent=u.agent AND s.session=u.session
              WHERE u.hour_ms>=?2 AND (?1 IS NULL OR u.project=?1)
              GROUP BY u.project,u.agent,u.session ORDER BY last DESC,u.agent,u.session LIMIT ?3",
         )
         .map_err(storage)?;
-    let mut runs: Vec<RunRow> = statement
+    let mut runs: Vec<(RunRow, i64, i64)> = statement
         .query_map(params![project, since_ms, ROWS_MAX as i64], |row| {
-            Ok(RunRow {
-                project: row.get(0)?,
-                agent: row.get(1)?,
-                session: row.get(2)?,
-                task: None,
-                title: None,
-                status: None,
-                last_ms: row.get(3)?,
-                tokens: tokens(row, 4)?,
-            })
+            let last_ms: i64 = row.get(3)?;
+            let seen: Option<i64> = row.get(9)?;
+            Ok((
+                RunRow {
+                    project: row.get(0)?,
+                    agent: row.get(1)?,
+                    session: row.get(2)?,
+                    task: None,
+                    title: None,
+                    status: None,
+                    last_ms,
+                    tokens: tokens(row, 5)?,
+                },
+                row.get(4)?,
+                seen.map_or(last_ms.saturating_add(HOUR_MS - 1), |_| last_ms),
+            ))
         })
         .map_err(storage)?
         .collect::<Result<_, _>>()
         .map_err(storage)?;
     if has_table(db, "team_tasks")? {
-        for run in &mut runs {
-            if let Some((task, title, status)) = run_task(db, run)? {
+        for (run, first_ms, until_ms) in &mut runs {
+            if let Some((task, title, status)) = run_task(db, run, *first_ms, *until_ms)? {
                 run.task = Some(task);
                 run.title = Some(title);
                 run.status = Some(status);
             }
         }
     }
-    Ok(runs)
+    Ok(runs.into_iter().map(|(run, _, _)| run).collect())
 }
 
 fn groups(
