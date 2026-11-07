@@ -132,6 +132,20 @@ test("By account shows its agents, the limit with less room left and when that r
   assert.deepEqual(view.limitLeft(undefined, NOW), { left: "", resets: "" });
 });
 
+test("Total is the Tokens tile and every share is out of it; an Other row holds what a capped list leaves out", () => {
+  const capped = metrics({ runs: [metrics().runs[0]] });
+  const table = tableText(render({ by: "run", metrics: { kind: "ok", value: capped } }));
+  assert.match(table, /#142 Calendar API endpoints 1\.4K 700 500 200 3K Juniper · Codex running Working 61%/);
+  assert.match(table, /Other, not listed 900 500 300 100 1K 39%/);
+  assert.match(table, /Total 2\.3K 1\.2K 800 300 4K cache read 67% of all read/);
+  const full = tableText(render({ by: "run" }));
+  assert.doesNotMatch(full, /Other, not listed/);
+  assert.match(full, /Total 2\.3K 1\.2K 800 300 4K/);
+  const agents = tableText(render({ usage: { kind: "ok", value: usage({ agents: [usage().agents[1]] }) } }));
+  assert.match(agents, /Master · Claude Code 900 500 300 100 1K 58 41 4 39%/);
+  assert.match(agents, /Other, not listed 1\.4K 700 500 200 3K 61%/);
+});
+
 test("By harness names each harness with its agents and runs", () => {
   const table = tableText(render({ by: "harness" }));
   assert.match(table, /^ Harness Tokens Input Cache write Output Cache read Agents Runs Share of tokens /);
