@@ -202,6 +202,7 @@ fn main() {
         "desktop_change_branches",
         "desktop_discard_change",
         "desktop_restore_change",
+        "desktop_undo_change",
         "desktop_update_change",
         "desktop_questions",
         "desktop_answer_question",

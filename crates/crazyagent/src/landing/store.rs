@@ -33,7 +33,9 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     intent TEXT,
     message TEXT NOT NULL DEFAULT '',
     waiting INTEGER NOT NULL DEFAULT 0 CHECK(waiting IN (0,1)),
-    outside INTEGER NOT NULL DEFAULT 0 CHECK(outside IN (0,1))
+    outside INTEGER NOT NULL DEFAULT 0 CHECK(outside IN (0,1)),
+    made INTEGER NOT NULL DEFAULT 0 CHECK(made IN (0,1)),
+    undone TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
@@ -53,8 +55,8 @@ CREATE INDEX IF NOT EXISTS landing_agent_branches_repository
 
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
-    restorable_until_ms,pruned,landed,intent,message,waiting,outside";
-const ADDED_COLUMNS: [(&str, &str); 3] = [
+    restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone";
+const ADDED_COLUMNS: [(&str, &str); 5] = [
     ("message", "message TEXT NOT NULL DEFAULT ''"),
     (
         "waiting",
@@ -64,6 +66,11 @@ const ADDED_COLUMNS: [(&str, &str); 3] = [
         "outside",
         "outside INTEGER NOT NULL DEFAULT 0 CHECK(outside IN (0,1))",
     ),
+    (
+        "made",
+        "made INTEGER NOT NULL DEFAULT 0 CHECK(made IN (0,1))",
+    ),
+    ("undone", "undone TEXT"),
 ];
 
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
@@ -82,7 +89,9 @@ pub(super) enum Intent {
     },
 }
 
-/// One stored change set with everything the engine needs to act on it.
+/// One stored change set with everything the engine needs to act on it. `made` says the
+/// set's own Accept committed `landed`, so an undo may revert it; `undone` is the commit
+/// that reverted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Record {
     pub(super) id: ChangeSetId,
@@ -110,6 +119,8 @@ pub(super) struct Record {
     pub(super) message: String,
     pub(super) waiting: bool,
     pub(super) outside: bool,
+    pub(super) made: bool,
+    pub(super) undone: Option<String>,
 }
 
 impl Record {
@@ -291,6 +302,8 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         message: text(24)?,
         waiting: row.get::<_, bool>(25)?,
         outside: row.get::<_, bool>(26)?,
+        made: row.get::<_, bool>(27)?,
+        undone: row.get(28)?,
     })
 }
 
@@ -322,7 +335,7 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
     db.execute(
         &format!(
             "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27) \
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29) \
              ON CONFLICT(id) DO UPDATE SET {updates}"
         ),
         params![
@@ -353,6 +366,8 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
             record.message,
             record.waiting,
             record.outside,
+            record.made,
+            record.undone,
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {

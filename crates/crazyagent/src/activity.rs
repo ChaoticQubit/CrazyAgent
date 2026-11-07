@@ -232,6 +232,22 @@ pub fn record(
     Ok(id)
 }
 
+/// Marks the rows of a change set's merge undone, so the project's activity shows the merge
+/// was reverted; a failure is logged by its plain code. Inputs: the database, the project
+/// and the change set id.
+pub fn mark_undone(db: &Connection, project: &ProjectId, change_set: &str) {
+    assert!(!change_set.is_empty());
+    let marked = db
+        .execute(
+            "UPDATE project_activity SET undone=1 WHERE project=?1 AND change_set=?2 \
+             AND kind IN ('accepted','merged_into_main')",
+            params![project.as_str(), change_set],
+        )
+        .map(drop)
+        .map_err(state);
+    logged(ActivityKind::Undone, marked);
+}
+
 /// Records one event for a writer whose own action must never fail on it: a failure is
 /// logged by its plain code. Takes what `record` takes.
 pub fn note(db: &Connection, project: &ProjectId, item: &NewActivity<'_>, now_ms: i64) {

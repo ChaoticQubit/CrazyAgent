@@ -3,7 +3,9 @@ import { Icon, Segmented, type IconName } from "../../ui";
 import { listMcpServers, listSkills, loadAllProjectMemories, nextGeneration, poolSummaries } from "../../api";
 import { failureCopy, loadActivity, loadAgentPolicy, retryResearch } from "../../api-projects";
 import type { ActivityItem, ActivityKind, ResearchJob } from "../../api-projects";
+import type { AcceptOutcome } from "../../api-changes";
 import type { Result } from "../../api";
+import { changesRefusal, undoChange } from "../../api-changes";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { anyHarnessTotal, poolName, poolSummary } from "../new-project/wizard";
@@ -64,12 +66,24 @@ const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "
 /** One activity row: when, the kind's icon, what happened, Undone when it was, and who, with
  * the goal when the row stands outside its group. Inputs: the event, the time it is read
  * against and the goal to tag it with. Output: the row. */
-function ActivityRow({ item, now, goal }: { item: ActivityItem; now: number; goal?: string }) {
+/** What a row's Undo does: the change set being undone, if any, and the undo itself. */
+type Undo = { undoing: string | null; onUndo: (changeSet: string) => void };
+
+/** The change set a row's Undo reverts: a master's merge into main not undone yet. Input: the
+ * event. Output: the change set id, or null when the row has no Undo. */
+function undoable(item: ActivityItem): string | null {
+  return item.kind === "merged_into_main" && !item.undone ? item.change_set : null;
+}
+
+function ActivityRow({ item, now, goal, undo }: { item: ActivityItem; now: number; goal?: string; undo?: Undo }) {
+  const changeSet = undoable(item);
   return <li className="pj-activity-row">
     <span className="pj-small pj-muted">{ago(item.at_ms, now)}</span>
     <span className={`pj-activity-kind ${KINDS[item.kind].tone}`}><Icon name={KINDS[item.kind].icon} size={14} /></span>
     <span className="pj-activity-text">{displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
       <span className="pj-small pj-muted pj-activity-by">{displayText(item.actor)}{goal !== undefined && <> · <span className="pj-activity-tag">{displayText(goal)}</span></>}</span></span>
+    {undo && changeSet !== null && <button type="button" className="pj-link pj-activity-undo" disabled={undo.undoing !== null}
+      aria-busy={undo.undoing === changeSet} onClick={() => undo.onUndo(changeSet)}>Undo</button>}
   </li>;
 }
 
@@ -78,8 +92,8 @@ function ActivityRow({ item, now, goal }: { item: ActivityItem; now: number; goa
  * goal. A read the engine cut counts with a plus. Inputs: the events, whether older ones were
  * left out, the time they are read against, the group keys shown in full, the closed group keys
  * and the Show all and close or open actions. Output: the groups. */
-export function ActivityGroups({ items, more, now, expanded, closed, onShowAll, onToggle }: {
-  items: ActivityItem[]; more: boolean; now: number; expanded: string[]; closed: string[]; onShowAll: (key: string) => void; onToggle: (key: string) => void;
+export function ActivityGroups({ items, more, now, expanded, closed, onShowAll, onToggle, undo }: {
+  items: ActivityItem[]; more: boolean; now: number; expanded: string[]; closed: string[]; onShowAll: (key: string) => void; onToggle: (key: string) => void; undo?: Undo;
 }) {
   return <div className="pj-stack-s">{groupActivity(items).map((group) => {
     const open = !closed.includes(group.key);
@@ -90,7 +104,7 @@ export function ActivityGroups({ items, more, now, expanded, closed, onShowAll, 
         <span className="pj-activity-name"><Icon name={open ? "chevron-down" : "chevron-right"} size={16} /><strong className="ellipsis">{displayText(group.goal)}</strong></span>
         <span className="pj-small pj-muted">{count} {count === "1" ? "item" : "items"}, latest {ago(group.items[0].at_ms, now).toLowerCase()}</span>
       </button>
-      {open && <ul className="pj-activity-list" aria-label={`${group.goal} activity`}>{(all ? group.items : group.items.slice(0, ACTIVITY_ROWS)).map((item) => <ActivityRow key={item.id} item={item} now={now} />)}</ul>}
+      {open && <ul className="pj-activity-list" aria-label={`${group.goal} activity`}>{(all ? group.items : group.items.slice(0, ACTIVITY_ROWS)).map((item) => <ActivityRow key={item.id} item={item} now={now} undo={undo} />)}</ul>}
       {open && !all && group.items.length > ACTIVITY_ROWS && <button type="button" className="pj-link pj-activity-more" onClick={() => onShowAll(group.key)}>Show all ({count})</button>}
     </section>;
   })}</div>;
@@ -98,9 +112,9 @@ export function ActivityGroups({ items, more, now, expanded, closed, onShowAll, 
 
 /** The project's activity as one list, newest first, each row tagged with its goal. Inputs: the
  * events and the time they are read against. Output: the list. */
-export function ActivityTimeline({ items, now }: { items: ActivityItem[]; now: number }) {
+export function ActivityTimeline({ items, now, undo }: { items: ActivityItem[]; now: number; undo?: Undo }) {
   return <section className="pj-panel pj-activity-timeline" aria-label="Activity timeline">
-    <ul className="pj-activity-list">{newestActivity(items).map((item) => <ActivityRow key={item.id} item={item} now={now} goal={activityGoal(item).goal} />)}</ul>
+    <ul className="pj-activity-list">{newestActivity(items).map((item) => <ActivityRow key={item.id} item={item} now={now} goal={activityGoal(item).goal} undo={undo} />)}</ul>
   </section>;
 }
 
@@ -113,9 +127,10 @@ type ActivityRead = { shown: Result<ActivityItem[]> | undefined; more: boolean; 
 const UNREAD: ActivityRead = { shown: undefined, more: false, at: 0, stale: null };
 
 /** Reads one project's activity now and again each interval while the window is visible, one
- * read at a time. A failed refresh keeps the last good read and says why. Inputs: the project
- * id, the interval and the read. Output: the read. */
-function useActivity(projectId: string, every: number, load: typeof loadActivity): ActivityRead {
+ * read at a time, and at once each time the round changes. A failed refresh keeps the last
+ * good read and says why. Inputs: the project id, the interval, the read and the round.
+ * Output: the read. */
+function useActivity(projectId: string, every: number, load: typeof loadActivity, round: number): ActivityRead {
   const [read, setRead] = useState<ActivityRead>(UNREAD);
   useEffect(() => setRead(UNREAD), [projectId]);
   useEffect(() => {
@@ -138,15 +153,33 @@ function useActivity(projectId: string, every: number, load: typeof loadActivity
       current = false;
       window.clearTimeout(timer);
     };
-  }, [projectId, every, load]);
+  }, [projectId, every, load, round]);
   return read;
 }
 
+const UNDO_FILES_SHOWN = 5;
+
+/** The note an Undo leaves. Input: its result. Output: the sentence, and whether main moved. */
+function undoNote(result: Result<AcceptOutcome>): { note: string; moved: boolean } {
+  if (result.kind === "not_ready") return { note: "Undo isn't in this build.", moved: false };
+  if (result.kind === "error") return { note: changesRefusal({ code: result.code, cause: result.cause }), moved: false };
+  if (result.value.kind === "landed") return { note: `Undid the merge. ${result.value.branch} is back to how it was before it.`, moved: true };
+  const files = result.value.files;
+  const more = files.length > UNDO_FILES_SHOWN ? ` and ${files.length - UNDO_FILES_SHOWN} more` : "";
+  return { note: `Couldn't undo the merge: ${files.slice(0, UNDO_FILES_SHOWN).join(", ")}${more} changed on its branch since, so nothing changed.`, moved: false };
+}
+
 /** Recent activity on Overview: the project's events by goal, read again while the window is
- * visible, with loading, failure and stale states. Inputs: the project id, and for tests the
- * interval and the read. Output: the section. */
-export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load = loadActivity }: { projectId: string; every?: number; read?: typeof loadActivity }) {
-  const read = useActivity(projectId, every, load);
+ * visible, with loading, failure and stale states, and Undo on a master's merge into main.
+ * Inputs: the project id, and for tests the interval, the read and the undo. Output: the
+ * section. */
+export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load = loadActivity, undo: runUndo = undoChange }: {
+  projectId: string; every?: number; read?: typeof loadActivity; undo?: typeof undoChange;
+}) {
+  const [round, setRound] = useState(0);
+  const [undoing, setUndoing] = useState<string | null>(null);
+  const [undoLine, setUndoLine] = useState<string | null>(null);
+  const read = useActivity(projectId, every, load, round);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [closed, setClosed] = useState<string[]>([RESEARCH_KEY]);
   const [view, setView] = useState<"goal" | "time">("goal");
@@ -154,7 +187,22 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
   useEffect(() => {
     setExpanded([]);
     setClosed([RESEARCH_KEY]);
+    setUndoLine(null);
   }, [projectId]);
+  const undo: Undo = {
+    undoing,
+    onUndo: (changeSet) => {
+      if (undoing !== null) return;
+      setUndoing(changeSet);
+      setUndoLine(null);
+      void runUndo(changeSet).then((result) => {
+        const { note, moved } = undoNote(result);
+        setUndoing(null);
+        setUndoLine(note);
+        if (moved) setRound((value) => value + 1);
+      });
+    },
+  };
   const shown = read.shown;
   const items = shown?.kind === "ok" ? shown.value : [];
   const visible = filter === "all" ? items : items.filter((item) => activityFilter(item.kind) === filter);
@@ -167,6 +215,7 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
     {shown === undefined && <p className="pj-muted" role="status">Loading activity...</p>}
     {shown?.kind === "not_ready" && <NotReady what="project activity isn't in this build." />}
     {shown?.kind === "error" && <p className="pj-error" role="alert">Couldn't load activity. {failureCopy(shown)}</p>}
+    {undoLine && <p className="pj-note" role="status">{displayText(undoLine)}</p>}
     {read.stale && <p className="pj-note warn" role="status">{displayText(`Couldn't refresh activity. ${read.stale} Showing the last read.`)}</p>}
     {shown?.kind === "ok" && items.length === 0 && <p className="pj-muted">Nothing yet.</p>}
     {items.length > 0 && <div className="pj-row" role="group" aria-label="Show only">{ACTIVITY_FILTERS.map((option) => <button type="button" key={option.value}
@@ -175,8 +224,8 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
     {visible.length > 0 && (view === "goal"
       ? <ActivityGroups items={visible} more={read.more} now={read.at} expanded={expanded} closed={closed}
         onShowAll={(key) => setExpanded((open) => [...open, key])}
-        onToggle={(key) => setClosed((keys) => keys.includes(key) ? keys.filter((other) => other !== key) : [...keys, key])} />
-      : <ActivityTimeline items={visible} now={read.at} />)}
+        onToggle={(key) => setClosed((keys) => keys.includes(key) ? keys.filter((other) => other !== key) : [...keys, key])} undo={undo} />
+      : <ActivityTimeline items={visible} now={read.at} undo={undo} />)}
     {shown?.kind === "ok" && read.more && <p className="pj-small pj-muted">Older activity isn't shown here.</p>}
   </section>;
 }

@@ -1918,6 +1918,8 @@ pub(super) fn record(
             message: String::new(),
             waiting: false,
             outside: false,
+            made: false,
+            undone: None,
             files: 0,
             added: 0,
             removed: 0,

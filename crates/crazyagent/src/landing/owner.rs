@@ -677,6 +677,7 @@ fn finish(
     by: By<'_>,
 ) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
+    record.made = matches!(&record.intent, Some(Intent::Land { new, .. }) if new == landed);
     record.landed = Some(landed.to_owned());
     record.conflicts.clear();
     record.intent = None;
@@ -979,6 +980,106 @@ pub(super) fn accept_to(
         return Err(failure("changes_git_failed"));
     }
     finish(db, &mut record, &commit, by)?;
+    Ok(AcceptOutcome::Landed { commit, branch })
+}
+
+/// Reverts the commit a change set's own Accept made, on the project's Land on branch
+/// through the owner's checkout or as its ref alone: merge-tree from the landed commit onto
+/// the branch tip with the landed commit's parent as the other side, the same checkout and
+/// configured-command checks as an Accept, one commit `Undo: <landed subject>` with the
+/// owner's identity and a compare-and-swap move of the branch. Then the set records the
+/// undo, its merge rows show Undone and one Undone row is added. A conflict changes
+/// nothing. Inputs: the store, the owner's home and the change set. Output: the undo commit
+/// and branch, the conflicts, or `changes_undo_unavailable` for a set whose Accept made no
+/// commit, that is undone already, whose commit is not on that branch or that lands in an
+/// agent's branch.
+pub(super) fn undo(
+    db: &Connection,
+    home: &Path,
+    id: &ChangeSetId,
+) -> Result<AcceptOutcome, EngineError> {
+    store::initialize(db)?;
+    let repository = store::load(db, id)?.repository;
+    let _held = hold(&repository);
+    let mut record = settled(db, id)?;
+    let unavailable = || failure("changes_undo_unavailable");
+    let landed = match &record.landed {
+        Some(landed)
+            if record.state == ChangeState::Accepted && record.made && record.undone.is_none() =>
+        {
+            landed.clone()
+        }
+        _ => return Err(unavailable()),
+    };
+    let git_dir = repository.join(".git");
+    let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
+    let named = land_on(db, &owner, &record.project)?.map(|(branch, _)| branch);
+    let (reference, tip, target) = landing_target(db, &owner, &repository, named.as_deref())?;
+    if matches!(target, Target::Agent(_))
+        || !owner.test(&["merge-base", "--is-ancestor", &landed, &tip])?
+    {
+        return Err(unavailable());
+    }
+    let parent = owner
+        .commit_of(&format!("{landed}^1"))?
+        .ok_or_else(unavailable)?;
+    let paths = diff::changed_paths(&owner, &parent, &landed)?;
+    if uses_configured_commands(&owner, &paths, &[&parent, &tip, &landed])? {
+        return Err(failure("changes_git_unsupported"));
+    }
+    let (tree, conflicts) = merge(&owner, &landed, &tip, &parent)?;
+    let branch = reference.trim_start_matches("refs/heads/").to_owned();
+    if !conflicts.is_empty() {
+        return Ok(AcceptOutcome::Conflict { files: conflicts });
+    }
+    if uses_configured_commands(&owner, &paths, &[&tree])? {
+        return Err(failure("changes_git_unsupported"));
+    }
+    flow::check_merged(&owner, &repository, &landed, &parent, &tree)?;
+    if matches!(target, Target::Checkout) {
+        check_clean(&owner, &repository, &tip, &tree)?;
+    }
+    if tree == owner.tree_of(&tip)? {
+        return Err(unavailable());
+    }
+    let subject = owner.run(&["show", "-s", "--format=%s", &landed])?;
+    let subject = String::from_utf8_lossy(&subject).trim().to_owned();
+    let identity = owner_identity(&repository, home)?;
+    let identity = (identity.0.as_str(), identity.1.as_str());
+    let commit = owner.commit_tree(&tree, &[&tip], &format!("Undo: {subject}\n"), identity)?;
+    verify_objects(&repository, &[&commit], &[&tip, &landed])?;
+    if matches!(target, Target::Checkout)
+        && owner
+            .exec(&["read-tree", "-u", "-m", &tip, &commit], None, &[], 4096)?
+            .code
+            != 0
+    {
+        return Err(failure("changes_owner_dirty"));
+    }
+    let env = [
+        ("GIT_COMMITTER_NAME", identity.0),
+        ("GIT_COMMITTER_EMAIL", identity.1),
+    ];
+    let message = format!("CrazyAgent: undo {}", id.as_str());
+    let moved = owner.exec(
+        &["update-ref", "-m", &message, &reference, &commit, &tip],
+        None,
+        &env,
+        256,
+    )?;
+    if moved.code != 0 {
+        if matches!(target, Target::Checkout)
+            && owner.test(&["diff-index", "--cached", "--quiet", &commit, "--"])?
+        {
+            let _ = owner.exec(&["read-tree", "-u", "-m", &commit, &tip], None, &[], 4096);
+        }
+        return Err(failure("changes_branch_moved"));
+    }
+    record.undone = Some(commit.clone());
+    record.updated_ms = flow::now_ms()?;
+    store::save(db, &record)?;
+    crate::activity::mark_undone(db, &record.project, id.as_str());
+    super::note_change(db, &record, ActivityKind::Undone, OWNER_ACTOR);
     Ok(AcceptOutcome::Landed { commit, branch })
 }
 

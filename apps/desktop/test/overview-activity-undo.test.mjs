@@ -63,7 +63,7 @@ test("an Undo that conflicts names the files and changes nothing, and a refusal 
     return { first, clicked, conflict, refused };
   `);
   assert.equal(seen.clicked.missed, null, "the merge row has an Undo button");
-  assert.equal(seen.conflict.note, "Couldn't undo the merge: main changed README.md, src/login.rs since it, so nothing changed.");
+  assert.equal(seen.conflict.note, "Couldn't undo the merge: README.md, src/login.rs changed on its branch since, so nothing changed.");
   assert.equal(seen.conflict.waiting, 0, "nothing changed, so nothing is read again");
   assert.deepEqual(seen.conflict.buttons.filter((button) => button.text === "Undo").map((button) => button.disabled), [false], "Undo can be tried again");
   assert.equal(seen.refused.note, "This merge can't be undone. CrazyAgent undoes only a merge it committed itself, and only once.");

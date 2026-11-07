@@ -97,6 +97,13 @@ impl OwnerController {
         self.changes_client()?.restore_changes(id).await
     }
 
+    /// Undoes a change set its own Accept merged, with one revert commit. Input: the
+    /// change set. Output: the undo commit and branch, the conflicting files, or a refusal
+    /// such as `changes_undo_unavailable`.
+    pub async fn undo_changes(&self, id: ChangeSetId) -> Result<AcceptOutcome, EngineError> {
+        self.changes_client()?.undo_changes(id).await
+    }
+
     /// Asks the agent to update a conflicting change set: the engine merges the owner's
     /// branch into the agent's worktree and starts the resolve task. Input: the change
     /// set. Output: Ok once merged, or a refusal such as `changes_agent_busy`.

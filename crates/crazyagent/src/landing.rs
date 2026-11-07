@@ -306,7 +306,7 @@ fn unavailable() -> EngineError {
 /// Records one action on a change set in its project's activity at the time the set last
 /// changed, with its sub-agent for the goal; a failure is logged by its plain code, so the
 /// action itself never fails on it. Inputs: the store, the change set, the kind of event
-/// (Accepted, Conflict, Discarded or SentBack) and who acted.
+/// (Accepted, Conflict, Discarded, SentBack or Undone) and who acted.
 #[cfg(unix)]
 fn note_change(
     db: &Connection,
@@ -326,6 +326,7 @@ fn note_change(
         ActivityKind::SentBack => {
             format!("Sent the changes of {label} back to take in the newer work: {line}")
         }
+        ActivityKind::Undone => format!("Undid the changes of {label}: {line}"),
         _ => unreachable!("note_change takes a change set action"),
     };
     let agent = match record.agent.kind {
@@ -1136,8 +1137,13 @@ pub fn undo_landing(
     owner_home: &Path,
     id: &ChangeSetId,
 ) -> Result<AcceptOutcome, EngineError> {
-    let _ = (db, owner_home, id);
-    Err(EngineError("changes_stale".into()))
+    #[cfg(unix)]
+    return owner::undo(db, owner_home, id);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, owner_home, id);
+        Err(unavailable())
+    }
 }
 
 /// Lists the local branches an Accept of a change set can land on and the owner's
