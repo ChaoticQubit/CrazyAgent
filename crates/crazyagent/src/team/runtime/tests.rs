@@ -2447,6 +2447,76 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
     );
 }
 
+/// The master's own `git` follows the project's access (DEC-117 Q2): at Full access it is
+/// the free copy that runs every merge, and at Sandboxed and Own branch it stays the
+/// worker copy with its DEC-107 refusal.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_s_own_git_is_the_free_copy_only_at_full_access() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    for (access, flag) in [
+        (AgentAccess::Full, "free=1"),
+        (AgentAccess::Sandboxed, "free=0"),
+        (AgentAccess::OwnBranch, "free=0"),
+    ] {
+        let fixture = Fixture::new(1);
+        let bin = fixture.base.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::sandbox::policy::save(
+            &fixture.connection,
+            PROJECT,
+            &AgentPolicy {
+                access,
+                ..AgentPolicy::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.agent(AgentRole::Master, "codex", AgentStatus::Starting),
+            1
+        );
+        let owner_access = fixture.access.clone();
+        let runtime = TeamRuntime::open(
+            &fixture.base.join("engine.db"),
+            &fixture.base.join("team"),
+            BTreeMap::from([("codex", codex)]),
+            Box::new(move || Some(owner_access.clone())),
+            TeamLimits::default(),
+        )
+        .unwrap();
+        let account = TeamAccount {
+            connection: reference(ENDPOINT),
+            reach: TeamReach::Endpoint {
+                base_url: "http://127.0.0.1:11434/v1".into(),
+                model: "qwen2.5:0.5b".into(),
+            },
+        };
+        runtime
+            .prepare(
+                &fixture.setup,
+                1,
+                AgentRole::Master,
+                "codex",
+                false,
+                &account,
+                false,
+                crate::agent_git::Layout::Linked,
+            )
+            .unwrap();
+        let home = agent_home(&runtime.state, 1);
+        let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
+        let script = std::fs::read_to_string(scratch.join("bin").join("git")).unwrap();
+        let _ = crate::sandbox::toolchains::remove_tmp(&home);
+        assert!(
+            script.lines().any(|line| line == flag),
+            "the master's git at {access:?} lacks {flag}"
+        );
+    }
+}
+
 /// A team agent whose delegation engine sits in an app bundle, as the macOS service runs it
 /// from `CrazyAgent.app/Contents/MacOS`, can start that engine under its installed profile
 /// for its team tools, relay hooks and monitor, with tools on or off, while another bundle's
