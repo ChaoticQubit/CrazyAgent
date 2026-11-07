@@ -24,7 +24,7 @@ pub const OVERLAP_REASON_BYTES_MAX: usize = 160;
 /// The longest task text a handoff relation carries; the task's own edge keeps it whole.
 pub const HANDOFF_TASK_BYTES_MAX: usize = 160;
 /// The most coordination rows one relation read scans, newest first.
-const RELATION_SCAN_MAX: usize = 256;
+const RELATION_SCAN_MAX: i64 = 256;
 /// How many stopped sub-agents the graph keeps listed, newest first: one full round of a
 /// project's terminals, so the agents of the latest work stay beside their tasks.
 pub const STOPPED_SHOWN_MAX: usize = PANES_PER_PROJECT_MAX;
@@ -281,20 +281,46 @@ pub fn facts(
 /// Reads the agents of a project that own review-ready work, which their reviewer reads
 /// next. Takes a connection and the project. Returns the owners, or a SQLite failure.
 fn review_ready(
-    _connection: &Connection,
-    _project: &ProjectId,
+    connection: &Connection,
+    project: &ProjectId,
 ) -> Result<BTreeSet<i64>, EngineError> {
-    Ok(BTreeSet::new())
+    let mut statement = connection
+        .prepare(
+            "SELECT owner_agent FROM coord_work
+             WHERE project=?1 AND state='review_ready' AND owner_agent IS NOT NULL
+             ORDER BY updated DESC LIMIT ?2",
+        )
+        .map_err(error)?;
+    let rows = statement
+        .query_map(params![project.as_str(), RELATION_SCAN_MAX], |row| {
+            row.get(0)
+        })
+        .map_err(error)?;
+    rows.collect::<Result<_, _>>().map_err(error)
 }
 
 /// Reads each asker and recipient of a project's open questions between two agents, one
 /// neither replied to nor ended. Takes a connection and the project. Returns the pairs as
 /// (asker, recipient), or a SQLite failure.
 fn asking(
-    _connection: &Connection,
-    _project: &ProjectId,
+    connection: &Connection,
+    project: &ProjectId,
 ) -> Result<BTreeSet<(i64, i64)>, EngineError> {
-    Ok(BTreeSet::new())
+    let mut statement = connection
+        .prepare(
+            "SELECT from_agent,to_agent FROM coord_messages
+             WHERE project=?1 AND kind='question' AND from_kind='agent' AND to_kind='agent'
+             AND from_agent IS NOT NULL AND to_agent IS NOT NULL
+             AND receipt NOT IN ('replied','failed','expired')
+             ORDER BY id DESC LIMIT ?2",
+        )
+        .map_err(error)?;
+    let rows = statement
+        .query_map(params![project.as_str(), RELATION_SCAN_MAX], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(error)?;
+    rows.collect::<Result<_, _>>().map_err(error)
 }
 
 /// Reads the branch each team member of a status commits on, from its worktree record and the
@@ -368,7 +394,7 @@ pub fn name_kept(graph: &mut TeamGraph, kept: impl Fn(&AgentId) -> bool) {
 /// agents show; a pane the engine adopted as a teammate row shows once, as that row. Every
 /// listed task is an edge from the node leading its agent to that agent, named by it; a task
 /// whose agent is not drawn still goes to that agent, from the lead that handed it out when
-/// that lead is drawn, else from the master. Unread messages and claim overlaps between shown agents are edges too. Takes the status and the
+/// that lead is drawn, else from the master. Unread messages and claim overlaps between shown agents are edges too, and each tree pair has one `relation_edges` edge. Takes the status and the
 /// facts. Returns the master first, then the tree depth first, and edges in task order.
 pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
     let stopped = stopped_shown(&status.agents);
@@ -597,6 +623,25 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         .as_ref()
         .map(|coord| (message_edges(coord, &end), overlap_edges(coord, &end)))
         .unwrap_or_default();
+    let named = |agent: &i64| end(Party::Agent(*agent));
+    let waits: BTreeSet<(String, String)> = facts
+        .asking
+        .iter()
+        .filter_map(|(asker, asked)| Some((named(asker)?, named(asked)?)))
+        .collect();
+    let reviews: BTreeSet<(String, String)> = facts
+        .review_ready
+        .iter()
+        .filter_map(|owner| {
+            let agent = status.agents.iter().find(|agent| agent.id == *owner)?;
+            let reviewer = match agent.parent.filter(|lead| lead != owner) {
+                Some(lead) => named(&lead)?,
+                None => MASTER_NODE.to_owned(),
+            };
+            Some((reviewer, named(owner)?))
+        })
+        .collect();
+    let relations = relation_edges(&nodes, &edges, &messages, &waits, &reviews);
     let unique: BTreeSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
     assert_eq!(unique.len(), nodes.len());
     assert!(nodes.iter().all(|node| {
@@ -613,8 +658,70 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         edges,
         messages,
         overlaps,
-        relations: Vec::new(),
+        relations,
     }
+}
+
+/// The relation edge from each node's parent to it: TeammateOf, DelegatedTo under the
+/// master, else Leads, live with the newest open task handed down, else an open question
+/// either way, else the parent's review, else an unread message either way. Takes the
+/// nodes, task and message edges, (asker, asked) and (reviewer, owner) pairs by node id.
+/// Returns one edge per node but the master's.
+fn relation_edges(
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    messages: &[MessageEdge],
+    waits: &BTreeSet<(String, String)>,
+    reviews: &BTreeSet<(String, String)>,
+) -> Vec<RelationEdge> {
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let from = node.parent.clone()?;
+            let to = node.id.clone();
+            let pair = |a: &str, b: &str| (a == from && b == to) || (a == to && b == from);
+            let live = edges
+                .iter()
+                .rev()
+                .find(|edge| {
+                    edge.from == from
+                        && edge.to == to
+                        && matches!(edge.state, EdgeState::Sent | EdgeState::Running)
+                })
+                .map(|edge| LiveAction::HandingOff {
+                    task: bound_text(&edge.text, HANDOFF_TASK_BYTES_MAX),
+                })
+                .or_else(|| {
+                    waits
+                        .iter()
+                        .any(|(asker, asked)| pair(asker, asked))
+                        .then_some(LiveAction::WaitingOn)
+                })
+                .or_else(|| {
+                    reviews
+                        .iter()
+                        .any(|(reviewer, owner)| *reviewer == from && *owner == to)
+                        .then_some(LiveAction::Reviewing)
+                })
+                .or_else(|| {
+                    messages
+                        .iter()
+                        .any(|edge| edge.unread > 0 && pair(&edge.from, &edge.to))
+                        .then_some(LiveAction::Messaging)
+                });
+            let relation = match node.kind {
+                NodeKind::Teammate => Relation::TeammateOf,
+                _ if from == MASTER_NODE => Relation::DelegatedTo,
+                _ => Relation::Leads,
+            };
+            Some(RelationEdge {
+                from,
+                to,
+                relation,
+                live,
+            })
+        })
+        .collect()
 }
 
 /// The unread message edges between parties the graph shows, one per pair once each party
