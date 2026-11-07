@@ -103,25 +103,7 @@ pub(super) struct Stats {
     pub(super) removed: u32,
 }
 
-/// Replaces every control character but newline and tab, and every bidirectional
-/// override or isolate, with U+FFFD, then shows every other character a reviewer cannot
-/// see, such as zero-width, tag and line separator characters, as its `memory::visible_text`
-/// escape, so text shown to the owner cannot move a terminal cursor, reorder what it shows
-/// or hide text from it. Input: the text. Output: the plain text.
-pub(super) fn plain(text: &str) -> String {
-    let replaced: String = text
-        .chars()
-        .map(|c| {
-            let bidi = matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}');
-            if (c.is_control() && c != '\n' && c != '\t') || bidi {
-                '\u{FFFD}'
-            } else {
-                c
-            }
-        })
-        .collect();
-    crate::memory::visible_text(&replaced)
-}
+pub(super) use super::plain;
 
 fn text(bytes: &[u8]) -> Result<&str, EngineError> {
     std::str::from_utf8(bytes).map_err(|_| failure("changes_git_unsupported"))

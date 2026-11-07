@@ -450,9 +450,9 @@ fn record_shows_hidden_characters_and_cuts_local_paths_in_text_goal_and_actor() 
             "{shown:?}"
         );
     }
-    assert_eq!(item.text, "Read id_rsa and plan.md\\u2066 twice");
+    assert_eq!(item.text, "Read id_rsa and plan.md twice");
     assert_eq!(item.actor, "Ada\\u200b");
-    assert_eq!(item.goal.as_deref(), Some("Ship goal.md\\u202e"));
+    assert_eq!(item.goal.as_deref(), Some("Ship goal.md"));
 }
 
 /// A team agent is named the way the team list names it (F2): its kept persona and handle,

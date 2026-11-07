@@ -758,13 +758,16 @@ fn record_in(
     .map_err(error)?;
     let id = tx.last_insert_rowid();
     assert!(id > 0);
-    let shown = match kind {
-        EventKind::Finished | EventKind::Failed => Some(ActivityKind::TaskFinished),
-        EventKind::ChangeSetReady => Some(ActivityKind::ChangesReady),
-        EventKind::Question | EventKind::Progress => None,
-    };
-    if let Some(shown) = shown {
-        crate::activity::note_agent(tx, project, agent, shown, &text, now);
+    match kind {
+        EventKind::Finished | EventKind::Failed => {
+            let failed = kind == EventKind::Failed;
+            crate::activity::note_task_end(tx, project, agent, task, failed, now);
+        }
+        EventKind::ChangeSetReady => {
+            let shown = ActivityKind::ChangesReady;
+            crate::activity::note_agent(tx, project, agent, shown, &text, now);
+        }
+        EventKind::Question | EventKind::Progress => {}
     }
     Ok(Some(id))
 }
