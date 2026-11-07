@@ -4632,3 +4632,96 @@ fn log_activity_refuses_a_caller_past_its_hourly_rate_and_another_caller_still_l
         .count();
     assert_eq!(phases, 31, "30 of the sub-agent's and 1 of the master's");
 }
+
+/// A sub-agent's `log_activity` row is named and scrubbed by the engine on the tool path
+/// (T11 r1 F3): an `actor` argument is ignored, a local path is cut and a zero-width space
+/// shows as its escape.
+#[cfg(target_os = "macos")]
+#[test]
+fn log_activity_names_the_caller_and_scrubs_what_it_wrote_whatever_the_call_says() {
+    let mut fixture = Fixture::new();
+    let agent = named_sub(&fixture, "api-fix", "working");
+    let label = crate::activity::agent_actor(&fixture.connection, agent).unwrap();
+    assert_ne!(label, crate::activity::MASTER_ACTOR);
+    let call = json!({
+        "goal": "Ship /Users/ada/private/goal.md",
+        "text": "Ran /Users/ada/api/run_tests.sh: 12 passed\u{200b}",
+        "kind": "test",
+        "actor": "Master",
+    });
+    assert_eq!(
+        as_sub(&mut fixture, agent, "log_activity", call),
+        ("Logged.".to_owned(), false)
+    );
+    let project = ProjectId::new(PROJECT).unwrap();
+    let logged: Vec<_> =
+        crate::activity::list(&fixture.connection, &project, crate::activity::LIST_MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.kind == crate::activity::ActivityKind::Test)
+            .map(|item| (item.actor, item.goal, item.text))
+            .collect();
+    assert_eq!(
+        logged,
+        vec![(
+            label,
+            Some("Ship goal.md".to_owned()),
+            "Ran run_tests.sh: 12 passed\\u200b".to_owned()
+        )]
+    );
+}
+
+/// A `log_activity` call from a server that still lists the tool is refused once the owner
+/// switched it off for the project (T11 r1 F3): the plain switched-off answer, and no row.
+#[cfg(target_os = "macos")]
+#[test]
+fn log_activity_switched_off_is_refused_from_the_mailbox_and_logs_nothing() {
+    let mut fixture = Fixture::new();
+    known_project(&fixture);
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::tool_switches::set(
+        &fixture.connection,
+        Some(&project),
+        crate::coord::tool_switches::CRAZYAGENT_SERVER,
+        tool::ACTIVITY_TOOL,
+        crate::coord::tool_switches::Switch::Off,
+    )
+    .unwrap();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let id = format!("{:032x}", 1);
+    std::fs::write(
+        mailbox.join(format!("{id}.call")),
+        json!({"tool": tool::ACTIVITY_TOOL, "goal": "Build the service", "text": "Started building the API", "kind": "phase"})
+            .to_string(),
+    )
+    .unwrap();
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    assert_eq!(
+        serve_calls(&mut fixture.connection, &answering, MASTER, &mailbox).unwrap(),
+        1
+    );
+    let reply: Value =
+        serde_json::from_slice(&std::fs::read(mailbox.join(format!("{id}.reply"))).unwrap())
+            .unwrap();
+    assert_eq!(
+        (reply["text"].as_str(), reply["error"].as_bool()),
+        (Some(SWITCHED_OFF), Some(true))
+    );
+    let logged = crate::activity::list(&fixture.connection, &project, crate::activity::LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind.agent_logged())
+        .count();
+    assert_eq!(logged, 0, "a switched-off call logs nothing");
+}
