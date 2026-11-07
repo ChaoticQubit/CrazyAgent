@@ -1124,6 +1124,54 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     store::save(db, &record)
 }
 
+/// The paths a change set's work conflicts on with the tip it lands on (OS-8): git's own
+/// three-way merge of its head onto that tip from where the work is measured, with no
+/// merge driver, run in the owner repository only. None while the tip cannot be read or
+/// already lies in the head's history. Inputs: the store and the change set. Output: the
+/// conflicting paths, empty for a clean merge, or the plain git code.
+pub(super) fn conflicts_with_tip(
+    db: &Connection,
+    record: &Record,
+) -> Result<Vec<String>, EngineError> {
+    let owner = Repo::open(&record.repository, &record.repository.join(".git"), None)?;
+    let Some(tip) = landing_tip(
+        db,
+        &owner,
+        &record.repository,
+        &record.project,
+        &record.agent,
+    ) else {
+        return Ok(Vec::new());
+    };
+    let from = measured_from(db, &owner, record, &tip)?;
+    if from == tip {
+        return Ok(Vec::new());
+    }
+    let (_, conflicts) = merge(&owner, &from, &tip, &record.head)?;
+    Ok(conflicts)
+}
+
+/// Sends an agent's change set that conflicts with the tip it lands on back to its agent
+/// at its turn end, merged with conflict markers as `update` makes it, so the owner never
+/// sees it waiting (OS-8). Only a Pending set of a team agent is checked; a master's set
+/// keeps the owner's Accept and Update. Inputs: the store and the change set. Output: Ok,
+/// or the plain code of a check or merge that could not run.
+pub(super) fn catch_up(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+    let record = store::load(db, id)?;
+    if record.state != ChangeState::Pending
+        || record.intent.is_some()
+        || record.agent.kind == AgentKind::Master
+    {
+        return Ok(());
+    }
+    if conflicts_with_tip(db, &record)?.is_empty() {
+        return Ok(());
+    }
+    update(db, id)?;
+    assert_eq!(store::load(db, id)?.state, ChangeState::Updating);
+    Ok(())
+}
+
 /// Finishes or undoes owner-checkout and worktree work an engine stop interrupted, one
 /// change set at a time: a change set that cannot be settled now is logged by its plain
 /// code and stays in flight for the next run, so it never stops the others. Input: the

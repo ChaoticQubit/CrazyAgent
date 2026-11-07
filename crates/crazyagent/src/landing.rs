@@ -718,6 +718,9 @@ pub fn commit_deletions(
 /// the agent made itself land too. A failed or cancelled turn commits too. Owner edits
 /// waiting in the worktree settle on the change set the turn end leaves open; when they
 /// cannot, they keep waiting for the next turn end and the recorded set is still returned.
+/// A team agent's Pending set that conflicts with the tip it lands on goes back to its
+/// agent merged with conflict markers before the owner sees it (OS-8); a check or merge
+/// that cannot run refuses the turn end by its plain code, the work kept in the set.
 /// Inputs: the store, the workspace and the turn end. Output: the change set the work now belongs
 /// to, None when nothing is pending.
 pub fn record_turn_end(
@@ -738,6 +741,9 @@ pub fn record_turn_end(
             "settle",
             owner_edit::settle(db, &workspace.worktree, kept.as_ref()),
         );
+        if let Some(id) = &kept {
+            owner::catch_up(db, id)?;
+        }
         Ok(kept)
     }
     #[cfg(not(unix))]

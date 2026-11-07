@@ -16,8 +16,11 @@ pub(crate) enum Landed {
 /// Records one ended turn through `landing::record_turn_end` and tells whether this turn
 /// added edits or finished an update, by comparing its change set's head and state before
 /// and after, so the owner is told once for each turn that changed something rather than
-/// at every turn while a set waits. Inputs: the change set store, the workspace and the
-/// turn end. Output: Nothing when no set is pending, Added or Waiting, or the refusal.
+/// at every turn while a set waits. A team agent's set merged and waiting for its agent,
+/// as a turn end leaves one that conflicts with main (OS-8), is handed its resolve work
+/// at once through `start_resolve` and reported Waiting, since it waits on the agent, not
+/// the owner. Inputs: the change set store, the workspace and the turn end. Output:
+/// Nothing when no set is pending, Added or Waiting, or the refusal.
 pub(crate) fn record(
     db: &Connection,
     workspace: &Workspace,
@@ -28,7 +31,16 @@ pub(crate) fn record(
     let Some(id) = landing::record_turn_end(db, workspace, end)? else {
         return Ok(Landed::Nothing);
     };
-    let after = landing::change_set(db, &id)?.map(|(_, set)| (set.head, set.state));
+    let after = landing::change_set(db, &id)?.map(|(_, set)| set);
+    if after.as_ref().is_some_and(|set| {
+        set.state == ChangeState::Updating && set.waiting && set.agent.kind != AgentKind::Master
+    }) {
+        if let Err(problem) = start_resolve(db, &id) {
+            eprintln!("resolve_not_started_after_turn cause={}", problem.0);
+        }
+        return Ok(Landed::Waiting(id));
+    }
+    let after = after.map(|set| (set.head, set.state));
     if after.is_some() && after == before {
         return Ok(Landed::Waiting(id));
     }
