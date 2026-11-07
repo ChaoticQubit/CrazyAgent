@@ -67,6 +67,77 @@ fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     }
 }
 
+const WALL_COMMANDS: [&str; 9] = [
+    "desktop_terminal_attach",
+    "desktop_terminal_input",
+    "desktop_terminal_prompt",
+    "desktop_terminal_resize",
+    "desktop_terminal_detach",
+    "desktop_team_graph",
+    "desktop_team_stop_agent",
+    "desktop_team_stop_teammate",
+    "desktop_terminals_per_window",
+];
+
+/// Terminal wall windows reach only the terminal, graph, Stop and Terminals per window
+/// commands: their capability grants exactly those to `terminals-*` windows, the app loads
+/// it beside the main window's, and in the bindings exactly those commands admit a wall
+/// window while every other command keeps the main window guard.
+#[test]
+fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
+    use serde_json::{Value, json};
+    use std::collections::BTreeSet;
+    let read = |text: &str| -> Value { serde_json::from_str(text).unwrap() };
+    let wall = read(include_str!("../capabilities/terminal-wall.json"));
+    assert_eq!(wall["windows"], json!(["terminals-*"]));
+    assert_eq!(wall["webviews"], json!(["terminals-*"]));
+    assert_eq!(wall["local"], json!(true));
+    let granted: BTreeSet<String> = wall["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|permission| permission.as_str().unwrap().to_owned())
+        .collect();
+    let allowed: BTreeSet<String> = WALL_COMMANDS
+        .iter()
+        .map(|command| format!("allow-{}", command.replace('_', "-")))
+        .collect();
+    assert_eq!(granted, allowed);
+    let main = read(include_str!("../capabilities/main-window.json"));
+    assert_eq!(main["windows"], json!(["main"]));
+    let conf = read(include_str!("../tauri.conf.json"));
+    assert_eq!(
+        conf["app"]["security"]["capabilities"],
+        json!(["main-window", "terminal-wall"])
+    );
+    let commands: Vec<(&str, &str)> = include_str!("../src/lib.rs")
+        .split("#[tauri::command]")
+        .skip(1)
+        .map(|body| {
+            let name = body
+                .split("fn ")
+                .nth(1)
+                .and_then(|rest| rest.split('(').next())
+                .unwrap();
+            (name, body)
+        })
+        .collect();
+    assert!(commands.len() > 100, "{}", commands.len());
+    let admitted: BTreeSet<&str> = commands
+        .iter()
+        .filter(|(_, body)| body.contains("terminal_window(&window)?;"))
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(admitted, WALL_COMMANDS.into_iter().collect());
+    for (name, body) in &commands {
+        assert_ne!(
+            body.contains("terminal_window(&window)?;"),
+            body.contains("main_window(&window)?;"),
+            "{name} has exactly one of the two window guards"
+        );
+    }
+}
+
 #[test]
 fn terminal_names_from_the_window_are_checked_before_use() {
     assert_eq!(agent("team-3").unwrap().as_str(), "team-3");

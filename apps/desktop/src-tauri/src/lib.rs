@@ -43,12 +43,12 @@ use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
-use crazyagent::protocol::ProjectSpec;
+use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::cleanup::FinishedAgent;
-use crazyagent::team::{TeamGraph, TeamStatus};
+use crazyagent::team::{TeamGraph, TeamStatus, TerminalsPerWindow};
 use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
@@ -69,6 +69,16 @@ fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
             cause: None,
             account: None,
         });
+    }
+    Ok(())
+}
+
+/// Admits the main window and the terminal wall windows to the terminal, graph, stop and
+/// Terminals per window commands; any other window gets `window_denied`. Takes the calling
+/// window. Returns unit or the refusal.
+fn terminal_window(window: &WebviewWindow) -> Result<(), BridgeError> {
+    if !bridge::terminal::window_label_valid(window.label()) {
+        return Err(engine_failure("window_denied"));
     }
     Ok(())
 }
@@ -1272,7 +1282,7 @@ async fn desktop_team_stop_agent(
     agent: i64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    terminal_window(&window)?;
     lock(&state)
         .await?
         .team_stop_agent(&id, agent, generation)
@@ -1304,7 +1314,7 @@ async fn desktop_team_stop_teammate(
     pane: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    terminal_window(&window)?;
     lock(&state)
         .await?
         .team_stop_teammate(&id, agent, pane, generation)
@@ -1440,7 +1450,7 @@ async fn desktop_team_graph(
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<TeamGraph, BridgeError> {
-    main_window(&window)?;
+    terminal_window(&window)?;
     read(&state).await?.team_graph(&id).await
 }
 
@@ -1453,7 +1463,7 @@ async fn desktop_terminal_attach(
     pane: Option<String>,
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, BridgeError> {
-    main_window(&window)?;
+    terminal_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
     let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
     let room = terminals.0.room(window.label(), &agent)?;
@@ -1468,7 +1478,7 @@ async fn desktop_terminal_input(
     agent: String,
     bytes: Vec<u8>,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    terminal_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
     terminals
         .0
@@ -1483,7 +1493,7 @@ async fn desktop_terminal_prompt(
     agent: String,
     text: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    terminal_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
     terminals
         .0
@@ -1499,7 +1509,7 @@ async fn desktop_terminal_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    terminal_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
     terminals
         .0
@@ -1518,9 +1528,175 @@ fn desktop_terminal_detach(
     agent: String,
     serial: u64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    terminal_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
     terminals.0.detach(window.label(), &agent, serial)
+}
+
+#[tauri::command]
+async fn desktop_team_terminals_per_window(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    per_window: TerminalsPerWindow,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_terminals_per_window(&id, per_window, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_terminals_per_window(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<TerminalsPerWindow, BridgeError> {
+    terminal_window(&window)?;
+    read(&state).await?.terminals_per_window(&id).await
+}
+
+#[tauri::command]
+async fn desktop_open_terminal_windows(
+    window: WebviewWindow,
+    app: AppHandle,
+    id: String,
+    name: String,
+    count: usize,
+    focus: bool,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
+    open_walls(&app, &project, &wall_name(&name), count, focus)
+}
+
+/// Whether a webview may load a URL: the app's own pages only, and the dev server in a
+/// debug build. Takes the URL. Returns the answer.
+fn app_page(url: &tauri::Url) -> bool {
+    (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+        || (url.scheme() == "http" && url.host_str() == Some("tauri.localhost"))
+        || (cfg!(debug_assertions)
+            && url.scheme() == "http"
+            && url.host_str() == Some("127.0.0.1")
+            && url.port() == Some(1420))
+}
+
+/// The project name a terminal wall window shows in its title: the shown name without
+/// control characters, at most WALL_NAME_CHARS_MAX characters, or "Project" when blank.
+/// Takes the name the main window sent. Returns the name to show.
+fn wall_name(name: &str) -> String {
+    let shown: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(WALL_NAME_CHARS_MAX)
+        .collect();
+    let shown = shown.trim();
+    if shown.is_empty() {
+        "Project".to_owned()
+    } else {
+        shown.to_owned()
+    }
+}
+
+const WALL_NAME_CHARS_MAX: usize = 80;
+
+/// Opens one project's terminal wall windows: builds each of pages 1 to `count` not yet
+/// open, retitles the open ones and brings them forward when asked, and closes the
+/// project's windows past `count`. Without `focus` it changes nothing while none of the
+/// project's wall windows is open, so a growing team only extends a wall the owner opened.
+/// Inputs: the app, the project, its shown name, the page count and whether to focus.
+/// Output: unit, `terminal_windows_full` past WINDOWS_MAX windows in all, or
+/// `terminal_window_failed`.
+fn open_walls(
+    app: &AppHandle,
+    project: &ProjectId,
+    name: &str,
+    count: usize,
+    focus: bool,
+) -> Result<(), BridgeError> {
+    let prefix = bridge::terminal::wall_prefix(project);
+    let open = app.webview_windows();
+    let mine = open
+        .keys()
+        .filter(|label| label.starts_with(&prefix))
+        .count();
+    let others = open
+        .keys()
+        .filter(|label| {
+            label.as_str() != "main"
+                && !label.starts_with(&prefix)
+                && bridge::terminal::window_label_valid(label)
+        })
+        .count();
+    if count > bridge::terminal::WINDOWS_MAX || others + count > bridge::terminal::WINDOWS_MAX {
+        return Err(engine_failure("terminal_windows_full"));
+    }
+    if !focus && mine == 0 {
+        return Ok(());
+    }
+    for (label, wall) in &open {
+        let past = label
+            .strip_prefix(&prefix)
+            .is_some_and(|page| !page.parse::<usize>().is_ok_and(|page| page <= count));
+        if past {
+            let _ = wall.close();
+        }
+    }
+    for page in 1..=count {
+        let label = bridge::terminal::wall_label(project, page);
+        let title = format!("{name} \u{b7} Terminals {page} of {count}");
+        match open.get(&label) {
+            Some(wall) => {
+                let _ = wall.set_title(&title);
+                if focus {
+                    let _ = wall.set_focus();
+                }
+            }
+            None => build_wall(app, &label, project, page, &title)?,
+        }
+    }
+    assert!(count <= bridge::terminal::WINDOWS_MAX);
+    Ok(())
+}
+
+/// Builds one terminal wall window on the wall page of its project, with the main window's
+/// navigation rule, a page load that clears only its own terminal views, and a close that
+/// forgets them. Inputs: the app, the window label, the project, the page and the title.
+/// Output: unit or `terminal_window_failed`.
+fn build_wall(
+    app: &AppHandle,
+    label: &str,
+    project: &ProjectId,
+    page: usize,
+    title: &str,
+) -> Result<(), BridgeError> {
+    assert!(bridge::terminal::window_label_valid(label));
+    let url = format!("index.html#/terminals/{}/{page}", project.as_str());
+    let wall = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+        .title(title)
+        .inner_size(1280.0, 820.0)
+        .min_inner_size(640.0, 420.0)
+        .on_navigation(app_page)
+        .on_page_load(|window, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                window
+                    .state::<TerminalState>()
+                    .0
+                    .page_started(window.label());
+            }
+        })
+        .build()
+        .map_err(|_| engine_failure("terminal_window_failed"))?;
+    let terminals = Arc::clone(&app.state::<TerminalState>().0);
+    let closed = label.to_owned();
+    wall.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            terminals.window_closed(&closed);
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -3604,6 +3780,9 @@ pub fn run() {
             desktop_terminal_prompt,
             desktop_terminal_resize,
             desktop_terminal_detach,
+            desktop_team_terminals_per_window,
+            desktop_terminals_per_window,
+            desktop_open_terminal_windows,
             desktop_update_project_setup,
             desktop_remove_project,
             desktop_cancel_research,
@@ -3786,14 +3965,7 @@ pub fn run() {
                 .title("CrazyAgent")
                 .inner_size(1180.0, 800.0)
                 .min_inner_size(760.0, 560.0)
-                .on_navigation(|url| {
-                    (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
-                        || (url.scheme() == "http" && url.host_str() == Some("tauri.localhost"))
-                        || (cfg!(debug_assertions)
-                            && url.scheme() == "http"
-                            && url.host_str() == Some("127.0.0.1")
-                            && url.port() == Some(1420))
-                })
+                .on_navigation(app_page)
                 .on_page_load(|window, payload| {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                         window
