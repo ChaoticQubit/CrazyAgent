@@ -12,18 +12,29 @@ fn the_agent_git_script_is_refused_for_the_xcrun_shim_and_any_path_that_is_not_p
         "/opt/new\nline/git",
         "/opt/semi;colon/git",
     ] {
-        assert_eq!(git_script(Path::new(git), false), None, "{git:?}");
-        assert_eq!(git_script(Path::new(git), true), None, "{git:?}");
+        for copy in [GitCopy::Worker, GitCopy::Lead, GitCopy::Free] {
+            assert_eq!(git_script(Path::new(git), copy), None, "{git:?}");
+        }
     }
-    let worker = git_script(Path::new("/Applications/X code.app/usr/bin/git"), false).unwrap();
-    let lead = git_script(Path::new("/Applications/X code.app/usr/bin/git"), true).unwrap();
-    for (script, flag) in [(&worker, "lead=0"), (&lead, "lead=1")] {
+    let real = Path::new("/Applications/X code.app/usr/bin/git");
+    let worker = git_script(real, GitCopy::Worker).unwrap();
+    let lead = git_script(real, GitCopy::Lead).unwrap();
+    let free = git_script(real, GitCopy::Free).unwrap();
+    for (script, flags) in [
+        (&worker, ["lead=0", "free=0"]),
+        (&lead, ["lead=1", "free=0"]),
+        (&free, ["lead=0", "free=1"]),
+    ] {
         assert!(script.starts_with("#!/bin/sh\ngit='/Applications/X code.app/usr/bin/git'\n"));
-        assert!(script.lines().any(|line| line == flag), "{flag}");
+        for flag in flags {
+            assert!(script.lines().any(|line| line == flag), "{flag}");
+        }
         assert!(!script.contains("@GIT@") && !script.contains("@LEAD@"));
+        assert!(!script.contains("@FREE@"));
         assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
     }
     assert_eq!(worker.replace("\nlead=0\n", "\nlead=1\n"), lead);
+    assert_eq!(worker.replace("\nfree=0\n", "\nfree=1\n"), free);
 }
 
 #[test]
