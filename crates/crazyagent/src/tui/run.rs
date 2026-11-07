@@ -416,9 +416,6 @@ pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
         | Request::PoolProjects
         | Request::Projects
         | Request::Reconnect
-        | Request::Recovery(_)
-        | Request::Questions(_)
-        | Request::Reveal(_)
         | Request::TerminalInput { .. }
         | Request::TerminalResize { .. }
         | Request::TerminalDetach { .. } => return None,
@@ -500,6 +497,22 @@ pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
         Request::Cleanup(query) => OwnerEvent::Cleanup(Box::new(
             super::client::cleanup::CleanupEvent::failed(*query, OWNER_BUSY),
         )),
+        Request::Recovery(query) => {
+            OwnerEvent::Recovery(Box::new(super::client::recovery::RecoveryEvent {
+                query: *query,
+                result: Err(busy()),
+            }))
+        }
+        Request::Questions(query) => {
+            OwnerEvent::Questions(Box::new(super::client::questions::QuestionsEvent {
+                query: *query,
+                result: Err(busy()),
+            }))
+        }
+        Request::Reveal(query) => OwnerEvent::Reveal(Box::new(super::client::ide::RevealEvent {
+            query: *query,
+            result: Err(busy()),
+        })),
     };
     Some(owner_arrival(event))
 }
