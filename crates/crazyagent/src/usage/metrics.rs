@@ -1,5 +1,5 @@
 use super::capture::Tokens;
-use super::report::{ROWS_MAX, count, has_table, tokens};
+use super::report::{REPORT_BYTES_MAX, ROWS_MAX, SHARES, count, has_table, tokens};
 use super::{failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -256,12 +256,31 @@ fn groups(
         .map_err(storage)
 }
 
+/// Keeps the metrics within `REPORT_BYTES_MAX` encoded bytes so their reply fits one frame:
+/// while they are larger, runs, accounts and harnesses each keep a smaller share of
+/// `ROWS_MAX`, losing the oldest runs and the least-used accounts and harnesses first.
+/// Input: the metrics. Output: the metrics that fit, or `usage_unavailable`.
+fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
+    for share in (0..=SHARES).rev() {
+        let kept = ROWS_MAX * share / SHARES;
+        metrics.runs.truncate(kept);
+        metrics.accounts.truncate(kept);
+        metrics.harnesses.truncate(kept);
+        let encoded = serde_json::to_vec(&metrics).map_err(|_| failure("usage_unavailable"))?;
+        if encoded.len() <= REPORT_BYTES_MAX {
+            return Ok(metrics);
+        }
+    }
+    Err(failure("usage_unavailable"))
+}
+
 /// Reads the Metrics page's counts for one project, None for every project, over the range
 /// from `since_ms` to `now_ms`: tasks running and waiting now, done and failed in the range,
 /// the tokens chart in bars `bucket_for` the range, anchored at its start, and the newest
-/// `ROWS_MAX` runs and largest `ROWS_MAX` accounts and harnesses by the headline. Inputs:
-/// the store, the project, the range start and now. Output: the metrics;
-/// `usage_request_invalid` for a range that starts before the epoch or after now.
+/// `ROWS_MAX` runs and largest `ROWS_MAX` accounts and harnesses by the headline, fewer when
+/// they would not fit one reply (`fit`). Inputs: the store, the project, the range start
+/// and now. Output: the metrics; `usage_request_invalid` for a range that starts before the
+/// epoch or after now.
 pub fn read(
     db: &Connection,
     project: Option<&ProjectId>,
@@ -277,7 +296,7 @@ pub fn read(
     let project = project.map(ProjectId::as_str);
     let [running, tasks_waiting, tasks_done, tasks_failed] = task_counts(db, project, since_ms)?;
     let bucket_ms = bucket_for(span_ms);
-    let metrics = Metrics {
+    let metrics = fit(Metrics {
         running,
         tasks_waiting,
         tasks_done,
@@ -287,7 +306,7 @@ pub fn read(
         runs: runs(db, project, since_ms)?,
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,
-    };
+    })?;
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);
     assert!(metrics.accounts.len() <= ROWS_MAX && metrics.harnesses.len() <= ROWS_MAX);
