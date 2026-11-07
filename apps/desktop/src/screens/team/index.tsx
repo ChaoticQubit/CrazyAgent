@@ -138,6 +138,13 @@ export function messageProblem(draft: string): string | null {
   return BYTES.encode(draft.trim()).length > AGENT_MESSAGE_BYTES_MAX ? `Keep the message under ${AGENT_MESSAGE_BYTES_MAX} bytes.` : null;
 }
 
+/** The identity the one terminal panel is kept by: the agent's engine number when it has one,
+ * so the same agent opened from Questions and then drawn by the graph keeps one panel, its
+ * terminal and its draft; else the node id. Input: the node. Output: the key. */
+export function panelKey(node: Pick<GraphNode, "agent" | "id">): string {
+  return typeof node.agent === "number" ? `agent:${node.agent}` : `node:${node.id}`;
+}
+
 /** What the graph view shows: the read it draws, and why the latest read failed while an
  * older graph stays on screen. */
 export type GraphState = { shown: Result<TeamGraph> | undefined; stale: string | null };
@@ -186,7 +193,8 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
  * Drag or the arrow keys pan, a pinch, Ctrl or Cmd wheel or the buttons zoom, and Fit shows it
  * all. Activating a card opens its terminal in the one panel beside the graph, replacing the
  * agent shown there; its menu sends a message, stops it, or opens its changes to merge. An
- * agent opened from elsewhere shows in that panel even while the graph loads, fails or is empty.
+ * agent opened from elsewhere shows in that panel even while the graph loads, fails or is empty,
+ * and keeps its terminal and draft when the graph then draws it.
  * Inputs: the project id, the agent whose terminal is open and the open action, and optional
  * harness and account name lookups. Output: the graph section. */
 export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
@@ -305,18 +313,24 @@ export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
     };
   }, [element]);
 
-  const side = (node: GraphNode) => <AgentSide key={node.id} projectId={projectId} node={node} harness={harness} onClose={() => onOpen(null)}>
+  const side = (node: GraphNode) => <AgentSide key={panelKey(node)} projectId={projectId} node={node} harness={harness} onClose={() => onOpen(null)}>
     <NodeMessages projectId={projectId} node={node} refresh={graph} />
   </AgentSide>;
-  const alone = (status: ReactNode) => open ? <>{status}{side(open)}</> : status;
-  if (graph === undefined) return alone(<section className="tg" aria-busy="true" aria-label="Team graph"><Skeleton shape="card" /></section>);
-  if (graph.kind === "not_ready") return alone(<NotReady what="The team graph" compact />);
-  if (graph.kind === "error") return alone(<LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />);
-  const team = account ? namedAccounts(graph.value, account) : graph.value;
-  if (team.nodes.length === 0) {
-    return alone(<EmptyState icon="users" title="No team yet" compact>
+  const team = graph?.kind === "ok" ? (account ? namedAccounts(graph.value, account) : graph.value) : null;
+  const status: ReactNode = graph === undefined ? <Skeleton shape="card" />
+    : graph.kind === "not_ready" ? <NotReady what="The team graph" compact />
+    : graph.kind === "error" ? <LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />
+    : team === null || team.nodes.length === 0 ? <EmptyState icon="users" title="No team yet" compact>
       Add a team in the project settings, then ask the master to build something.
-    </EmptyState>);
+    </EmptyState>
+    : null;
+  if (team === null || status !== null) {
+    return <section className="tg" aria-busy={graph === undefined || undefined} aria-label="Team graph">
+      <div key="split" className={`tg-split${open ? " with-terminal" : ""}`}>
+        {status}
+        {open && side(open)}
+      </div>
+    </section>;
   }
   const layout = layoutGraph(team);
   const content = { width: layout.width, height: layout.height };
@@ -348,7 +362,7 @@ export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
       <Button size="small" icon="refresh-cw" onClick={reload}>Try again</Button>
     </Notice>}
     <p className="tg-hint" id={`${ids}-hint`}>Drag or use the arrow keys to move around. Pinch or Ctrl+scroll to zoom, 0 fits. Click a card to open its terminal; its menu shows its skill counts, sends a message, stops it or merges its work.</p>
-    <div className={`tg-split${openNode ? " with-terminal" : ""}`}>
+    <div key="split" className={`tg-split${openNode ? " with-terminal" : ""}`}>
       <div className="tg-stage">
         <div className="tg-tools" role="toolbar" aria-label="Graph view">
           <Button size="small" icon="minus" iconOnly="Zoom out" onClick={() => zoom(1 / ZOOM_STEP)} />

@@ -211,7 +211,7 @@ test("the open graph card shows its sub-agent's Messages beside its instructions
   assert.match(words(open), /Reading this agent's messages\.\.\./u, "the first read is still running");
   assert.equal(renderToStaticMarkup(createElement(messages.NodeMessages, { projectId: "p", node: node("master", "master", "Master", null), refresh: 0 })), "");
   const graph = readFileSync(new URL("../src/screens/team/index.tsx", import.meta.url), "utf8");
-  assert.match(graph, /<AgentSide key=\{node\.id\} projectId=\{projectId\} node=\{node\} [^\n]*>\n\s*<NodeMessages projectId=\{projectId\} node=\{node\} refresh=\{graph\} \/>\n\s*<\/AgentSide>/u);
+  assert.match(graph, /<AgentSide key=\{panelKey\(node\)\} projectId=\{projectId\} node=\{node\} [^\n]*>\n\s*<NodeMessages projectId=\{projectId\} node=\{node\} refresh=\{graph\} \/>\n\s*<\/AgentSide>/u);
   const side = readFileSync(new URL("../src/screens/team/agent-instructions.tsx", import.meta.url), "utf8");
   assert.match(side, /<AgentInstructionsView read=\{read\} skills=\{catalogOf\(catalog\)\} \/>\}\n\s*\{children\}/u, "the Messages follow the instructions in the open card's side");
 });

@@ -192,6 +192,13 @@ test("a failed background read keeps the last graph, so an open terminal stays m
   assert.deepEqual(view.graphRead(view.GRAPH_UNREAD, busy), { shown: busy, stale: null }, "with no graph yet the error is the view");
 });
 
+test("the one terminal panel is kept by the agent's number, so a Questions node and its graph card share it", () => {
+  assert.equal(view.panelKey({ id: "team-1", agent: 1 }), "agent:1");
+  assert.equal(view.panelKey({ id: "team-1", agent: 1 }), view.panelKey({ id: "card-1", agent: 1 }));
+  assert.notEqual(view.panelKey({ id: "team-1", agent: 1 }), view.panelKey({ id: "team-2", agent: 2 }));
+  assert.equal(view.panelKey({ id: "pane-3", agent: null }), "node:pane-3");
+});
+
 test("the graph view waits for its first read before drawing", () => {
   const html = renderToStaticMarkup(createElement(view.TeamGraphView, { projectId: "chores" }));
   assert.match(html, /aria-busy="true"/);
