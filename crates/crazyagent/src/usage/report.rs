@@ -257,13 +257,13 @@ fn unreported_harnesses(
     Ok(names)
 }
 
-fn count(value: i64) -> u64 {
+pub(super) fn count(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
 
 /// Reads four `TOTAL()` token sums, which never overflow, saturating each into a count.
 /// Inputs: the row and its first sum's column. Output: the tokens.
-fn tokens(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Tokens> {
+pub(super) fn tokens(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Tokens> {
     let amount = |column: usize| row.get::<_, f64>(column).map(|total| total as u64);
     Ok(Tokens {
         input: amount(first)?,
@@ -329,7 +329,7 @@ fn rows(
         .map_err(storage)
 }
 
-fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
+pub(super) fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
     db.query_row(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
         params![name],
