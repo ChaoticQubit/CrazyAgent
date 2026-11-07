@@ -2430,7 +2430,10 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::MasterLands { .. } => Ok(Outcome::Applied),
+        TeamAction::MasterLands { mode, .. } => {
+            set_master_lands(tx, project, *mode)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::ReaskEmptyReply { on, .. } => {
             tx.execute(
                 "INSERT INTO team_reask_empty(project,reask) VALUES (?1,?2)
@@ -3630,6 +3633,31 @@ pub fn master_lands(
     if access != crate::sandbox::policy::AgentAccess::Full {
         return Ok(MasterLands::Waits);
     }
+    saved_master_lands(connection, project)
+}
+
+/// The owner's saved choice of what the master does with its own change set, as the team
+/// status offers it: None below Full access, where the master always waits. Takes a
+/// connection and the project. Returns the choice.
+fn offered_master_lands(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<MasterLands>, EngineError> {
+    let access = crate::sandbox::policy::load(connection, project.as_str())
+        .map_err(error)?
+        .access;
+    if access != crate::sandbox::policy::AgentAccess::Full {
+        return Ok(None);
+    }
+    saved_master_lands(connection, project).map(Some)
+}
+
+/// The owner's saved choice of what the master does with its own change set, Merges when
+/// none was saved. Takes a connection and the project. Returns the choice.
+fn saved_master_lands(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<MasterLands, EngineError> {
     let saved: Option<String> = connection
         .query_row(
             "SELECT mode FROM team_master_lands WHERE project=?1",
@@ -4409,7 +4437,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         land_on: land_on(connection, project)?,
         background_at_end: background_at_end(connection, project)?,
         ask_before_merge: ask_before_merge(connection, project)?,
-        master_lands: None,
+        master_lands: offered_master_lands(connection, project)?,
         reask_empty_reply: reask_empty_reply(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),

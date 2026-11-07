@@ -1080,6 +1080,21 @@ async fn desktop_team_ask_before_merge(
 }
 
 #[tauri::command]
+async fn desktop_team_master_lands(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: crazyagent::team::MasterLands,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_master_lands(&id, mode, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_reask_empty_reply(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3582,6 +3597,7 @@ pub fn run() {
             desktop_team_land_on,
             desktop_team_background,
             desktop_team_ask_before_merge,
+            desktop_team_master_lands,
             desktop_team_reask_empty_reply,
             desktop_team_new_folder_limit,
             desktop_team_coordination,

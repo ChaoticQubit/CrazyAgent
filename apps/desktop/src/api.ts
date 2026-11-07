@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, MasterLands, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -1271,6 +1271,13 @@ export function setBackgroundAtEnd(id: string, choice: BackgroundAtEnd): Promise
  * error. */
 export function setAskBeforeMerge(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_ask_before_merge", { id, on, generation: nextGeneration() });
+}
+
+/** Sets what a Full-access master does with its own conflict fixes: merge them into main
+ * itself, or leave them waiting for the owner's Accept in Changes. Inputs: the project id and
+ * the choice. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterLands(id: string, mode: MasterLands): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_lands", { id, mode, generation: nextGeneration() });
 }
 
 /** Turns the project's "Re-ask a sub-agent's empty reply" setting on or off; on, a

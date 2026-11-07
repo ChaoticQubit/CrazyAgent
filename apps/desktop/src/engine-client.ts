@@ -830,6 +830,10 @@ export type ChildLanding = "lead" | "owner";
 /** Where a project's new sub-agents commit: each on its own branch, or a detached HEAD. */
 export type BranchMode = "named" | "detached";
 
+/** What a Full-access master does with its own conflict fixes: merge them into main itself,
+ * or leave them waiting for the owner's Accept. */
+export type MasterLands = "merges" | "waits";
+
 /** A harness kind the coordination settings are kept for, by its catalog id. */
 export type CoordHarness = "claude-code" | "codex" | "rcli";
 /** How a lead's sub-agents start: app-spawned processes, or the harness's native teammates. */
@@ -913,6 +917,7 @@ export interface TeamStatus {
   land_on?: string | null;
   background_at_end?: BackgroundAtEnd;
   ask_before_merge?: boolean;
+  master_lands?: MasterLands | null;
   reask_empty_reply?: boolean;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;

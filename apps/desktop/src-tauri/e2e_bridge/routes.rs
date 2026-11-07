@@ -200,8 +200,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> =
-                async { read(state).await?.project_activity(&id, limit).await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.project_activity(&id, limit).await }.await;
             routed(result)
         }
         "desktop_project_context" => {
@@ -838,6 +837,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_ask_before_merge(&id, on, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_master_lands" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                mode: crazyagent::team::MasterLands,
+                generation: u64,
+            }
+            let Args { id, mode, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_master_lands(&id, mode, generation) .await }.await;
             routed(result)
         }
         "desktop_team_reask_empty_reply" => {

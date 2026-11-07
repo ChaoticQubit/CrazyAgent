@@ -3,7 +3,7 @@ mod routes;
 use crazyagent::agent_git::Layout;
 use crazyagent::coord::settings::SkillRole;
 use crazyagent::coord::{MessageKind, NewMessage, Party, QuestionFor, Severity};
-use crazyagent::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
+use crazyagent::landing::{AcceptOutcome, AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
 use crazyagent::protocol::ProjectId;
 use crazyagent_desktop::bridge::{BridgeError, BridgeQueue, NativeBridge};
 use serde::Serialize;
@@ -21,6 +21,7 @@ const HEAD_BYTES_MAX: usize = 16 * 1024;
 const BODY_BYTES_MAX: usize = 4 * 1024 * 1024;
 const TOKEN_BYTES: usize = 32;
 const RECORD_MODE: &str = "record-turn-end";
+const MASTER_MODE: &str = "master-turn-end";
 const ASK_MODE: &str = "ask-owner";
 const SKILLS_MODE: &str = "role-skills";
 const RECORD_ARGS_MAX: usize = 10;
@@ -185,11 +186,13 @@ async fn serve(mut stream: TcpStream, state: Shared, token: Arc<String>) {
     let _ = stream.shutdown().await;
 }
 
-/// Ends one sub-agent turn in a worktree the way the engine's turn hooks do, through the
+/// Ends one agent turn in a worktree the way the engine's turn hooks do, through the
 /// engine's own `landing::record_turn_end` on its database, so the end-to-end test reviews
-/// a real worktree edit. Inputs: engine root, project, agent id and label, owner checkout,
-/// agent worktree, its git folder and the prompt line. Output: the change set id or `none`.
-fn record_turn_end(args: &[OsString]) -> Result<String, String> {
+/// a real worktree edit. A master turn then goes through `landing::land_master_set` as the
+/// master runtime's turn end does. Inputs: the mode, engine root, project, agent id and
+/// label, owner checkout, agent worktree, its git folder and the prompt line. Output: the
+/// change set id or `none`; for a master, the id and `landed`, `conflict` or `waits`.
+fn record_turn_end(mode: &str, args: &[OsString]) -> Result<String, String> {
     let [
         root,
         project,
@@ -202,7 +205,7 @@ fn record_turn_end(args: &[OsString]) -> Result<String, String> {
     ] = args
     else {
         return Err(format!(
-            "usage: desktop-e2e-bridge {RECORD_MODE} <engine root> <project> <agent> <label> <repository> <worktree> <git dir> <prompt>"
+            "usage: desktop-e2e-bridge {mode} <engine root> <project> <agent> <label> <repository> <worktree> <git dir> <prompt>"
         ));
     };
     let text = |value: &OsString| {
@@ -212,10 +215,15 @@ fn record_turn_end(args: &[OsString]) -> Result<String, String> {
             .ok_or_else(|| "arguments must be UTF-8".to_owned())
     };
     let agent = text(agent)?;
+    let kind = if mode == MASTER_MODE {
+        AgentKind::Master
+    } else {
+        AgentKind::Sub
+    };
     let workspace = Workspace {
         project: ProjectId::new(text(project)?).map_err(|_| "invalid project id".to_owned())?,
         agent: ChangeAgent {
-            kind: AgentKind::Sub,
+            kind,
             id: agent.clone(),
             label: text(label)?,
         },
@@ -231,7 +239,20 @@ fn record_turn_end(args: &[OsString]) -> Result<String, String> {
     let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
     let recorded =
         crazyagent::landing::record_turn_end(&db, &workspace, &turn).map_err(|error| error.0)?;
-    Ok(recorded.map_or_else(|| "none".to_owned(), String::from))
+    let Some(id) = recorded else {
+        return Ok("none".to_owned());
+    };
+    if kind != AgentKind::Master {
+        return Ok(String::from(id));
+    }
+    let home = crazyagent::projects_home::owner_home().map_err(|error| error.0)?;
+    let landed = crazyagent::landing::land_master_set(&db, &home, &id).map_err(|error| error.0)?;
+    let how = match landed {
+        None => "waits",
+        Some(AcceptOutcome::Landed { .. }) => "landed",
+        Some(AcceptOutcome::Conflict { .. }) => "conflict",
+    };
+    Ok(format!("{} {how}", String::from(id)))
 }
 
 /// Puts one question from a team agent to the owner the way the agent's `update_work` call
@@ -341,6 +362,7 @@ fn role_skills(args: &[OsString]) -> Result<String, String> {
 
 /// Serves the app's `desktop_*` commands to the end-to-end test on 127.0.0.1 for as long as
 /// stdin stays open; with `record-turn-end` first, records one ended agent turn, with
+/// `master-turn-end` first, records one ended master turn and lands it when the setting lets it, with
 /// `ask-owner` first, puts one agent's question to the owner, and with `role-skills` first,
 /// installs one team role's skills. Input: the engine socket path. Output: prints
 /// `ready <port> <token>` once listening, or the recorded change set, the question's id or
@@ -372,14 +394,18 @@ async fn main() -> std::process::ExitCode {
             }
         };
     }
-    if all.first().is_some_and(|mode| mode == RECORD_MODE) {
-        return match record_turn_end(&all[1..]) {
+    if let Some(mode) = all
+        .first()
+        .and_then(|mode| mode.to_str())
+        .filter(|mode| [RECORD_MODE, MASTER_MODE].contains(mode))
+    {
+        return match record_turn_end(mode, &all[1..]) {
             Ok(recorded) => {
                 println!("{recorded}");
                 std::process::ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("record-turn-end: {error}");
+                eprintln!("{mode}: {error}");
                 std::process::ExitCode::FAILURE
             }
         };

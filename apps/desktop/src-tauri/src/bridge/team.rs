@@ -5,7 +5,8 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::team::agent_messages::{AgentMessages, Cursor, MessageSettings};
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{
-    BackgroundAtEnd, BranchMode, ChildLanding, SwitchApply, SwitchMode, TeamAction, TeamStatus,
+    BackgroundAtEnd, BranchMode, ChildLanding, MasterLands, SwitchApply, SwitchMode, TeamAction,
+    TeamStatus,
 };
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
@@ -398,6 +399,20 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         self.team_action(TeamAction::AskBeforeMerge { project_id, on }, generation)
+            .await
+    }
+
+    /// Sets what a Full-access master does with its own conflict fixes: merge them into main
+    /// itself, or leave them waiting for the owner's Accept. Takes the project id, the choice
+    /// and the client generation. Returns the actual commit receipt.
+    pub async fn team_master_lands(
+        &mut self,
+        id: &str,
+        mode: MasterLands,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MasterLands { project_id, mode }, generation)
             .await
     }
 

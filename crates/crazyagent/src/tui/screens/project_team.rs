@@ -20,8 +20,9 @@ use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, R
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, ChildLanding, CoordinationView,
-    DelegationPath, MASTER_BRANCH_BYTES_MAX, SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX,
-    TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
+    DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, SwitchApply, SwitchMode,
+    TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus,
+    TeamTask,
 };
 use crate::tui::keys::Key;
 use crate::tui::seam::AccountRow;
@@ -734,6 +735,7 @@ impl TeamView {
                 TeamReply::Handled
             }
             KeyCode::Char('g') => self.ask_before_merge(),
+            KeyCode::Char('W') => self.master_lands(),
             KeyCode::Char('R') => self.reask_empty_reply(),
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('B') => self.background_at_end(),
@@ -2016,6 +2018,40 @@ impl TeamView {
         })
     }
 
+    /// Flips "When the master resolves conflicts" between Merge into main itself and Wait
+    /// for my Accept (DEC-117 Q2), offered only at Full access. Output: the change to send,
+    /// or Handled with a notice while loading, saving or below Full access.
+    fn master_lands(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let Some(current) = status.master_lands else {
+            self.notice = Some(Notice::plain(
+                "The master merges into main itself only at Full access.",
+            ));
+            return TeamReply::Handled;
+        };
+        let mode = match current {
+            MasterLands::Merges => MasterLands::Waits,
+            MasterLands::Waits => MasterLands::Merges,
+        };
+        self.changing = Some(
+            match mode {
+                MasterLands::Merges => "The master now merges its conflict fixes into main itself.",
+                MasterLands::Waits => "The master now waits for your Accept on its conflict fixes.",
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::MasterLands {
+            project_id: self.project.clone(),
+            mode,
+        })
+    }
+
     /// Flips "Re-ask empty reply" between On and Off: whether a sub-agent that ends a task
     /// with no reply text is asked once more for its reply (DEC-111). Output: the change to
     /// send, or Handled with a notice while loading or saving.
@@ -2982,6 +3018,15 @@ impl TeamView {
                 if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
             ),
             setting(
+                "When the master resolves conflicts",
+                match status.master_lands {
+                    Some(MasterLands::Merges) => "Merge into main itself",
+                    Some(MasterLands::Waits) => "Wait for my Accept",
+                    None => "Only at Full access",
+                }
+                .to_owned(),
+            ),
+            setting(
                 "Re-ask empty reply",
                 if status.reask_empty_reply {
                     "On"
@@ -3344,6 +3389,7 @@ impl TeamView {
             ("m", "Master's branch"),
             ("L", "Land on"),
             ("g", "Ask before merge"),
+            ("W", "Master merges"),
             ("R", "Re-ask empty reply"),
             ("F", "New folder limit"),
             ("B", "Background commands"),
