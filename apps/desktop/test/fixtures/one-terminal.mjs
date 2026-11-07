@@ -9,7 +9,7 @@ import { AgentsTab } from "../../src/screens/project/agents.tsx";
 import { teamStatus } from "./team-status.mjs";
 
 let root = null;
-const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok" };
+const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok", release: () => {} };
 
 const node = (id, kind, extra = {}) => ({
   id, kind, parent: null, label: id, harness: "codex", status: "working", status_label: "Working", account: null, terminal: null, ...extra,
@@ -48,10 +48,12 @@ function deliver(channel, message) {
 }
 
 /** The team graph read the engine gives for a graph mode: the team ("ok"), a team with no
- * agents ("empty"), a read that never answers ("pending"), a failed read ("error") or a build
- * without the graph ("not_ready"). Input: the mode. Output: the read's answer. */
+ * agents ("empty"), a read that never answers ("pending"), the team once `release` is called
+ * ("late"), a failed read ("error") or a build without the graph ("not_ready"). Input: the
+ * mode. Output: the read's answer. */
 function graphRead(mode) {
   if (mode === "pending") return new Promise(() => {});
+  if (mode === "late") return new Promise((done) => { engine.release = () => done(TEAM); });
   if (mode === "error") return Promise.reject({ code: "engine_unreachable", message: "The engine isn't running." });
   if (mode === "not_ready") return Promise.reject("Command desktop_team_graph not found");
   return Promise.resolve(mode === "empty" ? { ...TEAM, nodes: [] } : TEAM);
@@ -146,6 +148,21 @@ export function openWaiting(name) {
   return true;
 }
 
+/** Answers the team graph read held by the "late" mode, as the engine does once it reads. */
+export function release() {
+  engine.release();
+}
+
+/** Types a draft into the open terminal panel's message box, as the owner does. Input: the
+ * text. Output: whether the box was there. */
+export function type(text) {
+  const box = document.querySelector(".tg-composer-input");
+  if (!box) return false;
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(box, text);
+  box.dispatchEvent(new Event("input", { bubbles: true }));
+  return true;
+}
+
 /** What the page and the engine show now: the terminal panels and their names, the xterm
  * views on the page, the panels whose terminal is live, and the engine's attached terminal
  * clients with every attach and detach. */
@@ -153,6 +170,7 @@ export function shown() {
   const panels = [...document.querySelectorAll("section.tg-terminal")];
   return {
     panels: panels.map((panel) => panel.getAttribute("aria-label")),
+    draft: document.querySelector(".tg-composer-input")?.value ?? null,
     xterms: document.querySelectorAll(".xterm").length,
     live: panels.filter((panel) => panel.querySelector(".tg-terminal-note")).length,
     clients: [...engine.clients.values()],

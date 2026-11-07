@@ -76,3 +76,24 @@ test("Open terminal in Waiting on you opens the one panel while the team graph i
     assert.deepEqual(seen.clients, ["team-1"], `${graph}: ${JSON.stringify(seen)}`);
   }
 });
+
+test("a panel opened from Waiting on you before the graph reads keeps its terminal and its draft once the graph draws that agent", async () => {
+  const seen = await withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate("Fixture.mount(0, 'late')");
+    assert.equal(await evaluate("Fixture.until(() => document.querySelector('[aria-label=\"Waiting on you in their terminal\"]') !== null)"), true, "the inbox drew");
+    assert.equal(await evaluate("Fixture.openWaiting('Ada')"), true, "Open terminal on Ada");
+    assert.equal(await evaluate("Fixture.until(() => Fixture.shown().live > 0 && document.querySelector('.tg-composer-input') !== null)"), true, "Ada's terminal went live");
+    assert.equal(await evaluate("Fixture.type('Keep the menu on the home page')"), true, "the owner typed a draft");
+    await evaluate("Fixture.release()");
+    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4)"), true, "the graph drew");
+    await evaluate("new Promise((done) => setTimeout(done, 300))");
+    return evaluate("Fixture.shown()");
+  });
+  assert.deepEqual(seen.panels, ["Ada terminal"], JSON.stringify(seen));
+  assert.equal(seen.draft, "Keep the menu on the home page", JSON.stringify(seen));
+  assert.deepEqual(seen.attaches, ["team-1"], `one attach, no remount: ${JSON.stringify(seen)}`);
+  assert.deepEqual(seen.detaches, [], JSON.stringify(seen));
+  assert.deepEqual(seen.clients, ["team-1"], JSON.stringify(seen));
+});
