@@ -239,11 +239,18 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
   };
 }
 
-function Breakdown({ by, control, head, extra, rows }: { by: MetricsBy; control: ReactNode; head: string; extra: string[]; rows: BreakdownRow[] }) {
-  const sum = (field: keyof Tokens) => rows.reduce((total, row) => total + row.tokens[field], 0);
-  const total: Tokens = { input: sum("input"), output: sum("output"), cache_read: sum("cache_read"), cache_write: sum("cache_write") };
+/** The breakdown table: each listed row with its four token parts, its own columns and its
+ * share of tokens, then an Other row for what a capped list leaves out of the range, then the
+ * Total, which is the Tokens tile's total. Every share is out of that total. Inputs: the
+ * choice, its switch, the heads, the rows and the range total. */
+function Breakdown({ by, control, head, extra, rows, total }: { by: MetricsBy; control: ReactNode; head: string; extra: string[]; rows: BreakdownRow[]; total: Tokens }) {
+  const left = (field: keyof Tokens) => Math.max(0, total[field] - rows.reduce((sum, row) => sum + row.tokens[field], 0));
+  const other: Tokens = { input: left("input"), output: left("output"), cache_read: left("cache_read"), cache_write: left("cache_write") };
+  const unlisted = other.input + other.output + other.cache_read + other.cache_write > 0;
   const headline = headlineTokens(total);
   const share = cacheShare(total);
+  const percent = (tokens: Tokens) => headline === 0 ? 0 : Math.min(100, Math.round((headlineTokens(tokens) * 100) / headline));
+  const bar = (tokens: Tokens) => <td><span className="mx-share"><span className="mx-bar"><i style={{ width: `${percent(tokens)}%` }} /></span><span className="mono small">{percent(tokens)}%</span></span></td>;
   const cells = (tokens: Tokens) => <>
     <td className="num">{compactCount(tokens.input)}</td>
     <td className="num">{compactCount(tokens.cache_write)}</td>
@@ -258,16 +265,20 @@ function Breakdown({ by, control, head, extra, rows }: { by: MetricsBy; control:
         {extra.map((column) => <th scope="col" key={column}>{column}</th>)}<th scope="col">Share of tokens</th>
       </tr></thead>
       <tbody>
-        {rows.map((row) => {
-          const percent = headline === 0 ? 0 : Math.round((headlineTokens(row.tokens) * 100) / headline);
-          return <tr key={row.key}>
-            <th scope="row">{row.name}</th>
-            <td className="num mx-headline">{compactCount(headlineTokens(row.tokens))}</td>
-            {cells(row.tokens)}
-            {row.extra.map((value, index) => <td key={extra[index]}>{value}</td>)}
-            <td><span className="mx-share"><span className="mx-bar"><i style={{ width: `${percent}%` }} /></span><span className="mono small">{percent}%</span></span></td>
-          </tr>;
-        })}
+        {rows.map((row) => <tr key={row.key}>
+          <th scope="row">{row.name}</th>
+          <td className="num mx-headline">{compactCount(headlineTokens(row.tokens))}</td>
+          {cells(row.tokens)}
+          {row.extra.map((value, index) => <td key={extra[index]}>{value}</td>)}
+          {bar(row.tokens)}
+        </tr>)}
+        {unlisted && <tr className="mx-other">
+          <th scope="row" className="muted">Other, not listed</th>
+          <td className="num mx-headline">{compactCount(headlineTokens(other))}</td>
+          {cells(other)}
+          {extra.map((column) => <td key={column} />)}
+          {bar(other)}
+        </tr>}
         <tr className="mx-total">
           <th scope="row">Total</th>
           <td className="num mx-headline">{compactCount(headline)}</td>
@@ -318,7 +329,7 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
     {tools}
     <Tiles usage={usage.value} metrics={metrics.value} />
     <Chart metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} reread={usage.value.total.cache_read} />
-    <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={BREAKDOWNS} onValue={onBy} />} {...table} />
+    <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} />
   </div>;
 }
 
