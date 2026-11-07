@@ -531,9 +531,10 @@ fn backfill_records_a_requeued_run_as_started_only() {
     );
 }
 
-/// The store keeps a project's newest `KEPT_PER_PROJECT_MAX` events with its Created event
-/// (F4): past the bound the oldest other events go first, and Created, which never churns,
-/// stays.
+/// The store keeps a project's `KEPT_PER_PROJECT_MAX` events split in two (F4, T11 r1 M1):
+/// Created with the newest 8,999 events of the engine and the owner, and the newest
+/// `AGENT_LOGGED_KEPT_MAX` phases and test runs agents logged. Past each share its oldest go
+/// first, and Created, which never churns, stays.
 #[test]
 fn the_store_keeps_its_bound_with_the_created_event_and_drops_the_oldest_others() {
     let (_folder, db) = db();
@@ -572,10 +573,39 @@ fn the_store_keeps_its_bound_with_the_created_event_and_drops_the_oldest_others(
         )
         .unwrap()
     };
-    assert_eq!(count("1"), KEPT_PER_PROJECT_MAX);
+    let others = "kind NOT IN ('created','phase','test')";
+    let first_kept = AGENT_LOGGED_KEPT_MAX + 6;
     assert_eq!(count("kind='created'"), 1);
-    assert_eq!(count("kind<>'created' AND at_ms <= 5"), 0);
-    assert_eq!(count("kind<>'created' AND at_ms = 6"), 1);
+    assert_eq!(
+        count(others),
+        KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX - 1
+    );
+    assert_eq!(count(&format!("{others} AND at_ms < {first_kept}")), 0);
+    assert_eq!(count(&format!("{others} AND at_ms = {first_kept}")), 1);
+    db.execute(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?2)
+         INSERT INTO project_activity(project,at_ms,kind,actor,text)
+         SELECT ?1, 20000 + i, 'phase', 'Master', 'Phase ' || i FROM n",
+        params![PROJECT, AGENT_LOGGED_KEPT_MAX + 2],
+    )
+    .unwrap();
+    let phase = NewActivity {
+        kind: ActivityKind::Phase,
+        actor: MASTER_ACTOR,
+        agent: None,
+        goal: None,
+        text: "The newest phase",
+        change_set: None,
+    };
+    record(&db, &project(), &phase, 30_000).unwrap();
+    assert_eq!(count("kind IN ('phase','test')"), AGENT_LOGGED_KEPT_MAX);
+    assert_eq!(count("kind='phase' AND at_ms <= 20003"), 0);
+    assert_eq!(
+        count(others),
+        KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX - 1,
+        "agents' rows push out none of the others"
+    );
+    assert_eq!(count("1"), KEPT_PER_PROJECT_MAX);
 }
 
 /// Phases and test runs agents log keep their own newest 1,000 (T11 r1 M1): a looping

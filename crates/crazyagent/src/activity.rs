@@ -15,7 +15,8 @@ pub const LISTED_BYTES_MAX: usize = 48 * 1024;
 const ACTOR_BYTES_MAX: usize = 120;
 /// The most bytes of a change set id kept with an event.
 const CHANGE_SET_BYTES_MAX: usize = 128;
-/// The most events one project keeps; the oldest go first.
+/// The most events one project keeps, split between the engine's and the owner's events
+/// and the agents' (`AGENT_LOGGED_KEPT_MAX`); the oldest of each share go first.
 const KEPT_PER_PROJECT_MAX: i64 = 10_000;
 /// The share of `KEPT_PER_PROJECT_MAX` for the phases and test runs agents log, which
 /// only push out their own oldest, never another kind of event.
@@ -203,11 +204,12 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
 }
 
 /// Records one event: the actor, text and goal go through the change set subject's scrub
-/// (`shown`) and are cut to their bounds, and the project keeps its Created event, the
-/// newest `AGENT_LOGGED_KEPT_MAX` phases and test runs and the newest of every other kind
-/// up to `KEPT_PER_PROJECT_MAX` events in all. Takes the database, the project, the event
-/// and the time in ms. Returns the event id, or `activity_item_invalid` for an empty actor
-/// or text.
+/// (`shown`) and are cut to their bounds. The project keeps `KEPT_PER_PROJECT_MAX` events
+/// in two shares that never push each other out: its Created event with the newest other
+/// events of the engine and the owner, `KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX` in
+/// all, and the newest `AGENT_LOGGED_KEPT_MAX` phases and test runs agents logged. Takes
+/// the database, the project, the event and the time in ms. Returns the event id, or
+/// `activity_item_invalid` for an empty actor or text.
 pub fn record(
     db: &Connection,
     project: &ProjectId,
