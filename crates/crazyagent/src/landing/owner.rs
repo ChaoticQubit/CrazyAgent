@@ -831,7 +831,7 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
 /// git keeps the "Catch up with main" it launched with. A failed send is logged by its plain
 /// code and never fails the Accept. Inputs: the store, the accepted set and the landed
 /// commit. Output: none.
-fn tell_landed(db: &Connection, record: &Record, landed: &str) {
+pub(super) fn tell_landed(db: &Connection, record: &Record, landed: &str) {
     if !flow::in_clone(record) || record.agent.kind != AgentKind::Sub {
         return;
     }

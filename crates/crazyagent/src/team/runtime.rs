@@ -7023,7 +7023,7 @@ impl TeamRuntime {
                     with_code("the team tool switches could not be read", Some(&e.0))
                 })?;
                 context
-                    .with_agent_team_tool(engine, &self.mailbox(id), &off)
+                    .with_agent_team_tool(engine, &self.mailbox(id), &off, layout == Layout::Clone)
                     .map_err(unread)
             }
             _ => Ok(context),

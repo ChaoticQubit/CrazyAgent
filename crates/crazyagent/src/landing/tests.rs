@@ -3741,10 +3741,10 @@ fn every_agent_clone_holds_the_landed_main_after_an_accept() {
 
 const CLONE_AGENT: i64 = 7;
 
-/// Records the case's own-clone agent as team sub-agent `CLONE_AGENT` with its worktree,
-/// and the coordination tables, as the engine does for a sub-agent on Own branch, so an
-/// Accept gives its clone main and sends it notes. Input: the case. Output: none.
-fn seat_clone_agent(case: &mut Case) {
+/// Records the case's agent as team sub-agent `CLONE_AGENT` with its worktree, own clone or
+/// linked, and the coordination tables, as the engine does for a sub-agent, so an Accept
+/// gives its worktree main and can send it notes. Input: the case. Output: none.
+fn seat_team_agent(case: &mut Case) {
     case.workspace.agent.id = CLONE_AGENT.to_string();
     crate::team::initialize(&case.db).unwrap();
     crate::coord::ensure(&case.db).unwrap();
@@ -3786,29 +3786,57 @@ fn engine_notes(case: &Case) -> Vec<String> {
         .collect()
 }
 
+/// How many landed Notes the engine sent anyone in the case's store. Input: the case.
+/// Output: the count.
+fn landed_notes(case: &Case) -> i64 {
+    case.db
+        .query_row(
+            "SELECT COUNT(*) FROM coord_messages WHERE from_kind='engine' AND idem_key LIKE 'landed-%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// The Note the engine sends a clone agent once its set lands, as the owner worded it
+/// (DEC-117 addendum, T6 r1 F1). Inputs: the landed commit and the set's head. Output: the
+/// body.
+fn landed_note(landed: &str, head: &str) -> String {
+    format!(
+        "Your change set landed on main as {}; its last commit was {}. If git log {}..HEAD shows no newer commits, start your next work from main: git reset --keep crazyagent/main.",
+        &landed[..12],
+        &head[..12],
+        &head[..12]
+    )
+}
+
 /// After the owner accepts a clone's set, the engine tells its agent in one Note that the
-/// set landed and to start its next work from main, naming no merge even with "Catch up
-/// with main" on, since the agent's own git keeps the setting it launched with; its git
-/// reset there opens its next set at the landed commit, which lands its one new line (OS-8).
+/// set landed and what its last commit was, so `git log <head>..HEAD` shows any newer work,
+/// and to start from main with `git reset --keep`, naming no merge even with "Catch up with
+/// main" on, since the agent's own git keeps the setting it launched with; that reset opens
+/// its next set at the landed commit, which lands its one new line (OS-8).
 #[test]
 fn after_an_accept_a_clone_agent_is_told_to_restart_from_main_and_its_next_set_starts_there() {
     let mut case = Case::own_branch();
-    seat_clone_agent(&mut case);
+    seat_team_agent(&mut case);
     case.edit("README", "one\ntwo\nthree\nfour\n");
     case.agent_commit("Add the fourth line");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
     let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
         panic!("the accept conflicted");
     };
     assert_eq!(
         engine_notes(&case),
-        [format!(
-            "Your change set landed on main as {}. If you have no newer commits, start your next work from main: git reset --hard crazyagent/main.",
-            &commit[..12]
-        )],
+        [landed_note(&commit, &head)],
         "the agent hears once that its set landed and how to start from main"
     );
-    case.agent(&["reset", "-q", "--hard", "crazyagent/main"]);
+    assert_eq!(
+        case.agent(&["log", "--oneline", &format!("{}..HEAD", &head[..12])]),
+        "",
+        "the Note's own check shows no newer commits"
+    );
+    case.agent(&["reset", "-q", "--keep", "crazyagent/main"]);
     assert_eq!(case.agent_head(), commit);
     case.edit("README", "ONE\ntwo\nthree\nfour\n");
     case.agent_commit("Shout the first line");
@@ -3848,7 +3876,7 @@ fn after_an_accept_a_clone_agent_is_told_to_restart_from_main_and_its_next_set_s
 fn an_owner_commit_after_the_accept_stays_out_of_the_set_of_an_agent_that_restarts_from_newer_main()
 {
     let mut case = Case::own_branch();
-    seat_clone_agent(&mut case);
+    seat_team_agent(&mut case);
     crate::team::set_catch_up_main(
         &case.db,
         &case.workspace.project,
@@ -3858,19 +3886,14 @@ fn an_owner_commit_after_the_accept_stays_out_of_the_set_of_an_agent_that_restar
     case.edit("README", "one\ntwo\nthree\nfour\n");
     case.agent_commit("Add the fourth line");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
     let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
         panic!("the accept conflicted");
     };
-    assert_eq!(
-        engine_notes(&case),
-        [format!(
-            "Your change set landed on main as {}. If you have no newer commits, start your next work from main: git reset --hard crazyagent/main.",
-            &commit[..12]
-        )]
-    );
+    assert_eq!(engine_notes(&case), [landed_note(&commit, &head)]);
     let owner_work = case.owner_commit("other.txt", "owner work\n", "Owner work");
     refresh_main(&case.db, &case.workspace.project).unwrap();
-    case.agent(&["reset", "-q", "--hard", "crazyagent/main"]);
+    case.agent(&["reset", "-q", "--keep", "crazyagent/main"]);
     assert_eq!(case.agent_head(), owner_work);
     case.edit("README", "ONE\ntwo\nthree\nfour\n");
     case.agent_commit("Shout the first line");
@@ -3895,7 +3918,7 @@ fn an_owner_commit_after_the_accept_stays_out_of_the_set_of_an_agent_that_restar
 #[test]
 fn a_clone_branch_without_the_landed_work_is_still_refused() {
     let mut case = Case::own_branch();
-    seat_clone_agent(&mut case);
+    seat_team_agent(&mut case);
     let start = case.tip();
     case.edit("README", "one\ntwo\nthree\nfour\n");
     case.agent_commit("Add the fourth line");
@@ -3917,14 +3940,16 @@ fn a_clone_branch_without_the_landed_work_is_still_refused() {
     );
 }
 
-/// A landed Note the engine cannot send, here to a clone agent the team does not record, is
-/// logged and leaves the Accept landed (OS-8).
+/// A landed Note the engine cannot send, here to a clone agent whose worktree the team
+/// records and was given main but whose agent row is gone, is logged and leaves the Accept
+/// landed (OS-8).
 #[test]
 fn a_landed_note_that_cannot_be_sent_never_fails_the_accept() {
     let mut case = Case::own_branch();
-    case.workspace.agent.id = CLONE_AGENT.to_string();
-    crate::team::initialize(&case.db).unwrap();
-    crate::coord::ensure(&case.db).unwrap();
+    seat_team_agent(&mut case);
+    case.db
+        .execute("DELETE FROM team_agents WHERE id=?1", [CLONE_AGENT])
+        .unwrap();
     case.edit("README", "one\ntwo\nthree\nfour\n");
     case.agent_commit("Add the fourth line");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -3932,10 +3957,126 @@ fn a_landed_note_that_cannot_be_sent_never_fails_the_accept() {
         panic!("the accept conflicted");
     };
     assert_eq!(
-        (case.view(&id).state, case.tip()),
-        (ChangeState::Accepted, commit)
+        (
+            case.view(&id).state,
+            case.tip(),
+            clone_main(&case, &case.workspace.worktree)
+        ),
+        (ChangeState::Accepted, commit.clone(), commit)
     );
-    assert!(engine_notes(&case).is_empty());
+    assert_eq!(landed_notes(&case), 0);
+}
+
+/// A clone the Accept could not give main, here because a folder stands where its
+/// `refs/crazyagent/main` goes, is sent no landed Note: a reset would take it to an older
+/// main or fail (T6 r1 L1, F2).
+#[test]
+fn a_clone_not_given_main_by_the_accept_hears_no_landed_note() {
+    let mut case = Case::own_branch();
+    seat_team_agent(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let main = case.workspace.worktree.join(".git/refs/crazyagent/main");
+    if main.is_file() {
+        std::fs::remove_file(&main).unwrap();
+    }
+    std::fs::create_dir_all(&main).unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(clone_main(&case, &case.workspace.worktree), "");
+    assert_eq!(engine_notes(&case), Vec::<String>::new());
+}
+
+/// A clone with an open set keeps that set's recorded base when it resets to main: the base
+/// is never moved for an open set, so its turn end is refused as before (GA-R3, T6 r1 F3).
+#[test]
+fn a_clone_with_an_open_set_that_resets_to_main_is_still_refused() {
+    let mut case = Case::own_branch();
+    seat_team_agent(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    case.edit("two.txt", "second\n");
+    case.agent_commit("Add a second file");
+    let open = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&open).state, ChangeState::Pending);
+    case.agent(&["reset", "-q", "--keep", "crazyagent/main"]);
+    case.edit("README", "ONE\ntwo\nthree\nfour\n");
+    case.agent_commit("Shout the first line");
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_branch_not_above_base"
+    );
+}
+
+/// The landed Note for one set is sent once however often the Accept's end runs for it,
+/// since the engine keys it to the set (T6 r1 F3).
+#[test]
+fn a_landed_note_told_again_for_the_same_set_is_sent_once() {
+    let mut case = Case::own_branch();
+    seat_team_agent(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    owner::tell_landed(&case.db, &store::load(&case.db, &id).unwrap(), &commit);
+    assert_eq!(engine_notes(&case), [landed_note(&commit, &head)]);
+}
+
+/// A sub-agent in a linked worktree, which the engine resets itself, is sent no landed Note
+/// when its set lands (T6 r1 F3, L2).
+#[test]
+fn a_linked_worktree_agent_hears_no_landed_note() {
+    let mut case = Case::new();
+    case.start();
+    seat_team_agent(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(landed_notes(&case), 0);
+}
+
+/// The master, whose change sets land from its leased linked worktree, is sent no landed Note
+/// when its set lands (T6 r1 F3, L2).
+#[test]
+fn the_master_hears_no_landed_note() {
+    let case = Case::new();
+    case.start();
+    crate::coord::ensure(&case.db).unwrap();
+    let master = master_agent(&case);
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    write(&master.worktree.join("master.txt"), "from the master\n");
+    let master_set = record_turn_end(&case.db, &master, &merge_turn())
+        .unwrap()
+        .expect("the master's edit makes its change set");
+    assert!(matches!(
+        case.accept(&master_set).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(landed_notes(&case), 0);
 }
 
 /// Adds a second agent's own clone beside the case's and records both agent worktrees in

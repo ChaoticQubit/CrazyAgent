@@ -796,6 +796,7 @@ impl AgentContext {
         executable: &Path,
         mailbox: &Path,
         off: &[String],
+        _own_clone: bool,
     ) -> Result<Self, LaunchError> {
         self.with_team_server(
             executable,

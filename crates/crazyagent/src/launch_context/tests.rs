@@ -788,7 +788,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
 
     let unrecorded = [crate::team::tool::RECORD_TOOL.to_owned()];
     let agent = fresh(start.into())
-        .with_agent_team_tool(engine, &mailbox, &unrecorded)
+        .with_agent_team_tool(engine, &mailbox, &unrecorded, false)
         .unwrap();
     let heard = agent.instructions();
     assert_eq!(
@@ -819,14 +819,14 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     assert_eq!(agent.read_paths(), [engine.to_path_buf()]);
     assert_eq!(
         agent
-            .with_agent_team_tool(engine, &mailbox, &unrecorded)
+            .with_agent_team_tool(engine, &mailbox, &unrecorded, false)
             .unwrap_err()
             .0,
         "launch_context_team_tool_taken"
     );
     assert_eq!(
         fresh(start.into())
-            .with_agent_team_tool(engine, Path::new("tmp/calls"), &[])
+            .with_agent_team_tool(engine, Path::new("tmp/calls"), &[], false)
             .unwrap_err()
             .0,
         "launch_context_team_tool_invalid"
@@ -840,7 +840,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     );
     let unreported = [crate::team::tool::UPDATE_WORK_TOOL.to_owned()];
     let reports_off = fresh(start.into())
-        .with_agent_team_tool(engine, &mailbox, &unreported)
+        .with_agent_team_tool(engine, &mailbox, &unreported, false)
         .unwrap();
     assert_eq!(
         reports_off.instructions(),
@@ -1385,11 +1385,63 @@ fn the_team_tools_section_tells_agents_to_restart_from_main_after_an_accept() {
         let section = team_tools_section(&[], catch_up);
         assert!(
             section.contains(
-                "and end with finish_work and its evidence. After your change set is accepted, start your next work from main with git reset --hard crazyagent/main, unless you have newer commits.\n"
+                "and end with finish_work and its evidence. After your change set is accepted, start your next work from main with git reset --keep crazyagent/main, unless you have newer commits.\n"
             ),
             "{section}"
         );
         assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
+    }
+}
+
+/// Only a sub-agent in its own clone is told to restart from main after an Accept: the live
+/// master works in the owner's checkout and the engine resets a linked-worktree agent itself,
+/// so a reset there would hit the owner's branch or repeat the engine's (T6 r1 L2).
+#[test]
+fn the_restart_sentence_reaches_only_a_sub_agent_in_its_own_clone() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let engine = Path::new("/usr/local/bin/crazyagent");
+    let mailbox = root.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
+    let fresh = || AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: false,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
+    };
+    let restart = " After your change set is accepted, start your next work from main with git reset --keep crazyagent/main, unless you have newer commits.\n";
+    let clone = fresh()
+        .with_agent_team_tool(engine, &mailbox, &[], true)
+        .unwrap();
+    assert!(
+        clone.instructions().contains(restart),
+        "{}",
+        clone.instructions()
+    );
+    for (kind, context) in [
+        (
+            "the live master",
+            fresh().with_live_team_tool(engine, &mailbox, &[]).unwrap(),
+        ),
+        (
+            "a linked-worktree sub-agent",
+            fresh()
+                .with_agent_team_tool(engine, &mailbox, &[], false)
+                .unwrap(),
+        ),
+    ] {
+        let told = context.instructions();
+        assert!(told.contains("## Team tools"), "{kind}: {told}");
+        assert!(
+            told.contains("and end with finish_work and its evidence.\nEvery question"),
+            "{kind}: {told}"
+        );
+        assert!(!told.contains("git reset"), "{kind}: {told}");
     }
 }
 
@@ -1418,7 +1470,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         ),
         (
             fresh()
-                .with_agent_team_tool(engine, &mailbox, &off)
+                .with_agent_team_tool(engine, &mailbox, &off, false)
                 .unwrap(),
             crate::team::tool::AGENT_SERVER_COMMAND,
         ),
@@ -1460,7 +1512,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
     );
     assert_eq!(
         fresh()
-            .with_agent_team_tool(engine, Path::new("mailbox"), &[])
+            .with_agent_team_tool(engine, Path::new("mailbox"), &[], false)
             .unwrap_err()
             .0,
         "launch_context_team_tool_invalid"
