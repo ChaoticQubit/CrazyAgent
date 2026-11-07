@@ -16,13 +16,6 @@ mod git;
 #[cfg(unix)]
 pub(crate) mod ide;
 #[cfg(unix)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Task 8 part B calls regenerate from Task 7's conflict check"
-    )
-)]
 mod lockfiles;
 mod merges;
 #[cfg(unix)]
@@ -1098,9 +1091,10 @@ pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), Eng
 /// Tells whether an agent's change set conflicts with the tip it lands on, so its turn
 /// end can send it back to its agent before the owner sees it (OS-8). Only a Pending set
 /// of a sub-agent in a linked worktree that its own resolve task fixes is checked, and
-/// never with an owner-configured filter or merge driver on a path it changes. Inputs:
-/// the store and the change set. Output: the answer, or the plain code of a check that
-/// could not run.
+/// never with an owner-configured filter or merge driver on a path it changes. A clash in
+/// known lockfiles only is rewritten by their tools on top of the set instead, which then
+/// waits for the owner. Inputs: the store and the change set. Output: the answer, or the
+/// plain code of a check that could not run.
 pub(crate) fn conflicts_with_main(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
     #[cfg(unix)]
     return owner::conflicts_with_main(db, id);

@@ -22,7 +22,8 @@ const LOCKFILES: [(&str, &str); 6] = [
     ("yarn.lock", "yarn"),
     ("poetry.lock", "poetry"),
 ];
-const PATHS_MAX: usize = 16;
+/// The most lockfiles one regeneration rewrites.
+pub(super) const PATHS_MAX: usize = 16;
 const LOCKFILE_BYTES_MAX: usize = 32 << 20;
 const VERSION_BYTES_MAX: usize = 4096;
 const LISTING_BYTES_MAX: usize = 1 << 20;
