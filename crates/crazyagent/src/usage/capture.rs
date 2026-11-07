@@ -82,7 +82,6 @@ impl Tokens {
     pub fn headline(&self) -> u64 {
         self.input
             .saturating_add(self.output)
-            .saturating_add(self.cache_read)
             .saturating_add(self.cache_write)
     }
 
