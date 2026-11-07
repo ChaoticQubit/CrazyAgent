@@ -229,6 +229,34 @@ mod tests {
         );
     }
 
+    /// OS-8 Wait is visible in the TUI as in the app: an agent waiting for a file leads its
+    /// task line with the file, and one waiting for none shows its task alone.
+    #[test]
+    fn an_agent_waiting_for_a_file_leads_its_task_line_with_the_file() {
+        let waiting = GraphNode {
+            waits_for: Some("src/a.rs".into()),
+            ..agent("team-1", "Ada (@charts)", AgentStatus::Idle)
+        };
+        let graph = team(
+            vec![waiting],
+            vec![edge(2, "team-1", EdgeState::Running, "Draw the chart")],
+        );
+        let Load::Ready(read) = &graph else {
+            panic!("the graph is read");
+        };
+        assert_eq!(
+            task_line(read, &read.nodes[0]),
+            "Waiting for src/a.rs. Draw the chart"
+        );
+        let rows = text(&activity_lines(&graph, 20, &Look::plain()));
+        assert!(rows[4].starts_with("  Waiting for src/a.rs."), "{rows:?}");
+        let free = GraphNode {
+            waits_for: None,
+            ..read.nodes[0].clone()
+        };
+        assert_eq!(task_line(read, &free), "Draw the chart");
+    }
+
     #[test]
     fn the_team_panel_says_when_there_are_no_sub_agents_or_no_read() {
         let look = Look::plain();
