@@ -56,3 +56,32 @@ test("Delete everything lists what is lost and stays disabled until the exact pr
   assert.doesNotMatch(ready, /<button[^>]*disabled=""[^>]*>Delete everything<\/button>/);
   assert.match(ready, /<button[^>]*>Delete everything<\/button>/);
 });
+
+test("when the engine refuses Delete everything the dialog says why and offers Remove only", () => {
+  const why = "Service A uses a folder of this project, so deleting it would delete that project's files too. Remove it from the dashboard instead.";
+  const html = view({ preview: preview({ can_delete: false, blocked: why }), choice: "everything" });
+  assert.match(html, /Service A uses a folder of this project/);
+  assert.doesNotMatch(html, /<input(?=[^>]*value="everything")[^>]*>/);
+  assert.doesNotMatch(html, /aria-label="Type the project name"/);
+  assert.match(html, /<button[^>]*>Remove project<\/button>/);
+  assert.doesNotMatch(view({ preview: preview(), choice: "dashboard" }), /Service A uses a folder/);
+});
+
+test("a refused Delete everything reads as its own plain sentence, never the generic one", async () => {
+  const { failureCopy } = await import("../src/api-projects.ts");
+  for (const code of [
+    "delete_shared_folder",
+    "delete_research_running",
+    "delete_platform_unqualified",
+    "delete_outside_home",
+    "delete_name_mismatch",
+    "delete_agents_running",
+    "delete_trash_partial",
+    "delete_unavailable",
+    "home_trash_failed",
+    "home_move_in_progress",
+    "project_delete_interrupted",
+  ]) {
+    assert.doesNotMatch(failureCopy(code), /Something went wrong/, code);
+  }
+});

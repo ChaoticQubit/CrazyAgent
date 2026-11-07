@@ -262,3 +262,204 @@ async fn the_removal_preview_names_the_project_its_folder_and_offers_delete_insi
     drop(owner);
     engine.stop().await;
 }
+
+/// Sets up a second project, Service A, beside the pooled one. Inputs: the engine's owner
+/// client and the generation. Output: the project and its folder.
+async fn service(owner: &mut OwnerController, generation: u64) -> (ProjectId, PathBuf) {
+    let project = ProjectId::new("service-a").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Service A"),
+            pooled_setup(vec![]),
+            generation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    (project, stored.project_folder())
+}
+
+fn set(engine: &Engine, sql: &str, parameters: impl rusqlite::Params) {
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(sql, parameters)
+        .unwrap();
+}
+
+/// Delete everything never moves a folder another project uses: with Service A's folder
+/// inside the pooled project's folder, neither project offers a delete, the preview names
+/// the other project, and a Delete of either refuses `delete_shared_folder` with nothing
+/// stopped or moved.
+#[tokio::test]
+async fn delete_everything_refuses_a_folder_that_holds_another_projects_folder() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    let (service, _) = service(&mut owner, 2).await;
+    let nested = folder.join("service-a");
+    std::fs::create_dir(&nested).unwrap();
+    set(
+        &engine,
+        "UPDATE project_setups SET body=json_set(body,'$.folder',?1) WHERE project='service-a'",
+        [nested.to_str().unwrap()],
+    );
+    for (id, other) in [(&project, "Service A"), (&service, NAME)] {
+        let preview = owner.removal_preview(id.clone()).await.unwrap();
+        assert!(!preview.can_delete, "{preview:?}");
+        assert!(
+            preview
+                .blocked
+                .as_deref()
+                .is_some_and(|why| why.contains(other)),
+            "the preview names {other}: {preview:?}"
+        );
+    }
+    for (id, name, generation) in [(&project, NAME, 3), (&service, "Service A", 4)] {
+        let response = owner
+            .delete_project(id.clone(), name.into(), generation)
+            .await
+            .unwrap();
+        assert_eq!(result(response), rejected("delete_shared_folder"), "{name}");
+    }
+    assert_eq!(kept(&engine), 2);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects WHERE id='service-a'"),
+        1
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_paused_projects"),
+        0,
+        "a refused delete stops no agent"
+    );
+    assert!(folder.is_dir() && nested.is_dir());
+    drop(owner);
+    engine.stop().await;
+}
+
+/// Two projects that declare the same repository inside the home: Delete everything of
+/// one would move the other's repository, so the preview offers no delete and names the
+/// other project, and a Delete refuses `delete_shared_folder` with nothing stopped or moved.
+#[tokio::test]
+async fn delete_everything_refuses_a_repository_another_project_declares() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    let (_, service_folder) = service(&mut owner, 2).await;
+    let shared = engine.home().join("shared-lib");
+    std::fs::create_dir(&shared).unwrap();
+    for id in [PROJECT, "service-a"] {
+        set(
+            &engine,
+            "UPDATE projects SET body=json_set(body,'$.spec.repositories',json_array(?1)) WHERE id=?2",
+            [shared.to_str().unwrap(), id],
+        );
+    }
+    let preview = owner.removal_preview(project.clone()).await.unwrap();
+    assert!(!preview.can_delete, "{preview:?}");
+    assert!(
+        preview
+            .blocked
+            .as_deref()
+            .is_some_and(|why| why.contains("Service A")),
+        "{preview:?}"
+    );
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 3)
+        .await
+        .unwrap();
+    assert_eq!(result(response), rejected("delete_shared_folder"));
+    assert_eq!(kept(&engine), 2);
+    assert_eq!(paused(&engine), 0, "a refused delete stops no agent");
+    assert!(folder.is_dir() && shared.is_dir() && service_folder.is_dir());
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A projects home move and a Delete everything never overlap: a pending move refuses a
+/// delete with nothing stopped, and a move asked while a delete waits for the project's
+/// agents refuses `home_move_delete_in_progress`; the delete's plan is forgotten once it ends.
+#[tokio::test]
+async fn a_pending_home_move_holds_a_delete_and_a_planned_delete_holds_a_home_move() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    let home = engine.home();
+    let next = tempfile::Builder::new()
+        .prefix("ca-next-home-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let next = std::fs::canonicalize(next.path()).unwrap();
+    set(
+        &engine,
+        "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"meal-planner\"]')",
+        [home.to_str().unwrap(), next.to_str().unwrap()],
+    );
+    let preview = owner.removal_preview(project.clone()).await.unwrap();
+    assert!(!preview.can_delete, "{preview:?}");
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), rejected("home_move_in_progress"));
+    assert_eq!(paused(&engine), 0, "a refused delete stops no agent");
+
+    write_db(
+        &engine,
+        "DELETE FROM projects_home_move;
+         INSERT INTO team_paused_projects(project,since_ms) VALUES ('setup-pooled',1);
+         INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+         VALUES (7,'setup-pooled','sub','codex',1,'working',0,0);",
+    );
+    let mut desktop =
+        OwnerController::attach(engine.root.path(), OwnerClientKind::Desktop, ENGINE_WAIT)
+            .await
+            .unwrap();
+    let planned = || engine.rows("SELECT count(*) FROM projects_delete_pending");
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let deleting = owner.delete_project(project.clone(), NAME.into(), 3);
+    let moving = async {
+        let deadline = std::time::Instant::now() + ENGINE_WAIT;
+        while planned() == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let seen = planned() == 1;
+        let moved = if seen {
+            Some(
+                desktop
+                    .move_projects_home(next.to_str().unwrap().into(), true, 1)
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        write_db(
+            &engine,
+            "UPDATE team_agents SET status='stopped' WHERE id=7",
+        );
+        (seen, moved)
+    };
+    let (deleted, (seen, moved)) = tokio::join!(deleting, moving);
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        seen,
+        "the delete records its plan before it waits for the agents"
+    );
+    assert_eq!(
+        result(moved.unwrap()),
+        rejected("home_move_delete_in_progress")
+    );
+    assert_eq!(
+        result(deleted.unwrap()),
+        rejected("home_trash_failed"),
+        "the read-only home keeps the folder out of the Trash"
+    );
+    assert_eq!(planned(), 0, "the plan is forgotten once the delete ends");
+    assert!(folder.is_dir());
+    assert_eq!(kept(&engine), 2);
+    drop(desktop);
+    drop(owner);
+    engine.stop().await;
+}

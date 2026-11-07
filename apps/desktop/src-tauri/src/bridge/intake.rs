@@ -874,7 +874,7 @@ mod tests {
             .iter()
             .flat_map(|source| source.split("refused(\"").skip(1))
             .filter_map(|rest| rest.split('"').next())
-            .filter(|code| !code.starts_with("home_trash_"))
+            .filter(|code| !code.starts_with("home_trash_") && !code.starts_with("delete_"))
             .collect();
         refusals.sort_unstable();
         refusals.dedup();
@@ -884,6 +884,7 @@ mod tests {
             "home_move_agent_work",
             "home_move_changes_restorable",
             "home_move_research_running",
+            "home_move_delete_in_progress",
             "home_new_project_failed",
         ]) {
             assert_eq!(intake_code(code), Some(code), "{code}");

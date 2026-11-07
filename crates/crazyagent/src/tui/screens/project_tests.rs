@@ -2046,6 +2046,7 @@ fn removal(can_delete: bool) -> crate::team::cleanup::RemovalPreview {
         name: "Gone app".into(),
         folders: vec!["/Users/owner/CrazyAgent/gone-app".into()],
         can_delete,
+        blocked: None,
         running: vec!["Builder 2".into()],
         open_change_sets: 1,
         losses: vec![crate::team::cleanup::AgentLoss {
@@ -2142,6 +2143,28 @@ fn remove_preselects_the_dashboard_choice_and_deletes_only_after_the_exact_name(
             project_id: project.clone(),
         }))
     );
+}
+
+/// When the engine refuses Delete everything, the remove ask offers only Remove from
+/// dashboard and says why in the engine's own sentence, which names the other project.
+#[test]
+fn the_remove_ask_says_why_delete_everything_is_not_offered() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    let read = screen.next_query(30).unwrap();
+    let mut preview = removal(false);
+    preview.blocked = Some(
+        "Service A uses a folder of this project, so deleting it would delete that project's files too. Remove it from the dashboard instead."
+            .into(),
+    );
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(preview))));
+    let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
+    assert!(shown.contains("Service A uses a folder"), "{shown}");
+    assert!(!shown.contains("Type the project name"), "{shown}");
+    screen.key(key(KeyCode::Down));
+    assert_eq!(screen.remove_choice, RemoveChoice::Dashboard);
 }
 
 #[test]

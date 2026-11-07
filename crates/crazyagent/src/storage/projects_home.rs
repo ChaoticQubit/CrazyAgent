@@ -291,6 +291,58 @@ pub(crate) fn delete_target(
     Ok(Some((found.name, folders, home)))
 }
 
+/// Why a Delete everything of a project is refused before anything stops: the refusal code
+/// and the sentence the remove dialog shows, which names the other project or the research.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeleteRefusal {
+    pub code: String,
+    pub reason: String,
+}
+
+impl DeleteRefusal {
+    /// A refusal shown with the plain sentence of its code. Input: the code. Output: the
+    /// refusal.
+    fn plain(code: &str) -> Self {
+        Self {
+            code: code.to_owned(),
+            reason: home::plain_problem(code).unwrap_or(code).to_owned(),
+        }
+    }
+}
+
+/// What a Delete everything of a project would take and whether it may go, read in one
+/// transaction: the project's name, its folder followed by every repository it declares, and
+/// either the canonical projects home with the fewest folders to move or the refusal.
+#[derive(Debug)]
+pub(crate) struct DeleteChecked {
+    pub name: String,
+    pub folders: Vec<PathBuf>,
+    pub planned: Result<(PathBuf, Vec<PathBuf>), DeleteRefusal>,
+}
+
+/// Checks a Delete everything of a project in one transaction, for the remove preview and
+/// the engine's plan alike. Inputs: the transaction and the project. Output: None for an
+/// unknown project, else what the delete would take and whether it may go.
+pub(crate) fn delete_check(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+) -> Result<Option<DeleteChecked>, EngineError> {
+    let Some((name, folders, home)) = delete_target(tx, project)? else {
+        return Ok(None);
+    };
+    let planned = match home {
+        None => Err(DeleteRefusal::plain("projects_home_unset")),
+        Some(home) => home::plan_delete(&home, &folders)
+            .map(|moved| (home, moved))
+            .map_err(|refusal| DeleteRefusal::plain(&refusal.0)),
+    };
+    Ok(Some(DeleteChecked {
+        name,
+        folders,
+        planned,
+    }))
+}
+
 const DELETE_ROWS_MAX: i64 = 100_000;
 
 /// Plans a Delete everything before the owner transport moves anything: the owner's grant

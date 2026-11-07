@@ -60,14 +60,15 @@ pub struct AgentLoss {
 
 /// What removing a project would do, read before anything stops: its stored name, the
 /// folders Delete everything would move to the Trash, whether it may (every folder is a
-/// real folder strictly inside the projects home), its running agents' labels, its open
-/// change sets and each agent whose work would be lost.
+/// real folder strictly inside the projects home), why not when a check refuses it, its
+/// running agents' labels, its open change sets and each agent whose work would be lost.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemovalPreview {
     pub name: String,
     pub folders: Vec<String>,
     pub can_delete: bool,
+    pub blocked: Option<String>,
     pub running: Vec<String>,
     pub open_change_sets: u32,
     pub losses: Vec<AgentLoss>,
@@ -175,6 +176,7 @@ pub fn removal_preview(
             .map(|folder| folder.to_string_lossy().into_owned())
             .collect(),
         can_delete,
+        blocked: None,
         running,
         open_change_sets: u32::try_from(open).unwrap_or(u32::MAX),
         losses: removal_loss(db, project, now_ms)?,

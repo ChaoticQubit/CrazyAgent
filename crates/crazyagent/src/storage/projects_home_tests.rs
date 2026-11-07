@@ -161,3 +161,139 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
         "a folder swapped for a link after the first check refuses before any move"
     );
 }
+
+/// Delete everything refuses what can change while it waits, in the plan and again after the
+/// agent wait before any folder moves: a folder another project uses (`delete_shared_folder`,
+/// naming that project), research of the project that is queued, running or waiting for a
+/// pool (`delete_research_running`), and a projects home move still pending
+/// (`home_move_in_progress`). Finished research holds nothing back.
+#[test]
+fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_before_any_move() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let web = home.join("web");
+    std::fs::create_dir_all(web.join("lib")).unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::projects_home::save(&connection, &home).unwrap();
+    let declare = |connection: &Connection, id: &str, name: &str, repository: &Path| {
+        let body = serde_json::json!({
+            "project_id": id,
+            "spec": { "name": name, "repositories": [repository.to_str().unwrap()] },
+        });
+        connection
+            .execute(
+                "INSERT INTO projects(id, body) VALUES (?1, ?2)",
+                params![id, body.to_string()],
+            )
+            .unwrap();
+    };
+    declare(&connection, "demo", "Demo", &web);
+    let project = ProjectId::new("demo").unwrap();
+    let check = |connection: &mut Connection| {
+        let tx = connection.transaction().unwrap();
+        projects_home::delete_check(&tx, &project)
+            .unwrap()
+            .unwrap()
+            .planned
+            .map(|(_, moved)| moved)
+    };
+    assert_eq!(check(&mut connection), Ok(vec![web.clone()]));
+    let plan = crate::projects_home::DeletePlan {
+        database: database.clone(),
+        project: project.clone(),
+        home: home.clone(),
+        folders: vec![web.clone()],
+        agents: vec![],
+    };
+    let moved = std::cell::RefCell::new(Vec::<std::path::PathBuf>::new());
+    let record = |folder: &Path| -> Result<(), EngineError> {
+        moved.borrow_mut().push(folder.to_path_buf());
+        Ok(())
+    };
+    let wait = std::time::Duration::from_millis(100);
+
+    declare(&connection, "lib", "Shared lib", &web.join("lib"));
+    let refusal = check(&mut connection).unwrap_err();
+    assert_eq!(refusal.code, "delete_shared_folder");
+    assert!(
+        refusal.reason.contains("Shared lib"),
+        "the refusal names the other project: {}",
+        refusal.reason
+    );
+    assert_eq!(
+        plan.run_with(wait, &record),
+        Err("delete_shared_folder".to_owned()),
+        "a project registered during the wait refuses before any move"
+    );
+    connection
+        .execute("DELETE FROM projects WHERE id='lib'", [])
+        .unwrap();
+
+    for status in ["queued", "running", "needs_pool"] {
+        connection
+            .execute_batch(&format!(
+                "DELETE FROM research_jobs;
+                 INSERT INTO research_jobs(id,project,kind,harness,tools,status,created_ms)
+                 VALUES (41,'demo','market_research','codex',1,'{status}',0);"
+            ))
+            .unwrap();
+        let refusal = check(&mut connection).unwrap_err();
+        assert_eq!(refusal.code, "delete_research_running", "{status}");
+        assert!(refusal.reason.contains("research"), "{}", refusal.reason);
+        assert_eq!(
+            plan.run_with(wait, &record),
+            Err("delete_research_running".to_owned()),
+            "{status}"
+        );
+    }
+    connection
+        .execute("UPDATE research_jobs SET status='done'", [])
+        .unwrap();
+    assert_eq!(
+        check(&mut connection),
+        Ok(vec![web.clone()]),
+        "finished research holds no delete"
+    );
+
+    connection
+        .execute(
+            "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"web\"]')",
+            params![home.to_str().unwrap(), base.join("next").to_str().unwrap()],
+        )
+        .unwrap();
+    assert_eq!(
+        check(&mut connection).unwrap_err().code,
+        "home_move_in_progress"
+    );
+    assert_eq!(
+        plan.run_with(wait, &record),
+        Err("home_move_in_progress".to_owned())
+    );
+    assert!(
+        moved.borrow().is_empty(),
+        "no refused delete moves a folder"
+    );
+    connection
+        .execute("DELETE FROM projects_home_move", [])
+        .unwrap();
+    assert_eq!(plan.run_with(wait, &record), Ok(()));
+    assert_eq!(*moved.borrow(), vec![web.clone()]);
+}
+
+/// Delete everything is offered only on macOS in V2, where the move to the Trash is proven;
+/// Windows and Linux offer Remove from dashboard only, and this build answers for its own
+/// platform.
+#[test]
+fn delete_everything_is_offered_only_on_macos_in_v2() {
+    assert!(crate::projects_home::delete_qualified_on("macos"));
+    for os in ["windows", "linux", "freebsd", ""] {
+        assert!(!crate::projects_home::delete_qualified_on(os), "{os:?}");
+    }
+    assert_eq!(
+        crate::projects_home::delete_offered(),
+        cfg!(target_os = "macos")
+    );
+}

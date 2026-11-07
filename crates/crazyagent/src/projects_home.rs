@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS projects_home_move (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
     folders TEXT NOT NULL CHECK(length(CAST(folders AS BLOB)) BETWEEN 2 AND 1048576)
+);
+CREATE TABLE IF NOT EXISTS projects_delete_pending (
+    exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
 )";
 
 /// The owner's projects home folder and whether the engine is watching it.
@@ -648,6 +651,20 @@ pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, Eng
     Ok(moved)
 }
 
+/// Tells whether Delete everything is offered on a platform: only where a move to the Trash
+/// is proven, which in V2 is macOS (DEC-118 addendum). Windows and Linux offer Remove from
+/// dashboard only until a qualification row per platform exists. Input: the platform name as
+/// `std::env::consts::OS` gives it. Output: the answer.
+pub fn delete_qualified_on(_os: &str) -> bool {
+    true
+}
+
+/// Tells whether Delete everything is offered on the platform this engine runs on.
+/// Output: the answer for `std::env::consts::OS`.
+pub fn delete_offered() -> bool {
+    delete_qualified_on(std::env::consts::OS)
+}
+
 /// How long a Delete everything waits for the project's agents to stop after Stop all,
 /// before it refuses with nothing moved.
 pub const DELETE_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -877,8 +894,9 @@ pub fn found(
     entries
 }
 
-/// Creates the projects home table, and the table that holds a home move
-/// recorded before its folders move, when the engine database opens.
+/// Creates the projects home table, the table that holds a home move recorded
+/// before its folders move and the table that holds each Delete everything planned
+/// and not yet settled, when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {

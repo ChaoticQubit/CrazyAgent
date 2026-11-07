@@ -61,6 +61,7 @@ test("intake failures read as plain sentences", () => {
   assert.equal(api.intakeCopy("home_move_agent_work"), "Agents still have work in projects in this folder, and moving it would cut them off from it. Land their changes and remove those agents first. An agent whose change you discarded can be removed 7 days later, when the change can no longer be restored. Nothing was moved.");
   assert.equal(api.intakeCopy("home_move_changes_restorable"), "A change you discarded in a project in this folder can still be restored, and moving the folder would break that. You can move it 7 days after the discard, when the change can no longer be restored. Nothing was moved.");
   assert.equal(api.intakeCopy("home_move_research_running"), "A research job is running in a project in this folder, and moving it would cut the job off. Wait for the job to finish or cancel it, then try again. Nothing was moved.");
+  assert.equal(api.intakeCopy("home_move_delete_in_progress"), "A project in your projects folder is being deleted. Try again when it finishes. Nothing was moved.");
   assert.equal(api.intakeCopy("pending_intent"), "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.");
   assert.equal(api.intakeCopy("made_up"), "Something went wrong. Try again. (made_up)");
   assert.equal(api.intakeCopy({ code: "made_up", cause: "engine_detail" }), "Something went wrong. Try again. (engine_detail)");
