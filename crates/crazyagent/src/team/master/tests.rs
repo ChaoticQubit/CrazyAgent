@@ -1987,7 +1987,7 @@ fn under_wait_the_master_s_start_that_would_close_a_cycle_leaves_the_held_file_o
     let (said, refused) = as_master(
         &mut fixture,
         tool::START_WORK_TOOL,
-        json!({"title": "Restyle the chart", "claims": ["src/ui/chart.ts", "src/ui/theme.ts"]}),
+        json!({"title": "Restyle the chart", "claims": ["src/ui/chart.ts", "styles/theme.css"]}),
     );
     assert!(!refused, "{said}");
     let work = work_id(&fixture, "Restyle the chart");
@@ -2005,7 +2005,7 @@ fn under_wait_the_master_s_start_that_would_close_a_cycle_leaves_the_held_file_o
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(claimed, vec!["src/ui/theme.ts".to_owned()]);
+    assert_eq!(claimed, vec!["styles/theme.css".to_owned()]);
     let noted: i64 = fixture
         .connection
         .query_row(

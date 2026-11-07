@@ -1544,8 +1544,8 @@ fn under_wait_a_chain_past_the_walk_bound_goes_ahead_as_under_warn() {
 
 /// OS-8 Wait, T9-FU: a start whose wait would close a cycle goes ahead without the file
 /// another agent's live claim holds, so that holder keeps editing it and the starter's
-/// edits of it stay refused; the start's other files are claimed, its overlap says the file
-/// was left out, and the owner hears who started and who holds the file.
+/// edits of it stay refused; the start's file in another folder is claimed, its overlap says
+/// the file was left out, and the owner hears who started and who holds the file.
 #[cfg(unix)]
 #[test]
 fn under_wait_a_cycle_fallback_leaves_the_held_file_to_its_holder() {
@@ -1564,7 +1564,7 @@ fn under_wait_a_cycle_fallback_leaves_the_held_file_to_its_holder() {
         &project(),
         ada,
         "Fix both".into(),
-        vec!["src/parser.rs".into(), "src/main.rs".into()],
+        vec!["src/parser.rs".into(), "docs/notes.md".into()],
         NOW,
     )
     .expect("waiting on Grace, who waits on Ada, would close a cycle");
@@ -1586,7 +1586,7 @@ fn under_wait_a_cycle_fallback_leaves_the_held_file_to_its_holder() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(claimed, vec!["src/main.rs".to_owned()]);
+    assert_eq!(claimed, vec!["docs/notes.md".to_owned()]);
     let live = |who: AgentId| -> Vec<AgentId> {
         overlapping(&connection, &project(), who, "src/parser.rs")
             .unwrap()
