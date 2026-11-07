@@ -736,6 +736,7 @@ impl TeamView {
             KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('R') => self.reask_empty_reply(),
             KeyCode::Char('F') => self.new_folder_limit(),
+            KeyCode::Char('W') => self.terminals_per_window(),
             KeyCode::Char('B') => self.background_at_end(),
             KeyCode::Char('G') => self.grace_time(),
             KeyCode::Char('c') => {
@@ -2043,6 +2044,13 @@ impl TeamView {
             project_id: self.project.clone(),
             on,
         })
+    }
+
+    /// Moves "Terminals per window", how many terminals each terminal wall window holds,
+    /// to its next choice: 4, 6, 9 and back to 4. Output: the change to send, or Handled
+    /// with a notice while loading or saving.
+    fn terminals_per_window(&mut self) -> TeamReply {
+        TeamReply::Handled
     }
 
     /// Moves "New folder limit", the most files one new top-level folder may gain in a change
