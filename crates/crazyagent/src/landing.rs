@@ -1138,7 +1138,7 @@ pub fn undo_landing(
     id: &ChangeSetId,
 ) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
-    return owner::undo(db, owner_home, id);
+    return owner::undo(db, owner_home, id, &|_| false);
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id);

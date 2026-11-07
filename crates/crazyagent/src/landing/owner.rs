@@ -33,7 +33,8 @@ const BUSY_STATE: [&str; 11] = [
 ];
 const BUILT_IN_MERGES: [&str; 6] = ["unspecified", "unset", "set", "text", "binary", "union"];
 
-/// A point inside an Accept after which a test can stop it, as an engine stop would.
+/// A point inside an Accept or an undo after which a test can stop it, as an engine stop
+/// would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Step {
     Recorded,
@@ -1051,14 +1052,15 @@ pub(super) fn accept_to(
 /// configured-command checks as an Accept, one commit `Undo: <landed subject>` with the
 /// owner's identity and a compare-and-swap move of the branch. Then the set records the
 /// undo, its merge rows show Undone and one Undone row is added. A conflict changes
-/// nothing. Inputs: the store, the owner's home and the change set. Output: the undo commit
-/// and branch, the conflicts, or `changes_undo_unavailable` for a set whose Accept made no
-/// commit, that is undone already, whose commit is not on that branch or that lands in an
-/// agent's branch.
+/// nothing. Inputs: the store, the owner's home, the change set and where a test stops it.
+/// Output: the undo commit and branch, the conflicts, or `changes_undo_unavailable` for a
+/// set whose Accept made no commit, that is undone already, whose commit is not on that
+/// branch or that lands in an agent's branch.
 pub(super) fn undo(
     db: &Connection,
     home: &Path,
     id: &ChangeSetId,
+    stopped: &dyn Fn(Step) -> bool,
 ) -> Result<AcceptOutcome, EngineError> {
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
@@ -1110,6 +1112,9 @@ pub(super) fn undo(
     let identity = (identity.0.as_str(), identity.1.as_str());
     let commit = owner.commit_tree(&tree, &[&tip], &format!("Undo: {subject}\n"), identity)?;
     verify_objects(&repository, &[&commit], &[&tip, &landed])?;
+    if stopped(Step::Recorded) {
+        return Err(failure("changes_git_failed"));
+    }
     if matches!(target, Target::Checkout)
         && owner
             .exec(&["read-tree", "-u", "-m", &tip, &commit], None, &[], 4096)?
@@ -1117,6 +1122,9 @@ pub(super) fn undo(
             != 0
     {
         return Err(failure("changes_owner_dirty"));
+    }
+    if stopped(Step::FilesWritten) {
+        return Err(failure("changes_git_failed"));
     }
     let env = [
         ("GIT_COMMITTER_NAME", identity.0),
@@ -1136,6 +1144,9 @@ pub(super) fn undo(
             let _ = owner.exec(&["read-tree", "-u", "-m", &commit, &tip], None, &[], 4096);
         }
         return Err(failure("changes_branch_moved"));
+    }
+    if stopped(Step::BranchMoved) {
+        return Err(failure("changes_git_failed"));
     }
     record.undone = Some(commit.clone());
     record.updated_ms = flow::now_ms()?;

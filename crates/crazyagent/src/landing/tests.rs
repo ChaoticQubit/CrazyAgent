@@ -6992,3 +6992,130 @@ fn a_master_merge_an_engine_stop_cut_short_settles_as_the_masters_merge() {
         );
     }
 }
+
+#[test]
+fn an_undo_an_engine_stop_cut_short_is_finished_or_dropped_by_the_next_owner_action() {
+    use crate::activity::ActivityKind;
+    for step in [
+        owner::Step::Recorded,
+        owner::Step::FilesWritten,
+        owner::Step::BranchMoved,
+    ] {
+        let case = Case::new();
+        keeps_activity(&case);
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        assert!(matches!(
+            case.accept(&id).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+        let stopped = owner::undo(&case.db, &case.home, &id, &|at| at == step);
+        assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
+        assert_eq!(
+            store::in_flight(&case.db).unwrap().len(),
+            1,
+            "the undo saved its intent before it wrote anything: {step:?}"
+        );
+
+        let again = undo_landing(&case.db, &case.home, &id);
+
+        assert!(store::in_flight(&case.db).unwrap().is_empty(), "{step:?}");
+        if step == owner::Step::Recorded {
+            assert!(
+                matches!(again, Ok(AcceptOutcome::Landed { .. })),
+                "nothing was written, so the intent is dropped and the undo runs: {again:?}"
+            );
+        } else {
+            assert_eq!(
+                refused(again),
+                "changes_undo_unavailable",
+                "the stopped undo was finished: {step:?}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(case.repo.join("README")).unwrap(),
+            "one\ntwo\nthree\n",
+            "{step:?}"
+        );
+        assert_eq!(case.owner(&["status", "--porcelain"]), "", "{step:?}");
+        let rows = activity_of(&case, &id);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.kind == ActivityKind::Undone)
+                .count(),
+            1,
+            "one Undone row: {step:?} {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.kind == ActivityKind::Accepted && row.undone),
+            "the Accept row shows Undone: {step:?}"
+        );
+    }
+}
+
+#[test]
+fn undoing_a_master_merge_names_and_marks_the_sets_it_closed() {
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    let (sub, fix, _) = master_fixing_a_conflict(&case);
+    let owner_readme = case.owner(&["show", "main:README"]);
+    assert!(matches!(
+        land_master_set(&case.db, &case.home, &fix).unwrap(),
+        Some(AcceptOutcome::Landed { .. })
+    ));
+
+    let AcceptOutcome::Landed { commit, .. } = undo_landing(&case.db, &case.home, &fix).unwrap()
+    else {
+        panic!("the undo conflicted");
+    };
+
+    assert_eq!(case.owner(&["show", "main:README"]), owner_readme);
+    assert_eq!(
+        store::load(&case.db, &sub).unwrap().undone.as_deref(),
+        Some(commit.as_str()),
+        "the set the merge closed is marked undone with it"
+    );
+    let undone: Vec<_> = activity_of(&case, &fix)
+        .into_iter()
+        .filter(|row| row.kind == ActivityKind::Undone)
+        .collect();
+    assert_eq!(undone.len(), 1, "{undone:?}");
+    assert!(
+        undone[0].text.contains("Agent 1"),
+        "the Undone row says the closed set's work was reverted too: {}",
+        undone[0].text
+    );
+}
+
+#[test]
+fn an_undo_reverts_on_the_branch_the_set_landed_on_after_land_on_changes() {
+    let case = Case::new();
+    keeps_activity(&case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit: landed, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    case.owner(&["branch", "stage"]);
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_land_on(project,branch) VALUES (?1,'stage')",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+
+    let AcceptOutcome::Landed { commit, branch } = undo_landing(&case.db, &case.home, &id).unwrap()
+    else {
+        panic!("the undo conflicted");
+    };
+
+    assert_eq!(branch, "main", "the undo goes where the set landed");
+    assert_eq!(case.owner(&["rev-parse", "main"]).trim(), commit);
+    assert_eq!(
+        case.owner(&["rev-parse", "stage"]).trim(),
+        landed,
+        "Land on's branch is left alone"
+    );
+}
