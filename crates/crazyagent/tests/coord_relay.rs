@@ -554,8 +554,8 @@ fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engin
 }
 
 /// OS-8, DEC-117 Q7: under Block, an edit of a file another agent's review-ready work still
-/// claims is denied, since that work has not landed; once its change set lands and
-/// `release_landed` frees the claim, the same edit goes through.
+/// claims is denied, since that work has not landed; once the change set holding it lands
+/// and `release_set` frees the claim, the same edit goes through.
 #[test]
 fn under_overlaps_block_a_review_ready_claim_denies_the_edit_until_its_work_lands() {
     let team = Team::new();
@@ -580,8 +580,13 @@ fn under_overlaps_block_a_review_ready_claim_denies_the_edit_until_its_work_land
     .unwrap();
     let start = |path: &Path| team.start_hook("edit", None, edit(LEAD_SESSION, path));
     claimed.denies_only_the_claimed_file(&team, start);
+    let set = "0123456789abcdef0123456789abcdef";
     assert_eq!(
-        crazyagent::coord::release_landed(&claimed.db, claimed.other, now_ms()).unwrap(),
+        crazyagent::coord::hold_for_set(&claimed.db, claimed.other, set).unwrap(),
+        1
+    );
+    assert_eq!(
+        crazyagent::coord::release_set(&claimed.db, set, now_ms()).unwrap(),
         1
     );
     assert_eq!(

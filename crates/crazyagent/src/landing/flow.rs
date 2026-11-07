@@ -2069,22 +2069,63 @@ pub(super) fn discard(
     Ok(until)
 }
 
-/// Releases the claims a sub-agent's review-ready and complete work holds once one of its
-/// change sets closes, landed or discarded, so no claim outlives the edits it guarded
-/// (OS-8, DEC-117 Q7). A failure is logged by its plain code and never fails the close.
-/// Inputs: the store and the closed change set.
+/// Releases the claims a change set held for its agent's ended work once it closes, landed
+/// or discarded, so no claim outlives the edits it guarded and claims another set holds
+/// stay (OS-8, DEC-117 Q7). A failure is logged by its plain code, never fails the close,
+/// and is tried again at the agent's next turn end. Inputs: the store and the closed set.
 pub(super) fn release_agent_claims(db: &Connection, record: &Record) {
     assert!(!record.is_open());
-    if record.agent.kind != AgentKind::Sub {
+    logged_claims(
+        i64::try_from(record.updated_ms)
+            .map_err(|_| failure("changes_unavailable"))
+            .and_then(|now| crate::coord::release_set(db, record.id.as_str(), now))
+            .map(drop),
+    );
+}
+
+/// Holds a sub-agent's claims on its ended work for the change set its turn end leaves
+/// open, or releases them when the turn leaves nothing to land, after releasing those of
+/// any set that closed while its release failed (OS-8, DEC-117 Q7). A failure is logged by
+/// its plain code, never fails the turn end, and is tried again at the next one. Inputs:
+/// the store, the workspace, the open change set and the time now.
+pub(super) fn hold_agent_claims(
+    db: &Connection,
+    workspace: &Workspace,
+    open: Option<&ChangeSetId>,
+    now: u64,
+) {
+    if workspace.agent.kind != AgentKind::Sub {
         return;
     }
-    let Ok(agent) = record.agent.id.parse::<crate::coord::AgentId>() else {
+    let Ok(agent) = workspace.agent.id.parse::<crate::coord::AgentId>() else {
         return;
     };
-    let released = i64::try_from(record.updated_ms)
-        .map_err(|_| failure("changes_unavailable"))
-        .and_then(|now| crate::coord::release_landed(db, agent, now));
-    if let Err(error) = released {
+    logged_claims(
+        i64::try_from(now)
+            .map_err(|_| failure("changes_unavailable"))
+            .and_then(|now| {
+                for set in crate::coord::held_sets(db, agent)? {
+                    let closed = ChangeSetId::new(&set)
+                        .ok()
+                        .and_then(|id| store::load(db, &id).ok())
+                        .is_some_and(|record| !record.is_open());
+                    if closed {
+                        crate::coord::release_set(db, &set, now)?;
+                    }
+                }
+                match open {
+                    Some(id) => crate::coord::hold_for_set(db, agent, id.as_str()),
+                    None => crate::coord::release_unheld(db, agent, now),
+                }
+            })
+            .map(drop),
+    );
+}
+
+/// Logs a failed claim hold or release by its plain code, so it never fails the landing
+/// step that ran it. Input: the result.
+fn logged_claims(result: Result<(), EngineError>) {
+    if let Err(error) = result {
         eprintln!(
             "landing_claims_failed cause={}",
             crate::protocol::plain_code(&error.0)
@@ -2128,9 +2169,9 @@ pub(super) fn discard_held(
     Ok(until)
 }
 
-/// Brings a discarded change set back as pending and puts its head back in the agent's
-/// worktree. An agent's own clone is read by the engine's fetch of its branch, before the
-/// repository hold. Inputs: the store, the change set and the time now. Output: Ok once
+/// Brings a discarded change set back as pending, takes back the claims its discard
+/// released, and puts its head back in the agent's worktree. An agent's own clone is read
+/// by the engine's fetch of its branch, before the repository hold. Inputs: the store, the change set and the time now. Output: Ok once
 /// pending; refused once the restore window passed, while the worktree has another
 /// open change set, or while it holds unrecorded work or a HEAD, or a clone a branch tip,
 /// other than the commit the worktree's next change set would open above, so commits
@@ -2177,6 +2218,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
         record.restorable_until_ms = None;
         record.updated_ms = now;
         store::save(db, &record)?;
+        logged_claims(crate::coord::restore_set(db, id.as_str()).map(drop));
         return set_engine_ref(&shared, &record.repository, &discarded_ref(id), None);
     }
     let agent = agent(db, &record)?;
@@ -2203,6 +2245,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     reset_agent(&agent, &record.head)?;
     record.intent = None;
     store::save(db, &record)?;
+    logged_claims(crate::coord::restore_set(db, id.as_str()).map(drop));
     set_engine_ref(&shared, &record.repository, &discarded_ref(id), None)?;
     Ok(())
 }

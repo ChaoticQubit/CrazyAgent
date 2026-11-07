@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS coord_claims (
     released INTEGER
 );
 CREATE INDEX IF NOT EXISTS coord_claims_project ON coord_claims(project, released);
+CREATE TABLE IF NOT EXISTS coord_held (
+    claim INTEGER PRIMARY KEY,
+    project TEXT NOT NULL,
+    change_set TEXT NOT NULL,
+    released INTEGER
+);
+CREATE INDEX IF NOT EXISTS coord_held_set ON coord_held(change_set, released);
 CREATE TABLE IF NOT EXISTS coord_activity (
     agent INTEGER PRIMARY KEY,
     last_seen INTEGER NOT NULL,
@@ -92,10 +99,11 @@ CREATE TABLE IF NOT EXISTS tool_switches (
 );";
 
 /// The coordination tables a project's removal clears by their `project` column.
-const REMOVED_WITH_PROJECT: [&str; 6] = [
+const REMOVED_WITH_PROJECT: [&str; 7] = [
     "coord_work",
     "coord_messages",
     "coord_claims",
+    "coord_held",
     "coord_audit",
     "coord_settings",
     "coord_harness_settings",
@@ -108,9 +116,9 @@ pub fn ensure(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(state)
 }
 
-/// Clears a removed project's coordination rows: its work, messages, claims, audit,
-/// settings and tool switches, and the activity and tool counts of the stopped agents
-/// removed with it. Runs inside the removal's transaction before its agents go.
+/// Clears a removed project's coordination rows: its work, messages, claims and their
+/// change-set holds, audit, settings and tool switches, and the activity and tool counts
+/// of the stopped agents removed with it. Runs inside the removal's transaction before its agents go.
 /// Takes the database and the project. Returns Ok or the SQLite failure.
 pub fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
     assert!(!project.as_str().is_empty());

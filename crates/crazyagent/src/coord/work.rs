@@ -151,8 +151,9 @@ pub fn transfer(
 
 /// Ends a unit of work with evidence (Concord's finish_work): its owner marks Accepted or
 /// Active work ReviewReady, Complete or Closed, and work waiting for review is Completed
-/// or Closed by its owner or whoever supervises it. The owner's claims are released, except
-/// at ReviewReady, where they hold until the agent's change set lands or is rejected (OS-8).
+/// or Closed by its owner or whoever supervises it. A master's claims are released at
+/// every end; any other agent's hold at every end until the change set carrying its edits
+/// lands or is rejected, or its turn ends with nothing to land (OS-8, DEC-117 Q7).
 /// Checks that belong to a role, such as a lead's unmerged sub-agent branches, run
 /// before this. Takes the database, the work, the version the caller read, the outcome,
 /// the evidence, who finishes and the time in ms. Returns the new version or a plain
@@ -188,8 +189,8 @@ pub fn finish(
         Finish::Complete => (WorkState::Complete, "finish_complete"),
         Finish::Closed => (WorkState::Closed, "finish_closed"),
     };
-    if ended != WorkState::ReviewReady
-        && let Some(owner) = row.owner
+    if let Some(owner) = row.owner
+        && super::store::agent(tx, owner)?.is_none_or(|found| found.master())
     {
         super::claims::release_claims(tx, owner, work, now)?;
     }

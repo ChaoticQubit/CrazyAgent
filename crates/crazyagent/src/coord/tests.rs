@@ -773,8 +773,8 @@ fn work_moves_through_its_transfer_table_one_version_at_a_time() {
 }
 
 /// OS-8: an agent's claim on work it finished as review-ready keeps overlapping another
-/// agent that starts on the same file until the work lands, when `release_landed`
-/// releases it; then the same start overlaps nothing.
+/// agent that starts on the same file until the change set holding it lands, when
+/// `release_set` releases it; then the same start overlaps nothing.
 #[cfg(unix)]
 #[test]
 fn a_review_ready_claim_keeps_overlapping_until_the_work_lands() {
@@ -832,7 +832,9 @@ fn a_review_ready_claim_keeps_overlapping_until_the_work_lands() {
     )
     .unwrap();
 
-    assert_eq!(release_landed(&connection, grace, NOW).unwrap(), 1);
+    let set = "0123456789abcdef0123456789abcdef";
+    assert_eq!(hold_for_set(&connection, grace, set).unwrap(), 1);
+    assert_eq!(release_set(&connection, set, NOW).unwrap(), 1);
     assert_eq!(held(&connection, grace, grace_work), 0);
     let (_, overlaps) = start("CLI again");
     assert!(
