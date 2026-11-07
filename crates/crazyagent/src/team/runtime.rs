@@ -3004,15 +3004,15 @@ impl TeamRuntime {
     }
 
     /// Tells the owner once of each pair of agents whose waits under Wait would have closed
-    /// a cycle, so a start went ahead with only an overlap warning (OS-8). Inputs: the
+    /// a cycle, so a start went ahead without the file the other holds (OS-8). Inputs: the
     /// project and the time in ms. Output: Ok or the first failure.
     fn note_wait_cycles(&mut self, project: &ProjectId, now: i64) -> Result<(), EngineError> {
-        for (first, second, file) in
+        for (starter, holder, file) in
             crate::coord::wait_cycle_notices(&self.connection, project, now)?
         {
-            let first = crate::team::events::label(&self.connection, first)?;
-            let second = crate::team::events::label(&self.connection, second)?;
-            self.note(project, &wait_cycle_note(&first, &second, &file))?;
+            let starter = crate::team::events::label(&self.connection, starter)?;
+            let holder = crate::team::events::label(&self.connection, holder)?;
+            self.note(project, &wait_cycle_note(&starter, &holder, &file))?;
         }
         Ok(())
     }
@@ -9346,7 +9346,7 @@ const HANDOFF_BYTES_MAX: usize = 1000;
 /// and the file. Output: the note.
 fn wait_cycle_note(starter: &str, holder: &str, file: &str) -> String {
     format!(
-        "{starter} and {holder} would have waited on each other under Overlapping edits Wait, so a start on {file} went ahead with only an overlap warning. Check that their edits of it do not clash."
+        "{starter} and {holder} would have waited on each other under Overlapping edits Wait, so {starter}'s start went ahead without {file}: {holder} keeps editing it, and {starter}'s edits of it stay refused until {holder}'s work on it lands or is discarded."
     )
 }
 

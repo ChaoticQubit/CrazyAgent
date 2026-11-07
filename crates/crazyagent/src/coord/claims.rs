@@ -573,14 +573,42 @@ pub fn overlaps_of(
         .collect())
 }
 
-/// The overlap a start under Wait waits on: another agent's claim, not stale, that covers
-/// a file this start claims, a file, folder or glob, so Wait holds whatever Block holds.
-/// Input: the start's overlaps. Output: that overlap, if any.
+/// The overlap a start under Wait waits on: the first that [`holds`] a file the start
+/// claims. Input: the start's overlaps. Output: that overlap, if any.
 pub(super) fn waits_on(overlaps: &[Overlap]) -> Option<&Overlap> {
-    overlaps.iter().find(|overlap| {
-        !overlap.theirs.stale
-            && matches!(Scope::of(&overlap.mine.pattern), Scope::File(file) if covers(&overlap.theirs.pattern, file))
-    })
+    overlaps.iter().find(|overlap| holds(overlap))
+}
+
+/// Says whether an overlap's other claim, not stale, covers a file the start claims, with
+/// a file, folder or glob, so Wait holds whatever Block holds. Input: the overlap. Output:
+/// the answer.
+fn holds(overlap: &Overlap) -> bool {
+    !overlap.theirs.stale
+        && matches!(Scope::of(&overlap.mine.pattern), Scope::File(file) if covers(&overlap.theirs.pattern, file))
+}
+
+/// Leaves out of a start every file claim another agent's live claim [`holds`], when its
+/// wait would close a cycle, so each holder keeps editing its file and the starter's edits
+/// of it stay refused (OS-8). The overlaps of the files left out stay, marked `left_out`;
+/// the other overlaps of those claims go with them. Takes the start's transaction and its
+/// overlaps. Returns Ok.
+pub(super) fn leave_out(tx: &Connection, overlaps: &mut Vec<Overlap>) -> Result<(), EngineError> {
+    let mut gone: Vec<i64> = overlaps
+        .iter()
+        .filter(|overlap| holds(overlap))
+        .map(|overlap| overlap.mine.id)
+        .collect();
+    gone.sort_unstable();
+    gone.dedup();
+    for id in &gone {
+        tx.execute("DELETE FROM coord_claims WHERE id=?1", params![id])
+            .map_err(state)?;
+    }
+    overlaps.retain(|overlap| !gone.contains(&overlap.mine.id) || holds(overlap));
+    for overlap in overlaps.iter_mut() {
+        overlap.left_out = gone.contains(&overlap.mine.id);
+    }
+    Ok(())
 }
 
 /// Says whether a start's wait under Wait would close a cycle: the holder, or an agent it
@@ -625,10 +653,10 @@ pub(super) fn closes_cycle(
     Ok(false)
 }
 
-/// Records that a start under Wait went ahead as under Warn because its wait would have
-/// closed a cycle, once per pair of agents, so [`wait_cycle_notices`] tells the owner of
-/// it once. Takes the transaction, the project, the two agents, the start's file and the
-/// time in ms. Returns Ok.
+/// Records that a start under Wait went ahead without the held file because its wait would
+/// have closed a cycle, once per pair of agents, so [`wait_cycle_notices`] tells the owner
+/// of it once. Takes the transaction, the project, the starter, the holder, the file and
+/// the time in ms. Returns Ok.
 pub(super) fn note_cycle(
     tx: &Connection,
     project: &ProjectId,
@@ -638,12 +666,13 @@ pub(super) fn note_cycle(
     now: i64,
 ) -> Result<(), EngineError> {
     tx.execute(
-        "INSERT OR IGNORE INTO coord_wait_cycles(project,first,second,file,created)
-         VALUES (?1,?2,?3,?4,?5)",
+        "INSERT OR IGNORE INTO coord_wait_cycles(project,first,second,holder,file,created)
+         VALUES (?1,?2,?3,?4,?5,?6)",
         params![
             project.as_str(),
             starter.min(holder),
             starter.max(holder),
+            holder,
             file,
             now
         ],
@@ -781,25 +810,25 @@ pub fn wake_waiters(db: &Connection, now: i64) -> Result<usize, EngineError> {
 }
 
 /// The waits under Wait that would have closed a cycle and the owner has not heard of yet,
-/// each pair once: its two agents, lower id first, and the file of the start that went
-/// ahead. Marks them told. Takes the database, the project and the time in ms. Returns the
-/// pairs.
+/// each pair once: the agent whose start went ahead without the file, the agent holding it
+/// and the file. Marks them told. Takes the database, the project and the time in ms.
+/// Returns the pairs.
 pub fn wait_cycle_notices(
     db: &Connection,
     project: &ProjectId,
     now: i64,
 ) -> Result<Vec<(AgentId, AgentId, String)>, EngineError> {
     let limit = i64::try_from(CYCLE_NOTICES_MAX).map_err(state)?;
-    let untold: Vec<(AgentId, AgentId, String)> = {
+    let untold: Vec<(AgentId, AgentId, AgentId, String)> = {
         let mut statement = db
             .prepare(
-                "SELECT first,second,file FROM coord_wait_cycles WHERE project=?1 AND told IS NULL
+                "SELECT first,second,holder,file FROM coord_wait_cycles WHERE project=?1 AND told IS NULL
                  ORDER BY created,first,second LIMIT ?2",
             )
             .map_err(state)?;
         statement
             .query_map(params![project.as_str(), limit], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })
             .map_err(state)?
             .collect::<Result<_, _>>()
@@ -807,11 +836,11 @@ pub fn wait_cycle_notices(
     };
     assert!(untold.len() <= CYCLE_NOTICES_MAX);
     if untold.is_empty() {
-        return Ok(untold);
+        return Ok(Vec::new());
     }
     let change = Change::begin(db)?;
     let tx = change.db();
-    for (first, second, _) in &untold {
+    for (first, second, _, _) in &untold {
         tx.execute(
             "UPDATE coord_wait_cycles SET told=?4 WHERE project=?1 AND first=?2 AND second=?3",
             params![project.as_str(), first, second, now],
@@ -819,7 +848,12 @@ pub fn wait_cycle_notices(
         .map_err(state)?;
     }
     change.commit()?;
-    Ok(untold)
+    Ok(untold
+        .into_iter()
+        .map(|(first, second, holder, file)| {
+            (if holder == first { second } else { first }, holder, file)
+        })
+        .collect())
 }
 
 /// The lead and sub-agent answers one overlap check already read, so a check over many

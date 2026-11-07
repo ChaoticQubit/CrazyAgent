@@ -25,7 +25,8 @@ struct WorkRow {
 /// overlaps, or a plain refusal for a stopped agent or invalid input. Under Wait a start on
 /// a file another agent's work holds starts nothing: it records the wait and is refused
 /// with `coord_claim_waits`, unless that wait would close a cycle of waits; then the start
-/// goes ahead as under Warn and the owner is told of the pair once (OS-8).
+/// goes ahead without the files other agents' live claims hold, their overlaps marked
+/// `left_out`, and the owner is told of the pair once (OS-8).
 pub fn start_work(
     db: &Connection,
     project: &ProjectId,
@@ -50,13 +51,14 @@ pub fn start_work(
     let work = tx.last_insert_rowid();
     audit(tx, project, work, Party::Agent(agent), "start", 0, 1, now)?;
     super::claims::add(tx, project, agent, work, &claims, now)?;
-    let overlaps = super::claims::overlaps_for(tx, project, agent, work, now)?;
+    let mut overlaps = super::claims::overlaps_for(tx, project, agent, work, now)?;
     if waits(tx, project)?
         && let Some(held) = super::claims::waits_on(&overlaps)
     {
         let file = held.mine.pattern.clone();
         if super::claims::closes_cycle(tx, agent, held.theirs.agent)? {
             super::claims::note_cycle(tx, project, agent, held.theirs.agent, &file, now)?;
+            super::claims::leave_out(tx, &mut overlaps)?;
         } else {
             let (holder, pattern) = (held.theirs.work, held.theirs.pattern.clone());
             drop(change);

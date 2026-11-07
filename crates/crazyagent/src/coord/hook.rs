@@ -755,7 +755,7 @@ fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value)
         .collect();
     let advice = match option {
         Overlaps::Wait => {
-            "set to Wait in this project: start_work on it to get a message when it is free, or start_work on other files."
+            "set to Wait in this project: start_work on it to get a message when it is free, or start_work on other files. If start_work leaves it out, you and its holder would wait on each other: work on other files until the holder's work on it lands or is discarded."
         }
         _ => {
             "set to Block in this project: message the holder with update_work, or start_work on other files."

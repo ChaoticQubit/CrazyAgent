@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS coord_wait_cycles (
     project TEXT NOT NULL,
     first INTEGER NOT NULL,
     second INTEGER NOT NULL,
+    holder INTEGER NOT NULL,
     file TEXT NOT NULL,
     created INTEGER NOT NULL,
     told INTEGER,
