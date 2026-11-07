@@ -20,8 +20,10 @@ const UNCOVERED_BYTES_MAX: usize = ID_FIELD_BYTES_MAX;
 /// Refuses a change set whose own commits merge in work from another branch (DEC-107
 /// rule 2), which the agent git wrapper alone cannot stop, since an agent can run git by
 /// its full path. A merge passes when every parent after its first is already in the
-/// owner's current branch, as the engine's own update merges are, or in the commit the
-/// agent's worktree starts from, or in the head of the agent's open change set, which the
+/// owner's current branch, as the engine's own update merges are, or in the tip of the
+/// project's Land on branch, the landed main the agent brings in with `git merge
+/// crazyagent/main` (OS-8), read from the owner repository and left out when it cannot be
+/// read, or in the commit the agent's worktree starts from, or in the head of the agent's open change set, which the
 /// engine recorded at an earlier turn end or made itself as the update merge it hands the
 /// agent, or, for a lead, in the tip of one of its own workers, or, for the master at Full
 /// access, in the head of any open change set of the project (DEC-117 Q2). The caller
@@ -39,6 +41,9 @@ pub(super) fn refuse_outside_merges(
         return Ok(());
     };
     let mut known = vec![owner];
+    if let Ok(Some((_, landed))) = super::owner::land_on(db, shared, &workspace.project) {
+        known.push(landed);
+    }
     let worktree = subagent::path_text(&workspace.worktree)?;
     if let Some(start) = store::base_of(db, worktree)?
         && shared.commit_of(&start)?.as_deref() == Some(start.as_str())

@@ -305,9 +305,12 @@ pub(super) fn other_refs(
 /// Points [`MAIN_REF`] in an agent's own clone at the project's landed tip with no git run
 /// in the clone, whose config is the agent's (CC-N1): `refs` and `crazyagent` opened
 /// without following a link and made when missing, the ref written to a new `main.lock`
-/// and renamed over `main`, as git itself writes a loose ref. The clone reads the commit
-/// through its alternates. Inputs: the owner checkout root, the worktree and the tip.
-/// Output: Ok, else `changes_workspace_invalid` for a link or a foreign entry on the way.
+/// and renamed over `main`, as git itself writes a loose ref. The caller holds the
+/// repository's hold, so a `main.lock` already there is stale, left by an engine stopped
+/// before its rename or by the agent, and is removed, never followed, and logged first.
+/// The clone reads the commit through its alternates. Inputs: the owner checkout root, the
+/// worktree and the tip. Output: Ok, else `changes_workspace_invalid` for a link or a
+/// foreign entry on the way.
 pub(super) fn give_main(repository: &Path, worktree: &Path, tip: &str) -> Result<(), EngineError> {
     use rustix::fs::{AtFlags, CWD, Mode, OFlags, mkdirat, openat, renameat, unlinkat};
     use std::io::Write;
@@ -331,8 +334,15 @@ pub(super) fn give_main(repository: &Path, worktree: &Path, tip: &str) -> Result
     }
     let created =
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let lock =
-        openat(&folder, MAIN_LOCK, created, Mode::from_raw_mode(0o644)).map_err(|_| invalid())?;
+    let lock = match openat(&folder, MAIN_LOCK, created, Mode::from_raw_mode(0o644)) {
+        Err(rustix::io::Errno::EXIST) => {
+            unlinkat(&folder, MAIN_LOCK, AtFlags::empty()).map_err(|_| invalid())?;
+            eprintln!("landing_main_lock_cleared");
+            openat(&folder, MAIN_LOCK, created, Mode::from_raw_mode(0o644))
+        }
+        opened => opened,
+    }
+    .map_err(|_| invalid())?;
     let mut file = std::fs::File::from(lock);
     let written = file
         .write_all(format!("{tip}\n").as_bytes())

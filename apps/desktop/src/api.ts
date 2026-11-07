@@ -1280,8 +1280,8 @@ export function setReaskEmptyReply(id: string, on: boolean): Promise<Result<Inte
   return call<IntentReceipt>("desktop_team_reask_empty_reply", { id, on, generation: nextGeneration() });
 }
 
-/** Sets the project's "Catch up with main" setting: on lets every agent merge the landed main,
- * `crazyagent/main`, into its own branch and tells it to; off keeps every merge refused.
+/** Sets the project's "Catch up with main" setting for agents started from now on: on lets each
+ * agent merge the landed main, `crazyagent/main`, into its own branch and tells it to; off refuses that merge.
  * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
 export function setCatchUpMain(id: string, mode: CatchUpMain): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_catch_up_main", { id, mode, generation: nextGeneration() });

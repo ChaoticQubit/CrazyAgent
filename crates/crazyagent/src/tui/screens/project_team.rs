@@ -2351,9 +2351,11 @@ impl TeamView {
                 };
                 let done = match mode {
                     CatchUpMain::On => {
-                        "Agents may now bring the landed main into their own branch with git merge crazyagent/main."
+                        "Catch up with main is on for agents started from now on: they may git merge crazyagent/main."
                     }
-                    CatchUpMain::Off => "Agents now have every merge refused, main included.",
+                    CatchUpMain::Off => {
+                        "Catch up with main is off for agents started from now on: their git merge of main is refused."
+                    }
                 };
                 (
                     TeamAction::CatchUpMain { project_id, mode },

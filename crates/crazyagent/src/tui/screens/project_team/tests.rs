@@ -2701,12 +2701,12 @@ fn catch_up_with_main_shows_on_under_overlapping_edits_and_space_flips_it() {
         (
             CatchUpMain::Off,
             "Off",
-            "Agents now have every merge refused, main included.",
+            "Catch up with main is off for agents started from now on: their git merge of main is refused.",
         ),
         (
             CatchUpMain::On,
             "On",
-            "Agents may now bring the landed main into their own branch with git merge crazyagent/main.",
+            "Catch up with main is on for agents started from now on: they may git merge crazyagent/main.",
         ),
     ] {
         let reply = view.key(press(KeyCode::Char(' ')));

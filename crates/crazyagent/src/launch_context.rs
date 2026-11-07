@@ -640,6 +640,13 @@ impl AgentContext {
         self
     }
 
+    /// Whether this launch's project has "Catch up with main" on, as read once with the rest
+    /// of the context, so the agent's own `git` copy and its team tools section agree.
+    /// Output: the choice.
+    pub fn catch_up_main(&self) -> bool {
+        self.catch_up_main
+    }
+
     /// Lists what a project sandbox must let an agent with tools on read beyond its home, as
     /// paths whose folders it reads: the executable of every approved command server and,
     /// for context-mode run from the engine's shared install, that install's `node_modules`.
