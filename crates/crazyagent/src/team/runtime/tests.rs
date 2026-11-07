@@ -2578,6 +2578,175 @@ fn a_sub_agent_s_own_git_merges_main_only_while_catch_up_with_main_is_on() {
     }
 }
 
+/// A team runtime over the fixture whose `codex` is a stand-in that exits at once, so
+/// preparing an agent writes its homes and own `git` without starting a harness.
+/// Input: the fixture. Output: the runtime.
+#[cfg(target_os = "macos")]
+fn stand_in_runtime(fixture: &Fixture) -> TeamRuntime {
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let owner_access = fixture.access.clone();
+    TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(owner_access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+}
+
+/// Saves the project's agent access in the fixture's store. Inputs: the fixture and the
+/// access.
+#[cfg(target_os = "macos")]
+fn save_access(fixture: &Fixture, access: crate::sandbox::policy::AgentAccess) {
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access,
+            ..crate::sandbox::policy::AgentPolicy::default()
+        },
+    )
+    .unwrap();
+}
+
+/// Prepares agent `id` in `role` on a local endpoint account as `start_agent` does: a new
+/// agent in a new worktree whose row and starting commit are then recorded, a relaunched or
+/// resumed one in the worktree recorded for it, each launch's ledger intent settled after. Reads the
+/// agent's own `git` script. Inputs: the runtime, the agent and its role. Output: the
+/// script's lines.
+#[cfg(target_os = "macos")]
+fn prepared_git(runtime: &TeamRuntime, fixture: &Fixture, id: i64, role: AgentRole) -> Vec<String> {
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let project = fixture.setup.project_id.as_str();
+    let kept = runtime
+        .connection
+        .query_row(
+            "SELECT 1 FROM team_worktrees WHERE agent=?1 AND project=?2",
+            params![id, project],
+            |_| Ok(()),
+        )
+        .optional()
+        .unwrap()
+        .is_some();
+    let (root, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            role,
+            "codex",
+            false,
+            &account,
+            kept,
+            crate::agent_git::Layout::Linked,
+        )
+        .unwrap();
+    if !kept {
+        let landing =
+            agent_git_dir(&root, &plan.working_dir, crate::agent_git::Layout::Linked).unwrap();
+        runtime
+            .connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![id, project, landing[0], landing[1], landing[2]],
+            )
+            .unwrap();
+        let named = crate::team::agent_branches(&runtime.connection, &fixture.setup.project_id)
+            .unwrap()
+            == crate::team::BranchMode::Named;
+        let paths = landing.each_ref().map(Path::new);
+        let db = crate::landing::open(&runtime.root).unwrap();
+        if named {
+            crate::landing::name_agent_branch(&db, paths[0], paths[1], paths[2]).unwrap();
+        }
+        crate::landing::record_worktree_start(&db, paths[0], paths[1], paths[2]).unwrap();
+    }
+    spawn_ledger::settle(&runtime.connection, &runtime.root, id, false);
+    let home = agent_home(&runtime.state, id);
+    let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
+    std::fs::read_to_string(scratch.join("bin").join("git"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Only the master gets the free copy at Full access (DEC-117 Q2): a lead and its worker
+/// in a Full access project keep their own copies, the lead's that may merge its workers
+/// and the worker's, both with `free=0` and the DEC-107 refusal.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_and_a_worker_at_full_access_never_get_the_free_copy_of_their_git() {
+    use crate::sandbox::policy::AgentAccess;
+    let fixture = Fixture::new(1);
+    save_access(&fixture, AgentAccess::Full);
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting);
+    let worker = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            params![lead, worker],
+        )
+        .unwrap();
+    let runtime = stand_in_runtime(&fixture);
+    for (id, copy) in [(lead, "lead=1"), (worker, "lead=0")] {
+        let script = prepared_git(&runtime, &fixture, id, AgentRole::Sub);
+        let _ = crate::sandbox::toolchains::remove_tmp(&agent_home(&runtime.state, id));
+        for flag in ["free=0", copy] {
+            assert!(
+                script.iter().any(|line| line == flag),
+                "agent {id} at Full access lacks {flag}"
+            );
+        }
+    }
+}
+
+/// The free copy lasts only while the project stays at Full access (DEC-117 Q2): a master
+/// prepared again after the owner lowers access, as its relaunch or resume prepares it,
+/// has its own `git` swapped back to the worker copy before it runs, and gets the free copy
+/// again once access is Full.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_master_prepared_again_after_access_drops_below_full_gets_the_worker_copy_back() {
+    use crate::sandbox::policy::AgentAccess;
+    let fixture = Fixture::new(1);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Starting);
+    let runtime = stand_in_runtime(&fixture);
+    let mut seen = Vec::new();
+    for access in [
+        AgentAccess::Full,
+        AgentAccess::OwnBranch,
+        AgentAccess::Full,
+        AgentAccess::Sandboxed,
+    ] {
+        save_access(&fixture, access);
+        let script = prepared_git(&runtime, &fixture, master, AgentRole::Master);
+        seen.push((access, script.iter().any(|line| line == "free=1")));
+    }
+    let _ = crate::sandbox::toolchains::remove_tmp(&agent_home(&runtime.state, master));
+    assert_eq!(
+        seen,
+        [
+            (AgentAccess::Full, true),
+            (AgentAccess::OwnBranch, false),
+            (AgentAccess::Full, true),
+            (AgentAccess::Sandboxed, false),
+        ],
+        "the master's git is the free copy exactly while access is Full"
+    );
+}
+
 /// A team agent whose delegation engine sits in an app bundle, as the macOS service runs it
 /// from `CrazyAgent.app/Contents/MacOS`, can start that engine under its installed profile
 /// for its team tools, relay hooks and monitor, with tools on or off, while another bundle's

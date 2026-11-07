@@ -285,6 +285,7 @@ impl Case {
     }
 }
 
+#[track_caller]
 fn refused<T: std::fmt::Debug>(result: Result<T, EngineError>) -> String {
     result.unwrap_err().0
 }
@@ -5890,6 +5891,158 @@ fn a_master_turn_merging_an_open_change_set_passes_only_at_full_access() {
         std::fs::read_to_string(case.repo.join("README")).unwrap(),
         "one\ntwo\nthree\nfour\n",
         "accepting the master's set lands the merged change set's work"
+    );
+}
+
+/// Saves the project's agent access in the case's store. Inputs: the case and the access.
+fn save_access(case: &Case, access: crate::sandbox::policy::AgentAccess) {
+    crate::sandbox::policy::save(
+        &case.db,
+        "project-1",
+        &crate::sandbox::policy::AgentPolicy {
+            access,
+            ..crate::sandbox::policy::AgentPolicy::default()
+        },
+    )
+    .unwrap();
+}
+
+/// Records a merge commit of `commit` in an agent's worktree, as the agent's own merge
+/// would. Inputs: the case, the agent's workspace and the commit.
+fn merge_in(case: &Case, agent: &Workspace, commit: &str) {
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "merge",
+            "-q",
+            "--no-ff",
+            "--no-edit",
+            commit,
+        ],
+    );
+    assert_eq!(
+        git_in(&case.home, &agent.worktree, &["rev-parse", "HEAD^2"]).trim(),
+        commit
+    );
+}
+
+/// Full access widens the master's merges to open change sets only (DEC-117 Q2): its merge
+/// of a commit no change set holds, or of a discarded set's head, is still refused as
+/// outside work (DEC-107), while its merge of an open set passes.
+#[test]
+fn at_full_access_the_master_s_merge_of_a_foreign_commit_or_a_closed_set_is_refused() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    case.start();
+    case.edit("closed.txt", "closed\n");
+    let closed = case.turn(TurnOutcome::Succeeded).unwrap();
+    let closed_head = case.view(&closed).head;
+    discard(&case.db, &closed, &closed_head, NOW_MS).unwrap();
+    assert_eq!(case.view(&closed).state, ChangeState::Discarded);
+    case.edit("open.txt", "open\n");
+    let open = case.turn(TurnOutcome::Succeeded).unwrap();
+    let open_head = case.view(&open).head;
+    let foreign = case.side_branch();
+    let master = master_agent(&case);
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    save_access(&case, AgentAccess::Full);
+    let start = git_in(&case.home, &master.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    for (commit, what) in [
+        (&foreign, "a commit no change set holds"),
+        (&closed_head, "a discarded set's head"),
+    ] {
+        merge_in(&case, &master, commit);
+        assert_eq!(
+            refused(record_turn_end(&case.db, &master, &merge_turn())),
+            "changes_outside_merge",
+            "the master's merge of {what} at Full access"
+        );
+        git_in(
+            &case.home,
+            &master.worktree,
+            &["reset", "-q", "--hard", &start],
+        );
+    }
+    merge_in(&case, &master, &open_head);
+    assert!(
+        record_turn_end(&case.db, &master, &merge_turn())
+            .unwrap()
+            .is_some(),
+        "the master's merge of an open set passes at Full access"
+    );
+}
+
+/// Full access widens no sub-agent's merges (DEC-117 Q2): a sub-agent's and a lead's merge
+/// of another agent's open change set are still refused as outside work (DEC-107), while
+/// the master's same merge passes.
+#[test]
+fn at_full_access_a_sub_agent_s_or_a_lead_s_merge_of_an_open_set_is_refused() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    case.start();
+    case.edit("open.txt", "open\n");
+    let open = case.turn(TurnOutcome::Succeeded).unwrap();
+    let open_head = case.view(&open).head;
+    let master = master_agent(&case);
+    save_access(&case, AgentAccess::Full);
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,mode)
+             VALUES (3,'project-1','sub','claude',1,'running',1,1,NULL,'app_spawned'),
+                    (4,'project-1','sub','claude',1,'running',1,1,3,'app_spawned');",
+        )
+        .unwrap();
+    let sub = second_agent(&case);
+    let mut lead = numbered_agent(&case, 3);
+    lead.agent.id = "3".into();
+    let worker = numbered_agent(&case, 4);
+    case.db
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (4,'project-1',?1,?2,?3)",
+            rusqlite::params![
+                worker.repository.to_str().unwrap(),
+                worker.worktree.to_str().unwrap(),
+                worker.git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    for (agent, what) in [(&sub, "a sub-agent"), (&lead, "a lead")] {
+        record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir)
+            .unwrap();
+        merge_in(&case, agent, &open_head);
+        assert_eq!(
+            refused(record_turn_end(&case.db, agent, &merge_turn())),
+            "changes_outside_merge",
+            "{what}'s merge of an open set at Full access"
+        );
+    }
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    merge_in(&case, &master, &open_head);
+    assert!(
+        record_turn_end(&case.db, &master, &merge_turn())
+            .unwrap()
+            .is_some(),
+        "the master's same merge passes at Full access"
     );
 }
 
