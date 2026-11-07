@@ -1915,15 +1915,25 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
 
 /// The words one tree line shows, as the desktop graph shows them: the live action while it
 /// happens, a handoff naming its task's title, a wait on the owner naming the owner's answer
-/// and a review its change set, else the relation. Input: the engine's relation edge.
-/// Output: the label.
+/// and a review the agent whose change set it reviews, else the relation. Input: the
+/// engine's relation edge. Output: the label.
 fn edge_label(edge: &RelationEdge) -> String {
     match &edge.live {
         Some(LiveAction::HandingOff { task }) => format!("handing off: {}", title(task)),
         Some(LiveAction::Messaging) => "messaging".to_owned(),
         Some(LiveAction::WaitingOn { owner: true }) => "waiting on: your answer".to_owned(),
         Some(LiveAction::WaitingOn { owner: false }) => "waiting on".to_owned(),
-        Some(LiveAction::Reviewing { .. }) => "reviewing".to_owned(),
+        Some(LiveAction::Reviewing { agent }) => {
+            let name = plain(agent)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if name.is_empty() {
+                "reviewing: change set".to_owned()
+            } else {
+                format!("reviewing: {name}'s change set")
+            }
+        }
         None => match edge.relation {
             Relation::Leads => "leads",
             Relation::DelegatedTo => "delegated to",

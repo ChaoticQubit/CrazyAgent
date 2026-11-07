@@ -340,14 +340,17 @@ function liveShown(live: LiveAction | null): live is LiveAction {
 
 /** The words one graph line shows, as the TUI tree shows them: the live action while it
  * happens, a handoff naming its task's first line, a wait on the owner naming the owner's
- * answer and a review its change set, else the relation. Input: the engine's relation edge.
- * Output: the label, empty for a relation this build does not know. */
+ * answer and a review the agent whose change set it reviews, else the relation. Input: the
+ * engine's relation edge. Output: the label, empty for a relation this build does not know. */
 export function edgeLabel(edge: RelationEdge): string {
   const live = edge.live;
   if (!liveShown(live)) return RELATION_WORDS.get(edge.relation) ?? "";
   if (live.action === "messaging") return "messaging";
   if (live.action === "waiting_on") return live.owner === true ? "waiting on: your answer" : "waiting on";
-  if (live.action === "reviewing") return "reviewing";
+  if (live.action === "reviewing") {
+    const name = typeof live.agent === "string" ? live.agent.split(/\s+/).filter(Boolean).join(" ") : "";
+    return name ? `reviewing: ${name}'s change set` : "reviewing: change set";
+  }
   const task = live.task.split("\n").map((line) => line.split(/\s+/).filter(Boolean).join(" ")).find(Boolean);
   return `handing off: ${task ?? "Untitled task"}`;
 }
