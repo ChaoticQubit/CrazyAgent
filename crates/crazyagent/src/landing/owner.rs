@@ -670,14 +670,21 @@ pub(super) fn commit_deletions(
 /// and records the Accept in the project's activity by who accepted it. A worker set that
 /// cannot be closed now is logged by its plain code and left open, so the Accept itself
 /// never fails on it.
-fn finish(db: &Connection, record: &mut Record, landed: &str, by: &str) -> Result<(), EngineError> {
+fn finish(
+    db: &Connection,
+    record: &mut Record,
+    landed: &str,
+    by: By<'_>,
+) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
     record.landed = Some(landed.to_owned());
     record.conflicts.clear();
     record.intent = None;
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
-    super::note_change(db, record, ActivityKind::Accepted, by);
+    if let By::Named(by) = by {
+        super::note_change(db, record, ActivityKind::Accepted, by);
+    }
     if let Err(error) = super::subagent::close_with_lead(db, record) {
         eprintln!(
             "landing_settle_failed cause={}",
@@ -693,6 +700,90 @@ fn finish(db: &Connection, record: &mut Record, landed: &str, by: &str) -> Resul
     super::owner_edit::logged("forget", super::owner_edit::forget(db, &record.id));
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)
+}
+
+/// Who lands a change set, as the project's activity names them: someone whose Accept or
+/// conflict is recorded as it happens, or the master landing its own set, whose land its
+/// caller records once with the sets it closed and whose conflict leaves the set as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum By<'a> {
+    Named(&'a str),
+    Master,
+}
+
+/// Lands the master's own pending change set when `team::master_lands` says Merges, read
+/// now: as an Accept onto the Land on branch, then closes every open set of the project
+/// its head holds and records one MergedIntoMain row naming them. Any other set, or Waits,
+/// is left alone, and a conflict changes nothing. Inputs: the store, the owner's home and
+/// the change set. Output: the outcome, or None when nothing was tried.
+pub(super) fn land_master(
+    db: &Connection,
+    home: &Path,
+    id: &ChangeSetId,
+) -> Result<Option<AcceptOutcome>, EngineError> {
+    store::initialize(db)?;
+    let record = store::load(db, id)?;
+    if record.agent.kind != AgentKind::Master
+        || record.state != ChangeState::Pending
+        || record.intent.is_some()
+        || crate::team::master_lands(db, &record.project)? != crate::team::MasterLands::Merges
+    {
+        return Ok(None);
+    }
+    let outcome = accept_to(db, home, id, &record.head, None, None, By::Master, &|_| {
+        false
+    })?;
+    let AcceptOutcome::Landed { commit, branch } = &outcome else {
+        return Ok(Some(outcome));
+    };
+    let closed = {
+        let _held = hold(&record.repository);
+        close_covered(db, &record, commit)?
+    };
+    let mut text = format!(
+        "The master merged its changes into {branch}: {}",
+        record.prompt_line
+    );
+    if !closed.is_empty() {
+        text.push_str(&format!(". It closed the changes of {}", closed.join(", ")));
+    }
+    let item = crate::activity::NewActivity {
+        kind: ActivityKind::MergedIntoMain,
+        actor: crate::activity::MASTER_ACTOR,
+        agent: None,
+        goal: None,
+        text: &text,
+        change_set: Some(id.as_str()),
+    };
+    let at = i64::try_from(flow::now_ms()?).unwrap_or(i64::MAX);
+    crate::activity::note(db, &record.project, &item, at);
+    Ok(Some(outcome))
+}
+
+/// Closes, as landed in `landed`, every other open change set of the master's project whose
+/// head the master's landed set holds, the way a lead's merge closes its workers' sets. A set
+/// with an owner action in flight stays open. The caller holds [`hold`] on the repository.
+/// Inputs: the store, the master's landed set and the commit it landed as. Output: the
+/// labels of the agents whose sets closed.
+fn close_covered(
+    db: &Connection,
+    master: &Record,
+    landed: &str,
+) -> Result<Vec<String>, EngineError> {
+    assert_eq!(master.agent.kind, AgentKind::Master);
+    let mut closed = Vec::new();
+    for mut record in store::open_of(db, Some(&master.project))? {
+        assert_eq!(record.project, master.project);
+        if record.id == master.id
+            || record.intent.is_some()
+            || !super::subagent::covers(&record, &master.head)?
+        {
+            continue;
+        }
+        super::subagent::land_covered(db, &mut record, landed)?;
+        closed.push(record.agent.label.clone());
+    }
+    Ok(closed)
 }
 
 /// The owner's edited Accept message: line ends made `\n`, trimmed, not empty, at most
@@ -734,7 +825,7 @@ pub(super) fn accept(
         expected_head,
         message,
         None,
-        OWNER_ACTOR,
+        By::Named(OWNER_ACTOR),
         stopped,
     )
 }
@@ -753,7 +844,7 @@ pub(super) fn accept_to(
     expected_head: &str,
     message: Option<&str>,
     target: Option<&str>,
-    by: &str,
+    by: By<'_>,
     stopped: &dyn Fn(Step) -> bool,
 ) -> Result<AcceptOutcome, EngineError> {
     let edited = message.map(edited).transpose()?;
@@ -784,11 +875,13 @@ pub(super) fn accept_to(
     let (tree, conflicts) = merge(&owner, &from, &tip, &record.head)?;
     let branch = reference.trim_start_matches("refs/heads/").to_owned();
     if !conflicts.is_empty() {
-        record.state = ChangeState::Conflict;
-        record.conflicts = conflicts.clone();
-        record.updated_ms = flow::now_ms()?;
-        store::save(db, &record)?;
-        super::note_change(db, &record, ActivityKind::Conflict, by);
+        if let By::Named(by) = by {
+            record.state = ChangeState::Conflict;
+            record.conflicts = conflicts.clone();
+            record.updated_ms = flow::now_ms()?;
+            store::save(db, &record)?;
+            super::note_change(db, &record, ActivityKind::Conflict, by);
+        }
         return Ok(AcceptOutcome::Conflict { files: conflicts });
     }
     if uses_configured_commands(&owner, &paths, &[&tree])? {

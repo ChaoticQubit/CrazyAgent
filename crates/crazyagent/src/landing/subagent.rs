@@ -868,7 +868,7 @@ fn close_covered(
 
 /// Tells whether a commit holds an open change set's head. Inputs: the change set and the
 /// commit. Output: the answer.
-fn covers(record: &store::Record, merged: &str) -> Result<bool, EngineError> {
+pub(super) fn covers(record: &store::Record, merged: &str) -> Result<bool, EngineError> {
     if record.head == merged {
         return Ok(true);
     }
@@ -881,7 +881,7 @@ fn covers(record: &store::Record, merged: &str) -> Result<bool, EngineError> {
 /// it landed, drops its pending ref and has the agent's next change set open above it.
 /// The caller holds [`hold`] on its repository. Inputs: the store, the change set and the
 /// commit it landed as. Output: Ok once closed.
-fn land_covered(
+pub(super) fn land_covered(
     db: &Connection,
     record: &mut store::Record,
     landed: &str,

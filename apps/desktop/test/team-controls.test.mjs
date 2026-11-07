@@ -286,3 +286,16 @@ test("Settings, Team offers Apply a master harness change with When the master i
   assert.match(choose, /const message = savedStale\(result\) \? TEAM_SETTINGS_STALE : changeNote\(result, "the Apply a master harness change setting"\);/, "a change from an older read says the settings changed and shows the saved ones");
   assert.match(choose, /setNote\(message\);\s*data\.reloadTeam\(\);/, "the page reads the team again after every save, stale or not");
 });
+
+test("what the master does with its conflict fixes is a choice only at Full access", () => {
+  const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
+  const merges = render({ master_lands: "merges" });
+  assert.match(merges, /role="radiogroup" aria-label="When the master resolves conflicts"/);
+  assert.match(merges, /aria-checked="true"[^>]*>Merge into main itself</);
+  assert.match(merges, /aria-checked="false"[^>]*>Wait for my Accept</);
+  assert.match(render({ master_lands: "waits" }), /aria-checked="true"[^>]*>Wait for my Accept</);
+  for (const below of [render({ master_lands: null }), render({})]) {
+    assert.doesNotMatch(below, /aria-label="When the master resolves conflicts"/, "no choice below Full access");
+    assert.match(below, /When the master resolves conflicts<\/span>[\s\S]*?Only at Full access\./);
+  }
+});

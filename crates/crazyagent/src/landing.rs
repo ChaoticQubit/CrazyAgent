@@ -1085,7 +1085,7 @@ pub fn accept_into_as(
         expected_head,
         message,
         Some(target_branch),
-        by,
+        owner::By::Named(by),
         &|_| false,
     );
     #[cfg(not(unix))]
@@ -1115,8 +1115,13 @@ pub fn land_master_set(
     owner_home: &Path,
     id: &ChangeSetId,
 ) -> Result<Option<AcceptOutcome>, EngineError> {
-    let _ = (db, owner_home, id);
-    Ok(None)
+    #[cfg(unix)]
+    return owner::land_master(db, owner_home, id);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, owner_home, id);
+        Ok(None)
+    }
 }
 
 /// Lists the local branches an Accept of a change set can land on and the owner's

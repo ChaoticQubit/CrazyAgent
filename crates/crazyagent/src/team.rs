@@ -713,6 +713,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    MasterLands {
+        project_id: ProjectId,
+        mode: MasterLands,
+    },
     ReaskEmptyReply {
         project_id: ProjectId,
         on: bool,
@@ -969,6 +973,7 @@ impl TeamAction {
             | Self::FinishedAgents { .. }
             | Self::AgentBranches { .. }
             | Self::AskBeforeMerge { .. }
+            | Self::MasterLands { .. }
             | Self::ReaskEmptyReply { .. }
             | Self::LiveMaster { .. }
             | Self::HarnessDelivery { .. }
@@ -997,6 +1002,7 @@ impl TeamAction {
             | Self::LandOn { project_id, .. }
             | Self::BackgroundAtEnd { project_id, .. }
             | Self::AskBeforeMerge { project_id, .. }
+            | Self::MasterLands { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
             | Self::MessageSettings { project_id, .. }
@@ -1456,6 +1462,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_merge_ask (
                 project TEXT PRIMARY KEY,
                 ask INTEGER NOT NULL CHECK(ask IN (0,1))
+            );
+            CREATE TABLE IF NOT EXISTS team_master_lands (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('merges','waits'))
             );
             CREATE TABLE IF NOT EXISTS team_reask_empty (
                 project TEXT PRIMARY KEY,
@@ -2420,6 +2430,7 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::MasterLands { .. } => Ok(Outcome::Applied),
         TeamAction::ReaskEmptyReply { on, .. } => {
             tx.execute(
                 "INSERT INTO team_reask_empty(project,reask) VALUES (?1,?2)
@@ -3035,6 +3046,8 @@ pub struct TeamStatus {
     pub background_at_end: BackgroundAtEnd,
     #[serde(default)]
     pub ask_before_merge: bool,
+    #[serde(default)]
+    pub master_lands: Option<MasterLands>,
     #[serde(default = "reask_default")]
     pub reask_empty_reply: bool,
     #[serde(default = "new_folder_default")]
@@ -3611,8 +3624,24 @@ pub fn master_lands(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<MasterLands, EngineError> {
-    let _ = (connection, project);
-    Ok(MasterLands::Waits)
+    let access = crate::sandbox::policy::load(connection, project.as_str())
+        .map_err(error)?
+        .access;
+    if access != crate::sandbox::policy::AgentAccess::Full {
+        return Ok(MasterLands::Waits);
+    }
+    let saved: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_master_lands WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match saved {
+        None => Ok(MasterLands::Merges),
+        Some(name) => MasterLands::named(&name).ok_or_else(|| failure("team_master_lands_invalid")),
+    }
 }
 
 /// Saves what the project's master does with its own change set. Takes a connection, the
@@ -3622,7 +3651,13 @@ pub fn set_master_lands(
     project: &ProjectId,
     mode: MasterLands,
 ) -> Result<(), EngineError> {
-    let _ = (connection, project, mode);
+    connection
+        .execute(
+            "INSERT INTO team_master_lands(project,mode) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+            params![project.as_str(), mode.name()],
+        )
+        .map_err(error)?;
     Ok(())
 }
 
@@ -4374,6 +4409,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         land_on: land_on(connection, project)?,
         background_at_end: background_at_end(connection, project)?,
         ask_before_merge: ask_before_merge(connection, project)?,
+        master_lands: None,
         reask_empty_reply: reask_empty_reply(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
