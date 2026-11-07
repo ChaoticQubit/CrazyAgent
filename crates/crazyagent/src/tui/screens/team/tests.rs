@@ -1354,6 +1354,91 @@ fn a_live_master_switch_from_an_older_read_reads_the_switch_again() {
     );
 }
 
+/// Keys the owner types while the master view starts the live master wait through a stale
+/// refusal of that start: the view reads the switch again, starts the master from the newer
+/// read and types the keys in once its terminal attaches, and never says they were lost.
+#[test]
+fn keys_typed_before_a_stale_live_master_start_reach_the_terminal_after_the_retry() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(false), None));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| live_master_change(request, true)),
+        "the read starts the live master: {sent:?}"
+    );
+    for character in "hello".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.arrive(turned(true, Err(crate::storage::versioned::STALE_CODE)));
+    let text = render(&mut shell).join("\n");
+    assert!(
+        !text.contains("What you typed for the master was not sent."),
+        "the keys wait for the retry: {text}"
+    );
+    let sent = requests(&mut shell);
+    assert!(sent.iter().any(switch_read), "{sent:?}");
+    assert!(
+        sent.iter().all(|request| input(request).is_none()),
+        "{sent:?}"
+    );
+
+    shell.arrive(switch(Some(false), None));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| live_master_change(request, true)),
+        "the newer read starts the live master once more: {sent:?}"
+    );
+    shell.arrive(turned(true, Ok(())));
+    requests(&mut shell);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(&sent[0], Request::TerminalAttach { agent } if agent.as_str() == "team-1"),
+        "{sent:?}"
+    );
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 74,
+            rows: 17,
+        },
+    });
+    let sent = requests(&mut shell);
+    let typed: Vec<_> = sent.iter().filter_map(input).collect();
+    assert_eq!(typed, vec![("team-1", &b"hello"[..])], "{sent:?}");
+}
+
+/// A retry whose switch read fails starts nothing more, so the keys the owner typed for the
+/// master are dropped at once and the owner is told to type them again.
+#[test]
+fn a_retry_whose_switch_read_fails_drops_the_keys_typed_for_the_master_and_says_so() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(false), None));
+    requests(&mut shell);
+    for character in "hello".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.arrive(turned(true, Err(crate::storage::versioned::STALE_CODE)));
+    requests(&mut shell);
+    shell.arrive(failed_read("team_status_unavailable"));
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("What you typed for the master was not sent."),
+        "{text}"
+    );
+    let sent = requests(&mut shell);
+    assert!(
+        !sent.iter().any(|request| live_master_change(request, true)),
+        "a failed read starts nothing: {sent:?}"
+    );
+}
+
 /// A master view retries its live master start once per open: after a second stale refusal
 /// the next read that still shows the master off starts nothing more, so two windows that
 /// keep changing the team settings never make it loop.
