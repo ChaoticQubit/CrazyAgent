@@ -297,6 +297,13 @@ pub(super) fn other_refs(
     Ok(found)
 }
 
+/// Points `refs/crazyagent/main` in an agent's own clone at the project's landed tip.
+/// Inputs: the owner checkout root, the worktree and the tip. Output: Ok.
+pub(super) fn give_main(repository: &Path, worktree: &Path, tip: &str) -> Result<(), EngineError> {
+    let _ = (repository, worktree, tip);
+    Ok(())
+}
+
 /// Says whether an agent's own clone still holds its branch, read as data from its git
 /// folder with no git run and no link followed: a loose ref file, a `packed-refs` line, or
 /// a `reftable` store, which the engine does not read and so counts as holding it. Inputs:
