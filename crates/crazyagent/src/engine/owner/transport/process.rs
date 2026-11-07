@@ -1425,10 +1425,32 @@ fn read_only(root: &Path) -> Result<rusqlite::Connection, EngineError> {
     Ok(connection)
 }
 
-/// Reads what a launch now gives every agent of the project. Inputs: the engine root and
-/// the project. Output: the text.
-fn given_text(_root: &Path, _project: &ProjectId) -> Result<String, EngineError> {
-    Ok(String::new())
+/// Reads what a launch now gives every agent of the project: `agent_home::text`, the
+/// render every launch uses, for the project's mode. A launch-size refusal names its larger
+/// part in a code the Process page does not answer with, so it reads as
+/// `agent_instructions_too_large`. Inputs: the engine root and the project. Output: the
+/// text, `process_project_unknown` for a project not set up, or the code of the part the
+/// engine cannot read.
+fn given_text(root: &Path, project: &ProjectId) -> Result<String, EngineError> {
+    let connection = read_only(root)?;
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|_| failure("process_unavailable"))?;
+    let agent = crate::launch_context::agent_project(&tx, project)
+        .map_err(|_| failure("process_unavailable"))?;
+    drop(tx);
+    if agent.folder.is_none() {
+        return Err(failure("process_project_unknown"));
+    }
+    crate::agent_home::text(&agent)
+        .map(|given| given.text)
+        .map_err(|problem| {
+            if problem.0.starts_with("agent_instructions_too_large") {
+                failure("agent_instructions_too_large")
+            } else {
+                EngineError(problem.0)
+            }
+        })
 }
 
 /// Finds one project's folder from its stored setup. Inputs: the engine root and the

@@ -230,6 +230,7 @@
     "allow-desktop-uncommitted-instruction-import",
     "allow-desktop-commit-instruction-import",
     "allow-desktop-default-process",
+    "allow-desktop-process-given",
     "allow-desktop-agent-instructions",
     "allow-desktop-recovery-banner",
     "allow-desktop-retry-recovery",

@@ -3284,6 +3284,17 @@ async fn desktop_default_process(
 }
 
 #[tauri::command]
+async fn desktop_process_given(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<String, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.given_text(project_id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_pick_folder(
     window: WebviewWindow,
     purpose: FolderPurpose,
@@ -3753,6 +3764,7 @@ pub fn run() {
             desktop_uncommitted_instruction_import,
             desktop_commit_instruction_import,
             desktop_default_process,
+            desktop_process_given,
             desktop_agent_instructions,
             desktop_recovery_banner,
             desktop_retry_recovery,
