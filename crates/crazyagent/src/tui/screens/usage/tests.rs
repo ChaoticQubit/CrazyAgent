@@ -262,7 +262,7 @@ fn the_summary_shows_totals_limits_with_countdowns_and_named_groups() {
     assert!(lines[0].starts_with("Usage") && lines[0].ends_with("Last 7 days"));
     assert_eq!(
         lines[1],
-        "Tokens 6.3K (1.2K in, 300 out)  Cache 67%  Runs 3  Lines +90 -57"
+        "Tokens 2.3K (1.2K in, 300 out)  Cache 67%  Runs 3  Lines +90 -57"
     );
     let all = lines.join("\n");
     for wanted in [
@@ -270,9 +270,9 @@ fn the_summary_shows_totals_limits_with_countdowns_and_named_groups() {
         "    5-hour   34% used  Resets in 2 h 0 min",
         "    Weekly    0% used  Next reset not known yet",
         "    The provider asked CrazyAgent to wait before reading limits again.",
-        "By project\n  Harbor Notes    5.5K tokens  2 runs",
-        "By pool\n  Main pool    5.5K tokens  2 runs",
-        "By account\n  acct-0    5.5K tokens  2 runs",
+        "By project\n  Harbor Notes    1.5K tokens  2 runs",
+        "By pool\n  Main pool    1.5K tokens  2 runs",
+        "By account\n  acct-0    1.5K tokens  2 runs",
         "  and 2 more",
     ] {
         assert!(all.contains(wanted), "{wanted:?} in\n{all}");
@@ -299,8 +299,8 @@ fn runs_tied_to_no_project_or_account_read_as_unattributed() {
     ))
     .join("\n");
     for wanted in [
-        "By project\n  Harbor Notes    5.5K tokens  2 runs\n  Unattributed    5.5K tokens  2 runs",
-        "By account\n  Unattributed    5.5K tokens  2 runs",
+        "By project\n  Harbor Notes    1.5K tokens  2 runs\n  Unattributed    1.5K tokens  2 runs",
+        "By account\n  Unattributed    1.5K tokens  2 runs",
     ] {
         assert!(all.contains(wanted), "{wanted:?} in\n{all}");
     }
@@ -548,7 +548,7 @@ fn a_reply_for_an_earlier_range_never_shows_under_the_new_label_and_the_newer_er
     page.apply(&Ok(Box::new(late)), &mut ctx);
     let shown = text(&page.body(96, NOW, 0, &ctx)).join("\n");
     assert!(
-        !shown.contains("Tokens 6.3K"),
+        !shown.contains("Tokens 2.3K"),
         "the Last 7 days totals never show under All time: {shown}"
     );
     assert!(page.busy(&ctx), "the All time read is still awaited");
@@ -556,7 +556,7 @@ fn a_reply_for_an_earlier_range_never_shows_under_the_new_label_and_the_newer_er
     page.apply(&Err("usage_outcome_unknown".into()), &mut ctx);
     let failed = text(&page.body(96, NOW, 0, &ctx)).join("\n");
     assert!(failed.contains("Could not read usage."), "{failed}");
-    assert!(!failed.contains("Tokens 6.3K"), "{failed}");
+    assert!(!failed.contains("Tokens 2.3K"), "{failed}");
     assert!(!page.busy(&ctx));
 
     page.key(&Key::Char('r'), &mut ctx);
@@ -565,7 +565,7 @@ fn a_reply_for_an_earlier_range_never_shows_under_the_new_label_and_the_newer_er
     assert_eq!(all, None);
     let shown = text(&page.body(96, NOW, 0, &ctx)).join("\n");
     assert!(shown.contains("All time"), "{shown}");
-    assert!(shown.contains("Tokens 6.3K"), "{shown}");
+    assert!(shown.contains("Tokens 2.3K"), "{shown}");
 
     page.key(&Key::Char('t'), &mut ctx);
     asked_since(&mut ctx);
@@ -607,7 +607,7 @@ fn the_page_asks_for_its_range_and_shows_answers_failures_and_not_ready() {
     page.apply(&Ok(Box::new(month)), &mut ctx);
     let shown = text(&page.body(96, NOW, 0, &ctx)).join("\n");
     assert!(shown.contains("Last 30 days"), "{shown}");
-    assert!(shown.contains("Tokens 6.3K"), "{shown}");
+    assert!(shown.contains("Tokens 2.3K"), "{shown}");
 
     assert!(matches!(page.key(&Key::Char('c'), &mut ctx), Flow::Handled));
     let Some(Request::Settings(job)) = ctx.next_request() else {
@@ -688,7 +688,7 @@ fn a_harness_without_a_reader_reads_as_not_reported_never_as_zero() {
     ));
     assert_eq!(
         lines[1],
-        "Tokens 6.3K (1.2K in, 300 out)  Cache 67%  Runs 3  Lines +90 -57"
+        "Tokens 2.3K (1.2K in, 300 out)  Cache 67%  Runs 3  Lines +90 -57"
     );
     assert_eq!(
         lines[2],
@@ -696,7 +696,7 @@ fn a_harness_without_a_reader_reads_as_not_reported_never_as_zero() {
     );
     let all = lines.join("\n");
     for wanted in [
-        "  Harbor Notes    5.5K tokens  2 runs  + usage not reported by Gemini CLI",
+        "  Harbor Notes    1.5K tokens  2 runs  + usage not reported by Gemini CLI",
         "  project-docs  usage not reported by OpenCode",
     ] {
         assert!(all.contains(wanted), "{wanted:?} in\n{all}");

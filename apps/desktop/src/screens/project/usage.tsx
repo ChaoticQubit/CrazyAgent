@@ -2,7 +2,7 @@ import { loadUsage, usageNotReady, usageRefusal, type UsageReport } from "../../
 import type { TeamAgent } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Panel, Skeleton } from "../../ui";
-import { agentLabel, offsetMinutes, PartialNotice, rangeStart, tokenText, totalTokens } from "../settings/usage";
+import { agentLabel, offsetMinutes, PartialNotice, rangeStart, tokenText, headlineTokens } from "../settings/usage";
 
 const TICK_MS = 30_000;
 
@@ -29,7 +29,7 @@ type Named = Pick<TeamAgent, "id" | "role" | "label">;
 function span(report: UsageReport, key: string): AgentSpan {
   const row = report.agents.find((item) => item.key === key);
   const lines = report.agent_lines.find((item) => item.agent === key);
-  return { tokens: row ? totalTokens(row.tokens) : 0, added: lines?.added ?? 0, removed: lines?.removed ?? 0 };
+  return { tokens: row ? headlineTokens(row.tokens) : 0, added: lines?.added ?? 0, removed: lines?.removed ?? 0 };
 }
 
 function notReportedBy(report: UsageReport, key: string): string | null {

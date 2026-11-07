@@ -332,6 +332,72 @@ fn a_project_report_keeps_only_its_runs_and_names_lines_by_the_agent_that_made_t
     assert_eq!(all.agent_lines.len(), 3);
 }
 
+fn cached_line(id: &str, input: u64, output: u64, read: u64, written: u64) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"id": id, "usage": {
+                "input_tokens": input, "output_tokens": output,
+                "cache_read_input_tokens": read, "cache_creation_input_tokens": written
+            }}
+        })
+    )
+}
+
+/// The headline counts new input, cache writes and output once per message and never the
+/// cache re-reads (DEC-117 Q6), and rows rank by it: an agent that mostly re-read its
+/// cache, as Ken did on HackerBlog (428,000 headline, 17.67 M re-read), ranks below one
+/// with a larger headline, while all four counts stay in the report.
+#[test]
+fn rows_count_and_rank_by_the_headline_and_never_by_cache_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let homes = tempfile::tempdir().unwrap();
+    let ken = homes.path().join("ken");
+    let ada = homes.path().join("ada");
+    let record = ken.join("projects/f/k.jsonl");
+    for _ in 0..3 {
+        append(&record, &cached_line("k1", 100, 70_000, 182_114, 150_000));
+    }
+    append(&record, &cached_line("k2", 94, 69_484, 17_482_981, 138_322));
+    let at = MIDNIGHT + HOUR;
+    scan_home(
+        &db,
+        &ken,
+        Format::Claude,
+        &who("alpha", None, "claude-1", "team-ken", RunKind::Agent),
+        at,
+    )
+    .unwrap();
+    append(&ada.join("projects/f/a.jsonl"), &line("a1", 500_000, 0));
+    scan_home(
+        &db,
+        &ada,
+        Format::Claude,
+        &who("alpha", None, "claude-2", "team-ada", RunKind::Agent),
+        at,
+    )
+    .unwrap();
+    let report = report(&db, None, None, 0, at + HOUR).unwrap();
+    let keys: Vec<&str> = report.agents.iter().map(|row| row.key.as_str()).collect();
+    assert_eq!(keys, ["team-ada", "team-ken"]);
+    let ken = &report.agents[1].tokens;
+    assert_eq!(
+        *ken,
+        Tokens {
+            input: 194,
+            output: 139_484,
+            cache_read: 17_665_095,
+            cache_write: 288_322,
+        }
+    );
+    assert_eq!(ken.headline(), 428_000);
+    assert_eq!(report.agents[0].tokens.headline(), 500_000);
+    assert_eq!(report.total.headline(), 928_000);
+    assert_eq!(report.total.cache_read, 17_665_095);
+}
+
 #[test]
 fn token_sums_past_the_integer_range_still_report_saturated() {
     let root = tempfile::tempdir().unwrap();
