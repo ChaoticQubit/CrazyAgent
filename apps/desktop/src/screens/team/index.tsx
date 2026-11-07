@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { loadTeamGraph, nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { loadChanges } from "../../api-changes";
@@ -185,7 +185,8 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
  * their receipt. Unread messages between other agents arc dashed and claim overlaps arc red.
  * Drag or the arrow keys pan, a pinch, Ctrl or Cmd wheel or the buttons zoom, and Fit shows it
  * all. Activating a card opens its terminal in the one panel beside the graph, replacing the
- * agent shown there; its menu sends a message, stops it, or opens its changes to merge.
+ * agent shown there; its menu sends a message, stops it, or opens its changes to merge. An
+ * agent opened from elsewhere shows in that panel even while the graph loads, fails or is empty.
  * Inputs: the project id, the agent whose terminal is open and the open action, and optional
  * harness and account name lookups. Output: the graph section. */
 export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
@@ -304,14 +305,18 @@ export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
     };
   }, [element]);
 
-  if (graph === undefined) return <section className="tg" aria-busy="true" aria-label="Team graph"><Skeleton shape="card" /></section>;
-  if (graph.kind === "not_ready") return <NotReady what="The team graph" compact />;
-  if (graph.kind === "error") return <LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />;
+  const side = (node: GraphNode) => <AgentSide key={node.id} projectId={projectId} node={node} harness={harness} onClose={() => onOpen(null)}>
+    <NodeMessages projectId={projectId} node={node} refresh={graph} />
+  </AgentSide>;
+  const alone = (status: ReactNode) => open === null ? status : <>{status}{side(open)}</>;
+  if (graph === undefined) return alone(<section className="tg" aria-busy="true" aria-label="Team graph"><Skeleton shape="card" /></section>);
+  if (graph.kind === "not_ready") return alone(<NotReady what="The team graph" compact />);
+  if (graph.kind === "error") return alone(<LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />);
   const team = account ? namedAccounts(graph.value, account) : graph.value;
   if (team.nodes.length === 0) {
-    return <EmptyState icon="users" title="No team yet" compact>
+    return alone(<EmptyState icon="users" title="No team yet" compact>
       Add a team in the project settings, then ask the master to build something.
-    </EmptyState>;
+    </EmptyState>);
   }
   const layout = layoutGraph(team);
   const content = { width: layout.width, height: layout.height };
@@ -404,9 +409,7 @@ export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
           </div>}
         </div>
       </div>
-      {openNode && <AgentSide key={openNode.id} projectId={projectId} node={openNode} harness={harness} onClose={() => onOpen(null)}>
-        <NodeMessages projectId={projectId} node={openNode} refresh={graph} />
-      </AgentSide>}
+      {openNode && side(openNode)}
     </div>
     {acting?.kind === "skills" && <AgentSkillsDialog projectId={projectId} agent={acting.agent}
       label={displayText(acting.node.label)} onClose={() => setActing(null)} />}
