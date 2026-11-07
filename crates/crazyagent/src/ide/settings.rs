@@ -184,14 +184,19 @@ pub fn workspace() -> Map<String, Value> {
 }
 
 /// The embedder defaults the IDE proxy gives the workbench page, which hold from its first
-/// render before Remote settings load: every locked key, and CrazyAgent's themes following
-/// the system appearance, which the owner may change. Output: the defaults.
+/// render before Remote settings load: every locked key, plus CrazyAgent's themes following
+/// the system appearance and a secondary side bar that starts hidden, since its default
+/// container is the disabled Chat. The owner may change these. Output: the defaults.
 pub fn defaults() -> Map<String, Value> {
     let mut all = locked();
     all.extend(table([
         (THEME_KEYS[0], json!(true)),
         (THEME_KEYS[1], json!("CrazyAgent Dark")),
         (THEME_KEYS[2], json!("CrazyAgent Light")),
+        (
+            "workbench.secondarySideBar.defaultVisibility",
+            json!("hidden"),
+        ),
     ]));
     all
 }
