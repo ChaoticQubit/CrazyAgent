@@ -5,6 +5,7 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
@@ -218,7 +219,7 @@ fn groups(
     project: Option<&str>,
     since_ms: i64,
 ) -> Result<Vec<GroupRow>, EngineError> {
-    assert!(matches!(column, "account" | "harness"));
+    assert!(matches!(column, "project" | "account" | "harness"));
     let mut statement = db
         .prepare(&format!(
             "SELECT {column},TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),\
@@ -228,7 +229,7 @@ fn groups(
              ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_write) DESC,{column} LIMIT ?3"
         ))
         .map_err(storage)?;
-    statement
+    let mut rows: Vec<GroupRow> = statement
         .query_map(params![project, since_ms, ROWS_MAX as i64], |row| {
             Ok(GroupRow {
                 key: row.get(0)?,
@@ -240,14 +241,102 @@ fn groups(
         })
         .map_err(storage)?
         .collect::<Result<_, _>>()
-        .map_err(storage)
+        .map_err(storage)?;
+    let index: HashMap<String, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| (row.key.clone(), at))
+        .collect();
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT DISTINCT {column},project FROM usage_tokens
+             WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1) ORDER BY project"
+        ))
+        .map_err(storage)?;
+    let pairs = statement
+        .query_map(params![project, since_ms], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage)?;
+    for pair in pairs {
+        let (key, name) = pair.map_err(storage)?;
+        if let Some(&at) = index.get(&key) {
+            rows[at].projects.push(name);
+        }
+    }
+    Ok(rows)
+}
+
+/// The largest `ROWS_MAX` agents by the headline, each with the harnesses and accounts it used,
+/// once each in name order. Inputs: the store, the project or None, and the range start.
+/// Output: the rows.
+fn agents(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+) -> Result<Vec<AgentRow>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT project,agent,TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write)
+             FROM usage_tokens WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
+             GROUP BY project,agent
+             ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_write) DESC,project,agent LIMIT ?3",
+        )
+        .map_err(storage)?;
+    let mut rows: Vec<AgentRow> = statement
+        .query_map(params![project, since_ms, ROWS_MAX as i64], |row| {
+            Ok(AgentRow {
+                project: row.get(0)?,
+                agent: row.get(1)?,
+                harnesses: Vec::new(),
+                accounts: Vec::new(),
+                tokens: tokens(row, 2)?,
+            })
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    let index: HashMap<(String, String), usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| ((row.project.clone(), row.agent.clone()), at))
+        .collect();
+    let mut statement = db
+        .prepare(
+            "SELECT DISTINCT project,agent,harness,account FROM usage_tokens
+             WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)",
+        )
+        .map_err(storage)?;
+    let used = statement
+        .query_map(params![project, since_ms], |row| {
+            Ok((
+                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(storage)?;
+    for entry in used {
+        let (key, harness, account) = entry.map_err(storage)?;
+        if let Some(&at) = index.get(&key) {
+            rows[at].harnesses.push(harness);
+            rows[at].accounts.push(account);
+        }
+    }
+    for row in &mut rows {
+        row.harnesses.sort();
+        row.harnesses.dedup();
+        row.accounts.sort();
+        row.accounts.dedup();
+    }
+    Ok(rows)
 }
 
 /// Reads the Metrics page's counts for one project, None for every project, over the range
 /// from `since_ms` to `now_ms`: tasks running and waiting now, done and failed in the range,
-/// the tokens chart in bars `bucket_for` the range, anchored at its start, and the newest
-/// `ROWS_MAX` runs and largest `ROWS_MAX` accounts and harnesses by the headline. Inputs:
-/// the store, the project, the range start and now. Output: the metrics;
+/// the tokens chart in bars `bucket_for` the range, anchored at its start, the newest
+/// `ROWS_MAX` runs, and the largest `ROWS_MAX` projects, agents, accounts and harnesses by the
+/// headline. Inputs: the store, the project, the range start and now. Output: the metrics;
 /// `usage_request_invalid` for a range that starts after now.
 pub fn read(
     db: &Connection,
@@ -269,14 +358,18 @@ pub fn read(
         bucket_ms,
         series: series(db, project, since_ms, bucket_ms)?,
         runs: runs(db, project, since_ms)?,
-        projects: Vec::new(),
-        agents: Vec::new(),
+        projects: groups(db, "project", project, since_ms)?,
+        agents: agents(db, project, since_ms)?,
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,
     };
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);
     assert!(metrics.accounts.len() <= ROWS_MAX && metrics.harnesses.len() <= ROWS_MAX);
+    assert!(metrics.projects.len() <= ROWS_MAX && metrics.agents.len() <= ROWS_MAX);
+    assert!(metrics.agents.iter().all(|row| {
+        row.harnesses.is_sorted() && row.accounts.is_sorted() && !row.harnesses.is_empty()
+    }));
     assert!(metrics.runs.iter().all(|run| {
         run.title
             .as_ref()
