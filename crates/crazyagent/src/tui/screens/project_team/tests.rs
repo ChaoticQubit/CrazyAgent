@@ -4008,7 +4008,7 @@ fn w_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access()
     let row = "When the master resolves conflicts";
     let mut view = loaded();
     assert!(view.help().contains(&("W", "Master merges")));
-    assert!(shows(&view, &format!("{row}  Only at Full access")));
+    assert!(!shows(&view, row), "the row shows only at Full access");
     assert_eq!(view.key(press(KeyCode::Char('W'))), TeamReply::Handled);
     assert_eq!(
         view.notice,
@@ -4018,7 +4018,7 @@ fn w_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access()
     );
     let mut full = team();
     full.master_lands = Some(MasterLands::Merges);
-    reread(&mut view, full, NOW + 10);
+    reread(&mut view, full, NOW + MINUTE);
     assert!(shows(&view, &format!("{row}  Merge into main itself")));
     let reply = view.key(press(KeyCode::Char('W')));
     assert_eq!(
@@ -4037,7 +4037,7 @@ fn w_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access()
     );
     let mut waits = team();
     waits.master_lands = Some(MasterLands::Waits);
-    reread(&mut view, waits, NOW + 20);
+    reread(&mut view, waits, NOW + MINUTE + 10);
     assert!(shows(&view, &format!("{row}  Wait for my Accept")));
     assert_eq!(
         view.key(press(KeyCode::Char('W'))),
