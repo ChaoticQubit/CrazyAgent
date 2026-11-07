@@ -7251,3 +7251,146 @@ fn a_clash_beyond_the_named_lockfiles_regenerates_nothing() {
     assert!(engine_notes(&case).is_empty());
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
+
+/// The owner's dependency of `app` on crate `a` lands on main first; the agent then adds a
+/// dev-dependency with its own Cargo.lock and its turn ends the way a team turn does, so its
+/// set meets main at once. Inputs: the case, the agent's manifest line and the name it
+/// locks. Output: the agent's change set and what its turn end reported.
+fn lockfile_clash_at_turn_end(
+    case: &Case,
+    line: &str,
+    name: &str,
+) -> (ChangeSetId, crate::landing_turns::Landed) {
+    write(
+        &case.repo.join("app/Cargo.toml"),
+        &APP_MANIFEST.replace(
+            "[dependencies]\n",
+            "[dependencies]\na = { path = \"../a\" }\n",
+        ),
+    );
+    write(&case.repo.join("Cargo.lock"), &cargo_lock(&["a"]));
+    case.owner(&["add", "-A"]);
+    case.owner(&["commit", "-q", "-m", "Depend on a"]);
+    case.edit(
+        "app/Cargo.toml",
+        &APP_MANIFEST.replace(
+            "[dev-dependencies]\n",
+            &format!("[dev-dependencies]\n{line}\n"),
+        ),
+    );
+    case.edit("Cargo.lock", &cargo_lock(&[name]));
+    let end = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Depend on b".into(),
+    };
+    let landed = crate::landing_turns::record(&case.db, &case.workspace, &end).unwrap();
+    let id = match &landed {
+        crate::landing_turns::Landed::Added(id) | crate::landing_turns::Landed::Waiting(id) => {
+            id.clone()
+        }
+        crate::landing_turns::Landed::Nothing => panic!("the agent's turn kept no change set"),
+    };
+    (id, landed)
+}
+
+/// Two agents that each add a dependency clash only in Cargo.lock: at the second one's turn
+/// end the engine rewrites the lockfile with cargo on top of its set instead of sending the
+/// set back to its agent, so the set waits for the owner on main with both dependencies
+/// locked, and its Accept lands with no conflict shown (OS-8).
+#[test]
+fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let (id, landed) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let tip = case.tip();
+    let set = case.view(&id);
+    assert_eq!(
+        (
+            set.state,
+            set.waiting,
+            set.conflicts.clone(),
+            set.base.as_str()
+        ),
+        (
+            ChangeState::Pending,
+            false,
+            Vec::<String>::new(),
+            tip.as_str()
+        ),
+        "the set waits for the owner on main, not for its agent"
+    );
+    assert_eq!(landed, crate::landing_turns::Landed::Added(id.clone()));
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%an <%ae>%n%s", &set.head]),
+        "CrazyAgent <engine@crazyagent.invalid>\nRegenerate Cargo.lock on main\n"
+    );
+    assert_eq!(
+        case.owner(&["rev-parse", &format!("{}^2", set.head)])
+            .trim(),
+        tip
+    );
+    let lock = case.owner(&["show", &format!("{}:Cargo.lock", set.head)]);
+    assert!(
+        lock.contains(
+            "name = \"app\"\nversion = \"0.1.0\"\ndependencies = [\n \"a\",\n \"b\",\n]\n"
+        ) && !lock.contains("<<<<<<<"),
+        "cargo locked both dependencies:\n{lock}"
+    );
+    let agent_lock = std::fs::read_to_string(case.workspace.worktree.join("Cargo.lock")).unwrap();
+    assert!(
+        !agent_lock.contains("<<<<<<<"),
+        "main is not merged into the agent's worktree:\n{agent_lock}"
+    );
+    assert_eq!(
+        engine_notes(&case),
+        [format!(
+            "The engine regenerated Cargo.lock on top of your work as {0}. Run git reset --hard {0} before you change anything else.",
+            set.head
+        )]
+    );
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+    let outcome = case.accept(&id).unwrap();
+    assert!(
+        matches!(outcome, AcceptOutcome::Landed { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("Cargo.lock")).unwrap(),
+        lock,
+        "main holds the regenerated lockfile"
+    );
+    let manifest = std::fs::read_to_string(case.repo.join("app/Cargo.toml")).unwrap();
+    assert!(
+        manifest.contains("a = { path = \"../a\" }")
+            && manifest.contains("b = { path = \"../b\" }"),
+        "both dependencies land:\n{manifest}"
+    );
+}
+
+/// When cargo cannot rewrite the clashing lockfile, here offline on a crate it never
+/// fetched, the turn end falls back to Task 7's update: the set goes back to its agent with
+/// main merged into its worktree, no regeneration note goes out and nothing temporary is
+/// left (OS-8).
+#[test]
+fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_end() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let (id, landed) =
+        lockfile_clash_at_turn_end(&case, "zzz-never-fetched = \"1\"", "zzz-never-fetched");
+    let set = case.view(&id);
+    assert_eq!(
+        (set.state, set.conflicts.clone()),
+        (ChangeState::Updating, vec!["Cargo.lock".to_owned()])
+    );
+    assert_eq!(landed, crate::landing_turns::Landed::Waiting(id.clone()));
+    let agent_lock = std::fs::read_to_string(case.workspace.worktree.join("Cargo.lock")).unwrap();
+    assert!(agent_lock.contains("<<<<<<<"), "{agent_lock}");
+    assert!(
+        engine_notes(&case)
+            .iter()
+            .all(|note| !note.contains("regenerated")),
+        "no regeneration note goes out"
+    );
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
