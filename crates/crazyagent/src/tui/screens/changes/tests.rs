@@ -572,6 +572,24 @@ fn a_set_merged_but_not_handed_to_its_agent_says_so_and_can_be_asked_again_or_di
 }
 
 #[test]
+fn a_set_its_agent_is_fixing_for_conflicts_with_main_says_so() {
+    let mut fixing = set('1', ChangeState::Updating);
+    fixing.conflicts = vec!["README".into()];
+    let shown = text(&listed(vec![fixing.clone()]));
+    assert!(
+        shown.contains("Agent is fixing conflicts with main"),
+        "{shown}"
+    );
+    assert!(!shown.contains("Agent is updating"), "{shown}");
+    fixing.waiting = true;
+    assert!(text(&listed(vec![fixing])).contains("Updated, waiting for the agent"));
+    assert!(
+        text(&listed(vec![set('2', ChangeState::Updating)])).contains("Agent is updating"),
+        "an update with no conflicts keeps its word"
+    );
+}
+
+#[test]
 fn v_names_the_listed_text_file_whose_diff_is_at_the_top_for_the_editor() {
     let mut view = listed(vec![set('1', ChangeState::Pending)]);
     assert!(
