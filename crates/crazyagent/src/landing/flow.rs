@@ -1785,6 +1785,40 @@ pub(super) fn read_tip(
     }
 }
 
+/// The base a clone's next change set opens above once its agent restarted from main after
+/// its last set landed (OS-8): while the recorded base left the fetched head and the commit
+/// the engine landed for it is in that head, the merge base of the head and the landing tip
+/// in the owner repository, so the owner's later main is not the agent's change; else the
+/// recorded base, which GA-R3 then refuses. Inputs: the store, the owner repository, the
+/// workspace, the recorded base, the fetched head and the tip. Output: the base.
+fn restarted_base(
+    db: &Connection,
+    shared: &Repo,
+    workspace: &Workspace,
+    base: String,
+    head: &str,
+    tip: &str,
+) -> Result<String, EngineError> {
+    let ancestor =
+        |older: &str, newer: &str| shared.test(&["merge-base", "--is-ancestor", older, newer]);
+    if ancestor(&base, head)? {
+        return Ok(base);
+    }
+    let Some(landed) = store::landed_head(db, &workspace.project, &workspace.repository, &base)?
+    else {
+        return Ok(base);
+    };
+    if shared.commit_of(&landed)?.as_deref() != Some(landed.as_str()) || !ancestor(&landed, head)? {
+        return Ok(base);
+    }
+    let output = shared.exec(&["merge-base", head, tip], None, &[], 256)?;
+    match output.code {
+        0 => object_id(&output.stdout),
+        1 => Ok(base),
+        _ => Err(failure("changes_git_failed")),
+    }
+}
+
 /// Commits an agent worktree's changes and adds them to its open change set, or opens
 /// one above the base recorded for the worktree, else its HEAD, so commits the agent
 /// made itself are part of it. An agent's own clone is never committed in: its change
@@ -1861,6 +1895,10 @@ pub(super) fn record(
     let base = match store::base_of(db, worktree)? {
         Some(base) if repo.commit_of(&base)?.as_deref() == Some(base.as_str()) => base,
         _ => head.clone(),
+    };
+    let base = match (&agent, &open, &tip) {
+        (None, None, Some(tip)) => restarted_base(db, &shared, workspace, base, &head, tip)?,
+        _ => base,
     };
     let above = open
         .as_ref()
