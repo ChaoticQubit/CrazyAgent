@@ -531,7 +531,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
     <Select id={`tg-token-budget-${projectId}`} label="Token budget" value={status.token_budget == null ? NO_LIMIT : String(status.token_budget)} options={budgetOptions()}
       onValue={(value) => void budget(value)}
       helper={status.token_budget == null
-        ? "Off lets the agents use tokens as their accounts allow. A budget counts every token the Usage page counts, cache reads included, from when you set it or start the team again."
+        ? "Off lets the agents use tokens as their accounts allow. A budget counts new input, cache writes and output; re-reads from cache are not counted. It counts from when you set it or start the team again."
         : `Used ${tokenWords(status.budget_used ?? 0)} of ${tokenWords(status.token_budget)}. At the budget the engine stops every agent and notifies you.`} />
     <div className="pj-row">
       <span aria-hidden="true">Finished agents</span>

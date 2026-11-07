@@ -443,7 +443,8 @@ pub const CAP_CHOICES: [u8; 9] = [1, 2, 3, 4, 5, 6, 8, 10, 15];
 const _: () = assert!(CAP_CHOICES[8] as usize == crate::terminal::PANES_PER_PROJECT_MAX);
 
 /// The owner's Token budget choices besides Off, the default: how many tokens a project's
-/// agents may use, every kind the Usage page counts, cache reads included, from when the
+/// agents may use, counted as the Usage page's headline (new input, cache writes and
+/// output; re-reads from cache are not counted), from when the
 /// owner set it or last started the team again, before the engine stops the whole team.
 pub const BUDGET_CHOICES: [u64; 7] = [
     10_000_000,
@@ -3891,9 +3892,10 @@ fn hour_of(ms: i64) -> i64 {
     ms - ms.rem_euclid(events::HOUR_MS)
 }
 
-/// Adds up every token the project's agents used in usage hours from `hour_ms` on, each kind
-/// the Usage page counts. Takes a connection, the project and the hour start. Returns the
-/// total, 0 before any usage was recorded, or a SQLite failure.
+/// Adds up the headline tokens the project's agents used in usage hours from `hour_ms` on:
+/// new input, cache writes and output, never cache re-reads (DEC-117 Q6). Takes a
+/// connection, the project and the hour start. Returns the total, 0 before any usage was
+/// recorded, or a SQLite failure.
 fn usage_from(
     connection: &Connection,
     project: &ProjectId,
@@ -3911,7 +3913,7 @@ fn usage_from(
     }
     let total: f64 = connection
         .query_row(
-            "SELECT TOTAL(input)+TOTAL(output)+TOTAL(cache_read)+TOTAL(cache_write) FROM usage_tokens
+            "SELECT TOTAL(input)+TOTAL(output)+TOTAL(cache_write) FROM usage_tokens
              WHERE project=?1 AND hour_ms>=?2",
             params![project.as_str(), hour_ms],
             |row| row.get(0),
