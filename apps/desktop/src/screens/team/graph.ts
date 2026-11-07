@@ -1,4 +1,4 @@
-import { HOOKLESS_WORDS, type GraphEdge, type GraphEdgeState, type GraphNode, type MessageEdge, type OverlapEdge, type Presence, type Receipt, type RelationEdge, type TeamAgentStatus, type TeamGraph } from "../../engine-client";
+import { HOOKLESS_WORDS, type GraphEdge, type GraphEdgeState, type GraphNode, type MessageEdge, type OverlapEdge, type Presence, type LiveAction, type Receipt, type RelationEdge, type TeamAgentStatus, type TeamGraph } from "../../engine-client";
 import type { Tone } from "../../ui";
 
 export const CARD_WIDTH = 216;
@@ -10,7 +10,7 @@ export const LEAF_COLUMNS_MAX = 4;
 export const ARC_RISE = 40;
 export const MARGIN = 24;
 export const NODES_MAX = 64;
-export const BADGE_WIDTH = 120;
+export const BADGE_WIDTH = CARD_WIDTH;
 export const BADGE_HEIGHT = 24;
 export const TITLE_CHARS = 22;
 export const LINE_CHARS = 30;
@@ -41,15 +41,17 @@ export const VIEW_HOME: View = { x: 0, y: 0, zoom: 1 };
 export interface PlacedCard extends Box { node: GraphNode }
 
 /** The solid assignment line from a lead's card down to one card it leads, with its badge
- * above that card: the live tasks the card's agent runs, the questions it waits on, and the
- * messages the lead sent it that are still unread, with the newest one's receipt, unless the
- * card's agent fires no hooks and has none. Unread messages the other way, to the lead, arc
- * like any other pair's. */
+ * row above that card: the pair's label, live while an action happens on it, then the live
+ * tasks the card's agent runs, the questions it waits on, and the messages the lead sent it
+ * that are still unread, with the newest one's receipt, unless the card's agent fires no hooks
+ * and has none. Unread messages the other way, to the lead, arc like any other pair's. */
 export interface Link {
   from: string;
   to: string;
   path: string;
   badge: Point;
+  label: string;
+  live: boolean;
   tasks: number;
   questions: number;
   unread: number;
@@ -254,9 +256,12 @@ export function layoutGraph(graph: TeamGraph): GraphLayout {
   const unread = (from: string, to: string) => (graph.messages ?? []).find((edge) => edge.from === from && edge.to === to && count(edge.unread) > 0);
   const link = (lead: PlacedCard, card: PlacedCard, path: string, badge: number) => {
     const message = unread(lead.node.id, card.node.id);
+    const pair = (graph.relations ?? []).find((item) => item.from === lead.node.id && item.to === card.node.id);
     links.push({
       from: lead.node.id, to: card.node.id, path,
       badge: { x: card.x + CARD_WIDTH / 2, y: badge },
+      label: pair ? edgeLabel(pair) : "",
+      live: pair !== undefined && liveShown(pair.live),
       tasks: edges.filter((edge) => live(edge) && edge.to === card.node.id).length,
       questions: questionCount(card.node),
       unread: message ? count(message.unread) : 0,
@@ -324,10 +329,29 @@ export function layoutCards(layout: GraphLayout): PlacedCard[] {
   return layout.cards;
 }
 
-/** The words one graph line shows: the live action while it happens, else the relation.
- * Input: the engine's relation edge. Output: the label, empty when there is none. */
-export function edgeLabel(_edge: RelationEdge): string {
-  return "";
+const RELATION_WORDS = new Map([["leads", "leads"], ["delegated_to", "delegated to"], ["teammate_of", "teammate of"]]);
+const LIVE_ACTIONS = new Set(["handing_off", "messaging", "waiting_on", "reviewing"]);
+
+/** Whether a line shows a live action: one this build knows, so an action from a newer engine
+ * leaves the line on its relation. Input: the engine's live action. Output: true when shown. */
+function liveShown(live: LiveAction | null): live is LiveAction {
+  return live !== null && LIVE_ACTIONS.has(live.action);
+}
+
+/** The words one graph line shows, as the TUI tree shows them: the live action while it
+ * happens, a handoff naming its task's first line, a wait on the owner naming the owner's
+ * answer and a review its change set, else the relation. Input: the engine's relation edge.
+ * Output: the label, empty for a relation this build does not know. */
+export function edgeLabel(edge: RelationEdge): string {
+  const live = edge.live;
+  if (!liveShown(live)) return RELATION_WORDS.get(edge.relation) ?? "";
+  if (live.action === "messaging") return "messaging";
+  if (live.action === "waiting_on") return live.owner === true ? "waiting on: your answer" : "waiting on";
+  if (live.action === "reviewing") {
+    return Number.isSafeInteger(live.change_set) && live.change_set > 0 ? `reviewing: change set #${live.change_set}` : "reviewing";
+  }
+  const task = live.task.split("\n").map((line) => line.split(/\s+/).filter(Boolean).join(" ")).find(Boolean);
+  return `handing off: ${task ?? "Untitled task"}`;
 }
 
 /** What a link's badges say to a screen reader. Input: the counts. Output: one phrase, empty
