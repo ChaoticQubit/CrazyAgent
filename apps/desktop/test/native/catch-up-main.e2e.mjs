@@ -18,13 +18,15 @@ const TASK_MS = 120000;
 const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const SETTING = "Catch up with main";
-const TASK = "Write fruit.md with one line about apples.";
+const LAND = "Write fruit.md with one line about apples.";
+const TASK = "Merge main into your branch, then list the pears.";
 
-/** The Codex stand-in the engine runs every team agent with: as it starts it runs
- * `git merge --no-edit crazyagent/main` with the git on its PATH, the agent's own, and keeps
- * that output and exit status in `merged` in its home, and keeps in `told` whether the
- * developer instructions it was given tell it to merge main. It keeps a conversation file as
- * Codex does and answers each turn with "done". */
+/** The Codex stand-in the engine runs every team agent with: as it starts it keeps in `told`
+ * whether the developer instructions it was given tell it to merge main. A turn about apples
+ * commits fruit.md with the git on its PATH, the agent's own; a turn about pears keeps what
+ * that git says `crazyagent/main` is in `main`, then runs `git merge --no-edit crazyagent/main`
+ * and keeps its output and exit status in `merged`. It keeps a conversation file as Codex does
+ * and answers each turn with "done". */
 const MERGING_CODEX = String.raw`#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/11/07"
@@ -32,18 +34,27 @@ d="$CODEX_HOME/sessions/2026/11/07"
 id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
 f="$d/rollout-2026-11-07T00-00-00-$id.jsonl"
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
-git merge --no-edit crazyagent/main > "$CODEX_HOME/merged" 2>&1
-printf 'exit %s\n' "$?" >> "$CODEX_HOME/merged"
 if /usr/bin/grep -qF 'git merge crazyagent/main before you finish' "$CODEX_HOME/config.toml"; then echo told; else echo untold; fi > "$CODEX_HOME/told"
 printf '\033[?2004hCodex stand-in ready\n'
 e=$(printf '\033')
 open=0
+said=
 while IFS= read -r line; do
-  case "$line" in
-    *"$e[201~"*) open=0 ;;
-    *"$e[200~"*) open=1; continue ;;
-    *) [ "$open" = 1 ] && continue ;;
+  case "$line" in *"$e[200~"*) open=1; said= ;; esac
+  said="$said $line"
+  case "$line" in *"$e[201~"*) open=0 ;; esac
+  [ "$open" = 1 ] && continue
+  case "$said" in
+    *pears*)
+      git rev-parse crazyagent/main > "$CODEX_HOME/main" 2>&1
+      git merge --no-edit crazyagent/main > "$CODEX_HOME/merged" 2>&1
+      printf 'exit %s\n' "$?" >> "$CODEX_HOME/merged" ;;
+    *apples*)
+      printf 'Apples are crisp.\n' > fruit.md
+      git add fruit.md && GIT_AUTHOR_NAME=Agent GIT_AUTHOR_EMAIL=agent@example.invalid GIT_COMMITTER_NAME=Agent GIT_COMMITTER_EMAIL=agent@example.invalid git commit -q -m 'Write fruit.md' > "$CODEX_HOME/wrote" 2>&1
+      printf 'exit %s\n' "$?" >> "$CODEX_HOME/wrote" ;;
   esac
+  said=
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   /bin/sleep 0.3
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}\n' >> "$f"
@@ -70,19 +81,19 @@ function standInHarness(root) {
   return path;
 }
 
-/** Reads what the engine keeps for the owner's task, its status, and what its agent's
- * stand-in kept: the merge output with its exit status and whether it was told to merge
- * main. Inputs: the engine root and the project. Output: those, or null before the task
- * exists. */
-function taskRow(runtime, project) {
+/** Reads what the engine keeps for one of the owner's tasks, its status, and what its agent's
+ * stand-in kept: the commit of fruit.md, what its git says crazyagent/main is, the merge
+ * output with its exit status and whether it was told to merge main. Inputs: the engine root,
+ * the project and the task's words. Output: those, or null before the task exists. */
+function taskRow(runtime, project, prompt) {
   const store = new DatabaseSync(join(runtime, "engine.db"), { readOnly: true });
   try {
     store.exec("PRAGMA busy_timeout = 5000");
-    const task = store.prepare("SELECT status, agent FROM team_tasks WHERE project=? AND prompt=?").get(project, TASK);
+    const task = store.prepare("SELECT status, agent FROM team_tasks WHERE project=? AND prompt=?").get(project, prompt);
     if (!task) return null;
     const home = join(runtime, "team", "agents", `agent-${task.agent}`, "home");
     const read = (name) => existsSync(join(home, name)) ? readFileSync(join(home, name), "utf8") : null;
-    return { status: task.status, merged: read("merged"), told: read("told")?.trim() ?? null };
+    return { status: task.status, wrote: read("wrote"), main: read("main"), merged: read("merged"), told: read("told")?.trim() ?? null };
   } finally {
     store.close();
   }
@@ -175,7 +186,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
             assert.ok(Date.now() < deadline, "the reloaded page never showed the Catch up with main setting");
           }
         };
-        await steps({ project, runtime, me, page, reload, status });
+        await steps({ project, runtime, me, page, reload, status, bridge, evidence, repo });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -218,10 +229,17 @@ async function kept(status, mode) {
   }
 }
 
-/** Hands the task to a Codex sub-agent from the Agents tab, as the owner does, and waits
- * until its stand-in has tried the merge and the engine finished the task. Inputs: the owner
- * on the page, the page, the project and the engine root. Output: what `taskRow` reads then. */
-async function handOff(me, page, project, runtime) {
+/** Brings the Catch up with main setting into the window, so a capture shows the pick.
+ * Input: the page. Output: none. */
+function showSetting(page) {
+  return page.evaluate(`document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"]`)}).scrollIntoView({ block: "center" })`);
+}
+
+/** Hands a task to a Codex sub-agent from the Agents tab, as the owner does, and waits until
+ * the engine finished it and its stand-in kept what `done` waits for. Inputs: the owner on the
+ * page, the page, the project, the engine root, the task's words and the wait. Output: what
+ * `taskRow` reads then. */
+async function handOff(me, page, project, runtime, prompt, done) {
   const picked = await page.evaluate(`(() => {
     const select = document.getElementById(${JSON.stringify(`tg-hand-to-${project}`)});
     if (!select || select.disabled || ![...select.options].some((option) => option.value === "codex")) return false;
@@ -232,18 +250,45 @@ async function handOff(me, page, project, runtime) {
     return true;
   })()`);
   assert.ok(picked, "no Codex to pick in the Send to list");
-  await me.type(`[id="tg-hand-text-${project}"]`, TASK);
+  await me.type(`[id="tg-hand-text-${project}"]`, prompt);
   await me.click("Hand off", "form.tg-hand button");
   await me.waitFor("the hand-off note", (text) => text.includes("Task handed off."));
   for (const deadline = Date.now() + TASK_MS; ; await pause(POLL_MS * 5)) {
-    const row = taskRow(runtime, project);
-    if (row && row.told !== null && !["queued", "needs_pool", "running"].includes(row.status)) return row;
+    const row = taskRow(runtime, project, prompt);
+    if (row && done(row) && !["queued", "needs_pool", "running"].includes(row.status)) return row;
     assert.ok(Date.now() < deadline, `the engine never finished the task: ${JSON.stringify(row)}`);
   }
 }
 
-test("Catch up with main On: the owner's pick is kept, the agent is told to merge main and its own git merges crazyagent/main", { timeout: 600000 }, async (t) => {
-  await onEngine(t, "ca-cu-on-", async ({ project, runtime, me, page, reload, status }) => {
+/** Lands one change set before the agent catches up: a Codex sub-agent commits fruit.md, and
+ * the owner accepts the set it opens, as the Changes tab does. Inputs: what the steps get.
+ * Output: the commit the set landed as on main. */
+async function landOne({ me, page, project, runtime, bridge, repo }) {
+  const row = await handOff(me, page, project, runtime, LAND, (row) => row.wrote !== null);
+  assert.equal(row.status, "done", `the task finished: ${JSON.stringify(row)}`);
+  assert.ok(row.wrote.trimEnd().endsWith("exit 0"), `the agent committed fruit.md: ${row.wrote}`);
+  let set;
+  for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS * 5)) {
+    set = (await value(bridge, "desktop_changes", { projectId: project })).find((change) => change.state === "pending");
+    if (set) break;
+    assert.ok(Date.now() < deadline, "the agent's commit never opened a change set");
+  }
+  const outcome = await value(bridge, "desktop_accept_change", { id: set.id, expectedHead: set.head, message: null, target: null });
+  assert.equal(outcome.kind, "landed", `the set lands: ${JSON.stringify(outcome)}`);
+  const main = spawnSync(GIT, ["rev-parse", "main"], { cwd: repo, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: repo, GIT_CONFIG_NOSYSTEM: "1", LANG: "C" } });
+  assert.equal(main.stdout.trim(), outcome.commit, "main holds the landed commit");
+  return outcome.commit;
+}
+
+/** Keeps what the agent's stand-in saw in the evidence folder. Inputs: the folder, the case
+ * and the task's row. Output: none. */
+function keep(evidence, label, row) {
+  for (const name of ["told", "main", "merged"]) writeFileSync(join(evidence, `${label}-${name}.txt`), `${row[name] ?? "(none)"}\n`);
+}
+
+test("Catch up with main On: the owner's pick is kept, and after a set lands the agent is told to merge main and its own git reads and merges the landed crazyagent/main", { timeout: 600000 }, async (t) => {
+  await onEngine(t, "ca-cu-on-", async (run) => {
+    const { project, runtime, me, page, reload, status, evidence } = run;
     assert.equal((await status()).catch_up_main, "on", "On is the default");
     assert.equal(await shown(page), "On", "the tab shows the default");
     await pick(me, "Off");
@@ -252,31 +297,42 @@ test("Catch up with main On: the owner's pick is kept, the agent is told to merg
     await kept(status, "on");
     await reload();
     assert.equal(await shown(page), "On", "On is shown again after a reload");
+    await showSetting(page);
     await me.capture("catch-up-on");
 
-    const row = await handOff(me, page, project, runtime);
+    const landed = await landOne(run);
+    const row = await handOff(me, page, project, runtime, TASK, (row) => row.merged !== null);
+    keep(evidence, "on", row);
     assert.equal(row.status, "done", `the task finished: ${JSON.stringify(row)}`);
     assert.equal(row.told, "told", "the agent's instructions tell it to merge crazyagent/main");
+    assert.equal(row.main?.trim(), landed, `the agent's own git sees the landed set as crazyagent/main: ${row.main}`);
     assert.ok(row.merged?.trimEnd().endsWith("exit 0"), `the agent's own git merged crazyagent/main: ${row.merged}`);
     assert.ok(!row.merged.includes("is refused"), `the merge was not refused: ${row.merged}`);
+    await showSetting(page);
     await me.capture("catch-up-on-merged");
   });
 });
 
-test("Catch up with main Off: the owner's pick is kept, the agent is not told to merge main and its own git refuses crazyagent/main", { timeout: 600000 }, async (t) => {
-  await onEngine(t, "ca-cu-off-", async ({ project, runtime, me, page, reload, status }) => {
+test("Catch up with main Off: the owner's pick is kept, and after a set lands the agent is not told to merge main and its own git refuses crazyagent/main", { timeout: 600000 }, async (t) => {
+  await onEngine(t, "ca-cu-off-", async (run) => {
+    const { project, runtime, me, page, reload, status, evidence } = run;
     await pick(me, "Off");
     await kept(status, "off");
     await reload();
     assert.equal(await shown(page), "Off", "Off is shown again after a reload");
+    await showSetting(page);
     await me.capture("catch-up-off");
 
-    const row = await handOff(me, page, project, runtime);
+    const landed = await landOne(run);
+    const row = await handOff(me, page, project, runtime, TASK, (row) => row.merged !== null);
+    keep(evidence, "off", row);
     assert.equal(row.status, "done", `the task finished: ${JSON.stringify(row)}`);
+    assert.equal(row.main?.trim(), landed, `the landed set is in the agent's repository as crazyagent/main, and Off still refuses to merge it: ${row.main}`);
     assert.equal(row.told, "untold", "the agent's instructions say nothing of crazyagent/main");
     assert.ok(row.merged?.trimEnd().endsWith("exit 1"), `the agent's own git refused crazyagent/main: ${row.merged}`);
     assert.ok(row.merged.includes("crazyagent: git merge is refused."), `the refusal names the merge: ${row.merged}`);
     assert.ok(!row.merged.includes("git merge crazyagent/main"), `the refusal does not offer main: ${row.merged}`);
+    await showSetting(page);
     await me.capture("catch-up-off-refused");
   });
 });
