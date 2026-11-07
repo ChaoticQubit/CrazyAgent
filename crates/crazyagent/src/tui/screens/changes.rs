@@ -1288,6 +1288,7 @@ fn state_word(set: &ChangeSetView) -> &'static str {
         ChangeState::Pending => "Ready to review",
         ChangeState::Conflict => "Conflicts with your branch",
         ChangeState::Updating if set.waiting => "Updated, waiting for the agent",
+        ChangeState::Updating if !set.conflicts.is_empty() => "Agent is fixing conflicts with main",
         ChangeState::Updating => "Agent is updating",
         ChangeState::Accepted if set.outside => "Landed outside the app",
         ChangeState::Accepted => "Accepted",

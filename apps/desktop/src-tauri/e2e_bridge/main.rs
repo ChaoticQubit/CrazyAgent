@@ -185,9 +185,10 @@ async fn serve(mut stream: TcpStream, state: Shared, token: Arc<String>) {
     let _ = stream.shutdown().await;
 }
 
-/// Ends one sub-agent turn in a worktree the way the engine's turn hooks do, through the
-/// engine's own `landing::record_turn_end` on its database, so the end-to-end test reviews
-/// a real worktree edit. Inputs: engine root, project, agent id and label, owner checkout,
+/// Ends one sub-agent turn in a worktree the way the team runtime does, through the
+/// engine's own `landing_turns::record` on its database, so the end-to-end test reviews a
+/// real worktree edit and a set that conflicts with main goes back to its agent with its
+/// resolve task (OS-8). Inputs: engine root, project, agent id and label, owner checkout,
 /// agent worktree, its git folder and the prompt line. Output: the change set id or `none`.
 fn record_turn_end(args: &[OsString]) -> Result<String, String> {
     let [
@@ -230,8 +231,12 @@ fn record_turn_end(args: &[OsString]) -> Result<String, String> {
     };
     let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
     let recorded =
-        crazyagent::landing::record_turn_end(&db, &workspace, &turn).map_err(|error| error.0)?;
-    Ok(recorded.map_or_else(|| "none".to_owned(), String::from))
+        crazyagent::landing_turns::record(&db, &workspace, &turn).map_err(|error| error.0)?;
+    Ok(match recorded {
+        crazyagent::landing_turns::Landed::Nothing => "none".to_owned(),
+        crazyagent::landing_turns::Landed::Added(id)
+        | crazyagent::landing_turns::Landed::Waiting(id) => String::from(id),
+    })
 }
 
 /// Puts one question from a team agent to the owner the way the agent's `update_work` call

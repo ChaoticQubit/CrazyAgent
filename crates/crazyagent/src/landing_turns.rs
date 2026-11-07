@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 /// added edits to the set, or a set waits that this turn added nothing to. Fields: the
 /// change set, when there is one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Landed {
+pub enum Landed {
     Nothing,
     Added(ChangeSetId),
     Waiting(ChangeSetId),
@@ -21,7 +21,7 @@ pub(crate) enum Landed {
 /// at once through `start_resolve` and reported Waiting, since it waits on the agent, not
 /// the owner. Inputs: the change set store, the workspace and the turn end. Output:
 /// Nothing when no set is pending, Added or Waiting, or the refusal.
-pub(crate) fn record(
+pub fn record(
     db: &Connection,
     workspace: &Workspace,
     end: &TurnEnd,
