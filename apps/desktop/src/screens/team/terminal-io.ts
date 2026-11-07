@@ -270,7 +270,7 @@ const END_COPY: Record<string, string> = {
   terminal_agent_unknown: "This agent's terminal isn't running. It may have finished or not started yet.",
   terminal_ended: "This run finished. Its last screen stays above.",
   terminal_unavailable: "Terminals need tmux, and it isn't ready on this Mac. Run setup again from Settings.",
-  terminal_viewers_full: "Too many terminals are open. Close one and try again.",
+  terminal_viewers_full: "Terminal limit reached. Close a terminal or a terminal window, then open this one again.",
   terminal_agent_mismatch: "The engine opened a different agent's terminal, so the view closed.",
   terminal_connection_lost: "Lost the connection to this terminal. Open it again to reconnect.",
   terminal_connection_closed: "The engine closed this terminal view. Open it again to reconnect.",

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, type SkillView } from "../../api";
+import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, setTerminalsPerWindow, type SkillView } from "../../api";
 import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select } from "../../ui";
@@ -179,6 +179,13 @@ export function CoordinationControls({ projectId, status, reload }: { projectId:
       <Segmented label="Overlapping edits" value={view.settings.overlaps} onValue={(value: Overlaps) => void save({ overlaps: value }, "overlapping edits")}
         options={[{ value: "warn", label: "Warn" }, { value: "block", label: "Block" }, { value: "off", label: "Off" }]} />
       <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit.</span>
+    </div>
+    <div className="pj-row">
+      <span aria-hidden="true">Terminals per window</span>
+      <Segmented label="Terminals per window" value={String(status.terminals_per_window ?? 6)}
+        onValue={(value) => { if (value === "4" || value === "6" || value === "9") void run(() => setTerminalsPerWindow(projectId, Number(value) as 4 | 6 | 9), "terminals per window"); }}
+        options={[{ value: "4", label: "4" }, { value: "6", label: "6 (default)" }, { value: "9", label: "9" }]} />
+      <span className="tg-terminal-note">How many terminals Open all terminals puts in one window. More agents open more windows.</span>
     </div>
     <div className="pj-row">
       <span aria-hidden="true">Workflow nudges</span>

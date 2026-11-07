@@ -1280,6 +1280,27 @@ export function setReaskEmptyReply(id: string, on: boolean): Promise<Result<Inte
   return call<IntentReceipt>("desktop_team_reask_empty_reply", { id, on, generation: nextGeneration() });
 }
 
+/** Sets how many terminals Open all terminals puts in one terminal wall window. Inputs: the
+ * project id and the choice, 4, 6 or 9. Output: the engine receipt, not ready, or a plain
+ * error. */
+export function setTerminalsPerWindow(id: string, perWindow: 4 | 6 | 9): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_terminals_per_window", { id, perWindow, generation: nextGeneration() });
+}
+
+/** Reads how many terminals one terminal wall window holds; the wall windows may call it.
+ * Input: the project id. Output: 4, 6 or 9, not ready, or a plain error. */
+export function loadTerminalsPerWindow(id: string): Promise<Result<4 | 6 | 9>> {
+  return call<4 | 6 | 9>("desktop_terminals_per_window", { id });
+}
+
+/** Opens or updates the project's terminal wall windows: count windows titled with the
+ * project's name, closing any past the count. With focus they come to the front; without it
+ * nothing opens unless the project has one open already. Inputs: the project id, its name,
+ * the window count and whether to focus them. Output: nothing, not ready, or a plain error. */
+export function openTerminalWindows(id: string, name: string, count: number, focus: boolean): Promise<Result<void>> {
+  return call<void>("desktop_open_terminal_windows", { id, name, count, focus });
+}
+
 /** Sets the most files one new top-level folder, a folder the owner's branch does not have,
  * may gain in a project's change set before the engine refuses the set. Inputs: the project id
  * and the limit. Output: the engine receipt, not ready, or a plain error. */

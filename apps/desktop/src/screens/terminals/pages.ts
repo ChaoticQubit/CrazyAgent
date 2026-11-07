@@ -30,14 +30,22 @@ export const WALL_WINDOWS_MAX = 8;
  * Input: the location hash. Output: the project id and the page, 1 to WALL_WINDOWS_MAX, or
  * null for any other address. */
 export function wallRoute(hash: string): { project: string; page: number } | null {
-  void hash;
-  return null;
+  const match = /^#\/terminals\/([^/]+)\/([1-9])$/u.exec(hash);
+  if (match === null) return null;
+  const page = Number(match[2]);
+  if (page > WALL_WINDOWS_MAX) return null;
+  try {
+    const project = decodeURIComponent(match[1]);
+    return project.length > 0 ? { project, page } : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The hint on Open all terminals. Inputs: how many windows the team takes and the terminals
  * per window. Output: one sentence. */
 export function openAllHint(windows: number, perWindow: PerWindow): string {
-  void windows;
-  void perWindow;
-  return "";
+  assert(Number.isInteger(windows) && windows >= 0, "a whole number of windows");
+  if (windows === 0) return "No agent has a terminal yet.";
+  return windows === 1 ? `Opens 1 window of up to ${perWindow} terminals.` : `Opens ${windows} windows, ${perWindow} terminals each.`;
 }
