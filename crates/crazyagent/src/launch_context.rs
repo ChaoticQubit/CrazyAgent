@@ -473,10 +473,10 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
 }
 
 /// The section that names a live master's or sub-agent's team tools (DEC-104), each on
-/// one line, with the two question tags, the branch rule for the agents it leads
-/// (Q-W-LAND-26) and, while "Catch up with main" is on, how to bring a moved main into its
-/// own branch (OS-8). Inputs: the team tools left out and the setting. Output: at most
-/// `TOOLS_SECTION_BYTES_MAX` bytes of markdown.
+/// one line, how to restart from main after an accepted change set, the two question tags,
+/// the branch rule for the agents it leads (Q-W-LAND-26) and, while "Catch up with main" is
+/// on, how to bring a moved main into its own branch (OS-8). Inputs: the team tools left out
+/// and the setting. Output: at most `TOOLS_SECTION_BYTES_MAX` bytes of markdown.
 pub fn team_tools_section(off: &[String], catch_up_main: bool) -> String {
     let mut section = format!(
         "\n## Team tools\n\nYour team tools are in the `{}` MCP server. The engine answers each by your place in the team:\n",
@@ -487,7 +487,7 @@ pub fn team_tools_section(off: &[String], catch_up_main: bool) -> String {
             section.push_str(&format!("- {name}: {line}\n"));
         }
     }
-    section.push_str("Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence.\nEvery question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.\nBranches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.\n");
+    section.push_str("Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence. After your change set is accepted, start your next work from main with git reset --hard crazyagent/main, unless you have newer commits.\nEvery question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.\nBranches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.\n");
     if catch_up_main {
         section.push_str("When main has moved on, bring it into your branch with git merge crazyagent/main before you finish.\n");
     }
