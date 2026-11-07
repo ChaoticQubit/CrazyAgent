@@ -270,3 +270,53 @@ async fn a_client_that_stops_reading_its_reply_is_dropped_and_frees_the_owner_ba
     drop(client);
     usage.stop().await;
 }
+
+/// The Metrics request answers over the owner socket with one project's runs from the
+/// engine's usage store, and refuses a range that starts after now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_metrics_request_answers_one_project_runs_over_the_owner_socket() {
+    let usage = Usage::start().await;
+    let now = crate::team::now_ms();
+    let hour = 60 * 60 * 1000;
+    let db = crate::usage::open(&usage.engine_root).unwrap();
+    for (project, agent) in [("alpha", "team-7"), ("beta", "team-9")] {
+        db.execute(
+            "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,\
+                input,output,cache_read,cache_write)
+             VALUES (?1,'agent',?2,'pool-a','acct-a',?3,'claude-code','s1',100,20,9000,30)",
+            rusqlite::params![now - now % hour, project, agent],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let alpha = crate::protocol::ProjectId::new("alpha").unwrap();
+
+    let metrics = usage
+        .client
+        .usage_metrics(Some(alpha), now - hour)
+        .await
+        .unwrap_or_else(|error| panic!("the metrics request answered {}", error.0));
+    let runs: Vec<_> = metrics
+        .runs
+        .iter()
+        .map(|run| {
+            (
+                run.agent.as_str(),
+                run.tokens.headline(),
+                run.tokens.cache_read,
+            )
+        })
+        .collect();
+    assert_eq!(runs, [("team-7", 150, 9000)]);
+    assert_eq!(metrics.bucket_ms, 2 * hour);
+    assert_eq!(
+        usage
+            .client
+            .usage_metrics(None, now + hour)
+            .await
+            .unwrap_err()
+            .0,
+        "usage_request_invalid"
+    );
+    usage.stop().await;
+}
