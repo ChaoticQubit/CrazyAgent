@@ -37,6 +37,7 @@ function state() {
   const all = (selector) => [...(section?.querySelectorAll(selector) ?? [])];
   return {
     groups: all(".pj-activity-goal").map((group) => ({ label: group.getAttribute("aria-label"), open: group.querySelector("[aria-expanded]")?.getAttribute("aria-expanded") ?? null, rows: [...group.querySelectorAll(".pj-activity-row")].map(rowText) })),
+    paths: all(".pj-activity-goal").map((group) => [...group.querySelectorAll(".pj-activity-path > span")].map((step) => step.textContent)),
     timeline: all(".pj-activity-timeline .pj-activity-row").map((row) => ({ text: rowText(row), goal: row.querySelector(".pj-activity-tag")?.textContent ?? null })),
     pressed: all("[aria-pressed=true]").map((chip) => chip.textContent),
     fresh: all(".pj-activity-row.fresh").map(rowText),
@@ -105,4 +106,35 @@ export async function click(selector, words) {
   if (!target) return { ...state(), missed: `${selector} ${words}` };
   await acted(() => target.click());
   return { ...state(), missed: null };
+}
+
+/** Puts the mounted section in the app's real Overview column: the sidebar, the page padding
+ * and the Overview grid with its facts panel, styled by the app's own CSS. Input: that CSS.
+ * Output: nothing. */
+export function inOverview(css) {
+  const style = document.createElement("style");
+  style.textContent = css;
+  document.head.append(style);
+  const shell = document.createElement("div");
+  shell.className = "shell";
+  shell.innerHTML = '<nav class="sidebar"></nav><main class="main"><div class="page"><div class="pj"><div class="pj-overview"><div class="pj-stack" id="column"></div><aside class="pj-panel pj-facts"></aside></div></div></div></main>';
+  document.body.append(shell);
+  document.getElementById("column").append(document.getElementById("root"));
+}
+
+/** Measures the goal headers where they are drawn. Output: the column width, each goal name's
+ * width, the header parts that run past their panel's right edge and how far the page scrolls
+ * sideways. */
+export function measure() {
+  const column = document.getElementById("column");
+  const past = [...document.querySelectorAll(".pj-activity-goal")].flatMap((panel) => {
+    const edge = panel.getBoundingClientRect().right;
+    return [...panel.querySelectorAll(".pj-activity-head *")].filter((part) => part.getBoundingClientRect().right > edge + 0.5).map((part) => part.getAttribute("class") ?? part.tagName);
+  });
+  return {
+    column: Math.round(column?.getBoundingClientRect().width ?? 0),
+    names: [...document.querySelectorAll(".pj-activity-name strong")].map((name) => Math.round(name.getBoundingClientRect().width)),
+    past,
+    sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  };
 }

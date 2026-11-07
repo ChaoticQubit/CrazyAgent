@@ -166,3 +166,26 @@ test("a fresh row's highlight runs only when the owner allows motion", async () 
   assert.match(css, /@media \(prefers-reduced-motion: no-preference\) \{ \.pj-activity-row\.fresh \{ animation: /);
   assert.equal(css.match(/\.pj-activity-row\.fresh/g)?.length, 1, "no fresh rule outside the motion query");
 });
+
+test("a phase step is shown through displayText like every other agent text", async () => {
+  const { displayText } = await import("../src/screens/conversation.tsx");
+  const hidden = "Build\u200bing";
+  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, {
+    items: [item(1, 0, "Build the service", { kind: "phase", text: `${hidden}: login next` })], more: false, now: 0, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {},
+  }));
+  assert.ok(displayText(hidden) !== hidden, "the step holds a character displayText escapes");
+  assert.ok(!html.includes("\u200b"), "the raw zero-width character never reaches the header");
+  assert.ok(html.includes(displayText(hidden)), "the step shows the escaped text");
+});
+
+test("the phase path shows at most four steps around the current one and counts the rest", () => {
+  const step = (name, done) => ({ step: name, done });
+  const seven = ["A", "B", "C", "D", "E", "F", "G"];
+  assert.equal(typeof research.pathWindow, "function", "research.ts has pathWindow");
+  assert.deepEqual(research.pathWindow(seven.map((name, index) => step(name, index < 6))), { before: 3, steps: seven.slice(3).map((name, index) => step(name, index < 3)), after: 0 });
+  assert.deepEqual(research.pathWindow(seven.map((name) => step(name, false))), { before: 0, steps: seven.slice(0, 4).map((name) => step(name, false)), after: 3 }, "a current first step stays in view");
+  assert.deepEqual(research.pathWindow(seven.map((name, index) => step(name, index < 2))), { before: 0, steps: seven.slice(0, 4).map((name, index) => step(name, index < 2)), after: 3 });
+  assert.deepEqual(research.pathWindow(seven.map((name, index) => step(name, index < 4))), { before: 1, steps: seven.slice(1, 5).map((name, index) => step(name, index < 3)), after: 2 });
+  assert.deepEqual(research.pathWindow([step("A", true), step("B", false)]), { before: 0, steps: [step("A", true), step("B", false)], after: 0 });
+  assert.deepEqual(research.pathWindow([]), { before: 0, steps: [], after: 0 });
+});
