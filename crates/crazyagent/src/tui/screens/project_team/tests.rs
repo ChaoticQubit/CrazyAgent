@@ -2896,10 +2896,10 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         assert_eq!(coordination_of(&view).settings.overlaps, overlaps);
     }
 
-    for _ in 0..3 {
+    for _ in 0..4 {
         view.key(press(KeyCode::Down));
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 11);
+    assert_eq!(view.coord.as_ref().unwrap().row, 12);
     assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
     assert!(view.typing());
     clear_counted(&mut view);
@@ -2980,10 +2980,10 @@ async fn skills_per_role_are_set_in_the_coordination_editor_through_a_real_engin
     for role in ["Master skills", "Lead skills", "Worker skills"] {
         assert!(find(&shown, role).contains("All approved skills"), "{role}");
     }
-    for _ in 0..14 {
+    for _ in 0..15 {
         assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 14);
+    assert_eq!(view.coord.as_ref().unwrap().row, 15);
     let (_, help) = view.rows(116, 40, &accounts(), &Look::plain());
     assert!(
         help.contains(&("Space", "All or chosen")) && help.contains(&("Enter", "Edit skills")),
@@ -3070,7 +3070,7 @@ fn workflow_nudges_show_off_by_default_and_space_steps_through_every_option() {
     assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
     let nudges = |view: &TeamView| find(&frame(view, 120, 40), "Workflow nudges").to_owned();
     assert!(nudges(&view).contains("Off"), "{}", nudges(&view));
-    for _ in 0..9 {
+    for _ in 0..10 {
         assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
     }
     let mut at = NOW;
@@ -3129,10 +3129,10 @@ fn the_task_start_reminder_shows_on_by_default_and_space_flips_it() {
         shown.join("\n")
     );
     let reminder = |view: &TeamView| find(&frame(view, 120, 40), "Task-start reminder").to_owned();
-    for _ in 0..10 {
+    for _ in 0..11 {
         assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 10);
+    assert_eq!(view.coord.as_ref().unwrap().row, 11);
     let mut at = NOW;
     for (next, words) in [(TaskStart::Off, "Off"), (TaskStart::On, "On")] {
         let mut settings = coordination.settings.clone();

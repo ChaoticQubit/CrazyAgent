@@ -166,8 +166,8 @@ pub(in crate::tui) struct CoordEdit {
 
 /// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
 /// the Claude Code terminal display (N-D9), where sub-agent questions go, overlapping edits,
-/// workflow nudges, the Task-start reminder (T3-15), the counted tools or the skills one team
-/// role gets (DEC-111 R3).
+/// whether agents may catch up with main (OS-8), workflow nudges, the Task-start reminder
+/// (T3-15), the counted tools or the skills one team role gets (DEC-111 R3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CoordRow {
     Mode(HarnessKind),
@@ -175,13 +175,14 @@ pub(in crate::tui) enum CoordRow {
     ClaudeDisplay,
     Questions,
     Overlaps,
+    CatchUpMain,
     Nudges,
     TaskStart,
     Counted,
     Skills(SkillRole),
 }
 
-const COORD_ROWS: [CoordRow; 15] = [
+const COORD_ROWS: [CoordRow; 16] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::ClaudeDisplay,
@@ -191,6 +192,7 @@ const COORD_ROWS: [CoordRow; 15] = [
     CoordRow::Delivery(HarnessKind::Rcli),
     CoordRow::Questions,
     CoordRow::Overlaps,
+    CoordRow::CatchUpMain,
     CoordRow::Nudges,
     CoordRow::TaskStart,
     CoordRow::Counted,
@@ -736,7 +738,6 @@ impl TeamView {
             }
             KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('R') => self.reask_empty_reply(),
-            KeyCode::Char('C') => self.catch_up_main(),
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('B') => self.background_at_end(),
             KeyCode::Char('G') => self.grace_time(),
@@ -2047,39 +2048,6 @@ impl TeamView {
         })
     }
 
-    /// Flips "Catch up with main" between On and Off: whether every agent may merge the
-    /// landed main, `crazyagent/main`, into its own branch and is told to (OS-8). Output: the
-    /// change to send, or Handled with a notice while loading or saving.
-    fn catch_up_main(&mut self) -> TeamReply {
-        let Some(status) = &self.status else {
-            self.notice = Some(Notice::plain("The team is still loading."));
-            return TeamReply::Handled;
-        };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
-        let mode = match status.catch_up_main {
-            CatchUpMain::On => CatchUpMain::Off,
-            CatchUpMain::Off => CatchUpMain::On,
-        };
-        self.changing = Some(
-            match mode {
-                CatchUpMain::On => {
-                    "Agents may now bring the landed main into their own branch with git merge crazyagent/main."
-                }
-                CatchUpMain::Off => "Agents now have every merge refused, main included.",
-            }
-            .to_owned(),
-        );
-        TeamReply::Change(TeamAction::CatchUpMain {
-            project_id: self.project.clone(),
-            mode,
-        })
-    }
-
     /// Moves "New folder limit", the most files one new top-level folder may gain in a change
     /// set (DEC-107), to its next choice. Output: the change to send, or Handled with a
     /// notice while loading or saving.
@@ -2376,6 +2344,22 @@ impl TeamView {
                     done,
                 )
             }
+            CoordRow::CatchUpMain => {
+                let mode = match self.status.as_ref().map(|status| status.catch_up_main) {
+                    Some(CatchUpMain::Off) => CatchUpMain::On,
+                    Some(CatchUpMain::On) | None => CatchUpMain::Off,
+                };
+                let done = match mode {
+                    CatchUpMain::On => {
+                        "Agents may now bring the landed main into their own branch with git merge crazyagent/main."
+                    }
+                    CatchUpMain::Off => "Agents now have every merge refused, main included.",
+                };
+                (
+                    TeamAction::CatchUpMain { project_id, mode },
+                    done.to_owned(),
+                )
+            }
             CoordRow::Nudges => {
                 settings.nudges = cycle(&Nudges::ALL, settings.nudges, forward);
                 let done = format!(
@@ -2595,6 +2579,15 @@ impl TeamView {
                 CoordRow::Overlaps => (
                     "Overlapping edits".to_owned(),
                     overlaps_words(view.settings.overlaps).to_owned(),
+                    "",
+                ),
+                CoordRow::CatchUpMain => (
+                    "Catch up with main".to_owned(),
+                    match self.status.as_ref().map(|status| status.catch_up_main) {
+                        Some(CatchUpMain::Off) => "Off",
+                        Some(CatchUpMain::On) | None => "On",
+                    }
+                    .to_owned(),
                     "",
                 ),
                 CoordRow::Nudges => (
@@ -3026,14 +3019,6 @@ impl TeamView {
                 .to_owned(),
             ),
             setting(
-                "Catch up with main",
-                match status.catch_up_main {
-                    CatchUpMain::On => "On",
-                    CatchUpMain::Off => "Off",
-                }
-                .to_owned(),
-            ),
-            setting(
                 "New folder limit",
                 format!("{} files", status.new_folder_files_max),
             ),
@@ -3388,7 +3373,6 @@ impl TeamView {
             ("L", "Land on"),
             ("g", "Ask before merge"),
             ("R", "Re-ask empty reply"),
-            ("C", "Catch up with main"),
             ("F", "New folder limit"),
             ("B", "Background commands"),
             ("G", "Grace time"),
