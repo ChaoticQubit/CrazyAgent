@@ -366,9 +366,11 @@ impl TeamRuntime {
 
     /// Hands an interrupted sub-agent that runs again in the pane this engine took over the
     /// task its run holds, with the note, typed as one turn into the session it never left,
-    /// once the takeover settled (its worker is ready), its worker is free and its account
-    /// not paused; the session is already running, so the run is resumed once the turn goes
-    /// out. A takeover that fails ends the worker with nothing handed, so the run restarts
+    /// once the takeover settled (its worker is ready), its worker is free and runs no turn
+    /// of its own, a kept native lead has its signed-in account again (it is briefed), and
+    /// its account is not paused; the session is already running, so the run is resumed
+    /// once the turn goes out.
+    /// A takeover that fails ends the worker with nothing handed, so the run restarts
     /// in a new pane once the old pane's processes were confirmed gone; otherwise it waits
     /// for the owner's retry (see [`Self::hold_unconfirmed`]). A task no longer waiting gives
     /// the run up. Any other agent that runs again keeps the run waiting until it stops.
@@ -379,9 +381,11 @@ impl TeamRuntime {
         run: &Interrupted,
     ) -> Result<(), EngineError> {
         let worker = &self.workers[&run.agent];
+        let handed = worker.kept_session && worker.briefed;
         if run.kind != AgentRole::Sub
             || !worker.ready
-            || worker.managed
+            || (worker.managed && !handed)
+            || worker.own_turn.is_some()
             || worker.stopping
             || worker.busy.is_some()
             || paused.contains(&worker.connection)
