@@ -730,6 +730,14 @@ pub fn record_turn_end(
     }
 }
 
+/// Releases or holds the claims no turn end will settle: claims of landed sets whose
+/// release failed, claims of restored sets that did not come back, and stopped agents'
+/// finished claims. Inputs: the store, the project and the time. Output: nothing.
+pub fn sweep_claims(db: &Connection, project: &ProjectId, now: u64) -> Result<(), EngineError> {
+    let _ = (db, project, now);
+    Ok(())
+}
+
 /// The plain code of a turn-end refusal as an owner window shows it: a refusal carrying
 /// text for the agent (see [`refusal_for_agent`]) shows its code alone. Input: the
 /// refusal. Output: the plain code.

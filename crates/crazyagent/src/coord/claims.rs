@@ -695,3 +695,15 @@ fn glob_match(glob: &[u8], path: &[u8]) -> bool {
     }
     row[path.len()]
 }
+
+/// Tells whether the owner should now hear that a project's claims fill one overlap check.
+/// Inputs: the store, the project and the time. Output: true the first time a full project
+/// is seen, false otherwise.
+pub fn claims_full_notice(
+    db: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<bool, EngineError> {
+    let _ = (db, project, now);
+    Ok(false)
+}

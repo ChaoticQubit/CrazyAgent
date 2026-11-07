@@ -959,6 +959,155 @@ fn a_restore_meeting_a_released_hold_on_a_held_claim_trips_the_assertion() {
     let _ = restore_set(&connection, SETS[0]);
 }
 
+/// Adds `count` claims `built/<i>.rs` to one agent's work, as a long backlog would.
+#[cfg(unix)]
+fn add_claims(connection: &Connection, who: AgentId, work: WorkId, count: i64) {
+    connection
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?4)
+             INSERT INTO coord_claims(project,agent,work,pattern,created)
+             SELECT ?1,?2,?3,'built/'||i||'.rs',?5 FROM n",
+            params![PROJECT, who, work, count, NOW],
+        )
+        .unwrap();
+}
+
+/// Sets one team agent's status, as the runtime does when it stops or resumes it.
+#[cfg(unix)]
+fn status_of(connection: &Connection, who: AgentId, status: &str) {
+    connection
+        .execute(
+            "UPDATE team_agents SET status=?2 WHERE id=?1",
+            params![who, status],
+        )
+        .unwrap();
+}
+
+/// OS-8 r2 M1: one agent's flood of claimed work fills only its own share: past its live
+/// claims limit its starts are refused with `coord_agent_claims_full`, and another agent
+/// still starts work.
+#[cfg(unix)]
+#[test]
+fn one_agent_s_flood_of_claimed_work_refuses_only_that_agent() {
+    let connection = db();
+    let flooder = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let mut refused = 0;
+    for unit in 0..64 {
+        let claims = (0..32)
+            .map(|file| format!("flood/{unit}/{file}.rs"))
+            .collect();
+        if let Err(problem) = start_work(
+            &connection,
+            &project(),
+            flooder,
+            format!("Flood {unit}"),
+            claims,
+            NOW,
+        ) {
+            assert_eq!(problem.0, "coord_agent_claims_full");
+            refused += 1;
+        }
+    }
+    assert_eq!(refused, 60, "four full units fill one agent's share");
+    let (_, overlaps) = start_work(
+        &connection,
+        &project(),
+        ada,
+        "Lexer".into(),
+        vec!["src/lexer.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    assert!(overlaps.is_empty(), "{overlaps:?}");
+}
+
+/// OS-8 r2 M1: a stopped agent's claims on work it was still on leave the overlap check, so
+/// built-up claims of agents that never run again stop no one; they are not released, and
+/// they count and overlap again once the agent is resumed under its own id.
+#[cfg(unix)]
+#[test]
+fn a_stopped_agent_s_claims_on_active_work_leave_the_scan_until_it_resumes() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_work(
+        &connection,
+        &project(),
+        grace,
+        "Build".into(),
+        vec!["built/0.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    add_claims(&connection, grace, grace_work, 2100);
+    let start = |file: &str| {
+        start_work(
+            &connection,
+            &project(),
+            ada,
+            format!("Edit {file}"),
+            vec![file.into()],
+            NOW,
+        )
+    };
+    assert_eq!(code(start("src/a.rs")), "coord_claims_full");
+    status_of(&connection, grace, "stopped");
+    let (_, overlaps) = start("built/7.rs").unwrap();
+    assert!(
+        overlaps.is_empty(),
+        "a stopped agent's active claims are left out: {overlaps:?}"
+    );
+    assert_eq!(held(&connection, grace, grace_work), 2101, "and kept");
+    status_of(&connection, grace, "working");
+    assert_eq!(
+        code(start("src/b.rs")),
+        "coord_claims_full",
+        "a resumed agent's claims count again"
+    );
+}
+
+/// OS-8 r2 M1: the owner hears once when a project's live claims pass what one overlap
+/// check reads, not again while it stays full, and again only after it emptied and filled.
+#[cfg(unix)]
+#[test]
+fn the_owner_hears_once_when_a_project_fills_the_claims_scan() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let (grace_work, _) = start_work(
+        &connection,
+        &project(),
+        grace,
+        "Build".into(),
+        vec!["built/0.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    assert!(!claims_full_notice(&connection, &project(), NOW).unwrap());
+    add_claims(&connection, grace, grace_work, 2100);
+    assert!(claims_full_notice(&connection, &project(), NOW).unwrap());
+    assert!(
+        !claims_full_notice(&connection, &project(), NOW).unwrap(),
+        "told once while it stays full"
+    );
+    release_claims(&connection, grace, grace_work, NOW).unwrap();
+    assert!(!claims_full_notice(&connection, &project(), NOW).unwrap());
+    let (again, _) = start_work(
+        &connection,
+        &project(),
+        grace,
+        "Build again".into(),
+        vec!["built/0.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    add_claims(&connection, grace, again, 2100);
+    assert!(
+        claims_full_notice(&connection, &project(), NOW).unwrap(),
+        "a project that filled again is told again"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {

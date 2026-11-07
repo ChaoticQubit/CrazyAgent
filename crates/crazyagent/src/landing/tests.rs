@@ -6542,6 +6542,141 @@ fn restoring_a_discarded_sub_set_holds_its_claims_again() {
     );
 }
 
+/// Marks the case's sub-agent, engine agent 1, stopped, as the runtime does when it stops
+/// or the engine starts. Input: the case.
+fn stop_agent_1(case: &Case) {
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=1", [])
+        .unwrap();
+}
+
+/// Runs the engine's claims sweep for the case's project. Input: the case.
+fn sweep(case: &Case) {
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS + 2 * DAY_MS).unwrap();
+}
+
+/// OS-8 r2 L2: a sub-agent that finished its work and stopped before any turn end never
+/// runs again; with nothing to land, the engine's sweep releases its claims.
+#[test]
+fn a_stopped_sub_agent_s_finished_claims_are_released_by_the_sweep_when_nothing_waits() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    stop_agent_1(&case);
+    assert_eq!(
+        second_start(&case),
+        1,
+        "finished work still holds its claim"
+    );
+    sweep(&case);
+    assert_eq!(
+        second_start(&case),
+        0,
+        "nothing waits to land, so the sweep released it"
+    );
+}
+
+/// OS-8 r2 L2: a sub-agent that finished its work after its set's last turn end and then
+/// stopped keeps its claims for that open set: the sweep holds them for it, and the set's
+/// Accept releases them.
+#[test]
+fn a_stopped_sub_agent_s_finished_claims_are_held_for_its_open_set_by_the_sweep() {
+    let mut case = Case::new();
+    let work = review_ready_claim(&mut case);
+    crate::coord::transfer(
+        &case.db,
+        work,
+        2,
+        crate::coord::Transfer::Reopen,
+        crate::coord::Party::Agent(1),
+        crate::team::now_ms(),
+    )
+    .unwrap();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    crate::coord::finish(
+        &case.db,
+        work,
+        3,
+        crate::coord::Finish::ReviewReady,
+        "Green again.".into(),
+        1,
+        crate::team::now_ms(),
+    )
+    .unwrap();
+    stop_agent_1(&case);
+    sweep(&case);
+    assert_eq!(second_start(&case), 1, "the open set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the set's Accept released the claim it held"
+    );
+}
+
+/// OS-8 r2 L2: a claim release that failed when the set landed is retried by the engine's
+/// sweep, so an agent that never has another turn end does not keep the claim.
+#[test]
+fn a_landed_set_s_failed_release_is_retried_by_the_sweep_after_its_agent_stopped() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER claims_stuck BEFORE UPDATE ON coord_claims
+             BEGIN SELECT RAISE(ABORT, 'claims stuck'); END;",
+        )
+        .unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    case.db.execute_batch("DROP TRIGGER claims_stuck;").unwrap();
+    stop_agent_1(&case);
+    assert_eq!(second_start(&case), 1, "the failed release kept the claim");
+    sweep(&case);
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the sweep released the landed set's claim"
+    );
+}
+
+/// OS-8 r2 L2: a restore whose claims could not be taken back is repaired by the engine's
+/// sweep, so the restored set's claims overlap again.
+#[test]
+fn a_restore_whose_claims_failed_to_return_is_repaired_by_the_sweep() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    discard(&case.db, &id, &case.view(&id).head, NOW_MS).unwrap();
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER claims_stuck BEFORE UPDATE ON coord_claims
+             BEGIN SELECT RAISE(ABORT, 'claims stuck'); END;",
+        )
+        .unwrap();
+    restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+    case.db.execute_batch("DROP TRIGGER claims_stuck;").unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the failed restore left the claim released"
+    );
+    sweep(&case);
+    assert_eq!(
+        second_start(&case),
+        1,
+        "the sweep took the restored set's claim back"
+    );
+}
+
 /// OS-8 L4: a sub-agent set whose worktree was deleted outside the app closes as removed
 /// outside and releases its review-ready work's claims.
 #[test]
