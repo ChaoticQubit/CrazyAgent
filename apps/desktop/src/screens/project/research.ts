@@ -1,6 +1,6 @@
 import type { IconName, Tone } from "../../ui";
 import { failureCopy, failureSentence, receiptState } from "../../api-projects";
-import type { ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
+import type { ActivityItem, ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { namedFailure } from "../../api";
 import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
@@ -431,6 +431,12 @@ export function activity(jobs: ResearchJob[], project: string, created: number |
 }
 
 export const ACTIVITY_ROWS = 8;
+
+/** Groups project activity by the goal it serves. */
+export function groupActivity(items: ActivityItem[]): { goal: string; items: ActivityItem[] }[] {
+  void items;
+  return [];
+}
 
 const settled: MasterTurn["phase"][] = ["succeeded", "failed", "cancelled", "uncertain", "blocked"];
 

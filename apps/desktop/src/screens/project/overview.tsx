@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Icon } from "../../ui";
 import { listMcpServers, listSkills, loadAllProjectMemories, nextGeneration, poolSummaries } from "../../api";
 import { failureCopy, loadAgentPolicy, retryResearch } from "../../api-projects";
-import type { ResearchJob } from "../../api-projects";
+import type { ActivityItem, ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { anyHarnessTotal, poolName, poolSummary } from "../new-project/wizard";
@@ -31,6 +31,12 @@ export function folderLabel(path: string): string {
  * Input: the saved folder path. Output: the project folder path. */
 export function projectFolder(path: string): string {
   return path.replace(/[\\/]\.crazyagent[\\/]?$/u, "");
+}
+
+/** Recent activity grouped by goal. */
+export function ActivityGroups(props: { items: ActivityItem[]; now: number; expanded: string[]; onShowAll: (goal: string) => void }) {
+  void props;
+  return null;
 }
 
 /** Overview tab: what needs the owner, research progress, recent activity and project facts.

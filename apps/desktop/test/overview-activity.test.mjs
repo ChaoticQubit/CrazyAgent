@@ -1,0 +1,77 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import "./load-source.mjs";
+
+const research = await import("../src/screens/project/research.ts");
+const overview = await import("../src/screens/project/overview.tsx");
+
+const item = (id, at_ms, goal, extra = {}) => ({
+  id, at_ms, kind: "accepted", actor: "Owner", goal, text: `Event ${id}`, change_set: null, undone: false, ...extra,
+});
+
+test("activity groups by goal, newest group first, and items without a goal go under Project", () => {
+  const items = [
+    item(6, 6_000, "Build the service"),
+    item(5, 5_000, null),
+    item(4, 4_000, "Write the docs"),
+    item(3, 3_000, "Build the service"),
+    item(2, 2_000, null),
+    item(1, 1_000, "Write the docs"),
+  ];
+  const groups = research.groupActivity(items);
+  assert.deepEqual(groups.map((group) => group.goal), ["Build the service", "Project", "Write the docs"]);
+  assert.deepEqual(groups.map((group) => group.items.map((entry) => entry.id)), [[6, 3], [5, 2], [4, 1]]);
+});
+
+test("a group is ordered by its latest item even when the read comes out of order", () => {
+  const groups = research.groupActivity([
+    item(1, 1_000, "Old goal"),
+    item(2, 9_000, "Old goal"),
+    item(3, 5_000, "New goal"),
+    item(4, 5_000, "New goal"),
+    item(5, 2_000, ""),
+  ]);
+  assert.deepEqual(groups.map((group) => group.goal), ["Old goal", "New goal", "Project"]);
+  assert.deepEqual(groups[0].items.map((entry) => entry.id), [2, 1]);
+  assert.deepEqual(groups[1].items.map((entry) => entry.id), [4, 3], "same time: the later id is newer");
+  assert.deepEqual(research.groupActivity([]), []);
+});
+
+test("each goal shows eight rows with its actor and Show all for the rest", () => {
+  const now = 10 * 60_000;
+  const items = [
+    ...Array.from({ length: 10 }, (_, i) => item(100 + i, now - i * 60_000, "Build the service", { actor: "Wren" })),
+    item(1, now - 30 * 60_000, null, { kind: "research_saved", actor: "Research", text: "Market research saved market_research.md" }),
+  ];
+  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, now, expanded: [], onShowAll: () => {} }));
+  assert.equal(html.match(/class="pj-activity-row/g)?.length, 9);
+  assert.match(html, /aria-label="Build the service"/);
+  assert.match(html, /aria-label="Project"/);
+  assert.match(html, />Show all \(10\)</);
+  assert.equal(html.match(/>Show all/g)?.length, 1, "a goal with eight rows or fewer has no Show all");
+  assert.match(html, /Market research saved market_research\.md/);
+  assert.match(html, />Wren</);
+  assert.match(html, />Just now</);
+  assert.ok(html.indexOf("Build the service") < html.indexOf("Market research saved"), "the newest goal comes first");
+  const open = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, now, expanded: ["Build the service"], onShowAll: () => {} }));
+  assert.equal(open.match(/class="pj-activity-row/g)?.length, 11);
+  assert.doesNotMatch(open, />Show all/);
+});
+
+test("an undone event says so", () => {
+  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, {
+    items: [item(1, 0, "Build the service", { kind: "lead_merged", text: "Master merged change set #17", undone: true })],
+    now: 0, expanded: [], onShowAll: () => {},
+  }));
+  assert.match(html, /Master merged change set #17/);
+  assert.match(html, />Undone</);
+});
+
+test("Overview reads every project event, not the research jobs", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/screens/project/overview.tsx", import.meta.url), "utf8");
+  assert.ok(source.includes("loadActivity("), "Overview reads the engine activity");
+  assert.equal(typeof research.activity, "undefined", "the research-only activity list is gone");
+});
