@@ -545,17 +545,14 @@ async fn a_second_session_attempt_revokes_the_first_session() {
     case.stop().await;
 }
 
-/// Capabilities stop at `GRANTS_MAX` projects, and a project id that names the `ide`
-/// folder itself never gets a capability.
+/// Capabilities stop at `GRANTS_MAX` projects, and no project id can name the `ide`
+/// folder itself, so none gets a capability there.
 #[tokio::test]
 async fn ide_capabilities_stop_at_their_bound() {
     let mut case = Case::start().await;
-    assert_eq!(
-        issue(&case.runtime, &ProjectId::new(".").unwrap())
-            .err()
-            .unwrap()
-            .0,
-        "ide_project_invalid"
+    assert!(
+        ProjectId::new(".").is_err(),
+        "a project id never names the ide folder itself"
     );
     for index in 0..GRANTS_MAX {
         issue(&case.runtime, &ProjectId::new(format!("p{index}")).unwrap()).unwrap();

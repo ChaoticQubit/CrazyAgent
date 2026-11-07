@@ -496,14 +496,21 @@ fn no_handle_takes_the_shape_of_an_agent_id() {
     let (_directory, connection) = engine();
     let alpha = project("alpha");
     let sub = agent(&connection, "alpha", "sub", "working");
-    for shaped in ["team-7", "@team-7", "7", "codex-7", "claude-code-12"] {
+    for shaped in [
+        "team-7",
+        "@team-7",
+        "7",
+        "codex-7",
+        "claude-code-12",
+        "team-07",
+    ] {
         assert_eq!(
             rename(&connection, &alpha, sub, shaped).unwrap(),
             Err("team_handle_invalid"),
             "{shaped}"
         );
     }
-    for kept in ["task-7", "team-07", "team-7a", "codex"] {
+    for kept in ["task-7", "team-7a", "codex"] {
         assert_eq!(
             rename(&connection, &alpha, sub, kept).unwrap(),
             Ok(kept.to_owned()),

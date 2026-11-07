@@ -571,8 +571,8 @@ fn a_stale_save_keeps_the_draft_and_never_adopts_the_newer_version() {
         "the owner learns the text changed: {shown}"
     );
     assert!(
-        shown.contains("Mine. Old rule."),
-        "the draft stays: {shown}"
+        shown.contains("│ Mine. █ld rule."),
+        "the draft stays, the cursor after the typed words: {shown}"
     );
     assert!(shown.contains("Not saved yet"), "{shown}");
     assert!(
@@ -623,8 +623,8 @@ fn stale_save_shows_the_conflict_choices() {
         "the text that landed: {shown}"
     );
     assert!(
-        shown.contains("Mine. Old rule."),
-        "the draft stays: {shown}"
+        shown.contains("│ Mine. █ld rule."),
+        "the draft stays, the cursor after the typed words: {shown}"
     );
     assert!(
         shown.contains("Ctrl-R Reload") && shown.contains("Ctrl-Y Keep mine"),

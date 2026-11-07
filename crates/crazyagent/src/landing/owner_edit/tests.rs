@@ -151,6 +151,9 @@ fn owner_edit_marks_the_change_set_its_turn_end_records_not_one_closed_before() 
     );
     assert_eq!(
         marks(&case, &second),
-        vec![("README".to_owned(), vec![FileMark::OwnerEdited])]
+        vec![
+            ("README".to_owned(), vec![FileMark::OwnerEdited]),
+            ("notes.txt".to_owned(), vec![])
+        ]
     );
 }

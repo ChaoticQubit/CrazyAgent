@@ -136,6 +136,22 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 SetupAction::PlanRoadmap { project_id } => {
                     controller.plan_roadmap(project_id, generation).await
                 }
+                SetupAction::Update {
+                    project_id,
+                    expected_revision,
+                    name,
+                    setup,
+                } => {
+                    controller
+                        .update_project_setup(
+                            project_id,
+                            expected_revision,
+                            name,
+                            setup,
+                            generation,
+                        )
+                        .await
+                }
                 other => panic!("the project screen never sends {other:?}"),
             }
             .map_err(problem)?,
@@ -1818,7 +1834,7 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     );
     let general = screen.general.as_ref().unwrap();
     assert_eq!(general.name.value(), "Notes Pro", "the typed draft is kept");
-    assert_eq!(general.stack.value(), "rust, sqlite, tauri");
+    assert_eq!(general.stack.value(), "rust, sqlite, tauri, ,");
     assert_eq!(general.revision, 5, "the form takes the saved revision");
     assert!(!general.stale);
     assert_eq!(
@@ -2681,6 +2697,52 @@ fn a_stale_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
     );
 }
 
+/// Once the research jobs and a context with no roadmap document are read, `p` on the
+/// Settings tab plans a roadmap at once and `k` opens the hidden folders box, so neither
+/// action takes the other's key.
+#[test]
+fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
+    let look = Look::plain();
+    let project = ProjectId::new("hidden").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.jobs = Some(Vec::new());
+    screen.hidden_paths = Some(vec!["/Users/owner/secret".into()]);
+    screen.context = Some(crate::project_setup::ProjectContext {
+        project_id: project.clone(),
+        folder: "/Users/owner/hidden".into(),
+        items: vec![],
+    });
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Roadmap   Not planned   p Plan roadmap now"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Hidden    /Users/owner/secret   k Edit hidden folders"),
+        "{shown}"
+    );
+
+    let ProjectReply::Change(action) = screen.key(key(KeyCode::Char('p'))) else {
+        panic!("p asks the engine to plan");
+    };
+    assert_eq!(
+        *action,
+        SetupAction::PlanRoadmap {
+            project_id: project.clone(),
+        }
+    );
+    assert!(
+        screen.hidden.is_none(),
+        "p never opens the hidden folders box"
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.hidden.as_ref().unwrap().input.value(),
+        "/Users/owner/secret"
+    );
+}
+
 #[test]
 fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     let look = Look::plain();
@@ -2691,7 +2753,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
         paths: vec![],
         version: 0,
     });
-    assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
     assert!(screen.hidden.is_none());
     assert_eq!(
         screen.problem.as_deref(),
@@ -2699,7 +2761,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
-        shown.contains("Hidden    Loading...   p Edit hidden folders"),
+        shown.contains("Hidden    Loading...   k Edit hidden folders"),
         "{shown}"
     );
 
@@ -2725,11 +2787,11 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
-        shown.contains("Hidden    /Users/owner/secret   p Edit hidden folders"),
+        shown.contains("Hidden    /Users/owner/secret   k Edit hidden folders"),
         "{shown}"
     );
 
-    assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
     assert_eq!(
         screen.hidden.as_ref().unwrap().input.value(),
         "/Users/owner/secret"
@@ -2798,7 +2860,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     assert_eq!(screen.hidden_paths, None);
 
     screen.hidden_paths = Some(vec![]);
-    screen.key(key(KeyCode::Char('p')));
+    screen.key(key(KeyCode::Char('k')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
     assert_eq!(

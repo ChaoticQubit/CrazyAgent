@@ -1348,7 +1348,7 @@ async fn keys_typed_into_the_hidden_folders_box_never_reach_the_plugins_list() {
     let mut shell = Shell::with(ctx, screen);
     drive(&mut shell, &mut connection).await;
 
-    shell.key(Key::Char('p'));
+    shell.key(Key::Char('k'));
     let shown = render(&mut shell, 100, 40);
     assert!(shown.contains("Hidden folders"), "the box opens: {shown}");
 
@@ -1408,7 +1408,7 @@ async fn quitting_with_the_hidden_box_open_warns_the_hidden_folders_are_unsaved(
     let mut shell = Shell::with(ctx, screen);
     drive(&mut shell, &mut connection).await;
 
-    shell.key(Key::Char('p'));
+    shell.key(Key::Char('k'));
     assert!(
         render(&mut shell, 100, 40).contains("Hidden folders"),
         "the hidden box opens"

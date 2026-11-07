@@ -1718,9 +1718,14 @@ async fn stale_project_setup_write_is_refused() {
             stored.revision,
             stored.name.as_str(),
             stored.about.as_str(),
-            stored.tech_stack.len()
+            stored.tech_stack.as_slice()
         ),
-        (2, "Meals for two", "Plans meals for two.", 0),
+        (
+            2,
+            "Meals for two",
+            "Plans meals for two.",
+            ["typescript".to_owned()].as_slice()
+        ),
         "the stale window changed nothing"
     );
     assert_eq!(

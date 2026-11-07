@@ -123,10 +123,19 @@ fn rcli_usage_counts_are_bounded_and_input_never_goes_below_zero() {
         }
     );
 
-    let (ready, _) = frame(1, json!({"kind": "ready"}));
-    let (beyond, _) = usage(2, json!({"inputTokens": 9_007_199_254_740_992_u64}));
-    assert!(
-        stream(&ready).accept(&beyond).is_err(),
+    let beyond = json!({
+        "protocol_version": 1, "session_id": "session-a", "instance_id": "instance-a",
+        "sequence": 2, "event": {
+            "kind": "usage_observation", "scope": "turn_unattributed",
+            "provenance": "sdk_reported", "accounting": "UNKNOWN",
+            "usage": {"inputTokens": 9_007_199_254_740_992_u64}
+        }
+    });
+    assert_eq!(
+        serde_json::from_value::<Event>(beyond)
+            .unwrap_err()
+            .to_string(),
+        "invalid host observation",
         "a count past the SDK's safe integers is refused before any capture counts it"
     );
 }

@@ -303,15 +303,20 @@ fn note_lines_carry_the_oldest_notes_that_fit_and_name_them() {
     );
     assert_eq!(carried, [3, 5]);
 
+    let half = NOTES_BYTES_MAX / 2 - NOTE_PREFIX.len() - 2;
     let long: Vec<Note> = (1..=3)
         .map(|question| Note {
             question,
-            text: "a".repeat(crate::questions::ANSWER_BYTES_MAX),
+            text: "a".repeat(half),
         })
         .collect();
     let (lines, carried) = note_lines(&long);
     assert_eq!(carried, [1, 2], "the third waits for a later turn");
-    assert!(lines.len() <= NOTES_BYTES_MAX);
+    assert_eq!(
+        lines.len(),
+        NOTES_BYTES_MAX,
+        "two notes fill the budget exactly"
+    );
     assert_eq!(lines.matches("Engine: ").count(), 2);
 }
 
@@ -348,16 +353,21 @@ fn a_drop_file_master_logs_its_questions_and_records_a_chat_answer_from_the_owne
     let master = Asker::Master(41);
     let renamed = asked(&case, &master, "Rename the app?");
     let tx = case.db.unchecked_transaction().unwrap();
-    let owner = crate::team::append_message(
-        &tx,
-        &case.project,
-        crate::team::MessageAuthor::Owner,
-        "Yes, rename it.",
-        crate::team::MessageState::Answered,
-        crate::team::now_ms(),
-    )
-    .unwrap()
-    .unwrap();
+    let typed = crate::team::TeamAction::Message {
+        project_id: case.project.clone(),
+        text: "Yes, rename it.".into(),
+    };
+    assert_eq!(
+        crate::team::execute(&tx, &crate::config::ModelAccess::default(), &typed).unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    let owner: i64 = tx
+        .query_row(
+            "SELECT MAX(id) FROM team_messages WHERE project=?1",
+            [case.project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
     tx.commit().unwrap();
 
     called(&drop, ASK_TOOL, shipping());

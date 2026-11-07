@@ -225,7 +225,7 @@ async fn questions_page_lists_pending_first_with_the_recommendation() {
         .unwrap();
     let second = lines
         .iter()
-        .position(|line| line.contains("weekly newsletter"))
+        .position(|line| line.contains("Should the shop send a weekly newsl…"))
         .unwrap();
     assert!(first < second, "pending first:\n{narrow}");
     assert!(lines[first].contains("Waiting") && lines[second].contains("Dismissed"));
