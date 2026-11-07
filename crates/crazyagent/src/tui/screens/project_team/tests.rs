@@ -2664,53 +2664,67 @@ fn capital_r_turns_reask_empty_reply_off_and_on() {
     );
 }
 
-/// C flips Catch up with main: On is shown for a team that has made no choice, C sends Off
-/// and then On, each with its plain notice (OS-8).
+/// OS-8: Catch up with main shows On in the coordination editor of a project that made no
+/// choice, on the row under Overlapping edits, and Space flips it Off and back: each press
+/// sends the setting's own change, the engine's answer says what agents may now do and the
+/// row shows the stored choice.
 #[test]
-fn capital_c_turns_catch_up_with_main_off_and_on() {
+fn catch_up_with_main_shows_on_under_overlapping_edits_and_space_flips_it() {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
     let mut view = TeamView::new(project());
-    assert_eq!(view.key(press(KeyCode::Char('C'))), TeamReply::Handled);
-    assert_eq!(
-        view.notice,
-        Some(Notice::plain("The team is still loading."))
+    let query = view.next_query(NOW).unwrap();
+    let mut stored = team();
+    stored.coordination = Some(crate::team::coordination(&connection, &project()).unwrap());
+    stored.catch_up_main = crate::team::catch_up_main(&connection, &project()).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    let shown = frame(&view, 120, 40);
+    let at_overlaps = shown
+        .iter()
+        .position(|row| row.contains("Overlapping edits"))
+        .unwrap();
+    assert!(
+        shown[at_overlaps + 1].contains("Catch up with main")
+            && shown[at_overlaps + 1].contains("On"),
+        "the row under Overlapping edits shows Catch up with main On:\n{}",
+        shown.join("\n")
     );
-    let mut view = loaded();
-    assert!(view.help().contains(&("C", "Catch up with main")));
-    assert!(shows(&view, "Catch up with main  On"));
-    let reply = view.key(press(KeyCode::Char('C')));
-    assert_eq!(
-        reply,
-        TeamReply::Change(TeamAction::CatchUpMain {
-            project_id: project(),
-            mode: CatchUpMain::Off,
-        })
-    );
-    applied(&mut view, reply);
-    assert_eq!(
-        view.notice,
-        Some(Notice::plain(
-            "Agents now have every merge refused, main included."
-        ))
-    );
-    let mut off = team();
-    off.catch_up_main = CatchUpMain::Off;
-    reread(&mut view, off, NOW + 10);
-    assert!(shows(&view, "Catch up with main  Off"));
-    let reply = view.key(press(KeyCode::Char('C')));
-    assert_eq!(
-        reply,
-        TeamReply::Change(TeamAction::CatchUpMain {
-            project_id: project(),
-            mode: CatchUpMain::On,
-        })
-    );
-    applied(&mut view, reply);
-    assert_eq!(
-        view.notice,
-        Some(Notice::plain(
-            "Agents may now bring the landed main into their own branch with git merge crazyagent/main."
-        ))
-    );
+    let row = |view: &TeamView| find(&frame(view, 120, 40), "Catch up with main").to_owned();
+    for _ in 0..9 {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 9);
+    let mut at = NOW;
+    for (mode, words, done) in [
+        (
+            CatchUpMain::Off,
+            "Off",
+            "Agents now have every merge refused, main included.",
+        ),
+        (
+            CatchUpMain::On,
+            "On",
+            "Agents may now bring the landed main into their own branch with git merge crazyagent/main.",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::CatchUpMain {
+                project_id: project(),
+                mode,
+            })
+        );
+        stored.catch_up_main = mode;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(row(&view).contains(words), "{}", row(&view));
+    }
 }
 
 async fn coord_send(
