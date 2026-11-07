@@ -31,6 +31,10 @@ export function ago(at: number, now: number): string {
   return days === 1 ? "Yesterday" : `${days} days ago`;
 }
 
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
 const PROMPT_LINE_MAX = 140;
 const RATE_LIMITED = /^rate_limited until (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) UTC: (.+)$/s;
 
@@ -413,29 +417,26 @@ export function planningJob(jobs: ResearchJob[]): ResearchJob | null {
   return newest;
 }
 
-/** Builds the Recent activity list from real job times.
- * Inputs: the jobs, the project name and when it was created. Output: every event, newest first. */
-export function activity(jobs: ResearchJob[], project: string, created: number | null): { at: number; text: string }[] {
-  const events: { at: number; text: string }[] = [];
-  const research = researchJobs(jobs).length;
-  if (created !== null) events.push({ at: created, text: `You created ${project} with ${research} research ${research === 1 ? "task" : "tasks"}` });
-  for (const job of jobs) {
-    if (job.started_ms !== null) events.push({ at: job.started_ms, text: `${job.kind_label} started` });
-    if (job.finished_ms === null) continue;
-    const file = job.report_path.slice(job.report_path.lastIndexOf("/") + 1);
-    if (job.status === "done") events.push({ at: job.finished_ms, text: `${job.kind_label} saved ${file}` });
-    else if (job.status === "failed") events.push({ at: job.finished_ms, text: `${job.kind_label} stopped: ${job.error?.trim() || "error"}` });
-    else if (job.status === "cancelled") events.push({ at: job.finished_ms, text: `${job.kind_label} was stopped` });
-  }
-  return events.sort((a, b) => b.at - a.at);
-}
-
 export const ACTIVITY_ROWS = 8;
 
-/** Groups project activity by the goal it serves. */
+/** The group Overview shows activity under when it serves no goal. */
+export const PROJECT_GOAL = "Project";
+
+/** Groups project activity by the goal it serves, for Overview. Events without a goal go under
+ * "Project". Input: the events in any order. Output: one group per goal, the group with the
+ * newest event first, each group's events newest first and a later id first at the same time. */
 export function groupActivity(items: ActivityItem[]): { goal: string; items: ActivityItem[] }[] {
-  void items;
-  return [];
+  const newest = [...items].sort((a, b) => b.at_ms - a.at_ms || b.id - a.id);
+  const groups = new Map<string, ActivityItem[]>();
+  for (const item of newest) {
+    const goal = item.goal?.trim() || PROJECT_GOAL;
+    const group = groups.get(goal);
+    if (group) group.push(item);
+    else groups.set(goal, [item]);
+  }
+  const grouped = [...groups].map(([goal, entries]) => ({ goal, items: entries }));
+  assert(grouped.reduce((sum, group) => sum + group.items.length, 0) === items.length, "every event is in exactly one group");
+  return grouped;
 }
 
 const settled: MasterTurn["phase"][] = ["succeeded", "failed", "cancelled", "uncertain", "blocked"];
