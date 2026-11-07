@@ -85,6 +85,18 @@ pub(super) fn owner_identity(
     Ok((read("user.name")?, read("user.email")?))
 }
 
+/// The paths a merge of a change set onto a tip can touch: those the agent changed and
+/// those main changed since the set's merge base, each side of a rename apart, so the
+/// path git merges an edit at after main renamed the file is checked too. Inputs: the
+/// repository, the merge base, the tip and the set's head. Output: the paths, sorted once.
+fn merge_paths(repo: &Repo, from: &str, tip: &str, head: &str) -> Result<Vec<String>, EngineError> {
+    let mut paths = diff::changed_paths(repo, from, head)?;
+    paths.extend(diff::changed_paths(repo, from, tip)?);
+    paths.sort_unstable();
+    paths.dedup();
+    Ok(paths)
+}
+
 /// Says whether any path has a filter attribute, or a merge attribute naming a driver,
 /// in any of the trees, reading attributes from each tree and the repository's own
 /// info/attributes. Inputs: the repository, the paths and the trees. Output: true when
@@ -917,7 +929,7 @@ pub(super) fn accept_to(
     let (reference, tip, target) = landing_target(db, &owner, &repository, named.as_deref())?;
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let from = measured_from(db, &owner, &record, &tip)?;
-    let paths = diff::changed_paths(&owner, &from, &record.head)?;
+    let paths = merge_paths(&owner, &from, &tip, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
     }
@@ -1096,7 +1108,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     };
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let from = measured_from(db, &owner, &record, &tip)?;
-    let paths = diff::changed_paths(&owner, &from, &record.head)?;
+    let paths = merge_paths(&owner, &from, &tip, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
     }
@@ -1149,7 +1161,7 @@ pub(super) fn conflicts_with_tip(
     if from == tip {
         return Ok(Vec::new());
     }
-    let paths = diff::changed_paths(&owner, &from, &record.head)?;
+    let paths = merge_paths(&owner, &from, &tip, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
     }
@@ -1486,7 +1498,7 @@ fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Ju
         }
         return whole(&from);
     }
-    let paths = diff::changed_paths(owner, &from, &record.head)?;
+    let paths = merge_paths(owner, &from, tip, &record.head)?;
     if uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
         return whole(&from);
     }
