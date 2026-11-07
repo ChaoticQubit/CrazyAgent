@@ -100,7 +100,7 @@ pub struct Listed {
     pub settled: Vec<Interrupted>,
 }
 
-fn unavailable() -> EngineError {
+pub(crate) fn unavailable() -> EngineError {
     EngineError("recovery_unavailable".into())
 }
 

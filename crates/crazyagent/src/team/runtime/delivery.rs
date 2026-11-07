@@ -150,11 +150,12 @@ pub(super) fn ended(
 /// One that never arrived waits and is typed once more. One the record cannot tell about
 /// is failed with a note, never typed again, and its intent stays pending for the owner, up
 /// to `UNKNOWN_KEPT` of each kind, marked so later starts keep it unknown without reading
-/// any record again. Input: the engine connection. Output: Ok, or a SQLite or ledger failure.
+/// any record again. Input: the engine connection. Output: Ok, `recovery_unavailable` while
+/// another writer holds the store past its wait, or another SQLite or ledger failure.
 pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
     ledger::initialize(connection)?;
-    let tx =
-        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+        .map_err(store_failure)?;
     let check = Delivered(latest(&tx, None)?);
     let now = now_ms();
     let messages = unheld(&tx, ActionKind::Message, &check)?;
@@ -174,11 +175,25 @@ pub(super) fn settle(connection: &Connection) -> Result<(), EngineError> {
         failed.extend(settle_task(&tx, action, UNKNOWN_TASK, now)?);
     }
     keep_newest(&tx, &tasks.unknown)?;
-    tx.commit().map_err(error)?;
+    tx.commit().map_err(store_failure)?;
     for task in failed {
         events::task_ended(connection, task, now)?;
     }
     Ok(())
+}
+
+/// The failure to take or commit a settle transaction, in `settle` or `settle_released`:
+/// the plain `recovery_unavailable` for SQLite's busy and locked codes, which another writer
+/// holding the store past its wait gives, so no raw SQLite text reaches the tick or the
+/// resume reply; any other failure keeps its own text. Input: the SQLite failure. Output:
+/// the error.
+fn store_failure(problem: rusqlite::Error) -> EngineError {
+    match problem.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            crate::recovery::unavailable()
+        }
+        _ => error(problem),
+    }
 }
 
 /// Checks the pending deliveries of one kind against the agents' records. An intent whose
@@ -226,8 +241,9 @@ fn unheld(
 /// arrival the record cannot tell, is never typed again; one that never arrived waits to be
 /// handed out as usual. An unknown intent stays pending for the owner only when its item
 /// was still waiting and is failed here. The master hears of a task failed here. Inputs:
-/// the engine connection and the item. Output: Ok, also when no intent is open, or a SQLite
-/// or ledger failure.
+/// the engine connection and the item. Output: Ok, also when no intent is open,
+/// `recovery_unavailable` while another writer holds the store past its wait, or another
+/// SQLite or ledger failure.
 pub(super) fn settle_released(connection: &Connection, item: Busy) -> Result<(), EngineError> {
     let Some(open) = ledger::pending_key(connection, kind(item), &key(item))? else {
         return Ok(());
@@ -236,8 +252,8 @@ pub(super) fn settle_released(connection: &Connection, item: Busy) -> Result<(),
     if let Some(held) = held_item(&open) {
         assert!(!crate::recovery::holds(connection, held)?);
     }
-    let tx =
-        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+        .map_err(store_failure)?;
     let latest = match agent {
         Some(agent) => latest(&tx, Some(agent))?,
         None => BTreeMap::new(),
@@ -246,7 +262,7 @@ pub(super) fn settle_released(connection: &Connection, item: Busy) -> Result<(),
     let resolution = Delivered(latest).check(&open);
     if resolution == Resolution::NotStarted {
         ledger::finish(&tx, open.id, Outcome::Failed)?;
-        return tx.commit().map_err(error);
+        return tx.commit().map_err(store_failure);
     }
     let arrived = resolution == Resolution::Done;
     let (settled, failed) = match item {
@@ -266,7 +282,7 @@ pub(super) fn settle_released(connection: &Connection, item: Busy) -> Result<(),
         Resolution::Unknown => ledger::finish(&tx, open.id, Outcome::Unknown)?,
         _ => ledger::finish(&tx, open.id, Outcome::Done)?,
     }
-    tx.commit().map_err(error)?;
+    tx.commit().map_err(store_failure)?;
     if let Some(task) = failed {
         events::task_ended(connection, task, now)?;
     }
