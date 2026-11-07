@@ -4933,7 +4933,6 @@ impl TeamRuntime {
                     params![task, agent, now_ms()],
                 )
                 .map_err(error)?;
-            crate::activity::note_task(&self.connection, project, agent, task, now_ms());
             self.connection
                 .execute(
                     "UPDATE team_agents SET session=(SELECT session FROM team_tasks WHERE id=?1) WHERE id=?2 AND session IS NULL",
@@ -4941,6 +4940,7 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             names::assign_task_role(&self.connection, project, agent, task)?;
+            crate::activity::note_task(&self.connection, project, agent, task, now_ms());
             self.mark_agent(agent, AgentStatus::Working, Some(task))?;
         }
         Ok(())

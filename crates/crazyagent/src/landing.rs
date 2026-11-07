@@ -41,7 +41,7 @@ pub const LIST_MAX: usize = 32;
 pub const MESSAGE_BYTES_MAX: usize = 4096;
 
 /// The folders a path an agent wrote is cut at when it is shown: any absolute local path
-/// starting with one of them shows only its last component.
+/// under one of them, anywhere in a word, shows only its last component.
 const LOCAL_ROOTS: [&str; 10] = [
     "~/",
     "/Users/",
@@ -94,19 +94,42 @@ pub(crate) fn scrubbed(text: &str, roots: &[&Path]) -> String {
     words.join(" ")
 }
 
-/// One word with an absolute local path in it cut to the path's last component, the
-/// punctuation around it kept. Input: the word. Output: the word, maybe empty.
+/// One word with a local path in it cut to the path's last component, from where the path
+/// starts (see `local_start`) to the word's closing punctuation, the text before and after
+/// it kept. Input: the word. Output: the word.
 fn local_path(word: &str) -> String {
-    let core = word.trim_start_matches(['(', '"', '\'', '<', '[', '`']);
-    let path = core.trim_end_matches([')', '"', '\'', '>', ']', '`', ',', '.', ';', ':', '!', '?']);
-    if !LOCAL_ROOTS.iter().any(|root| path.starts_with(root)) {
+    let Some(start) = local_start(word) else {
         return word.to_owned();
-    }
-    let (lead, tail) = (&word[..word.len() - core.len()], &core[path.len()..]);
-    match path.rsplit('/').find(|part| !part.is_empty()) {
-        Some(last) => format!("{lead}{last}{tail}"),
-        None => String::new(),
-    }
+    };
+    let (lead, rest) = word.split_at(start);
+    let path = rest.trim_end_matches([')', '"', '\'', '>', ']', '`', ',', '.', ';', ':', '!', '?']);
+    let tail = &rest[path.len()..];
+    let last = path
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or_default();
+    assert!(lead.len() + last.len() + tail.len() <= word.len());
+    format!("{lead}{last}{tail}")
+}
+
+/// Where the first local path in a word starts: a `LOCAL_ROOTS` folder, a `file://` link
+/// in any case or a drive letter with `:\` or `:/`, at the word's start or after a mark
+/// such as `=`, `:` or `(`, never after a letter, digit, slash, dot, dash or underscore, so
+/// a URL's own folders, a URL scheme and a relative path are not taken. Input: the word.
+/// Output: the byte offset, or None.
+fn local_start(word: &str) -> Option<usize> {
+    word.char_indices().map(|(at, _)| at).find(|&at| {
+        let opens = word[..at].chars().next_back().is_none_or(|before| {
+            !before.is_alphanumeric() && !matches!(before, '/' | '\\' | '.' | '-' | '_')
+        });
+        let rest = &word[at..];
+        opens
+            && (LOCAL_ROOTS.iter().any(|root| rest.starts_with(root))
+                || rest
+                    .get(..7)
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://"))
+                || matches!(rest.as_bytes(), [letter, b':', b'\\' | b'/', ..] if letter.is_ascii_alphabetic()))
+    })
 }
 
 /// Who made a change set: the master of a project conversation or one team sub-agent.
