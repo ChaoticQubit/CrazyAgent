@@ -18,6 +18,8 @@ const GIT = "/usr/bin/git";
 const REPO = "seed-shop";
 const AGENT = "agent-builder";
 const AGENT_LABEL = "Ada (@builder) · Codex";
+const AGENT_NAME = "Ada (@builder)";
+const FOLDER = "Project";
 const OWNER_NAME = "IDE Owner";
 const OWNER_EMAIL = "owner@example.invalid";
 const OWNER_LINE = "Owner line typed in the IDE.";
@@ -258,7 +260,7 @@ function workbench(page, keys, me) {
       const name = row.querySelector(".scm-provider .name")?.textContent?.trim();
       if (name) current = name;
       const editor = row.querySelector(".scm-editor");
-      if (editor && editor.getClientRects().length && (!named || current === ${JSON.stringify(REPO)})) {
+      if (editor && editor.getClientRects().length && (!named || current === ${JSON.stringify(FOLDER)})) {
         const rect = editor.getBoundingClientRect();
         const text = [...editor.querySelectorAll(".view-line")].map((line) => line.textContent.replace(/\\u00a0/g, " ")).join("\\n");
         return { x: rect.left + 24, y: rect.top + rect.height / 2, text };
@@ -401,7 +403,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.navigate", { url: workbenchUrl(server) });
         await ide.until("the workbench with the project's folders", `(() => {
           const explorer = document.querySelector(".explorer-folders-view");
-          return document.querySelector(".monaco-workbench .part.activitybar") !== null && explorer !== null && explorer.textContent.includes("Project");
+          return document.querySelector(".monaco-workbench .part.activitybar") !== null && explorer !== null && explorer.textContent.includes(${JSON.stringify(FOLDER)});
         })()`, WORKBENCH_MS);
         await pause(SETTLE_MS * 2);
         await me.capture("workbench-cold");
@@ -435,7 +437,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await ide.until("quick open", ide.rows);
         await keys.text("notes.md");
         await pause(SETTLE_MS);
-        await ide.pick("notes.md", "Project");
+        await ide.pick("notes.md", FOLDER);
         await ide.until("notes.md open in an editor", `(() => [...document.querySelectorAll(".tabs-container .tab.active")].some((tab) => (tab.getAttribute("aria-label") ?? tab.textContent).includes("notes.md")))()`);
         await ide.until("the editor focused", `document.activeElement?.closest(".monaco-editor") !== null`);
         await keys.text(`${OWNER_LINE}\n`);
@@ -451,10 +453,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("owner-edit");
       });
 
-      await t.test("F1 finds View: Show Source Control and Ctrl+Shift+G opens it", async () => {
-        const listed = await ide.palette("View: Show Source Control");
-        assert.ok(listed.some((label) => label.startsWith("View: Show Source Control")), `the F1 palette lists View: Show Source Control; it shows ${JSON.stringify(listed)}`);
-        await ide.pick("View: Show Source Control");
+      await t.test("F1 finds View: Show Changes and Ctrl+Shift+G opens it", async () => {
+        const listed = await ide.palette("View: Show Changes");
+        assert.ok(listed.some((label) => label.startsWith("View: Show Changes")), `the F1 palette lists View: Show Changes; it shows ${JSON.stringify(listed)}`);
+        await ide.pick("View: Show Changes");
         await ide.until("the Source Control view from the palette", ide.sidebar(/source control/i));
         await keys.key("E", PRIMARY | SHIFT);
         await ide.until("the Explorer again", ide.sidebar(/explorer/i));
@@ -494,12 +496,12 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         const before = head();
         await ide.until("the agent's change set in Source Control", `(() => {
           const view = document.querySelector(".scm-view");
-          return Boolean(view && view.textContent.includes("CrazyAgent changes") && view.textContent.includes(${JSON.stringify(AGENT_LABEL)}) && view.textContent.includes("README.md"));
+          return Boolean(view && view.textContent.includes("CrazyAgent changes") && view.textContent.includes(${JSON.stringify(AGENT_NAME)}) && view.textContent.includes("README.md"));
         })()`, WORKBENCH_MS);
         assert.equal(await page.evaluate(`document.querySelectorAll('.scm-view .codicon-sparkle, .scm-view [aria-label*="Generate Commit Message"]').length`), 0, "no AI commit message action in Source Control");
-        const found = await ide.until("the change set's group row", ide.group(AGENT_LABEL));
+        const found = await ide.until("the change set's group row", ide.group(AGENT_NAME));
         await keys.hover(found.row);
-        const accept = await ide.until("the group's Accept action", `(() => { const found = ${ide.group(AGENT_LABEL)}; return found && found.action; })()`);
+        const accept = await ide.until("the group's Accept action", `(() => { const found = ${ide.group(AGENT_NAME)}; return found && found.action; })()`);
         await keys.click(accept);
         await ide.until("the Accept commit message box", `(() => {
           const widget = document.querySelector(".quick-input-widget");
@@ -515,7 +517,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.ok(readFileSync(join(repo, "README.md"), "utf8").includes(AGENT_LINE), "the agent's change is in the project folder");
         assert.equal(git(repo, "show", "HEAD:notes.md"), `${OWNER_LINE}\nPlanting notes.`, "landing keeps the owner's own commit");
         assert.equal(git(repo, "status", "--porcelain"), "", "landing leaves the owner's checkout clean");
-        await ide.until("the change set gone from Source Control", `!(document.querySelector(".scm-view")?.textContent ?? "").includes(${JSON.stringify(AGENT_LABEL)})`);
+        await ide.until("the change set gone from Source Control", `!(document.querySelector(".scm-view")?.textContent ?? "").includes(${JSON.stringify(AGENT_NAME)})`);
         await me.capture("accepted");
       });
 
