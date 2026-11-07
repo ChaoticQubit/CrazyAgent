@@ -7,6 +7,7 @@ import { displayText } from "../conversation";
 import { HEARTBEAT_MS, closeIde, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
+import { MetricsView } from "../metrics/view";
 import { WaitingChanges } from "../changes/waiting";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
@@ -36,6 +37,7 @@ export const TABS = [
   { id: "questions", label: "Questions", icon: "inbox" },
   { id: "context", label: "Context", icon: "folder-open" },
   { id: "process", label: "Process", icon: "list-checks" },
+  { id: "metrics", label: "Metrics", icon: "trending-up" },
   { id: "settings", label: "Settings", icon: "settings" },
 ] as const satisfies readonly { id: string; label: string; icon: IconName }[];
 
@@ -263,6 +265,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "questions" && <QuestionsTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
+      {active === "metrics" && <MetricsView key={data.id} projectId={data.id} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
       {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={(value) => setIde({ kind: "ok", value })} />}
     </div>

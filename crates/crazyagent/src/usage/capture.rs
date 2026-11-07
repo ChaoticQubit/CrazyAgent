@@ -41,6 +41,13 @@ pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_tokens (
     PRIMARY KEY (hour_ms, kind, project, pool, account, agent, harness, session)
 );
 CREATE INDEX IF NOT EXISTS usage_tokens_hour ON usage_tokens(hour_ms);
+CREATE TABLE IF NOT EXISTS usage_seen (
+    project TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    session TEXT NOT NULL,
+    last_ms INTEGER NOT NULL,
+    PRIMARY KEY (project, agent, session)
+);
 CREATE TABLE IF NOT EXISTS usage_files (
     path TEXT PRIMARY KEY,
     progress TEXT NOT NULL
@@ -828,7 +835,6 @@ fn scan(
         Some(id) if format == Format::Codex || launched_without_hooks(db, id)? => Some(id),
         _ => None,
     };
-    let hour_ms = now_ms - now_ms.rem_euclid(HOUR_MS);
     let (paths, left, stopped) = records(home, format);
     mark_cut(db, home, attribution, &left, stopped, now_ms)?;
     let mut changed = Vec::new();
@@ -874,7 +880,7 @@ fn scan(
             params![key, serde_json::to_string(&progress).map_err(storage)?],
         )
         .map_err(storage)?;
-        add_tokens(&tx, hour_ms, attribution, &session, growth)?;
+        add_tokens(&tx, now_ms, attribution, &session, growth)?;
         added = added.plus(growth);
         limits = limits.or(observed);
     }
@@ -903,9 +909,12 @@ fn text(value: Option<&str>) -> &str {
     value.unwrap_or("")
 }
 
+/// Adds a session's new tokens to the usage hour that holds `now_ms`, after recording
+/// `now_ms` as when that run was last counted. Inputs: the store, the time, the
+/// attribution, the session and the tokens. Output: done, or `usage_unavailable`.
 fn add_tokens(
     tx: &Connection,
-    hour_ms: i64,
+    now_ms: i64,
     attribution: &Attribution,
     session: &str,
     growth: Tokens,
@@ -913,6 +922,14 @@ fn add_tokens(
     if growth.is_empty() {
         return Ok(());
     }
+    let hour_ms = now_ms - now_ms.rem_euclid(HOUR_MS);
+    let project = text(attribution.project.as_ref().map(ProjectId::as_str));
+    tx.execute(
+        "INSERT INTO usage_seen (project,agent,session,last_ms) VALUES (?1,?2,?3,?4)
+         ON CONFLICT(project,agent,session) DO UPDATE SET last_ms=MAX(last_ms,excluded.last_ms)",
+        params![project, attribution.agent, session, now_ms],
+    )
+    .map_err(storage)?;
     tx.execute(
         "INSERT INTO usage_tokens (hour_ms,kind,project,pool,account,agent,harness,session,\
             input,output,cache_read,cache_write)
@@ -924,7 +941,7 @@ fn add_tokens(
         params![
             hour_ms,
             attribution.kind.name(),
-            text(attribution.project.as_ref().map(ProjectId::as_str)),
+            project,
             text(attribution.pool.as_ref().map(CredentialRef::as_str)),
             text(attribution.account.as_ref().map(CredentialRef::as_str)),
             attribution.agent,
@@ -956,13 +973,7 @@ pub fn count_reported(
     if session.is_empty() || session.len() > NAME_BYTES_MAX {
         return Err(failure("usage_attribution_invalid"));
     }
-    add_tokens(
-        db,
-        now_ms - now_ms.rem_euclid(HOUR_MS),
-        attribution,
-        session,
-        tokens,
-    )
+    add_tokens(db, now_ms, attribution, session, tokens)
 }
 
 /// Counts one finished turn whose home is about to be removed, such as an engine-driven

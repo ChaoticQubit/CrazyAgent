@@ -188,6 +188,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "process_import_missing" => "That file doesn't exist. Check the path.".into(),
         "process_import_unsafe" => "That file isn't a plain file you own, so CrazyAgent won't read it.".into(),
         "process_import_unreadable" => "That file couldn't be read. Check it, then try again.".into(),
+        "process_instructions_would_be_empty" => "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first.".into(),
         "process_import_outside" => "That file links outside the project folder, so it stays where it is.".into(),
         "process_import_unmovable" => "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.".into(),
         "process_request_invalid" => "Type the file's full path, starting with / or ~/.".into(),

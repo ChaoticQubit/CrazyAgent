@@ -3,6 +3,7 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{OwnerClient, USAGE_CODES};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::usage::WindowKind;
+use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 
@@ -51,6 +52,27 @@ impl NativeBridge {
         Ok(Box::pin(async move {
             client
                 .usage_report(project, since_ms, offset_minutes)
+                .await
+                .map_err(usage_error)
+        }))
+    }
+
+    /// Reads the Metrics page's task counts, tokens chart and run, account and harness rows
+    /// for one project, None for every project, from `since_ms`, run without the bridge
+    /// lock. Inputs: the project id and the range start. Output: the metrics.
+    pub fn usage_metrics(
+        &self,
+        project_id: Option<String>,
+        since_ms: i64,
+    ) -> Result<Unlocked<Metrics>, BridgeError> {
+        let project = project_id
+            .map(ProjectId::new)
+            .transpose()
+            .map_err(|_| failure("usage_request_invalid"))?;
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client
+                .usage_metrics(project, since_ms)
                 .await
                 .map_err(usage_error)
         }))

@@ -17,7 +17,7 @@ pub const HARNESSES_MAX: usize = 32;
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 const OFFSET_MINUTES_MAX: u32 = 14 * 60;
-const SHARES: usize = 8;
+pub(super) const SHARES: usize = 8;
 const AGENT_BYTES_MAX: usize = 192;
 const HARNESS_BYTES_MAX: usize = 128;
 
@@ -258,13 +258,13 @@ fn unreported_harnesses(
     Ok(names)
 }
 
-fn count(value: i64) -> u64 {
+pub(super) fn count(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
 
 /// Reads four `TOTAL()` token sums, which never overflow, saturating each into a count.
 /// Inputs: the row and its first sum's column. Output: the tokens.
-fn tokens(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Tokens> {
+pub(super) fn tokens(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Tokens> {
     let amount = |column: usize| row.get::<_, f64>(column).map(|total| total as u64);
     Ok(Tokens {
         input: amount(first)?,
@@ -346,7 +346,7 @@ fn saved_accounts(db: &Connection) -> Result<BTreeSet<String>, EngineError> {
         .map_err(storage)
 }
 
-fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
+pub(super) fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
     db.query_row(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
         params![name],

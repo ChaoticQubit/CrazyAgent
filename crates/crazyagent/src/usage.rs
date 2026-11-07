@@ -7,6 +7,7 @@ use std::time::Duration;
 
 pub mod capture;
 pub mod health;
+pub mod metrics;
 pub mod poll;
 pub mod report;
 pub mod service;

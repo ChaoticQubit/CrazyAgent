@@ -91,6 +91,41 @@ export interface UsageReport {
   partial_homes: number;
 }
 
+export interface MetricsBucket {
+  start_ms: number;
+  tokens: Tokens;
+}
+
+export interface MetricsRun {
+  project: string;
+  agent: string;
+  session: string;
+  task: number | null;
+  title: string | null;
+  status: string | null;
+  last_ms: number;
+  tokens: Tokens;
+}
+
+export interface MetricsGroup {
+  key: string;
+  tokens: Tokens;
+  agents: number;
+  runs: number;
+}
+
+export interface Metrics {
+  running: number;
+  tasks_waiting: number;
+  tasks_done: number;
+  tasks_failed: number;
+  bucket_ms: number;
+  series: MetricsBucket[];
+  runs: MetricsRun[];
+  accounts: MetricsGroup[];
+  harnesses: MetricsGroup[];
+}
+
 const REFUSALS: Record<string, string> = {
   usage_limits_invalid: "That reset time isn't valid. Pick a time in the future.",
   usage_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the page before you try again.",
@@ -146,6 +181,13 @@ export function usageNotReady<T>(result: Result<T>): boolean {
  * of UTC in minutes and the project id. Output: the report. */
 export function loadUsage(sinceMs: number | null, offsetMinutes: number, projectId: string | null = null): Promise<Result<UsageReport>> {
   return call<UsageReport>("desktop_usage_report", { projectId, sinceMs, offsetMinutes });
+}
+
+/** Reads the Metrics page's task counts, tokens chart and run, account and harness rows for
+ * one project, or every project when the id is null. Inputs: the range start in milliseconds
+ * and the project id. Output: the metrics. */
+export function loadMetrics(sinceMs: number, projectId: string | null): Promise<Result<Metrics>> {
+  return call<Metrics>("desktop_usage_metrics", { projectId, sinceMs });
 }
 
 /** Asks the engine to read every signed-in account's limits now. */

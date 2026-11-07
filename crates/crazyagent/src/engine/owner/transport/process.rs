@@ -53,6 +53,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "process_import_unmovable",
     "process_import_unreadable",
     "process_import_unsafe",
+    "process_instructions_would_be_empty",
     "process_outcome_unknown",
     "process_owner_unavailable",
     "process_project_folder_missing",
@@ -97,6 +98,9 @@ enum Action {
         path: PathBuf,
     },
     Default,
+    Given {
+        project: ProjectId,
+    },
     Agent {
         project: ProjectId,
         agent: Option<i64>,
@@ -467,6 +471,13 @@ impl OwnerClient {
     /// Reads the CrazyAgent default process, for a preview the owner may then save.
     pub async fn default_process(&self) -> Result<String, EngineError> {
         self.process_text_reply(Action::Default).await
+    }
+
+    /// Reads what a launch now gives every agent of the project, as the engine renders it
+    /// from the project's mode. Input: the project. Output: the text, or the code of the
+    /// part the engine cannot read.
+    pub async fn given_text(&self, project: ProjectId) -> Result<String, EngineError> {
+        self.process_text_reply(Action::Given { project }).await
     }
 
     /// Reads the owner's own instructions for one team agent, which its next launch gets
@@ -965,6 +976,7 @@ fn run(root: &Path, action: Action, text: Option<String>) -> Result<Answer, Engi
             Answer::Text(crate::instruction_files::read_picked(&path)?)
         }
         (Action::Default, None) => Answer::Text(crate::agent_home::DEFAULT_PROCESS.to_owned()),
+        (Action::Given { project }, None) => Answer::Text(given_text(root, &project)?),
         (Action::AgentText { project, agent }, None) => {
             Answer::Current(current_agent_text(root, &project, agent)?)
         }
@@ -1140,6 +1152,7 @@ fn save_text(
     };
     match versioned::write_if(&tx, &item, version, &writer) {
         Ok(next) => {
+            refuse_text_leaving_none(&tx, project, text)?;
             store_text(root, folder.as_deref(), text)?;
             tx.commit().map_err(|_| unknown())?;
             assert_eq!(next, version + 1);
@@ -1162,6 +1175,102 @@ fn save_text(
         }
         Err(Refusal::Failed(_)) => Err(failure("process_unavailable")),
     }
+}
+
+/// The refusal for a change after which a project's agents would get no instructions at all.
+const NONE_GIVEN: &str = "process_instructions_would_be_empty";
+
+/// Refuses a change after which a project's agents would get no instructions at all: the
+/// render for its mode, `app` or `own` standing for the stored text a save replaces. A text
+/// the engine cannot read is not known to be empty, so it refuses nothing here; the launch
+/// reports it. Inputs: the project as a launch sees it after the change and the replacing
+/// texts. Output: unit, or `process_instructions_would_be_empty`.
+fn refuse_none_given(
+    agent: &crate::agent_home::AgentProject,
+    app: Option<&str>,
+    own: Option<&str>,
+) -> Result<(), EngineError> {
+    let app = match (agent.mode.app(), app) {
+        (false, _) => String::new(),
+        (true, Some(text)) => text.to_owned(),
+        (true, None) => match crate::agent_home::read_app(&agent.data) {
+            Ok(text) => text,
+            Err(_) => return Ok(()),
+        },
+    };
+    let own = match (agent.mode.project(), own, &agent.folder) {
+        (false, _, _) | (true, None, None) => String::new(),
+        (true, Some(text), _) => text.to_owned(),
+        (true, None, Some(folder)) => match crate::agent_home::read_project(folder) {
+            Ok(text) => text,
+            Err(_) => return Ok(()),
+        },
+    };
+    match crate::agent_home::render(&app, &own).is_empty() {
+        true => Err(failure(NONE_GIVEN)),
+        false => Ok(()),
+    }
+}
+
+/// Refuses a text save after which agents of a set-up project would get no instructions at
+/// all. A project save is checked when its mode gives the project text; an app save only
+/// when its text is blank, against each set-up project whose mode gives the app text.
+/// Inputs: the save's transaction, the project (none for the app) and the new text.
+/// Output: unit, or `process_instructions_would_be_empty`.
+fn refuse_text_leaving_none(
+    tx: &rusqlite::Transaction<'_>,
+    project: Option<&ProjectId>,
+    text: &str,
+) -> Result<(), EngineError> {
+    let projects = match project {
+        Some(project) => vec![project.clone()],
+        None if !text.trim().is_empty() => return Ok(()),
+        None => set_up_projects(tx)?,
+    };
+    assert!(projects.len() <= SAVED_PROJECTS_MAX as usize);
+    for id in &projects {
+        let Ok(agent) = crate::launch_context::agent_project(tx, id) else {
+            continue;
+        };
+        match project {
+            Some(_) if agent.mode.project() => refuse_none_given(&agent, None, Some(text))?,
+            None if agent.mode.app() => refuse_none_given(&agent, Some(text), None)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Lists the set-up projects a blank app save is checked against. Past
+/// `SAVED_PROJECTS_MAX` of them not every project could be checked, so the save is refused.
+/// Input: the save's transaction. Output: the projects, or a plain code.
+fn set_up_projects(tx: &rusqlite::Transaction<'_>) -> Result<Vec<ProjectId>, EngineError> {
+    let unavailable = |_| failure("process_unavailable");
+    let table: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_setups')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !table {
+        return Ok(Vec::new());
+    }
+    let mut statement = tx
+        .prepare("SELECT project FROM project_setups ORDER BY project LIMIT ?1")
+        .map_err(unavailable)?;
+    let ids = statement
+        .query_map([SAVED_PROJECTS_MAX + 1], |row| row.get::<_, String>(0))
+        .map_err(unavailable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(unavailable)?;
+    if ids.len() > SAVED_PROJECTS_MAX as usize {
+        return Err(failure(NONE_GIVEN));
+    }
+    Ok(ids
+        .iter()
+        .filter_map(|id| ProjectId::new(id).ok())
+        .collect())
 }
 
 /// Reads the stored instructions. Inputs: the engine root and the project folder, none for
@@ -1379,7 +1488,14 @@ fn instruction_settings(
         if written.is_err() {
             return Err(failure(versioned::STALE_CODE));
         }
+        let mode_kept = crate::instruction_files::load(&tx, project)
+            .is_ok_and(|stored| stored.mode == settings.mode);
         crate::instruction_files::save(&tx, project, settings).map_err(unavailable)?;
+        if !mode_kept {
+            let agent = crate::launch_context::agent_project(&tx, project)
+                .map_err(|_| failure("instruction_settings_unavailable"))?;
+            refuse_none_given(&agent, None, None)?;
+        }
         expected = Some((settings, read + 1));
     }
     let stored = crate::instruction_files::load(&tx, project).map_err(failure)?;
@@ -1435,6 +1551,34 @@ fn read_only(root: &Path) -> Result<rusqlite::Connection, EngineError> {
         .busy_timeout(Duration::from_secs(5))
         .map_err(|_| failure("process_unavailable"))?;
     Ok(connection)
+}
+
+/// Reads what a launch now gives every agent of the project: `agent_home::text`, the
+/// render every launch uses, for the project's mode. A launch-size refusal names its larger
+/// part in a code the Process page does not answer with, so it reads as
+/// `agent_instructions_too_large`. Inputs: the engine root and the project. Output: the
+/// text, `process_project_unknown` for a project not set up, or the code of the part the
+/// engine cannot read.
+fn given_text(root: &Path, project: &ProjectId) -> Result<String, EngineError> {
+    let connection = read_only(root)?;
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|_| failure("process_unavailable"))?;
+    let agent = crate::launch_context::agent_project(&tx, project)
+        .map_err(|_| failure("process_unavailable"))?;
+    drop(tx);
+    if agent.folder.is_none() {
+        return Err(failure("process_project_unknown"));
+    }
+    crate::agent_home::text(&agent)
+        .map(|given| given.text)
+        .map_err(|problem| {
+            if problem.0.starts_with("agent_instructions_too_large") {
+                failure("agent_instructions_too_large")
+            } else {
+                EngineError(problem.0)
+            }
+        })
 }
 
 /// Finds one project's folder from its stored setup. Inputs: the engine root and the

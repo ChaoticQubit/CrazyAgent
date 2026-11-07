@@ -31,6 +31,7 @@ const REFUSALS: Record<string, string> = {
   process_import_missing: "That file no longer exists. Pick another one.",
   process_import_unsafe: "That file isn't a plain file you own, so CrazyAgent won't read it.",
   process_import_unreadable: "That file couldn't be read. Check it, then try again.",
+  process_instructions_would_be_empty: "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first.",
   process_import_outside: "That file links outside the project folder, so it stays where it is.",
   process_import_unmovable: "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.",
   process_request_invalid: "CrazyAgent couldn't read that path. Pick the file again.",
@@ -176,6 +177,13 @@ export function importRefusal(code: string): string {
 /** Reads the CrazyAgent default process for a preview. Output: the text. */
 export function defaultProcess(): Promise<Result<string>> {
   return call<string>("desktop_default_process");
+}
+
+/** Reads the instructions a project's agents get, composed by the engine as launches compose
+ * them for the project's mode. Input: the project id. Output: the text, empty when agents get
+ * none. */
+export function loadGivenText(projectId: string): Promise<Result<string>> {
+  return call<string>("desktop_process_given", { projectId });
 }
 
 /** A skill the tags can name: its engine id, its name and its one-line description. */
