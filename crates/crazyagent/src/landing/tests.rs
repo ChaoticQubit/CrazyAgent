@@ -3787,8 +3787,9 @@ fn engine_notes(case: &Case) -> Vec<String> {
 }
 
 /// After the owner accepts a clone's set, the engine tells its agent in one Note that the
-/// set landed and to start its next work from main; the agent's own git reset there opens
-/// its next set at the landed commit, which then lands its one new line only (OS-8).
+/// set landed and to start its next work from main, naming no merge even with "Catch up
+/// with main" on, since the agent's own git keeps the setting it launched with; its git
+/// reset there opens its next set at the landed commit, which lands its one new line (OS-8).
 #[test]
 fn after_an_accept_a_clone_agent_is_told_to_restart_from_main_and_its_next_set_starts_there() {
     let mut case = Case::own_branch();
@@ -3802,7 +3803,7 @@ fn after_an_accept_a_clone_agent_is_told_to_restart_from_main_and_its_next_set_s
     assert_eq!(
         engine_notes(&case),
         [format!(
-            "Your change set landed on main as {}. If you have no newer commits, start your next work from main: git reset --hard crazyagent/main. If you do, run git merge crazyagent/main.",
+            "Your change set landed on main as {}. If you have no newer commits, start your next work from main: git reset --hard crazyagent/main.",
             &commit[..12]
         )],
         "the agent hears once that its set landed and how to start from main"
@@ -3842,7 +3843,7 @@ fn after_an_accept_a_clone_agent_is_told_to_restart_from_main_and_its_next_set_s
 /// An owner commit on main after the Accept stays out of the agent's next set once the agent
 /// resets to the newer main the engine gave its clone: the set opens at the merge base of its
 /// head and the main tip, never at the older landed commit; with "Catch up with main" off the
-/// Note names no merge (OS-8).
+/// Note reads the same (OS-8).
 #[test]
 fn an_owner_commit_after_the_accept_stays_out_of_the_set_of_an_agent_that_restarts_from_newer_main()
 {
