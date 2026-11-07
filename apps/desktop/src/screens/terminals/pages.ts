@@ -22,3 +22,22 @@ export function wallPages(nodes: GraphNode[], perWindow: PerWindow): GraphNode[]
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
+
+/** The most terminal wall windows one project opens, as the desktop bridge allows. */
+export const WALL_WINDOWS_MAX = 8;
+
+/** Reads a terminal wall window's project and page from its address, `#/terminals/<project>/<page>`.
+ * Input: the location hash. Output: the project id and the page, 1 to WALL_WINDOWS_MAX, or
+ * null for any other address. */
+export function wallRoute(hash: string): { project: string; page: number } | null {
+  void hash;
+  return null;
+}
+
+/** The hint on Open all terminals. Inputs: how many windows the team takes and the terminals
+ * per window. Output: one sentence. */
+export function openAllHint(windows: number, perWindow: PerWindow): string {
+  void windows;
+  void perWindow;
+  return "";
+}

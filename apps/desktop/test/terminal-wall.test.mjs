@@ -41,3 +41,57 @@ test("agents without a terminal take no tile, and a team with no terminal opens 
   assert.deepEqual(wallPages([node("m", "master", false)], 6), []);
   assert.deepEqual(wallPages([], 6), []);
 });
+
+const { readFileSync } = await import("node:fs");
+const { createElement } = await import("react");
+const { renderToStaticMarkup } = await import("react-dom/server");
+const pages = await import("../src/screens/terminals/pages.ts");
+const io = await import("../src/screens/team/terminal-io.ts");
+const source = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
+
+test("a wall window reads its project and page from its own address and nothing else", () => {
+  assert.deepEqual(pages.wallRoute("#/terminals/larkspur/1"), { project: "larkspur", page: 1 });
+  assert.deepEqual(pages.wallRoute("#/terminals/my%20app/8"), { project: "my app", page: 8 });
+  for (const bad of ["", "#/projects/larkspur", "#/terminals/larkspur", "#/terminals/larkspur/0", "#/terminals/larkspur/9",
+    "#/terminals/larkspur/2x", "#/terminals//1", "#/terminals/a/b/1", "#/terminals/%E0%A4%A/1"]) {
+    assert.equal(pages.wallRoute(bad), null, bad);
+  }
+});
+
+test("the Open all terminals hint names the windows and the terminals in each", () => {
+  assert.equal(pages.openAllHint(2, 6), "Opens 2 windows, 6 terminals each.");
+  assert.equal(pages.openAllHint(1, 4), "Opens 1 window of up to 4 terminals.");
+  assert.equal(pages.openAllHint(0, 9), "No agent has a terminal yet.");
+  assert.equal(pages.WALL_WINDOWS_MAX, 8);
+});
+
+test("a terminal past the view bound shows the terminal limit reached state", () => {
+  assert.match(io.endCopy("terminal_viewers_full"), /^Terminal limit reached\./u);
+});
+
+test("a wall window draws its tiles master first with Message and Stop, then free slots up to the setting", async () => {
+  const wall = await import("../src/screens/terminals/index.tsx");
+  const nodes = [{ ...node("m", "master"), agent: 9 }, { ...node("a1"), agent: 1 }];
+  const html = renderToStaticMarkup(createElement(wall.WallGrid, { projectId: "larkspur", tiles: nodes, nodes, perWindow: 4, onStop: () => {} }));
+  assert.equal(html.match(/class="tw-tile"/gu)?.length, 2);
+  assert.equal(html.match(/Free slot/gu)?.length, 2);
+  assert.ok(html.indexOf("m terminal") < html.indexOf("a1 terminal"), "the master's tile comes first");
+  assert.equal(html.match(/aria-label="Message [^"]+"/gu)?.length, 2);
+  assert.deepEqual(html.match(/aria-label="Stop [^"]+"/gu), ["aria-label=\"Stop a1\""]);
+});
+
+test("the wall boots from main.tsx on its own address, and Agents and Agent settings carry the button and the setting", () => {
+  assert.match(source("main.tsx"), /wallRoute\(window\.location\.hash\)/u);
+  assert.match(source("main.tsx"), /<TerminalWall /u);
+  assert.match(source("screens/team/index.tsx"), />Open all terminals</u);
+  assert.match(source("screens/team/index.tsx"), /openTerminalWindows\(/u);
+  assert.match(source("screens/project/agents.tsx"), /<TeamGraphView [^>]*perWindow=/u);
+  const controls = source("screens/team/controls.tsx");
+  assert.match(controls, /label="Terminals per window"/u);
+  assert.match(controls, /\{ value: "4", label: "4" \}, \{ value: "6", label: "6 \(default\)" \}, \{ value: "9", label: "9" \}/u);
+  assert.match(controls, /How many terminals Open all terminals puts in one window\. More agents open more windows\./u);
+  const api = source("api.ts");
+  for (const command of ["desktop_team_terminals_per_window", "desktop_terminals_per_window", "desktop_open_terminal_windows"]) {
+    assert.ok(api.includes(`"${command}"`), command);
+  }
+});
