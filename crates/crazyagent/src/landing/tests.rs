@@ -3739,6 +3739,173 @@ fn every_agent_clone_holds_the_landed_main_after_an_accept() {
     );
 }
 
+/// Adds a second agent's own clone beside the case's and records both agent worktrees in
+/// the team tables, agent 1 the case's and agent 2 the new one, as the runtime records
+/// them. Input: the case. Output: the second agent's workspace.
+fn second_clone(case: &Case) -> Workspace {
+    let second = case.repo.parent().unwrap().join("agent-two");
+    add_agent_clone(&case.repo, &second).unwrap();
+    let other = Workspace {
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-two".into(),
+            label: "Agent 2".into(),
+        },
+        git_dir: crate::agent_git::git_dir(&second),
+        worktree: second,
+        ..case.workspace.clone()
+    };
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    crate::team::initialize(&case.db).unwrap();
+    for (agent, workspace) in [(1, &case.workspace), (2, &other)] {
+        case.db
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![
+                    agent,
+                    workspace.project.as_str(),
+                    workspace.repository.to_str().unwrap(),
+                    workspace.worktree.to_str().unwrap(),
+                    workspace.git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    other
+}
+
+/// The commit `refs/crazyagent/main` names in an agent's own clone, read by its own git,
+/// empty when it names none. Inputs: the case and the clone. Output: the commit.
+fn clone_main(case: &Case, worktree: &Path) -> String {
+    git_in(
+        &case.home,
+        worktree,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/crazyagent/main",
+        ],
+    )
+    .trim()
+    .to_owned()
+}
+
+/// An agent that brings the landed main into its branch with `git merge crazyagent/main`
+/// has its next set recorded and landed, both when Land on names a branch checked out
+/// nowhere and when it is the owner's checked-out branch: the merged parent is the Land on
+/// tip the engine gave it, which is landed work (OS-8).
+#[test]
+fn a_merge_of_crazyagent_main_lands_whether_or_not_land_on_is_checked_out() {
+    for land_on in [Some("release"), None] {
+        let case = Case::own_branch();
+        let other = second_clone(&case);
+        let checked_out = case.tip();
+        if let Some(branch) = land_on {
+            case.owner(&["branch", branch]);
+            case.db
+                .execute(
+                    "INSERT INTO team_land_on(project,branch) VALUES (?1,?2)",
+                    rusqlite::params![case.workspace.project.as_str(), branch],
+                )
+                .unwrap();
+        }
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        case.agent_commit("Add the fourth line");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let AcceptOutcome::Landed { commit, branch } = case.accept(&id).unwrap() else {
+            panic!("the accept conflicted");
+        };
+        assert_eq!(branch, land_on.unwrap_or("main"));
+        assert_eq!(
+            case.tip() == checked_out,
+            land_on.is_some(),
+            "with Land on {land_on:?} the owner's checkout moves only when it is the Land on branch"
+        );
+        assert_eq!(clone_main(&case, &other.worktree), commit);
+        let agent = |args: &[&str]| {
+            let named = [
+                "-c",
+                "user.name=Agent",
+                "-c",
+                "user.email=agent@example.invalid",
+            ];
+            git_in(&case.home, &other.worktree, &[&named[..], args].concat())
+        };
+        write(&other.worktree.join("two.txt"), "second agent\n");
+        agent(&["add", "-A"]);
+        agent(&["commit", "-q", "-m", "Add two"]);
+        agent(&["merge", "-q", "--no-edit", "crazyagent/main"]);
+        assert_eq!(agent(&["rev-parse", "HEAD^2"]).trim(), commit);
+        let next = record_turn_end(&case.db, &other, &own_branch_turn()).map_err(|error| error.0);
+        let Ok(Some(next)) = next else {
+            panic!("with Land on {land_on:?} the merge of crazyagent/main is refused: {next:?}");
+        };
+        let AcceptOutcome::Landed { commit: landed, .. } = case.accept(&next).unwrap() else {
+            panic!("the second accept conflicted");
+        };
+        assert_eq!(
+            case.owner(&["show", &format!("{landed}:two.txt")]),
+            "second agent\n"
+        );
+        assert_eq!(
+            case.owner(&["show", &format!("{landed}:README")]),
+            "one\ntwo\nthree\nfour\n"
+        );
+    }
+}
+
+/// A `main.lock` left in an agent clone's `refs/crazyagent`, as by an engine killed between
+/// making the lock and renaming it, is cleared when main is next given, and the clone gets
+/// the landed main instead of keeping an old one forever.
+#[test]
+fn a_stale_main_lock_in_a_clone_is_cleared_when_main_is_given() {
+    let case = Case::own_branch();
+    let other = second_clone(&case);
+    let held = other.git_dir.join("refs/crazyagent");
+    std::fs::create_dir_all(&held).unwrap();
+    std::fs::write(held.join("main.lock"), "stale\n").unwrap();
+    crate::landing::refresh_main(&case.db, &case.workspace.project).unwrap();
+    assert_eq!(clone_main(&case, &other.worktree), case.tip());
+    assert!(!held.join("main.lock").exists(), "the stale lock is gone");
+}
+
+/// Giving main at an agent start waits for the hold an Accept keeps on the owner
+/// repository, so it never writes a tip read before that Accept after the Accept wrote the
+/// newer one: while the hold is kept no clone gets main, and once it is let go every clone
+/// does.
+#[test]
+fn giving_main_waits_for_the_repository_hold() {
+    let case = Case::own_branch();
+    let other = second_clone(&case);
+    let engine = case.repo.parent().unwrap().join("engine");
+    let held = flow::hold(&case.workspace.repository);
+    let (given, done) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let (home, project) = (case.home.clone(), case.workspace.project.clone());
+        scope.spawn(move || {
+            git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home));
+            let db = open(&engine).unwrap();
+            given
+                .send(crate::landing::refresh_main(&db, &project).map_err(|error| error.0))
+                .unwrap();
+        });
+        assert!(
+            done.recv_timeout(std::time::Duration::from_millis(1500))
+                .is_err(),
+            "main was given while the repository was held"
+        );
+        assert_eq!(clone_main(&case, &other.worktree), "");
+        drop(held);
+        assert_eq!(
+            done.recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap(),
+            Ok(())
+        );
+    });
+    assert_eq!(clone_main(&case, &other.worktree), case.tip());
+    assert_eq!(clone_main(&case, &case.workspace.worktree), case.tip());
+}
+
 /// The engine writes an agent clone's `refs/crazyagent/main` with no git run there and
 /// never through a link the agent planted on the way (CC-N1): a `refs/crazyagent` that
 /// links outside is refused and the folder it names stays empty; with the link gone the
