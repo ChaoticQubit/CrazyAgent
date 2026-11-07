@@ -347,6 +347,14 @@ pub trait Host: Send + Sync {
         Ok(None)
     }
 
+    /// Whether this host runs an agent's pane without the engine's pane keeper, as a native
+    /// lead's own server does, which already runs inside the lead's sandbox: no warden then
+    /// ends what the pane's agent started, so its stop is judged by the processes still found.
+    /// Takes the name. Returns the answer; false for a host that runs each pane as given.
+    fn unkept(&self, _agent: &AgentId) -> bool {
+        false
+    }
+
     /// Lists the agent terminals still running, reconnecting to the host first when needed.
     /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
     /// Returns the names in order.
@@ -430,6 +438,10 @@ impl Host for OwnServer {
 
     fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
         self.0.pane_pid(agent)
+    }
+
+    fn unkept(&self, agent: &AgentId) -> bool {
+        self.0.unkept(agent)
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
@@ -525,6 +537,10 @@ impl Host for PaneView {
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
         self.host.kill_pane(agent, &self.pane)
+    }
+
+    fn unkept(&self, agent: &AgentId) -> bool {
+        self.host.unkept(agent)
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {

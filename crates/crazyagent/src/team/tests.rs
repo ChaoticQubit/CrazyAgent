@@ -3994,7 +3994,7 @@ fn the_team_status_counts_an_agent_stored_under_a_harness_alias_as_live() {
 /// launch names nothing give none, and with the setting Off no prompt gets it.
 #[test]
 fn a_native_teammate_gets_the_task_start_reminder_on_the_first_prompt_of_each_task_while_on() {
-    const TEXT: &str = "Task start reminder: before you work on this task, call the Skill tool for each of these skills that fits this task: `crazyagent:tdd`.";
+    const TEXT: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and call the Skill tool for each one that applies: `crazyagent:tdd`.";
     let (_directory, connection) = database();
     let project = crate::protocol::ProjectId::new("tidepool").unwrap();
     connection

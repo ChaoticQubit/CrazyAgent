@@ -449,7 +449,7 @@ fn a_teammate_hook_claiming_another_pane_acts_as_its_own_pane() {
 /// after it rested.
 #[test]
 fn a_teammate_prompt_hook_adds_the_task_start_reminder_to_the_first_prompt_of_each_task() {
-    const TEXT: &str = "Task start reminder: before you work on this task, call the Skill tool for each of these skills that fits this task: `crazyagent:tdd`.";
+    const TEXT: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and call the Skill tool for each one that applies: `crazyagent:tdd`.";
     let mut team = Team::new();
     team.starts.text = Some(TEXT.into());
     let alpha = team.alpha.clone();

@@ -184,7 +184,8 @@ struct Grant {
 /// through, the only network its profile allows (S4b); `network` is the project network its
 /// profile was made for, which a narrower saved choice stops it for (CS-2); `claude_display`
 /// is the project's Claude Code terminal display, read when the agent is prepared (N-D9);
-/// `task_start` is a sub-agent's Task-start reminder from its launch context (T3-15).
+/// `task_start` is a sub-agent's or master's Task-start reminder from its launch context
+/// (T3-15, DEC-116).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -331,7 +332,8 @@ impl Launch {
     }
 
     /// Gives the Task-start reminder the launch's sub-agent gets with each task, which its
-    /// teammates get too (T3-15). Takes the launch. Returns the text, if any.
+    /// teammates get too (T3-15), and its master with each owner message (DEC-116). Takes the
+    /// launch. Returns the text, if any.
     fn task_start(&self) -> Option<String> {
         match self {
             Launch::Fresh(plan, _) => plan.task_start.clone(),
@@ -1054,12 +1056,12 @@ impl TeamRuntime {
             )
             .map_err(error)?;
         let task_start = match role {
-            AgentRole::Sub => self
+            AgentRole::Sub | AgentRole::Master => self
                 .agent_layout(&project, id)
                 .ok()
                 .and_then(|layout| self.context(&project, id, role, tools, layout).ok())
                 .and_then(|context| context.task_start(launch, tools)),
-            AgentRole::Master | AgentRole::Teammate => None,
+            AgentRole::Teammate => None,
         };
         let adoption = Adoption {
             host: host.clone(),
@@ -3119,6 +3121,14 @@ impl TeamRuntime {
             ));
         }
         prompt.push_str(&format!("{speaker}:\n{text}"));
+        if author == "owner"
+            && let Some(reminder) = &self.workers[&id].starts.text
+            && crate::coord::settings::read(&self.connection, project)?.task_start
+                == crate::coord::settings::TaskStart::On
+        {
+            prompt.push_str("\n\n");
+            prompt.push_str(reminder);
+        }
         if !delivery::intend(&self.connection, Busy::Message(message), id, &text, newest)? {
             return Ok(());
         }
@@ -3844,10 +3854,11 @@ impl TeamRuntime {
     /// holds the relay plugin: delivers its and its native teammates' messages through the
     /// mailbox, split into the lead's part and its teammates' for a native lead, applies
     /// their reported activity and waits, answers their overlap questions and, at most once
-    /// each `events::SCAN_EVERY` per project, marks read receipts from their transcripts. A
-    /// relay that fails is skipped until the next tick, like the agents' team calls, and so
-    /// is one whose agent's stored mode cannot be read, never served in the single layout a
-    /// native lead's teammates could write into. Takes the project.
+    /// each `events::SCAN_EVERY` per project, marks read receipts from their transcripts,
+    /// and those of each running Codex agent from its rollouts. A relay or receipt read that
+    /// fails is skipped until the next tick, like the agents' team calls, and so is a relay
+    /// whose agent's stored mode cannot be read, never served in the single layout a native
+    /// lead's teammates could write into. Takes the project.
     fn serve_relays(&mut self, project: &ProjectId) {
         let now = Instant::now();
         let receipts = self
@@ -3858,20 +3869,25 @@ impl TeamRuntime {
             self.receipts_next
                 .insert(project.clone(), now + super::events::SCAN_EVERY);
         }
-        let relays: Vec<i64> = self
+        let served: Vec<(i64, Option<crate::coord::settings::HarnessKind>)> = self
             .workers
             .iter()
-            .filter(|(_, worker)| {
-                &worker.project == project
-                    && !worker.stopping
-                    && crate::coord::settings::HarnessKind::from_harness(&worker.harness)
-                        == Some(crate::coord::settings::HarnessKind::ClaudeCode)
+            .filter(|(_, worker)| &worker.project == project && !worker.stopping)
+            .map(|(id, worker)| {
+                (
+                    *id,
+                    crate::coord::settings::HarnessKind::from_harness(&worker.harness),
+                )
             })
-            .map(|(id, _)| *id)
             .collect();
-        for id in relays {
+        for (id, kind) in served {
             let home = agent_home(&self.state, id);
-            if !crate::coord::relay::installed(&home) {
+            if receipts && kind == Some(crate::coord::settings::HarnessKind::Codex) {
+                let _ = crate::coord::relay::codex_receipts(&self.connection, id, &home, now_ms());
+            }
+            if kind != Some(crate::coord::settings::HarnessKind::ClaudeCode)
+                || !crate::coord::relay::installed(&home)
+            {
                 continue;
             }
             let layout = match self.stored_mode(id) {
@@ -3966,11 +3982,13 @@ impl TeamRuntime {
     /// and under the Next task choice the owner's instruction edit first, once, cut to the
     /// room the input limit leaves beside the message; when not even the cut block fits, a
     /// team note says the edit waits for a later message, once per edited text until it is
-    /// delivered (DEC-111 QR1). While the master's app does not read keys the message
-    /// waits, and past `READY_WAIT` one note and the problem line say so (F2); a typed
-    /// message takes that line down, also one an earlier engine stored. Takes the project.
-    /// Returns any SQLite failure; a message that cannot be typed is failed with a team
-    /// note, one that must wait stays pending.
+    /// delivered (DEC-111 QR1). An owner message ends with the master's Task-start reminder
+    /// while the setting is On and it still fits the input limit beside the message and the
+    /// edit, which it never cuts (DEC-116, OP4-L1). While the master's app
+    /// does not read keys the message waits, and past `READY_WAIT` one note and the problem
+    /// line say so (F2); a typed message takes that line down, also one an earlier engine
+    /// stored. Takes the project. Returns any SQLite failure; a message that cannot be typed
+    /// is failed with a team note, one that must wait stays pending.
     fn feed_live(&mut self, project: &ProjectId) -> Result<(), EngineError> {
         let Some(id) = self.master(project) else {
             return Ok(());
@@ -4015,10 +4033,19 @@ impl TeamRuntime {
             (Some(edit), None) => Some(edit.text_hash()),
             _ => None,
         };
-        let (edit, typed) = match block {
+        let (edit, mut typed) = match block {
             Some(block) => (edit, format!("{block}{}", typed.trim_start())),
             None => (None, typed),
         };
+        if author == "owner"
+            && let Some(reminder) = &self.workers[&id].starts.text
+            && typed.len() + "\n\n".len() + reminder.len() <= super::master::INPUT_TEXT_MAX
+            && crate::coord::settings::read(&self.connection, project)?.task_start
+                == crate::coord::settings::TaskStart::On
+        {
+            typed.push_str("\n\n");
+            typed.push_str(reminder);
+        }
         assert!(edit.is_none() || super::master::typable(&typed));
         let state = match super::master::master_input_when(
             &self.connection,
@@ -6609,8 +6636,8 @@ impl TeamRuntime {
         }
         let context = self.context(&stored.project_id, id, role, tools, layout)?;
         let task_start = match role {
-            AgentRole::Sub => context.task_start(launch, tools),
-            AgentRole::Master | AgentRole::Teammate => None,
+            AgentRole::Sub | AgentRole::Master => context.task_start(launch, tools),
+            AgentRole::Teammate => None,
         };
         let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?;
@@ -8581,8 +8608,9 @@ fn live_serve(
 type Held = (AgentCredential, NativeProfileUse);
 
 /// Settles what an agent's harness stop leaves behind: a clean stop drops the credential
-/// copy and lease; a stop no warden confirmed keeps both for the engine's life; a Full
-/// access stop that left processes running, or could not list them, keeps both until a
+/// copy and lease; a stop no warden confirmed keeps both for the engine's life; a stop at
+/// Full access, or of a pane run without the keeper, that left processes running, or could
+/// not list them, keeps both until a
 /// listing shows none running (see [`crate::harnesses::leftovers::Leftovers::hold`]), with
 /// the copy's keeper stopped so no renewed token reaches it. Inputs: the stop's outcome and what the
 /// harness held, if anything. Output: none for a clean stop, or the plain problem, naming

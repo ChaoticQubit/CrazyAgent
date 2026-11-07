@@ -6,6 +6,7 @@ use super::{
     VIEWERS_MAX, end_except, failure, pane_id_valid,
 };
 use crate::harnesses::interactive::InteractiveCommand;
+use crate::harnesses::launch::Ending;
 pub use servers::Servers;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
@@ -1047,6 +1048,8 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
 /// server (see `Tmux::lead_environment`) with `pane_env` set over it in the lead's pane only.
 /// The lead's window becomes the session's current one, since tmux puts a split the lead's
 /// app runs without a target into the current window, which would otherwise be the holder.
+/// A command the engine put under its pane keeper is taken back out of it first
+/// (`crate::sandbox::unkept_pane`): the keeper cannot run inside the server's sandbox.
 /// Takes the agent, the command, the server's profile and those variables. Returns the line,
 /// or `terminal_command_invalid` for any other command or a variable name not plain.
 fn confined_line(
@@ -1057,17 +1060,22 @@ fn confined_line(
 ) -> Result<String, HostError> {
     let invalid = || failure("terminal_command_invalid");
     let cwd = checked(command)?;
+    #[cfg(target_os = "macos")]
+    let unkept = crate::sandbox::unkept_pane(&command.argv);
+    #[cfg(not(target_os = "macos"))]
+    let unkept: Option<Vec<String>> = None;
+    let argv = unkept.as_deref().unwrap_or(&command.argv);
     let profile = profile.to_str().ok_or_else(invalid)?;
     let confined = [crate::sandbox::SANDBOX_EXEC, "-f", profile];
-    if command.argv.len() <= confined.len()
-        || command.argv[..confined.len()]
+    if argv.len() <= confined.len()
+        || argv[..confined.len()]
             .iter()
             .zip(confined)
             .any(|(arg, wanted)| arg != wanted)
     {
         return Err(invalid());
     }
-    let program = &command.argv[confined.len()..];
+    let program = &argv[confined.len()..];
     let first = &program[0];
     if first.is_empty() || first.starts_with('-') || first.contains('=') {
         return Err(invalid());
@@ -1237,8 +1245,8 @@ impl Tmux {
     /// Ends groups on a thread of their own, so a caller such as the team tick never waits
     /// out the hangup grace and stops in a row share one grace; `close` waits for every
     /// reaper. Past `REAPERS_MAX`, or when no thread starts, the caller waits instead.
-    /// Takes the groups.
-    fn reap(&self, groups: Vec<rustix::process::Pid>) {
+    /// Takes the holds on the groups, which the reaper gets once its thread runs.
+    fn reap(&self, groups: Vec<Ending>) {
         if groups.is_empty() {
             return;
         }
@@ -1250,13 +1258,21 @@ impl Tmux {
         if reapers.len() >= REAPERS_MAX {
             let _ = reapers.remove(0).join();
         }
-        let kept = groups.clone();
+        let (hand, take) = std::sync::mpsc::channel::<Vec<Ending>>();
         match std::thread::Builder::new()
             .name("tmux-reaper".into())
-            .spawn(move || end_groups(groups))
-        {
-            Ok(reaper) => reapers.push(reaper),
-            Err(_) => end_groups(kept),
+            .spawn(move || {
+                if let Ok(groups) = take.recv() {
+                    end_groups(groups);
+                }
+            }) {
+            Ok(reaper) => {
+                reapers.push(reaper);
+                if let Err(std::sync::mpsc::SendError(groups)) = hand.send(groups) {
+                    end_groups(groups);
+                }
+            }
+            Err(_) => end_groups(groups),
         }
         assert!(reapers.len() <= REAPERS_MAX);
     }
@@ -1306,19 +1322,22 @@ impl Tmux {
 /// The process groups of open panes, read before they close: tmux starts each pane's first
 /// process as the leader of its own session and group, where the processes it starts in the
 /// background stay. A pane whose first process ended or leads no group of its own gives
-/// none, so a stop never signals a group it did not read from its pane. Takes the panes.
-/// Returns their groups.
-fn pane_groups(panes: &[PaneInfo]) -> Vec<rustix::process::Pid> {
+/// none, so a stop never signals a group it did not read from its pane. A group another
+/// path holds, as the session stop that ends this pane, is left to that path, so one group
+/// is signalled from one path only (CB-2 one signal). Takes the panes. Returns the holds on
+/// their groups.
+fn pane_groups(panes: &[PaneInfo]) -> Vec<Ending> {
     assert!(panes.len() <= PANES_LISTED_MAX);
     let own = rustix::process::getpgrp();
     panes
         .iter()
         .filter(|pane| !pane.dead)
-        .filter_map(|pane| rustix::process::Pid::from_raw(i32::try_from(pane.pid).ok()?))
-        .filter(|leader| {
-            leader.as_raw_nonzero().get() > 1
-                && *leader != own
-                && rustix::process::getpgid(Some(*leader)) == Ok(*leader)
+        .filter_map(|pane| {
+            let leader = rustix::process::Pid::from_raw(i32::try_from(pane.pid).ok()?)?;
+            let leads = leader.as_raw_nonzero().get() > 1
+                && leader != own
+                && rustix::process::getpgid(Some(leader)) == Ok(leader);
+            if leads { Ending::claim(pane.pid) } else { None }
         })
         .collect()
 }
@@ -1327,9 +1346,10 @@ fn pane_groups(panes: &[PaneInfo]) -> Vec<rustix::process::Pid> {
 /// then kills what is left until no group answers, for at most `GROUP_KILL_WAIT`. macOS
 /// answers EPERM for a group whose last member it just reaped, so only ESRCH ends a group,
 /// and a group that answered ESRCH once is never tested or signalled again: its number may
-/// lead a new group by then (r1 SG-L1). Takes the groups `pane_groups` read before their
-/// panes closed.
-fn end_groups(groups: Vec<rustix::process::Pid>) {
+/// lead a new group by then (r1 SG-L1); its hold is marked gone and dropped then, so the
+/// number stays refused to later paths (CB-2 r1 F1). Takes the holds `pane_groups` took
+/// before their panes closed.
+fn end_groups(groups: Vec<Ending>) {
     end_groups_with(
         groups,
         |group| rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH),
@@ -1340,16 +1360,16 @@ fn end_groups(groups: Vec<rustix::process::Pid>) {
 }
 
 /// Ends the groups as `end_groups` describes, through `left`, which tells whether a group
-/// still answers, and `kill`, which sends it KILL. Takes the groups and both calls.
+/// still answers, and `kill`, which sends it KILL. Takes the holds and both calls.
 fn end_groups_with(
-    groups: Vec<rustix::process::Pid>,
+    groups: Vec<Ending>,
     mut left: impl FnMut(rustix::process::Pid) -> bool,
     mut kill: impl FnMut(rustix::process::Pid),
 ) {
     let mut groups = groups;
     let hung_up = Instant::now() + HANGUP_GRACE;
     loop {
-        groups.retain(|group| left(*group));
+        keep_left(&mut groups, &mut left);
         if groups.is_empty() || Instant::now() >= hung_up {
             break;
         }
@@ -1358,11 +1378,24 @@ fn end_groups_with(
     let killed = Instant::now() + GROUP_KILL_WAIT;
     while !groups.is_empty() && Instant::now() < killed {
         for group in &groups {
-            kill(*group);
+            kill(group.pid());
         }
         std::thread::sleep(Duration::from_millis(10));
-        groups.retain(|group| left(*group));
+        keep_left(&mut groups, &mut left);
     }
+}
+
+/// Keeps the holds whose group still answers `left` and marks every other one gone, so
+/// its number stays refused to later paths once dropped (CB-2 r1 F1). Takes the holds and
+/// the test.
+fn keep_left(groups: &mut Vec<Ending>, left: &mut impl FnMut(rustix::process::Pid) -> bool) {
+    groups.retain_mut(|group| {
+        let answers = left(group.pid());
+        if !answers {
+            group.gone();
+        }
+        answers
+    });
 }
 
 /// Reads an attach's pane line: its ids, cursor, size, input modes, history size, and its
@@ -1966,6 +1999,10 @@ impl Host for Tmux {
             &format!("kill-pane -t {pane}"),
         )
     }
+    fn unkept(&self, _agent: &AgentId) -> bool {
+        self.confined.is_some()
+    }
+
     fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
         let pane = if self.confined.is_some() {
             self.own_pane(agent)?

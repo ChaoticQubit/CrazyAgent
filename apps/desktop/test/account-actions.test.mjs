@@ -1,5 +1,6 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -113,4 +114,17 @@ test("rows carry an actions menu and a selection offers Delete selected and Canc
     onCancelSelected: forbidden, initialSelection: ["a"] }));
   assert.doesNotMatch(idle, />Cancel sign-in<\/button>/);
   assert.match(idle, />Delete selected<\/button>/);
+});
+
+test("Sign in and Try again start from a fresh sign-in record, since the open drawer's ticket only reads or cancels its own attempt once other reads ran", () => {
+  const source = readFileSync(new URL("../src/screens/settings/sign-in.tsx", import.meta.url), "utf8");
+  assert.match(source, /const start = useCallback\(async \(method: NativeAuthMethod\) => \{\s*await open\(\);\s*await act\(method\);\s*\}, \[act, open\]\);/);
+});
+
+test("a sign-in started in the drawer reloads the account list, so its row reads Signing in and the page polls it", () => {
+  const source = readFileSync(new URL("../src/screens/settings/account-drawer.tsx", import.meta.url), "utf8");
+  assert.match(source, /function SignInAgain\(\{ account, onSignedIn, onStarted \}/);
+  assert.match(source, /const attempt = signInRunning\(signIn\.state\) \? signIn\.state\?\.operation\?\.operation_id : undefined;/);
+  assert.match(source, /if \(!attempt \|\| started\.current === attempt\) return;\s*started\.current = attempt;\s*onStarted\(\);/);
+  assert.match(source, /<SignInAgain account=\{account\} onStarted=\{\(\) => onChanged\(\)\}/);
 });

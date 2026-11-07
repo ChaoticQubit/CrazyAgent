@@ -52,3 +52,25 @@ fn an_agent_socket_is_named_by_its_canonical_control_path() {
     assert_eq!(super::socket(&linked), Some(socket));
     assert_eq!(super::socket(&root.path().join("missing")), None);
 }
+
+/// b19 P2 r2: the bridge keeps the turn id the app-server named only when it is plain,
+/// printable ASCII of at most `TURN_ID_BYTES_MAX` bytes, as 0.164's UUIDs are; a missing,
+/// empty, longer or unprintable id is kept as none, so the delivery names no turn.
+#[test]
+fn a_turn_id_is_kept_only_when_it_is_short_plain_text() {
+    let uuid = "01a18507-26f8-7de2-8fbd-bcc304c9daf2";
+    assert_eq!(turn_id(Some(uuid)), Some(uuid.to_owned()));
+    let longest = "t".repeat(TURN_ID_BYTES_MAX);
+    assert_eq!(turn_id(Some(&longest)), Some(longest.clone()));
+    let longer = "t".repeat(TURN_ID_BYTES_MAX + 1);
+    for id in [
+        None,
+        Some(""),
+        Some(longer.as_str()),
+        Some("turn 1"),
+        Some("turn\n"),
+        Some("tür"),
+    ] {
+        assert_eq!(turn_id(id), None, "{id:?}");
+    }
+}

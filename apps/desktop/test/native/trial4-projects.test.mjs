@@ -156,3 +156,18 @@ test("a could not start message is found in any of its spellings", () => {
   assert.equal(couldNotStart("It couldn’t start"), "It couldn’t start");
   assert.equal(couldNotStart("Build the code graph\nDone\nMap the project\nWorking"), null);
 });
+
+test("the Move anyway checks N-D37 and N-D36 have the trial 4 shape and say not run before they make a folder", async () => {
+  for (const [file, id] of [["n-d37-add-folder-move-anyway.mjs", "N-D37"], ["n-d36-add-folder-anyway-use-here.mjs", "N-D36"]]) {
+    const { checks } = await import(`./trial4/${file}`);
+    assert(Array.isArray(checks) && checks.length === 1, `${file} exports one check`);
+    const [check] = checks;
+    assert.equal(check.id, id);
+    assert.deepEqual(check.op, ["OP-19"]);
+    assert.equal(check.after, "end");
+    assert(check.why.startsWith("owner: "), `${id} has an owner why`);
+    await assert.rejects(check.run({}), { message: /^not run: needs kit\.chooseFolder\(path\)/ }, id);
+  }
+  const { scratchBase } = await import("./trial4/n-d37-add-folder-move-anyway.mjs");
+  assert.throws(() => scratchBase("/Users/owner/CrazyAgent"), /^Error: not run: needs TRIAL_ADD_SCRATCH/);
+});

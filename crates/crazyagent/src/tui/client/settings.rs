@@ -347,7 +347,13 @@ impl SettingsEvent {
     /// The failure event for a job that reached no trusted connection.
     /// Input: the job. Output: its event carrying the plain problem code.
     pub(in crate::tui) fn unavailable(job: &SettingsJob) -> Self {
-        let problem = "trusted_connection_unavailable".to_owned();
+        Self::failed(job, "trusted_connection_unavailable")
+    }
+
+    /// The failure event for a job that failed before it reached the engine.
+    /// Inputs: the job and the problem code. Output: its event carrying that code.
+    pub(in crate::tui) fn failed(job: &SettingsJob, code: &str) -> Self {
+        let problem = code.to_owned();
         match job {
             SettingsJob::Accounts(_) => Self::Accounts(Err(problem)),
             SettingsJob::AllAccounts => Self::AllAccounts(Err(problem)),

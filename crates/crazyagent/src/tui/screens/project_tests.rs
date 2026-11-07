@@ -768,6 +768,129 @@ fn report_paths_map_back_to_their_research() {
 }
 
 #[test]
+fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
+    let families = [
+        "agent_access_",
+        "agent_policy_",
+        "agent_network_",
+        "agent_toolchain_",
+        "agent_project_",
+    ];
+    let mut missing = Vec::new();
+    for source in [
+        include_str!("../../sandbox/policy.rs"),
+        include_str!("../../project_setup.rs"),
+        include_str!("../../storage.rs"),
+    ] {
+        for code in source.split('"').filter(|text| {
+            families.iter().any(|family| text.starts_with(family))
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        }) {
+            if plain_problem(code).contains("(code: ") && !missing.contains(&code) {
+                missing.push(code);
+            }
+        }
+    }
+    assert_eq!(
+        missing,
+        Vec::<&str>::new(),
+        "every access, policy, network, toolchain and project refusal has a sentence"
+    );
+    for (code, sentence) in [
+        (
+            "agent_access_lowered",
+            "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
+        ),
+        (
+            "agent_network_narrowed",
+            "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
+        ),
+        (
+            "agent_toolchain_lowered",
+            "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
+        ),
+        (
+            "agent_project_unreadable",
+            "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
+        ),
+    ] {
+        assert_eq!(
+            plain_problem(code),
+            sentence,
+            "{code} reads as on the desktop"
+        );
+    }
+}
+
+/// TN-L1: every cause a process stops for under a narrowed policy reads its own sentence,
+/// word for word the same in the TUI and in the desktop's copy table. The walk follows one
+/// match with no catch-all arm, whose arm for each Narrowing names its code and the next
+/// Narrowing, so a new one fails to compile here until it has an arm, and that arm puts it
+/// on the walk, where its sentence is checked, whatever its code's family and wherever that
+/// code is defined (TN-L1 r1).
+#[test]
+fn every_narrowing_stop_reads_the_same_sentence_in_both_uis() {
+    use crate::sandbox::policy::Narrowing;
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/desktop/src/api.ts"
+    ))
+    .unwrap();
+    let start = source
+        .find("const COPY: Record<string, string> = {")
+        .unwrap();
+    let body = &source[start..];
+    let body = &body[..body.find("\n};").unwrap()];
+    let desktop: std::collections::BTreeMap<&str, &str> = body
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (code, sentence) = line.trim().split_once(": ")?;
+            Some((
+                code,
+                sentence
+                    .strip_suffix(',')?
+                    .strip_prefix('"')?
+                    .strip_suffix('"')?,
+            ))
+        })
+        .collect();
+    let mut walked = Vec::new();
+    let mut next = Some(Narrowing::Access);
+    while let Some(narrowing) = next {
+        assert!(
+            !walked.contains(&narrowing),
+            "the walk reaches {narrowing:?} once"
+        );
+        walked.push(narrowing);
+        let (code, after) = match narrowing {
+            Narrowing::Access => ("agent_access_lowered", Some(Narrowing::Network)),
+            Narrowing::Network => ("agent_network_narrowed", Some(Narrowing::TurnedOff)),
+            Narrowing::TurnedOff => ("agent_toolchain_lowered", Some(Narrowing::NotAllowed)),
+            Narrowing::NotAllowed => ("agent_toolchain_lowered", Some(Narrowing::PolicyUnreadable)),
+            Narrowing::PolicyUnreadable => {
+                ("agent_policy_unreadable", Some(Narrowing::FolderUnreadable))
+            }
+            Narrowing::FolderUnreadable => ("agent_project_unreadable", None),
+        };
+        next = after;
+        assert_eq!(narrowing.code(), code, "{narrowing:?} reports its code");
+        let sentence = plain_problem(code);
+        assert!(
+            !sentence.contains("(code: "),
+            "{code} has its own sentence in the TUI: {sentence}"
+        );
+        assert_eq!(
+            desktop.get(code).copied(),
+            Some(sentence.as_str()),
+            "{code} reads the same on the desktop"
+        );
+    }
+}
+
+#[test]
 fn a_memory_stands_for_itself_by_its_first_line_of_prose() {
     use super::project_view::memory_quote;
     assert_eq!(

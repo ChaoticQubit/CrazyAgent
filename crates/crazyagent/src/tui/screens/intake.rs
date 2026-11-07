@@ -10,6 +10,78 @@ pub(in crate::tui) const NOT_READY: &str = "Not ready yet.";
 /// Bytes above which copying a folder gets a warning before it starts.
 pub(in crate::tui) const COPY_WARN_BYTES: u64 = 1 << 30;
 
+/// One warning shown before a Move anyway or Copy anyway, in the owner's words. The texts
+/// match the desktop's `ADD_WARNINGS` map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum AddWarning {
+    CloseApps,
+    OldPlace,
+    AcrossDisks,
+    SameDisk,
+    CopyAll,
+    Large,
+    Unmeasured,
+    TooMany,
+    Unreadable,
+    UnreadableCopy,
+    Worktrees,
+    LinkedWorktree,
+    Submodule,
+    GitDataUnread,
+    LinkedCheckout,
+    NoGit,
+}
+
+impl AddWarning {
+    /// The sentence for this warning. Takes the warning. Returns its fixed text.
+    pub(in crate::tui) fn text(self) -> &'static str {
+        match self {
+            Self::CloseApps => {
+                "Close editors, terminals and apps that use this folder first. Files saved while it moves can be lost."
+            }
+            Self::OldPlace => {
+                "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working."
+            }
+            Self::AcrossDisks => {
+                "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left."
+            }
+            Self::SameDisk => "This is a rename on the same disk; it is quick.",
+            Self::CopyAll => {
+                "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete."
+            }
+            Self::Large => "This folder is very large.",
+            Self::Unmeasured => "CrazyAgent couldn't measure it.",
+            Self::TooMany => {
+                "The folder is deeper or bigger than CrazyAgent checks, so the copy check can take a long time."
+            }
+            Self::Unreadable => {
+                "Some files can't be read. They can't be copied, so a move across disks keeps the original in place and fails rather than leave them behind."
+            }
+            Self::UnreadableCopy => {
+                "Some files can't be read. They can't be copied, so the copy fails rather than leave them behind."
+            }
+            Self::Worktrees => {
+                "Git worktrees linked to this folder stop working until you run git worktree repair in each. Their files stay, but git there fails until repaired."
+            }
+            Self::LinkedWorktree => {
+                "This folder is a git worktree of another repository, and that repository keeps this folder's staged changes and branch link. Right after the move, go to that repository and run git worktree repair with the moved folder's path. Until then git here may fail or seem to work, and a git worktree prune or git gc there drops those staged changes and the branch link for good; commits here that are on no branch can be lost too. The files stay."
+            }
+            Self::Submodule => {
+                "This folder is a submodule of another repository. After the move, git here fails and the parent repository no longer finds it. Its git data stays in the parent repository, so moving the folder back brings git here back."
+            }
+            Self::GitDataUnread => {
+                "CrazyAgent could not read this folder's git data, so it cannot tell what a move breaks."
+            }
+            Self::LinkedCheckout => {
+                "The copy keeps this folder's link to another repository's git data. Where that link still reaches it, the copy and this folder share one index and current branch: switching branches, staging or resetting in either one changes the other, and uncommitted work in either can be lost. Where it does not, git fails in the copy."
+            }
+            Self::NoGit => {
+                "This folder has no git history. Agents' changes can't be shown or undone with git until you run git init here."
+            }
+        }
+    }
+}
+
 /// Sends one intake query to the engine.
 /// Takes the context and the query.
 /// Returns nothing; the reply arrives as an `OwnerEvent::Intake` holding the same query.
@@ -77,6 +149,9 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         }
         "home_copy_special_file" => "The folder holds a device or pipe file that can't be copied.",
         "home_copy_too_large" => "The folder has too many files or levels to copy.",
+        "home_override_invalid" => {
+            "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again."
+        }
         "home_copy_failed" | "home_move_failed" => {
             "The folder could not be added. Nothing was removed. Try again."
         }
@@ -179,6 +254,75 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tui_add_warnings_match_the_desktop_map_word_for_word() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/src/api-intake.ts"
+        ))
+        .unwrap();
+        let start = source.find("export const ADD_WARNINGS = {").unwrap();
+        let body = &source[start..];
+        let body = &body[..body.find("\n} as const;").unwrap()];
+        let mut desktop: std::collections::BTreeMap<&str, &str> = body
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let (key, text) = line.trim().split_once(": ").unwrap();
+                let text = text.strip_suffix(',').unwrap_or(text);
+                (
+                    key,
+                    text.strip_prefix('"').unwrap().strip_suffix('"').unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(desktop.len(), 17, "{desktop:#?}");
+        assert!(
+            desktop.remove("git_unread").is_some(),
+            "the TUI reads git itself, so only the desktop says it could not"
+        );
+        let key = |warning: AddWarning| match warning {
+            AddWarning::CloseApps => "close_apps",
+            AddWarning::OldPlace => "old_place",
+            AddWarning::AcrossDisks => "across_disks",
+            AddWarning::SameDisk => "same_disk",
+            AddWarning::CopyAll => "copy_all",
+            AddWarning::Large => "large",
+            AddWarning::Unmeasured => "unmeasured",
+            AddWarning::TooMany => "too_many",
+            AddWarning::Unreadable => "unreadable",
+            AddWarning::UnreadableCopy => "unreadable_copy",
+            AddWarning::Worktrees => "worktrees",
+            AddWarning::LinkedWorktree => "linked_worktree",
+            AddWarning::Submodule => "submodule",
+            AddWarning::GitDataUnread => "git_data_unread",
+            AddWarning::LinkedCheckout => "linked_checkout",
+            AddWarning::NoGit => "no_git",
+        };
+        let tui: std::collections::BTreeMap<&str, &str> = [
+            AddWarning::CloseApps,
+            AddWarning::OldPlace,
+            AddWarning::AcrossDisks,
+            AddWarning::SameDisk,
+            AddWarning::CopyAll,
+            AddWarning::Large,
+            AddWarning::Unmeasured,
+            AddWarning::TooMany,
+            AddWarning::Unreadable,
+            AddWarning::UnreadableCopy,
+            AddWarning::Worktrees,
+            AddWarning::LinkedWorktree,
+            AddWarning::Submodule,
+            AddWarning::GitDataUnread,
+            AddWarning::LinkedCheckout,
+            AddWarning::NoGit,
+        ]
+        .into_iter()
+        .map(|warning| (key(warning), warning.text()))
+        .collect();
+        assert_eq!(tui, desktop);
+    }
 
     #[test]
     fn a_known_problem_reads_as_a_plain_sentence_and_an_unknown_one_names_its_code() {

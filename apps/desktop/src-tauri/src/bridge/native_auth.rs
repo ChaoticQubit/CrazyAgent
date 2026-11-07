@@ -97,12 +97,13 @@ impl NativeBridge {
             method,
         };
         self.retain_auth(Original::Start(request.clone()), connection);
+        self.bind_attempt(&request.request_id);
         let result = self.controller()?.start_native_auth(request).await;
         self.finish_auth(ticket, result)
     }
 
     pub async fn read_native_auth(&mut self, ticket: &str) -> Result<NativeAuthView, BridgeError> {
-        let (scope, connection) = self.native_auth_selection(ticket)?;
+        let (scope, connection) = self.held_auth_selection(ticket)?;
         let (operation_id, scope) = self.auth_operation(&scope, &connection)?;
         let request = NativeAuthQuery {
             request_id: self.auth_request_id()?,
@@ -117,7 +118,7 @@ impl NativeBridge {
         &mut self,
         ticket: &str,
     ) -> Result<NativeAuthView, BridgeError> {
-        let (scope, connection) = self.native_auth_selection(ticket)?;
+        let (scope, connection) = self.held_auth_selection(ticket)?;
         let (operation_id, scope) = self.auth_operation(&scope, &connection)?;
         let request = NativeAuthCancel {
             request_id: self.auth_request_id()?,
@@ -139,6 +140,7 @@ impl NativeBridge {
             scope,
         };
         self.retain_auth(Original::Logout(request.clone()), connection);
+        self.bind_attempt(&request.request_id);
         let result = self.controller()?.logout_native_auth(request).await;
         self.finish_auth(ticket, result)
     }
@@ -193,6 +195,19 @@ impl NativeBridge {
                 value.unresolved && (!value.running || value.uncertain || self.auth_moved(value))
             })
             .map(|value| &value.connection)
+    }
+
+    /// The id of the sign-in this bridge holds for this connection, if any: the same connection
+    /// id and profile. Input: the connection as a selection read it. Output: the attempt id.
+    pub(super) fn held_attempt(&self, connection: &ModelConnection) -> Option<RequestId> {
+        self.native_auth
+            .as_ref()
+            .filter(|value| {
+                value.unresolved
+                    && value.connection.id == connection.id
+                    && value.connection.auth == connection.auth
+            })
+            .map(|value| value.original.id().clone())
     }
 
     /// Names the connection of the sign-in the bridge holds, running or stuck, if any.

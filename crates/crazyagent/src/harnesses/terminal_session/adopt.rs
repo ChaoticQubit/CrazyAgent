@@ -279,6 +279,7 @@ impl TerminalSession {
             }
             replay(&mut reader, &limits, &mut events)?;
         }
+        let unkept = host.unkept(&agent);
         Ok(Self {
             host,
             agent,
@@ -306,6 +307,7 @@ impl TerminalSession {
                 record.access,
                 Some(AgentAccess::Sandboxed | AgentAccess::OwnBranch)
             ),
+            unkept,
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: context,
