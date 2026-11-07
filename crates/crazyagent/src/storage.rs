@@ -186,9 +186,7 @@ pub(crate) enum Job {
     DeletePlan(
         Admission,
         Box<OwnerRequest>,
-        oneshot::Sender<
-            Result<Result<(crate::projects_home::DeletePlan, Vec<i64>), String>, EngineError>,
-        >,
+        oneshot::Sender<Result<projects_home::DeletePlanned, EngineError>>,
     ),
     DeleteRecord(
         Admission,
@@ -2179,7 +2177,7 @@ enum Effect<'a> {
 pub(crate) fn delete_target(
     db: &mut Connection,
     project: &ProjectId,
-) -> Result<Option<(String, Vec<std::path::PathBuf>, Option<std::path::PathBuf>)>, EngineError> {
+) -> Result<Option<projects_home::DeleteTarget>, EngineError> {
     let tx = db.transaction().map_err(error)?;
     projects_home::delete_target(&tx, project)
 }

@@ -265,6 +265,12 @@ pub(super) fn add_plan(
     )
 }
 
+/// What a Delete everything would take: the project's name, its folders and the projects home.
+pub(crate) type DeleteTarget = (String, Vec<PathBuf>, Option<PathBuf>);
+
+/// A checked Delete everything: the plan with the project's research jobs, or the refusal code.
+pub(crate) type DeletePlanned = Result<(home::DeletePlan, Vec<i64>), String>;
+
 /// What a Delete everything of a project would take, read in one transaction: the project's
 /// name, its folder followed by every repository it declares, and the canonical projects
 /// home. Inputs: the transaction and the project. Output: None for an unknown project, else
@@ -272,7 +278,7 @@ pub(super) fn add_plan(
 pub(crate) fn delete_target(
     tx: &Transaction<'_>,
     project: &ProjectId,
-) -> Result<Option<(String, Vec<PathBuf>, Option<PathBuf>)>, EngineError> {
+) -> Result<Option<DeleteTarget>, EngineError> {
     let Some(found) = guarded(tx)?
         .into_iter()
         .find(|registered| &registered.project_id == project)
@@ -298,7 +304,7 @@ pub(super) fn delete_plan(
     path: &Path,
     a: &Admission,
     request: &OwnerRequest,
-) -> Result<Result<(home::DeletePlan, Vec<i64>), String>, EngineError> {
+) -> Result<DeletePlanned, EngineError> {
     let OwnerOperation::Apply {
         mutation: OwnerMutation::DeleteProject { project_id, name },
     } = &request.operation
