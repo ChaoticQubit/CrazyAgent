@@ -17,9 +17,9 @@ const GIT = "/usr/bin/git";
 const MASTER = "master-1";
 const MASTER_LABEL = "Master";
 const PROMPT = "Fix the seed service conflict";
-const SETTING = "When the master resolves conflicts";
-const MERGES = "Merge into main itself";
-const WAITS = "Wait for my Accept";
+const SETTING = "Under Full access, merging into main";
+const MERGES = "Master resolves conflicts and merges into main itself Default";
+const WAITS = "Master resolves conflicts, then waits for my accept";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 
 /** Runs git in a folder with no system or user config. Inputs: the folder and git's
@@ -159,8 +159,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
  * waits until the engine keeps it and the tab shows it picked. Inputs: the case's handles,
  * the choice's label and the engine's name for it. Output: none. */
 async function choose({ me, page, status }, label, mode) {
-  await me.click(label, `[role=radiogroup][aria-label="${SETTING}"] [role=radio]`);
-  const picked = `document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"] [role=radio][aria-checked=true]`)})?.innerText.trim() ?? null`;
+  await me.click(label, `[role=radiogroup][aria-label="${SETTING}"] .radio-card .title`);
+  const picked = `document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"] .radio-card:has(input:checked) .title`)})?.innerText.replace(/\\s+/g, " ").trim() ?? null`;
   for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
     const held = (await status()).master_lands;
     if (held === mode && (await page.evaluate(picked)) === label) return;

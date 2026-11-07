@@ -16,20 +16,23 @@ const harness = (name, role) => ({ harness: name, role, agents_max: 2, tools: tr
 const STATUS = {
   project_id: "alpha", keep_warm: false, idle_stop_secs: 600, paused: false, min_agents: 1, max_agents: 3, settings_version: 1, master_lands: "merges",
   harnesses: [harness("codex", "master"), harness("codex", "sub"), harness("claude", "sub")], agents: [], tasks: [], messages: [], plan: [],
+  events: { recent: [], waiting: [], notifications: [], paused: false, questions: [],
+    wake: { app: null, app_version: 0, project: null, project_version: 0, agents: [], cleared: [], effective: { question: true, finished: true, failed: true, change_set_ready: true, progress: false, hourly_cap: 30 }, level: "shipped" } },
 };
 const GROUPS = [
-  ["Model and harness", ["Master and sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
-  ["Access and merging", ["Agent access", "When the master resolves conflicts", "Ask me before merging into the master's branch", "Agent branches", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
-  ["Skills and tools", ["Skills per role", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
+  ["Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
+  ["Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
+  ["Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
   ["Coordination", ["Claude Code sub-agents", "Messages to Claude Code agents", "Claude Code terminal display", "Codex sub-agents", "Messages to Codex agents", "rcli sub-agents", "Messages to rcli agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Catch up with main", "Finished agents"]],
   ["Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
 ];
 const MASTER = [
   ["Master", ["Harness", "Account"]],
-  ["Conversation", ["On master harness switch", "Apply a master harness change", "Stop the master when idle after"]],
+  ["Conversation", ["On master harness switch", "Apply a master harness change"]],
   ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
   ["Access", ["Full access"]],
 ];
+const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main"];
 
 /** Presses Tab until every wanted row had the focus or the presses run out. Inputs: the page's
  * handles and the row labels. Output: the rows the focus reached, in order, once each. */
@@ -51,7 +54,7 @@ for (const width of [1024, 1440]) {
       await page.evaluate(fixture);
       const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`);
       const measured = await page.evaluate("Fixture.measure()");
-      const reached = await tabThrough(page, GROUPS.flatMap(([, rows]) => rows));
+      const reached = await tabThrough(page, GROUPS.flatMap(([, rows]) => rows).filter((row) => !READ_ONLY.includes(row)));
       return { mounted, measured, reached };
     });
     assert.equal(seen.mounted, true, "Agent settings mount");
@@ -59,7 +62,7 @@ for (const width of [1024, 1440]) {
     assert.ok(seen.measured.width > 500, `the groups have room, ${seen.measured.width} px`);
     assert.deepEqual(seen.measured.past, [], "nothing runs past a group's panel");
     assert.ok(seen.measured.sideways <= 0, `the page does not scroll sideways, ${seen.measured.sideways} px`);
-    assert.deepEqual(GROUPS.flatMap(([, rows]) => rows).filter((row) => !seen.reached.includes(row)), [], "Tab reaches every setting");
+    assert.deepEqual(GROUPS.flatMap(([, rows]) => rows).filter((row) => !READ_ONLY.includes(row) && !seen.reached.includes(row)), [], "Tab reaches every setting with a control");
   });
 }
 
@@ -69,7 +72,7 @@ test("the master's settings drawer holds its four groups with nothing past the d
     await page.evaluate(fixture);
     const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "drawer", ${JSON.stringify(STATUS)})`);
     const measured = await page.evaluate("Fixture.measure()");
-    const controls = MASTER.flatMap(([, rows]) => rows).filter((row) => row !== "Stop the master when idle after");
+    const controls = MASTER.flatMap(([, rows]) => rows);
     const reached = await tabThrough(page, controls);
     return { mounted, measured, reached, controls };
   });
@@ -78,4 +81,66 @@ test("the master's settings drawer holds its four groups with nothing past the d
   assert.deepEqual(seen.measured.past, [], "nothing runs past a group's panel");
   assert.ok(seen.measured.sideways <= 0, `the drawer does not scroll sideways, ${seen.measured.sideways} px`);
   assert.deepEqual(seen.controls.filter((row) => !seen.reached.includes(row)), [], "Tab reaches every control in the drawer");
+});
+
+test("two quick coordination changes from different rows both stay saved", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`);
+    const clicked = await page.evaluate(`Fixture.click('[aria-label="Overlapping edits"] [role="radio"]', "Block") && Fixture.click('[aria-label="Workflow nudges"] [role="radio"]', "Every 10 minutes")`);
+    await page.evaluate("Fixture.settle(600)");
+    return { mounted, clicked, sent: await page.evaluate(`Fixture.sentTo("desktop_team_coordination")`) };
+  });
+  assert.equal(seen.mounted, true, "Agent settings mount");
+  assert.equal(seen.clicked, true, "both choices are there to click");
+  assert.equal(seen.sent.most, 1, "one coordination save runs at a time");
+  assert.deepEqual(seen.sent.args.map((call) => [call.settings.overlaps, call.settings.nudges]), [["block", "off"], ["block", "ten_minutes"]], "the nudges save keeps Block");
+});
+
+test("the Agents tab opens Agent settings at the routed group, and its view switch moves between Team and Agent settings", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "agents", ${JSON.stringify(STATUS)}, "access")`);
+    const routed = await page.evaluate("Fixture.shown()");
+    const toTeam = await page.evaluate(`Fixture.click('[aria-label="Agents view"] [role="radio"]', "Team")`);
+    await page.evaluate("Fixture.settle(50)");
+    const teamView = await page.evaluate("Fixture.shown()");
+    const toSettings = await page.evaluate(`Fixture.click('[aria-label="Agents view"] [role="radio"]', "Agent settings")`);
+    await page.evaluate("Fixture.settle(50)");
+    const settingsView = await page.evaluate("Fixture.shown()");
+    await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "agents", ${JSON.stringify(STATUS)}, null)`);
+    const plain = await page.evaluate("Fixture.shown()");
+    return { mounted, routed, toTeam, teamView, toSettings, settingsView, plain };
+  });
+  assert.equal(seen.mounted, true, "the Agents tab mounts");
+  assert.deepEqual({ ...seen.routed, drawer: undefined }, { view: "Agent settings", settings: true, stopAll: false, focused: "set-alpha-access-title", drawer: undefined }, "agents?section=access opens Agent settings at Access and merging");
+  assert.equal(seen.toTeam, true);
+  assert.deepEqual([seen.teamView.view, seen.teamView.settings, seen.teamView.stopAll], ["Team", false, true], "Team shows the team's actions and no settings");
+  assert.equal(seen.toSettings, true);
+  assert.deepEqual([seen.settingsView.view, seen.settingsView.settings, seen.settingsView.stopAll], ["Agent settings", true, false]);
+  assert.deepEqual([seen.plain.view, seen.plain.settings], ["Team", false], "a route with no section opens the Team view");
+});
+
+test("Master settings opens its drawer with the master's four groups, and Close shuts it", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1024, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "button", ${JSON.stringify(STATUS)})`);
+    const before = await page.evaluate("Fixture.shown().drawer");
+    const opened = await page.evaluate(`Fixture.click("button", "Master settings")`);
+    await page.evaluate("Fixture.settle(50)");
+    const open = await page.evaluate("Fixture.shown().drawer");
+    const closed = await page.evaluate(`Fixture.click('dialog.drawer button[aria-label="Close"]', "")`);
+    await page.evaluate("Fixture.settle(50)");
+    const after = await page.evaluate("Fixture.shown().drawer");
+    return { mounted, before, opened, open, closed, after };
+  });
+  assert.equal(seen.mounted, true, "the Master settings button mounts");
+  assert.equal(seen.before, null, "no drawer before the button");
+  assert.equal(seen.opened, true);
+  assert.deepEqual(seen.open, { title: "Master settings", groups: MASTER.map(([title]) => title) });
+  assert.equal(seen.closed, true);
+  assert.equal(seen.after, null, "Close shuts the drawer");
 });

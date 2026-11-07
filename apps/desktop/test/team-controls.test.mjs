@@ -298,13 +298,13 @@ test("Settings, Team offers Apply a master harness change with When the master i
 
 test("what the master does with its conflict fixes is a choice only at Full access", () => {
   const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
+  const cards = (html) => [...html.matchAll(/<label class="radio-card"><input type="radio"[^>]*value="(merges|waits)"([^>]*)\/>/g)].map((card) => [card[1], /checked=""/.test(card[2])]);
   const merges = render({ master_lands: "merges" });
-  assert.match(merges, /role="radiogroup" aria-label="When the master resolves conflicts"/);
-  assert.match(merges, /aria-checked="true"[^>]*>Merge into main itself</);
-  assert.match(merges, /aria-checked="false"[^>]*>Wait for my Accept</);
-  assert.match(render({ master_lands: "waits" }), /aria-checked="true"[^>]*>Wait for my Accept</);
+  assert.match(merges, /role="radiogroup" aria-label="Under Full access, merging into main"/);
+  assert.deepEqual(cards(merges), [["merges", true], ["waits", false]]);
+  assert.deepEqual(cards(render({ master_lands: "waits" })), [["merges", false], ["waits", true]]);
   for (const below of [render({ master_lands: null }), render({})]) {
-    assert.doesNotMatch(below, /aria-label="When the master resolves conflicts"/, "no choice below Full access");
-    assert.match(below, /When the master resolves conflicts<\/span>[\s\S]*?Only at Full access\./);
+    assert.doesNotMatch(below, /aria-label="Under Full access, merging into main"/, "no choice below Full access");
+    assert.match(below, /Under Full access, merging into main<\/span>[\s\S]*?Only at Full access\./);
   }
 });

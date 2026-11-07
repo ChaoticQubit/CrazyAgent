@@ -120,3 +120,35 @@ test("the Task-start reminder row follows Workflow nudges with On as the default
     assert.match(row, /first turn of each task/, option);
   }
 });
+
+test("quick coordination saves from any row keep every change: one save at a time, each built on the last applied one", async () => {
+  assert.equal(typeof coord.saveCoordSettings, "function", "coordination.tsx has one save path for coordination settings");
+  const sent = [];
+  let running = 0;
+  let most = 0;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command, args) {
+    assert.equal(command, "desktop_team_coordination");
+    running += 1;
+    most = Math.max(most, running);
+    sent.push(args.settings);
+    await new Promise((done) => setTimeout(done, 20));
+    running -= 1;
+    return { outcome: "applied", pending: false, rejection: args.settings.claude_display === "fullscreen" ? "team_settings_invalid" : null };
+  } } };
+  const read = { ...coord.COORD_DEFAULTS };
+  const pick = (settings) => [settings.overlaps, settings.nudges, settings.task_start, settings.claude_display];
+  const both = await Promise.all([coord.saveCoordSettings("p1", read, { overlaps: "block" }), coord.saveCoordSettings("p1", read, { nudges: "ten_minutes" })]);
+  assert.deepEqual(both.map((result) => result.kind), ["ok", "ok"]);
+  assert.equal(most, 1, "one coordination save runs at a time");
+  assert.deepEqual(sent.map(pick), [["block", "off", "on", "classic"], ["block", "ten_minutes", "on", "classic"]], "the second save keeps Block");
+  await coord.saveCoordSettings("p1", read, { task_start: "off" });
+  assert.deepEqual(pick(sent[2]), ["block", "ten_minutes", "off", "classic"], "a save from the read the row still shows builds on the saves since");
+  await coord.saveCoordSettings("p1", read, { claude_display: "fullscreen" });
+  await coord.saveCoordSettings("p1", read, { nudges: "first_edit" });
+  assert.deepEqual(pick(sent[4]), ["block", "first_edit", "off", "classic"], "a refused save is not built on");
+  const moved = { ...coord.COORD_DEFAULTS, overlaps: "off" };
+  await coord.saveCoordSettings("p1", moved, { nudges: "ten_minutes" });
+  assert.deepEqual(pick(sent[5]), ["off", "ten_minutes", "on", "classic"], "a read another window moved on is taken as it is");
+  await coord.saveCoordSettings("p2", read, { task_start: "off" });
+  assert.deepEqual(pick(sent[6]), ["warn", "off", "off", "classic"], "each project keeps its own saves");
+});

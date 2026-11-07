@@ -17,12 +17,13 @@ const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const TAB_PRESSES_MAX = 400;
 const GROUPS = [
-  ["Model and harness", ["Master and sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
-  ["Access and merging", ["Agent access", "When the master resolves conflicts", "Ask me before merging into the master's branch", "Agent branches", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
-  ["Skills and tools", ["Skills per role", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
+  ["Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
+  ["Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
+  ["Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
   ["Coordination", ["Claude Code sub-agents", "Messages to Claude Code agents", "Claude Code terminal display", "Codex sub-agents", "Messages to Codex agents", "rcli sub-agents", "Messages to rcli agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Catch up with main", "Finished agents"]],
   ["Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
 ];
+const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main"];
 const MEASURE = `(() => {
   const groups = [...document.querySelectorAll("section.set-group")];
   const past = groups.flatMap((group) => {
@@ -142,7 +143,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
  * run out, as a keyboard owner does. Input: the page. Output: the rows the focus reached, in
  * order, once each. */
 async function tabThrough(page) {
-  const wanted = GROUPS.flatMap(([, rows]) => rows);
+  const wanted = GROUPS.flatMap(([, rows]) => rows).filter((row) => !READ_ONLY.includes(row));
   await page.evaluate("document.activeElement?.blur(), true");
   const reached = [];
   for (let press = 0; press < TAB_PRESSES_MAX && !wanted.every((row) => reached.includes(row)); press += 1) {
@@ -166,7 +167,7 @@ for (const width of [1024, 1440]) {
       assert.ok(measured.sideways <= 0, `the page does not scroll sideways, ${measured.sideways} px`);
       await me.capture(`agent-settings-${width}`);
       const reached = await tabThrough(page);
-      assert.deepEqual(GROUPS.flatMap(([, rows]) => rows).filter((row) => !reached.includes(row)), [], "Tab reaches every setting");
+      assert.deepEqual(GROUPS.flatMap(([, rows]) => rows).filter((row) => !READ_ONLY.includes(row) && !reached.includes(row)), [], "Tab reaches every setting with a control");
       await page.send("Page.navigate", { url: `http://127.0.0.1:${port}/#/projects/${encodeURIComponent(project)}/agents?section=limits` });
       await me.waitFor("Agent settings opened at Limits", (text) => text.includes("Token budget"));
       for (const deadline = Date.now() + 5000; (await page.evaluate("document.activeElement?.textContent ?? null")) !== "Limits"; await pause(POLL_MS)) {
