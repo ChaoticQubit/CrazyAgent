@@ -762,7 +762,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         format!(
             "{start}{}{}",
             ask_rule(AskReach::Live, true),
-            team_tools_section(&[], true)
+            team_tools_section(&[], true, false)
         )
     );
     assert_eq!(told.matches(joint).count(), 1, "{told}");
@@ -796,7 +796,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         format!(
             "{start}{}{}",
             ask_rule(AskReach::SubAgent, true),
-            team_tools_section(&unrecorded, true)
+            team_tools_section(&unrecorded, true, false)
         )
     );
     assert!(heard.contains("types the owner's answer or dismissal into your terminal once"));
@@ -847,7 +847,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         format!(
             "{start}{}{}",
             ask_rule(AskReach::SubAgent, false),
-            team_tools_section(&unreported, true)
+            team_tools_section(&unreported, true, false)
         )
     );
     assert_eq!(reports_off.instructions().matches(rule).count(), 1);
@@ -873,7 +873,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     assert!(full.instructions().ends_with(&format!(
         "{}{}",
         ask_rule(AskReach::Live, true),
-        team_tools_section(&[], true)
+        team_tools_section(&[], true, false)
     )));
 
     setup.team.sub_harnesses = (0..200)
@@ -1328,7 +1328,7 @@ fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
 
 #[test]
 fn the_team_tools_section_lists_each_tool_left_on_with_the_tags_and_the_branch_rule() {
-    let all = team_tools_section(&[], true);
+    let all = team_tools_section(&[], true, true);
     for (name, line) in crate::coord::tool_switches::BUILTIN_TOOLS {
         assert_eq!(
             all.matches(&format!("\n- {name}: {line}\n")).count(),
@@ -1344,7 +1344,7 @@ fn the_team_tools_section_lists_each_tool_left_on_with_the_tags_and_the_branch_r
         crate::team::tool::STOP_TOOL.to_owned(),
         crate::team::tool::MERGE_TOOL.to_owned(),
     ];
-    let some = team_tools_section(&off, true);
+    let some = team_tools_section(&off, true, true);
     for name in &off {
         assert!(!some.contains(&format!("\n- {name}: ")), "{name}:\n{some}");
     }
@@ -1357,7 +1357,7 @@ fn the_team_tools_section_lists_each_tool_left_on_with_the_tags_and_the_branch_r
 /// to bring a moved main into its own branch with `git merge crazyagent/main` (OS-8).
 #[test]
 fn the_team_tools_section_tells_agents_to_merge_crazyagent_main_while_catch_up_is_on() {
-    let section = team_tools_section(&[], true);
+    let section = team_tools_section(&[], true, true);
     assert!(
         section.contains(
             "When main has moved on, bring it into your branch with git merge crazyagent/main before you finish."
@@ -1365,7 +1365,7 @@ fn the_team_tools_section_tells_agents_to_merge_crazyagent_main_while_catch_up_i
         "{section}"
     );
     assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
-    let off = team_tools_section(&[], false);
+    let off = team_tools_section(&[], false, true);
     assert!(!off.contains("git merge crazyagent/main"), "{off}");
     assert_eq!(
         section.replace(
@@ -1382,7 +1382,7 @@ fn the_team_tools_section_tells_agents_to_merge_crazyagent_main_while_catch_up_i
 #[test]
 fn the_team_tools_section_tells_agents_to_restart_from_main_after_an_accept() {
     for catch_up in [true, false] {
-        let section = team_tools_section(&[], catch_up);
+        let section = team_tools_section(&[], catch_up, true);
         assert!(
             section.contains(
                 "and end with finish_work and its evidence. After your change set is accepted, start your next work from main with git reset --keep crazyagent/main, unless you have newer commits.\n"
@@ -1497,7 +1497,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         assert!(
             context
                 .instructions()
-                .ends_with(&team_tools_section(&off, true)),
+                .ends_with(&team_tools_section(&off, true, false)),
             "{}",
             context.instructions()
         );
