@@ -51,3 +51,11 @@ test("a terminal opened from Waiting on you is the same one panel the graph swap
   assert.deepEqual(seen.clients, ["team-3"], JSON.stringify(seen));
   assert.deepEqual(seen.detaches, ["team-1", "team-2"], JSON.stringify(seen));
 });
+
+test("an agent waiting on you that the graph does not draw opens in the same one panel, and a graph click replaces it", async () => {
+  const seen = await run([["waiting", "Dune"], ["card", "Ada"]], 0, true);
+  assert.deepEqual(seen.panels, ["Ada terminal"], JSON.stringify(seen));
+  assert.equal(seen.xterms, 1, JSON.stringify(seen));
+  assert.deepEqual(seen.clients, ["team-1"], JSON.stringify(seen));
+  assert.deepEqual(seen.detaches, ["team-5"], JSON.stringify(seen));
+});

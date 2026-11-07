@@ -27,10 +27,14 @@ const TEAM = {
   edges: [],
 };
 
-/** The owner's Questions inbox: Ada waits on a permission prompt in its terminal. */
+/** The owner's Questions inbox: Ada waits on a permission prompt in its terminal, and so does
+ * Dune, an agent the graph does not draw. */
 const INBOX = {
   project_id: "alpha", questions: [], more: 0,
-  waiting: [{ agent: 1, label: "Ada", waiting: "permission", since_ms: 0, terminal: "team-1" }],
+  waiting: [
+    { agent: 1, label: "Ada", waiting: "permission", since_ms: 0, terminal: "team-1" },
+    { agent: 5, label: "Dune", waiting: "question", since_ms: 0, terminal: "team-5" },
+  ],
 };
 
 /** Sends one message down a terminal channel as the bridge does, in order. Inputs: the
