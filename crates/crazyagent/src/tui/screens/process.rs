@@ -201,6 +201,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "process_folder_missing" => "CrazyAgent's data folder is missing. Restart the engine, then try again.".into(),
         "process_folder_unsafe" => "CrazyAgent's data folder isn't a plain folder, so nothing was saved.".into(),
         "process_unavailable" => "Instructions aren't ready in this engine yet.".into(),
+        "process_save_unavailable" => "The engine couldn't save right now, so nothing was saved. Save again.".into(),
         "process_agent_unknown" => "This agent isn't part of this project's team.".into(),
         "process_agent_unsupported" => "CrazyAgent doesn't write instructions for this agent's harness.".into(),
         "agent_instructions_unsafe" => "This agent's instructions file is a link or not a plain file, so CrazyAgent won't read it.".into(),
@@ -210,6 +211,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "trusted_connection_unavailable" => "Not connected to the engine. Try again once it reconnects.".into(),
         "instruction_settings_invalid" => "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.".into(),
         "instruction_settings_unavailable" => "This project's agent settings couldn't be read. Try again.".into(),
+        "instruction_settings_save_unavailable" => "The engine couldn't save this project's agent settings right now, so nothing was saved. Make the change again.".into(),
         "process_adoption_unavailable" => "Workflow adoption couldn't be read. Try again.".into(),
         other => coded("CrazyAgent couldn't finish that.", other),
     }

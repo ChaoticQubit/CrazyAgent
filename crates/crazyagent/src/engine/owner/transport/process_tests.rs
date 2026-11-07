@@ -84,7 +84,12 @@ fn keep(
 
 /// The refusals a store call answers when the store stayed busy past its own wait, as it
 /// can on a loaded machine, and how often a racing test asks again before failing.
-const BUSY_CODES: [&str; 2] = ["process_unavailable", "instruction_settings_unavailable"];
+const BUSY_CODES: [&str; 4] = [
+    "process_unavailable",
+    "process_save_unavailable",
+    "instruction_settings_unavailable",
+    "instruction_settings_save_unavailable",
+];
 const BUSY_TRIES: usize = 20;
 
 /// Runs one store call of a racing test until the store takes it, asking again each time
