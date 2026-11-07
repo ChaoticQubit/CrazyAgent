@@ -5,7 +5,8 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::team::agent_messages::{AgentMessages, Cursor, MessageSettings};
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{
-    BackgroundAtEnd, BranchMode, ChildLanding, SwitchApply, SwitchMode, TeamAction, TeamStatus,
+    BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, SwitchApply, SwitchMode, TeamAction,
+    TeamStatus,
 };
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
@@ -413,6 +414,22 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         self.team_action(TeamAction::ReaskEmptyReply { project_id, on }, generation)
+            .await
+    }
+
+    /// Sets a project's "Catch up with main" setting: `on` lets every agent merge
+    /// `crazyagent/main` into its own branch and tells it to, `off` keeps every merge
+    /// refused (OS-8). Takes the project id, the mode and the client generation. Returns the
+    /// actual commit receipt, or `team_action_invalid` for any other mode.
+    pub async fn team_catch_up_main(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = CatchUpMain::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::CatchUpMain { project_id, mode }, generation)
             .await
     }
 

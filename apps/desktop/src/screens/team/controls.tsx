@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
@@ -237,6 +237,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [landOn, setLandOnText] = useState<string | null>(null);
   const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
   const [reask, setReask] = useState<"off" | "on" | null>(null);
+  const [catchUp, setCatchUp] = useState<"off" | "on" | null>(null);
   const [newFolder, setNewFolder] = useState<number | null>(null);
   const [background, setBackground] = useState<BackgroundAtEnd | null>(null);
   const [graceText, setGraceText] = useState<string | null>(null);
@@ -408,6 +409,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function chooseCatchUp(choice: "off" | "on") {
+    setCatchUp(choice);
+    setBusy(true);
+    const message = changeNote(await setCatchUpMain(projectId, choice), "the catch up with main setting");
+    setBusy(false);
+    setCatchUp(null);
+    setNote(message);
+    reload();
+  }
+
   async function chooseReask(choice: "off" | "on") {
     setReask(choice);
     setBusy(true);
@@ -555,6 +566,12 @@ export function TeamControls({ projectId, status, harness, reload }: {
       <Segmented label="Ask me before merging into the master's branch" value={askMerge ?? (status.ask_before_merge === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
         options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
       <span className="tg-terminal-note">On keeps each finished harness's work in Changes for your Accept instead of the master merging it.</span>
+    </div>
+    <div className="pj-row">
+      <span aria-hidden="true">Catch up with main</span>
+      <Segmented label="Catch up with main" value={catchUp ?? (status.catch_up_main === "off" ? "off" : "on")} onValue={(choice) => { if (!busy) void chooseCatchUp(choice); }}
+        options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
+      <span className="tg-terminal-note">On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; merging another agent's branch stays refused. Off refuses every merge.</span>
     </div>
     <div className="pj-row">
       <span aria-hidden="true">Re-ask a sub-agent's empty reply</span>

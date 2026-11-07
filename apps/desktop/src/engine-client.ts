@@ -830,6 +830,9 @@ export type ChildLanding = "lead" | "owner";
 /** Where a project's new sub-agents commit: each on its own branch, or a detached HEAD. */
 export type BranchMode = "named" | "detached";
 
+/** Whether a project's agents may merge the landed main, `crazyagent/main`, into their own branch. */
+export type CatchUpMain = "on" | "off";
+
 /** A harness kind the coordination settings are kept for, by its catalog id. */
 export type CoordHarness = "claude-code" | "codex" | "rcli";
 /** How a lead's sub-agents start: app-spawned processes, or the harness's native teammates. */
@@ -914,6 +917,7 @@ export interface TeamStatus {
   background_at_end?: BackgroundAtEnd;
   ask_before_merge?: boolean;
   reask_empty_reply?: boolean;
+  catch_up_main?: CatchUpMain;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
   message_settings?: MessageSettings;

@@ -2664,6 +2664,55 @@ fn capital_r_turns_reask_empty_reply_off_and_on() {
     );
 }
 
+/// C flips Catch up with main: On is shown for a team that has made no choice, C sends Off
+/// and then On, each with its plain notice (OS-8).
+#[test]
+fn capital_c_turns_catch_up_with_main_off_and_on() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('C'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(view.help().contains(&("C", "Catch up with main")));
+    assert!(shows(&view, "Catch up with main  On"));
+    let reply = view.key(press(KeyCode::Char('C')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::CatchUpMain {
+            project_id: project(),
+            mode: CatchUpMain::Off,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "Agents now have every merge refused, main included."
+        ))
+    );
+    let mut off = team();
+    off.catch_up_main = CatchUpMain::Off;
+    reread(&mut view, off, NOW + 10);
+    assert!(shows(&view, "Catch up with main  Off"));
+    let reply = view.key(press(KeyCode::Char('C')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::CatchUpMain {
+            project_id: project(),
+            mode: CatchUpMain::On,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "Agents may now bring the landed main into their own branch with git merge crazyagent/main."
+        ))
+    );
+}
+
 async fn coord_send(
     view: &mut TeamView,
     controller: &mut OwnerController,

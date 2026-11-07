@@ -50,6 +50,7 @@
     "allow-desktop-team-background",
     "allow-desktop-team-ask-before-merge",
     "allow-desktop-team-reask-empty-reply",
+    "allow-desktop-team-catch-up-main",
     "allow-desktop-team-new-folder-limit",
     "allow-desktop-team-coordination",
     "allow-desktop-team-harness-mode",

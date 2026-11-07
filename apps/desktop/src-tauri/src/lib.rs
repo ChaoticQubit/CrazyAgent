@@ -1084,6 +1084,21 @@ async fn desktop_team_reask_empty_reply(
 }
 
 #[tauri::command]
+async fn desktop_team_catch_up_main(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_catch_up_main(&id, &mode, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_new_folder_limit(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3571,6 +3586,7 @@ pub fn run() {
             desktop_team_background,
             desktop_team_ask_before_merge,
             desktop_team_reask_empty_reply,
+            desktop_team_catch_up_main,
             desktop_team_new_folder_limit,
             desktop_team_coordination,
             desktop_team_harness_mode,

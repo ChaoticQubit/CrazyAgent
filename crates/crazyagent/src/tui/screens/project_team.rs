@@ -19,7 +19,7 @@ use crate::protocol::ProjectId;
 use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, ResultsShown};
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
-    AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, ChildLanding, CoordinationView,
+    AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordinationView,
     DelegationPath, MASTER_BRANCH_BYTES_MAX, SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX,
     TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
@@ -735,6 +735,7 @@ impl TeamView {
             }
             KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('R') => self.reask_empty_reply(),
+            KeyCode::Char('C') => self.catch_up_main(),
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('B') => self.background_at_end(),
             KeyCode::Char('G') => self.grace_time(),
@@ -2045,6 +2046,39 @@ impl TeamView {
         })
     }
 
+    /// Flips "Catch up with main" between On and Off: whether every agent may merge the
+    /// landed main, `crazyagent/main`, into its own branch and is told to (OS-8). Output: the
+    /// change to send, or Handled with a notice while loading or saving.
+    fn catch_up_main(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let mode = match status.catch_up_main {
+            CatchUpMain::On => CatchUpMain::Off,
+            CatchUpMain::Off => CatchUpMain::On,
+        };
+        self.changing = Some(
+            match mode {
+                CatchUpMain::On => {
+                    "Agents may now bring the landed main into their own branch with git merge crazyagent/main."
+                }
+                CatchUpMain::Off => "Agents now have every merge refused, main included.",
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::CatchUpMain {
+            project_id: self.project.clone(),
+            mode,
+        })
+    }
+
     /// Moves "New folder limit", the most files one new top-level folder may gain in a change
     /// set (DEC-107), to its next choice. Output: the change to send, or Handled with a
     /// notice while loading or saving.
@@ -2991,6 +3025,14 @@ impl TeamView {
                 .to_owned(),
             ),
             setting(
+                "Catch up with main",
+                match status.catch_up_main {
+                    CatchUpMain::On => "On",
+                    CatchUpMain::Off => "Off",
+                }
+                .to_owned(),
+            ),
+            setting(
                 "New folder limit",
                 format!("{} files", status.new_folder_files_max),
             ),
@@ -3345,6 +3387,7 @@ impl TeamView {
             ("L", "Land on"),
             ("g", "Ask before merge"),
             ("R", "Re-ask empty reply"),
+            ("C", "Catch up with main"),
             ("F", "New folder limit"),
             ("B", "Background commands"),
             ("G", "Grace time"),

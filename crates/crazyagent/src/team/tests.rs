@@ -5748,6 +5748,53 @@ fn catch_up_main_defaults_to_on_and_reads_the_saved_choice() {
     );
 }
 
+/// The owner's Catch up with main action saves Off and On again for the project and the
+/// team status shows each choice (OS-8).
+#[test]
+fn the_catch_up_with_main_action_is_saved_and_shown_in_the_team_status() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-catch-up-action",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-catch-up-action", &["local-a"]);
+    assert_eq!(
+        status(&connection, &setup).unwrap().catch_up_main,
+        CatchUpMain::On,
+        "On is the default"
+    );
+    for mode in [CatchUpMain::Off, CatchUpMain::On] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::CatchUpMain {
+                    project_id: setup.project_id.clone(),
+                    mode,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().catch_up_main, mode);
+    }
+}
+
 /// Owner 2026-11-05: under Native only the team status and graph say "Can't receive
 /// messages" on a tools-off Codex sub-agent of a keyless endpoint account, which runs a kept
 /// session with no bridge, and on no other agent: not one on a signed-in profile, woken per
