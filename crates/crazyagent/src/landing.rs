@@ -442,6 +442,20 @@ pub fn land_on(
     }
 }
 
+/// Points `refs/crazyagent/main` at the tip of the project's Land on branch in every agent
+/// worktree the team records for it, so each agent brings main into its own branch with
+/// `git merge crazyagent/main` (OS-8). A worktree it cannot reach is logged and skipped.
+/// Inputs: the engine database and the project. Output: Ok, else `changes_unavailable`.
+pub fn refresh_main(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return owner::refresh_main(db, project);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project);
+        Err(unavailable())
+    }
+}
+
 /// The commit a lead's worktree holds now, which its new worker's worktree is cut from
 /// (N1). Inputs: the store, the owner's checkout root, the lead's worktree and its git
 /// metadata folder. Output: the commit id.

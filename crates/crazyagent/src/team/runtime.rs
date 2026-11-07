@@ -5583,6 +5583,14 @@ impl TeamRuntime {
                 return Ok(Err(problem));
             }
         }
+        if let Err(problem) = crate::landing::open(&self.root)
+            .and_then(|db| crate::landing::refresh_main(&db, &stored.project_id))
+        {
+            eprintln!(
+                "team_main_not_refreshed code={}",
+                crate::protocol::plain_code(&problem.0)
+            );
+        }
         let hosted = match spawn_ledger::begin_spawn(&self.root, id, plan.pane.is_some())
             .and_then(|()| self.host(stored, id, role, &plan.harness, &account.connection, again))
         {

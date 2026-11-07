@@ -22,6 +22,11 @@ const REFS_LISTED_MAX: usize = 16;
 const BASE_NAME_BYTES_MAX: usize = 128;
 const REF_STORES: [&str; 2] = ["reftable", "worktrees"];
 const TEAMMATES_MAX: usize = 64;
+const MAIN_LOCK: &str = "main.lock";
+/// The engine's ref in every agent clone, and in the owner repository for linked
+/// worktrees, that holds the tip of the project's Land on branch, so an agent brings main
+/// into its own branch with `git merge crazyagent/main` (OS-8).
+pub(super) const MAIN_REF: &str = "refs/crazyagent/main";
 
 #[cfg(test)]
 thread_local! {
@@ -236,9 +241,9 @@ pub(super) fn store_folders(worktree: &Path) -> Result<(), EngineError> {
 /// folder with no git run and no link followed (CC-1): each file under `refs`, each name in
 /// `packed-refs`, `HEAD` unless it is the symbolic ref to the branch, and `reftable` or
 /// `worktrees` when either exists, since git keeps refs there too. The engine's clone makes
-/// no ref but its branch. With `teammates`, the teammate branches of the branch
-/// (`agent_git::is_teammate_branch`) and the `worktrees` folder are left out, for a caller
-/// that checks those itself. Inputs: the worktree, its branch and `teammates`. Output: at
+/// no ref but its branch and [`MAIN_REF`], which is left out as well. With `teammates`, the
+/// teammate branches of the branch (`agent_git::is_teammate_branch`) and the `worktrees`
+/// folder are left out, for a caller that checks those itself. Inputs: the worktree, its branch and `teammates`. Output: at
 /// most `REFS_LISTED_MAX` names, empty when nothing else is held, else
 /// `changes_workspace_invalid` for ref data that is not a plain file or folder or
 /// `changes_too_large` past the bounds, never a clean read.
@@ -283,7 +288,7 @@ pub(super) fn other_refs(
             .position(|byte| *byte == b' ')
             .ok_or_else(invalid)?;
         let name = String::from_utf8_lossy(&line[space + 1..]).into_owned();
-        if name != own && !task(&name) {
+        if name != own && name != MAIN_REF && !task(&name) {
             listed(&mut found, name);
         }
     }
@@ -297,11 +302,46 @@ pub(super) fn other_refs(
     Ok(found)
 }
 
-/// Points `refs/crazyagent/main` in an agent's own clone at the project's landed tip.
-/// Inputs: the owner checkout root, the worktree and the tip. Output: Ok.
+/// Points [`MAIN_REF`] in an agent's own clone at the project's landed tip with no git run
+/// in the clone, whose config is the agent's (CC-N1): `refs` and `crazyagent` opened
+/// without following a link and made when missing, the ref written to a new `main.lock`
+/// and renamed over `main`, as git itself writes a loose ref. The clone reads the commit
+/// through its alternates. Inputs: the owner checkout root, the worktree and the tip.
+/// Output: Ok, else `changes_workspace_invalid` for a link or a foreign entry on the way.
 pub(super) fn give_main(repository: &Path, worktree: &Path, tip: &str) -> Result<(), EngineError> {
-    let _ = (repository, worktree, tip);
-    Ok(())
+    use rustix::fs::{AtFlags, CWD, Mode, OFlags, mkdirat, openat, renameat, unlinkat};
+    use std::io::Write;
+    if !super::git::is_object_id(tip) {
+        return Err(failure("changes_git_failed"));
+    }
+    if super::flow::check_places(repository, worktree, &agent_git::git_dir(worktree))?
+        != agent_git::Layout::Clone
+    {
+        return Err(invalid());
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = openat(CWD, worktree, flags, Mode::empty()).map_err(|_| invalid())?;
+    let mut folder = openat(&root, ".git", flags, Mode::empty()).map_err(|_| invalid())?;
+    for part in ["refs", "crazyagent"] {
+        match mkdirat(&folder, part, Mode::from_raw_mode(0o755)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(_) => return Err(invalid()),
+        }
+        folder = openat(&folder, part, flags, Mode::empty()).map_err(|_| invalid())?;
+    }
+    let created = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let lock = openat(&folder, MAIN_LOCK, created, Mode::from_raw_mode(0o644))
+        .map_err(|_| invalid())?;
+    let mut file = std::fs::File::from(lock);
+    let written = file
+        .write_all(format!("{tip}\n").as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| failure("changes_git_failed"))
+        .and_then(|()| renameat(&folder, MAIN_LOCK, &folder, "main").map_err(|_| invalid()));
+    if written.is_err() {
+        let _ = unlinkat(&folder, MAIN_LOCK, AtFlags::empty());
+    }
+    written
 }
 
 /// Says whether an agent's own clone still holds its branch, read as data from its git
@@ -385,7 +425,7 @@ fn loose_refs(
                 let opened = openat(folder, name, flags, Mode::empty()).map_err(|_| invalid())?;
                 loose_refs(&opened, &inner, depth + 1, budget, own, found)?;
             }
-            FileType::RegularFile if inner == own => {}
+            FileType::RegularFile if inner == own || inner == MAIN_REF => {}
             FileType::RegularFile => listed(found, inner),
             _ => return Err(invalid()),
         }
