@@ -94,7 +94,7 @@ impl AgentRole {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "master" => Some(Self::Master),
             "sub" => Some(Self::Sub),
