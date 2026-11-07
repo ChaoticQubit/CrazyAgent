@@ -1370,3 +1370,11 @@ fn an_unreadable_adoption_says_so_on_the_project_page() {
         "{shown}"
     );
 }
+
+#[test]
+fn a_save_that_would_leave_agents_no_instructions_says_so_in_one_sentence() {
+    assert_eq!(
+        message("process_instructions_would_be_empty"),
+        "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first."
+    );
+}

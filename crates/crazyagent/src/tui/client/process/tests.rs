@@ -446,6 +446,20 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
         })),
         "a project the owner never changed gets both texts and keeps transcripts"
     );
+    for scope in [None, Some(project.clone())] {
+        assert!(matches!(
+            native
+                .process(ProcessQuery::Save {
+                    project: scope,
+                    text: "Rule.\n".into(),
+                    version: 0,
+                    opened: None,
+                })
+                .await
+                .result,
+            Ok(ProcessReply::Saved(SavedText::Saved { version: 1, .. }))
+        ));
+    }
     let mut version = 0;
     let every = [Mode::ProjectOnly, Mode::AppOnly, Mode::Both]
         .into_iter()
