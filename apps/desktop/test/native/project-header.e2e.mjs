@@ -26,6 +26,10 @@ function measure(page) {
       height: window.innerHeight,
       scrolled: document.querySelector(".main")?.scrollTop ?? 0,
       head: document.querySelector(".pj-head")?.className ?? null,
+      headHeight: document.querySelector(".pj-head")?.offsetHeight ?? null,
+      settling: document.querySelector(".pj-head")?.getAnimations({ subtree: true }).filter((animation) => animation instanceof CSSTransition).length ?? 0,
+      room: (() => { const project = document.querySelector(".pj-project"); return project ? parseFloat(getComputedStyle(project).getPropertyValue("--pj-head-room")) || 0 : 0; })(),
+      range: (() => { const main = document.querySelector(".main"); return main ? main.scrollHeight - main.clientHeight : 0; })(),
       title: box(document.querySelector(".pj-head h1")),
       tabs: box(document.querySelector(".pj-head [role=tablist]")),
       desc: desc ? { text: desc.textContent, scrollWidth: desc.scrollWidth, clientWidth: desc.clientWidth, clientHeight: desc.clientHeight, line: parseFloat(getComputedStyle(desc).lineHeight) } : null,
@@ -34,7 +38,42 @@ function measure(page) {
   })()`);
 }
 
-test("the project title and tab bar stay on screen while the page scrolls, the description wraps to two lines, one once scrolled, a focused control lands below the head and a page just taller than the window keeps the head shrunk", { timeout: 300000 }, async () => {
+/** Puts the page at the top of a window of the given height, with motion reduced or not,
+ * waits for the head's full form to settle, scrolls to a point and samples the head for
+ * 1.5 s. Inputs: the page, the window height, whether motion is reduced and the scrollTop.
+ * Output: the head's full height, the scroll range at rest and [class, scrollTop, room,
+ * height] samples. */
+async function scrollAndSample(page, { height, reduced, top }) {
+  await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: reduced ? "reduce" : "no-preference" }] });
+  await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height, deviceScaleFactor: 1, mobile: false });
+  await page.evaluate("document.activeElement?.blur(); document.querySelector('.main').scrollTop = 0");
+  let rest = await measure(page);
+  for (const until = Date.now() + STEP_MS; (rest.head !== "pj-head" || rest.settling > 0) && Date.now() < until; rest = await measure(page)) await pause(POLL_MS);
+  assert.equal(rest.head, "pj-head", "the head is back in its full form before the scroll");
+  await page.evaluate(`document.querySelector('.main').scrollTop = ${top}`);
+  const samples = [];
+  for (const until = Date.now() + 1500; Date.now() < until; await pause(POLL_MS)) {
+    const now = await measure(page);
+    samples.push([now.head, now.scrolled, now.room, now.headHeight]);
+  }
+  return { full: rest.headHeight, range: rest.range - rest.room, samples };
+}
+
+/** Whether the head held its scrolled form and the page its scroll through the later half of
+ * the samples. Input: the samples. Output: true when it held. */
+function held(samples) {
+  const late = samples.slice(Math.floor(samples.length / 2));
+  return late.length > 0 && late.every(([head, top]) => head === "pj-head scrolled" && top > 2);
+}
+
+/** Whether the room under the page equals what the scrolled head gives up through the later
+ * half of the samples. Inputs: the head's full height and the samples. Output: true when so. */
+function trimmed(full, samples) {
+  const late = samples.slice(Math.floor(samples.length / 2));
+  return late.length > 0 && late.every(([, , room, height]) => Math.abs(room - Math.ceil(full - height)) <= 1);
+}
+
+test("the project title and tab bar stay on screen while the page scrolls, the description wraps to two lines, one once scrolled, a focused control lands below the head, and a small scroll or a page just taller than the window keeps the head shrunk with or without motion", { timeout: 300000 }, async () => {
   assert.ok(ABOUT.length >= 600, "the description is a long one");
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -145,22 +184,28 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.ok(clear.focused && clear.top >= clear.head - 1, `the focused control lands below the head, not under it: ${hidden} ${JSON.stringify(clear)}`);
         await me.capture("head-focus");
 
-        await page.evaluate("document.activeElement.blur(); document.querySelector('.main').scrollTop = 0");
-        for (const until = Date.now() + STEP_MS; (await measure(page)).head !== "pj-head" && Date.now() < until;) await pause(POLL_MS);
-        const range = await page.evaluate("(() => { const main = document.querySelector('.main'); return main.scrollHeight - main.clientHeight; })()");
+        const nudge = await scrollAndSample(page, { height: 420, reduced: false, top: 10 });
+        await me.capture("head-small-scroll");
+        const range = nudge.range;
         assert.ok(range > 40, `the page scrolls far enough to trim it: ${range}`);
-        await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 420 + range - 20, deviceScaleFactor: 1, mobile: false });
-        await pause(POLL_MS);
-        await page.evaluate("document.querySelector('.main').scrollTop = 20");
-        const samples = [];
-        for (const until = Date.now() + 1500; Date.now() < until; await pause(POLL_MS)) {
-          const now = await measure(page);
-          samples.push([now.head, now.scrolled]);
-        }
-        const settled = samples.slice(Math.floor(samples.length / 2));
-        assert.ok(settled.length > 0 && settled.every(([head, top]) => head === "pj-head scrolled" && top > 2),
-          `a page only just taller than the window keeps the head shrunk after scrolling: ${JSON.stringify(samples)}`);
+        const short = await scrollAndSample(page, { height: 420 + range - 20, reduced: false, top: 20 });
         await me.capture("head-short-page");
+        const still = await scrollAndSample(page, { height: 420 + range - 20, reduced: true, top: 20 });
+        await me.capture("head-short-page-reduced-motion");
+        assert.deepEqual({
+          smallScrollOnALongPage: held(nudge.samples),
+          shortPage: held(short.samples),
+          shortPageRoomTrimmedOnceSettled: trimmed(short.full, short.samples),
+          shortPageReducedMotion: held(still.samples),
+          shortPageReducedMotionRoomTrimmed: trimmed(still.full, still.samples),
+        }, {
+          smallScrollOnALongPage: true,
+          shortPage: true,
+          shortPageRoomTrimmedOnceSettled: true,
+          shortPageReducedMotion: true,
+          shortPageReducedMotionRoomTrimmed: true,
+        }, `the head keeps its scrolled form after a small scroll and on a page only just taller than the window, with and without motion, and the room ends at what the head gives up: ${JSON.stringify({ nudge, short, still })}`);
+        await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 420, deviceScaleFactor: 1, mobile: false });
         await page.evaluate("document.querySelector('.main').scrollBy(0, 2000)");
         for (const until = Date.now() + STEP_MS; (await measure(page)).head !== "pj-head scrolled" && Date.now() < until;) await pause(POLL_MS);

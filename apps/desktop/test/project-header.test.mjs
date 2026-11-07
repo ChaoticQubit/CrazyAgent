@@ -76,6 +76,25 @@ test("the room the scrolled head gives up stays under the page, so the scroll ra
   assert.match(index, /useProjectHead\(root, projectId\)/u);
 });
 
+test("a head still taking its scrolled form holds the room at its full height, and trims it once settled", () => {
+  assert.deepEqual([[120, 120, true, false], [120, 104, true, false], [120, 104, true, true], [120, 104, false, false], [119.5, 119.5, true, false]]
+    .map(([full, now, scrolled, settled]) => head.headRoom(full, now, scrolled, settled)), [120, 120, 16, 0, 120]);
+});
+
+test("the head settles on its own transitions ending, never on a timer", () => {
+  assert.match(source, /addEventListener\("transitionend", sync\)/u);
+  assert.match(source, /addEventListener\("transitioncancel", sync\)/u);
+  assert.match(source, /removeEventListener\("transitionend", sync\)/u);
+  assert.match(source, /removeEventListener\("transitioncancel", sync\)/u);
+  assert.match(source, /getAnimations\(\{ subtree: true \}\)/u);
+  assert.doesNotMatch(source, /setTimeout|setInterval|requestAnimationFrame/u);
+});
+
+test("only the project page turns scroll anchoring off, so the head's shrink never pulls the page back to the top", () => {
+  assert.match(css, /\.main:has\(\.pj-project\) \{ overflow-anchor: none; \}/u);
+  assert.doesNotMatch(css, /(^|\n)\.main \{[^}]*overflow-anchor/u);
+});
+
 test("the scroll container keeps a focused control clear of the head by the head's own height", () => {
   assert.match(css, /\.main \{[^}]*scroll-padding-top: var\(--pj-head-h, 0px\);/u);
   assert.match(source, /setProperty\("--pj-head-h", `\$\{height\}px`\)/u);
