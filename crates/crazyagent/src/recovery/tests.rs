@@ -6,6 +6,7 @@ use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::harnesses::terminal_session::PaneRecord;
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{CredentialRef, ProjectId};
+use crate::sandbox::policy::AgentAccess;
 use crate::team::runtime::{TeamLimits, TeamRuntime};
 use crate::team::{AgentRole, AgentStatus};
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
@@ -206,6 +207,10 @@ impl Fixture {
         task
     }
 
+    /// Starts team agent `id`'s pane and keeps its record as a current engine does under the
+    /// project's default policy: Sandboxed, with no toolchain, so a later engine's policy
+    /// check (AL-2) keeps the pane it takes over. Takes the host and the agent.
+    /// Returns the record.
     fn pane(&self, host: &Arc<dyn Host>, id: i64) -> PaneRecord {
         let file = self.base.join(format!("session-{id}.jsonl"));
         std::fs::write(&file, format!("{TURN_OPEN}\n{TURN_DONE}\n")).unwrap();
@@ -217,8 +222,11 @@ impl Fixture {
         };
         let since = SystemTime::now();
         let pane = host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
-        let record =
-            PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap();
+        let record = PaneRecord {
+            access: Some(AgentAccess::Sandboxed),
+            toolchains: Some(Vec::new()),
+            ..PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap()
+        };
         self.connection
             .execute(
                 "INSERT OR REPLACE INTO team_panes(agent,record) VALUES (?1,?2)",
