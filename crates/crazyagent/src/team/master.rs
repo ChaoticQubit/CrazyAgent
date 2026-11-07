@@ -30,7 +30,7 @@ const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const LEAD_MODE_REFUSED: &str = "Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).";
 const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.";
 const MASTER_LABEL: &str = "Master";
-const NOT_LIVE_TOOL: &str = "Not done: without its live terminal the master's team tools are delegate, remember and recall.";
+const NOT_LIVE_TOOL: &str = "Not done: without its live terminal the master's team tools are delegate, ask, record_answer, remember and recall.";
 const WORKERS_LISTED_MAX: i64 = 64;
 const AGENT_SHOWN_MAX: usize = 64;
 const NO_MASTER: &str =
@@ -974,12 +974,11 @@ pub fn serve_calls(
     Ok(taken.len())
 }
 
-/// Answers the memory calls a project's master left in its mailbox while it runs without its
-/// live terminal, at most `CALLS_PER_TICK_MAX`, each checked again and against the owner's
-/// tool switches: `remember` and `recall` under the master's name. Any other call is refused,
-/// since that master's server lists only `delegate`, `remember` and `recall`. Takes the engine
-/// database, the project and the mailbox. Returns how many calls were answered, or a SQLite
-/// failure.
+/// Answers at most `CALLS_PER_TICK_MAX` memory calls a project's master left in its mailbox
+/// while it runs without its live terminal: `remember` and `recall` under the master's name,
+/// each checked again and against the owner's tool switches. Any other call is refused, since
+/// that master's server sends `delegate`, `ask` and `record_answer` through its drop file.
+/// Takes the database, the project and the mailbox. Returns the calls answered, or a SQLite error.
 pub fn serve_memory_calls(
     connection: &mut Connection,
     project: &ProjectId,

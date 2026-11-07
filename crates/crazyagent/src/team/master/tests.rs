@@ -4502,7 +4502,7 @@ fn a_reply_turn_master_remembers_and_the_project_memory_page_lists_it() {
         (reply["text"].as_str(), reply["error"].as_bool()),
         (
             Some(
-                "Not done: without its live terminal the master's team tools are delegate, remember and recall."
+                "Not done: without its live terminal the master's team tools are delegate, ask, record_answer, remember and recall."
             ),
             Some(true)
         )
