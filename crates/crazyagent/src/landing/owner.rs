@@ -826,11 +826,12 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
 }
 
 /// Tells the sub-agent of an accepted set in its own clone, which the engine never resets
-/// (CC-N1), that the set landed and to start its next work from the main it was just given
-/// (OS-8): one Note from the engine keyed to the set, naming no merge, since the agent's own
-/// git keeps the "Catch up with main" it launched with. A failed send is logged by its plain
-/// code and never fails the Accept. Inputs: the store, the accepted set and the landed
-/// commit. Output: none.
+/// (CC-N1), that the set landed, what its last commit was, so `git log <head>..HEAD` shows
+/// any newer work, and to start from the main it was just given with `git reset --keep`,
+/// which keeps uncommitted edits (OS-8, DEC-117): one Note from the engine keyed to the set,
+/// naming no merge, since the agent's git keeps the "Catch up with main" it launched with. A
+/// failed send is logged by its plain code and never fails the Accept. Inputs: the store,
+/// the accepted set and the landed commit. Output: none.
 pub(super) fn tell_landed(db: &Connection, record: &Record, landed: &str) {
     if !flow::in_clone(record) || record.agent.kind != AgentKind::Sub {
         return;
@@ -838,8 +839,9 @@ pub(super) fn tell_landed(db: &Connection, record: &Record, landed: &str) {
     let Ok(agent) = record.agent.id.parse::<i64>() else {
         return;
     };
+    let head = record.head.get(..12).unwrap_or(&record.head);
     let body = format!(
-        "Your change set landed on main as {}. If you have no newer commits, start your next work from main: git reset --hard crazyagent/main.",
+        "Your change set landed on main as {}; its last commit was {head}. If git log {head}..HEAD shows no newer commits, start your next work from main: git reset --keep crazyagent/main.",
         landed.get(..12).unwrap_or(landed)
     );
     let note = crate::coord::NewMessage {
