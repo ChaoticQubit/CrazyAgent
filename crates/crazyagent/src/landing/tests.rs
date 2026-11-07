@@ -285,6 +285,7 @@ impl Case {
     }
 }
 
+#[track_caller]
 fn refused<T: std::fmt::Debug>(result: Result<T, EngineError>) -> String {
     result.unwrap_err().0
 }
