@@ -200,8 +200,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> =
-                async { read(state).await?.project_activity(&id, limit).await }.await;
+            let result: Result<_, BridgeError> = async { read(state).await?.project_activity(&id, limit).await }.await;
             routed(result)
         }
         "desktop_project_context" => {
