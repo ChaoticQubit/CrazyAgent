@@ -7039,6 +7039,90 @@ fn a_tools_on_live_master_s_typed_owner_message_carries_the_task_start_reminder_
     );
 }
 
+/// OP4-L1: the Task-start reminder never cuts the owner's instruction edit. An owner message
+/// typed into a tools-on live master beside a pending edit whose whole change block fits
+/// beside it, with no room left for the reminder, arrives whole with the whole block, and
+/// the reminder is left out.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_s_reminder_is_left_out_when_only_the_owner_message_and_its_edit_fit() {
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    approve_skills(&fixture, &["meal-tips"]);
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the live master's first turn ends", |f| {
+        typed(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+    });
+    let first = typed(&fixture, master);
+    assert!(first.contains("Task start reminder"), "{first}");
+
+    let edited = format!(
+        "{EDITED_TEXT}\n## Pages\n\n{}\n",
+        "Keep each page short and plain. ".repeat(256)
+    );
+    crate::agent_home::save_app(&fixture.base, &edited).unwrap();
+    let home = agent_home(&fixture.base.join("team"), master);
+    let block = crate::instruction_files::edit_for(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &home,
+        "codex",
+    )
+    .unwrap()
+    .expect("the edit is pending")
+    .message_within(crate::team::master::INPUT_TEXT_MAX)
+    .expect("the whole block fits the input limit");
+    assert!(!block.contains(SECTIONS_CUT_LINE), "{block}");
+    let room = crate::team::master::INPUT_TEXT_MAX - block.len() - "[owner] ".len() - 1;
+    assert!(
+        (1..=crate::team::MESSAGE_BYTES_MAX).contains(&room),
+        "the owner message fits its own bound: {room}"
+    );
+    let message = format!(
+        "Plan the title {}",
+        "x".repeat(room - "Plan the title ".len())
+    );
+    tell_master(&fixture, &message);
+    fixture.until(&mut team, "the live master's second turn ends", |f| {
+        typed(f, master).contains(&message) && live_turns(&f.connection) == (2, false)
+    });
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    let second = &text[first.len()..];
+    assert!(
+        second.contains(block.trim_end()),
+        "the whole change block arrives: {second}"
+    );
+    assert!(!second.contains(SECTIONS_CUT_LINE), "{second}");
+    assert!(
+        second.contains(&format!("[owner] {message}")),
+        "the owner message arrives whole"
+    );
+    assert!(
+        !second.contains("Task start reminder"),
+        "the reminder that does not fit is left out: {second}"
+    );
+}
+
 /// Under Stop, a Codex sub-agent whose app keeps running between tasks is not told that its
 /// background commands stop when its turn ends: its rollout reports no such commands, so
 /// the engine neither holds its turn for them nor stops them, and the line would be untrue
