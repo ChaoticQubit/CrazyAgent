@@ -467,7 +467,16 @@ pub fn created_text(name: &str) -> String {
 /// failure is logged by its plain code, so creating never fails on it. Takes the database,
 /// the project, its name and the time in ms.
 pub fn note_created(db: &Connection, project: &ProjectId, name: &str, now_ms: i64) {
-    let _ = (db, project, name, now_ms);
+    let text = created_text(name);
+    let item = NewActivity {
+        kind: ActivityKind::Created,
+        actor: OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text: &text,
+        change_set: None,
+    };
+    note(db, project, &item, now_ms);
 }
 
 /// Brings in the Created event of a project that has none, at its saved setup's creation
@@ -475,8 +484,44 @@ pub fn note_created(db: &Connection, project: &ProjectId, name: &str, now_ms: i6
 /// when it began; a project that has one, or has no saved setup, is left alone. Takes the
 /// database and the project. Returns whether it added one, or the SQLite failure.
 pub fn backfill_created(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
-    let _ = (db, project);
-    Ok(false)
+    let created: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_activity WHERE project=?1 AND kind=?2)",
+            params![project.as_str(), ActivityKind::Created.name()],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if created || !has_table(db, "project_setups")? {
+        return Ok(false);
+    }
+    let body: Option<String> = db
+        .query_row(
+            "SELECT body FROM project_setups WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(state)?;
+    let setup = body.and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok());
+    let field = |key: &str| setup.as_ref().and_then(|setup| setup.get(key));
+    let name = field("name").and_then(serde_json::Value::as_str);
+    let at_ms = field("created_ms")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|at_ms| *at_ms >= 0);
+    let (Some(name), Some(at_ms)) = (name, at_ms) else {
+        return Ok(false);
+    };
+    let text = created_text(name);
+    let item = NewActivity {
+        kind: ActivityKind::Created,
+        actor: OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text: &text,
+        change_set: None,
+    };
+    record(db, project, &item, at_ms)?;
+    Ok(true)
 }
 
 /// Brings in, once per project, what happened before the engine recorded events: the
