@@ -5,7 +5,6 @@ import type { GraphNode, OwnerQuestion, QuestionSeverity, QuestionsInbox, Waitin
 import { Button, LoadError, NotReady, Notice, Skeleton, StatusBadge, TextArea, type Tone } from "../../ui";
 import { displayText } from "../conversation";
 import { changeNote } from "./controls";
-import { TerminalPanel } from "./terminal-panel";
 
 export const QUESTIONS_READ_MS = 5_000;
 export const ANSWER_BYTES_MAX = 4000;
@@ -149,13 +148,12 @@ export function QuestionRow({ projectId, question, onOpen, onAnswered }: {
 /** The owner's Questions inbox on the Agents tab (Q14, Q14b): the open questions agents put
  * to the owner, most urgent first, each with its urgency, the assumption a low one carries on
  * with, Answer and Open terminal while the asker runs; then the agents waiting on the owner in
- * their own terminal, each with Open terminal. Reads again every 5 s and after each answer.
- * Inputs: the project id and an optional harness name lookup. Output: the section. */
-export function QuestionsPanel({ projectId, harness }: { projectId: string; harness?: (id: string) => string }) {
+ * their own terminal, each with Open terminal, which opens the agent in the Agents tab's one
+ * terminal panel. Reads again every 5 s and after each answer. Inputs: the project id and the
+ * open action. Output: the section. */
+export function QuestionsPanel({ projectId, onOpen }: { projectId: string; onOpen: (node: GraphNode) => void }) {
   const [read, reload] = useQuestions(projectId);
-  const [open, setOpen] = useState<GraphNode | null>(null);
   const ids = useId();
-  useEffect(() => setOpen(null), [projectId]);
   const shown = read.shown;
   if (shown === undefined) return <section className="tg-events" aria-busy="true" aria-label="Questions for you"><Skeleton shape="card" /></section>;
   if (shown.kind === "not_ready") return <NotReady what="Questions for you" compact />;
@@ -170,7 +168,7 @@ export function QuestionsPanel({ projectId, harness }: { projectId: string; harn
     </Notice>}
     {count === 0 && inbox.waiting.length === 0 && <p className="tg-terminal-note">No agent is waiting on you.</p>}
     {inbox.questions.length > 0 && <ul className="pj-rows" aria-label="Open questions">
-      {inbox.questions.map((question) => <QuestionRow key={question.id} projectId={projectId} question={question} onOpen={setOpen} onAnswered={reload} />)}
+      {inbox.questions.map((question) => <QuestionRow key={question.id} projectId={projectId} question={question} onOpen={onOpen} onAnswered={reload} />)}
     </ul>}
     {inbox.more > 0 && <p className="pj-secondary pj-small">
       {inbox.more} more {inbox.more === 1 ? "question waits" : "questions wait"}. They show here as you answer these.
@@ -181,11 +179,8 @@ export function QuestionsPanel({ projectId, harness }: { projectId: string; harn
         <StatusBadge word="Waiting on you" tone="warn" />
         <strong>{displayText(agent.label)}</strong>
         <span className="grow">{agent.waiting === "permission" ? "A permission prompt waits in its terminal." : "A question waits in its terminal."}</span>
-        <OpenTerminal row={agent} onOpen={setOpen} />
+        <OpenTerminal row={agent} onOpen={onOpen} />
       </li>)}</ul>
     </>}
-    {open && <div className="tg-question-terminal">
-      <TerminalPanel key={open.id} node={open} harness={harness} onClose={() => setOpen(null)} />
-    </div>}
   </section>;
 }

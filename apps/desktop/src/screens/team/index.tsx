@@ -184,15 +184,16 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
  * assignment lines whose badges count live tasks, waiting questions and unread messages with
  * their receipt. Unread messages between other agents arc dashed and claim overlaps arc red.
  * Drag or the arrow keys pan, a pinch, Ctrl or Cmd wheel or the buttons zoom, and Fit shows it
- * all. Activating a card opens its terminal beside the graph; its menu sends a message, stops
- * it, or opens its changes to merge. Inputs: the project id and optional harness and account
- * name lookups. Output: the graph section. */
-export function TeamGraphView({ projectId, harness, account }: {
-  projectId: string; harness?: (id: string) => string; account?: (id: string) => string;
+ * all. Activating a card opens its terminal in the one panel beside the graph, replacing the
+ * agent shown there; its menu sends a message, stops it, or opens its changes to merge.
+ * Inputs: the project id, the agent whose terminal is open and the open action, and optional
+ * harness and account name lookups. Output: the graph section. */
+export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
+  projectId: string; open: GraphNode | null; onOpen: (node: GraphNode | null) => void;
+  harness?: (id: string) => string; account?: (id: string) => string;
 }) {
   const [read, reload] = useTeamGraph(projectId);
   const graph = read.shown;
-  const [open, setOpen] = useState<string | null>(null);
   const [moved, setMoved] = useState<View | null>(null);
   const [tip, setTip] = useState<string | null>(null);
   const [element, setElement] = useState<HTMLDivElement | null>(null);
@@ -208,7 +209,6 @@ export function TeamGraphView({ projectId, harness, account }: {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    setOpen(null);
     setMoved(null);
     setTip(null);
     setActing(null);
@@ -318,7 +318,8 @@ export function TeamGraphView({ projectId, harness, account }: {
   sizes.current = { content, port };
   const shown = moved ?? fitView(content, port);
   const cards = layoutCards(layout);
-  const openNode = cards.find((item) => item.node.id === open)?.node;
+  const openNode = open === null ? undefined : (cards.find((item) => item.node.id === open.id)
+    ?? cards.find((item) => item.node.kind !== "teammate" && item.node.terminal === open.terminal))?.node ?? open;
   const tipCard = cards.find((item) => item.node.id === tip);
   const tipId = `${ids}-tip`;
   const pan = (dx: number, dy: number) => setMoved((current) => panView(current ?? shown, dx, dy, content, port));
@@ -393,9 +394,9 @@ export function TeamGraphView({ projectId, harness, account }: {
               {layout.messages.map((item) => <path key={`message:${item.from}:${item.to}`} className="tg-message" d={item.path} />)}
               {layout.overlaps.map((item) => <path key={`overlap:${item.from}:${item.to}`} className={`tg-overlap${item.edge.stale ? " stale" : ""}`} d={item.path} />)}
             </svg>
-            {cards.map((item) => <GraphCard key={item.node.id} placed={item} graph={team} harness={harness} open={item.node.id === open}
+            {cards.map((item) => <GraphCard key={item.node.id} placed={item} graph={team} harness={harness} open={item.node.id === openNode?.id}
               tipId={item.node.id === tip ? tipId : null} onTip={setTip} items={menuItems(item.node, team.nodes)}
-              onOpen={setOpen} />)}
+              onOpen={() => onOpen(item.node)} />)}
             {layout.links.map((link) => <LinkBadges key={`badge:${link.from}:${link.to}`} link={link} />)}
           </div>
           {tipCard && place && <div id={tipId} role="tooltip" className={`tg-tip${place.above ? " above" : ""}`} style={{ left: place.left, top: place.top }}>
@@ -403,7 +404,7 @@ export function TeamGraphView({ projectId, harness, account }: {
           </div>}
         </div>
       </div>
-      {openNode && <AgentSide key={openNode.id} projectId={projectId} node={openNode} harness={harness} onClose={() => setOpen(null)}>
+      {openNode && <AgentSide key={openNode.id} projectId={projectId} node={openNode} harness={harness} onClose={() => onOpen(null)}>
         <NodeMessages projectId={projectId} node={openNode} refresh={graph} />
       </AgentSide>}
     </div>

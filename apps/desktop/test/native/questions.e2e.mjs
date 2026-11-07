@@ -182,7 +182,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           }
           assert.ok(Date.now() < deadline, `the page never asked to attach a terminal: ${JSON.stringify(log.calls)}`);
         }
-        assert.ok(await page.evaluate(`document.querySelector(${JSON.stringify(`.tg-question-terminal section[aria-label="${label} terminal"]`)}) !== null`), "the asker's terminal panel opens beside the question");
+        assert.deepEqual(await page.evaluate(`[...document.querySelectorAll("section.tg-terminal")].map((panel) => panel.getAttribute("aria-label"))`), [`${label} terminal`], "the asker's terminal opens in the Agents tab's one terminal panel");
         await me.capture("questions-terminal");
 
         await me.click("Answer", "li.tg-question button");

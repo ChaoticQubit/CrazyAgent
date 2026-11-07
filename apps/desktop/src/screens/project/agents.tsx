@@ -3,7 +3,7 @@ import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
 import { cancelResearch, failureCopy, loadResearchLog, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
-import type { IntentReceipt } from "../../engine-client";
+import type { GraphNode, IntentReceipt } from "../../engine-client";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
@@ -71,6 +71,8 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const [note, setNote] = useState("");
   const [logOpen, setLogOpen] = useState<number | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
+  const [terminal, setTerminal] = useState<GraphNode | null>(null);
+  useEffect(() => setTerminal(null), [data.id]);
   const waits = stopping !== null && stopping.status !== "running";
   const jobs = valueOf(data.research)?.jobs ?? [];
   const harnesses = valueOf(data.harnesses);
@@ -117,8 +119,8 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <QuestionsPanel projectId={data.id} harness={(id) => harnessName(harnesses, id)} />
-    <TeamGraphView projectId={data.id} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)} />
+    <QuestionsPanel projectId={data.id} onOpen={setTerminal} />
+    <TeamGraphView projectId={data.id} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)} />
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
     {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
     <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />
