@@ -58,9 +58,23 @@ function panels(page) {
   return page.evaluate(`[...document.querySelectorAll("section.tg-terminal")].map((panel) => panel.getAttribute("aria-label"))`);
 }
 
-/** Clicks the graph card of the named agent and waits for the one panel to show it. Inputs:
- * the page and the agent's name. */
-async function openCard(page, label) {
+/** Waits until the named agent's panel is past connecting: its terminal attached, or it shows
+ * why not, as Not ready on the bridge, which has no terminals. Inputs: the page and the agent's
+ * name. Output: none. */
+async function settled(page, label) {
+  const done = `(() => {
+    const panel = [...document.querySelectorAll("section.tg-terminal")].find((section) => section.getAttribute("aria-label") === ${JSON.stringify(`${label} terminal`)});
+    return panel !== undefined && !panel.textContent.includes("Connecting to the terminal");
+  })()`;
+  for (const deadline = Date.now() + STEP_MS; !(await page.evaluate(done)); await pause(POLL_MS)) {
+    assert.ok(Date.now() < deadline, `${label}'s terminal never got past connecting: ${JSON.stringify(await panels(page))}`);
+  }
+}
+
+/** Clicks the graph card of the named agent, waits for the one panel to show it and, unless
+ * told not to, for that panel to settle as the owner sees it before clicking on. Inputs: the
+ * page, the agent's name and whether to wait for the panel to settle. */
+async function openCard(page, label, settle = true) {
   const clicked = await page.evaluate(`(() => {
     const card = [...document.querySelectorAll(".tg-card-open")].find((button) => button.querySelector(".tg-card-title")?.textContent.includes(${JSON.stringify(label)}));
     card?.click();
@@ -72,6 +86,7 @@ async function openCard(page, label) {
     if (shown.includes(`${label} terminal`)) break;
     assert.ok(Date.now() < deadline, `${label}'s terminal never opened: ${JSON.stringify(shown)}`);
   }
+  if (settle) await settled(page, label);
 }
 
 test("on the Agents tab one terminal panel follows the clicked agent, from Open terminal and from the graph", { timeout: 600000 }, async (t) => {
@@ -145,7 +160,25 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
         await me.waitFor("the Agents tab with the team graph", (text) => text.includes("Team graph") && labels.every((label) => text.includes(label)));
 
-        for (const label of labels) await openCard(page, label);
+        const attached = () => log.trail.filter((call) => call.cmd === "desktop_terminal_attach").map((call) => call.args.agent);
+        const held = [];
+        let holding = true;
+        page.on("Fetch.requestPaused", (event) => {
+          if (holding) held.push(event.requestId);
+          else page.send("Fetch.continueRequest", { requestId: event.requestId }).catch(() => {});
+        });
+        await page.send("Fetch.enable", { patterns: [{ urlPattern: "*/assets/xterm-*", requestStage: "Request" }] });
+        await openCard(page, labels[2], false);
+        for (const deadline = Date.now() + STEP_MS; held.length === 0; await pause(POLL_MS)) {
+          assert.ok(Date.now() < deadline, "the first panel never asked for its terminal code");
+        }
+        await openCard(page, labels[0], false);
+        holding = false;
+        for (const id of held.splice(0)) await page.send("Fetch.continueRequest", { requestId: id });
+        await page.send("Fetch.disable");
+        await settled(page, labels[0]);
+        assert.deepEqual(attached(), [`team-${agents[0]}`], "a panel closed before its terminal code loaded asks no attach; the panel that replaced it asks once");
+        for (const label of labels.slice(1)) await openCard(page, label);
         assert.deepEqual(await panels(page), [`${labels[2]} terminal`], "three graph clicks leave one terminal panel, showing the last agent clicked");
         await me.capture("one-terminal-graph");
 
@@ -158,13 +191,13 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           if (shown.includes(`${labels[0]} terminal`)) break;
           assert.ok(Date.now() < deadline, `Open terminal never showed ${labels[0]}: ${JSON.stringify(shown)}`);
         }
+        await settled(page, labels[0]);
         assert.deepEqual(await panels(page), [`${labels[0]} terminal`], "Open terminal on a question replaces the graph's panel, it opens no second one");
         await openCard(page, labels[1]);
         assert.deepEqual(await panels(page), [`${labels[1]} terminal`], "a graph click after Open terminal still leaves one panel");
         await me.capture("one-terminal-question");
 
-        const attaches = log.trail.filter((call) => call.cmd === "desktop_terminal_attach").map((call) => call.args.agent);
-        assert.deepEqual(attaches, [...agents, agents[0], agents[1]].map((agent) => `team-${agent}`), "each open asks to attach the clicked agent's own terminal, once");
+        assert.deepEqual(attached(), [...agents, agents[0], agents[1]].map((agent) => `team-${agent}`), "each open asks to attach the clicked agent's own terminal, once");
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
