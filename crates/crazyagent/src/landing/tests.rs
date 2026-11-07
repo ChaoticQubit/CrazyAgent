@@ -6782,3 +6782,121 @@ fn a_master_set_waits_for_the_owner_under_waits_or_below_full_access() {
         assert_eq!(case.tip(), tip, "main does not move");
     }
 }
+
+/// Makes the case's store keep the project's activity, as an engine's does. Input: the case.
+fn keeps_activity(case: &Case) {
+    case.db
+        .execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+        .unwrap();
+    crate::activity::initialize(&case.db).unwrap();
+}
+
+#[test]
+fn undo_reverts_a_landed_set_on_main_and_refuses_with_the_files_when_main_changed_them_since() {
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    keeps_activity(&case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit: landed, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    let AcceptOutcome::Landed { commit, branch } = undo_landing(&case.db, &case.home, &id).unwrap()
+    else {
+        panic!("the undo conflicted");
+    };
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%an <%ae>|%s", &commit])
+            .trim(),
+        format!("{landed}|Repo Owner <owner@example.invalid>|Undo: Add the fourth line")
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+    let rows = activity_of(&case, &id);
+    assert!(
+        rows.iter()
+            .any(|row| row.kind == ActivityKind::Accepted && row.undone),
+        "the Accept row shows Undone: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.kind == ActivityKind::Undone && !row.undone)
+            .count(),
+        1,
+        "one Undone row"
+    );
+    assert_eq!(
+        refused(undo_landing(&case.db, &case.home, &id)),
+        "changes_undo_unavailable",
+        "a merge is undone once"
+    );
+    assert_eq!(case.tip(), commit);
+
+    let case = Case::new();
+    keeps_activity(&case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    let tip = case.owner_commit(
+        "README",
+        "one\ntwo\nthree\nfour, as the owner says\n",
+        "Owner rewords four",
+    );
+    assert_eq!(
+        undo_landing(&case.db, &case.home, &id).unwrap(),
+        AcceptOutcome::Conflict {
+            files: vec!["README".to_owned()]
+        }
+    );
+    assert_eq!(case.tip(), tip, "main does not move");
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour, as the owner says\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+    assert!(
+        activity_of(&case, &id)
+            .iter()
+            .all(|row| !row.undone && row.kind != ActivityKind::Undone),
+        "nothing was undone"
+    );
+}
+
+#[test]
+fn an_accept_that_made_no_commit_and_a_set_still_open_have_nothing_to_undo() {
+    let case = Case::new();
+    keeps_activity(&case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(
+        refused(undo_landing(&case.db, &case.home, &id)),
+        "changes_undo_unavailable",
+        "an open set has not landed"
+    );
+    let tip = case.owner_commit("README", "one\ntwo\nthree\nfour\n", "Owner adds four too");
+    assert_eq!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed {
+            commit: tip.clone(),
+            branch: "main".to_owned()
+        },
+        "main already held the work, so the Accept made no commit"
+    );
+    assert_eq!(
+        refused(undo_landing(&case.db, &case.home, &id)),
+        "changes_undo_unavailable",
+        "an undo never reverts a commit the Accept did not make"
+    );
+    assert_eq!(case.tip(), tip);
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n"
+    );
+}

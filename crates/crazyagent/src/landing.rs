@@ -1124,6 +1124,22 @@ pub fn land_master_set(
     }
 }
 
+/// Undoes a change set its own Accept merged into main: one commit on the branch it landed
+/// on that reverts the landed commit by a three-way merge, made with the owner's identity
+/// and named `Undo: <landed subject>`, and one Undone activity row; the merge's own rows
+/// then show Undone. A conflict with what that branch changed since returns the files and
+/// changes nothing. Inputs: the store, the owner's home and the change set. Output: the
+/// undo commit and branch, the conflicts, or `changes_undo_unavailable` for a set whose
+/// Accept made no commit of its own or that is already undone.
+pub fn undo_landing(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+) -> Result<AcceptOutcome, EngineError> {
+    let _ = (db, owner_home, id);
+    Err(EngineError("changes_stale".into()))
+}
+
 /// Lists the local branches an Accept of a change set can land on and the owner's
 /// checked-out branch. Inputs: the store and the change set. Output: the branches.
 pub fn target_branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranches, EngineError> {
