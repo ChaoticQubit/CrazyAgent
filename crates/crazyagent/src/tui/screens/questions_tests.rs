@@ -1,4 +1,4 @@
-use super::new_project_frames::{check_frames, compose};
+use super::new_project_frames::{check_frames, compose_pending};
 use super::new_project_view::Look;
 use super::project::{ProjectScreen, Tab};
 use super::project_frames::clocks;
@@ -177,10 +177,16 @@ fn typed(screen: &mut ProjectScreen, text: &str) {
 }
 
 fn shown(screen: &mut ProjectScreen, width: u16, height: u16) -> String {
+    shown_pending(screen, width, height, 0)
+}
+
+/// Draws the project screen as the shell shows it with a pending questions badge. Takes
+/// the screen, the terminal size and the pending count. Returns the frame text.
+fn shown_pending(screen: &mut ProjectScreen, width: u16, height: u16, pending: u64) -> String {
     let look = Look::plain();
     screen.width = width;
     let frame = project_screen(screen, width, height, &look);
-    clocks(&compose(&frame, width, height, "", &look))
+    clocks(&compose_pending(&frame, width, height, "", &look, pending))
 }
 
 #[tokio::test]
@@ -212,8 +218,17 @@ async fn questions_page_lists_pending_first_with_the_recommendation() {
         })
     );
     assert_eq!(engine.pump(&mut screen, NOW + 1).await, None, "one read");
+    let pending: u64 = engine
+        .controller
+        .questions_counts()
+        .await
+        .unwrap()
+        .iter()
+        .map(|(_, count)| u64::from(*count))
+        .sum();
+    assert_eq!(pending, 1);
 
-    let narrow = shown(&mut screen, 80, 24);
+    let narrow = shown_pending(&mut screen, 80, 24, pending);
     let lines: Vec<&str> = narrow.lines().collect();
     assert!(
         lines[0].contains("Home  /  Plant Shop  /  Questions"),
@@ -231,10 +246,11 @@ async fn questions_page_lists_pending_first_with_the_recommendation() {
     assert!(lines[first].contains("Waiting") && lines[second].contains("Dismissed"));
     assert!(narrow.contains("1. Europe (recommended)"), "{narrow}");
     assert!(
-        lines.last().unwrap().starts_with(" a Answer  d Dismiss"),
-        "{narrow}"
+        lines.last().unwrap().starts_with(" a Answer  d Dismiss")
+            && lines.last().unwrap().ends_with("1 question  ? Help"),
+        "the badge shows on the Questions page too:\n{narrow}"
     );
-    let wide = shown(&mut screen, 120, 36);
+    let wide = shown_pending(&mut screen, 120, 36, pending);
     check_frames(&[
         ("questions-80".to_owned(), narrow),
         ("questions-120".to_owned(), wide),

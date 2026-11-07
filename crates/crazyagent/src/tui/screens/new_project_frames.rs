@@ -13,9 +13,28 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
-fn help_line(width: usize, items: &[(&'static str, &'static str)], look: &Look) -> Row {
+/// The help line as the shell's footer draws it: hints that do not fit drop first, and the
+/// pending questions badge and `? Help` stay. Takes the width, the hints, the pending count
+/// and the look. Returns the row.
+fn help_line(
+    width: usize,
+    items: &[(&'static str, &'static str)],
+    pending: u64,
+    look: &Look,
+) -> Row {
     let separator = if width >= 100 { "   " } else { "  " };
-    let right = Row::of("?", look.heading).push(" Help ", look.fg);
+    let mut right = Row::default();
+    if pending > 0 {
+        let noun = if pending == 1 {
+            "question"
+        } else {
+            "questions"
+        };
+        right = right
+            .push(format!("{pending} {noun}"), look.warning)
+            .push(separator, Style::new());
+    }
+    let right = right.push("?", look.heading).push(" Help ", look.fg);
     let mut row = Row::of(" ", Style::new());
     let mut used = 1;
     for (index, (name, label)) in items.iter().enumerate() {
@@ -45,6 +64,20 @@ pub(super) fn compose(
     message: &str,
     look: &Look,
 ) -> String {
+    compose_pending(screen, width, height, message, look, 0)
+}
+
+/// Draws a screen inside the shared frame as [`compose`] does, with the footer badge the
+/// shell shows while questions wait for the owner. Takes what `compose` takes and the
+/// pending question count. Returns the plain text of every terminal row.
+pub(super) fn compose_pending(
+    screen: &Screen,
+    width: u16,
+    height: u16,
+    message: &str,
+    look: &Look,
+    pending: u64,
+) -> String {
     let columns = usize::from(width);
     let body = usize::from(height) - 4;
     assert!(
@@ -66,7 +99,7 @@ pub(super) fn compose(
     } else {
         Row::of(format!(" {message}"), look.fg).pad(columns)
     });
-    rows.push(help_line(columns, &screen.help, look));
+    rows.push(help_line(columns, &screen.help, pending, look));
     let lines: Vec<Line<'static>> = std::iter::once(top)
         .chain(rows.into_iter().map(Row::line))
         .collect();
