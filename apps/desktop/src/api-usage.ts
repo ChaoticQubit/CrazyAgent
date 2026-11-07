@@ -112,6 +112,15 @@ export interface MetricsGroup {
   tokens: Tokens;
   agents: number;
   runs: number;
+  projects: string[];
+}
+
+export interface MetricsAgent {
+  project: string;
+  agent: string;
+  harnesses: string[];
+  accounts: string[];
+  tokens: Tokens;
 }
 
 export interface Metrics {
@@ -122,6 +131,8 @@ export interface Metrics {
   bucket_ms: number;
   series: MetricsBucket[];
   runs: MetricsRun[];
+  projects: MetricsGroup[];
+  agents: MetricsAgent[];
   accounts: MetricsGroup[];
   harnesses: MetricsGroup[];
 }
