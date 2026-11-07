@@ -1,9 +1,9 @@
 use super::new_project::*;
 use super::new_project_input::cells;
 use super::new_project_tests::{key, load_catalog, type_text, wizard};
-use super::new_project_view::{Look, Row, Screen, research_glyph, spread, wizard_screen};
+use super::new_project_view::{Look, Row, Screen, research_glyph, wizard_screen};
 use crate::project_setup::ResearchKind;
-use crate::tui::frame::header;
+use crate::tui::frame::{footer, header, hint};
 use crate::tui::glyphs::{ASCII, UNICODE};
 use crate::tui::theme::{Appearance, Colors, Depth, Theme};
 use crossterm::event::KeyCode;
@@ -12,47 +12,6 @@ use ratatui::backend::TestBackend;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
-
-/// The help line as the shell's footer draws it: hints that do not fit drop first, and the
-/// pending questions badge and `? Help` stay. Takes the width, the hints, the pending count
-/// and the look. Returns the row.
-fn help_line(
-    width: usize,
-    items: &[(&'static str, &'static str)],
-    pending: u64,
-    look: &Look,
-) -> Row {
-    let separator = if width >= 100 { "   " } else { "  " };
-    let mut right = Row::default();
-    if pending > 0 {
-        let noun = if pending == 1 {
-            "question"
-        } else {
-            "questions"
-        };
-        right = right
-            .push(format!("{pending} {noun}"), look.warning)
-            .push(separator, Style::new());
-    }
-    let right = right.push("?", look.heading).push(" Help ", look.fg);
-    let mut row = Row::of(" ", Style::new());
-    let mut used = 1;
-    for (index, (name, label)) in items.iter().enumerate() {
-        let gap = if index == 0 { 0 } else { separator.len() };
-        let piece = gap + cells(name) + 1 + cells(label);
-        if used + piece + right.width() + 2 > width {
-            break;
-        }
-        if index > 0 {
-            row = row.push(separator, Style::new());
-        }
-        row = row
-            .push(*name, look.heading)
-            .push(format!(" {label}"), look.fg);
-        used += piece;
-    }
-    spread(width, row, right)
-}
 
 /// Draws a screen inside the shared frame on a real ratatui test terminal.
 /// Takes the screen, the terminal size, the message line and the look; follows the generator in DESIGN.md.
@@ -99,9 +58,15 @@ pub(super) fn compose_pending(
     } else {
         Row::of(format!(" {message}"), look.fg).pad(columns)
     });
-    rows.push(help_line(columns, &screen.help, pending, look));
+    let hints: Vec<_> = screen
+        .help
+        .iter()
+        .map(|(key, label)| hint(key, label))
+        .collect();
+    let help = footer(columns, &hints, pending, &theme, glyphs);
     let lines: Vec<Line<'static>> = std::iter::once(top)
         .chain(rows.into_iter().map(Row::line))
+        .chain(std::iter::once(help))
         .collect();
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
