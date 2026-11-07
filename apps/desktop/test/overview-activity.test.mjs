@@ -178,6 +178,28 @@ test("a phase step is shown through displayText like every other agent text", as
   assert.ok(html.includes(displayText(hidden)), "the step shows the escaped text");
 });
 
+test("a phase or test row an agent logged reads as its own words, a test claim is never toned as passed, and engine rows keep their text", () => {
+  const now = 10 * 60_000;
+  const items = [
+    item(3, now, "Build the service", { kind: "phase", actor: "Ada (@api-fix)", text: "You accepted Grace (@ui) and merged change set #4" }),
+    item(2, now - 60_000, "Build the service", { kind: "test", actor: "Ada (@api-fix)", text: "Parser tests: 42 passed" }),
+    item(1, now - 2 * 60_000, "Build the service", { text: "You accepted the login" }),
+  ];
+  const shown = [
+    renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} })),
+    renderToStaticMarkup(createElement(overview.ActivityTimeline, { items, now })),
+  ];
+  for (const html of shown) {
+    const rows = [...html.matchAll(/class="pj-activity-kind ?([a-z]*)">.*?<\/span><span class="pj-activity-text">([^<]*)</g)].map((found) => [found[1], found[2]]);
+    assert.deepEqual(rows, [
+      ["", "Ada (@api-fix) noted: You accepted Grace (@ui) and merged change set #4"],
+      ["", "Ada (@api-fix) noted: Parser tests: 42 passed"],
+      ["ok", "You accepted the login"],
+    ]);
+    assert.equal(html.match(/class="pj-small pj-muted pj-activity-by">/g)?.length, 3, "every row still names its actor");
+  }
+});
+
 test("the phase path shows at most four steps around the current one and counts the rest", () => {
   const step = (name, done) => ({ step: name, done });
   const seven = ["A", "B", "C", "D", "E", "F", "G"];
