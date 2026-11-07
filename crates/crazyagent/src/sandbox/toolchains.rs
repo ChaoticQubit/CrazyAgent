@@ -35,8 +35,9 @@ const GIT_SCRIPT_BYTES_MAX: u64 = 8192;
 /// a lead's copy, `@FREE@` for 1 in the free copy and `@MAIN@` for 1 while "Catch up with
 /// main" is on, else 0. It refuses merge, pull, rebase and cherry-pick, and aliases for
 /// them, with a plain reason (DEC-107 rule 2); with main on any copy merges
-/// `crazyagent/main`, a lead its own workers' `BRANCH--NAME` branches, and the free copy
-/// runs every command as is.
+/// `crazyagent/main` only while that name resolves to the commit the engine's own
+/// `refs/crazyagent/main` holds, a lead its own workers' `BRANCH--NAME` branches, and the
+/// free copy runs every command as is.
 #[cfg(unix)]
 const GIT_SCRIPT: &str = r##"#!/bin/sh
 git='@GIT@'
@@ -126,6 +127,8 @@ own_workers() {
 }
 only_main() {
   [ "$moved" = 0 ] || return 1
+  held=$("$git" show-ref --verify --hash refs/crazyagent/main 2>/dev/null) || return 1
+  held=$("$git" rev-parse --verify -q "$held^{commit}" 2>/dev/null) || return 1
   named=0
   value=0
   for word do
@@ -136,7 +139,10 @@ only_main() {
     case "$word" in
       -m|-F|-s|-X|--message|--file|--strategy|--strategy-option|--into-name|--cleanup) value=1 ;;
       -*) ;;
-      crazyagent/main|refs/crazyagent/main) named=1 ;;
+      crazyagent/main|refs/crazyagent/main)
+        [ "$("$git" rev-parse --verify -q "$word^{commit}" 2>/dev/null)" = "$held" ] || return 1
+        named=1
+        ;;
       *) return 1 ;;
     esac
   done
