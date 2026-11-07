@@ -1587,20 +1587,19 @@ fn under_wait_a_cycle_fallback_leaves_the_held_file_to_its_holder() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(claimed, vec!["docs/notes.md".to_owned()]);
-    let live = |who: AgentId| -> Vec<AgentId> {
+    let holders = |who: AgentId| -> Vec<AgentId> {
         overlapping(&connection, &project(), who, "src/parser.rs")
             .unwrap()
-            .into_iter()
-            .filter(|claim| !claim.stale)
+            .iter()
             .map(|claim| claim.agent)
             .collect()
     };
     assert_eq!(
-        live(grace),
+        holders(grace),
         Vec::<AgentId>::new(),
         "Grace keeps editing her own file"
     );
-    assert_eq!(live(ada), vec![grace], "Ada's edits of it stay refused");
+    assert_eq!(holders(ada), vec![grace], "Ada's edits of it stay refused");
     assert_eq!(
         wait_cycle_notices(&connection, &project(), NOW).unwrap(),
         vec![(ada, grace, "src/parser.rs".to_owned())]
