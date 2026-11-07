@@ -1612,3 +1612,72 @@ fn relation_facts_read_review_ready_work_and_open_questions_between_agents() {
         "an answered question and completed work leave the facts"
     );
 }
+
+#[test]
+fn relation_facts_keep_each_owner_and_pair_past_one_agents_many_rows() {
+    let connection = Connection::open_in_memory().unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let project = ProjectId::new("tidepool").unwrap();
+    let work = |owner: i64, updated: i64| -> i64 {
+        connection
+            .execute(
+                "INSERT INTO coord_work(project,title,owner_agent,state,version,created,updated) VALUES ('tidepool','Tests',?1,'review_ready',1,?2,?2)",
+                params![owner, updated],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let question = |from: i64, to: i64| {
+        connection
+            .execute(
+                "INSERT INTO coord_messages(project,from_kind,from_agent,to_kind,to_agent,kind,body,receipt,created,receipt_at) VALUES ('tidepool','agent',?1,'agent',?2,'question','Which branch?','sent',1,1)",
+                params![from, to],
+            )
+            .unwrap();
+    };
+    let quiet = work(4, 1);
+    question(4, 2);
+    let mut newest = 0;
+    for at in 0..=RELATION_SCAN_MAX {
+        newest = work(3, 10 + at);
+        question(3, 2);
+    }
+    assert_eq!(
+        review_ready(&connection, &project).unwrap(),
+        [(3, newest), (4, quiet)],
+        "one owner's many review-ready rows count once, with its newest change set, and leave room for every other owner"
+    );
+    assert_eq!(
+        asking(&connection, &project).unwrap(),
+        BTreeSet::from([(3, 2), (4, 2)]),
+        "one pair's many open questions count once and leave room for every other pair"
+    );
+}
+
+#[test]
+fn a_review_shows_on_its_drawn_reviewer_line_whether_or_not_its_worker_is_drawn() {
+    let mut status = tree();
+    status.agents[2].finished = true;
+    status.agents[2].teammates.clear();
+    status.agents.last_mut().unwrap().finished = true;
+    finish(&mut status, &[11, 15, 16]);
+    let facts = GraphFacts {
+        review_ready: vec![(8, 31), (7, 30)],
+        ..none()
+    };
+    assert_eq!(
+        relations(&graph(&status, &facts)),
+        [
+            ("master", "team-4", Relation::DelegatedTo, None),
+            ("master", "team-5", Relation::DelegatedTo, None),
+            ("master", "team-6", Relation::DelegatedTo, None),
+            (
+                "master",
+                "team-7",
+                Relation::DelegatedTo,
+                Some(LiveAction::Reviewing { change_set: 31 })
+            ),
+        ],
+        "a drawn lead reviewing its hidden worker's change set shows on its own line, and a review by a hidden lead sits on no line"
+    );
+}
