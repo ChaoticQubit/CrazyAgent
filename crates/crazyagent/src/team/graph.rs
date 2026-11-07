@@ -21,6 +21,10 @@ pub const ENGINE_PARTY: &str = "engine";
 pub const MESSAGE_EDGES_MAX: usize = 32;
 pub const OVERLAP_EDGES_MAX: usize = 16;
 pub const OVERLAP_REASON_BYTES_MAX: usize = 160;
+/// The longest task text a handoff relation carries; the task's own edge keeps it whole.
+pub const HANDOFF_TASK_BYTES_MAX: usize = 160;
+/// The most coordination rows one relation read scans, newest first.
+const RELATION_SCAN_MAX: usize = 256;
 /// How many stopped sub-agents the graph keeps listed, newest first: one full round of a
 /// project's terminals, so the agents of the latest work stay beside their tasks.
 pub const STOPPED_SHOWN_MAX: usize = PANES_PER_PROJECT_MAX;
@@ -149,9 +153,44 @@ pub struct OverlapEdge {
     pub stale: bool,
 }
 
+/// How the upper node of one tree pair relates to the lower one: a lead leads its worker,
+/// the master delegated to a top-level agent, and a native teammate works beside the lead
+/// whose harness split it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relation {
+    Leads,
+    DelegatedTo,
+    TeammateOf,
+}
+
+/// What one tree pair is doing now: the upper node hands the lower one an open task, one
+/// of them waits on an open question it asked the other, the upper one reviews the lower
+/// one's review-ready work, or unread messages wait between them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum LiveAction {
+    HandingOff { task: String },
+    Messaging,
+    WaitingOn,
+    Reviewing,
+}
+
+/// The one relation edge of a tree pair, from the node that leads to the node it leads,
+/// with the pair's live action while one holds. A handed-off task is cut to
+/// `HANDOFF_TASK_BYTES_MAX`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationEdge {
+    pub from: String,
+    pub to: String,
+    pub relation: Relation,
+    pub live: Option<LiveAction>,
+}
+
 /// A project's team as a tree of who leads whom: the master, its harness leads, their
-/// sub-agents and native teammates, the assignment edges between them, and the unread
-/// message and claim overlap edges of the coordination layer.
+/// sub-agents and native teammates, the assignment edges between them, the unread
+/// message and claim overlap edges of the coordination layer, and one relation edge per
+/// tree pair.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamGraph {
     pub project_id: ProjectId,
@@ -161,15 +200,20 @@ pub struct TeamGraph {
     pub messages: Vec<MessageEdge>,
     #[serde(default)]
     pub overlaps: Vec<OverlapEdge>,
+    #[serde(default)]
+    pub relations: Vec<RelationEdge>,
 }
 
-/// What the graph reads beside the team status: each sub-agent's branch and the project's
-/// coordination snapshot. The default draws the tree with no branch, presence or
-/// coordination lines.
+/// What the graph reads beside the team status: each sub-agent's branch, the project's
+/// coordination snapshot, the agents that own review-ready work, and each asker and
+/// recipient of an open question between agents. The default draws the tree with no
+/// branch, presence, coordination lines or live action but handoffs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GraphFacts {
     pub branches: BTreeMap<i64, String>,
     pub coord: Option<Snapshot>,
+    pub review_ready: BTreeSet<i64>,
+    pub asking: BTreeSet<(i64, i64)>,
 }
 
 fn edge_state(status: TaskStatus) -> EdgeState {
@@ -218,9 +262,9 @@ fn teammate_node(agent: i64, pane: &str) -> String {
     )
 }
 
-/// Reads what the graph shows beside a status: `branches` and `crate::coord::snapshot`.
-/// Takes a connection, the status and the time in ms. Returns the facts, or a failure of
-/// either read.
+/// Reads what the graph shows beside a status: `branches`, `crate::coord::snapshot`,
+/// `review_ready` and `asking`. Takes a connection, the status and the time in ms. Returns
+/// the facts, or a failure of any read.
 pub fn facts(
     connection: &Connection,
     status: &TeamStatus,
@@ -229,7 +273,28 @@ pub fn facts(
     Ok(GraphFacts {
         branches: branches(connection, status)?,
         coord: Some(crate::coord::snapshot(connection, &status.project_id, now)?),
+        review_ready: review_ready(connection, &status.project_id)?,
+        asking: asking(connection, &status.project_id)?,
     })
+}
+
+/// Reads the agents of a project that own review-ready work, which their reviewer reads
+/// next. Takes a connection and the project. Returns the owners, or a SQLite failure.
+fn review_ready(
+    _connection: &Connection,
+    _project: &ProjectId,
+) -> Result<BTreeSet<i64>, EngineError> {
+    Ok(BTreeSet::new())
+}
+
+/// Reads each asker and recipient of a project's open questions between two agents, one
+/// neither replied to nor ended. Takes a connection and the project. Returns the pairs as
+/// (asker, recipient), or a SQLite failure.
+fn asking(
+    _connection: &Connection,
+    _project: &ProjectId,
+) -> Result<BTreeSet<(i64, i64)>, EngineError> {
+    Ok(BTreeSet::new())
 }
 
 /// Reads the branch each team member of a status commits on, from its worktree record and the
@@ -548,6 +613,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         edges,
         messages,
         overlaps,
+        relations: Vec::new(),
     }
 }
 

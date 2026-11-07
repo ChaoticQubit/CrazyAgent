@@ -1593,14 +1593,35 @@ export interface GraphEdge {
   agent_label?: string | null;
 }
 
-/** One project's team as a tree of who leads whom, its assignment edges, and the unread
- * message and claim overlap edges of the coordination layer. */
+/** How the upper node of one tree pair relates to the lower one. */
+export type Relation = "leads" | "delegated_to" | "teammate_of";
+
+/** What one tree pair is doing now: a handoff names its task, cut to 160 bytes. */
+export type LiveAction =
+  | { action: "handing_off"; task: string }
+  | { action: "messaging" }
+  | { action: "waiting_on" }
+  | { action: "reviewing" };
+
+/** The one relation edge of a tree pair, from the node that leads to the node it leads,
+ * with the pair's live action while one holds. */
+export interface RelationEdge {
+  from: string;
+  to: string;
+  relation: Relation;
+  live: LiveAction | null;
+}
+
+/** One project's team as a tree of who leads whom, its assignment edges, the unread
+ * message and claim overlap edges of the coordination layer, and one relation edge per
+ * tree pair. */
 export interface TeamGraph {
   project_id: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
   messages?: MessageEdge[];
   overlaps?: OverlapEdge[];
+  relations?: RelationEdge[];
 }
 
 /** A control message on an attached terminal channel: the terminal's size once attached,

@@ -1272,6 +1272,7 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
         edges: Vec::new(),
         messages: Vec::new(),
         overlaps: Vec::new(),
+        relations: Vec::new(),
     }));
     screen.open(Tab::Conversation);
     let look = Look::plain();
@@ -2748,6 +2749,7 @@ fn console_screen() -> ProjectScreen {
         edges: vec![],
         messages: Vec::new(),
         overlaps: Vec::new(),
+        relations: Vec::new(),
     }));
     screen.context = Some(ProjectContext {
         project_id: project,
