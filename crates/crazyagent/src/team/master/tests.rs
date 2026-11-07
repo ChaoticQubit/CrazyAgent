@@ -1929,7 +1929,7 @@ fn under_wait_the_master_s_start_on_a_held_file_is_told_to_wait() {
     assert_eq!(
         said,
         format!(
-            "Wait: charts's work #{work} holds src/ui/chart.ts until it lands. You will get a message when it is free."
+            "Wait: Ada (@charts)'s work #{work} holds src/ui/chart.ts until it lands. You will get a message when it is free."
         )
     );
     let started: i64 = fixture
