@@ -4003,13 +4003,17 @@ fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
 }
 
 #[test]
-fn w_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access() {
+fn e_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access() {
     use crate::team::MasterLands;
     let row = "When the master resolves conflicts";
     let mut view = loaded();
-    assert!(view.help().contains(&("W", "Master merges")));
+    assert!(view.help().contains(&("E", "Master merges")));
+    assert!(
+        !view.help().contains(&("W", "Master merges")),
+        "W stays free for Terminals per window"
+    );
     assert!(!shows(&view, row), "the row shows only at Full access");
-    assert_eq!(view.key(press(KeyCode::Char('W'))), TeamReply::Handled);
+    assert_eq!(view.key(press(KeyCode::Char('E'))), TeamReply::Handled);
     assert_eq!(
         view.notice,
         Some(Notice::plain(
@@ -4020,7 +4024,14 @@ fn w_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access()
     full.master_lands = Some(MasterLands::Merges);
     reread(&mut view, full, NOW + MINUTE);
     assert!(shows(&view, &format!("{row}  Merge into main itself")));
-    let reply = view.key(press(KeyCode::Char('W')));
+    assert!(
+        !matches!(
+            view.key(press(KeyCode::Char('W'))),
+            TeamReply::Change(TeamAction::MasterLands { .. })
+        ),
+        "W does not switch the master merge setting"
+    );
+    let reply = view.key(press(KeyCode::Char('E')));
     assert_eq!(
         reply,
         TeamReply::Change(TeamAction::MasterLands {
@@ -4040,7 +4051,7 @@ fn w_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access()
     reread(&mut view, waits, NOW + MINUTE + 10);
     assert!(shows(&view, &format!("{row}  Wait for my Accept")));
     assert_eq!(
-        view.key(press(KeyCode::Char('W'))),
+        view.key(press(KeyCode::Char('E'))),
         TeamReply::Change(TeamAction::MasterLands {
             project_id: project(),
             mode: MasterLands::Merges,
