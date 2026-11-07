@@ -15915,6 +15915,119 @@ fn dispatch_hands_a_briefed_kept_session_its_task_with_no_grant() {
     team.shutdown().unwrap();
 }
 
+/// A kept native lead taken over in its pane while its run still held a task (L6R2-L1)
+/// resumes that run there with the note once briefed and ready, then takes the task pinned
+/// to it when that turn ends. With the idle stop Off nothing else ends the lead, so a run
+/// left waiting would keep the pinned task from it for good.
+#[test]
+fn a_kept_lead_taken_over_with_a_held_task_resumes_it_in_its_pane_then_takes_its_pinned_task() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let (orders, turns) = channel();
+    let (reports, reported) = channel();
+    let mut worker = between_turns(&project, AgentRole::Sub, true, true);
+    (worker.orders, worker.reports) = (orders, reported);
+    (worker.tools, worker.team_tool, worker.ask_tool) = (false, false, false);
+    team.workers.insert(lead, worker);
+    ledger::initialize(&fixture.connection).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,NULL,NULL,0)
+             ON CONFLICT(project) DO UPDATE SET idle_secs=excluded.idle_secs",
+            [PROJECT],
+        )
+        .unwrap();
+    let queued = |prompt: &str| -> i64 {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'owner','codex',0,?2,'queued',1)",
+                params![PROJECT, prompt],
+            )
+            .unwrap();
+        fixture.connection.last_insert_rowid()
+    };
+    let held = queued("Write the release notes");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO recovery_runs(agent,project,kind,harness,at_ms,turn,task,state) VALUES (?1,?2,'sub','codex',1,1,?3,'interrupted')",
+            params![lead, PROJECT, held],
+        )
+        .unwrap();
+    let pinned = queued("Then write the index");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+            params![pinned, PROJECT, lead],
+        )
+        .unwrap();
+
+    let none = BTreeSet::new();
+    let mut typed = Vec::new();
+    for _ in 0..4 {
+        team.collect().unwrap();
+        team.resume_interrupted(&fixture.setup, &fixture.access, &none)
+            .unwrap();
+        team.dispatch(&fixture.setup, &fixture.access, &none)
+            .unwrap();
+        team.reap_idle(&fixture.setup).unwrap();
+        while let Ok(order) = turns.try_recv() {
+            let Order::Turn(text, grant, _) = order else {
+                panic!("the lead got an order other than a turn");
+            };
+            assert!(
+                grant.is_none(),
+                "a briefed kept session takes its turns with no grant"
+            );
+            typed.push(text);
+            reports
+                .send(Report::Finished {
+                    text: "Done.".into(),
+                    end: TurnEnd::Success,
+                    cause: None,
+                })
+                .unwrap();
+        }
+    }
+    assert_eq!(
+        task_row(&fixture, pinned),
+        ("done".to_owned(), Some(lead), None),
+        "the task pinned to the taken-over lead ran on it"
+    );
+    assert_eq!(
+        task_row(&fixture, held),
+        ("done".to_owned(), Some(lead), None)
+    );
+    assert_eq!(typed.len(), 2, "{typed:?}");
+    assert!(
+        typed[0].starts_with("You were interrupted at ")
+            && typed[0].contains("Write the release notes"),
+        "the held task resumes first, with the note: {}",
+        typed[0]
+    );
+    assert!(typed[1].contains("Then write the index"), "{}", typed[1]);
+    let state: String = fixture
+        .connection
+        .query_row(
+            "SELECT state FROM recovery_runs WHERE agent=?1",
+            [lead],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "resumed");
+    assert!(
+        !team.workers[&lead].stopping,
+        "with the idle stop Off the lead keeps running"
+    );
+    team.shutdown().unwrap();
+}
+
 /// Wiring test of engine mechanics, not Claude Code: a shell stand-in pane plays a native
 /// lead an earlier engine left running. A Stop before any order, or a first order without
 /// the signed-in account, ends its pane; a Stop while the engine leaves panes running
