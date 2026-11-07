@@ -170,13 +170,13 @@ export const TRIAL3_STEPS = [
     title: `Set Land on to ${SETTINGS.landOn}`,
     why: `18.13 Land on (Q1): the master's merges and Accept land on ${SETTINGS.landOn}, not on main`,
     action: async () => {
-      await tab("agents");
+      await tab("agents?section=settings");
       const field = `[id="tg-land-on-${project()}"]`;
       const save = "//form[@aria-label=\"Land on\"]//button[normalize-space(.)=\"Save\"]";
       await type(field, SETTINGS.landOn);
       await click(save);
       await until(async () => !(await $(save).isEnabled()), UI_MS, "Land on Save did not finish");
-      await reopen("agents");
+      await reopen("agents?section=settings");
       await until(async () => await shown(field) && (await $(field).getValue()) === SETTINGS.landOn, UI_MS, "Land on did not read back");
       await inView(field);
       return `Land on reads ${SETTINGS.landOn} after reopening the Agents tab`;
@@ -188,10 +188,10 @@ export const TRIAL3_STEPS = [
     title: "Set Background commands at task end to Wait",
     why: "18.13 background commands (Q13, S3): under Wait a task stays open until its background command ends",
     action: async () => {
-      await tab("agents");
+      await tab("agents?section=settings");
       const field = `[id="tg-background-${project()}"]`;
       const changed = await pick(field, SETTINGS.background);
-      await reopen("agents");
+      await reopen("agents?section=settings");
       await until(async () => await shown(field) && (await $(field).getValue()) === SETTINGS.background, UI_MS, "Background commands did not read back");
       await inView(field);
       return `Background commands reads Wait for them after reopening${changed ? "" : " (it already was; no row also means Wait)"}`;
@@ -203,14 +203,14 @@ export const TRIAL3_STEPS = [
     title: "Set Worker skills to Chosen skills with one skill",
     why: "18.13 skills per role (R3): workers get only the one approved skill the owner ticks, a real subset the audit checks",
     action: async () => {
-      const done = await choose("agents", "Worker skills", SETTINGS.worker);
+      const done = await choose("agents?section=settings", "Worker skills", SETTINGS.worker);
       const none = "//*[@role=\"group\"][@aria-label=\"Skills per role\"]/div[.//*[@aria-label=\"Worker skills\"]]//*[normalize-space(.)=\"No approved skills for this project yet.\"]";
       await until(async () => (await workerSkills()).length > 0 || await shown(none), UI_MS, "the worker skill boxes were never shown");
       const boxes = await workerSkills();
       if (boxes.length === 0) throw new Error("no approved skill to choose: Chosen skills for workers needs at least one");
       const keep = boxes[0].name;
       for (const box of boxes) await tick(box.name, box.name === keep);
-      await reopen("agents");
+      await reopen("agents?section=settings");
       await until(async () => (await workerSkills()).length === boxes.length, UI_MS, "the worker skill boxes did not come back after reopening");
       const after = await workerSkills();
       assert.deepEqual(after.filter((box) => box.on).map((box) => box.name), [keep], `workers read only ${keep} after reopening`);
@@ -226,14 +226,14 @@ export const TRIAL3_STEPS = [
     it: "sets workflow nudges",
     title: "Set Workflow nudges to First edit",
     why: "18.13 nudges (R4): an agent editing before any graph query gets one nudge",
-    action: () => choose("agents", "Workflow nudges", SETTINGS.nudges),
+    action: () => choose("agents?section=settings", "Workflow nudges", SETTINGS.nudges),
   },
   {
     slug: "finished-agents",
     it: "shows finished agents",
     title: "Set Finished agents to Show",
     why: "The final tree must show the stopped agents, so finished agents stay in the tree",
-    action: () => choose("agents", "Finished agents", SETTINGS.finished),
+    action: () => choose("agents?section=settings", "Finished agents", SETTINGS.finished),
   },
   {
     slug: "network",

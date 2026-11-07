@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { AGENTS_VIEW, INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
@@ -187,8 +187,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.enable");
         await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
-        await me.waitFor("the Team graph and the Task-start reminder setting on the Agents tab", (text) => text.includes("Team graph") && text.includes("Task-start reminder"));
+        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents?section=tools` });
+        await me.waitFor("the Task-start reminder setting in Agent settings", (text) => text.includes("Task-start reminder"));
         await steps({ project, runtime, me, page });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
@@ -229,10 +229,11 @@ async function shows(me, page, wanted) {
   }
 }
 
-/** Hands the owner's task to Codex from the Agents tab, as the owner does, and waits until the
+/** Hands the owner's task to Codex from the Agents tab's Team view, as the owner does, and waits until the
  * engine finished it on a live tools-on agent. Inputs: the owner on the page, the page, the
  * project and the engine root. Output: the engine's rows then. */
 async function handOff(me, page, project, runtime) {
+  await me.click("Team", AGENTS_VIEW);
   const picked = await page.evaluate(`(() => {
     const select = document.getElementById(${JSON.stringify(`tg-hand-to-${project}`)});
     if (!select || select.disabled || ![...select.options].some((option) => option.value === "codex")) return false;

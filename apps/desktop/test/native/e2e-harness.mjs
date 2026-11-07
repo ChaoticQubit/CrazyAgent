@@ -8,6 +8,9 @@ import { setTimeout as pause } from "node:timers/promises";
 export const READY_MS = 60000;
 export const STEP_MS = 30000;
 export const POLL_MS = 100;
+/** The Agents tab's view switch, Team or Agent settings; `me.click("Team", AGENTS_VIEW)` picks
+ * a view as the owner does. */
+export const AGENTS_VIEW = '[role=radiogroup][aria-label="Agents view"] [role=radio]';
 const BODY_BYTES_MAX = 4 * 1024 * 1024;
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2" };
 

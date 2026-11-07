@@ -177,8 +177,8 @@ function waiting(sets, id) {
 test("below Full access the master merge setting is off and the master's fix waits for the owner's Accept", { timeout: 600000 }, async (t) => {
   await withProject(t, "sandboxed", async (run) => {
     const { me, page, open, masterTurn, changes, status, activity, repo, start } = run;
-    await open("agents", SETTING);
-    const row = await page.evaluate(`[...document.querySelectorAll(".pj-row")].find((node) => node.textContent.includes(${JSON.stringify(SETTING)}))?.innerText ?? ""`);
+    await open("agents?section=access", SETTING);
+    const row = await page.evaluate(`document.querySelector(${JSON.stringify(`.set-row[data-setting="${SETTING}"]`)})?.innerText ?? ""`);
     assert.match(row, /Only at Full access\./, "the row says the setting needs Full access");
     assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"]`)})`), null, "no choice is offered below Full access");
     assert.equal((await status()).master_lands, null, "the engine offers no choice below Full access");
@@ -195,7 +195,7 @@ test("below Full access the master merge setting is off and the master's fix wai
 test("at Full access Merge into main itself lands the master's fix on main with no Accept and Activity lists it", { timeout: 600000 }, async (t) => {
   await withProject(t, "full", async (run) => {
     const { me, open, masterTurn, changes, status, activity, repo, start } = run;
-    await open("agents", SETTING);
+    await open("agents?section=access", SETTING);
     assert.equal((await status()).master_lands, "merges", "Full access starts with Merge into main itself");
     await choose(run, WAITS, "waits");
     await choose(run, MERGES, "merges");
@@ -218,7 +218,7 @@ test("at Full access Merge into main itself lands the master's fix on main with 
 test("at Full access Wait for my Accept leaves the master's fix in Changes", { timeout: 600000 }, async (t) => {
   await withProject(t, "full", async (run) => {
     const { me, open, masterTurn, changes, activity, repo, start } = run;
-    await open("agents", SETTING);
+    await open("agents?section=access", SETTING);
     await choose(run, WAITS, "waits");
     await me.capture("full-waits-agents");
 

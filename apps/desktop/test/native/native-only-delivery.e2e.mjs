@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { AGENTS_VIEW, INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
@@ -169,7 +169,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/settings?section=team` });
         await codexToolsOff(me, page, () => value(bridge, "desktop_project_setup", { id: project }));
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
-        await me.waitFor("the Team graph and the Codex delivery setting on the Agents tab", (text) => text.includes("Team graph") && text.includes("Messages to Codex agents"));
+        await me.waitFor("the Team graph on the Agents tab", (text) => text.includes("Team graph"));
         await steps({ project, runtime, me, page, status, graph });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
@@ -217,10 +217,12 @@ async function codexToolsOff(me, page, setup) {
   }
 }
 
-/** Picks one choice of the Agents tab's "Messages to Codex agents" setting, as the owner's pick
- * in its list does, and waits until the engine keeps it. Inputs: the page, the project, the
- * status reader and the choice. Output: none. */
-async function deliver(page, project, status, choice) {
+/** Picks one choice of the "Messages to Codex agents" setting in Agent settings, as the owner's
+ * pick in its list does, waits until the engine keeps it and goes back to the Team view. Inputs:
+ * the owner on the page, the page, the project, the status reader and the choice. Output: none. */
+async function deliver(me, page, project, status, choice) {
+  await me.click("Agent settings", AGENTS_VIEW);
+  await me.waitFor("the Codex delivery setting in Agent settings", (text) => text.includes("Messages to Codex agents"));
   const id = `tg-delivery-codex-${project}`;
   const picked = await page.evaluate(`(() => {
     const select = document.getElementById(${JSON.stringify(id)});
@@ -234,9 +236,10 @@ async function deliver(page, project, status, choice) {
   assert.ok(picked, `no ${choice} to pick in ${id}`);
   for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
     const held = (await status()).coordination?.harnesses.find((item) => item.harness === "codex")?.delivery;
-    if (held === choice) return;
+    if (held === choice) break;
     assert.ok(Date.now() < deadline, `the engine never kept Codex delivery ${choice}; it holds ${JSON.stringify(held)}`);
   }
+  await me.click("Team", AGENTS_VIEW);
 }
 
 /** Hands the task to a Codex sub-agent from the Agents tab, as the owner does, and waits until
@@ -322,7 +325,7 @@ async function typedIn(runtime, project, what) {
  * default. Output: none. */
 function typedOption(t, prefix, choice) {
   return onEngine(t, prefix, async ({ project, runtime, me, page, status, graph }) => {
-    if (choice) await deliver(page, project, status, choice);
+    if (choice) await deliver(me, page, project, status, choice);
     const done = await handOff(me, page, project, runtime);
     assert.equal(done.tools, false, "the sub-agent runs with tools off");
     const name = (await graph()).nodes.find((node) => node.agent === done.agent)?.label ?? assert.fail("no card for the sub-agent");
@@ -344,7 +347,7 @@ test("Messages to Codex agents Typing only: a tools-off Codex sub-agent gets the
 
 test("Messages to Codex agents Native only: a tools-off Codex sub-agent's row, card and Message dialog say it can't receive messages, the message stays Sent, and Auto then types it in", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-nod-native-", async ({ project, runtime, me, page, status, graph }) => {
-    await deliver(page, project, status, "native_only");
+    await deliver(me, page, project, status, "native_only");
     const done = await handOff(me, page, project, runtime);
     assert.equal(done.tools, false, "the sub-agent runs with tools off");
     const name = (await graph()).nodes.find((node) => node.agent === done.agent)?.label ?? assert.fail("no card for the sub-agent");
@@ -359,7 +362,7 @@ test("Messages to Codex agents Native only: a tools-off Codex sub-agent's row, c
       assert.equal(row.reached, false, "Native only never types into the agent");
     }
     await me.capture("native-only-held");
-    await deliver(page, project, status, "auto");
+    await deliver(me, page, project, status, "auto");
     await typedIn(runtime, project, "the switch to Auto");
     await shownTo(me, "the sentence gone from the card", () => cardText(page, name), (text) => text !== null && !text.includes(NO_CHANNEL));
     await shownTo(me, "the sentence gone from the Agents row", () => rowText(page, name), (text) => text !== null && !text.includes(NO_CHANNEL));
