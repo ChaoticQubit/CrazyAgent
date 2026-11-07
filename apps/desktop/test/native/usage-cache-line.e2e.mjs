@@ -142,11 +142,12 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 4 });
     assert.equal(assigned.outcome, "applied", `the project gets the pool its sub-agents run on: ${JSON.stringify(assigned)}`);
     const stored = await value(bridge, "desktop_project_setup", { id: project });
-    const subs = (stored.team.sub_harnesses ?? []).map((slot) => slot.harness === "codex" ? { ...slot, tools: true } : slot);
-    assert.ok(subs.some((slot) => slot.harness === "codex"), `the project has a Codex sub-agent: ${JSON.stringify(stored.team)}`);
+    const subs = [...(stored.team.sub_harnesses ?? []).filter((slot) => slot.harness !== "codex"), { harness: "codex", agents: 1, tools: true }];
     const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team: { ...stored.team, sub_harnesses: subs }, documents: [] };
     const saved = await value(bridge, "desktop_update_project_setup", { id: project, setup, name: null, revision: stored.revision, generation: 5 });
     assert.equal(saved.outcome, "applied", `the Codex sub-agent gets its team tools: ${JSON.stringify(saved)}`);
+    const kept = (await value(bridge, "desktop_project_setup", { id: project })).team.sub_harnesses;
+    assert.ok(kept.some((slot) => slot.harness === "codex" && slot.tools), `the project keeps a Codex sub-agent with team tools: ${JSON.stringify(kept)}`);
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
