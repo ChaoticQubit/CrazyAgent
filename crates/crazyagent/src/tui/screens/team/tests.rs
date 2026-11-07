@@ -274,12 +274,12 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
         relation(
             "master",
             "agent-2",
-            Relation::DelegatedTo,
+            Relation::Leads,
             Some(LiveAction::HandingOff {
                 task: "Fix the login bug\nThe token expires early.".into(),
             }),
         ),
-        relation("agent-2", "agent-3", Relation::Leads, None),
+        relation("agent-2", "agent-3", Relation::TeammateOf, None),
         relation("master", "agent-5", Relation::DelegatedTo, None),
     ];
     let mut shell = fresh(80, 24);
@@ -295,7 +295,7 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
         "  │  • handing off: Fix the…",
         "  ├─ ▸ claude-1  Working",
         "  │  │  Claude Max - work",
-        "  │  │  leads",
+        "  │  │  teammate of",
         "  │  └─ ◌ claude-2  Waiting…",
         "  │  delegated to",
         "  └─ ▸ codex-1  Starting",
@@ -346,12 +346,25 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
         "messaging"
     );
     assert_eq!(
-        label(Relation::DelegatedTo, Some(LiveAction::WaitingOn)),
+        label(
+            Relation::DelegatedTo,
+            Some(LiveAction::WaitingOn { owner: false })
+        ),
         "waiting on"
     );
     assert_eq!(
-        label(Relation::TeammateOf, Some(LiveAction::Reviewing)),
-        "reviewing"
+        label(
+            Relation::DelegatedTo,
+            Some(LiveAction::WaitingOn { owner: true })
+        ),
+        "waiting on: your answer"
+    );
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::Reviewing { change_set: 16 })
+        ),
+        "reviewing: change set #16"
     );
 }
 

@@ -126,15 +126,15 @@ test("each link shows its pair's label first in its badge row, live while an act
   const related = {
     ...team,
     relations: [
-      { from: "m", to: "team-2", relation: "delegated_to", live: { action: "handing_off", task: "Task 7" } },
-      { from: "team-2", to: "team-3", relation: "leads", live: null },
+      { from: "m", to: "team-2", relation: "leads", live: { action: "handing_off", task: "Task 7" } },
+      { from: "team-2", to: "team-3", relation: "teammate_of", live: null },
       { from: "team-4", to: "teammate-4-12", relation: "teammate_of", live: { action: "messaging" } },
       { from: "gone", to: "team-4", relation: "leads", live: null },
     ],
   };
   const layout = graph.layoutGraph(related);
   assert.deepEqual(layout.links.map((link) => [link.from, link.to, link.label, link.live]), [
-    ["team-2", "team-3", "leads", false],
+    ["team-2", "team-3", "teammate of", false],
     ["m", "team-2", "handing off: Task 7", true],
     ["team-4", "teammate-4-12", "messaging", true],
     ["m", "team-4", "", false],
@@ -145,8 +145,8 @@ test("each link shows its pair's label first in its badge row, live while an act
   assert.match(live, /aria-label="handing off: Task 7, 1 live task, 2 questions waiting"/);
   assert.match(live, /<span class="tg-edge-label live"><span class="tg-clip">handing off: Task 7<\/span><\/span><span class="tg-badge">/);
   const standing = renderToStaticMarkup(createElement(view.LinkBadges, { link: layout.links[0] }));
-  assert.match(standing, /aria-label="leads"/);
-  assert.match(standing, /<span class="tg-edge-label"><span class="tg-clip">leads<\/span><\/span><\/span>$/);
+  assert.match(standing, /aria-label="teammate of"/);
+  assert.match(standing, /<span class="tg-edge-label"><span class="tg-clip">teammate of<\/span><\/span><\/span>$/);
   assert.equal(renderToStaticMarkup(createElement(view.LinkBadges, { link: layout.links[3] })), "", "a link with no label and no counts draws nothing");
   const hostile = graph.layoutGraph({ ...related, relations: [{ from: "m", to: "team-2", relation: "leads", live: { action: "handing_off", task: "Fix‮ it" } }] });
   assert.match(renderToStaticMarkup(createElement(view.LinkBadges, { link: hostile.links[1] })), /handing off: Fix\\u202e it/, "a direction mark in a task shows as an escape");
