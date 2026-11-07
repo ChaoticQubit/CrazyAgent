@@ -2943,6 +2943,53 @@ fn without_agent_commits_the_message_is_the_prompt_line_with_local_paths_cut_at_
     );
 }
 
+/// A local path after a key or a flag in the same word is cut to its last component with
+/// the key kept, while a URL's own folders and a route stay as written.
+#[test]
+fn a_local_path_after_a_key_or_flag_in_the_same_word_is_cut_to_its_last_component() {
+    assert_eq!(
+        super::scrubbed(
+            "Wrote key=/Users/ada/secret.txt --out=/home/ada/build/out.json path:~/notes/plan.md (src=/private/var/ada/run.log).",
+            &[]
+        ),
+        "Wrote key=secret.txt --out=out.json path:plan.md (src=run.log)."
+    );
+    assert_eq!(
+        super::scrubbed("See https://example.com/var/lib and /api/users", &[]),
+        "See https://example.com/var/lib and /api/users"
+    );
+}
+
+/// A `file://` link to a local file, in any case and under any folder, is cut to the
+/// file's name with the marks around it kept.
+#[test]
+fn a_file_link_to_a_local_file_is_cut_to_its_last_component() {
+    assert_eq!(
+        super::scrubbed(
+            "Open file:///Users/ada/notes/plan.md and <file://localhost/srv/ada/report.pdf> then see:FILE:///C:/Users/ada/run.sh",
+            &[]
+        ),
+        "Open plan.md and <report.pdf> then see:run.sh"
+    );
+}
+
+/// A Windows drive path, with backslashes or slashes, alone or after a flag, is cut to its
+/// last component, while a URL scheme is not read as a drive.
+#[test]
+fn a_windows_drive_path_is_cut_to_its_last_component() {
+    assert_eq!(
+        super::scrubbed(
+            r"Read C:\Users\ada\notes\plan.md and d:/work/ada/report.pdf then --log=E:\logs\ada\run.txt",
+            &[]
+        ),
+        "Read plan.md and report.pdf then --log=run.txt"
+    );
+    assert_eq!(
+        super::scrubbed("Fetch https://example.com/a and http://x.org/b", &[]),
+        "Fetch https://example.com/a and http://x.org/b"
+    );
+}
+
 #[test]
 fn an_edited_message_lands_and_an_invalid_one_changes_nothing() {
     let case = Case::new();
