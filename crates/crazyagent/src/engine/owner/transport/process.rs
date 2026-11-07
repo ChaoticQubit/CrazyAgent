@@ -21,6 +21,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "agent_instructions_unreadable",
     "agent_instructions_unsafe",
     "instruction_settings_invalid",
+    "instruction_settings_save_unavailable",
     "instruction_settings_unavailable",
     "owner_authentication_failed",
     "owner_authority_unavailable",
@@ -59,6 +60,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "process_reply_bounds",
     "process_request_bounds",
     "process_request_invalid",
+    "process_save_unavailable",
     "process_text_invalid",
     "process_text_too_large",
     "process_text_unreadable",
@@ -296,6 +298,18 @@ enum Answer {
 
 fn unknown() -> EngineError {
     failure("process_outcome_unknown")
+}
+
+/// Gives a save refused before anything was written its own code, since the store's
+/// `process_unavailable` and `instruction_settings_unavailable` also refuse reads and the
+/// owner must be told nothing was saved, as when the store stays busy past its wait. Input:
+/// the save's refusal. Output: the save code for those two, any other refusal unchanged.
+fn unsaved(problem: EngineError) -> EngineError {
+    match problem.0.as_str() {
+        "process_unavailable" => failure("process_save_unavailable"),
+        "instruction_settings_unavailable" => failure("instruction_settings_save_unavailable"),
+        _ => problem,
+    }
 }
 
 impl OwnerClient {
@@ -895,13 +909,6 @@ async fn handle(
         Action::Settings { project } if text.is_none() => {
             instruction_settings(&root, &project, None).map(Answer::Settings)
         }
-        Action::SaveSettings {
-            project,
-            settings,
-            version,
-        } if text.is_none() => {
-            instruction_settings(&root, &project, Some((settings, version))).map(Answer::Settings)
-        }
         Action::Adoption { project } if text.is_none() => {
             adoption(&root, &project).map(Answer::Adoption)
         }
@@ -927,9 +934,10 @@ async fn handle(
     .map_err(|_| failure("process_unavailable"))?
 }
 
-/// Runs one Process request against the engine root. Inputs: the root holding
-/// `engine.db`, the action and a save's text. Output: the text read with its version, a
-/// seed text, what a save did, or a plain code.
+/// Runs one Process request against the engine root; a save refused before anything was
+/// written answers its save code. Inputs: the root holding `engine.db`, the action and a
+/// save's text. Output: the text read with its version, a seed text, what a save did, the
+/// settings a save stored, or a plain code.
 fn run(root: &Path, action: Action, text: Option<String>) -> Result<Answer, EngineError> {
     Ok(match (action, text) {
         (Action::Read { project }, None) => Answer::Current(current_text(root, project.as_ref())?),
@@ -940,7 +948,19 @@ fn run(root: &Path, action: Action, text: Option<String>) -> Result<Answer, Engi
                 opened,
             },
             Some(text),
-        ) => Answer::Saved(save_text(root, project.as_ref(), &text, version, opened)?),
+        ) => Answer::Saved(
+            save_text(root, project.as_ref(), &text, version, opened).map_err(unsaved)?,
+        ),
+        (
+            Action::SaveSettings {
+                project,
+                settings,
+                version,
+            },
+            None,
+        ) => Answer::Settings(
+            instruction_settings(root, &project, Some((settings, version))).map_err(unsaved)?,
+        ),
         (Action::ReadFile { path }, None) => {
             Answer::Text(crate::instruction_files::read_picked(&path)?)
         }
@@ -956,9 +976,9 @@ fn run(root: &Path, action: Action, text: Option<String>) -> Result<Answer, Engi
                 opened,
             },
             Some(text),
-        ) => Answer::Saved(save_agent_text(
-            root, &project, agent, &text, version, opened,
-        )?),
+        ) => Answer::Saved(
+            save_agent_text(root, &project, agent, &text, version, opened).map_err(unsaved)?,
+        ),
         _ => return Err(failure("process_request_invalid")),
     })
 }
@@ -1365,7 +1385,10 @@ fn instruction_settings(
     let stored = crate::instruction_files::load(&tx, project).map_err(failure)?;
     let version = current(&tx)?;
     assert!(expected.is_none_or(|expected| expected == (stored, version)));
-    tx.commit().map_err(unavailable)?;
+    tx.commit().map_err(|_| match expected {
+        Some(_) => unknown(),
+        None => failure("instruction_settings_unavailable"),
+    })?;
     Ok(InstructionView {
         settings: stored,
         version,

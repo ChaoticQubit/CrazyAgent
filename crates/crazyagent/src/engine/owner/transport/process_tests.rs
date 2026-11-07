@@ -84,7 +84,12 @@ fn keep(
 
 /// The refusals a store call answers when the store stayed busy past its own wait, as it
 /// can on a loaded machine, and how often a racing test asks again before failing.
-const BUSY_CODES: [&str; 2] = ["process_unavailable", "instruction_settings_unavailable"];
+const BUSY_CODES: [&str; 4] = [
+    "process_unavailable",
+    "process_save_unavailable",
+    "instruction_settings_unavailable",
+    "instruction_settings_save_unavailable",
+];
 const BUSY_TRIES: usize = 20;
 
 /// Runs one store call of a racing test until the store takes it, asking again each time
@@ -787,6 +792,83 @@ fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_sav
             .unwrap_err()
             .0,
         versioned::STALE_CODE
+    );
+}
+
+#[test]
+fn a_save_the_store_keeps_busy_past_its_wait_saves_nothing_says_so_and_lands_when_saved_again() {
+    use crate::instruction_files::{EditDelivery, Mode};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    let agent = team_agent(&root, project.as_str(), "sub", "codex");
+    let settings = InstructionSettings {
+        mode: Mode::AppOnly,
+        transcripts: true,
+        edits: EditDelivery::Badge,
+    };
+    assert_ne!(settings, InstructionSettings::default());
+    let save_settings = || -> Result<InstructionView, EngineError> {
+        let action = Action::SaveSettings {
+            project: project.clone(),
+            settings,
+            version: Some(0),
+        };
+        match run(&root, action, None)? {
+            Answer::Settings(view) => Ok(view),
+            _ => panic!("a settings save answers the settings"),
+        }
+    };
+    let writer = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert_eq!(
+        save(&root, None, "App rule.\n", 0).unwrap_err().0,
+        "process_save_unavailable"
+    );
+    assert_eq!(
+        agent_save(&root, &project, agent, "Only touch the parser.\n", 0, None)
+            .unwrap_err()
+            .0,
+        "process_save_unavailable"
+    );
+    assert_eq!(
+        save_settings().unwrap_err().0,
+        "instruction_settings_save_unavailable"
+    );
+    writer.execute_batch("ROLLBACK").unwrap();
+
+    assert_eq!(
+        read(&root, None).unwrap(),
+        shown("", 0),
+        "nothing was saved"
+    );
+    assert_eq!(agent_read(&root, &project, agent).unwrap(), shown("", 0));
+    assert_eq!(
+        instruction_settings(&root, &project, None).unwrap(),
+        InstructionView {
+            settings: InstructionSettings::default(),
+            version: 0
+        }
+    );
+    let saved = save(&root, None, "App rule.\n", 0).unwrap();
+    assert!(
+        matches!(saved, SavedText::Saved { version: 1, .. }),
+        "saving again lands: {saved:?}"
+    );
+    assert_eq!(
+        agent_save(&root, &project, agent, "Only touch the parser.\n", 0, None).unwrap(),
+        SavedText::Saved {
+            version: 1,
+            size: None
+        }
+    );
+    assert_eq!(
+        save_settings().unwrap(),
+        InstructionView {
+            settings,
+            version: 1
+        }
     );
 }
 

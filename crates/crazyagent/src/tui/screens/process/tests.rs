@@ -345,6 +345,37 @@ fn a_save_the_full_queue_refuses_leaves_the_page_ready_to_save_again() {
 }
 
 #[test]
+fn a_save_the_store_keeps_busy_says_nothing_was_saved_and_the_same_ctrl_s_saves_again() {
+    let mut shell = opened(Scope::App, "Use tdd.");
+    shell.key(Key::End);
+    typed(&mut shell, " Always.");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Use tdd. Always.".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    shell.arrive(reply(save.clone(), Err("process_save_unavailable")));
+    let shown = screen(&mut shell);
+    let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("nothing was saved. Save again."), "{shown}");
+    assert!(
+        shown.contains("Not saved yet"),
+        "a refused save keeps the draft"
+    );
+    shell.key(Key::Ctrl('s'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![save.clone()],
+        "the same Ctrl-S saves again"
+    );
+    shell.arrive(saved(save, 16));
+    assert!(!screen(&mut shell).contains("Not saved yet"));
+}
+
+#[test]
 fn a_first_read_the_full_queue_refuses_offers_a_retry_instead_of_loading_forever() {
     let mut ctx = ctx(80, 24);
     let mut filled = 0;
@@ -759,13 +790,20 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         version: Some(version),
     };
     assert_eq!(requests(&mut shell), vec![refused.clone()]);
-    shell.arrive(settings(refused, Err("instruction_settings_unavailable")));
+    shell.arrive(settings(
+        refused,
+        Err("instruction_settings_save_unavailable"),
+    ));
     let shown = screen(&mut shell);
+    let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
     assert!(
         shown.contains("Keep transcripts for headless Claude runs: On"),
         "{shown}"
     );
-    assert!(shown.contains("couldn't be read"), "{shown}");
+    assert!(
+        flat.contains("nothing was saved. Change it again."),
+        "{shown}"
+    );
 }
 
 #[cfg(unix)]
@@ -881,6 +919,83 @@ fn a_stale_agent_setting_reads_the_saved_settings_again_and_the_next_change_name
             },
             version: Some(3),
         }]
+    );
+}
+
+/// A settings save the engine could not confirm may have landed, so the page reads the
+/// settings and their version again before the next change, which then names that version.
+#[test]
+fn a_settings_save_the_engine_cannot_confirm_reads_the_settings_again_before_the_next_change() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let mut shell = opened(
+        Scope::Project {
+            id: project.clone(),
+            name: "Harbor Notes".into(),
+        },
+        "",
+    );
+    shell.key(Key::Ctrl('t'));
+    let unconfirmed = ProcessQuery::SaveSettings {
+        project: project.clone(),
+        settings: InstructionSettings {
+            mode: Mode::Both,
+            transcripts: false,
+            edits: EditDelivery::NextMessage,
+        },
+        version: Some(0),
+    };
+    assert_eq!(requests(&mut shell), vec![unconfirmed.clone()]);
+    shell.arrive(settings(unconfirmed, Err("process_outcome_unknown")));
+    let read = ProcessQuery::Settings {
+        project: project.clone(),
+    };
+    assert_eq!(
+        requests(&mut shell),
+        vec![read.clone()],
+        "the page reads what is really stored"
+    );
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("couldn't confirm these agent settings were saved"),
+        "{shown}"
+    );
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "no change goes out before the settings are read again"
+    );
+    let landed = InstructionSettings {
+        mode: Mode::Both,
+        transcripts: false,
+        edits: EditDelivery::NextMessage,
+    };
+    shell.arrive(settings(read, Ok(at(landed, 1))));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::Adoption {
+            project: project.clone()
+        }]
+    );
+    shell.arrive(adoption_reply(&project, Ok(no_agents(&project))));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Keep transcripts for headless Claude runs: Off"),
+        "{shown}"
+    );
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::SaveSettings {
+            project,
+            settings: InstructionSettings {
+                mode: Mode::Both,
+                transcripts: true,
+                edits: EditDelivery::NextMessage,
+            },
+            version: Some(1),
+        }],
+        "the next change names the stored version, so it is never refused as stale"
     );
 }
 
