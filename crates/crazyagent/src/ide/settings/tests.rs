@@ -92,7 +92,7 @@ fn expected_locks() -> Value {
         "extensions.ignoreRecommendations": true,
         "telemetry.telemetryLevel": "off",
         "update.mode": "none",
-        "extensions.autoUpdate": false,
+        "extensions.autoUpdate": "off",
         "extensions.autoCheckUpdates": false,
         "task.allowAutomaticTasks": "off",
     })
