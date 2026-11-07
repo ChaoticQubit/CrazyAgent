@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Icon, type IconName } from "../../ui";
+import { Icon, Segmented, type IconName } from "../../ui";
 import { listMcpServers, listSkills, loadAllProjectMemories, nextGeneration, poolSummaries } from "../../api";
 import { failureCopy, loadActivity, loadAgentPolicy, retryResearch } from "../../api-projects";
 import type { ActivityItem, ActivityKind, ResearchJob } from "../../api-projects";
@@ -13,7 +13,7 @@ import { homePath } from "../settings/harnesses";
 import { accessSummary } from "./access";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_ROWS, ago, changeOutcome, groupActivity, memoryGroups, researchJobs, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
+import { ACTIVITY_FILTERS, ACTIVITY_ROWS, RESEARCH_KEY, activityFilter, activityGoal, ago, changeOutcome, groupActivity, memoryGroups, newestActivity, type ActivityFilter, researchJobs, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
 import { PlanningLine } from "./planning";
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -61,29 +61,50 @@ const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "
   test: { icon: "shield-check", tone: "ok" },
 };
 
-/** The project's activity grouped by goal, newest goal first: up to eight rows per goal with
- * when, what, and who, and Show all (N) for a longer goal. A read the engine cut counts with a
- * plus. Inputs: the events, whether older ones were left out, the time they are read against,
- * the group keys shown in full and the Show all action. Output: the groups. */
-export function ActivityGroups({ items, more, now, expanded, onShowAll }: { items: ActivityItem[]; more: boolean; now: number; expanded: string[]; onShowAll: (key: string) => void }) {
+/** One activity row: when, the kind's icon, what happened, Undone when it was, and who, with
+ * the goal when the row stands outside its group. Inputs: the event, the time it is read
+ * against and the goal to tag it with. Output: the row. */
+function ActivityRow({ item, now, goal }: { item: ActivityItem; now: number; goal?: string }) {
+  return <li className="pj-activity-row">
+    <span className="pj-small pj-muted">{ago(item.at_ms, now)}</span>
+    <span className={`pj-activity-kind ${KINDS[item.kind].tone}`}><Icon name={KINDS[item.kind].icon} size={14} /></span>
+    <span className="pj-activity-text">{displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
+      <span className="pj-small pj-muted pj-activity-by">{displayText(item.actor)}{goal !== undefined && <> · <span className="pj-activity-tag">{displayText(goal)}</span></>}</span></span>
+  </li>;
+}
+
+/** The project's activity grouped by goal, newest goal first: a header that closes and opens the
+ * goal, up to eight rows per open goal with when, what, and who, and Show all (N) for a longer
+ * goal. A read the engine cut counts with a plus. Inputs: the events, whether older ones were
+ * left out, the time they are read against, the group keys shown in full, the closed group keys
+ * and the Show all and close or open actions. Output: the groups. */
+export function ActivityGroups({ items, more, now, expanded, closed, onShowAll, onToggle }: {
+  items: ActivityItem[]; more: boolean; now: number; expanded: string[]; closed: string[]; onShowAll: (key: string) => void; onToggle: (key: string) => void;
+}) {
   return <div className="pj-stack-s">{groupActivity(items).map((group) => {
+    const open = !closed.includes(group.key);
     const all = expanded.includes(group.key);
     const count = `${group.items.length}${more ? "+" : ""}`;
     return <section className="pj-panel pj-activity-goal" aria-label={group.goal} key={group.key}>
-      <div className="pj-activity-head">
-        <strong className="ellipsis">{displayText(group.goal)}</strong>
+      <button type="button" className="pj-activity-head" aria-expanded={open} onClick={() => onToggle(group.key)}>
+        <span className="pj-activity-name"><Icon name={open ? "chevron-down" : "chevron-right"} size={16} /><strong className="ellipsis">{displayText(group.goal)}</strong></span>
         <span className="pj-small pj-muted">{count} {count === "1" ? "item" : "items"}, latest {ago(group.items[0].at_ms, now).toLowerCase()}</span>
-      </div>
-      <ul className="pj-activity-list" aria-label={`${group.goal} activity`}>{(all ? group.items : group.items.slice(0, ACTIVITY_ROWS)).map((item) => <li className="pj-activity-row" key={item.id}>
-        <span className="pj-small pj-muted">{ago(item.at_ms, now)}</span>
-        <span className={`pj-activity-kind ${KINDS[item.kind].tone}`}><Icon name={KINDS[item.kind].icon} size={14} /></span>
-        <span className="pj-activity-text">{displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
-          <span className="pj-small pj-muted pj-activity-by">{displayText(item.actor)}</span></span>
-      </li>)}</ul>
-      {!all && group.items.length > ACTIVITY_ROWS && <button type="button" className="pj-link pj-activity-more" onClick={() => onShowAll(group.key)}>Show all ({count})</button>}
+      </button>
+      {open && <ul className="pj-activity-list" aria-label={`${group.goal} activity`}>{(all ? group.items : group.items.slice(0, ACTIVITY_ROWS)).map((item) => <ActivityRow key={item.id} item={item} now={now} />)}</ul>}
+      {open && !all && group.items.length > ACTIVITY_ROWS && <button type="button" className="pj-link pj-activity-more" onClick={() => onShowAll(group.key)}>Show all ({count})</button>}
     </section>;
   })}</div>;
 }
+
+/** The project's activity as one list, newest first, each row tagged with its goal. Inputs: the
+ * events and the time they are read against. Output: the list. */
+export function ActivityTimeline({ items, now }: { items: ActivityItem[]; now: number }) {
+  return <section className="pj-panel pj-activity-timeline" aria-label="Activity timeline">
+    <ul className="pj-activity-list">{newestActivity(items).map((item) => <ActivityRow key={item.id} item={item} now={now} goal={activityGoal(item).goal} />)}</ul>
+  </section>;
+}
+
+const VIEWS: { value: "goal" | "time"; label: string }[] = [{ value: "goal", label: "By goal" }, { value: "time", label: "Timeline" }];
 
 /** What Recent activity draws: the last good read, whether the engine left older events out of
  * it, when it was read, and why the latest read failed while an older one stays on screen. */
@@ -127,17 +148,35 @@ function useActivity(projectId: string, every: number, load: typeof loadActivity
 export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load = loadActivity }: { projectId: string; every?: number; read?: typeof loadActivity }) {
   const read = useActivity(projectId, every, load);
   const [expanded, setExpanded] = useState<string[]>([]);
-  useEffect(() => setExpanded([]), [projectId]);
+  const [closed, setClosed] = useState<string[]>([RESEARCH_KEY]);
+  const [view, setView] = useState<"goal" | "time">("goal");
+  const [filter, setFilter] = useState<ActivityFilter>("all");
+  useEffect(() => {
+    setExpanded([]);
+    setClosed([RESEARCH_KEY]);
+  }, [projectId]);
   const shown = read.shown;
+  const items = shown?.kind === "ok" ? shown.value : [];
+  const visible = filter === "all" ? items : items.filter((item) => activityFilter(item.kind) === filter);
+  const chip = ACTIVITY_FILTERS.find((option) => option.value === filter)?.label ?? "";
   return <section className="pj-stack-s" aria-labelledby="pj-activity">
-    <div className="pj-row"><h2 id="pj-activity">Recent activity</h2>{shown?.kind === "ok" && !read.stale && <span className="pj-live">Live</span>}</div>
+    <div className="pj-row between">
+      <div className="pj-row"><h2 id="pj-activity">Recent activity</h2>{shown?.kind === "ok" && !read.stale && <span className="pj-live">Live</span>}</div>
+      {items.length > 0 && <Segmented label="Show activity" value={view} options={VIEWS} onValue={setView} />}
+    </div>
     {shown === undefined && <p className="pj-muted" role="status">Loading activity...</p>}
     {shown?.kind === "not_ready" && <NotReady what="project activity isn't in this build." />}
     {shown?.kind === "error" && <p className="pj-error" role="alert">Couldn't load activity. {failureCopy(shown)}</p>}
     {read.stale && <p className="pj-note warn" role="status">{displayText(`Couldn't refresh activity. ${read.stale} Showing the last read.`)}</p>}
-    {shown?.kind === "ok" && (shown.value.length
-      ? <ActivityGroups items={shown.value} more={read.more} now={read.at} expanded={expanded} onShowAll={(key) => setExpanded((open) => [...open, key])} />
-      : <p className="pj-muted">Nothing yet.</p>)}
+    {shown?.kind === "ok" && items.length === 0 && <p className="pj-muted">Nothing yet.</p>}
+    {items.length > 0 && <div className="pj-row" role="group" aria-label="Show only">{ACTIVITY_FILTERS.map((option) => <button type="button" key={option.value}
+      className={`pj-chip-toggle${filter === option.value ? " on" : ""}`} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>{option.label}</button>)}</div>}
+    {items.length > 0 && visible.length === 0 && <p className="pj-muted">Nothing under {chip} yet.</p>}
+    {visible.length > 0 && (view === "goal"
+      ? <ActivityGroups items={visible} more={read.more} now={read.at} expanded={expanded} closed={closed}
+        onShowAll={(key) => setExpanded((open) => [...open, key])}
+        onToggle={(key) => setClosed((keys) => keys.includes(key) ? keys.filter((other) => other !== key) : [...keys, key])} />
+      : <ActivityTimeline items={visible} now={read.at} />)}
     {shown?.kind === "ok" && read.more && <p className="pj-small pj-muted">Older activity isn't shown here.</p>}
   </section>;
 }

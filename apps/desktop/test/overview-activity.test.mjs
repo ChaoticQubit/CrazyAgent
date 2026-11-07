@@ -45,17 +45,17 @@ test("each goal shows eight rows with its actor and Show all for the rest", () =
     ...Array.from({ length: 10 }, (_, i) => item(100 + i, now - i * 60_000, "Build the service", { actor: "Wren" })),
     item(1, now - 30 * 60_000, null, { kind: "research_saved", actor: "Research", text: "Market research saved market_research.md" }),
   ];
-  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, now, expanded: [], onShowAll: () => {} }));
+  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
   assert.equal(html.match(/class="pj-activity-row/g)?.length, 9);
   assert.match(html, /aria-label="Build the service"/);
-  assert.match(html, /aria-label="Project"/);
+  assert.match(html, /aria-label="Research"/, "research with no goal shows under Research");
   assert.match(html, />Show all \(10\)</);
   assert.equal(html.match(/>Show all/g)?.length, 1, "a goal with eight rows or fewer has no Show all");
   assert.match(html, /Market research saved market_research\.md/);
   assert.match(html, />Wren</);
   assert.match(html, />Just now</);
   assert.ok(html.indexOf("Build the service") < html.indexOf("Market research saved"), "the newest goal comes first");
-  const open = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, now, expanded: ["Build the service"], onShowAll: () => {} }));
+  const open = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, now, expanded: ["goal:Build the service"], closed: [], onShowAll: () => {}, onToggle: () => {} }));
   assert.equal(open.match(/class="pj-activity-row/g)?.length, 11);
   assert.doesNotMatch(open, />Show all/);
 });
@@ -63,7 +63,7 @@ test("each goal shows eight rows with its actor and Show all for the rest", () =
 test("an undone event says so", () => {
   const html = renderToStaticMarkup(createElement(overview.ActivityGroups, {
     items: [item(1, 0, "Build the service", { kind: "lead_merged", text: "Master merged change set #17", undone: true })],
-    now: 0, expanded: [], onShowAll: () => {},
+    now: 0, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {},
   }));
   assert.match(html, /Master merged change set #17/);
   assert.match(html, />Undone</);
@@ -86,16 +86,16 @@ test("a goal named Project is its own group, apart from events with no goal", ()
 test("a read the engine cut counts each goal with a plus", () => {
   const now = 10 * 60_000;
   const items = Array.from({ length: 10 }, (_, i) => item(100 + i, now - i * 60_000, "Build the service"));
-  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: true, now, expanded: [], onShowAll: () => {} }));
+  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: true, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
   assert.match(html, /10\+ items, latest just now/);
   assert.match(html, />Show all \(10\+\)</);
-  const whole = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], onShowAll: () => {} }));
+  const whole = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
   assert.match(whole, /10 items, latest just now/);
 });
 
 test("the project's creation shows under Project", () => {
   const html = renderToStaticMarkup(createElement(overview.ActivityGroups, {
-    items: [item(1, 0, null, { kind: "created", text: "You created Harbor Notes" })], more: false, now: 0, expanded: [], onShowAll: () => {},
+    items: [item(1, 0, null, { kind: "created", text: "You created Harbor Notes" })], more: false, now: 0, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {},
   }));
   assert.match(html, /aria-label="Project"/);
   assert.match(html, /You created Harbor Notes/);

@@ -1,6 +1,6 @@
 import type { IconName, Tone } from "../../ui";
 import { failureCopy, failureSentence, receiptState } from "../../api-projects";
-import type { ActivityItem, ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
+import type { ActivityItem, ActivityKind, ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { namedFailure } from "../../api";
 import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
@@ -422,20 +422,79 @@ export const ACTIVITY_ROWS = 8;
 /** The group Overview shows activity under when it serves no goal. */
 export const PROJECT_GOAL = "Project";
 
-/** Groups project activity by the goal it serves, for Overview. Events without a goal go under
- * "Project", kept apart from a goal of that name by an empty key no named goal can have. Input:
- * the events in any order. Output: one group per goal with its key and label, the group with
- * the newest event first, each group's events newest first and a later id first at the same time. */
+/** The group Overview shows research under when it serves no goal, closed until opened. */
+export const RESEARCH_GOAL = "Research";
+export const RESEARCH_KEY = "research";
+const PROJECT_KEY = "project";
+const RESEARCH_KINDS: ActivityKind[] = ["research_started", "research_saved", "research_stopped"];
+
+/** The filter chips over Overview activity, All first. */
+export type ActivityFilter = "all" | "merge" | "change" | "tests" | "task" | "phase";
+export const ACTIVITY_FILTERS: { value: ActivityFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "merge", label: "Merges" },
+  { value: "change", label: "Changes" },
+  { value: "tests", label: "Tests" },
+  { value: "task", label: "Tasks" },
+  { value: "phase", label: "Phases" },
+];
+
+const FILTER_OF: Record<ActivityKind, Exclude<ActivityFilter, "all"> | null> = {
+  created: null,
+  research_started: "task",
+  research_saved: "task",
+  research_stopped: "task",
+  task_started: "task",
+  task_finished: "task",
+  changes_ready: "change",
+  accepted: "change",
+  discarded: "change",
+  conflict: "change",
+  sent_back: "change",
+  lead_merged: "merge",
+  merged_into_main: "merge",
+  undone: "merge",
+  work_started: "task",
+  work_review_ready: "task",
+  work_complete: "task",
+  work_closed: "task",
+  phase: "phase",
+  test: "tests",
+};
+
+/** The chip an event shows under besides All. Input: its kind. Output: the chip, or null for
+ * the project's creation, which shows only under All. */
+export function activityFilter(kind: ActivityKind): Exclude<ActivityFilter, "all"> | null {
+  return FILTER_OF[kind];
+}
+
+/** The goal an event is shown under. A named goal keys by its name; research with no goal goes
+ * under Research and anything else with no goal under Project, each keyed apart from a goal of
+ * that name. Input: the event. Output: the group key and its label. */
+export function activityGoal(item: ActivityItem): { key: string; goal: string } {
+  const goal = item.goal?.trim();
+  if (goal) return { key: `goal:${goal}`, goal };
+  return RESEARCH_KINDS.includes(item.kind) ? { key: RESEARCH_KEY, goal: RESEARCH_GOAL } : { key: PROJECT_KEY, goal: PROJECT_GOAL };
+}
+
+/** Project activity newest first, a later id first at the same time. Input: the events in any
+ * order. Output: a sorted copy. */
+export function newestActivity(items: ActivityItem[]): ActivityItem[] {
+  return [...items].sort((a, b) => b.at_ms - a.at_ms || b.id - a.id);
+}
+
+/** Groups project activity by the goal it serves, for Overview, as activityGoal places each
+ * event. Input: the events in any order. Output: one group per goal with its key and label, the
+ * group with the newest event first, each group's events newest first. */
 export function groupActivity(items: ActivityItem[]): { key: string; goal: string; items: ActivityItem[] }[] {
-  const newest = [...items].sort((a, b) => b.at_ms - a.at_ms || b.id - a.id);
-  const groups = new Map<string, ActivityItem[]>();
-  for (const item of newest) {
-    const key = item.goal?.trim() ?? "";
-    const group = groups.get(key);
-    if (group) group.push(item);
-    else groups.set(key, [item]);
+  const groups = new Map<string, { key: string; goal: string; items: ActivityItem[] }>();
+  for (const item of newestActivity(items)) {
+    const place = activityGoal(item);
+    const group = groups.get(place.key);
+    if (group) group.items.push(item);
+    else groups.set(place.key, { ...place, items: [item] });
   }
-  const grouped = [...groups].map(([key, entries]) => ({ key, goal: key || PROJECT_GOAL, items: entries }));
+  const grouped = [...groups.values()];
   assert(grouped.reduce((sum, group) => sum + group.items.length, 0) === items.length, "every event is in exactly one group");
   return grouped;
 }
