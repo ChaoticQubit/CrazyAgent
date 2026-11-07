@@ -373,3 +373,47 @@ fn a_project_made_before_events_gets_one_created_event_from_its_setup() {
         "a project with no saved setup has no creation time"
     );
 }
+
+#[test]
+fn a_read_says_when_older_events_were_left_out_by_the_limit_or_the_byte_bound() {
+    let (_folder, db) = db();
+    let line = "x".repeat(TEXT_BYTES_MAX);
+    for at_ms in 0..3 {
+        let item = NewActivity {
+            kind: ActivityKind::Phase,
+            actor: "Master",
+            agent: None,
+            goal: None,
+            text: &line,
+            change_set: None,
+        };
+        record(&db, &project(), &item, at_ms).unwrap();
+    }
+    let all = listed(&db, &project(), 3).unwrap();
+    assert_eq!((all.items.len(), all.more), (3, false));
+    let newest = listed(&db, &project(), 2).unwrap();
+    assert_eq!(
+        newest
+            .items
+            .iter()
+            .map(|item| item.at_ms)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    assert!(newest.more, "the limit left one out");
+    for at_ms in 3..200 {
+        let item = NewActivity {
+            kind: ActivityKind::Phase,
+            actor: "Master",
+            agent: None,
+            goal: None,
+            text: &line,
+            change_set: None,
+        };
+        record(&db, &project(), &item, at_ms).unwrap();
+    }
+    let cut = listed(&db, &project(), LIST_MAX).unwrap();
+    assert!(cut.items.len() < 200, "{}", cut.items.len());
+    assert!(cut.more, "the byte bound left the rest out");
+    assert_eq!(cut.items, list(&db, &project(), LIST_MAX).unwrap());
+}

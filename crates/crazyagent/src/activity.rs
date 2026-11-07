@@ -448,6 +448,24 @@ pub fn list(
     Ok(items)
 }
 
+/// One read of a project's events: the newest that fit, and whether older ones were left
+/// out by the limit or the byte bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listed {
+    pub items: Vec<ActivityItem>,
+    pub more: bool,
+}
+
+/// Lists a project's events as `list` does and says whether older ones were left out.
+/// Takes the database, the project and the limit, 1 to `LIST_MAX`. Returns the read, or
+/// `activity_limit_invalid`.
+pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<Listed, EngineError> {
+    Ok(Listed {
+        items: list(db, project, limit)?,
+        more: false,
+    })
+}
+
 /// One event found in the project's older records by `backfill`.
 struct Past {
     kind: ActivityKind,

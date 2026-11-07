@@ -2554,9 +2554,11 @@ fn owner_read(
         },
         OwnerRead::ProjectActivity { project_id, limit } => {
             stored_setup(&tx, project_id)?;
+            let listed = crate::activity::listed(&tx, project_id, *limit)?;
             OwnerData::ProjectActivity {
                 project_id: project_id.clone(),
-                items: crate::activity::list(&tx, project_id, *limit)?,
+                items: listed.items,
+                more: listed.more,
             }
         }
         OwnerRead::ProjectContext { project_id } => OwnerData::ProjectContext {
