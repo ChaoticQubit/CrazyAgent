@@ -146,3 +146,63 @@ fn the_free_copy_merges_another_branch_that_the_worker_copy_refuses() {
         String::from_utf8_lossy(&merged.stderr)
     );
 }
+
+/// With "Catch up with main" on, the worker copy of an agent's own `git` merges the project
+/// main the engine keeps at `crazyagent/main`, and still refuses another branch, a merge
+/// naming another branch beside main, and pull, telling the agent how to catch up.
+#[test]
+fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&self.0);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = crate::research::runner::sandboxed_git();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+        &["checkout", "-q", "-b", "landed"],
+        &["commit", "-q", "--allow-empty", "-m", "landed work"],
+        &["update-ref", "refs/crazyagent/main", "landed"],
+        &["checkout", "-q", "-b", "other", "main"],
+        &["commit", "-q", "--allow-empty", "-m", "other work"],
+        &["checkout", "-q", "-b", "own", "main"],
+    ] {
+        let done = git_run(git, repo.path(), home.path(), args);
+        assert!(done.status.success(), "{args:?} {done:?}");
+    }
+    let tmp = make_tmp(home.path()).unwrap();
+    let _removed = Removed(home.path().to_path_buf());
+    let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let merged = git_run(
+        &wrapper,
+        repo.path(),
+        home.path(),
+        &["merge", "--no-edit", "crazyagent/main"],
+    );
+    assert!(
+        merged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+    let landed = git_run(git, repo.path(), home.path(), &["rev-parse", "landed"]);
+    let head = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(head.stdout, landed.stdout);
+    for (args, refused) in [
+        (&["merge", "--no-edit", "other"][..], "git merge is refused"),
+        (
+            &["merge", "--no-edit", "crazyagent/main", "other"],
+            "git merge is refused",
+        ),
+        (&["pull"], "git pull is refused"),
+    ] {
+        let done = git_run(&wrapper, repo.path(), home.path(), args);
+        assert!(!done.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&done.stderr);
+        assert!(stderr.contains(refused), "{args:?} {stderr}");
+        assert!(stderr.contains("git merge crazyagent/main"), "{args:?} {stderr}");
+    }
+}
