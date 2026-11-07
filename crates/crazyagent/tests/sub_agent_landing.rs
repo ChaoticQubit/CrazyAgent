@@ -432,9 +432,10 @@ fn merge_into_the_lead_clone_under_its_profile() {
             .filter(|item| item.kind == crazyagent::activity::ActivityKind::LeadMerged)
             .map(|item| (item.actor, item.text))
             .collect();
+    let label = |agent: i64| crazyagent::team::events::label(&team.db, agent).unwrap();
     let once = (
-        "Sub-agent 1".to_owned(),
-        "Merged the work of Sub-agent 2 from crazyagent/lead--fix".to_owned(),
+        label(1),
+        format!("Merged the work of {} from crazyagent/lead--fix", label(2)),
     );
     assert_eq!(
         merged,

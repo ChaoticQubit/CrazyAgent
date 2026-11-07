@@ -25,18 +25,6 @@ const SUBJECT_CHARS_MAX: usize = 72;
 const PROPOSED_BYTES_MAX: usize = 1024;
 const AGENT_COMMITS_READ_MAX: usize = 200;
 const MORE_COMMITS: &str = "\n- and more commits";
-const LOCAL_ROOTS: [&str; 10] = [
-    "~/",
-    "/Users/",
-    "/home/",
-    "/root/",
-    "/private/",
-    "/tmp/",
-    "/var/",
-    "/Volumes/",
-    "/mnt/",
-    "/opt/",
-];
 const LINK_BYTES_MAX: usize = 4096;
 const HEAD_BYTES_MAX: usize = 512;
 const CONFLICTS_SHOWN_MAX: usize = 50;
@@ -279,25 +267,14 @@ fn name(text: &str) -> Result<String, EngineError> {
     Ok(text.to_owned())
 }
 
-/// A commit subject from free text: its first line, plain, every character a reviewer
-/// cannot see shown as an escape by `memory::visible_text`, with paths under `roots` made
-/// relative to them and any other absolute local path cut to its last component,
-/// ended at the last whole word within `SUBJECT_CHARS_MAX` characters. A first word
-/// longer than that is cut to fit. Inputs: the text and the folders, innermost first.
-/// Output: the subject, maybe empty.
+/// A commit subject from free text: its first line through `landing::scrubbed`, ended
+/// at the last whole word within `SUBJECT_CHARS_MAX` characters. A first word longer than
+/// that is cut to fit. Inputs: the text and the folders, innermost first. Output: the
+/// subject, maybe empty.
 pub(super) fn subject(text: &str, roots: &[&Path]) -> String {
-    let mut line = crate::memory::visible_text(&plain(text.lines().next().unwrap_or_default()));
-    for root in roots.iter().filter_map(|root| root.to_str()) {
-        if root.len() > 1 {
-            line = line.replace(&format!("{}/", root.trim_end_matches('/')), "");
-        }
-    }
+    let line = super::scrubbed(text.lines().next().unwrap_or_default(), roots);
     let mut subject = String::new();
-    let words = line
-        .split(|c: char| c.is_whitespace() || c == '\u{FFFD}')
-        .map(local_path)
-        .filter(|word| !word.is_empty());
-    for word in words {
+    for word in line.split(' ').filter(|word| !word.is_empty()) {
         let (used, more) = (subject.chars().count(), word.chars().count());
         if used == 0 && more > SUBJECT_CHARS_MAX {
             return word.chars().take(SUBJECT_CHARS_MAX).collect();
@@ -308,25 +285,10 @@ pub(super) fn subject(text: &str, roots: &[&Path]) -> String {
         if used > 0 {
             subject.push(' ');
         }
-        subject.push_str(&word);
+        subject.push_str(word);
     }
     assert!(subject.chars().count() <= SUBJECT_CHARS_MAX);
     subject
-}
-
-/// One word with an absolute local path in it cut to the path's last component, the
-/// punctuation around it kept. Input: the word. Output: the word, maybe empty.
-fn local_path(word: &str) -> String {
-    let core = word.trim_start_matches(['(', '"', '\'', '<', '[', '`']);
-    let path = core.trim_end_matches([')', '"', '\'', '>', ']', '`', ',', '.', ';', ':', '!', '?']);
-    if !LOCAL_ROOTS.iter().any(|root| path.starts_with(root)) {
-        return word.to_owned();
-    }
-    let (lead, tail) = (&word[..word.len() - core.len()], &core[path.len()..]);
-    match path.rsplit('/').find(|part| !part.is_empty()) {
-        Some(last) => format!("{lead}{last}{tail}"),
-        None => String::new(),
-    }
 }
 
 /// The message an Accept proposes from the commits the agent made itself above the

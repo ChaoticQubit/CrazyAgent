@@ -292,5 +292,94 @@ fn every_project_event_the_engine_sees_is_recorded_newest_first() {
         listed[4].text,
         "Accepted the changes of Sub-agent 1: Build the login form"
     );
-    assert_eq!(listed[6].text, "Finished: Build the login form");
+    assert_eq!(listed[6].text, "Sub-agent 1 finished a task");
+}
+
+/// A task's start and end name the task by its title (F1): the prompt's first line with an
+/// absolute path outside the project cut to its last component. A finished task never
+/// carries the agent's reply, so a path and a hidden character the reply holds are never
+/// listed, and a failed task only says it failed.
+#[test]
+fn a_task_row_names_its_task_and_never_carries_the_reply() {
+    let project = Project::new();
+    let task = |status: &str, result: Option<&str>, error: Option<&str>| -> i64 {
+        project
+            .db
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,result,error,created_ms) VALUES (?1,'owner','claude-code',1,?2,?3,1,?4,?5,1)",
+                params![
+                    PROJECT,
+                    "Build the login form from /Users/ada/notes/plan.md\nKeep it short.",
+                    status,
+                    result,
+                    error
+                ],
+            )
+            .unwrap();
+        project.db.last_insert_rowid()
+    };
+    let done = task(
+        "done",
+        Some("Done. I read /Users/ada/.ssh/id_rsa\u{200b} to sign in."),
+        None,
+    );
+    let failed = task(
+        "failed",
+        None,
+        Some("harness exited reading /Users/ada/.aws/credentials"),
+    );
+    activity::note_task(&project.db, &project.id, 1, done, now_ms());
+    for ended in [done, failed] {
+        assert!(
+            crazyagent::team::events::task_ended(&project.db, ended, now_ms())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    let listed = activity::list(&project.db, &project.id, activity::LIST_MAX).unwrap();
+
+    let tasks: Vec<(ActivityKind, &str)> = listed
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                ActivityKind::TaskStarted | ActivityKind::TaskFinished
+            )
+        })
+        .map(|item| (item.kind, item.text.as_str()))
+        .collect();
+    let title = "Build the login form from plan.md";
+    assert_eq!(
+        tasks,
+        vec![
+            (
+                ActivityKind::TaskFinished,
+                format!("Sub-agent 1 could not finish \u{201c}{title}\u{201d}").as_str()
+            ),
+            (
+                ActivityKind::TaskFinished,
+                format!("Sub-agent 1 finished \u{201c}{title}\u{201d}").as_str()
+            ),
+            (
+                ActivityKind::TaskStarted,
+                format!("Sub-agent 1 started \u{201c}{title}\u{201d}").as_str()
+            ),
+        ]
+    );
+    for item in &listed {
+        for shown in [
+            item.actor.as_str(),
+            item.goal.as_deref().unwrap_or_default(),
+            item.text.as_str(),
+        ] {
+            assert!(
+                !shown.contains("/Users/")
+                    && !shown.contains('\u{200b}')
+                    && !shown.contains("id_rsa")
+                    && !shown.contains("credentials"),
+                "{shown:?}"
+            );
+        }
+    }
 }

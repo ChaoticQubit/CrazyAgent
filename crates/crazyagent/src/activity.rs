@@ -180,28 +180,30 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Records one event: the actor, text and goal are made one line and cut to their bounds,
-/// and the project keeps its newest `KEPT_PER_PROJECT_MAX` events. Takes the database, the
-/// project, the event and the time in ms. Returns the event id, or `activity_item_invalid`
-/// for an empty actor or text.
+/// Records one event: the actor, text and goal go through the change set subject's scrub
+/// (`shown`) and are cut to their bounds, and the project keeps its Created event and its
+/// newest `KEPT_PER_PROJECT_MAX` events in all. Takes the database, the project, the event
+/// and the time in ms. Returns the event id, or `activity_item_invalid` for an empty actor
+/// or text.
 pub fn record(
     db: &Connection,
     project: &ProjectId,
     item: &NewActivity<'_>,
     now_ms: i64,
 ) -> Result<i64, EngineError> {
-    let actor = one_line(item.actor, ACTOR_BYTES_MAX);
-    let text = one_line(item.text, TEXT_BYTES_MAX);
+    let actor = shown(item.actor, ACTOR_BYTES_MAX);
+    let text = shown(item.text, TEXT_BYTES_MAX);
     if actor.is_empty() || text.is_empty() || now_ms < 0 {
         return Err(failure("activity_item_invalid"));
     }
     let goal = match item.goal {
-        Some(goal) => Some(one_line(goal, GOAL_BYTES_MAX)),
+        Some(goal) => Some(goal.to_owned()),
         None => match item.agent {
             Some(agent) => active_goal(db, project, agent)?,
             None => None,
         },
     }
+    .map(|goal| shown(&goal, GOAL_BYTES_MAX))
     .filter(|goal| !goal.is_empty());
     let change_set = item
         .change_set
@@ -223,10 +225,21 @@ pub fn record(
     .map_err(state)?;
     let id = db.last_insert_rowid();
     assert!(id > 0);
+    let created: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM project_activity WHERE project=?1 AND kind=?2",
+            params![project.as_str(), ActivityKind::Created.name()],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
     db.execute(
         "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
-         WHERE project=?1 ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
-        params![project.as_str(), KEPT_PER_PROJECT_MAX],
+         WHERE project=?1 AND kind<>?3 ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
+        params![
+            project.as_str(),
+            (KEPT_PER_PROJECT_MAX - created).max(0),
+            ActivityKind::Created.name()
+        ],
     )
     .map_err(state)?;
     Ok(id)
@@ -263,23 +276,141 @@ pub fn note_agent(
     logged(kind, recorded);
 }
 
-/// Records that a team agent started a task, with the first line of the task's prompt;
-/// a failure is logged by its plain code. Takes the database, the project, the agent, the
-/// task id and the time in ms.
+/// Records that a team agent started a task, named by its title (`task_title`); a failure
+/// is logged by its plain code. Takes the database, the project, the agent, the task id and
+/// the time in ms.
 pub fn note_task(db: &Connection, project: &ProjectId, agent: i64, task: i64, now_ms: i64) {
-    let prompt: Result<String, EngineError> = db
-        .query_row("SELECT prompt FROM team_tasks WHERE id=?1", [task], |row| {
-            row.get(0)
-        })
-        .map_err(state);
-    match prompt {
-        Ok(prompt) => {
-            let first = prompt.lines().find(|line| !line.trim().is_empty());
-            let text = format!("Started a task: {}", first.unwrap_or("(no prompt)"));
-            note_agent(db, project, agent, ActivityKind::TaskStarted, &text, now_ms);
-        }
-        Err(error) => logged(ActivityKind::TaskStarted, Err(error)),
+    let kind = ActivityKind::TaskStarted;
+    logged(
+        kind,
+        record_task(db, project, agent, Some(task), (kind, "started"), now_ms),
+    );
+}
+
+/// Records that a team agent's task ended, named by its title and never by the agent's
+/// reply or failure text: finished, or could not finish for a failed one; a failure is
+/// logged by its plain code. Takes the database, the project, the agent, the task when the
+/// event names one, whether it failed and the time in ms.
+pub fn note_task_end(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    task: Option<i64>,
+    failed: bool,
+    now_ms: i64,
+) {
+    let kind = ActivityKind::TaskFinished;
+    let verb = if failed {
+        "could not finish"
+    } else {
+        "finished"
+    };
+    logged(
+        kind,
+        record_task(db, project, agent, task, (kind, verb), now_ms),
+    );
+}
+
+fn record_task(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    task: Option<i64>,
+    (kind, verb): (ActivityKind, &str),
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    let actor = agent_actor(db, agent)?;
+    let title = match task {
+        Some(task) => task_title(db, project, agent, task)?,
+        None => String::new(),
+    };
+    let text = if title.is_empty() {
+        format!("{actor} {verb} a task")
+    } else {
+        format!("{actor} {verb} \u{201c}{title}\u{201d}")
+    };
+    let item = NewActivity {
+        kind,
+        actor: &actor,
+        agent: Some(agent),
+        goal: None,
+        text: &text,
+        change_set: None,
+    };
+    record(db, project, &item, now_ms).map(drop)
+}
+
+/// Names a team task the way its rows show it: the first line of its prompt through the
+/// change set subject's scrub, paths under the agent's worktree and the project's folder
+/// made relative, cut to `GOAL_BYTES_MAX` bytes like the metrics title. Takes the database,
+/// the project, the agent and the task. Returns the title, empty for a task of another
+/// project, gone or with no prompt.
+fn task_title(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    task: i64,
+) -> Result<String, EngineError> {
+    let prompt: Option<String> = db
+        .query_row(
+            "SELECT prompt FROM team_tasks WHERE id=?1 AND project=?2",
+            params![task, project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(state)?;
+    let Some(first) = prompt
+        .as_deref()
+        .and_then(|prompt| prompt.lines().find(|line| !line.trim().is_empty()))
+    else {
+        return Ok(String::new());
+    };
+    let worktree: Option<String> = if has_table(db, "team_worktrees")? {
+        db.query_row(
+            "SELECT worktree FROM team_worktrees WHERE agent=?1 AND project=?2",
+            params![agent, project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(state)?
+    } else {
+        None
+    };
+    let folder = setup_folder(db, project)?;
+    let roots: Vec<&std::path::Path> = [worktree.as_deref(), folder.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(std::path::Path::new)
+        .filter(|root| root.is_absolute())
+        .collect();
+    Ok(one_line(
+        &crate::landing::scrubbed(first, &roots),
+        GOAL_BYTES_MAX,
+    ))
+}
+
+/// The folder of a project's saved setup. Takes the database and the project. Returns
+/// it, none for a project with no saved setup, or the SQLite failure.
+fn setup_folder(db: &Connection, project: &ProjectId) -> Result<Option<String>, EngineError> {
+    if !has_table(db, "project_setups")? {
+        return Ok(None);
     }
+    let body: Option<String> = db
+        .query_row(
+            "SELECT body FROM project_setups WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(state)?;
+    Ok(body
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .and_then(|setup| {
+            setup
+                .get("folder")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        }))
 }
 
 /// Records the start or one of the three ends of a unit of work, as the coordination
@@ -333,13 +464,27 @@ fn record_audit(
 /// by its plain code, so the run itself never fails on it. Takes the database, the job
 /// id, the research kind of event and the time in ms.
 pub fn note_research(db: &Connection, job: i64, kind: ActivityKind, now_ms: i64) {
-    logged(kind, record_research(db, job, kind, now_ms));
+    logged(
+        kind,
+        record_research(db, job, (kind, research_verb(kind)), now_ms),
+    );
+}
+
+/// Records that a research run was parked until its project has a pool, as a stopped run
+/// that says it waits for one; a failure is logged by its plain code. Takes the database,
+/// the job id and the time in ms.
+pub fn note_research_waiting(db: &Connection, job: i64, now_ms: i64) {
+    let kind = ActivityKind::ResearchStopped;
+    logged(
+        kind,
+        record_research(db, job, (kind, "waiting for a pool"), now_ms),
+    );
 }
 
 fn record_research(
     db: &Connection,
     job: i64,
-    kind: ActivityKind,
+    (kind, verb): (ActivityKind, &str),
     now_ms: i64,
 ) -> Result<(), EngineError> {
     let (project, name): (String, String) = db
@@ -350,7 +495,7 @@ fn record_research(
         )
         .map_err(state)?;
     let project = ProjectId::new(&project).map_err(|_| failure("activity_item_invalid"))?;
-    let text = research_text(kind, &name);
+    let text = research_line(verb, &name);
     let item = NewActivity {
         kind,
         actor: RESEARCH_ACTOR,
@@ -675,14 +820,12 @@ fn past_research(db: &Connection, project: &ProjectId) -> Result<Vec<Past>, Engi
         .map_err(state)?;
     let mut found = Vec::new();
     for (job, status, started, finished) in rows {
-        let ended = finished.map(|at_ms| {
-            let kind = if status == "done" {
-                ActivityKind::ResearchSaved
-            } else {
-                ActivityKind::ResearchStopped
-            };
-            (kind, at_ms)
-        });
+        let end = match status.as_str() {
+            "done" => Some(ActivityKind::ResearchSaved),
+            "failed" | "cancelled" => Some(ActivityKind::ResearchStopped),
+            _ => None,
+        };
+        let ended = end.zip(finished);
         for (kind, at_ms) in std::iter::once((ActivityKind::ResearchStarted, started)).chain(ended)
         {
             found.push(Past {
@@ -698,22 +841,31 @@ fn past_research(db: &Connection, project: &ProjectId) -> Result<Vec<Past>, Engi
     Ok(found)
 }
 
+/// Says whether an event `backfill` found is recorded already: by its kind and change set
+/// for one that names a set, else by its kind, time, text and goal, not by who acted, since
+/// an agent's name can change after the event. Takes the database, the project and the
+/// event. Returns the answer, or the SQLite failure.
 fn known(db: &Connection, project: &ProjectId, past: &Past) -> Result<bool, EngineError> {
     let change_set = past
         .change_set
         .as_deref()
         .map(|id| one_line(id, CHANGE_SET_BYTES_MAX));
+    let goal = past
+        .goal
+        .as_deref()
+        .map(|goal| shown(goal, GOAL_BYTES_MAX))
+        .filter(|goal| !goal.is_empty());
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM project_activity WHERE project=?1 AND kind=?2 AND
          ((?3 IS NOT NULL AND change_set=?3)
-          OR (?3 IS NULL AND at_ms=?4 AND actor=?5 AND text=?6)))",
+          OR (?3 IS NULL AND at_ms=?4 AND text=?5 AND goal IS ?6)))",
         params![
             project.as_str(),
             past.kind.name(),
             change_set,
             past.at_ms,
-            one_line(&past.actor, ACTOR_BYTES_MAX),
-            one_line(&past.text, TEXT_BYTES_MAX)
+            shown(&past.text, TEXT_BYTES_MAX),
+            goal
         ],
         |row| row.get(0),
     )
@@ -759,12 +911,19 @@ pub fn audit_event(action: &str) -> Option<(ActivityKind, &'static str)> {
 /// backfill: the job named by its label, or as stored when the kind is unknown. Takes the
 /// research kind of event and the job's stored kind. Returns the text.
 pub fn research_text(kind: ActivityKind, job: &str) -> String {
-    let verb = match kind {
+    research_line(research_verb(kind), job)
+}
+
+fn research_verb(kind: ActivityKind) -> &'static str {
+    match kind {
         ActivityKind::ResearchStarted => "started",
         ActivityKind::ResearchSaved => "saved",
         ActivityKind::ResearchStopped => "stopped",
         _ => unreachable!("research_text takes a research event"),
-    };
+    }
+}
+
+fn research_line(verb: &str, job: &str) -> String {
     let shown = match crate::project_setup::ResearchKind::parse(job) {
         Some(known) => known.label(),
         None => job,
@@ -782,8 +941,10 @@ pub fn party_actor(db: &Connection, kind: &str, agent: Option<i64>) -> Result<St
     })
 }
 
-/// Names a team agent for the activity the way the team list does. Takes the database
-/// and the agent id. Returns its label, or "Agent" and the id for a row that is gone.
+/// Names a team agent for the activity the way the team list does: its kept persona and
+/// handle, the persona alone, "Master", or its role and number when it has no kept name.
+/// Takes the database and the agent id. Returns its label, or "Agent" and the id for a row
+/// that is gone.
 pub fn agent_actor(db: &Connection, agent: i64) -> Result<String, EngineError> {
     let role: Option<String> = db
         .query_row("SELECT role FROM team_agents WHERE id=?1", [agent], |row| {
@@ -793,7 +954,10 @@ pub fn agent_actor(db: &Connection, agent: i64) -> Result<String, EngineError> {
         .map_err(state)?;
     Ok(
         match role.as_deref().and_then(crate::team::AgentRole::parse) {
-            Some(role) => role.agent_label(agent),
+            Some(role) => {
+                let name = crate::team::names::name(db, agent)?;
+                crate::team::names::label(role, agent, name.as_ref())
+            }
             None => format!("Agent {agent}"),
         },
     )
@@ -811,12 +975,24 @@ fn active_goal(
         |row| row.get::<_, String>(0),
     )
     .optional()
-    .map(|title| title.map(|title| one_line(&title, GOAL_BYTES_MAX)))
     .map_err(state)
 }
 
+/// Text as a row shows it: through `landing::scrubbed`, so a character a reader cannot see
+/// is shown as an escape or breaks the line into words and an absolute local path is cut to
+/// its last component, then made one line of at most `bytes`. Takes the text and the
+/// bound. Returns the line.
+fn shown(text: &str, bytes: usize) -> String {
+    one_line(&crate::landing::scrubbed(text, &[]), bytes)
+}
+
 fn one_line(text: &str, bytes: usize) -> String {
-    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let joined = text
+        .split_whitespace()
+        .map(|word| word.chars().filter(|c| !c.is_control()).collect::<String>())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut end = joined.len().min(bytes);
     while !joined.is_char_boundary(end) {
         end -= 1;

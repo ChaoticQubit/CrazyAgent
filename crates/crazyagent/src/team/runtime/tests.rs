@@ -5707,11 +5707,12 @@ fn a_task_start_is_recorded_in_the_project_activity() {
     .map(|item| (item.actor, item.text))
     .collect();
 
+    let label = crate::team::events::label(&fixture.connection, agent).unwrap();
     assert_eq!(
         started,
         vec![(
-            format!("Sub-agent {agent}"),
-            "Started a task: Write page.md".to_owned()
+            label.clone(),
+            format!("{label} started \u{201c}Write page.md\u{201d}")
         )]
     );
     team.shutdown().unwrap();

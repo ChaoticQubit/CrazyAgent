@@ -300,8 +300,9 @@ impl ResearchJobs {
 
     /// Records a failed attempt of the claim `held`: a job whose cancel was
     /// requested ends cancelled, otherwise it requeues while attempts remain under
-    /// `attempts_max`, otherwise it is marked failed; the stopped run is recorded in
-    /// the project's activity. Returns the new status.
+    /// `attempts_max`, otherwise it is marked failed; a failed or cancelled run is
+    /// recorded in the project's activity as stopped, a requeued one not at all. Returns
+    /// the new status.
     pub fn fail(
         &self,
         held: &ResearchJob,
@@ -333,16 +334,20 @@ impl ResearchJobs {
             status,
             ResearchStatus::Queued | ResearchStatus::Failed | ResearchStatus::Cancelled
         ));
-        let stopped = ActivityKind::ResearchStopped;
-        crate::activity::note_research(&self.connection, held.id, stopped, now);
+        if status != ResearchStatus::Queued {
+            let stopped = ActivityKind::ResearchStopped;
+            crate::activity::note_research(&self.connection, held.id, stopped, now);
+        }
         Ok(status)
     }
 
     /// Parks the job of the claim `held` until its project has a pool, without
-    /// using an attempt; a job whose cancel was requested ends cancelled instead.
-    /// Returns the new status.
+    /// using an attempt; a job whose cancel was requested ends cancelled instead. The
+    /// project's activity says the run waits for a pool, or that it stopped. Returns the
+    /// new status.
     pub fn needs_pool(&self, held: &ResearchJob) -> Result<ResearchStatus, JobError> {
         let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
+        let now = now_ms();
         let status = self
             .connection
             .query_row(
@@ -352,7 +357,7 @@ impl ResearchJobs {
                      attempts = attempts - 1, claimer = NULL, started_ms = NULL, heartbeat_ms = NULL
                  WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
                  RETURNING status",
-                params![held.id, claimer, held.attempts, now_ms()],
+                params![held.id, claimer, held.attempts, now],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
@@ -362,6 +367,12 @@ impl ResearchJobs {
             status,
             ResearchStatus::NeedsPool | ResearchStatus::Cancelled
         ));
+        if status == ResearchStatus::NeedsPool {
+            crate::activity::note_research_waiting(&self.connection, held.id, now);
+        } else {
+            let stopped = ActivityKind::ResearchStopped;
+            crate::activity::note_research(&self.connection, held.id, stopped, now);
+        }
         Ok(status)
     }
 
