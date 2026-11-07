@@ -599,9 +599,13 @@ fn a_resolve_the_engine_starts_never_clears_an_owner_stop() {
     assert_eq!(case.resolve_tasks().len(), 1);
 }
 
+/// A setup run just before the agent's turn end is recorded: the store, the agent's id and
+/// its workspace.
+type BeforeTurnEnd = fn(&Connection, i64, &mut Workspace);
+
 #[test]
 fn a_catch_up_that_cannot_run_leaves_the_set_for_the_owner_and_keeps_the_turn_end() {
-    let cases: [(&str, fn(&Connection, i64, &mut Workspace)); 3] = [
+    let cases: [(&str, BeforeTurnEnd); 3] = [
         ("a filter attribute, as Git LFS sets", |_, _, workspace| {
             owner_attributes(&workspace.repository, "README filter=lfs\n");
         }),
@@ -669,7 +673,7 @@ fn a_set_whose_agent_cannot_take_the_resolve_is_never_merged_at_its_turn_end() {
 }
 
 #[test]
-fn sets_a_lead_lands_a_master_s_set_and_a_set_with_no_clash_wait_as_before() {
+fn a_teammate_s_set_a_lead_s_worker_s_set_and_a_set_with_no_clash_wait_as_before() {
     let teammate = |db: &Connection, agent: i64, _: &mut Workspace| {
         db.execute(
             "UPDATE team_agents SET role='teammate' WHERE id=?1",
@@ -730,16 +734,6 @@ fn sets_a_lead_lands_a_master_s_set_and_a_set_with_no_clash_wait_as_before() {
     };
     let (case, recorded) = Case::build_with(true, true, false, lead_worker);
     case.left_for_the_owner(recorded, "a lead's worker under Lands Lead");
-
-    let master = |_: &Connection, _: i64, workspace: &mut Workspace| {
-        workspace.agent = ChangeAgent {
-            kind: AgentKind::Master,
-            id: "session-1".into(),
-            label: "Master".into(),
-        };
-    };
-    let (case, recorded) = Case::build_with(false, true, false, master);
-    case.left_for_the_owner(recorded, "a master's set");
 
     let no_clash = |_: &Connection, _: i64, workspace: &mut Workspace| {
         std::fs::write(

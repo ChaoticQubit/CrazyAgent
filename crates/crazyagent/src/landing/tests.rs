@@ -6124,6 +6124,42 @@ fn a_master_turn_merging_an_open_change_set_passes_only_at_full_access() {
     );
 }
 
+/// A master's change set that conflicts with main waits for the owner at its turn end, as
+/// before OS-8: the engine never merges main into the master's leased worktree.
+#[test]
+fn a_master_s_set_that_conflicts_with_main_waits_for_the_owner_at_its_turn_end() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    std::fs::write(
+        master.worktree.join("README"),
+        "one\ntwo\nthree, the master's\n",
+    )
+    .unwrap();
+    let recorded =
+        crate::landing_turns::record(&case.db, &master, &merge_turn()).map_err(|problem| problem.0);
+    let Ok(crate::landing_turns::Landed::Added(id)) = recorded else {
+        panic!("the master's turn kept no change set: {recorded:?}");
+    };
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(
+        std::fs::read_to_string(master.worktree.join("README")).unwrap(),
+        "one\ntwo\nthree, the master's\n",
+        "the engine merged main into the master's work at its turn end"
+    );
+    assert!(
+        matches!(case.accept(&id).unwrap(), AcceptOutcome::Conflict { .. }),
+        "the master's set clashes with main"
+    );
+}
+
 /// Saves the project's agent access in the case's store. Inputs: the case and the access.
 fn save_access(case: &Case, access: crate::sandbox::policy::AgentAccess) {
     crate::sandbox::policy::save(
