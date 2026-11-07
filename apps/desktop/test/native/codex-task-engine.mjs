@@ -79,8 +79,9 @@ export function taskStatus(runtime, project) {
 }
 
 /** Makes one of the owner's repositories a project the way the app does: onboarding, the
- * pool its sub-agents run on, and team tools for its Codex sub-agent. Inputs: the bridge, the
- * repository and the first of the three write generations it uses. Output: the project id. */
+ * pool its sub-agents run on, and a Codex sub-agent with team tools saved through the team
+ * settings, since onboarding's team names no sub-agent. Inputs: the bridge, the repository and
+ * the first of the three write generations it uses. Output: the project id. */
 async function addProject(bridge, repo, generation) {
   const receipt = await value(bridge, "desktop_start_onboarding", { path: repo, pool: "local-pool", generation });
   assert.equal(receipt.outcome, "applied", `the folder becomes a project: ${JSON.stringify(receipt)}`);
@@ -96,11 +97,12 @@ async function addProject(bridge, repo, generation) {
   const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: generation + 1 });
   assert.equal(assigned.outcome, "applied", `the project gets the pool its sub-agents run on: ${JSON.stringify(assigned)}`);
   const stored = await value(bridge, "desktop_project_setup", { id: project });
-  const subs = (stored.team.sub_harnesses ?? []).map((slot) => slot.harness === "codex" ? { ...slot, tools: true } : slot);
-  assert.ok(subs.some((slot) => slot.harness === "codex"), `the project has a Codex sub-agent: ${JSON.stringify(stored.team)}`);
-  const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team: { ...stored.team, sub_harnesses: subs }, documents: [] };
+  const team = { ...stored.team, sub_harnesses: [{ harness: "codex", agents: 1, tools: true }] };
+  const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team, documents: [] };
   const saved = await value(bridge, "desktop_update_project_setup", { id: project, setup, name: null, revision: stored.revision, generation: generation + 2 });
-  assert.equal(saved.outcome, "applied", `the Codex sub-agent gets its team tools: ${JSON.stringify(saved)}`);
+  assert.equal(saved.outcome, "applied", `the project gets a Codex sub-agent with team tools: ${JSON.stringify(saved)}`);
+  const kept = await value(bridge, "desktop_project_setup", { id: project });
+  assert.ok(kept.team.sub_harnesses.some((slot) => slot.harness === "codex" && slot.tools), `the saved team has a Codex sub-agent with team tools: ${JSON.stringify(kept.team)}`);
   return project;
 }
 
