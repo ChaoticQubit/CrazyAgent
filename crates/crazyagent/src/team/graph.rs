@@ -63,8 +63,9 @@ impl NodeKind {
 /// master. `branch` is the branch it commits on, `terminal` the name to attach to, and
 /// `questions` its question events still queued for the master. `agent` is its own team
 /// agent row and `pane` a native teammate's pane in its lead's terminal, for Stop.
-/// `presence`, `waiting` (on the owner in its terminal), `owner_questions` (open For: Me
-/// questions) and `no_worktree` (a teammate working with none, Q17) come from coordination.
+/// `presence`, `waiting` (on the owner in its terminal), `waits_for` (the file its start
+/// waits for under Wait, OS-8), `owner_questions` (open For: Me questions) and
+/// `no_worktree` (a teammate working with none, Q17) come from coordination.
 /// `hookless` marks an agent whose launch fires no hooks, so it has no receipts; its adoption
 /// counts and flags come from its transcript like any other agent's (OQ-8). `message_note`
 /// is its agent row's sentence when the Delivery setting leaves it no way to get messages.
@@ -461,7 +462,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         pane: None,
         presence: master_state.map(|state| state.presence),
         waiting: master_state.and_then(|state| state.waiting),
-        waits_for: None,
+        waits_for: master_state.and_then(|state| state.waits_for.clone()),
         owner_questions: master.map_or(0, |agent| asked.get(&agent.id).copied().unwrap_or(0)),
         no_worktree: false,
         hookless: master.is_some_and(|agent| agent.hookless),
@@ -522,7 +523,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
             pane: agent.pane.clone(),
             presence: state.map(|state| state.presence),
             waiting: state.and_then(|state| state.waiting),
-            waits_for: None,
+            waits_for: state.and_then(|state| state.waits_for.clone()),
             owner_questions: asked.get(&agent.id).copied().unwrap_or(0),
             no_worktree: agent.role == AgentRole::Teammate
                 && state.is_some_and(|state| !state.has_worktree),

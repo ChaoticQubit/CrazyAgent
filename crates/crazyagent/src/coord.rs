@@ -308,12 +308,14 @@ pub struct Overlap {
     pub reasons: Vec<String>,
 }
 
-/// What the graph, the Process page and the inbox show for one agent.
+/// What the graph, the Process page and the inbox show for one agent; `waits_for` is the
+/// file its newest start under Wait waits for (OS-8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentState {
     pub agent: AgentId,
     pub presence: Presence,
     pub waiting: Option<Waiting>,
+    #[serde(default)]
     pub waits_for: Option<String>,
     pub has_worktree: bool,
     pub unread: u32,

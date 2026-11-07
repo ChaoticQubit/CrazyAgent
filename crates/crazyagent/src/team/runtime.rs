@@ -223,7 +223,7 @@ const NATIVE_NEEDS_HOOKS: &str = "Native teammates need hooks, and this account 
 
 /// Why an agent with tools that Claude Code starts `--bare` does not start while Overlaps is
 /// Block: the edit guard is a hook, and no hook fires there (DEC-104 bare-hooks).
-const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block needs hooks, and this account starts Claude Code without them. Set Overlaps to Warn, or use a signed-in account.";
+const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block or Wait needs hooks, and this account starts Claude Code without them. Set Overlaps to Warn, or use a signed-in account.";
 
 impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
@@ -2470,7 +2470,8 @@ impl TeamRuntime {
     /// starts and then at most once each `CLAIMS_SWEEP_EVERY`: the landing sweep holds or
     /// releases stopped agents' finished claims and retries failed releases and restores,
     /// agents waiting for a file that is free now are prompted (OS-8 Wait), and the owner
-    /// is told once when the project's claims fill one overlap check. A
+    /// is told once when the project's claims fill one overlap check and once of each pair
+    /// of agents whose waits would have closed a cycle. A
     /// failure leaves the team step running and is logged once by its plain code until a
     /// sweep succeeds again. Input: the project. Output: unit.
     fn tend_claims(&mut self, project: &ProjectId) {
@@ -2489,14 +2490,15 @@ impl TeamRuntime {
             .map_err(|_| EngineError("team_state_unavailable".into()))
             .and_then(|now| crate::landing::sweep_claims(&self.connection, project, now))
             .and_then(|()| crate::coord::wake_waiters(&self.connection, now).map(drop));
-        let told =
-            crate::coord::claims_full_notice(&self.connection, project, now).and_then(|full| {
+        let told = crate::coord::claims_full_notice(&self.connection, project, now)
+            .and_then(|full| {
                 if full {
                     self.note(project, CLAIMS_FULL_NOTE)
                 } else {
                     Ok(())
                 }
-            });
+            })
+            .and_then(|()| self.note_wait_cycles(project, now));
         let failed = swept
             .and(told)
             .err()
@@ -2999,6 +3001,25 @@ impl TeamRuntime {
             context,
             access,
         })))
+    }
+
+    /// Tells the owner once of each pair of agents whose waits under Wait would have closed
+    /// a cycle, so a start went ahead with only an overlap warning (OS-8). Inputs: the
+    /// project and the time in ms. Output: Ok or the first failure.
+    fn note_wait_cycles(&mut self, project: &ProjectId, now: i64) -> Result<(), EngineError> {
+        for (first, second, file) in
+            crate::coord::wait_cycle_notices(&self.connection, project, now)?
+        {
+            let first = crate::team::events::label(&self.connection, first)?;
+            let second = crate::team::events::label(&self.connection, second)?;
+            self.note(
+                project,
+                &format!(
+                    "{first} and {second} would have waited on each other under Overlapping edits Wait, so a start on {file} went ahead with only an overlap warning. Check that their edits of it do not clash."
+                ),
+            )?;
+        }
+        Ok(())
     }
 
     fn note(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
@@ -6654,15 +6675,17 @@ impl TeamRuntime {
             .map_err(|_| with_code("the agent's hooks state could not be saved", None))?;
         if hookless
             && tools
-            && crate::coord::settings::read(&self.connection, &stored.project_id)
-                .map_err(|e| {
-                    with_code(
-                        "the project's coordination settings could not be read",
-                        Some(&e.0),
-                    )
-                })?
-                .overlaps
-                == crate::coord::settings::Overlaps::Block
+            && matches!(
+                crate::coord::settings::read(&self.connection, &stored.project_id)
+                    .map_err(|e| {
+                        with_code(
+                            "the project's coordination settings could not be read",
+                            Some(&e.0),
+                        )
+                    })?
+                    .overlaps,
+                crate::coord::settings::Overlaps::Block | crate::coord::settings::Overlaps::Wait
+            )
         {
             return Err(with_code(
                 OVERLAP_BLOCK_NEEDS_HOOKS,

@@ -430,9 +430,15 @@ export function latestTask(node: GraphNode, edges: readonly GraphEdge[]): GraphE
 }
 
 /** The task line of a card: for the master, how many tasks are live and how many wait for an
- * agent; for an agent, its latest task, led by Done or Failed once it ended. Inputs: the node
- * and the edges. Output: the full line, before clipping. */
+ * agent; for an agent, its latest task, led by Done or Failed once it ended. Either is led by
+ * the file the node waits for under Wait (OS-8). Inputs: the node and the edges. Output: the
+ * full line, before clipping. */
 export function cardTask(node: GraphNode, edges: readonly GraphEdge[]): string {
+  const line = taskLine(node, edges);
+  return node.waits_for ? `Waiting for ${node.waits_for}. ${line}` : line;
+}
+
+function taskLine(node: GraphNode, edges: readonly GraphEdge[]): string {
   if (node.kind === "master") {
     const count = edges.filter(live).length;
     const waiting = edges.filter((edge) => live(edge) && edge.to === node.id).length;

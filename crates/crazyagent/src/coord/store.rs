@@ -65,8 +65,18 @@ CREATE TABLE IF NOT EXISTS coord_waits (
     agent INTEGER NOT NULL,
     work INTEGER NOT NULL,
     file TEXT NOT NULL,
+    held TEXT NOT NULL,
     created INTEGER NOT NULL,
     UNIQUE(agent, work)
+);
+CREATE TABLE IF NOT EXISTS coord_wait_cycles (
+    project TEXT NOT NULL,
+    first INTEGER NOT NULL,
+    second INTEGER NOT NULL,
+    file TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    told INTEGER,
+    PRIMARY KEY(project, first, second)
 );
 CREATE TABLE IF NOT EXISTS coord_activity (
     agent INTEGER PRIMARY KEY,
@@ -113,13 +123,14 @@ CREATE TABLE IF NOT EXISTS tool_switches (
 );";
 
 /// The coordination tables a project's removal clears by their `project` column.
-const REMOVED_WITH_PROJECT: [&str; 9] = [
+const REMOVED_WITH_PROJECT: [&str; 10] = [
     "coord_work",
     "coord_messages",
     "coord_claims",
     "coord_held",
     "coord_claims_full",
     "coord_waits",
+    "coord_wait_cycles",
     "coord_audit",
     "coord_settings",
     "coord_harness_settings",
@@ -146,7 +157,7 @@ pub fn ensure(db: &Connection) -> Result<(), EngineError> {
 }
 
 /// Clears a removed project's coordination rows: its work, messages, claims and their
-/// change-set holds, full-scan notice, waits, audit, settings and tool switches, and the activity and tool counts
+/// change-set holds, full-scan notice, waits and wait cycles, audit, settings and tool switches, and the activity and tool counts
 /// of the stopped agents removed with it. Runs inside the removal's transaction before its agents go.
 /// Takes the database and the project. Returns Ok or the SQLite failure.
 pub fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {

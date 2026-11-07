@@ -1549,8 +1549,8 @@ export type Receipt = "sent" | "delivered" | "typed" | "read" | "replied" | "fai
  * names the node that leads it; `terminal` is the name the terminal commands take, for the
  * nodes that have one. `questions` counts the questions it queued for the master, `agent` is
  * its own team agent row and `pane` a native teammate's pane, for Stop. `presence`, `waiting`
- * on the owner in its terminal, `owner_questions` (open For: Me questions) and `no_worktree`
- * come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
+ * on the owner in its terminal, `waits_for` (the file its start waits for under Wait),
+ * `owner_questions` (open For: Me questions) and `no_worktree` come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
  * it has no receipts; `message_note` is the engine's sentence when the Delivery setting leaves
  * the agent no way to get messages. Older engines leave the optional fields out. */
 export interface GraphNode {
@@ -1569,6 +1569,7 @@ export interface GraphNode {
   pane?: string | null;
   presence?: Presence | null;
   waiting?: Waiting | null;
+  waits_for?: string | null;
   owner_questions?: number;
   no_worktree?: boolean;
   hookless?: boolean;

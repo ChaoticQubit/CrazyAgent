@@ -107,23 +107,29 @@ fn status_glyph(status: Option<AgentStatus>, look: &Look) -> (&'static str, Styl
 }
 
 /// The task line of one sub-agent: its newest live task, else its newest ended one led by
-/// Done or Failed, as a one-line title. Takes the graph and the agent. Returns the line, or
-/// "No task yet." when it has none.
+/// Done or Failed, as a one-line title, led by the file it waits for under Wait (OS-8).
+/// Takes the graph and the agent. Returns the line, "No task yet." when it has none.
 fn task_line(graph: &TeamGraph, agent: &GraphNode) -> String {
     let live = |state: EdgeState| matches!(state, EdgeState::Sent | EdgeState::Running);
-    let Some(edge) = graph
+    let task = match graph
         .edges
         .iter()
         .filter(|edge| edge.to == agent.id)
         .max_by_key(|edge| (live(edge.state), edge.task_id))
-    else {
-        return "No task yet.".to_owned();
+    {
+        None => "No task yet.".to_owned(),
+        Some(edge) => {
+            let title = super::team::title(&edge.text);
+            match edge.state {
+                EdgeState::Done => format!("Done: {title}"),
+                EdgeState::Failed => format!("Failed: {title}"),
+                EdgeState::Sent | EdgeState::Running => title,
+            }
+        }
     };
-    let title = super::team::title(&edge.text);
-    match edge.state {
-        EdgeState::Done => format!("Done: {title}"),
-        EdgeState::Failed => format!("Failed: {title}"),
-        EdgeState::Sent | EdgeState::Running => title,
+    match &agent.waits_for {
+        Some(file) => format!("Waiting for {}. {task}", super::team::title(file)),
+        None => task,
     }
 }
 

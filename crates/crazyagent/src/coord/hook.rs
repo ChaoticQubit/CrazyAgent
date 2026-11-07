@@ -687,8 +687,9 @@ fn first_edit(folder: &Mailbox, socket: Option<&Path>, who: &Identity) -> Option
 
 /// Decides one file edit before it runs. A session the engine placed in no pane may not
 /// edit (DEC-111 Q18). A native teammate may edit only inside
-/// `<lead worktree>/.worktrees/<its name>/` (Q17); under Overlaps Block, an edit to a
-/// repository file another active agent claimed is refused after asking the engine (Q15).
+/// `<lead worktree>/.worktrees/<its name>/` (Q17); under Overlaps Block or Wait, an edit to
+/// a repository file another active agent claimed is refused after asking the engine (Q15,
+/// OS-8).
 /// The guard is cooperative: the session owns its home and mailbox. Takes the folder, the
 /// mailbox whose caller socket a native teammate asks over, the identity and the hook
 /// input. Returns the reason to deny, or None to let it run.
@@ -725,11 +726,12 @@ fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value)
         (None, Some(root)) => root.clone(),
         (_, None) => return None,
     };
-    let blocks = roster.is_some_and(|roster| roster.overlaps == Overlaps::Block);
+    let option = roster
+        .as_ref()
+        .map(|roster| roster.overlaps)
+        .filter(|overlaps| matches!(overlaps, Overlaps::Block | Overlaps::Wait));
     let tag = who.activity.as_deref()?;
-    if !blocks {
-        return None;
-    }
+    let option = option?;
     let relative = target.strip_prefix(&base).ok()?.to_str()?;
     if relative.is_empty()
         || relative.starts_with(".git/")
@@ -751,8 +753,16 @@ fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value)
         .iter()
         .map(|held| format!("{} ({})", held.by, held.pattern))
         .collect();
+    let advice = match option {
+        Overlaps::Wait => {
+            "set to Wait in this project: start_work on it to get a message when it is free, or start_work on other files."
+        }
+        _ => {
+            "set to Block in this project: message the holder with update_work, or start_work on other files."
+        }
+    };
     Some(format!(
-        "CrazyAgent: {relative} is claimed by {}. Overlapping edits are set to Block in this project: message the holder with update_work, or start_work on other files.",
+        "CrazyAgent: {relative} is claimed by {}. Overlapping edits are {advice}",
         holders.join(", ")
     ))
 }

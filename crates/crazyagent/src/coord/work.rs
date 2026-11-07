@@ -24,7 +24,8 @@ struct WorkRow {
 /// the agent, the title, the claims and the time in ms. Returns the work and the
 /// overlaps, or a plain refusal for a stopped agent or invalid input. Under Wait a start on
 /// a file another agent's work holds starts nothing: it records the wait and is refused
-/// with `coord_claim_waits`.
+/// with `coord_claim_waits`, unless that wait would close a cycle of waits; then the start
+/// goes ahead as under Warn and the owner is told of the pair once (OS-8).
 pub fn start_work(
     db: &Connection,
     project: &ProjectId,
@@ -53,10 +54,15 @@ pub fn start_work(
     if waits(tx, project)?
         && let Some(held) = super::claims::waits_on(&overlaps)
     {
-        let (holder, file) = (held.theirs.work, held.mine.pattern.clone());
-        drop(change);
-        super::claims::wait_for(db, project, agent, holder, &file, now)?;
-        return Err(failure("coord_claim_waits"));
+        let file = held.mine.pattern.clone();
+        if super::claims::closes_cycle(tx, agent, held.theirs.agent)? {
+            super::claims::note_cycle(tx, project, agent, held.theirs.agent, &file, now)?;
+        } else {
+            let (holder, pattern) = (held.theirs.work, held.theirs.pattern.clone());
+            drop(change);
+            super::claims::wait_for(db, project, agent, holder, &file, &pattern, now)?;
+            return Err(failure("coord_claim_waits"));
+        }
     }
     super::presence::seen(tx, agent, now)?;
     change.commit()?;
