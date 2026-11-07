@@ -318,8 +318,9 @@ fn at_80_columns_the_summary_draws_every_number() {
     let mut ctx = ctx(80, 40);
     let mut page = UsagePage::new();
     page.shown(&mut ctx);
-    assert!(ctx.next_request().is_some(), "the page asks for usage");
-    page.apply(&Ok(Box::new(report())), &mut ctx);
+    let mut answer = report();
+    answer.since_ms = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(answer)), &mut ctx);
     let mut screen = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 40)).unwrap();
     screen
         .draw(|frame| {
