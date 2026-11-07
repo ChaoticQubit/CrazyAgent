@@ -1641,6 +1641,96 @@ fn tools_section(text: &str) -> &str {
     &rest[..end]
 }
 
+/// DEC-116: every tools-on launch delivers the tool rules as firm rules, not choices left to
+/// the agent: Claude Code's own instructions and its native teammates' file, which every
+/// master, lead, sub-agent, teammate and research launch is given, and Codex's developer
+/// instructions. Each says to query graphify before reading source, to run any output that is
+/// not short and fixed through context-mode, and to check the skills and use any that applies.
+#[test]
+fn every_tools_on_launch_delivers_the_tool_rules_as_firm_rules() {
+    const LOOSE: [&str; 6] = [
+        "may pass 20 lines",
+        "that fits",
+        "keep Bash for",
+        "keep the shell for",
+        "when `graphify-out/graph.json` is in your worktree",
+        "look here for a skill",
+    ];
+    const SHARED: [&str; 3] = [
+        "These rules apply to every task;",
+        "whose output is not short and fixed through",
+        "- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first,",
+    ];
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let folder = root.join("skill-store").join("tdd");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("SKILL.md"),
+        "---\nname: tdd\ndescription: Teaches tdd.\n---\n\nSteps.\n",
+    )
+    .unwrap();
+    let context = || {
+        context_with(
+            &root,
+            LaunchPlugins {
+                skills: vec![EffectiveSkill {
+                    name: "tdd".into(),
+                    folder: folder.clone(),
+                }],
+                servers: vec![command_server("context-mode")],
+            },
+            Vec::new(),
+        )
+    };
+    let worktree = root.join("lead-worktree");
+    fs::create_dir_all(&worktree).unwrap();
+    let lead = private_home(&root, "lead");
+    let installed = context()
+        .with_native_team(&root.join("bin").join("tmux"), &worktree)
+        .install("claude-code", &lead, true)
+        .unwrap();
+    let own = fs::read_to_string(lead.join(STATE).join("instructions.md")).unwrap();
+    let mate = fs::read_to_string(&installed.native().unwrap().instructions).unwrap();
+    drop(installed);
+    let codex = private_home(&root, "codex");
+    let installed = context().install("codex", &codex, true).unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let developer = config["developer_instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(installed);
+    let claude_rules = [
+        ". Use Bash only for short fixed output, state changes and edits. These tools load on demand: first run ToolSearch with `select:",
+        "- Skills: before each task, check the Skills section below and call the Skill tool for every skill there that applies, by its name there, such as `crazyagent:tdd`.",
+        "Check this list before every task and use every skill here that applies to it.",
+    ];
+    let codex_rules = [
+        " MCP server. Use the shell only for short fixed output, state changes and edits.",
+        "- Skills: before each task, check the Skills section below, then read the SKILL.md of every skill there that applies and follow it.",
+        "Check this list before every task and use every skill here that applies to it.",
+    ];
+    for (launch, text, rules) in [
+        ("claude-code", &own, claude_rules),
+        ("native teammate", &mate, claude_rules),
+        ("codex", &developer, codex_rules),
+    ] {
+        for rule in SHARED.iter().chain(rules.iter()) {
+            assert!(text.contains(rule), "{launch} lacks {rule:?}: {text}");
+        }
+        for loose in LOOSE {
+            assert!(
+                !text.contains(loose),
+                "{launch} still says {loose:?}: {text}"
+            );
+        }
+    }
+}
+
 /// T3-15: the Task-start reminder names the exact ToolSearch select string the launch's own
 /// "Tools to use" section gives Claude Code and the approved skills by their Skill tool
 /// names, Codex's context-mode tools on their MCP server and its skills by SKILL.md, and
@@ -1684,7 +1774,7 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
         both.task_start("claude-code", true).as_deref(),
         Some(
             format!(
-                "Task start reminder: before you work on this task, run ToolSearch with `{select}` and use those context-mode tools for any command, test, search or file read whose output may pass 20 lines, and call the Skill tool for each of these skills that fits this task: `crazyagent:brainstorming`, `crazyagent:tdd`."
+                "Task start reminder: before you work on this task, run ToolSearch with `{select}` and run every command, test, search or file read whose output is not short and fixed through those context-mode tools (Bash only for short fixed output, state changes and edits), query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and call the Skill tool for each one that applies: `crazyagent:brainstorming`, `crazyagent:tdd`."
             )
             .as_str()
         )
@@ -1704,7 +1794,7 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
     assert_eq!(
         both.task_start("codex", true).as_deref(),
         Some(
-            "Task start reminder: before you work on this task, use the `ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_search` tools of the `plugin_context-mode_context-mode` MCP server for any command, test, search or file read whose output may pass 20 lines, and read the SKILL.md of each of these skills that fits this task and follow it: `brainstorming`, `tdd`."
+            "Task start reminder: before you work on this task, run every command, test, search or file read whose output is not short and fixed through the `ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_search` tools of the `plugin_context-mode_context-mode` MCP server (the shell only for short fixed output, state changes and edits), query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and read and follow the SKILL.md of each one that applies: `brainstorming`, `tdd`."
         )
     );
     assert_eq!(both.task_start("claude-code", false), None, "tools off");
@@ -1715,14 +1805,14 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
     assert_eq!(
         skills_only.task_start("claude-code", true).as_deref(),
         Some(
-            "Task start reminder: before you work on this task, call the Skill tool for each of these skills that fits this task: `crazyagent:tdd`."
+            "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and call the Skill tool for each one that applies: `crazyagent:tdd`."
         )
     );
     let tools_only = context_with(&root, plugins(Vec::new(), true), Vec::new());
     assert_eq!(
         tools_only.task_start("codex", true).as_deref(),
         Some(
-            "Task start reminder: before you work on this task, use the `ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_fetch_and_index`, `ctx_search` tools of the `plugin_context-mode_context-mode` MCP server for any command, test, search or file read whose output may pass 20 lines."
+            "Task start reminder: before you work on this task, run every command, test, search or file read whose output is not short and fixed through the `ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_fetch_and_index`, `ctx_search` tools of the `plugin_context-mode_context-mode` MCP server (the shell only for short fixed output, state changes and edits), and query the project graph with `graphify query \"<question>\"` before you read or search source."
         )
     );
     let every_tool_off = context_with(
@@ -1971,14 +2061,14 @@ fn the_skills_index_gives_each_skill_its_description_and_path_and_says_check_it_
     assert_eq!(
         index,
         format!(
-            "\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. Use one with the Skill tool, where it is named crazyagent:NAME; without a Skill tool, read its SKILL.md at the path shown.\n\n- skill-000: Does task 0. (/private/tmp/home/crazyagent/plugin/skills/skill-000/SKILL.md)\n- skill-001: {}... (/private/tmp/home/crazyagent/plugin/skills/skill-001/SKILL.md)\n- skill-002 (/private/tmp/home/crazyagent/plugin/skills/skill-002/SKILL.md)\n",
+            "\n## Skills\n\nThe owner approved these skills for this project. Check this list before every task and use every skill here that applies to it. Use one with the Skill tool, where it is named crazyagent:NAME; without a Skill tool, read its SKILL.md at the path shown.\n\n- skill-000: Does task 0. (/private/tmp/home/crazyagent/plugin/skills/skill-000/SKILL.md)\n- skill-001: {}... (/private/tmp/home/crazyagent/plugin/skills/skill-001/SKILL.md)\n- skill-002 (/private/tmp/home/crazyagent/plugin/skills/skill-002/SKILL.md)\n",
             ["word"; 31].join(" ")
         ),
         "a long description is cut at a word within its bound, and a skill whose description cannot be read keeps its name and path"
     );
     assert_eq!(
         skills_index(folder, &skills[..1], false),
-        "\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. To use one, read its SKILL.md at the path shown and follow it.\n\n- skill-000: Does task 0. (/private/tmp/home/crazyagent/plugin/skills/skill-000/SKILL.md)\n",
+        "\n## Skills\n\nThe owner approved these skills for this project. Check this list before every task and use every skill here that applies to it. To use one, read its SKILL.md at the path shown and follow it.\n\n- skill-000: Does task 0. (/private/tmp/home/crazyagent/plugin/skills/skill-000/SKILL.md)\n",
         "a harness with no Skill tool is told to read the file"
     );
     assert_eq!(short_description("one two", 6), "one...");

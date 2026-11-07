@@ -538,12 +538,13 @@ impl AgentContext {
     }
 
     /// Builds the Task-start reminder the first turn of each task carries while the setting
-    /// is On (T3-15): for Claude Code the ToolSearch select string of the context-mode tools
-    /// left on, the one its "Tools to use" section gives, and the approved skills by their
-    /// Skill tool names; for Codex those tools on their MCP server and the skills' SKILL.md.
-    /// Skills past the bound are named as the rest of the Skills section. Inputs: the harness
-    /// id and the launch's tools switch. Output: at most `TASK_START_BYTES_MAX` bytes, or None
-    /// with tools off, for another harness, or with no context-mode tool and no skill to name.
+    /// is On (T3-15), as firm rules (DEC-116): for Claude Code the ToolSearch select string of
+    /// the context-mode tools left on, the one its "Tools to use" section gives, and the
+    /// approved skills by their Skill tool names; for Codex those tools on their MCP server
+    /// and the skills' SKILL.md; for both the graphify query before any source read. Skills
+    /// past the bound are named as the rest of the Skills section. Inputs: the harness id and
+    /// the launch's tools switch. Output: at most `TASK_START_BYTES_MAX` bytes, or None with
+    /// tools off, for another harness, or with no context-mode tool and no skill to name.
     pub fn task_start(&self, harness: &str, tools: bool) -> Option<String> {
         const MORE: &str = ", and the other skills in the Skills section";
         let id = crate::harnesses::spec(harness)
@@ -564,26 +565,28 @@ impl AgentContext {
         if context_mode {
             text.push_str(&match claude {
                 true => format!(
-                    "run ToolSearch with `select:{}` and use those context-mode tools",
+                    "run ToolSearch with `select:{}` and run every command, test, search or file read whose output is not short and fixed through those context-mode tools (Bash only for short fixed output, state changes and edits)",
                     names.join(",")
                 ),
                 false => format!(
-                    "use the `{}` tools of the `{CONTEXT_MODE_DECLARED}` MCP server",
+                    "run every command, test, search or file read whose output is not short and fixed through the `{}` tools of the `{CONTEXT_MODE_DECLARED}` MCP server (the shell only for short fixed output, state changes and edits)",
                     names.join("`, `")
                 ),
             });
-            text.push_str(
-                " for any command, test, search or file read whose output may pass 20 lines",
-            );
+            text.push_str(match self.plugins.skills.is_empty() {
+                true => ", and ",
+                false => ", ",
+            });
         }
+        text.push_str(
+            "query the project graph with `graphify query \"<question>\"` before you read or search source",
+        );
         if !self.plugins.skills.is_empty() {
-            if context_mode {
-                text.push_str(", and ");
-            }
+            text.push_str(", and ");
             text.push_str(match claude {
-                true => "call the Skill tool for each of these skills that fits this task: ",
+                true => "check these skills and call the Skill tool for each one that applies: ",
                 false => {
-                    "read the SKILL.md of each of these skills that fits this task and follow it: "
+                    "check these skills and read and follow the SKILL.md of each one that applies: "
                 }
             });
             let room = TASK_START_BYTES_MAX.saturating_sub(text.len() + MORE.len() + 1);
@@ -1333,11 +1336,12 @@ fn short_description(text: &str, bytes: usize) -> String {
     short
 }
 
-/// Tells a tools-on launch when to use the tools it has (18.15.1): the context-mode tools
-/// left on, by the names its harness gives them, graphify on the project graph and the
-/// approved skills by the names the skills index uses. Inputs: whether the harness is Claude
-/// Code, the launch's servers, the tools switched off and the first approved skill's name,
-/// none without skills. Output: at most `TOOL_USE_BYTES_MAX` bytes of markdown.
+/// Tells a tools-on launch the rules for the tools it has (18.15.1), as firm rules for every
+/// task (DEC-116): the context-mode tools left on, by the names its harness gives them, for
+/// all output that is not short and fixed, a graphify query before any source read and a
+/// check of the approved skills by the names the skills index uses. Inputs: whether the
+/// harness is Claude Code, the launch's servers, the tools switched off and the first
+/// approved skill's name, none without skills. Output: at most `TOOL_USE_BYTES_MAX` bytes.
 fn tool_use_section(
     claude: bool,
     servers: &[LaunchServer],
@@ -1345,7 +1349,7 @@ fn tool_use_section(
     skill: Option<&str>,
 ) -> String {
     let mut section = String::from(
-        "\n## Tools to use\n\nThe owner's instructions and the sections above come first. This section only names the tools this launch has as you call them; where other instructions name one another way, use the name here.\n\n",
+        "\n## Tools to use\n\nThe owner's instructions and the sections above come first. These rules apply to every task; this section names the tools this launch has as you call them, and where other instructions name one another way, use the name here.\n\n",
     );
     let names = context_mode_names(claude, off_tools);
     let context_mode = servers
@@ -1354,27 +1358,27 @@ fn tool_use_section(
     if context_mode && !names.is_empty() {
         let listed: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
         section.push_str(&format!(
-            "- context-mode: run every command, test, search, file read or web fetch whose output may pass 20 lines through {}",
+            "- context-mode: run every command, test, search, file read or web fetch whose output is not short and fixed through {}",
             listed.join(", ")
         ));
         section.push_str(&match claude {
             true => format!(
-                ", and keep Bash for short fixed output, edits and git. They load on demand: first run ToolSearch with `select:{}`.\n",
+                ". Use Bash only for short fixed output, state changes and edits. These tools load on demand: first run ToolSearch with `select:{}`.\n",
                 names.join(",")
             ),
             false => format!(
-                " of the `{CONTEXT_MODE_DECLARED}` MCP server, and keep the shell for short fixed output, edits and git.\n"
+                " of the `{CONTEXT_MODE_DECLARED}` MCP server. Use the shell only for short fixed output, state changes and edits.\n"
             ),
         });
     }
-    section.push_str("- graphify: when `graphify-out/graph.json` is in your worktree, run `graphify query \"<question>\"` in the shell before you read or edit code, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part.\n");
+    section.push_str("- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report.\n");
     if let Some(name) = skill {
         section.push_str(&match claude {
             true => format!(
-                "- Skills: before each task, call the Skill tool for every skill in the Skills section below that fits, by its name there, such as `crazyagent:{}`. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or plain `NAME` is `crazyagent:NAME` here.\n",
+                "- Skills: before each task, check the Skills section below and call the Skill tool for every skill there that applies, by its name there, such as `crazyagent:{}`. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or plain `NAME` is `crazyagent:NAME` here.\n",
                 clip(name, NAME_BYTES_MAX)
             ),
-            false => "- Skills: before each task, read the SKILL.md of every skill in the Skills section below that fits and follow it. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or `crazyagent:NAME` is the one listed as NAME there.\n".to_owned(),
+            false => "- Skills: before each task, check the Skills section below, then read the SKILL.md of every skill there that applies and follow it. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or `crazyagent:NAME` is the one listed as NAME there.\n".to_owned(),
         });
     }
     assert!(section.len() <= TOOL_USE_BYTES_MAX);
@@ -1412,7 +1416,7 @@ fn skills_index(folder: &Path, skills: &[EffectiveSkill], skill_tool: bool) -> S
         false => SKILL_FILE_USE,
     };
     let mut index = format!(
-        "\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. {using}\n\n"
+        "\n## Skills\n\nThe owner approved these skills for this project. Check this list before every task and use every skill here that applies to it. {using}\n\n"
     );
     let mut left = 0;
     for skill in skills {
