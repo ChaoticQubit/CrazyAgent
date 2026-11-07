@@ -894,6 +894,7 @@ fn land_covered(
     record.waiting = false;
     record.updated_ms = now_ms()?;
     store::save(db, record)?;
+    super::flow::release_agent_claims(db, record);
     set_engine_ref(&shared, &record.repository, &pending_ref(&record.id), None)?;
     store::set_base(db, &record.worktree, &record.head)?;
     assert!(!record.is_open());

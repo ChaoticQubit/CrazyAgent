@@ -6405,3 +6405,16 @@ fn discarding_a_sub_set_releases_its_agents_review_ready_claims() {
         "the rejected set's claim is released"
     );
 }
+
+/// OS-8: the claim release runs only once a change set closed; called on a set still open,
+/// it stops at its assertion, so no claim is freed while that set's edits wait for review.
+#[test]
+#[should_panic(expected = "!record.is_open()")]
+fn releasing_claims_for_an_open_set_trips_the_assertion() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &id).unwrap();
+    super::flow::release_agent_claims(&case.db, &record);
+}

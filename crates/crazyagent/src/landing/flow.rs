@@ -2069,6 +2069,29 @@ pub(super) fn discard(
     Ok(until)
 }
 
+/// Releases the claims a sub-agent's review-ready and complete work holds once one of its
+/// change sets closes, landed or discarded, so no claim outlives the edits it guarded
+/// (OS-8, DEC-117 Q7). A failure is logged by its plain code and never fails the close.
+/// Inputs: the store and the closed change set.
+pub(super) fn release_agent_claims(db: &Connection, record: &Record) {
+    assert!(!record.is_open());
+    if record.agent.kind != AgentKind::Sub {
+        return;
+    }
+    let Ok(agent) = record.agent.id.parse::<crate::coord::AgentId>() else {
+        return;
+    };
+    let released = i64::try_from(record.updated_ms)
+        .map_err(|_| failure("changes_unavailable"))
+        .and_then(|now| crate::coord::release_landed(db, agent, now));
+    if let Err(error) = released {
+        eprintln!(
+            "landing_claims_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
+}
+
 /// Discards one open change set holding no intent, as [`discard`] does once it checked the
 /// owner's reviewed head. The caller holds [`hold`] on its repository. Inputs: the store,
 /// the change set and the time now. Output: the time it stays restorable until.
@@ -2098,6 +2121,7 @@ pub(super) fn discard_held(
     record.conflicts.clear();
     record.updated_ms = now;
     store::save(db, record)?;
+    release_agent_claims(db, record);
     set_engine_ref(&shared, &record.repository, &pending_ref(&id), None)?;
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, &target)?;
