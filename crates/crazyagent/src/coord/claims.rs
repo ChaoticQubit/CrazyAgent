@@ -305,14 +305,16 @@ pub fn release_set(db: &Connection, set: &str, now: i64) -> Result<usize, Engine
 }
 
 /// Takes back the claims a change set's close released, once that set is restored, so
-/// they overlap newer claims again as any held claim does; a set with none to take back
-/// writes nothing. Takes the database and the set's id. Returns how many claims hold again.
+/// they overlap newer claims again as any held claim does; a set with no released hold to
+/// take back or unmark writes nothing. Takes the database and the set's id. Returns how many
+/// claims hold again.
 pub fn restore_set(db: &Connection, set: &str) -> Result<usize, EngineError> {
     assert!(!set.is_empty());
     let due: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM coord_held h JOIN coord_claims c ON c.id=h.claim
-             WHERE h.change_set=?1 AND h.released IS NOT NULL AND h.released=c.released)",
+             WHERE h.change_set=?1 AND h.released IS NOT NULL
+             AND (c.released IS NULL OR h.released=c.released))",
             [set],
             |row| row.get(0),
         )
