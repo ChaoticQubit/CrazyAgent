@@ -4142,6 +4142,7 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     assert!(host.alive().unwrap().is_empty());
 }
 
+#[cfg(target_os = "macos")]
 const RECORDING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
@@ -4169,6 +4170,7 @@ done
 
 const INTERRUPTED: &str = "Ship the release notes";
 
+#[cfg(target_os = "macos")]
 fn reopen(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
     let access = fixture.access.clone();
     TeamRuntime::open(
@@ -4185,6 +4187,7 @@ fn reopen(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
 
 /// Starts a recording live master, lets the owner's first turn end and stops the engine
 /// with the master's pane left running, as a closing engine does. Returns the master's id.
+#[cfg(target_os = "macos")]
 fn left_live_master(fixture: &Fixture, host: &Arc<dyn Host>) -> i64 {
     let mut team = live_runtime(fixture, host, RECORDING_CODEX);
     super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
@@ -4194,9 +4197,9 @@ fn left_live_master(fixture: &Fixture, host: &Arc<dyn Host>) -> i64 {
 }
 
 /// Waits for the live master to start idle with nothing typed, since the engine types
-/// nothing before the owner's first line, then types the owner's first line into its pane
-/// and waits for that turn to end, as the owner opens a live master. Takes the fixture, the
-/// running runtime and its host. Returns the master's id.
+/// nothing before the owner's first line, then types that line into its pane as the owner,
+/// whose key the owner typing signal records, and waits for the turn to end, as the owner
+/// opens a live master. Takes the fixture, the running runtime and its host. Returns the id.
 #[cfg(target_os = "macos")]
 fn owner_first_turn(fixture: &Fixture, team: &mut TeamRuntime, host: &Arc<dyn Host>) -> i64 {
     fixture.until(team, "the live master starts idle", |f| {
@@ -4206,6 +4209,13 @@ fn owner_first_turn(fixture: &Fixture, team: &mut TeamRuntime, host: &Arc<dyn Ho
     assert_eq!(live_turns(&fixture.connection), (0, false), "nothing typed");
     let master = masters(&fixture.connection)[0];
     assert_eq!(live_agent(&fixture.connection), Some(master));
+    let typed = now_ms();
+    super::super::master::owner_typed(&fixture.connection, master, b"hello\r", typed).unwrap();
+    assert_eq!(
+        super::super::master::owner_key_ms(&fixture.connection, None, master).unwrap(),
+        Some(typed),
+        "the owner's first line is an owner key"
+    );
     host.input(&AgentId::team(master).unwrap(), b"hello\r")
         .unwrap();
     fixture.until(team, "the owner's first turn ends", |f| {
@@ -4241,6 +4251,7 @@ fn interrupted_message(fixture: &Fixture, agent: i64) -> i64 {
 
 /// Counts the typed lines holding `text` in every Codex rollout under the fixture's folder,
 /// skipping folders the running agents remove while it reads.
+#[cfg(target_os = "macos")]
 fn typed_count(fixture: &Fixture, text: &str) -> usize {
     let mut folders = vec![fixture.base.clone()];
     let mut count = 0;
@@ -4967,6 +4978,7 @@ fn a_team_master_s_questions_are_logged_as_its_own_and_a_refused_one_is_noted() 
     );
 }
 
+#[cfg(target_os = "macos")]
 const ASKING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
