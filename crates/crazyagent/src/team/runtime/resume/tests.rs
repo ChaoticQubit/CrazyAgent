@@ -857,6 +857,53 @@ done
         host.close(&[]).unwrap();
     }
 
+    /// A resume that gives up lets go of its task and settles that task's delivery, as the
+    /// runtime's failed resume does; while another writer holds the store past its wait, that
+    /// settle answers the plain `recovery_unavailable`, never SQLite's own text, and leaves the
+    /// delivery open until the store is free.
+    #[test]
+    fn a_released_task_the_store_cannot_settle_answers_recovery_unavailable() {
+        let fixture = Team::new();
+        let host = fixture.host();
+        let mut team = fixture.runtime(&host);
+        let (task, sub) = fixture.hung(&mut team);
+        team.shutdown().unwrap();
+        drop(team);
+        host.kill(&AgentId::team(sub).unwrap()).unwrap();
+        let key = format!("team-task/{task}");
+        let open = |connection: &Connection| {
+            crate::ledger::pending(connection, crate::ledger::ActionKind::Dispatch)
+                .unwrap()
+                .into_iter()
+                .any(|action| action.key == key)
+        };
+        assert!(open(&fixture.connection), "the task's delivery is open");
+
+        recovery::release(&fixture.connection, recovery::HeldItem::Task(task)).unwrap();
+        let writer = Connection::open(fixture.base.join("engine.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert_eq!(
+            crate::team::runtime::delivery::settle_released(
+                &fixture.connection,
+                crate::team::runtime::Busy::Task(task),
+            ),
+            Err(EngineError("recovery_unavailable".into())),
+            "the store is held by another writer"
+        );
+        assert!(open(&fixture.connection), "the delivery stays open");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        assert_eq!(
+            crate::team::runtime::delivery::settle_released(
+                &fixture.connection,
+                crate::team::runtime::Busy::Task(task),
+            ),
+            Ok(())
+        );
+        host.close(&[]).unwrap();
+    }
+
     /// A task its sub-agent's record shows it had when the engine stopped is left to the
     /// agent's resume by the next start, never failed as already handed over: its delivery
     /// stays open while the run holds it, the agent resumes its own session with the task
