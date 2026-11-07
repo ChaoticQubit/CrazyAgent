@@ -360,10 +360,7 @@ fn rows_count_and_rank_by_the_headline_and_never_by_cache_reads() {
     for _ in 0..3 {
         append(&record, &cached_line("k1", 100, 70_000, 182_114, 150_000));
     }
-    append(
-        &record,
-        &cached_line("k2", 94, 69_484, 17_482_981, 138_322),
-    );
+    append(&record, &cached_line("k2", 94, 69_484, 17_482_981, 138_322));
     let at = MIDNIGHT + HOUR;
     scan_home(
         &db,
