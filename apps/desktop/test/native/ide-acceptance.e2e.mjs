@@ -545,6 +545,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("settings");
         assert.equal(settings.toggle, 0, "the Settings search has no AI toggle");
         assert.deepEqual(settings.toc.filter((entry) => /^chat\b/i.test(entry)), [], "the Settings table of contents has no Chat section");
+        await keys.key("Escape");
+        await ide.until("the modal Settings editor closed", `document.querySelector(".modal-editor-part, .monaco-modal-editor-block") === null`);
         await ide.run("Terminal: Create New Terminal");
         await pause(SETTLE_MS * 2);
         await me.capture("terminal");
