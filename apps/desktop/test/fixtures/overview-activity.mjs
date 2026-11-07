@@ -59,6 +59,7 @@ function state() {
     undos: [...undos],
     buttons: all(".pj-activity-row button").map((button) => ({ text: button.textContent, row: rowText(button.closest(".pj-activity-row")), disabled: button.disabled })),
     note: section?.querySelector(".pj-note[role=status]")?.textContent ?? null,
+    dialog: document.querySelector("dialog[open]")?.innerText ?? null,
   };
 }
 

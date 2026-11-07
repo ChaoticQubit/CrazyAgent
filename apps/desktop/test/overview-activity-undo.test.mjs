@@ -35,19 +35,38 @@ test("a master's merge into main has Undo, and an undone merge, an Accept or a l
   assert.deepEqual(seen.timeline.buttons.filter((button) => button.text === "Undo"), login, "the Timeline offers the same Undo");
 });
 
+test("Undo asks first, naming the branch, and Keep it changes nothing", { timeout: 60_000 }, async () => {
+  const seen = await steps(`
+    const clicked = await Fixture.click(".pj-activity-row button", "Undo");
+    if (clicked.missed) return { first, clicked };
+    const kept = await Fixture.click("dialog[open] button", "Keep it");
+    return { first, clicked, kept };
+  `);
+  assert.equal(seen.clicked.missed, null, "the merge row has an Undo button");
+  assert.match(seen.clicked.dialog ?? "", /Undo this merge on main\?/, "the confirm names the branch");
+  assert.match(seen.clicked.dialog ?? "", /one new commit on main that reverts this merge\. Later commits stay\./);
+  assert.deepEqual(seen.clicked.undos, [], "nothing is asked of the engine before the owner confirms");
+  assert.equal(seen.kept.missed, null, "the confirm has Keep it");
+  assert.equal(seen.kept.dialog, null, "Keep it closes the confirm");
+  assert.deepEqual(seen.kept.undos, [], "Keep it undoes nothing");
+});
+
 test("Undo reverts the merge through the engine, says so and reads the activity again", { timeout: 60_000 }, async () => {
   const undone = [item(5, "undone", "Undid the changes of Master on main: Fix the login", LOGIN), ...ITEMS.slice(0, 3), { ...ITEMS[3], undone: true }];
   const seen = await steps(`
-    const clicked = await Fixture.click(".pj-activity-row button", "Undo");
+    const asked = await Fixture.click(".pj-activity-row button", "Undo");
+    if (asked.missed) return { first, clicked: asked };
+    const clicked = await Fixture.click("dialog[open] button", "Undo merge");
     if (clicked.missed) return { first, clicked };
     const done = await Fixture.answerUndo({ kind: "ok", value: { kind: "landed", commit: "${"f".repeat(40)}", branch: "main" } });
     const again = await Fixture.reply(${JSON.stringify(read(undone))});
     return { first, clicked, done, again };
   `);
-  assert.equal(seen.clicked.missed, null, "the merge row has an Undo button");
+  assert.equal(seen.clicked.missed, null, "the merge row has an Undo button and the confirm has Undo merge");
   assert.deepEqual(seen.clicked.undos, [LOGIN], "Undo asks the engine to undo that merge's change set");
   assert.deepEqual(seen.clicked.buttons.filter((button) => button.text === "Undo").map((button) => button.disabled), [true], "Undo waits for the engine");
-  assert.equal(seen.done.note, "Undid the merge. main is back to how it was before it.");
+  assert.equal(seen.done.note, "Undid the merge with one new commit on main. Later commits stay.");
+  assert.equal(seen.done.dialog, null, "the confirm closes once the engine answers");
   assert.equal(seen.done.waiting, 1, "the activity is read again at once");
   assert.deepEqual(seen.again.buttons.filter((button) => button.text === "Undo"), [], "an undone merge has no Undo");
   assert.match(seen.again.text, /Fix the login Undone/);
@@ -55,14 +74,16 @@ test("Undo reverts the merge through the engine, says so and reads the activity 
 
 test("an Undo that conflicts names the files and changes nothing, and a refusal reads as a sentence", { timeout: 60_000 }, async () => {
   const seen = await steps(`
-    const clicked = await Fixture.click(".pj-activity-row button", "Undo");
+    await Fixture.click(".pj-activity-row button", "Undo");
+    const clicked = await Fixture.click("dialog[open] button", "Undo merge");
     if (clicked.missed) return { first, clicked };
     const conflict = await Fixture.answerUndo({ kind: "ok", value: { kind: "conflict", files: ["README.md", "src/login.rs"] } });
     await Fixture.click(".pj-activity-row button", "Undo");
+    await Fixture.click("dialog[open] button", "Undo merge");
     const refused = await Fixture.answerUndo({ kind: "error", code: "changes_undo_unavailable", message: "x" });
     return { first, clicked, conflict, refused };
   `);
-  assert.equal(seen.clicked.missed, null, "the merge row has an Undo button");
+  assert.equal(seen.clicked.missed, null, "the merge row has an Undo button and the confirm has Undo merge");
   assert.equal(seen.conflict.note, "Couldn't undo the merge: README.md, src/login.rs changed on its branch since, so nothing changed.");
   assert.equal(seen.conflict.waiting, 0, "nothing changed, so nothing is read again");
   assert.deepEqual(seen.conflict.buttons.filter((button) => button.text === "Undo").map((button) => button.disabled), [false], "Undo can be tried again");
