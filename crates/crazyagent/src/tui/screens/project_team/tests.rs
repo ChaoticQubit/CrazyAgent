@@ -151,6 +151,7 @@ fn team() -> TeamStatus {
         budget_used: None,
         budget_reached: false,
         spread_accounts: false,
+        terminals_per_window: crate::team::TerminalsPerWindow::Six,
         show_finished: false,
         message_settings: crate::team::agent_messages::MessageSettings::default(),
         agent_branches: crate::team::BranchMode::Named,

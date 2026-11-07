@@ -5905,3 +5905,79 @@ fn only_a_tools_off_codex_agent_on_a_keyless_endpoint_says_it_cannot_receive_mes
         );
     }
 }
+
+/// Owner 2026-11-07 (OS-4): Terminals per window is Six for a project with no choice saved,
+/// the team status and the reader keep each saved choice of 4, 6 and 9, the choice is per
+/// project, and any other count is refused before it reaches the engine.
+#[test]
+fn terminals_per_window_is_six_until_the_owner_picks_four_or_nine_and_reads_each_choice() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-wall",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-wall", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert_eq!(
+        status(&connection, &setup).unwrap().terminals_per_window,
+        TerminalsPerWindow::Six,
+        "Six is the default"
+    );
+    for choice in [
+        TerminalsPerWindow::Four,
+        TerminalsPerWindow::Nine,
+        TerminalsPerWindow::Six,
+        TerminalsPerWindow::Four,
+    ] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::TerminalsPerWindow {
+                    project_id: project.clone(),
+                    per_window: choice,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(terminals_per_window(&connection, &project).unwrap(), choice);
+        assert_eq!(
+            status(&connection, &setup).unwrap().terminals_per_window,
+            choice
+        );
+    }
+    assert_eq!(
+        terminals_per_window(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        TerminalsPerWindow::Six,
+        "the choice is per project"
+    );
+    assert_eq!(
+        [4u8, 6, 9].map(|count| serde_json::to_string(
+            &TerminalsPerWindow::try_from(count).unwrap()
+        )
+        .unwrap()),
+        ["4", "6", "9"]
+    );
+    for count in ["0", "5", "8", "10", "\"six\""] {
+        assert!(
+            serde_json::from_str::<TerminalsPerWindow>(count).is_err(),
+            "{count} is not a choice"
+        );
+    }
+}
