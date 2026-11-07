@@ -45,6 +45,14 @@ fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
 impl Case {
     /// Builds the case. Input: whether the team still has the agent that made the set.
     fn new(on_team: bool) -> Self {
+        Self::build(on_team, false).0
+    }
+
+    /// Builds the case with the owner's edit made either after the agent's turn, then
+    /// accepted into a conflict, or before it, as main moves while an agent works.
+    /// Inputs: whether the team still has the agent and whether the owner edits first.
+    /// Output: the case and what recording the agent's turn end did.
+    fn build(on_team: bool, owner_first: bool) -> (Self, Landed) {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let (repo, home, engine) = (root.join("repo"), root.join("home"), root.join("engine"));
@@ -104,24 +112,33 @@ impl Case {
             worktree: worktree.clone(),
             git_dir,
         };
-        std::fs::write(worktree.join("README"), "uno\ntwo\nthree\n").unwrap();
         let end = TurnEnd {
             outcome: TurnOutcome::Succeeded,
             turn: "turn-1".into(),
             prompt_line: "Say one in Italian".into(),
         };
-        let id = landing::record_turn_end(&db, &workspace, &end)
-            .unwrap()
-            .unwrap();
-        std::fs::write(repo.join("README"), "eins\ntwo\nthree\n").unwrap();
-        owner(&["commit", "-q", "-am", "Say one in German"]);
-        let head = view(&db, &id).unwrap().unwrap().head;
-        let landed = landing::accept(&db, &home, &id, &head, None).unwrap();
-        assert!(
-            matches!(landed, AcceptOutcome::Conflict { .. }),
-            "{landed:?}"
-        );
-        Self {
+        let german = || {
+            std::fs::write(repo.join("README"), "eins\ntwo\nthree\n").unwrap();
+            owner(&["commit", "-q", "-am", "Say one in German"]);
+        };
+        if owner_first {
+            german();
+        }
+        std::fs::write(worktree.join("README"), "uno\ntwo\nthree\n").unwrap();
+        let recorded = record(&db, &workspace, &end).unwrap();
+        let (Landed::Added(id) | Landed::Waiting(id)) = recorded.clone() else {
+            panic!("the agent's turn kept no change set: {recorded:?}");
+        };
+        if !owner_first {
+            german();
+            let head = view(&db, &id).unwrap().unwrap().head;
+            let landed = landing::accept(&db, &home, &id, &head, None).unwrap();
+            assert!(
+                matches!(landed, AcceptOutcome::Conflict { .. }),
+                "{landed:?}"
+            );
+        }
+        let case = Self {
             _tmp: tmp,
             repo,
             worktree,
@@ -129,7 +146,8 @@ impl Case {
             project,
             id,
             workspace,
-        }
+        };
+        (case, recorded)
     }
 
     fn set(&self) -> ChangeSetView {
@@ -187,6 +205,26 @@ fn an_update_for_a_team_agent_merges_and_hands_it_the_resolve_work() {
     assert!(update(&case.db, &case.id).unwrap());
     let set = case.set();
     assert_eq!((set.state, set.waiting), (ChangeState::Updating, false));
+    assert_eq!(case.agent_head(), set.head);
+    assert!(case.readme().contains("<<<<<<<"));
+    let tasks = case.resolve_tasks();
+    assert_eq!(tasks.len(), 1, "{tasks:?}");
+    assert!(tasks[0].contains("- README\n"), "{}", tasks[0]);
+}
+
+#[test]
+fn a_team_agent_whose_set_conflicts_with_main_at_its_turn_end_gets_the_fix_task_at_once() {
+    let (case, recorded) = Case::build(true, true);
+    assert_eq!(
+        recorded,
+        Landed::Waiting(case.id.clone()),
+        "the owner is not told a set is waiting while it went back to its agent"
+    );
+    let set = case.set();
+    assert_eq!(
+        (set.state, set.waiting, set.conflicts.clone()),
+        (ChangeState::Updating, false, vec!["README".to_owned()])
+    );
     assert_eq!(case.agent_head(), set.head);
     assert!(case.readme().contains("<<<<<<<"));
     let tasks = case.resolve_tasks();
