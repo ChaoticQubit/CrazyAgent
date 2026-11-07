@@ -90,15 +90,30 @@ export function GraphCard({ placed, graph, harness, open, tipId, items, onOpen, 
   </div>;
 }
 
-function LinkBadges({ link }: { link: Link }) {
-  const label = badgeLabel(link);
+/** The row on a link above the card it leads to: the pair's label, marked live while an action
+ * happens, then the link's badges, with the whole row's words for hover and screen readers.
+ * Input: the link. Output: the row, or nothing when it has nothing to show. */
+export function LinkBadges({ link }: { link: Link }) {
+  const shown = displayText(link.label);
+  const label = [shown, badgeLabel(link)].filter(Boolean).join(", ");
   if (!label) return null;
   return <span className="tg-badges" role="img" aria-label={label} title={label}
     style={{ left: link.badge.x - BADGE_WIDTH / 2, top: link.badge.y - BADGE_HEIGHT / 2, width: BADGE_WIDTH, height: BADGE_HEIGHT }}>
+    {shown && <span className={`tg-edge-label${link.live ? " live" : ""}`}><span className="tg-clip">{shown}</span></span>}
     {link.tasks > 0 && <span className="tg-badge"><Icon name="list-checks" size={12} />{link.tasks}</span>}
     {link.questions > 0 && <span className="tg-badge question"><Icon name="message-square" size={12} />{link.questions}</span>}
     {link.unread > 0 && <span className="tg-badge message"><Icon name="send" size={12} />{link.unread}{link.receipt && !link.hookless ? ` ${receiptTicks(link.receipt).ticks}` : ""}</span>}
   </span>;
+}
+
+/** The key under the graph: the label each relation's line shows, and the marked label of a
+ * live action. Output: the legend. */
+export function EdgeLegend() {
+  return <p className="tg-legend">
+    <span>Edges:</span>
+    {["leads", "delegated to", "teammate of"].map((word) => <span key={word} className="tg-edge-label">{word}</span>)}
+    <span className="tg-edge-label live">live action, while it happens</span>
+  </p>;
 }
 
 /** What the owner is doing from a card's menu: reading its agent's skill counts, writing a
@@ -409,7 +424,7 @@ export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
           <div className="tg-canvas" style={{ width: layout.width, height: layout.height, transform: `translate(${shown.x}px, ${shown.y}px) scale(${shown.zoom})`,
             visibility: port.width > 0 ? "visible" : "hidden", ["--tg-unzoom" as string]: String(1 / shown.zoom) }}>
             <svg className="tg-lines" width={layout.width} height={layout.height} aria-hidden="true">
-              {layout.links.map((link) => <path key={`link:${link.from}:${link.to}`} className="tg-link" d={link.path} />)}
+              {layout.links.map((link) => <path key={`link:${link.from}:${link.to}`} className={`tg-link${link.live ? " live" : ""}`} d={link.path} />)}
               {layout.messages.map((item) => <path key={`message:${item.from}:${item.to}`} className="tg-message" d={item.path} />)}
               {layout.overlaps.map((item) => <path key={`overlap:${item.from}:${item.to}`} className={`tg-overlap${item.edge.stale ? " stale" : ""}`} d={item.path} />)}
             </svg>
@@ -422,6 +437,7 @@ export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
             {cardTip(tipCard.node, team, harness).map((line, index) => <p key={index} className={index === 0 ? "tg-tip-title" : undefined}>{displayText(line)}</p>)}
           </div>}
         </div>
+        <EdgeLegend />
       </div>
       {openNode && side(openNode)}
     </div>

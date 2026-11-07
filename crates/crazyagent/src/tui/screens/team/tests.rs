@@ -1,5 +1,6 @@
 use crate::engine::owner::AgentInstructions;
 use crate::protocol::{CredentialRef, ProjectId};
+use crate::team::graph::{LiveAction, Relation, RelationEdge};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
 use crate::terminal::{AgentId, TerminalFrame};
 use crate::tui::client::OwnerEvent;
@@ -255,6 +256,146 @@ fn the_tree_draws_who_leads_whom_and_the_tasks_from_a_team_graph() {
     let drawn: Vec<String> = rows[2..22].iter().map(|row| chars(row, 2, 32)).collect();
     assert_eq!(drawn, expected);
     assert!(rows[0].contains("Tidepool  /  Team"), "{}", rows[0]);
+}
+
+fn relation(from: &str, to: &str, relation: Relation, live: Option<LiveAction>) -> RelationEdge {
+    RelationEdge {
+        from: from.into(),
+        to: to.into(),
+        relation,
+        live,
+    }
+}
+
+#[test]
+fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
+    let mut team = graph();
+    team.relations = vec![
+        relation(
+            "master",
+            "agent-2",
+            Relation::Leads,
+            Some(LiveAction::HandingOff {
+                task: "Fix the login bug\nThe token expires early.".into(),
+            }),
+        ),
+        relation("agent-2", "agent-3", Relation::TeammateOf, None),
+        relation("master", "agent-5", Relation::DelegatedTo, None),
+    ];
+    let mut shell = fresh(80, 24);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    let rows = render(&mut shell);
+    let mut expected = Vec::new();
+    for line in [
+        "> ▸ Master  Working",
+        "  │  ChatGPT Pro - main",
+        "  ├─ ▸ claude-1  • handing …",
+        "  │  │  Claude Max - work",
+        "  │  └─ ◌ claude-2  Waiting…",
+        "  └─ ▸ codex-1  Starting  d…",
+        "     ChatGPT Plus",
+        "",
+        "  Tasks",
+        "  ▸ claude-1  Fix the login…",
+        "  ✓ codex-1  Write tests",
+        "",
+        "",
+        "",
+    ] {
+        expected.push(format!("│{line:<28}│"));
+    }
+    let drawn: Vec<String> = rows[3..17].iter().map(|row| chars(row, 2, 32)).collect();
+    assert_eq!(
+        drawn, expected,
+        "each agent's line names its relation on that same line, so 80x24 shows as many agents as with no labels: the live action right after the name, cut to the width left, and the standing word after the status word"
+    );
+    let mut bare = graph();
+    bare.relations.clear();
+    let mut plain_shell = fresh(80, 24);
+    plain_shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(bare),
+    });
+    let drawn_lines = |rows: &[String]| {
+        rows[3..22]
+            .iter()
+            .filter(|row| !chars(row, 3, 31).trim().is_empty())
+            .count()
+    };
+    assert_eq!(
+        drawn_lines(&rows),
+        drawn_lines(&render(&mut plain_shell)),
+        "the labels take no row of their own"
+    );
+    let label = |relation, live| {
+        super::edge_label(&RelationEdge {
+            from: "a".into(),
+            to: "b".into(),
+            relation,
+            live,
+        })
+    };
+    assert_eq!(label(Relation::Leads, None), "leads");
+    assert_eq!(label(Relation::DelegatedTo, None), "delegated to");
+    assert_eq!(label(Relation::TeammateOf, None), "teammate of");
+    assert_eq!(
+        label(
+            Relation::DelegatedTo,
+            Some(LiveAction::HandingOff {
+                task: "\n  Fix\tthe   login bug\nThe token expires early.".into()
+            })
+        ),
+        "handing off: Fix the login bug"
+    );
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::HandingOff {
+                task: " \n\t ".into()
+            })
+        ),
+        "handing off: Untitled task"
+    );
+    assert_eq!(
+        label(Relation::Leads, Some(LiveAction::Messaging)),
+        "messaging"
+    );
+    assert_eq!(
+        label(
+            Relation::DelegatedTo,
+            Some(LiveAction::WaitingOn { owner: false })
+        ),
+        "waiting on"
+    );
+    assert_eq!(
+        label(
+            Relation::DelegatedTo,
+            Some(LiveAction::WaitingOn { owner: true })
+        ),
+        "waiting on: your answer"
+    );
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::Reviewing {
+                agent: "Wren (@checkout)".into()
+            })
+        ),
+        "reviewing: Wren (@checkout)'s change set"
+    );
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::Reviewing {
+                agent: "Wren\u{1b}[31m\nnow".into()
+            })
+        ),
+        "reviewing: Wren[31m now's change set",
+        "a reviewed name keeps no control character"
+    );
 }
 
 #[test]

@@ -109,6 +109,10 @@
   stroke-width: 1.5;
 }
 
+.tg-link.live {
+  stroke: var(--accent);
+}
+
 .tg-message {
   fill: none;
   stroke: var(--accent);
@@ -332,6 +336,69 @@
 
 .tg-badge.message {
   border-style: dashed;
+}
+
+.tg-edge-label {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-3);
+  font: 500 11px/14px var(--mono);
+  white-space: nowrap;
+  box-shadow: var(--elev-1);
+}
+
+.tg-badges .tg-edge-label {
+  pointer-events: auto;
+}
+
+.tg-edge-label.live {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.tg-edge-label.live::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tg-edge-label.live::before {
+    animation: tg-pulse 1.2s ease-in-out infinite;
+  }
+}
+
+@keyframes tg-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.tg-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--text-3);
+  font: 11px/16px var(--mono);
+}
+
+.tg-legend .tg-edge-label {
+  box-shadow: none;
 }
 
 .tg-tip {

@@ -63,6 +63,26 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.nodeLine(node("team-8", "sub", { label: "Grace" })), "Grace \u00b7 codex");
 });
 
+test("each graph line names its relation, and the live action while it happens", () => {
+  const pair = (relation, live = null) => ({ from: "m", to: "team-1", relation, live });
+  assert.equal(graph.edgeLabel(pair("leads")), "leads");
+  assert.equal(graph.edgeLabel(pair("delegated_to")), "delegated to");
+  assert.equal(graph.edgeLabel(pair("teammate_of")), "teammate of");
+  assert.equal(graph.edgeLabel(pair("delegated_to", { action: "handing_off", task: "\n  Fix\tthe   login bug\nThe token expires early." })), "handing off: Fix the login bug",
+    "a handoff names the first line of its task, as the TUI does");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "handing_off", task: " \n\t " })), "handing off: Untitled task");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "messaging" })), "messaging");
+  assert.equal(graph.edgeLabel(pair("delegated_to", { action: "waiting_on", owner: false })), "waiting on");
+  assert.equal(graph.edgeLabel(pair("delegated_to", { action: "waiting_on", owner: true })), "waiting on: your answer");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "reviewing", agent: "Wren (@checkout)" })), "reviewing: Wren (@checkout)'s change set",
+    "a review names the agent whose change set it reviews, as its card names it");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "reviewing", agent: " Wren\n\t(@checkout) " })), "reviewing: Wren (@checkout)'s change set");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "reviewing", agent: " \n " })), "reviewing: change set", "a blank name is not named");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "reviewing", change_set: 16 })), "reviewing: change set", "a number from an older engine is never shown");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "someday" })), "leads", "a live action from a newer engine falls back to the relation");
+  assert.equal(graph.edgeLabel(pair("someday")), "", "a relation from a newer engine draws no label");
+});
+
 test("the graph reads again quickly only while work is live", () => {
   assert.equal(graph.graphLive(team), true);
   const quiet = { ...team, nodes: team.nodes.map((item) => ({ ...item, status: item.status && "idle" })), edges: [edge(3, "m", "team-1", "done")] };

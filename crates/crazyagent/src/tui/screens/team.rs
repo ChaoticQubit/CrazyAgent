@@ -3,6 +3,7 @@ use crate::config::plain_problem;
 use crate::engine::owner::{AgentInstructions, OwnerResult};
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
+use crate::team::graph::{LiveAction, Relation, RelationEdge};
 use crate::team::{
     AgentRole, AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamAction,
     TeamGraph,
@@ -1752,9 +1753,10 @@ fn stem(glyphs: &Glyphs, last: bool) -> String {
 }
 
 /// Adds the rows of agents that share one lead, each followed by its detail row and the
-/// agents it leads in turn. A node already drawn is skipped, so a cycle in the parent
-/// links cannot loop. Inputs: the graph, glyphs, the agents, the indent their branches
-/// hang from, the row width, the drawn nodes and the rows. Output: none; rows are appended.
+/// agents it leads in turn.
+/// A node already drawn is skipped, so a cycle in the parent links cannot loop. Inputs: the
+/// graph, glyphs, the agents, the indent their branches hang from, the row width, the drawn
+/// nodes and the rows. Output: none; rows are appended.
 fn lead_rows(
     graph: &TeamGraph,
     glyphs: &Glyphs,
@@ -1794,6 +1796,20 @@ fn lead_rows(
     }
 }
 
+/// The engine's relation edge for the line from an agent's lead down to it: the edge from
+/// the agent's parent, when that parent is in the graph, as the tree then hangs the agent
+/// under it. Inputs: the graph and the agent. Output: the edge's index, or None.
+fn relation_of(graph: &TeamGraph, node: &GraphNode) -> Option<usize> {
+    let parent = node.parent.as_deref()?;
+    if !graph.nodes.iter().any(|other| other.id == parent) {
+        return None;
+    }
+    graph
+        .relations
+        .iter()
+        .position(|edge| edge.from == parent && edge.to == node.id)
+}
+
 /// Adds the rows under an agent: its account and branch on one row, then, for an agent
 /// whose launch fires no hooks, that its receipts are unavailable, then the engine's note
 /// when the Delivery setting leaves it no way to get messages, each wrapped to the width
@@ -1828,17 +1844,28 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
     }
 }
 
-/// One tree row's text after its prefix. A master or agent row leads with its
-/// status glyph, then its label and status word; a task row leads with its
-/// status glyph, then the agent it went to and its title. The row is cut from
-/// the right with an ellipsis, so the glyph always shows. Inputs: the row, the
-/// graph and the context. Output: the line.
+/// One tree row's text after its prefix: a master or agent row's status glyph and label, the
+/// live action on the line from its lead, its status word and that line's standing relation;
+/// a task row's status glyph, the agent it went to and its title. Cut from the right with an
+/// ellipsis, so the glyph always shows. Inputs: the row, the graph and the context. Output:
+/// the line.
 fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
     let theme = &ctx.theme;
     let glyphs = ctx.glyphs;
     match &row.body {
         Body::Master(node) | Body::Agent(node) => {
             let node = &graph.nodes[*node];
+            let edge = relation_of(graph, node).map(|pair| &graph.relations[pair]);
+            let live = edge.filter(|edge| edge.live.is_some()).map(|edge| {
+                Span::styled(
+                    format!("  {} {}", glyphs.dot, edge_label(edge)),
+                    theme.style(Role::Accent),
+                )
+            });
+            let standing = edge
+                .filter(|edge| edge.live.is_none())
+                .map(|edge| Span::styled(format!("  {}", edge_label(edge)), theme.muted));
+            let mut spans = Vec::new();
             match node.status {
                 Some(status) => {
                     let kind = agent_status(status);
@@ -1846,20 +1873,23 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
                         .status_label
                         .clone()
                         .unwrap_or_else(|| status.label().to_owned());
-                    Line::from(vec![
-                        Span::styled(glyphs.status(kind), theme.style(kind.role())),
-                        Span::raw(format!(" {}", node.label)),
-                        Span::styled(format!("  {word}"), theme.style(kind.role())),
-                    ])
+                    spans.push(Span::styled(glyphs.status(kind), theme.style(kind.role())));
+                    spans.push(Span::raw(format!(" {}", node.label)));
+                    spans.extend(live);
+                    spans.push(Span::styled(format!("  {word}"), theme.style(kind.role())));
                 }
-                None => match &node.status_label {
-                    Some(word) => Line::from(vec![
-                        Span::raw(node.label.clone()),
-                        Span::styled(format!("  {word}"), theme.muted),
-                    ]),
-                    None => Line::raw(node.label.clone()),
-                },
+                None => {
+                    spans.push(Span::raw(node.label.clone()));
+                    spans.extend(live);
+                    spans.extend(
+                        node.status_label
+                            .as_ref()
+                            .map(|word| Span::styled(format!("  {word}"), theme.muted)),
+                    );
+                }
             }
+            spans.extend(standing);
+            Line::from(spans)
         }
         Body::Detail { account, branch } => {
             let account = account.as_ref().map(|account| {
@@ -1890,6 +1920,36 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
                 Span::styled(title(&edge.text), theme.muted),
             ])
         }
+    }
+}
+
+/// The words one tree line shows, as the desktop graph shows them: the live action while it
+/// happens, a handoff naming its task's title, a wait on the owner naming the owner's answer
+/// and a review the agent whose change set it reviews, else the relation. Input: the
+/// engine's relation edge. Output: the label.
+fn edge_label(edge: &RelationEdge) -> String {
+    match &edge.live {
+        Some(LiveAction::HandingOff { task }) => format!("handing off: {}", title(task)),
+        Some(LiveAction::Messaging) => "messaging".to_owned(),
+        Some(LiveAction::WaitingOn { owner: true }) => "waiting on: your answer".to_owned(),
+        Some(LiveAction::WaitingOn { owner: false }) => "waiting on".to_owned(),
+        Some(LiveAction::Reviewing { agent }) => {
+            let name = plain(agent)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if name.is_empty() {
+                "reviewing: change set".to_owned()
+            } else {
+                format!("reviewing: {name}'s change set")
+            }
+        }
+        None => match edge.relation {
+            Relation::Leads => "leads",
+            Relation::DelegatedTo => "delegated to",
+            Relation::TeammateOf => "teammate of",
+        }
+        .to_owned(),
     }
 }
 
