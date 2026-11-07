@@ -159,6 +159,14 @@ pub(in crate::tui) enum Speaker {
     Task,
 }
 
+/// How the remove ask removes the project: Remove from dashboard keeps every file, and
+/// Delete everything also moves its folders to the Trash (DEC-118).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoveChoice {
+    Dashboard,
+    Everything,
+}
+
 /// What the prompt's inline menu offers at the cursor: the commands matching a `/` word, or
 /// the tags completing an `@` word with how many characters that word has, `@` included.
 #[derive(Debug, PartialEq, Eq)]
@@ -657,6 +665,9 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_delete: Option<String>,
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
+    pub removal: Option<crate::team::cleanup::RemovalPreview>,
+    pub remove_choice: RemoveChoice,
+    pub remove_typed: String,
     pub confirm_plan: Option<SetupAction>,
     pub adding: Option<AddFile>,
     pub folders: Option<AddFile>,
@@ -736,6 +747,9 @@ impl ProjectScreen {
             confirm_delete: None,
             confirm_stop: None,
             confirm_remove: false,
+            removal: None,
+            remove_choice: RemoveChoice::Dashboard,
+            remove_typed: String::new(),
             confirm_plan: None,
             adding: None,
             folders: None,
@@ -1082,6 +1096,7 @@ impl ProjectScreen {
             | SetupView::Team(_)
             | SetupView::TeamMessages(_)
             | SetupView::CoordQuestions(_)
+            | SetupView::Removal(_)
             | SetupView::Library(_) => {}
         }
         self.assert_consistent();

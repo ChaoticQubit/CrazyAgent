@@ -10,6 +10,10 @@ use std::time::Duration;
 /// engine, its owner connection and a real tmux pane.
 mod message_timeline;
 
+/// One test per refusal and outcome of removing a project, Remove from dashboard or
+/// Delete everything, through a real engine and its owner connection (DEC-118).
+mod delete;
+
 /// How long these engine tests let the engine and its owner client wait for
 /// one answer. Every test engine in the lib test binary shares one
 /// process-wide git setup lock, so parallel New Projects queue behind each

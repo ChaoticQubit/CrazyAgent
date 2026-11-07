@@ -52,6 +52,12 @@ impl NativeOwner {
             SetupQuery::Jobs { project } => {
                 SetupView::Jobs(controller.research_jobs(project).await.map_err(problem)?)
             }
+            SetupQuery::Removal { project } => SetupView::Removal(Box::new(
+                controller
+                    .removal_preview(project)
+                    .await
+                    .map_err(problem)?,
+            )),
             SetupQuery::Context { project } => {
                 SetupView::Context(controller.project_context(project).await.map_err(problem)?)
             }
@@ -225,6 +231,9 @@ impl NativeOwner {
                     }
                     SetupAction::Remove { project_id } => {
                         controller.remove_project(project_id, generation).await
+                    }
+                    SetupAction::Delete { project_id, name } => {
+                        controller.delete_project(project_id, name, generation).await
                     }
                     SetupAction::CancelResearch { project_id, job } => {
                         controller

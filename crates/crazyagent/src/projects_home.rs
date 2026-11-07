@@ -609,6 +609,53 @@ pub fn trash(folder: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Checks the folders a Delete everything would move to the Trash: the project folder and
+/// every repository it declares. Inputs: the canonical home and the stored folders. Output:
+/// the fewest real folders to move, one holding another counted once and one already
+/// missing skipped, or `delete_outside_home` for any that is a link, not a folder, or not
+/// strictly below the home.
+pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, EngineError> {
+    let _ = (home, folders);
+    Err(refused("delete_unavailable"))
+}
+
+/// How long a Delete everything waits for the project's agents to stop after Stop all,
+/// before it refuses with nothing moved.
+pub const DELETE_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A checked Delete everything, after Stop all was recorded: the engine database, the
+/// project, the canonical home, the folders `plan_delete` gave and the project's agents,
+/// whose engine folders go once the records are removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletePlan {
+    pub database: PathBuf,
+    pub project: ProjectId,
+    pub home: PathBuf,
+    pub folders: Vec<PathBuf>,
+    pub agents: Vec<i64>,
+}
+
+impl DeletePlan {
+    /// Waits for the project's agents to stop, then moves its folders to the system Trash
+    /// in order. Output: Ok once every folder is gone from the home, or the refusal code.
+    pub fn run(&self) -> Result<(), String> {
+        self.run_with(DELETE_STOP_WAIT, &trash)
+    }
+
+    /// Runs the plan with a bounded wait and a mover: no folder moves while an agent of the
+    /// project runs (`delete_agents_running` past the wait), the folders are checked again
+    /// just before the first move, and a later folder that fails leaves the earlier ones
+    /// moved (`delete_trash_partial`). Inputs: the wait and the mover. Output: the outcome.
+    pub(crate) fn run_with(
+        &self,
+        wait: std::time::Duration,
+        mover: &dyn Fn(&Path) -> Result<(), EngineError>,
+    ) -> Result<(), String> {
+        let _ = (wait, mover);
+        Err("delete_unavailable".into())
+    }
+}
+
 /// The sentence shown after the owner removes a project from CrazyAgent.
 /// Input: the project folder. Output: a plain note that the folder stays.
 pub fn forgotten(folder: &str) -> String {

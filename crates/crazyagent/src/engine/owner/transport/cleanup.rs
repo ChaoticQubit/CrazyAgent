@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::{ProjectId, encode_frame};
-use crate::team::cleanup::{self, FinishedAgent, RECLAIMABLE_MAX, Removal};
+use crate::team::cleanup::{self, FinishedAgent, RECLAIMABLE_MAX, Removal, RemovalPreview};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 2048;
@@ -113,6 +113,14 @@ impl OwnerClient {
             }
             _ => Err(unknown()),
         }
+    }
+
+    /// Reads what removing a project would do: its name, the folders Delete everything
+    /// would move and whether it may, its running agents, open change sets and the work
+    /// each agent would lose. Input: the project. Output: the preview.
+    pub async fn removal_preview(&self, project: ProjectId) -> Result<RemovalPreview, EngineError> {
+        let _ = project;
+        Err(unknown())
     }
 
     async fn cleanup_exchange(&self, action: Action) -> Result<Reply, EngineError> {

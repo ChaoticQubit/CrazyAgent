@@ -677,6 +677,10 @@ pub enum SetupQuery {
     Jobs {
         project: ProjectId,
     },
+    /// Reads what removing the project would do before the owner picks how (DEC-118).
+    Removal {
+        project: ProjectId,
+    },
     Context {
         project: ProjectId,
     },
@@ -743,6 +747,7 @@ pub enum SetupView {
     Catalog(Box<ProjectCatalog>),
     Setup(Option<Box<StoredSetup>>),
     Jobs(Vec<ResearchJob>),
+    Removal(Box<crate::team::cleanup::RemovalPreview>),
     Context(ProjectContext),
     ReadPaths(ReadPaths),
     HiddenPaths(Vec<String>),
@@ -789,6 +794,10 @@ pub enum SetupAction {
     },
     Remove {
         project_id: ProjectId,
+    },
+    Delete {
+        project_id: ProjectId,
+        name: String,
     },
     CancelResearch {
         project_id: ProjectId,
@@ -892,6 +901,12 @@ impl SetupAction {
                 setup.validate()
             }
             Self::Remove { .. } | Self::PlanRoadmap { .. } => Ok(()),
+            Self::Delete { name, .. } => {
+                if name.len() > DELETE_NAME_BYTES_MAX {
+                    return Err(failure("project_spec_bounds"));
+                }
+                Ok(())
+            }
             Self::CancelResearch { job, .. } | Self::RetryResearch { job, .. } => {
                 if *job <= 0 {
                     return Err(failure("research_job_missing"));
@@ -1880,6 +1895,7 @@ pub(crate) fn execute(
             setup,
         ),
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
+        SetupAction::Delete { .. } => Ok(rejected("project_delete_requires_transport")),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
         SetupAction::SetReadPaths {
             project_id,
@@ -2387,6 +2403,9 @@ fn plan_roadmap(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
+/// The longest project name a Delete everything may carry as the owner typed it.
+const DELETE_NAME_BYTES_MAX: usize = 1024;
+
 const REMOVED_WITH_PROJECT: [&str; 37] = [
     "research_jobs",
     "onboarding",

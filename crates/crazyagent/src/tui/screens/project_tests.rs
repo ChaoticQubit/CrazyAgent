@@ -1,7 +1,7 @@
 use super::new_project_view::{Look, Row};
 use super::project::{
-    JobLog, MasterStatus, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, Tab, Transcript,
-    memory_source, plain_problem, research_kind,
+    JobLog, MasterStatus, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, RemoveChoice, Tab,
+    Transcript, memory_source, plain_problem, research_kind,
 };
 use super::project_markdown::line_width;
 use super::project_view::{activity, job_status, project_screen};
@@ -156,6 +156,9 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
             }
             .map_err(problem)?,
         )?,
+        SetupQuery::Removal { project } => SetupView::Removal(Box::new(
+            controller.removal_preview(project).await.map_err(problem)?,
+        )),
         SetupQuery::Catalog { .. } => panic!("the project screen never reads the catalog"),
         SetupQuery::Team { .. }
         | SetupQuery::TeamChange { .. }
@@ -2033,6 +2036,102 @@ fn a_stale_general_form_names_each_field_changed_since_the_owner_last_saw_it() {
             "Changed elsewhere: tech stack. Enter saves your edit over it; Esc keeps the saved one."
         ),
         "fields already named are compared from the setup the owner was last shown"
+    );
+}
+
+/// What the remove ask shows: the engine's preview of a project whose folders are all inside
+/// the projects home, or only its dashboard choice when one is outside.
+fn removal(can_delete: bool) -> crate::team::cleanup::RemovalPreview {
+    crate::team::cleanup::RemovalPreview {
+        name: "Gone app".into(),
+        folders: vec!["/Users/owner/CrazyAgent/gone-app".into()],
+        can_delete,
+        running: vec!["Builder 2".into()],
+        open_change_sets: 1,
+        losses: vec![crate::team::cleanup::AgentLoss {
+            id: 3,
+            label: "Tester 3".into(),
+            code: "cleanup_worktree_dirty".into(),
+        }],
+    }
+}
+
+/// The remove ask reads what removing would do and preselects Remove from dashboard (keep
+/// files); Delete everything shows only when every folder is inside the projects home, lists
+/// what would be lost, and sends only once the project's exact name is typed (DEC-118).
+#[test]
+fn remove_preselects_the_dashboard_choice_and_deletes_only_after_the_exact_name() {
+    let project = ProjectId::new("gone").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Gone app".into(), None);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('x')));
+    assert_eq!(screen.remove_choice, RemoveChoice::Dashboard);
+    let read = screen.next_query(30);
+    assert_eq!(
+        read,
+        Some(SetupQuery::Removal {
+            project: project.clone()
+        }),
+        "the ask reads what removing would do first"
+    );
+    screen.apply(
+        read.as_ref().unwrap(),
+        Ok(SetupView::Removal(Box::new(removal(true)))),
+    );
+    let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
+    for words in [
+        "Remove from dashboard (keep files)",
+        "Delete everything",
+        "Builder 2",
+        "Tester 3",
+        "1 change set",
+    ] {
+        assert!(shown.contains(words), "{words:?} missing: {shown}");
+    }
+    assert_eq!(screen.key(key(KeyCode::Down)), ProjectReply::Handled);
+    assert_eq!(screen.remove_choice, RemoveChoice::Everything);
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Handled,
+        "nothing is sent before the name is typed"
+    );
+    for letter in "Gone app ".chars() {
+        assert_eq!(screen.key(key(KeyCode::Char(letter))), ProjectReply::Handled);
+    }
+    assert!(screen.confirm_remove, "typing n or y is text, not an answer");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Handled,
+        "a trailing space is not the name"
+    );
+    screen.key(key(KeyCode::Backspace));
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(SetupAction::Delete {
+            project_id: project.clone(),
+            name: "Gone app".into(),
+        }))
+    );
+    assert!(!screen.confirm_remove);
+
+    screen.key(key(KeyCode::Char('x')));
+    assert_eq!(screen.remove_choice, RemoveChoice::Dashboard);
+    assert!(screen.remove_typed.is_empty());
+    let read = screen.next_query(60).unwrap();
+    screen.apply(&read, Ok(SetupView::Removal(Box::new(removal(false)))));
+    let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
+    assert!(shown.contains("Remove from dashboard (keep files)"), "{shown}");
+    assert!(
+        !shown.contains("Delete everything"),
+        "a project outside the projects home offers no delete: {shown}"
+    );
+    screen.key(key(KeyCode::Down));
+    assert_eq!(screen.remove_choice, RemoveChoice::Dashboard);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('y'))),
+        ProjectReply::Change(Box::new(SetupAction::Remove {
+            project_id: project.clone(),
+        }))
     );
 }
 

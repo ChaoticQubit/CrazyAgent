@@ -1075,3 +1075,68 @@ fn a_leftover_the_engine_cannot_delete_keeps_the_agent_offered_and_a_later_remov
     assert!(case.retiring().is_empty() && case.listed().is_empty());
     drop(unlocked);
 }
+
+/// What a Delete everything would lose, read before anything stops: uncommitted edits,
+/// unlanded commits and an open change set each keep their plain reason, a running agent's
+/// edits count too, a clean agent is not listed, and an agent's own clone whose git config
+/// names an fsmonitor and a filter never runs either while it is read (DEC-118).
+#[test]
+fn a_removal_preview_names_each_agent_s_unlanded_work_without_running_git_in_a_clone() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    write(&case.worktree(1).join("README"), b"edited\n");
+    case.agent(2, "sub", "stopped");
+    write(&case.worktree(2).join("README"), b"committed\n");
+    case.in_agent(2, &["commit", "-q", "-am", "Agent commit"]);
+    case.agent(3, "sub", "stopped");
+    write(&case.worktree(3).join("README"), b"pending\n");
+    case.turn_end(3);
+    case.agent(4, "sub", "working");
+    write(&case.worktree(4).join("notes.txt"), b"new\n");
+    case.agent(5, "sub", "stopped");
+    case.clone_agent(6, "stopped");
+    let marker = case.home.join("hook-ran");
+    let hook = case.home.join("hook.sh");
+    write(
+        &hook,
+        format!("#!/bin/sh\necho ran >> '{}'\nexit 1\n", marker.display()).as_bytes(),
+    );
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    case.in_agent(6, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
+    case.in_agent(6, &["config", "filter.mark.clean", hook.to_str().unwrap()]);
+    write(&case.worktree(6).join(".gitattributes"), b"* filter=mark\n");
+    write(&case.worktree(6).join("README"), b"edited in the clone\n");
+
+    let losses = removal_loss(&case.db, &case.project, NOW).unwrap();
+    let got: Vec<(i64, &str)> = losses
+        .iter()
+        .map(|loss| (loss.id, loss.code.as_str()))
+        .collect();
+    assert_eq!(
+        got[..got.len().min(4)],
+        [
+            (1, "cleanup_worktree_dirty"),
+            (2, "cleanup_commits_unlanded"),
+            (3, "cleanup_changes_open"),
+            (4, "cleanup_worktree_dirty"),
+        ],
+        "{got:?}"
+    );
+    assert!(
+        matches!(
+            got.get(4),
+            Some((6, "cleanup_worktree_dirty" | "cleanup_worktree_unreadable"))
+        ),
+        "the clone's edits are named or said to be unreadable: {got:?}"
+    );
+    assert_eq!(got.len(), 5, "a clean agent loses nothing: {got:?}");
+    assert!(losses.iter().all(|loss| !loss.label.is_empty()));
+    assert!(
+        !marker.exists(),
+        "no fsmonitor or filter ran in an agent's clone"
+    );
+    for id in [1, 2, 3, 4, 6] {
+        assert!(case.kept(id), "a preview changes nothing for agent {id}");
+    }
+}

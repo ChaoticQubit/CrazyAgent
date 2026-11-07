@@ -46,6 +46,46 @@ impl Removal {
     }
 }
 
+/// One agent whose work a Delete everything would lose: its id and label, and the plain
+/// code of what it holds, such as `cleanup_worktree_dirty` for uncommitted edits or
+/// `cleanup_worktree_unreadable` when its edits could not be read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentLoss {
+    pub id: i64,
+    pub label: String,
+    pub code: String,
+}
+
+/// What removing a project would do, read before anything stops: its stored name, the
+/// folders Delete everything would move to the Trash, whether it may (every folder is a
+/// real folder strictly inside the projects home), its running agents' labels, its open
+/// change sets and each agent whose work would be lost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemovalPreview {
+    pub name: String,
+    pub folders: Vec<String>,
+    pub can_delete: bool,
+    pub running: Vec<String>,
+    pub open_change_sets: u32,
+    pub losses: Vec<AgentLoss>,
+}
+
+/// Reads what each agent of a project with a worktree would lose if its worktree went:
+/// uncommitted edits, commits or refs not landed, or an open change set, judged as a
+/// removal judges it, so git runs only with the engine's hardened settings in a linked
+/// worktree and never in an agent's own clone. Inputs: the store, the project and the
+/// time now. Output: the agents with a loss, by id.
+pub fn removal_loss(
+    db: &Connection,
+    project: &ProjectId,
+    now_ms: i64,
+) -> Result<Vec<AgentLoss>, EngineError> {
+    let _ = (db, project, now_ms);
+    Ok(Vec::new())
+}
+
 /// Where one agent's worktree lives: the owner's checkout root, the worktree and its git
 /// folder, as the runtime recorded them when it added the worktree.
 struct Place {

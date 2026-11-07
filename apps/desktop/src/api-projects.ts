@@ -613,6 +613,23 @@ export function updateProjectSetup(id: string, setup: ProjectSetup, generation: 
   return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation });
 }
 
+/** What removing a project would do, read before the owner picks how: its stored name, the folders
+ * Delete everything would move to the Trash and whether it may, its running agents, its open change
+ * sets and each agent whose work would be lost, with the plain code of what it holds. */
+export type RemovalPreview = {
+  name: string;
+  folders: string[];
+  can_delete: boolean;
+  running: string[];
+  open_change_sets: number;
+  losses: { id: number; label: string; code: string }[];
+};
+
+/** Reads what removing a project would do. Input: the project id. Output: the preview. */
+export function loadRemovalPreview(id: string): Promise<Result<RemovalPreview>> {
+  return call<RemovalPreview>("desktop_project_removal", { id });
+}
+
 /** Removes a project from CrazyAgent; its research stops and its folder stays on disk.
  * Inputs: project id and a generation. Output: the receipt. */
 export function removeProject(id: string, generation: number): Promise<Result<IntentReceipt>> {
