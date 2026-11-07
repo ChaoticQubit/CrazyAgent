@@ -123,7 +123,7 @@ test("Edit shows the project's own text with Save, Use app default and when runn
   assert.match(markup, /Running agents get the change at their next task\./);
   assert.doesNotMatch(markup, /Import from file|Use the CrazyAgent default process/);
   assert.match(projectPage({ view: "edit", draft: "" }), /disabled=""[^>]*>Use app default<\/button>/, "an empty project text is the app default already");
-  const stale = projectPage({ conflict: { opened: 1, version: 2, current: "Theirs.\n", writer: null } });
+  const stale = projectPage({ conflict: { opened: 1, version: 2, current: "Theirs.\n", writer: "owner" } });
   assert.match(stale, /<textarea[^>]*id="process-project"/, "a stale save shows the editor whatever view was picked");
 });
 
