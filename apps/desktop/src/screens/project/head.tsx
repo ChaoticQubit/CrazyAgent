@@ -1,14 +1,64 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { PageHeader, Tabs, type TabLink } from "../../ui";
 import { displayText } from "../conversation";
 
 /** Scroll distance in px past which the project head takes its scrolled form. */
 export const HEAD_SCROLLED_PX = 8;
 
-/** Whether the page scrolled far enough for the project head to shrink. Input: the scroll
- * container's scrollTop in px. Output: true once past HEAD_SCROLLED_PX. */
-export function headScrolled(top: number): boolean {
-  return top > HEAD_SCROLLED_PX;
+/** Scroll distance in px a scrolled head must fall to or under before it takes its full
+ * form again, below HEAD_SCROLLED_PX so the head never flips back and forth at one point. */
+export const HEAD_GROWN_PX = 2;
+
+/** Whether the project head takes its scrolled form. Inputs: the scroll container's
+ * scrollTop in px and whether the head is scrolled now. Output: true once past
+ * HEAD_SCROLLED_PX, and for a scrolled head until it is back at HEAD_GROWN_PX or under. */
+export function headScrolled(top: number, was = false): boolean {
+  return top > (was ? HEAD_GROWN_PX : HEAD_SCROLLED_PX);
+}
+
+/** The height a scrolled head gives up, kept as room under the page so the scroll range
+ * never shrinks with the head and pulls the page back to the top. Inputs: the head's full
+ * height, its height now and whether it is scrolled. Output: the room in whole px. */
+export function headRoom(full: number, now: number, scrolled: boolean): number {
+  return scrolled ? Math.max(0, Math.ceil(full - now)) : 0;
+}
+
+/** Follows the page scroll for the project head: its scrolled form, its height as
+ * --pj-head-h on the scroll container for scroll-padding-top, and the room it gives up as
+ * --pj-head-room on the page. Inputs: the project page's root and the project id.
+ * Output: whether the head is scrolled. */
+export function useProjectHead(root: RefObject<HTMLDivElement | null>, project: string): boolean {
+  const [scrolled, setScrolled] = useState(false);
+  useEffect(() => {
+    const node = root.current;
+    const page = node?.closest<HTMLElement>(".main");
+    const head = node?.querySelector<HTMLElement>(".pj-head");
+    if (!node || !page || !head) return;
+    let was = false;
+    let full = head.offsetHeight;
+    const sync = () => {
+      const height = head.offsetHeight;
+      if (!was) full = height;
+      page.style.setProperty("--pj-head-h", `${height}px`);
+      node.style.setProperty("--pj-head-room", `${headRoom(full, height, was)}px`);
+    };
+    const follow = () => {
+      was = headScrolled(page.scrollTop, was);
+      setScrolled(was);
+      sync();
+    };
+    follow();
+    page.addEventListener("scroll", follow, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync);
+    observer?.observe(head);
+    return () => {
+      page.removeEventListener("scroll", follow);
+      observer?.disconnect();
+      page.style.removeProperty("--pj-head-h");
+      node.style.removeProperty("--pj-head-room");
+    };
+  }, [project]);
+  return scrolled;
 }
 
 /** The project's description: wraps to two lines, one once the page scrolls, and offers

@@ -59,7 +59,8 @@ test("the head stays on screen and the description takes two lines, one once the
 
 test("the project page draws its head through ProjectHead and follows the page scroll", () => {
   assert.match(index, /<ProjectHead /u);
-  assert.match(index, /headScrolled\(/u);
+  assert.match(index, /useProjectHead\(/u);
+  assert.match(source, /headScrolled\(page\.scrollTop, was\)/u);
 });
 
 test("a scrolled head keeps its scrolled form until the page is nearly back at the top", () => {

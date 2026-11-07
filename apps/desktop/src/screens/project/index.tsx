@@ -14,7 +14,7 @@ import { IdeExtensionConfirm } from "./ide-extensions";
 import { IDE_POLL_MS, IdeTab, IdeUnavailable } from "./ide";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
-import { ProjectHead, headScrolled } from "./head";
+import { ProjectHead, useProjectHead } from "./head";
 import { IdeConfirm } from "./ide-confirm";
 import { OverviewTab } from "./overview";
 import { ImportMoveBanner, InstructionImportPrompt, ProcessEditor } from "../process";
@@ -244,15 +244,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   }, [projectId, tabs.map((item) => item.id).join(" ")]);
 
   const root = useRef<HTMLDivElement>(null);
-  const [scrolled, setScrolled] = useState(false);
-  useEffect(() => {
-    const page = root.current?.closest(".main");
-    if (!page) return;
-    const follow = () => setScrolled(headScrolled(page.scrollTop));
-    follow();
-    page.addEventListener("scroll", follow, { passive: true });
-    return () => page.removeEventListener("scroll", follow);
-  }, [projectId]);
+  const scrolled = useProjectHead(root, projectId);
 
   return <div className="pj pj-project" ref={root}>
     <ProjectHead title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
