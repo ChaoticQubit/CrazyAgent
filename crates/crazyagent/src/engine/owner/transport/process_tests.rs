@@ -1103,6 +1103,70 @@ fn a_received_payload_holds_the_rendered_bound() {
     );
 }
 
+fn given(root: &Path, project: &ProjectId) -> Result<String, EngineError> {
+    run(
+        root,
+        Action::Given {
+            project: project.clone(),
+        },
+        None,
+    )
+    .map(answered)
+}
+
+/// What the Process page shows as what agents read is what a launch gives them now: the
+/// engine's own render for the project's mode, with its title and headings. A part the
+/// engine cannot read refuses the read with that part's code, so the page never shows the
+/// rest as all of it.
+#[test]
+fn the_text_agents_get_is_the_engines_render_for_the_projects_mode() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, None, "App rule.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "  Project rule.\n\n", 0).unwrap();
+    let both = given(&root, &project).unwrap();
+    assert_eq!(
+        both,
+        crate::agent_home::render("App rule.\n", "  Project rule.\n\n")
+    );
+    assert!(
+        both.starts_with("# Instructions from CrazyAgent\n") && both.contains("Project rule.\n"),
+        "{both}"
+    );
+    let mut version = instruction_settings(&root, &project, None).unwrap().version;
+    for (mode, app, own) in [
+        (Mode::ProjectOnly, "", "  Project rule.\n\n"),
+        (Mode::AppOnly, "App rule.\n", ""),
+        (Mode::Both, "App rule.\n", "  Project rule.\n\n"),
+    ] {
+        let settings = InstructionSettings {
+            mode,
+            ..InstructionSettings::default()
+        };
+        version = instruction_settings(&root, &project, Some((settings, Some(version))))
+            .unwrap()
+            .version;
+        assert_eq!(
+            given(&root, &project).unwrap(),
+            crate::agent_home::render(app, own),
+            "{mode:?}"
+        );
+    }
+    let app = root.join(crate::agent_home::APP_FILE);
+    fs::remove_file(&app).unwrap();
+    fs::write(root.join("elsewhere.md"), "Other rule.\n").unwrap();
+    std::os::unix::fs::symlink(root.join("elsewhere.md"), &app).unwrap();
+    assert_eq!(given(&root, &project).unwrap_err().0, "process_text_unsafe");
+    let unknown = ProjectId::new("not-set-up").unwrap();
+    assert_eq!(
+        given(&root, &unknown).unwrap_err().0,
+        "process_project_unknown"
+    );
+}
+
 /// Reads the plain codes a source file refuses with, before its tests, whichever of
 /// `#[cfg(test)]` or `#[cfg(all(test, ...))]` gates them. Input: the file text. Output:
 /// each `process_` code once.

@@ -95,6 +95,9 @@ enum Action {
         path: PathBuf,
     },
     Default,
+    Given {
+        project: ProjectId,
+    },
     Agent {
         project: ProjectId,
         agent: Option<i64>,
@@ -453,6 +456,13 @@ impl OwnerClient {
     /// Reads the CrazyAgent default process, for a preview the owner may then save.
     pub async fn default_process(&self) -> Result<String, EngineError> {
         self.process_text_reply(Action::Default).await
+    }
+
+    /// Reads what a launch now gives every agent of the project, as the engine renders it
+    /// from the project's mode. Input: the project. Output: the text, or the code of the
+    /// part the engine cannot read.
+    pub async fn given_text(&self, project: ProjectId) -> Result<String, EngineError> {
+        self.process_text_reply(Action::Given { project }).await
     }
 
     /// Reads the owner's own instructions for one team agent, which its next launch gets
@@ -945,6 +955,7 @@ fn run(root: &Path, action: Action, text: Option<String>) -> Result<Answer, Engi
             Answer::Text(crate::instruction_files::read_picked(&path)?)
         }
         (Action::Default, None) => Answer::Text(crate::agent_home::DEFAULT_PROCESS.to_owned()),
+        (Action::Given { project }, None) => Answer::Text(given_text(root, &project)?),
         (Action::AgentText { project, agent }, None) => {
             Answer::Current(current_agent_text(root, &project, agent)?)
         }
@@ -1412,6 +1423,12 @@ fn read_only(root: &Path) -> Result<rusqlite::Connection, EngineError> {
         .busy_timeout(Duration::from_secs(5))
         .map_err(|_| failure("process_unavailable"))?;
     Ok(connection)
+}
+
+/// Reads what a launch now gives every agent of the project. Inputs: the engine root and
+/// the project. Output: the text.
+fn given_text(_root: &Path, _project: &ProjectId) -> Result<String, EngineError> {
+    Ok(String::new())
 }
 
 /// Finds one project's folder from its stored setup. Inputs: the engine root and the
