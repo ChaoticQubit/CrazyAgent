@@ -1354,7 +1354,8 @@ fn judged(
 
 /// Closes a change set whose agent copy, branch or commit is gone as removed outside the
 /// app: discarded, never restorable, its pending ref dropped while the owner repository is
-/// still there. Inputs: the store and the open change set. Output: Ok once closed.
+/// still there, and the project's activity says it was closed outside the app. Inputs: the
+/// store and the open change set. Output: Ok once closed.
 fn close_removed(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     assert!(record.is_open() && record.intent.is_none());
     record.state = ChangeState::Discarded;
@@ -1373,6 +1374,7 @@ fn close_removed(db: &Connection, record: &mut Record) -> Result<(), EngineError
             None,
         )?;
     }
+    super::note_change(db, record, ActivityKind::Discarded, OWNER_ACTOR);
     Ok(())
 }
 

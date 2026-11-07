@@ -5792,6 +5792,55 @@ fn a_change_set_whose_worktree_was_deleted_outside_the_app_closes_as_removed_out
     }
 }
 
+/// A discarded set the owner brings back, and a set closed because its worktree was
+/// removed outside the app, each leave a row in the project's activity, named for what
+/// happened (F5).
+#[test]
+fn restoring_a_discarded_set_and_closing_one_removed_outside_the_app_are_recorded() {
+    let case = Case::new();
+    case.db
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+        )
+        .unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    crate::activity::initialize(&case.db).unwrap();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+    std::fs::remove_dir_all(&case.workspace.worktree).unwrap();
+    case.observe();
+    case.removed_outside(&id, &head);
+    let record = super::store::load(&case.db, &id).unwrap();
+    let (label, line) = (&record.agent.label, &record.prompt_line);
+    let mut rows: Vec<(&str, String)> =
+        crate::activity::list(&case.db, &record.project, crate::activity::LIST_MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.change_set.as_deref() == Some(id.as_str()))
+            .map(|item| (item.kind.name(), item.text))
+            .collect();
+    rows.sort();
+    let mut expected = vec![
+        (
+            "changes_ready",
+            format!("Brought back the changes of {label}: {line}"),
+        ),
+        (
+            "discarded",
+            format!("Discarded the changes of {label}: {line}"),
+        ),
+        (
+            "discarded",
+            format!("The changes of {label} were closed outside the app: {line}"),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
+}
+
 #[test]
 fn an_own_branch_change_set_whose_branch_was_deleted_outside_the_app_closes_as_removed_outside() {
     let case = Case::own_branch();
