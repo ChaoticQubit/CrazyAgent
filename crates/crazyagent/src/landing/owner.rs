@@ -89,7 +89,7 @@ pub(super) fn owner_identity(
 /// in any of the trees, reading attributes from each tree and the repository's own
 /// info/attributes. Inputs: the repository, the paths and the trees. Output: true when
 /// one does, so the change cannot land without running a configured command.
-fn uses_configured_commands(
+pub(super) fn uses_configured_commands(
     repo: &Repo,
     paths: &[String],
     trees: &[&str],
@@ -139,7 +139,7 @@ fn uses_configured_commands(
 /// Three-way merges a change set's work onto a commit with git's own merge and no
 /// merge driver. Inputs: the repository, the merge base and both sides.
 /// Output: the merged tree, holding conflict markers, and the conflicting paths.
-fn merge(
+pub(super) fn merge(
     repo: &Repo,
     base: &str,
     ours: &str,
