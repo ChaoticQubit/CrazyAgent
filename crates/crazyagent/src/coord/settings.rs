@@ -113,14 +113,19 @@ pub enum ClaudeDisplay {
 }
 
 impl ClaudeDisplay {
-    /// The variable a Claude Code terminal starts with for this display: Classic turns its
-    /// alternate screen off, which makes Claude Code 2.1.309 use its classic renderer; Fullscreen
-    /// sets 3 rows a wheel notch, the step Claude Code picks itself for xterm.js. Takes the
-    /// display. Returns the name and value.
-    pub fn variable(self) -> (&'static str, &'static str) {
+    /// The variables a Claude Code terminal starts with for this display: Classic turns its
+    /// alternate screen off, which makes Claude Code 2.1.309 use its classic renderer;
+    /// Fullscreen sets 3 rows a wheel notch, the step Claude Code picks itself for xterm.js,
+    /// and asks for the fullscreen renderer, which Claude Code otherwise picks per account
+    /// from its own settings and rollout (R8-FS). Takes the display. Returns the names and
+    /// values.
+    pub fn variables(self) -> &'static [(&'static str, &'static str)] {
         match self {
-            Self::Classic => ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1"),
-            Self::Fullscreen => ("CLAUDE_CODE_SCROLL_SPEED", "3"),
+            Self::Classic => &[("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1")],
+            Self::Fullscreen => &[
+                ("CLAUDE_CODE_SCROLL_SPEED", "3"),
+                ("CLAUDE_CODE_NO_FLICKER", "1"),
+            ],
         }
     }
 }
