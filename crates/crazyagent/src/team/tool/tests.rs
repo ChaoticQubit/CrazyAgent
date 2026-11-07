@@ -1113,8 +1113,8 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(!known_tools(&names(&["status"])));
     assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
     assert!(known_tools(&names(&QUESTION_TOOLS)));
-    assert!(known_tools(&names(&[STOP_TOOL; 14])));
-    assert!(!known_tools(&names(&[STOP_TOOL; 15])));
+    assert!(known_tools(&names(&[STOP_TOOL; 15])));
+    assert!(!known_tools(&names(&[STOP_TOOL; 16])));
 }
 /// The words a tool name, description or schema field of the owner's Messages timeline read
 /// or its settings write would carry, lowercased.
