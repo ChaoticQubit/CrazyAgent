@@ -114,6 +114,13 @@ test("a wall tile attaches naming its own project, so the bridge can refuse a te
   assert.match(source("api.ts"), /call<number>\("desktop_terminal_attach", \{ agent, pane, output, id: project \}\)/u);
 });
 
+test("removing a project the engine applied closes that project's wall windows, from both Remove project screens", () => {
+  const projects = source("api-projects.ts");
+  const remove = projects.slice(projects.indexOf("export async function removeProject("));
+  assert.match(remove.slice(0, remove.indexOf("\n}\n")), /receiptState\(result\.value\)\.kind === "applied"\) await closeProjectWalls\(id\)/u);
+  assert.match(source("api.ts"), /call<void>\("desktop_close_project_walls", \{ id \}\)/u);
+});
+
 test("a native teammate's pane, which shares its lead's terminal, takes no tile of its own, so no tile replaces another", () => {
   const lead = { ...node("lead", "lead"), terminal: "team-4" };
   const mate = { ...node("mate", "teammate"), terminal: "team-4", pane: "%12" };

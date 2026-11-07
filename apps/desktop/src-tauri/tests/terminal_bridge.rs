@@ -180,7 +180,8 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
 }
 
 /// The wall windows do not outlive what they show: closing the main window closes every
-/// wall window, and a project removal the engine applied closes that project's walls.
+/// wall window, and after a project removal the engine applied the main window asks a
+/// main-only command to close that project's walls, so the removal stays a plain bridge call.
 #[test]
 fn closing_main_or_removing_a_project_closes_the_wall_windows() {
     let lib = include_str!("../src/lib.rs");
@@ -189,16 +190,25 @@ fn closing_main_or_removing_a_project_closes_the_wall_windows() {
     assert!(setup.contains("main.on_window_event("), "{setup}");
     assert!(setup.contains("tauri::WindowEvent::Destroyed"), "{setup}");
     assert!(setup.contains("close_walls(&handle, None)"), "{setup}");
-    let remove = command_bodies()
+    let close = command_bodies()
         .into_iter()
-        .find(|(name, _)| *name == "desktop_remove_project")
-        .unwrap()
-        .1;
-    assert!(remove.contains("app: AppHandle"), "{remove}");
+        .find(|(name, _)| *name == "desktop_close_project_walls")
+        .map(|(_, body)| body)
+        .unwrap_or_default();
+    assert!(close.contains("app: AppHandle"), "{close}");
     assert!(
-        remove.contains("ActionOutcome::Applied")
-            && remove.contains("close_walls(&app, Some(&project))"),
-        "{remove}"
+        close.contains("main_window(&window)?;")
+            && close.contains("close_walls(&app, Some(&project))"),
+        "{close}"
+    );
+    let build = include_str!("../build.rs");
+    assert_eq!(build.matches("\"desktop_close_project_walls\"").count(), 1);
+    let capability = include_str!("../capabilities/main-window.json");
+    assert_eq!(
+        capability
+            .matches("\"allow-desktop-close-project-walls\"")
+            .count(),
+        1
     );
 }
 
