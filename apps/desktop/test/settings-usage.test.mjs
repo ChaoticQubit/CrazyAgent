@@ -194,8 +194,8 @@ test("a sign-in the limits check cannot use says on the card what it is and what
 test("the usage page shows totals, limits with countdowns, named groups and lines changed", () => {
   const markup = render();
   const words = text(markup);
-  assert.match(words, /Tokens 2\.3K Re-read from cache: 4K, counted apart\./);
-  assert.match(words, /Cache 67% 4K read, 800 written/);
+  assert.match(words, /Tokens 2\.3K 1\.2K input, 800 cache write, 300 output/);
+  assert.match(words, /Re-read from cache 4K 67% of everything read; billed far lower, not in Tokens/);
   assert.match(words, /Runs 3/);
   assert.match(words, /Lines changed \+90 -57/);
   assert.match(words, /Work Claude max/);
@@ -218,15 +218,15 @@ test("the usage page shows totals, limits with countdowns, named groups and line
   assert.match(words, /Check limits now/);
 });
 
-test("the Tokens tile says what was re-read from cache, counted apart, and every usage table shows all four parts with the headline first (OS-7)", () => {
+test("the Tokens tile shows the headline with its three parts, the re-reads have their own tile, and every usage table shows all four parts with the headline first (OS-7, T19-L1)", () => {
   const parts = tokens({ input: 1200, cache_write: 700, output: 300, cache_read: 9000 });
   const markup = render({ report: { kind: "ok", value: report({
     projects: [row("project-harbor", { tokens: parts })],
     days: [{ day_ms: NOW - 9 * HOUR, tokens: parts }],
   }) } });
   const words = text(markup);
-  assert.match(words, /Tokens 2\.3K Re-read from cache: 4K, counted apart\./);
-  assert.doesNotMatch(words, /Tokens 2\.3K 1\.2K in/);
+  assert.match(words, /Tokens 2\.3K 1\.2K input, 800 cache write, 300 output Re-read from cache 4K 67% of everything read; billed far lower, not in Tokens/);
+  assert.doesNotMatch(words, /counted apart|Cache 67%/, "the budget meter's wording stays on the budget meter and the cache share moves into the re-read tile");
   assert.match(words, /By project Name Tokens Input Cache write Output Cache read Runs Last used Harbor Notes 2\.2K 1\.2K 700 300 9K 2 5 min ago/);
   assert.match(words, /By day Day Tokens Input Cache write Output Cache read .*? 2\.2K 1\.2K 700 300 9K/);
   assert.match(markup, /<th scope="col" class="muted">Cache read<\/th>/);
@@ -334,7 +334,7 @@ test("a harness without a reader reads as usage not reported, never as zero", ()
     projects: [row("project-harbor", { not_reported_by: "Gemini CLI" }), unreported("project-docs", "OpenCode")],
     not_reported_by: ["Gemini CLI", "OpenCode"],
   }) } }));
-  assert.match(mixed, /Tokens 2\.3K Re-read from cache: 4K, counted apart\./);
+  assert.match(mixed, /Tokens 2\.3K 1\.2K input, 800 cache write, 300 output/);
   assert.match(mixed, /Not in these totals: usage not reported by Gemini CLI, OpenCode\./);
   assert.match(mixed, /Harbor Notes 1\.5K \+ usage not reported by Gemini CLI 1\.2K 0 300 4K 2 5 min ago/);
   assert.match(mixed, /project-docs Usage not reported by OpenCode 5 min ago/);

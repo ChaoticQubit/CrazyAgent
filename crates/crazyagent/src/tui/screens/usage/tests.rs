@@ -262,9 +262,13 @@ fn the_summary_shows_totals_limits_with_countdowns_and_named_groups() {
     assert!(lines[0].starts_with("Usage") && lines[0].ends_with("Last 7 days"));
     assert_eq!(
         lines[1],
-        "Tokens 2.3K (1.2K input, 800 cache write, 300 output)  Cache 67%  Runs 3  Lines +90 -57"
+        "Tokens 2.3K (1.2K input, 800 cache write, 300 output)"
     );
-    assert_eq!(lines[2], "Re-read from cache: 4K, counted apart.");
+    assert_eq!(
+        lines[2],
+        "Re-read from cache 4K: 67% of everything read, not in Tokens"
+    );
+    assert_eq!(lines[3], "Runs 3  Lines +90 -57");
     let all = lines.join("\n");
     for wanted in [
         "  Work Claude  max  read from the provider 3 min ago",
@@ -307,6 +311,40 @@ fn runs_tied_to_no_project_or_account_read_as_unattributed() {
     }
 }
 
+/// At 80 columns the page draws every number of the summary: the headline with its three
+/// parts, the cache re-reads with their share, the runs and the lines changed (T19-L2).
+#[test]
+fn at_80_columns_the_summary_draws_every_number() {
+    let mut ctx = ctx(80, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    assert!(ctx.next_request().is_some(), "the page asks for usage");
+    page.apply(&Ok(Box::new(report())), &mut ctx);
+    let mut screen =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 40)).unwrap();
+    screen
+        .draw(|frame| {
+            page.draw(frame, frame.area(), &ctx);
+        })
+        .unwrap();
+    let buffer = screen.backend().buffer();
+    let all = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for wanted in [
+        "Tokens 2.3K (1.2K input, 800 cache write, 300 output)",
+        "Re-read from cache 4K: 67% of everything read, not in Tokens",
+        "Runs 3  Lines +90 -57",
+    ] {
+        assert!(all.contains(wanted), "{wanted:?} at 80 columns:\n{all}");
+    }
+}
+
 #[test]
 fn a_manual_reset_is_marked_and_an_empty_range_says_so() {
     let ctx = ctx(100, 40);
@@ -340,7 +378,7 @@ fn a_manual_reset_is_marked_and_an_empty_range_says_so() {
         "{all}"
     );
     assert!(all.contains("Weekly  Not reported"), "{all}");
-    assert!(all.contains("Cache none"), "{all}");
+    assert!(all.contains("Re-read from cache 0, not in Tokens"), "{all}");
     assert!(all.contains("No usage in this range."), "{all}");
     assert!(!all.contains("By project"), "{all}");
     let none = UsageReport {
@@ -690,11 +728,15 @@ fn a_harness_without_a_reader_reads_as_not_reported_never_as_zero() {
     ));
     assert_eq!(
         lines[1],
-        "Tokens 2.3K (1.2K input, 800 cache write, 300 output)  Cache 67%  Runs 3  Lines +90 -57"
+        "Tokens 2.3K (1.2K input, 800 cache write, 300 output)"
     );
-    assert_eq!(lines[2], "Re-read from cache: 4K, counted apart.");
     assert_eq!(
-        lines[3],
+        lines[2],
+        "Re-read from cache 4K: 67% of everything read, not in Tokens"
+    );
+    assert_eq!(lines[3], "Runs 3  Lines +90 -57");
+    assert_eq!(
+        lines[4],
         "Not in these totals: usage not reported by Gemini CLI, OpenCode."
     );
     let all = lines.join("\n");
@@ -753,16 +795,16 @@ fn a_usage_step_that_panicked_shows_one_plain_line_with_its_count_and_last_time(
         &ctx,
     ));
     assert_eq!(
-        lines[3],
+        lines[4],
         "Checking account limits hit an internal error once since the engine started, last just now. CrazyAgent keeps retrying; limits shown may be out of date."
     );
     assert_eq!(
-        lines[4],
+        lines[5],
         "Counting agent tokens hit an internal error 3 times since the engine started, last 4 min ago. CrazyAgent keeps retrying; agent and research run token totals may be low."
     );
     assert_eq!(
-        lines[5],
+        lines[6],
         "Counting research run tokens hit an internal error 2 times since the engine started, last 4 min ago. It worked again 1 min ago."
     );
-    assert_eq!(lines[7], "Account limits");
+    assert_eq!(lines[8], "Account limits");
 }
