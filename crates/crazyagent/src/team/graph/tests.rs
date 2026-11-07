@@ -1367,12 +1367,10 @@ fn finish(status: &mut TeamStatus, tasks: &[i64]) {
 #[test]
 fn relations_name_each_pair_and_a_live_handoff_overrides_then_falls_back() {
     let facts = GraphFacts {
-        coord: unread(vec![(
-            Party::Agent(7),
-            Party::Agent(3),
-            1,
-            Receipt::Delivered,
-        )]),
+        coord: unread(vec![
+            (Party::Agent(7), Party::Agent(3), 1, Receipt::Delivered),
+            (Party::Agent(8), Party::Agent(7), 1, Receipt::Delivered),
+        ]),
         ..none()
     };
     let mut status = tree();
@@ -1380,15 +1378,20 @@ fn relations_name_each_pair_and_a_live_handoff_overrides_then_falls_back() {
     assert_eq!(
         relations(&shown),
         [
-            ("master", "team-3", Relation::Leads, handing("Task 11")),
+            ("master", "team-3", Relation::Leads, None),
             ("team-3", "teammate-3-12", Relation::TeammateOf, None),
-            ("team-3", "team-7", Relation::TeammateOf, handing("Task 15")),
+            (
+                "team-3",
+                "team-7",
+                Relation::TeammateOf,
+                Some(LiveAction::Messaging)
+            ),
             ("team-7", "team-8", Relation::TeammateOf, handing("Task 16")),
             ("master", "team-4", Relation::DelegatedTo, None),
             ("master", "team-5", Relation::DelegatedTo, None),
             ("master", "team-6", Relation::DelegatedTo, None),
         ],
-        "as in the approved mockup the master leads an agent that leads workers and delegates to one that leads none, every agent under a lead is its teammate, and an open task hands off over an unread message"
+        "as in the approved mockup the master leads an agent that leads workers and delegates to one that leads none, every agent under a lead is its teammate, a task sent and not yet picked up hands off over an unread message, and a running one leaves its pair's standing word or message"
     );
     let pairs: BTreeSet<(&str, &str)> = shown
         .relations
@@ -1406,7 +1409,7 @@ fn relations_name_each_pair_and_a_live_handoff_overrides_then_falls_back() {
         "every pair of connected agents has exactly one relation edge"
     );
 
-    finish(&mut status, &[11, 15]);
+    finish(&mut status, &[16]);
     let finished = graph(&status, &facts);
     assert_eq!(
         relations(&finished)
@@ -1418,9 +1421,64 @@ fn relations_name_each_pair_and_a_live_handoff_overrides_then_falls_back() {
             ("master", "team-3", None),
             ("team-3", "teammate-3-12", None),
             ("team-3", "team-7", Some(LiveAction::Messaging)),
-            ("team-7", "team-8", handing("Task 16")),
+            ("team-7", "team-8", Some(LiveAction::Messaging)),
         ],
-        "a finished handoff leaves the pair at rest, or at the unread message still between them"
+        "a finished handoff leaves the pair at the unread message still between them"
+    );
+}
+
+/// A task hands off only while it is sent and not yet picked up, a moment as in the approved
+/// mockup: once its agent runs it, the pair shows its standing word again, or the child's
+/// wait on the owner's answer, as the agents with no task do (T14-F1).
+#[test]
+fn a_running_task_leaves_its_pair_s_standing_word_or_owner_wait_and_a_sent_one_hands_off() {
+    let mut status = tree();
+    let facts = GraphFacts {
+        coord: Some(Snapshot {
+            questions_for_owner: vec![question(1, Party::Agent(7))],
+            ..unread(Vec::new()).unwrap()
+        }),
+        ..none()
+    };
+    let shown = |status: &TeamStatus| -> Vec<(String, String, Relation, Option<LiveAction>)> {
+        relations(&graph(status, &facts))
+            .into_iter()
+            .take(4)
+            .map(|(from, to, relation, live)| (from.to_owned(), to.to_owned(), relation, live))
+            .collect()
+    };
+    let row =
+        |from: &str, to: &str, relation, live| (from.to_owned(), to.to_owned(), relation, live);
+    assert_eq!(
+        shown(&status),
+        [
+            row("master", "team-3", Relation::Leads, None),
+            row("team-3", "teammate-3-12", Relation::TeammateOf, None),
+            row(
+                "team-3",
+                "team-7",
+                Relation::TeammateOf,
+                Some(LiveAction::WaitingOn { owner: true })
+            ),
+            row("team-7", "team-8", Relation::TeammateOf, handing("Task 16")),
+        ],
+        "a running task hides neither the standing word nor the wait on the owner's answer, and only the task not yet picked up hands off"
+    );
+    for task in status.tasks.iter_mut().filter(|task| task.id == 16) {
+        task.status = TaskStatus::Running;
+    }
+    assert_eq!(
+        shown(&status)[3],
+        row("team-7", "team-8", Relation::TeammateOf, None),
+        "the handoff ends when its agent picks the task up"
+    );
+    for task in status.tasks.iter_mut().filter(|task| task.id == 16) {
+        task.status = TaskStatus::NeedsPool;
+    }
+    assert_eq!(
+        shown(&status)[3],
+        row("team-7", "team-8", Relation::TeammateOf, handing("Task 16")),
+        "a task waiting for a pool is still sent and not yet picked up"
     );
 }
 
@@ -1458,7 +1516,7 @@ fn waits_reviews_and_messages_show_on_their_pair_under_a_handoff() {
         [
             ("master", "team-3", handing("Task 17")),
             ("team-3", "teammate-3-12", None),
-            ("team-3", "team-7", handing("Task 15")),
+            ("team-3", "team-7", waiting(false)),
             ("team-7", "team-8", cut),
             ("master", "team-4", None),
             ("master", "team-5", waiting(true)),
