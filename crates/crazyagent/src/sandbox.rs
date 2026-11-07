@@ -93,13 +93,17 @@ const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
 /// own tmux server, its caller socket and its teammates' tmux server.
 const SOCKET_GRANTS_MAX: usize = 4;
-/// The writes that move, remove, replace or re-permission a folder's own node while its
-/// contents stay writable: the scratch root's and a native lead's home for its teammates.
-const FIXED_WRITES: &str = "file-write-unlink file-write-create file-write-mode file-write-acl";
-/// The writes that move, remove or re-permission a folder's own node but still let it be made
-/// where it is missing: an agent home's `skills` folder, which Codex makes in a fresh home for
-/// its own skills, while no folder built elsewhere replaces the one holding the engine's copies.
-const PINNED_WRITES: &str = "file-write-unlink file-write-mode file-write-acl";
+/// The writes that move, remove, replace, re-permission or flag a folder's own node while
+/// its contents stay writable: every writable root, the scratch root and a native lead's
+/// home for its teammates. A flag such as `uchg` would freeze the folder for every other
+/// writer and for the engine (CTX-M1 r1).
+const FIXED_WRITES: &str =
+    "file-write-unlink file-write-create file-write-mode file-write-acl file-write-flags";
+/// The writes that move, remove, re-permission or flag a folder's own node but still let it
+/// be made where it is missing: an agent home's `skills` folder, which Codex makes in a fresh
+/// home for its own skills, while no folder built elsewhere replaces the one holding the
+/// engine's copies and no flag keeps the engine from removing what is in it (CTX-M1 r1).
+const PINNED_WRITES: &str = "file-write-unlink file-write-mode file-write-acl file-write-flags";
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
 #[cfg(unix)]
@@ -1837,30 +1841,24 @@ impl ProjectSandbox {
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
         );
-        let last_write_allow = text
-            .rfind("(allow file-write*")
-            .max(text.rfind("(allow file-read* file-write*"));
+        let mut last: Vec<String> = self
+            .read_only
+            .iter()
+            .map(|folder| format!("(deny file-write* (subpath \"{}\"))", folder.display()))
+            .collect();
+        last.push(launch);
+        last.extend(self.writable_roots().map(|root| root_pin(root)));
+        last.extend(
+            self.fixed
+                .iter()
+                .map(|folder| format!("(deny {FIXED_WRITES} (literal \"{}\"))", folder.display())),
+        );
+        last.extend(self.shared.iter().map(|folder| shared_denies(folder)));
+        if !teammates.is_empty() {
+            last.push(teammates);
+        }
         assert!(
-            self.read_only.iter().all(|folder| {
-                text.rfind(&format!(
-                    "(deny file-write* (subpath \"{}\"))",
-                    folder.display()
-                )) > last_write_allow
-            }) && text.rfind(&launch) > last_write_allow
-                && self
-                    .writable_roots()
-                    .all(|root| text.rfind(&root_pin(root)) > last_write_allow)
-                && self.fixed.iter().all(|folder| {
-                    text.rfind(&format!(
-                        "(deny {FIXED_WRITES} (literal \"{}\"))",
-                        folder.display()
-                    )) > last_write_allow
-                })
-                && self
-                    .shared
-                    .iter()
-                    .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow)
-                && (teammates.is_empty() || text.rfind(&teammates) > last_write_allow),
+            denies_follow_write_allows(&text, &last),
             "a read-only, root, fixed, shared or teammates' write deny must follow every write allow, since the last match wins"
         );
         let denied_last = |operations: &str, socket: &PathBuf| {
@@ -2759,9 +2757,10 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// instructions or Claude Code's `settings.json`, none under `skills` but Codex's own
 /// `.system` skills, which Codex installs at its start and the engine removes before each
 /// Codex launch, and no move or removal of the `skills` folder, so no folder built elsewhere
-/// is moved in, each name in any letter case. Its own run cannot change the text it runs
-/// with until the next launch rewrites it. They must follow every write allow. Input: the
-/// home. Output: the rule text.
+/// is moved in, nor a flag on `skills` or anywhere in `.system` that would keep the engine
+/// from removing it (CTX-M1 r1), each name in any letter case. Its own run cannot change the
+/// text it runs with until the next launch rewrites it. They must follow every write allow.
+/// Input: the home. Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
     use crate::launch_context::STATE;
@@ -2794,10 +2793,11 @@ fn launch_denies(home: &Path) -> String {
         text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", any_case(file)));
     }
     text.push_str(&format!(
-        "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n",
-        other_than(crate::launch_context::CODEX_SYSTEM_SKILLS)
+        "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n(deny file-write-flags (regex #\"^{skills}/{}(/.*)?$\"))\n",
+        other_than(crate::launch_context::CODEX_SYSTEM_SKILLS),
+        any_case(crate::launch_context::CODEX_SYSTEM_SKILLS)
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 14);
+    assert_eq!(text.matches("(regex #\"^/").count(), 15);
     text
 }
 
@@ -2839,6 +2839,19 @@ fn other_than(name: &str) -> String {
 /// root. Output: the rule text.
 fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
+}
+
+/// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies
+/// the last matching rule and a deny a later allow overrides no longer holds (CTX-M1 F1).
+/// Inputs: the profile text and the deny rules as written in it. Output: false when any
+/// deny is missing or comes before a write allow.
+fn denies_follow_write_allows(text: &str, denies: &[String]) -> bool {
+    let last_write_allow = text
+        .rfind("(allow file-write*")
+        .max(text.rfind("(allow file-read* file-write*"));
+    denies
+        .iter()
+        .all(|deny| text.rfind(deny.as_str()) > last_write_allow)
 }
 
 /// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no
@@ -3202,5 +3215,49 @@ mod linux_sockets_tests {
                 "{program}"
             );
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod order_tests {
+    use super::*;
+
+    /// CTX-M1 F1: the order check the profile asserts holds for a profile as the engine
+    /// writes it, and fails once a write allow follows a root pin or once a pin is gone, so
+    /// the profile's assert can trip.
+    #[test]
+    fn a_root_pin_a_later_write_allow_overrides_fails_the_order_check() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for folder in ["project", "home", "tmp"] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        let sandbox = ProjectSandbox::new(
+            &root.join("project"),
+            &root.join("home"),
+            &root.join("tmp"),
+            SandboxNetwork::Open,
+        )
+        .unwrap();
+        let pins: Vec<String> = sandbox
+            .writable_roots()
+            .map(|root| root_pin(root))
+            .collect();
+        assert_eq!(pins.len(), 3);
+        let text = sandbox.profile();
+        let allow = format!(
+            "(allow file-read* file-write* (subpath \"{}\"))\n",
+            root.join("home").display()
+        );
+
+        assert!(denies_follow_write_allows(&text, &pins));
+        assert!(!denies_follow_write_allows(
+            &format!("{text}{allow}"),
+            &pins
+        ));
+        assert!(!denies_follow_write_allows(
+            &text.replace(&pins[1], ""),
+            &pins
+        ));
     }
 }
