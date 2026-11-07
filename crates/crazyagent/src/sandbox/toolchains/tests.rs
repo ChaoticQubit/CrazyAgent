@@ -13,28 +13,33 @@ fn the_agent_git_script_is_refused_for_the_xcrun_shim_and_any_path_that_is_not_p
         "/opt/semi;colon/git",
     ] {
         for copy in [GitCopy::Worker, GitCopy::Lead, GitCopy::Free] {
-            assert_eq!(git_script(Path::new(git), copy), None, "{git:?}");
+            for main in [true, false] {
+                assert_eq!(git_script(Path::new(git), copy, main), None, "{git:?}");
+            }
         }
     }
     let real = Path::new("/Applications/X code.app/usr/bin/git");
-    let worker = git_script(real, GitCopy::Worker).unwrap();
-    let lead = git_script(real, GitCopy::Lead).unwrap();
-    let free = git_script(real, GitCopy::Free).unwrap();
+    let worker = git_script(real, GitCopy::Worker, true).unwrap();
+    let lead = git_script(real, GitCopy::Lead, true).unwrap();
+    let free = git_script(real, GitCopy::Free, true).unwrap();
+    let strict = git_script(real, GitCopy::Worker, false).unwrap();
     for (script, flags) in [
-        (&worker, ["lead=0", "free=0"]),
-        (&lead, ["lead=1", "free=0"]),
-        (&free, ["lead=0", "free=1"]),
+        (&worker, ["lead=0", "free=0", "main=1"]),
+        (&lead, ["lead=1", "free=0", "main=1"]),
+        (&free, ["lead=0", "free=1", "main=1"]),
+        (&strict, ["lead=0", "free=0", "main=0"]),
     ] {
         assert!(script.starts_with("#!/bin/sh\ngit='/Applications/X code.app/usr/bin/git'\n"));
         for flag in flags {
             assert!(script.lines().any(|line| line == flag), "{flag}");
         }
         assert!(!script.contains("@GIT@") && !script.contains("@LEAD@"));
-        assert!(!script.contains("@FREE@"));
+        assert!(!script.contains("@FREE@") && !script.contains("@MAIN@"));
         assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
     }
     assert_eq!(worker.replace("\nlead=0\n", "\nlead=1\n"), lead);
     assert_eq!(worker.replace("\nfree=0\n", "\nfree=1\n"), free);
+    assert_eq!(worker.replace("\nmain=1\n", "\nmain=0\n"), strict);
 }
 
 #[test]
@@ -205,4 +210,48 @@ fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
         assert!(stderr.contains(refused), "{args:?} {stderr}");
         assert!(stderr.contains("git merge crazyagent/main"), "{args:?} {stderr}");
     }
+}
+
+/// With "Catch up with main" off, the strict copy of an agent's own `git` refuses
+/// `crazyagent/main` too, with the reason the worker copy gave before the setting.
+#[test]
+fn the_strict_copy_refuses_crazyagent_main_with_the_plain_reason() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&self.0);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = crate::research::runner::sandboxed_git();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+        &["checkout", "-q", "-b", "landed"],
+        &["commit", "-q", "--allow-empty", "-m", "landed work"],
+        &["update-ref", "refs/crazyagent/main", "landed"],
+        &["checkout", "-q", "-b", "own", "main"],
+    ] {
+        let done = git_run(git, repo.path(), home.path(), args);
+        assert!(done.status.success(), "{args:?} {done:?}");
+    }
+    let tmp = make_tmp(home.path()).unwrap();
+    let _removed = Removed(home.path().to_path_buf());
+    strict_git(&tmp).unwrap();
+    let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let refused = git_run(
+        &wrapper,
+        repo.path(),
+        home.path(),
+        &["merge", "--no-edit", "crazyagent/main"],
+    );
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("git merge is refused"), "{stderr}");
+    assert!(
+        stderr.contains("If you need work from another branch, stop and tell your lead"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("crazyagent/main"), "{stderr}");
 }
