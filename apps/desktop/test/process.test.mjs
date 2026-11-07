@@ -167,7 +167,7 @@ test("a save the engine store keeps busy says nothing was saved and to save agai
   for (const code of ["process_save_unavailable", "instruction_settings_save_unavailable"]) {
     assert.ok(client.PROCESS_REFUSALS.includes(code), code);
     const text = client.processMessage({ kind: "error", code, message: "" });
-    assert.match(text, /nothing was saved\. (Save|Make the change) again\.$/, code);
+    assert.match(text, /nothing was saved\. (Save|Change it) again\.$/, code);
     assert.ok(tui.includes(`"${code}" => "${text}"`), `${code} reads the same in the TUI`);
   }
 });

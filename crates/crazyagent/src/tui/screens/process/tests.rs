@@ -801,7 +801,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         "{shown}"
     );
     assert!(
-        flat.contains("nothing was saved. Make the change again."),
+        flat.contains("nothing was saved. Change it again."),
         "{shown}"
     );
 }

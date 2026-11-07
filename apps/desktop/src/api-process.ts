@@ -54,7 +54,7 @@ const REFUSALS: Record<string, string> = {
   agent_instructions_unreadable: "This agent's instructions file couldn't be read. Try again.",
   instruction_settings_invalid: "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.",
   instruction_settings_unavailable: "This project's agent settings couldn't be read. Try again.",
-  instruction_settings_save_unavailable: "The engine couldn't save this project's agent settings right now, so nothing was saved. Make the change again.",
+  instruction_settings_save_unavailable: "The engine couldn't save right now, so nothing was saved. Change it again.",
   process_adoption_unavailable: "Workflow adoption couldn't be read. Try again.",
 };
 

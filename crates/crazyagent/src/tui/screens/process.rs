@@ -211,7 +211,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "trusted_connection_unavailable" => "Not connected to the engine. Try again once it reconnects.".into(),
         "instruction_settings_invalid" => "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.".into(),
         "instruction_settings_unavailable" => "This project's agent settings couldn't be read. Try again.".into(),
-        "instruction_settings_save_unavailable" => "The engine couldn't save this project's agent settings right now, so nothing was saved. Make the change again.".into(),
+        "instruction_settings_save_unavailable" => "The engine couldn't save right now, so nothing was saved. Change it again.".into(),
         "process_adoption_unavailable" => "Workflow adoption couldn't be read. Try again.".into(),
         other => coded("CrazyAgent couldn't finish that.", other),
     }
