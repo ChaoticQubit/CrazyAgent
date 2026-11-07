@@ -1213,9 +1213,10 @@ fn answer_work(
 }
 
 /// Records one `log_activity` call in the project activity: a new phase of the work or a
-/// finished test run with the goal it serves, under Master or the sub-agent's team label.
-/// Takes the engine database, the project, the caller, whether it is the master and the
-/// call's goal, line and kind. Returns "Logged." and false, or a SQLite failure.
+/// finished test run with the goal it serves, under Master or the sub-agent's team label,
+/// within the caller's hourly rate (`activity::record_logged`). Takes the engine database,
+/// the project, the caller, whether it is the master and the call's goal, line and kind.
+/// Returns "Logged." and false, a plain refusal and true past the rate, or a SQLite failure.
 fn log_activity(
     connection: &Connection,
     project: &ProjectId,
@@ -1241,8 +1242,16 @@ fn log_activity(
         text,
         change_set: None,
     };
-    crate::activity::record(connection, project, &item, now_ms())?;
-    Ok(("Logged.".to_owned(), false))
+    match crate::activity::record_logged(connection, project, (agent, master), &item, now_ms())? {
+        Some(_) => Ok(("Logged.".to_owned(), false)),
+        None => Ok((
+            format!(
+                "Not logged: you logged {} phases or test runs in the last hour. Log the next one later.",
+                crate::activity::LOGGED_PER_WINDOW_MAX
+            ),
+            true,
+        )),
+    }
 }
 
 /// The workers a lead started, newest first, at most `WORKERS_LISTED_MAX`. Takes the
