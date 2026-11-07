@@ -6,8 +6,7 @@ use crazyagent::team::agent_messages::{AgentMessages, Cursor, MessageSettings};
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{
     BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, MasterLands, SwitchApply, SwitchMode,
-    TeamAction,
-    TeamStatus,
+    TeamAction, TeamStatus,
 };
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
