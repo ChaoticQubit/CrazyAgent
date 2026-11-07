@@ -643,7 +643,9 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
             None => Some(MASTER_NODE.to_owned()),
         };
         if let Some(reviewer) = reviewer {
-            reviews.entry(reviewer).or_default();
+            reviews
+                .entry(reviewer)
+                .or_insert_with(|| bound_text(&agent.label, REVIEWED_AGENT_BYTES_MAX));
         }
     }
     let relations = relation_edges(&nodes, &edges, &messages, &waits, &reviews);
