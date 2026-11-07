@@ -1182,111 +1182,34 @@ fn update_merges_the_owner_branch_into_the_agent_worktree_with_conflict_markers(
 }
 
 #[test]
-fn a_set_that_conflicts_with_main_goes_back_to_its_agent_before_the_owner_sees_it() {
-    let case = Case::new();
-    let owner_tip = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
-    case.edit("README", "one\ntwo\nthree, the agent's\n");
-    let id = case.turn(TurnOutcome::Succeeded).unwrap();
-    let view = case.view(&id);
-    assert_eq!(
-        (view.state, view.base.as_str(), view.conflicts),
-        (
-            ChangeState::Updating,
-            owner_tip.as_str(),
-            vec!["README".to_owned()]
-        ),
-        "a set that conflicts with main never waits for the owner as Pending"
-    );
-    let merged = std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap();
-    assert!(
-        merged.contains("<<<<<<<") && merged.contains("=======") && merged.contains(">>>>>>>"),
-        "{merged}"
-    );
-    let prompt = resolve_task_prompt(&case.db, &id).unwrap();
-    assert!(
-        prompt.contains("README") && prompt.contains("conflict"),
-        "{prompt}"
-    );
-
-    let case = Case::own_branch();
-    let owner_tip = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
-    case.edit("README", "one\ntwo\nthree, the agent's\n");
-    let head = case.agent_commit("Change the third line");
-    let id = case.turn(TurnOutcome::Succeeded).unwrap();
-    let view = case.view(&id);
-    assert_eq!(
-        (view.state, view.base.as_str(), view.conflicts),
-        (
-            ChangeState::Updating,
-            owner_tip.as_str(),
-            vec!["README".to_owned()]
-        ),
-        "an own-branch set that conflicts with main goes back to its agent too"
-    );
-    assert_eq!(
-        (
-            case.agent_head(),
-            case.agent(&["status", "--porcelain"]),
-            std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap()
-        ),
-        (
-            head,
-            String::new(),
-            "one\ntwo\nthree, the agent's\n".to_owned()
-        ),
-        "the engine never runs git in the agent's own clone (CC-N1)"
-    );
-    let prompt = resolve_task_prompt(&case.db, &id).unwrap();
-    assert!(prompt.contains("README"), "{prompt}");
-
+fn recording_a_turn_end_alone_never_merges_main_into_the_agent_s_work() {
     let case = Case::new();
     case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
-    case.edit("README", "one, the agent's\ntwo\nthree\n");
-    let id = case.turn(TurnOutcome::Succeeded).unwrap();
-    let view = case.view(&id);
-    assert_eq!(
-        (view.state, view.conflicts),
-        (ChangeState::Pending, Vec::<String>::new()),
-        "a set with no clash waits for the owner as before"
-    );
-    assert_eq!(
-        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
-        "one, the agent's\ntwo\nthree\n"
-    );
-}
-
-#[test]
-fn a_turn_end_whose_check_against_main_cannot_run_is_refused_by_its_plain_code() {
-    let case = Case::new();
-    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
-    let blob = case.owner(&["rev-parse", "main:README"]);
-    let blob = blob.trim();
-    let object = case
-        .repo
-        .join(".git/objects")
-        .join(&blob[..2])
-        .join(&blob[2..]);
-    std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o644)).unwrap();
-    std::fs::write(&object, b"not a git object").unwrap();
     case.edit("README", "one\ntwo\nthree, the agent's\n");
-    let turn = TurnEnd {
-        outcome: TurnOutcome::Succeeded,
-        turn: "turn-1".into(),
-        prompt_line: "Change the third line".into(),
-    };
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
     assert_eq!(
-        refused(record_turn_end(&case.db, &case.workspace, &turn)),
-        "changes_git_failed",
-        "a merge with main that cannot run fails closed, by name"
-    );
-    let sets = list(&case.db, &case.workspace.project).unwrap();
-    assert!(
-        sets.iter().all(|set| set.state != ChangeState::Updating),
-        "{sets:?}"
+        case.view(&id).state,
+        ChangeState::Pending,
+        "the turn-end caller decides whether a set goes back to its agent"
     );
     assert_eq!(
         std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
         "one\ntwo\nthree, the agent's\n"
+    );
+
+    let case = Case::own_branch();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    case.edit("README", "one\ntwo\nthree, the agent's\n");
+    let head = case.agent_commit("Change the third line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(
+        (case.view(&id).state, case.view(&id).head),
+        (ChangeState::Pending, head.clone())
+    );
+    assert_eq!(
+        (case.agent_head(), case.agent(&["status", "--porcelain"])),
+        (head, String::new()),
+        "the engine never runs git in the agent's own clone (CC-N1)"
     );
 }
 
