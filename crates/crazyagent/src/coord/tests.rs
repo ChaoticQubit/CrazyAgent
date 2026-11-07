@@ -1274,7 +1274,7 @@ fn under_wait_a_holder_that_stops_frees_its_waiter_at_the_next_sweep() {
 /// reports the overlap as stale, as under Warn.
 #[cfg(unix)]
 #[test]
-fn under_wait_a_stopped_holder_never_makes_a_start_wait() {
+fn under_wait_an_away_holder_never_makes_a_start_wait() {
     let connection = db();
     overlaps_set(&connection, Overlaps::Wait);
     let grace = agent(&connection, "sub", None);
@@ -1282,8 +1282,8 @@ fn under_wait_a_stopped_holder_never_makes_a_start_wait() {
     start_on(&connection, grace, "src/lexer.rs").unwrap();
     connection
         .execute(
-            "UPDATE team_agents SET status='stopped' WHERE id=?1",
-            [grace],
+            "UPDATE coord_activity SET last_seen=?2 WHERE agent=?1",
+            params![grace, NOW - 31 * MINUTE],
         )
         .unwrap();
     let (_, overlaps) = start_on(&connection, ada, "src/lexer.rs").unwrap();
