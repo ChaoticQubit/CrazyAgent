@@ -98,6 +98,64 @@ test("two quick coordination changes from different rows both stay saved", { tim
   assert.deepEqual(seen.sent.args.map((call) => [call.settings.overlaps, call.settings.nudges]), [["block", "off"], ["block", "ten_minutes"]], "the nudges save keeps Block");
 });
 
+test("a coordination save keeps a change the TUI or another window made after this window's save, while the rows still show the older read", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`);
+    const nudges = await page.evaluate(`Fixture.click('[aria-label="Workflow nudges"] [role="radio"]', "Every 10 minutes")`);
+    await page.evaluate("Fixture.settle(300)");
+    await page.evaluate(`Fixture.changedElsewhere({ overlaps: "block" })`);
+    const reminder = await page.evaluate(`Fixture.click('[aria-label="Task-start reminder"] [role="radio"]', "Off")`);
+    await page.evaluate("Fixture.settle(300)");
+    return { mounted, nudges, reminder, sent: await page.evaluate(`Fixture.sentTo("desktop_team_coordination")`) };
+  });
+  assert.equal(seen.mounted, true, "Agent settings mount");
+  assert.deepEqual([seen.nudges, seen.reminder], [true, true], "both choices are there to click");
+  assert.deepEqual(seen.sent.args.map((call) => [call.settings.overlaps, call.settings.nudges, call.settings.task_start]),
+    [["warn", "ten_minutes", "on"], ["block", "ten_minutes", "off"]], "the reminder save keeps the Block set elsewhere");
+});
+
+test("Agent access in place moves its choice on arrow keys and clicks, says first when saving stops agents, and saves only on Save, Full access after its warning", { timeout: 120_000 }, async () => {
+  const sentAccess = `Fixture.sentTo("desktop_set_project_agent_policy").args.map((call) => call.policy.access)`;
+  const rowText = `document.querySelector('[data-setting="Agent access"]').textContent`;
+  const checked = `document.querySelector('[aria-label="Agent access"] [aria-checked="true"]')?.textContent ?? null`;
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`);
+    const pressed = await page.evaluate(`Fixture.press('[aria-label="Agent access"]', "ArrowRight")`);
+    await page.evaluate("Fixture.settle(150)");
+    const afterArrow = { sent: await page.evaluate(sentAccess), checked: await page.evaluate(checked) };
+    const picked = await page.evaluate(`Fixture.click('[aria-label="Agent access"] [role="radio"]', "Own branch")`);
+    await page.evaluate("Fixture.settle(150)");
+    const afterClick = { sent: await page.evaluate(sentAccess), checked: await page.evaluate(checked), row: await page.evaluate(rowText) };
+    const saved = await page.evaluate(`Fixture.click('[data-setting="Agent access"] button', "Save agent access")`);
+    await page.evaluate("Fixture.settle(300)");
+    const afterSave = { sent: await page.evaluate(sentAccess), checked: await page.evaluate(checked), row: await page.evaluate(rowText) };
+    await page.evaluate(`Fixture.click('[aria-label="Agent access"] [role="radio"]', "Full access")`);
+    await page.evaluate("Fixture.settle(150)");
+    await page.evaluate(`Fixture.click('[data-setting="Agent access"] button', "Save agent access")`);
+    await page.evaluate("Fixture.settle(150)");
+    const asked = { sent: await page.evaluate(sentAccess), dialog: await page.evaluate(`document.querySelector("dialog[open] h2")?.textContent ?? null`) };
+    await page.evaluate(`Fixture.click("dialog[open] button", "Allow Full access")`);
+    await page.evaluate("Fixture.settle(300)");
+    const afterFull = { sent: await page.evaluate(sentAccess), checked: await page.evaluate(checked) };
+    return { mounted, pressed, afterArrow, picked, afterClick, saved, afterSave, asked, afterFull };
+  });
+  assert.equal(seen.mounted, true, "Agent settings mount");
+  assert.equal(seen.pressed, true, "the Agent access choice is there");
+  assert.deepEqual(seen.afterArrow, { sent: [], checked: "Sandboxed" }, "an arrow key wrapping Full access to Sandboxed only moves the choice");
+  assert.equal(seen.picked, true, "Own branch is there to click");
+  assert.deepEqual([seen.afterClick.sent, seen.afterClick.checked], [[], "Own branch"], "a click only moves the choice");
+  assert.match(seen.afterClick.row, /Saving lowers agent access from Full access to Own branch: agents running above Own branch stop and restart at it\./, "the row says the save stops agents before Save");
+  assert.equal(seen.saved, true, "a moved choice shows Save agent access");
+  assert.deepEqual([seen.afterSave.sent, seen.afterSave.checked], [["own_branch"], "Own branch"], "Save sends the choice once and the row shows the saved level");
+  assert.doesNotMatch(seen.afterSave.row, /Save agent access|Saving lowers/, "nothing is left to save");
+  assert.deepEqual(seen.asked, { sent: ["own_branch"], dialog: "Give this project's agents Full access?" }, "Save of Full access asks first");
+  assert.deepEqual(seen.afterFull, { sent: ["own_branch", "full"], checked: "Full access" }, "Allow Full access saves it");
+});
+
 test("the Agents tab opens Agent settings at the routed group, and its view switch moves between Team and Agent settings", { timeout: 120_000 }, async () => {
   const seen = await withPage(async (page) => {
     await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });

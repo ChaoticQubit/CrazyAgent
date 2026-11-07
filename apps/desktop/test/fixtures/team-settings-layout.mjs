@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import * as conversation from "../../src/screens/project/conversation.tsx";
 import * as agents from "../../src/screens/project/agents.tsx";
 import * as team from "../../src/screens/team/controls.tsx";
+import * as coordination from "../../src/screens/team/coordination.tsx";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 let root = null;
@@ -27,32 +28,53 @@ const SERVERS = [server("graphify"), server("context-mode")];
 let sent = [];
 let running = 0;
 let most = 0;
+let coordSaved = null;
+let policy = POLICY;
 
-/** Answers the app's engine calls as a quick engine does: the reads these screens make, and a
- * coordination save that takes a moment, counting how many run at once; any other command is
- * not in this build. Output: nothing; it installs the answers on the window. */
-function engine() {
+/** Answers the app's engine calls as a quick engine does: the reads these screens make, the
+ * team read with the coordination settings saved since, an agent access save that the policy
+ * read then shows, and a coordination save that takes a moment, counting how many run at once;
+ * any other command is not in this build. Input: the team status. Output: nothing; it installs
+ * the answers on the window. */
+function engine(status) {
   sent = [];
   running = 0;
   most = 0;
+  coordSaved = null;
+  policy = POLICY;
   window.__TAURI_INTERNALS__ = {
     plugins: {},
     transformCallback: () => 0,
     async invoke(command, args) {
       sent.push({ command, args });
-      if (command === "desktop_project_agent_policy") return POLICY;
+      if (command === "desktop_project_agent_policy") return policy;
+      if (command === "desktop_set_project_agent_policy") {
+        policy = { ...policy, access: args.policy.access, version: policy.version + 1 };
+        return RECEIPT;
+      }
       if (command === "desktop_plugin_servers") return SERVERS;
       if (command === "desktop_plugin_skills") return [];
+      if (command === "desktop_team_status") {
+        return coordSaved === null ? status : { ...status, coordination: { settings: coordSaved, harnesses: status.coordination?.harnesses ?? [] } };
+      }
       if (command === "desktop_team_coordination") {
         running += 1;
         most = Math.max(most, running);
         await new Promise((done) => setTimeout(done, SAVE_MS));
         running -= 1;
+        coordSaved = { ...args.settings };
         return RECEIPT;
       }
       throw `Command ${command} not found`;
     },
   };
+}
+
+/** Changes the coordination settings the fake engine holds, as the TUI or another window
+ * would, while the mounted screen still shows its older team read. Input: the change. Output:
+ * nothing. */
+export function changedElsewhere(patch) {
+  coordSaved = { ...(coordSaved ?? coordination.COORD_DEFAULTS), ...patch };
 }
 
 /** Mounts Agent settings in the app's real page column, the master's settings in the app's
@@ -62,7 +84,7 @@ function engine() {
  * view, else true. */
 export async function mount(css, view, status, section) {
   root?.unmount();
-  engine();
+  engine(status);
   document.head.querySelector("style[data-app]")?.remove();
   const style = document.createElement("style");
   style.dataset.app = "";
@@ -103,6 +125,14 @@ export function click(selector, words) {
   const found = [...document.querySelectorAll(selector)].find((element) => element.textContent.trim() === words);
   found?.click();
   return found !== undefined;
+}
+
+/** Presses a key on the element a selector finds, as the keyboard does on a focused control.
+ * Inputs: the selector and the key's name. Output: whether such an element was there. */
+export async function press(selector, key) {
+  const found = document.querySelector(selector);
+  await act(async () => { found?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })); });
+  return found !== null;
 }
 
 /** What the engine was asked with one command and the most of them that ran at once. Input:
