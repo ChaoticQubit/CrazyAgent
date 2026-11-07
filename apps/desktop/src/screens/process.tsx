@@ -508,6 +508,26 @@ export function InstructionImportPrompt({ projectId, name, onMoved }: { projectI
     onConfirm={() => void confirm()} onLater={() => setClosed(true)} />;
 }
 
+/** Who follows a project's instructions, as a pure view. */
+export function FollowingView(props: {
+  adoption: Loaded<Adoption>;
+  names: Map<number, string>;
+  finished: boolean;
+  expanded: number | null;
+  onFinished: () => void;
+  onExpand: (agent: number | null) => void;
+  onMetrics: () => void;
+  onRetry: () => void;
+}) {
+  void props;
+  return null;
+}
+
+/** How a task runs, in four steps. */
+export function TaskSteps() {
+  return null;
+}
+
 /** Settings, Process: the app-wide instructions every agent gets. */
 export function ProcessSettings() {
   return <ProcessEditor scope={{ kind: "app" }} />;

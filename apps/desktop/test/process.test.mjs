@@ -90,12 +90,41 @@ test("the app Process page shows the saved text, the two seeds and a Save that w
   assert.match(edited, /Discard edits/);
 });
 
-test("a project Process page names its file and offers no seeds", () => {
-  const markup = page({ scope: { kind: "project", id: "harbor-notes", name: "Harbor Notes" } });
-  assert.match(markup, /Instructions every agent in Harbor Notes gets, after the app-wide ones\. Kept in the project&#x27;s \.crazyagent\/instructions\.md/);
-  assert.match(markup, /id="process-project"/);
-  assert.doesNotMatch(markup, /Import from file/);
-  assert.doesNotMatch(markup, /Use the CrazyAgent default process/);
+const PROJECT = { kind: "project", id: "harbor-notes", name: "Harbor Notes" };
+
+function projectPage(extra = {}) {
+  return page({
+    scope: PROJECT, view: "read", all: false, shown: "App rules.\n\nUse tdd.\n", subtitle: "App default plus this project's file",
+    editNote: "Running agents get the change at their next task.", onView: never("onView"), onAll: never("onAll"), onUseDefault: never("onUseDefault"), ...extra,
+  });
+}
+
+test("a project's Process page shows the instructions as agents read them, folded, with Edit beside and no seeds", () => {
+  const markup = projectPage();
+  const words = markup.replace(/<[^>]*>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ");
+  assert.match(words, /Instructions App default plus this project's file · 3 lines/);
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>As agents read it<\/button>/);
+  assert.match(markup, /role="radio" aria-checked="false"[^>]*>Edit<\/button>/);
+  assert.match(markup, /App rules\./);
+  assert.match(markup, /class="skill-tag"[^>]*>tdd<\/a>/);
+  assert.doesNotMatch(markup, /<textarea/);
+  assert.doesNotMatch(markup, /Show all|Import from file|Use the CrazyAgent default process/);
+  const long = Array.from({ length: 20 }, (_, index) => `Line ${index + 1}.`).join("\n");
+  assert.match(projectPage({ shown: long }), /class="pr-instr"[\s\S]*>Show all 20 lines<\/button>/);
+  assert.match(projectPage({ shown: long, all: true }), /class="pr-instr all"[\s\S]*>Show less<\/button>/);
+});
+
+test("Edit shows the project's own text with Save, Use app default and when running agents get the change", () => {
+  const markup = projectPage({ view: "edit" });
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Edit<\/button>/);
+  assert.match(markup, /<textarea[^>]*id="process-project"[^>]*>Use tdd\.\n<\/textarea>/);
+  assert.match(saveButton(markup), /disabled=""/);
+  assert.match(markup, />Use app default<\/button>/);
+  assert.match(markup, /Running agents get the change at their next task\./);
+  assert.doesNotMatch(markup, /Import from file|Use the CrazyAgent default process/);
+  assert.match(projectPage({ view: "edit", draft: "" }), /disabled=""[^>]*>Use app default<\/button>/, "an empty project text is the app default already");
+  const stale = projectPage({ conflict: { opened: 1, version: 2, current: "Theirs.\n", writer: null } });
+  assert.match(stale, /<textarea[^>]*id="process-project"/, "a stale save shows the editor whatever view was picked");
 });
 
 test("a draft over 64 KB or with a NUL says why and cannot be saved", () => {
@@ -263,7 +292,7 @@ test("unreadable agent settings say why and show the defaults so a change replac
 
 test("a project's Process page reads and saves its agent settings through the engine commands", () => {
   const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
-  assert.match(source, /<AgentSettings projectId=\{scope\.id\} \/>/);
+  assert.match(source, /<AgentSettings projectId=\{scope\.id\} onSaved=\{reloadSettings\} \/>/);
   assert.match(source, /if \(scope\.kind === "app"\) return editor;/, "the app page has no agent settings");
   const api = readFileSync(new URL("../src/api-process.ts", import.meta.url), "utf8");
   assert.match(api, /call<InstructionView>\("desktop_instruction_settings", \{ projectId \}\)/);
@@ -393,48 +422,62 @@ const ADOPTION = {
   ],
 };
 
-const rowOf = (markup, label) => {
-  const row = markup.split("<tr").find((part) => part.includes(`>${label}</th>`));
-  assert.ok(row, `${label} has a row`);
+const NAMES = new Map([[1, "Master"], [2, "Moss"], [3, "Wren"]]);
+
+const followRow = (markup, name) => {
+  const row = markup.split("<tr").find((part) => part.includes(`>${name}</button>`));
+  assert.ok(row, `${name} has a row`);
   return row;
 };
 
-test("workflow adoption shows each counted tool's column, skill counts, red flags and the nudges line", () => {
-  const markup = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: ADOPTION }, onRefresh: never("onRefresh") }));
-  assert.match(markup, /Nudges run every 10 minutes: each red flag sends that agent one reminder\./);
-  assert.match(markup, /<th scope="col">Agent<\/th><th scope="col">start_work<\/th><th scope="col">graphify<\/th><th scope="col">Skills<\/th><th scope="col">Flags<\/th>/);
-  const codex = rowOf(markup, "#2 sub codex");
-  assert.match(codex, /class="adoption-stopped"/, "a stopped agent is dimmed");
-  assert.match(codex, /<td>0<\/td><td>2<\/td>/);
-  assert.match(codex, /graphify <strong>2<\/strong>/);
-  assert.match(codex, /ctx_\* <strong>1<\/strong>/);
-  assert.match(codex, /<span>tdd <strong>1<\/strong><\/span>/);
-  assert.match(codex, /<span class="secondary">zeta <strong>0<\/strong><\/span>/, "a zero count is muted");
-  assert.match(codex, /other-one \(not enabled\) <strong>1<\/strong>/);
-  assert.match(codex, /Edits without start_work, reminded/);
-  const master = rowOf(markup, "#1 master claude-code");
-  assert.doesNotMatch(master, /adoption-stopped/);
-  assert.match(master, /10\+ min without graphify or context-mode/);
-  assert.doesNotMatch(master, /reminded/);
+function following(extra = {}) {
+  return renderToStaticMarkup(createElement(view.FollowingView, {
+    adoption: { kind: "ok", value: ADOPTION }, names: NAMES, finished: false, expanded: null,
+    onFinished: never("onFinished"), onExpand: never("onExpand"), onMetrics: never("onMetrics"), onRetry: never("onRetry"), ...extra,
+  }));
+}
+
+const words = (markup) => markup.replace(/<[^>]*>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ");
+
+test("Are agents following it shows one row per agent with its graph, context tools, skills and flags, and sends counts to Metrics", () => {
+  const markup = following();
+  assert.match(words(markup), /Are agents following it One row per agent\. Click a row for details\. Counts are in Metrics\. Open Metrics/);
+  assert.match(markup, /<th scope="col">Agent<\/th><th scope="col">Graph before edits<\/th><th scope="col">Context tools<\/th><th scope="col">Skills used<\/th><th scope="col">Flags<\/th>/);
+  assert.doesNotMatch(markup, /<th scope="col">(start_work|graphify)<\/th>/, "the counts moved to Metrics");
+  assert.doesNotMatch(markup, /Nudges/);
+  assert.match(words(followRow(markup, "Wren")), /Wren Claude Code Missed Not yet tdd Edits without start_work/);
+  assert.match(words(followRow(markup, "Master")), /Master Claude Code Not yet Missed None 10\+ min without graphify or context-mode/);
   assert.match(markup, /2 older agents are not listed\./);
-  const off = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: { ...ADOPTION, nudges: "off", hidden: 0, agents: [] } }, onRefresh: never("onRefresh") }));
-  assert.match(off, /Nudges are off: flags show here, and agents get no reminder\./);
-  const firstEdit = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: { ...ADOPTION, nudges: "first_edit", hidden: 0, agents: [] } }, onRefresh: never("onRefresh") }));
-  assert.match(firstEdit, /Nudges run on the first edit: an edit before any graph query gets one reminder, and flags send none\./);
-  assert.match(off, /No agents yet/);
-  assert.doesNotMatch(off, /not listed/);
-  const failed = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "error", code: "process_adoption_unavailable", message: "" }, onRefresh() {} }));
+  assert.match(markup, /aria-expanded="false"/);
+});
+
+test("finished agents wait behind Show finished, and a clicked row shows the agent's counts", () => {
+  const markup = following();
+  assert.doesNotMatch(markup, /Moss/);
+  assert.match(markup, />Show finished \(1\)<\/button>/);
+  const all = following({ finished: true });
+  assert.match(words(followRow(all, "Moss")), /Moss Codex Missed Yes tdd, other-one Edits without start_work reminded/);
+  assert.match(all, />Hide finished<\/button>/);
+  const open = following({ expanded: 3 });
+  assert.match(open, /aria-expanded="true"/);
+  const detail = open.slice(open.indexOf('colSpan="5"') >= 0 ? open.indexOf('colSpan="5"') : open.indexOf('colspan="5"'));
+  assert.match(detail, /start_work <strong>0<\/strong>/);
+  assert.match(detail, /graphify <strong>1<\/strong>/);
+  assert.match(detail, /<span>tdd <strong>1<\/strong><\/span>/);
+  const none = following({ adoption: { kind: "ok", value: { ...ADOPTION, hidden: 0, agents: [] } } });
+  assert.match(none, /No agents yet/);
+  assert.doesNotMatch(none, /Show finished|not listed/);
+  const failed = following({ adoption: { kind: "error", code: "process_adoption_unavailable", message: "" }, onRetry() {} });
   assert.match(failed, /Workflow adoption couldn&#x27;t be read\. Try again\./);
 });
 
-test("a hookless agent's adoption row shows its counts, skills and flags like any other agent's", () => {
-  const markup = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: ADOPTION }, onRefresh: never("onRefresh") }));
-  const bare = rowOf(markup, "#3 sub claude-code");
-  assert.match(bare, /<td>0<\/td><td>1<\/td>/);
-  assert.match(bare, /graphify <strong>1<\/strong>/);
-  assert.match(bare, /<span>tdd <strong>1<\/strong><\/span>/);
-  assert.match(bare, /Edits without start_work/);
-  assert.doesNotMatch(bare, /colSpan|unavailable/i);
+test("the project Process page puts Delivery and How a task runs beside the instructions and who follows them", () => {
+  assert.match(agentSettings(), /<h2>Delivery<\/h2>/);
+  const steps = words(renderToStaticMarkup(createElement(view.TaskSteps)));
+  assert.match(steps, /How a task runs 1 Master writes the task and picks an agent\. 2 Agent reads instructions, asks the graph, works on its branch\. 3 Reviewer checks the change set\. 4 Master merges into main \(Full access\) or it waits for your accept\./);
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /<div className="pr">[\s\S]*<ProjectFollowing projectId=\{scope\.id\}[\s\S]*<aside className="pr-side">\s*<AgentSettings projectId=\{scope\.id\} onSaved=\{reloadSettings\} \/>\s*<TaskSteps \/>/);
+  assert.doesNotMatch(source, /<ProjectAdoption|function AdoptionView/);
 });
 
 test("an agent's skill counts list graphify, ctx_* and every enabled skill, zeros muted", () => {
