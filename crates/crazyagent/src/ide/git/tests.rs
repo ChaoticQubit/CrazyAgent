@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -238,11 +239,50 @@ fn the_ide_git_configuration_runs_no_planted_program_and_refuses_a_bare_looking_
     );
 }
 
+/// FZ-7: Off and On, the shim's last line runs the absolute git the engine resolved, and
+/// it keeps the PATH's git for the `/usr/bin/git` xcrun shim itself or for a path that a
+/// single-quoted shell word cannot hold.
+#[test]
+fn the_shim_runs_the_resolved_git_and_keeps_the_path_git_otherwise() {
+    let tools = Path::new("/Library/Developer/CommandLineTools/usr/bin/git");
+    let exec = "exec '/Library/Developer/CommandLineTools/usr/bin/git' \"$@\"\n";
+    let head = SHIM_TEXT.strip_suffix("exec git \"$@\"\n").unwrap();
+    assert_eq!(shim_text(None, tools).unwrap(), format!("{head}{exec}"));
+    let on = shim_text(Some(Path::new("/projects/alpha")), tools).unwrap();
+    assert!(on.starts_with(head), "{on}");
+    assert!(
+        on.ends_with(&format!(
+            "if [ \"$(pwd -P)\" = '/projects/alpha' ]; then\n  GIT_CONFIG_COUNT={PROJECT_HOOKS_COUNT}\n  export GIT_CONFIG_COUNT\nfi\n{exec}"
+        )),
+        "{on}"
+    );
+    let odd = std::ffi::OsStr::from_bytes(b"/odd/\xff/git");
+    for kept in [
+        Path::new("/usr/bin/git"),
+        Path::new("/Applications/Xcode it's/git"),
+        Path::new("/odd/line\nbreak/git"),
+        Path::new(odd),
+    ] {
+        assert_eq!(shim_text(None, kept).unwrap(), SHIM_TEXT, "{kept:?}");
+    }
+}
+
+/// The engine only ever hands the shim an absolute git.
+#[test]
+#[should_panic(expected = "the engine resolves git to an absolute path")]
+fn the_shim_refuses_a_relative_git() {
+    let _ = shim_text(None, Path::new("git"));
+}
+
 #[test]
 fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
-    assert_eq!(shim_text(None).unwrap(), SHIM_TEXT);
+    let path_git = Path::new(crate::research::runner::GIT);
+    assert_eq!(shim_text(None, path_git).unwrap(), SHIM_TEXT);
     for refused in ["relative/project", "/project/it's", "/project/line\nbreak"] {
-        assert!(shim_text(Some(Path::new(refused))).is_err(), "{refused:?}");
+        assert!(
+            shim_text(Some(Path::new(refused)), path_git).is_err(),
+            "{refused:?}"
+        );
     }
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
@@ -256,8 +296,8 @@ fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
     let on = base.join("on");
     let off = base.join("off");
     for (shim, text) in [
-        (&on, shim_text(Some(&project)).unwrap()),
-        (&off, shim_text(None).unwrap()),
+        (&on, shim_text(Some(&project), path_git).unwrap()),
+        (&off, shim_text(None, path_git).unwrap()),
     ] {
         assert!(text.starts_with("#!/bin/sh\n") && text.ends_with("exec git \"$@\"\n"));
         std::fs::write(shim, text).unwrap();

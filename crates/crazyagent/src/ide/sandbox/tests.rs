@@ -780,7 +780,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     crate::ide::settings::write(&mine, &home, &data, None).unwrap();
     assert_eq!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::SHIM_TEXT
+        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
     );
     let (status, said) = ide_git(
         &profile,
@@ -859,7 +859,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     crate::ide::settings::write(&mine, &home, &data, Some(&root)).unwrap();
     assert_ne!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::SHIM_TEXT
+        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
     );
     fs::write(root.join("a.txt"), "on\n").unwrap();
     let (staged, said) = ide_git(&profile, &shim, &home, &root, &root, &["add", "a.txt"]);

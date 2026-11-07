@@ -36,7 +36,8 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const GIT: &str = "/usr/bin/git";
+/// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
+pub(crate) const GIT: &str = "/usr/bin/git";
 pub(crate) const GIT_SAFE: [&str; 10] = [
     "-c",
     "core.hooksPath=/dev/null",

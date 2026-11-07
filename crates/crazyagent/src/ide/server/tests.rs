@@ -499,8 +499,14 @@ async fn the_hooks_switch_reaches_the_git_shim_through_open() {
     let folder = servers.project_folder(&project).unwrap();
     let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
     let on = fs::read_to_string(&shim).unwrap();
-    assert_eq!(on, crate::ide::git::shim_text(Some(&root)).unwrap());
-    assert_ne!(on, crate::ide::git::SHIM_TEXT);
+    assert_eq!(
+        on,
+        crate::ide::git::shim_text(Some(&root), crate::research::runner::sandboxed_git()).unwrap()
+    );
+    assert_ne!(
+        on,
+        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+    );
     assert!(
         on.contains(&format!("if [ \"$(pwd -P)\" = '{}' ]", root.display())),
         "{on}"
@@ -509,7 +515,7 @@ async fn the_hooks_switch_reaches_the_git_shim_through_open() {
     servers.open(&project, &root, &build, false).await.unwrap();
     assert_eq!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::SHIM_TEXT
+        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
     );
     servers.stop_all().await;
 }
