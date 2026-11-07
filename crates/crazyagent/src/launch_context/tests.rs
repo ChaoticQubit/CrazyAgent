@@ -1366,7 +1366,7 @@ fn the_team_tools_section_tells_agents_to_merge_crazyagent_main_while_catch_up_i
     );
     assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
     let off = team_tools_section(&[], false);
-    assert!(!off.contains("crazyagent/main"), "{off}");
+    assert!(!off.contains("git merge crazyagent/main"), "{off}");
     assert_eq!(
         section.replace(
             "When main has moved on, bring it into your branch with git merge crazyagent/main before you finish.\n",
@@ -1374,6 +1374,23 @@ fn the_team_tools_section_tells_agents_to_merge_crazyagent_main_while_catch_up_i
         ),
         off
     );
+}
+
+/// Every agent hears, with "Catch up with main" on or off, to start its next work from main
+/// with git reset --hard crazyagent/main once its change set is accepted, unless it has
+/// newer commits (OS-8).
+#[test]
+fn the_team_tools_section_tells_agents_to_restart_from_main_after_an_accept() {
+    for catch_up in [true, false] {
+        let section = team_tools_section(&[], catch_up);
+        assert!(
+            section.contains(
+                "and end with finish_work and its evidence. After your change set is accepted, start your next work from main with git reset --hard crazyagent/main, unless you have newer commits.\n"
+            ),
+            "{section}"
+        );
+        assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
+    }
 }
 
 #[test]

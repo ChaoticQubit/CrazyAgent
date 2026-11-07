@@ -3739,6 +3739,204 @@ fn every_agent_clone_holds_the_landed_main_after_an_accept() {
     );
 }
 
+const CLONE_AGENT: i64 = 7;
+
+/// Records the case's own-clone agent as team sub-agent `CLONE_AGENT` with its worktree,
+/// and the coordination tables, as the engine does for a sub-agent on Own branch, so an
+/// Accept gives its clone main and sends it notes. Input: the case. Output: none.
+fn seat_clone_agent(case: &mut Case) {
+    case.workspace.agent.id = CLONE_AGENT.to_string();
+    crate::team::initialize(&case.db).unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    let project = case.workspace.project.as_str();
+    case.db
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent)
+             VALUES (?1,?2,'sub','claude',0,'idle',1,1,NULL)",
+            rusqlite::params![CLONE_AGENT, project],
+        )
+        .unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![
+                CLONE_AGENT,
+                project,
+                case.workspace.repository.to_str().unwrap(),
+                case.workspace.worktree.to_str().unwrap(),
+                case.workspace.git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+}
+
+/// The bodies of the notes the engine sent the clone agent, oldest first. Input: the case.
+/// Output: the bodies.
+fn engine_notes(case: &Case) -> Vec<String> {
+    crate::coord::unread(&case.db, CLONE_AGENT, 10)
+        .unwrap()
+        .into_iter()
+        .map(|note| {
+            assert_eq!(
+                (note.from, note.kind),
+                (crate::coord::Party::Engine, crate::coord::MessageKind::Note)
+            );
+            note.body
+        })
+        .collect()
+}
+
+/// After the owner accepts a clone's set, the engine tells its agent in one Note that the
+/// set landed and to start its next work from main; the agent's own git reset there opens
+/// its next set at the landed commit, which then lands its one new line only (OS-8).
+#[test]
+fn after_an_accept_a_clone_agent_is_told_to_restart_from_main_and_its_next_set_starts_there() {
+    let mut case = Case::own_branch();
+    seat_clone_agent(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        engine_notes(&case),
+        [format!(
+            "Your change set landed on main as {}. If you have no newer commits, start your next work from main: git reset --hard crazyagent/main. If you do, run git merge crazyagent/main.",
+            &commit[..12]
+        )],
+        "the agent hears once that its set landed and how to start from main"
+    );
+    case.agent(&["reset", "-q", "--hard", "crazyagent/main"]);
+    assert_eq!(case.agent_head(), commit);
+    case.edit("README", "ONE\ntwo\nthree\nfour\n");
+    case.agent_commit("Shout the first line");
+    let next = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &next).unwrap();
+    let measured = owner::measured_from(
+        &case.db,
+        &flow::shared(&case.repo).unwrap(),
+        &record,
+        &case.tip(),
+    )
+    .unwrap();
+    assert_eq!(
+        (record.base.as_str(), measured.as_str()),
+        (commit.as_str(), commit.as_str()),
+        "the next set opens and is measured at the landed commit"
+    );
+    let AcceptOutcome::Landed { commit: second, .. } = case.accept(&next).unwrap() else {
+        panic!("the second accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["diff", "--numstat", &commit, &second]),
+        "1\t1\tREADME\n"
+    );
+    assert_eq!(
+        engine_notes(&case).len(),
+        2,
+        "each accept tells the agent once"
+    );
+}
+
+/// An owner commit on main after the Accept stays out of the agent's next set once the agent
+/// resets to the newer main the engine gave its clone: the set opens at the merge base of its
+/// head and the main tip, never at the older landed commit; with "Catch up with main" off the
+/// Note names no merge (OS-8).
+#[test]
+fn an_owner_commit_after_the_accept_stays_out_of_the_set_of_an_agent_that_restarts_from_newer_main()
+{
+    let mut case = Case::own_branch();
+    seat_clone_agent(&mut case);
+    crate::team::set_catch_up_main(
+        &case.db,
+        &case.workspace.project,
+        crate::team::CatchUpMain::Off,
+    )
+    .unwrap();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        engine_notes(&case),
+        [format!(
+            "Your change set landed on main as {}. If you have no newer commits, start your next work from main: git reset --hard crazyagent/main.",
+            &commit[..12]
+        )]
+    );
+    let owner_work = case.owner_commit("other.txt", "owner work\n", "Owner work");
+    refresh_main(&case.db, &case.workspace.project).unwrap();
+    case.agent(&["reset", "-q", "--hard", "crazyagent/main"]);
+    assert_eq!(case.agent_head(), owner_work);
+    case.edit("README", "ONE\ntwo\nthree\nfour\n");
+    case.agent_commit("Shout the first line");
+    let next = case.turn(TurnOutcome::Succeeded).unwrap();
+    let view = case.view(&next);
+    assert_eq!(
+        (view.base.as_str(), view.files, view.added, view.removed),
+        (owner_work.as_str(), 1, 1, 1),
+        "the owner's later commit is not the agent's change"
+    );
+    let AcceptOutcome::Landed { commit: second, .. } = case.accept(&next).unwrap() else {
+        panic!("the second accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["diff", "--numstat", &owner_work, &second]),
+        "1\t1\tREADME\n"
+    );
+}
+
+/// A clone whose branch holds neither its recorded base nor the commit landed for it is still
+/// refused at its turn end, as before an agent could restart from main (GA-R3, OS-8).
+#[test]
+fn a_clone_branch_without_the_landed_work_is_still_refused() {
+    let mut case = Case::own_branch();
+    seat_clone_agent(&mut case);
+    let start = case.tip();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    case.agent(&["reset", "-q", "--hard", &start]);
+    case.edit("README", "ONE\ntwo\nthree\n");
+    case.agent_commit("Shout on the old start");
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_branch_not_above_base"
+    );
+}
+
+/// A landed Note the engine cannot send, here to a clone agent the team does not record, is
+/// logged and leaves the Accept landed (OS-8).
+#[test]
+fn a_landed_note_that_cannot_be_sent_never_fails_the_accept() {
+    let mut case = Case::own_branch();
+    case.workspace.agent.id = CLONE_AGENT.to_string();
+    crate::team::initialize(&case.db).unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        (case.view(&id).state, case.tip()),
+        (ChangeState::Accepted, commit)
+    );
+    assert!(engine_notes(&case).is_empty());
+}
+
 /// The engine writes an agent clone's `refs/crazyagent/main` with no git run there and
 /// never through a link the agent planted on the way (CC-N1): a `refs/crazyagent` that
 /// links outside is refused and the folder it names stays empty; with the link gone the
