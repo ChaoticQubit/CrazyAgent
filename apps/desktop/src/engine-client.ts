@@ -1596,12 +1596,13 @@ export interface GraphEdge {
 /** How the upper node of one tree pair relates to the lower one. */
 export type Relation = "leads" | "delegated_to" | "teammate_of";
 
-/** What one tree pair is doing now: a handoff names its task, cut to 160 bytes. */
+/** What one tree pair is doing now: a handoff names its task, cut to 160 bytes, and a review
+ * the agent whose change set it reviews by its node name, cut to 96 bytes. */
 export type LiveAction =
   | { action: "handing_off"; task: string }
   | { action: "messaging" }
   | { action: "waiting_on"; owner: boolean }
-  | { action: "reviewing"; change_set: number };
+  | { action: "reviewing"; agent: string };
 
 /** The one relation edge of a tree pair, from the node that leads to the node it leads,
  * with the pair's live action while one holds. */
