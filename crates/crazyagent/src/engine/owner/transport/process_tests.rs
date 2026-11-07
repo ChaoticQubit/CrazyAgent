@@ -637,8 +637,10 @@ fn saves_at_once_land_only_on_the_version_they_read() {
     use crate::instruction_files::{EditDelivery, Mode};
     let (_directory, root) = root();
     let folder = root.join("project");
-    fs::create_dir_all(&folder).unwrap();
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
     let project = with_project(&root, &folder);
+    save(&root, None, "App rule.\n", 0).unwrap();
+    save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
     let options: Vec<InstructionSettings> = [Mode::ProjectOnly, Mode::AppOnly, Mode::Both]
         .into_iter()
         .flat_map(|mode| [true, false].map(|transcripts| (mode, transcripts)))
