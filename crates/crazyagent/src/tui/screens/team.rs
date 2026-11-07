@@ -377,10 +377,12 @@ impl Team {
     /// Takes a team status read, a live switch change or a session check of this master
     /// view: a good read replaces the switch, and the first one of this open turns a switch
     /// that is not on on, or checks the session of a running team's switch already on; a
-    /// failed read changes nothing; an accepted change is the switch until the next read,
-    /// which is read at once, and an accepted Start all checks the session too; a change
-    /// refused as stale reads the switch again, and any other refusal keeps the switch; an
-    /// Open that opened no session is named.
+    /// failed read changes nothing but ends a start waiting to be retried; an accepted change
+    /// is the switch until the next read, which is read at once, and an accepted Start all
+    /// checks the session too; a change refused as stale reads the switch again, and the first
+    /// such start of this open stays wanted, keeping the owner's typed keys, until that read
+    /// starts it once more; any other refusal keeps the switch; an Open that opened no session
+    /// is named.
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
         &mut self,
@@ -394,6 +396,9 @@ impl Team {
         match query {
             SetupQuery::Team { project } if *project == self.project => {
                 let Ok(SetupView::Team(status)) = result else {
+                    if !self.asked && self.want == Some(true) {
+                        self.want = None;
+                    }
                     return;
                 };
                 self.paused = status.paused;
@@ -436,8 +441,9 @@ impl Team {
                 Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code)
                     if code == crate::storage::versioned::STALE_CODE =>
                 {
-                    self.want = None;
-                    if !self.retried {
+                    if self.retried {
+                        self.want = None;
+                    } else {
                         self.retried = true;
                         self.asked = false;
                     }
