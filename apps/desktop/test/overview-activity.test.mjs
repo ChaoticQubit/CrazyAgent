@@ -72,7 +72,7 @@ test("an undone event says so", () => {
 test("Overview reads every project event, not the research jobs", async () => {
   const { readFileSync } = await import("node:fs");
   const source = readFileSync(new URL("../src/screens/project/overview.tsx", import.meta.url), "utf8");
-  assert.ok(source.includes("loadActivity("), "Overview reads the engine activity");
+  assert.ok(source.includes("read: load = loadActivity"), "Overview reads the engine activity unless a test hands it a read");
   assert.equal(typeof research.activity, "undefined", "the research-only activity list is gone");
 });
 

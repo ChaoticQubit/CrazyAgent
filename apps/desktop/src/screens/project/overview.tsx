@@ -62,16 +62,17 @@ const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "
 };
 
 /** The project's activity grouped by goal, newest goal first: up to eight rows per goal with
- * when, what, and who, and Show all (N) for a longer goal. Inputs: the events, the time they are
- * read against, the goals shown in full and the Show all action. Output: the groups. */
-export function ActivityGroups({ items, now, expanded, onShowAll }: { items: ActivityItem[]; now: number; expanded: string[]; onShowAll: (goal: string) => void }) {
+ * when, what, and who, and Show all (N) for a longer goal. A read the engine cut counts with a
+ * plus. Inputs: the events, whether older ones were left out, the time they are read against,
+ * the group keys shown in full and the Show all action. Output: the groups. */
+export function ActivityGroups({ items, more, now, expanded, onShowAll }: { items: ActivityItem[]; more: boolean; now: number; expanded: string[]; onShowAll: (key: string) => void }) {
   return <div className="pj-stack-s">{groupActivity(items).map((group) => {
-    const all = expanded.includes(group.goal);
-    const count = group.items.length;
-    return <section className="pj-panel pj-activity-goal" aria-label={group.goal} key={group.goal}>
+    const all = expanded.includes(group.key);
+    const count = `${group.items.length}${more ? "+" : ""}`;
+    return <section className="pj-panel pj-activity-goal" aria-label={group.goal} key={group.key}>
       <div className="pj-activity-head">
         <strong className="ellipsis">{displayText(group.goal)}</strong>
-        <span className="pj-small pj-muted">{count} {count === 1 ? "item" : "items"}, latest {ago(group.items[0].at_ms, now).toLowerCase()}</span>
+        <span className="pj-small pj-muted">{count} {count === "1" ? "item" : "items"}, latest {ago(group.items[0].at_ms, now).toLowerCase()}</span>
       </div>
       <ul className="pj-activity-list" aria-label={`${group.goal} activity`}>{(all ? group.items : group.items.slice(0, ACTIVITY_ROWS)).map((item) => <li className="pj-activity-row" key={item.id}>
         <span className="pj-small pj-muted">{ago(item.at_ms, now)}</span>
@@ -79,46 +80,52 @@ export function ActivityGroups({ items, now, expanded, onShowAll }: { items: Act
         <span className="pj-activity-text">{displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
           <span className="pj-small pj-muted pj-activity-by">{displayText(item.actor)}</span></span>
       </li>)}</ul>
-      {!all && count > ACTIVITY_ROWS && <button type="button" className="pj-link pj-activity-more" onClick={() => onShowAll(group.goal)}>Show all ({count})</button>}
+      {!all && group.items.length > ACTIVITY_ROWS && <button type="button" className="pj-link pj-activity-more" onClick={() => onShowAll(group.key)}>Show all ({count})</button>}
     </section>;
   })}</div>;
 }
 
-/** What Recent activity draws: the last good read, when it was read, and why the latest read
- * failed while an older one stays on screen. */
-type ActivityRead = { shown: Result<ActivityItem[]> | undefined; at: number; stale: string | null };
+/** What Recent activity draws: the last good read, whether the engine left older events out of
+ * it, when it was read, and why the latest read failed while an older one stays on screen. */
+type ActivityRead = { shown: Result<ActivityItem[]> | undefined; more: boolean; at: number; stale: string | null };
 
-/** Reads one project's activity now and again every 5 s while the window is visible. A failed
- * refresh keeps the last good read and says why. Input: the project id. Output: the read. */
-function useActivity(projectId: string): ActivityRead {
-  const [read, setRead] = useState<ActivityRead>({ shown: undefined, at: 0, stale: null });
-  useEffect(() => setRead({ shown: undefined, at: 0, stale: null }), [projectId]);
+const UNREAD: ActivityRead = { shown: undefined, more: false, at: 0, stale: null };
+
+/** Reads one project's activity now and again each interval while the window is visible, one
+ * read at a time. A failed refresh keeps the last good read and says why. Inputs: the project
+ * id, the interval and the read. Output: the read. */
+function useActivity(projectId: string, every: number, load: typeof loadActivity): ActivityRead {
+  const [read, setRead] = useState<ActivityRead>(UNREAD);
+  useEffect(() => setRead(UNREAD), [projectId]);
   useEffect(() => {
     let current = true;
     let timer = 0;
     const tick = async () => {
       if (document.visibilityState === "visible") {
-        const result = await loadActivity(projectId, ACTIVITY_READ_MAX);
+        const result = await load(projectId, ACTIVITY_READ_MAX);
         if (!current) return;
         const at = Date.now();
         setRead((previous) => result.kind === "ok" || previous.shown?.kind !== "ok"
-          ? { shown: result.kind === "ok" ? { kind: "ok", value: result.value.items } : result, at, stale: null }
+          ? { shown: result.kind === "ok" ? { kind: "ok", value: result.value.items } : result, more: result.kind === "ok" && result.value.more === true, at, stale: null }
           : { ...previous, stale: result.kind === "error" ? failureCopy(result) : "Activity isn't in this build." });
         if (result.kind === "not_ready") return;
       }
-      timer = window.setTimeout(() => void tick(), ACTIVITY_READ_MS);
+      timer = window.setTimeout(() => void tick(), every);
     };
     void tick();
     return () => {
       current = false;
       window.clearTimeout(timer);
     };
-  }, [projectId]);
+  }, [projectId, every, load]);
   return read;
 }
 
-export function RecentActivity({ projectId }: { projectId: string; every?: number; read?: unknown }) {
-  const read = useActivity(projectId);
+/** Recent activity on Overview: the project's events by goal, read again while the window is
+ * visible, with loading, failure and stale states. Inputs: the project id, and for tests the
+ * interval and the read. Output: the section. */
+export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load = loadActivity }: { projectId: string; every?: number; read?: typeof loadActivity }) {
+  const read = useActivity(projectId, every, load);
   const [expanded, setExpanded] = useState<string[]>([]);
   useEffect(() => setExpanded([]), [projectId]);
   const shown = read.shown;
@@ -129,8 +136,9 @@ export function RecentActivity({ projectId }: { projectId: string; every?: numbe
     {shown?.kind === "error" && <p className="pj-error" role="alert">Couldn't load activity. {failureCopy(shown)}</p>}
     {read.stale && <p className="pj-note warn" role="status">{displayText(`Couldn't refresh activity. ${read.stale} Showing the last read.`)}</p>}
     {shown?.kind === "ok" && (shown.value.length
-      ? <ActivityGroups items={shown.value} now={read.at} expanded={expanded} onShowAll={(goal) => setExpanded((open) => [...open, goal])} />
+      ? <ActivityGroups items={shown.value} more={read.more} now={read.at} expanded={expanded} onShowAll={(key) => setExpanded((open) => [...open, key])} />
       : <p className="pj-muted">Nothing yet.</p>)}
+    {shown?.kind === "ok" && read.more && <p className="pj-small pj-muted">Older activity isn't shown here.</p>}
   </section>;
 }
 

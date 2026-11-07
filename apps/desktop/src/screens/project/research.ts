@@ -423,18 +423,19 @@ export const ACTIVITY_ROWS = 8;
 export const PROJECT_GOAL = "Project";
 
 /** Groups project activity by the goal it serves, for Overview. Events without a goal go under
- * "Project". Input: the events in any order. Output: one group per goal, the group with the
- * newest event first, each group's events newest first and a later id first at the same time. */
-export function groupActivity(items: ActivityItem[]): { goal: string; items: ActivityItem[] }[] {
+ * "Project", kept apart from a goal of that name by an empty key no named goal can have. Input:
+ * the events in any order. Output: one group per goal with its key and label, the group with
+ * the newest event first, each group's events newest first and a later id first at the same time. */
+export function groupActivity(items: ActivityItem[]): { key: string; goal: string; items: ActivityItem[] }[] {
   const newest = [...items].sort((a, b) => b.at_ms - a.at_ms || b.id - a.id);
   const groups = new Map<string, ActivityItem[]>();
   for (const item of newest) {
-    const goal = item.goal?.trim() || PROJECT_GOAL;
-    const group = groups.get(goal);
+    const key = item.goal?.trim() ?? "";
+    const group = groups.get(key);
     if (group) group.push(item);
-    else groups.set(goal, [item]);
+    else groups.set(key, [item]);
   }
-  const grouped = [...groups].map(([goal, entries]) => ({ goal, items: entries }));
+  const grouped = [...groups].map(([key, entries]) => ({ key, goal: key || PROJECT_GOAL, items: entries }));
   assert(grouped.reduce((sum, group) => sum + group.items.length, 0) === items.length, "every event is in exactly one group");
   return grouped;
 }
