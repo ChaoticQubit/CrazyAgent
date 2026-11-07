@@ -197,8 +197,8 @@ pub fn defaults() -> Map<String, Value> {
 }
 
 /// The keys Remote settings apply: AI features, agents and the command center chat off, the
-/// MCP gallery, terminal hint, tips, start editor, Accounts, announcements, walkthroughs,
-/// remote recommendations, semantic search and telemetry. Output: the keys.
+/// MCP gallery, terminal hint, tips, start editor, announcements, walkthroughs, remote
+/// recommendations, semantic search and telemetry. Output: the keys.
 fn machine() -> Map<String, Value> {
     table([
         ("chat.disableAIFeatures", json!(true)),
@@ -209,7 +209,6 @@ fn machine() -> Map<String, Value> {
         ("terminal.integrated.initialHint", json!(false)),
         ("workbench.tips.enabled", json!(false)),
         ("workbench.startupEditor", json!("none")),
-        ("workbench.activity.showAccounts", json!(false)),
         ("workbench.welcomePage.extraAnnouncements", json!(false)),
         (
             "workbench.welcomePage.walkthroughs.openOnInstall",

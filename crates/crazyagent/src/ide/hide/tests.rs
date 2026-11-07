@@ -214,7 +214,7 @@ fn a_link_or_leftover_at_the_staged_name_is_replaced_and_never_followed() {
 /// Every hiding revision, oldest first, with the digest of the edits a build installed under
 /// it carries. Changing [`EDITS`] or [`WINDOW`] changes the digest, so it needs a new row
 /// and a new [`REVISION`], or installed builds would keep the old edits.
-const REVISIONS: [(&str, &str); 2] = [
+const REVISIONS: [(&str, &str); 3] = [
     (
         "h1",
         "257622519e4a1a7d3a7bee30f97186083c9a4e14b1f5cdaaf83e3ef33347430b",
@@ -222,6 +222,10 @@ const REVISIONS: [(&str, &str); 2] = [
     (
         "h2",
         "794fd53ff124982ffacd3a829147c6f969f1df4694efa015a78fb4d62d9c22dc",
+    ),
+    (
+        "h3",
+        "97a8ce21fc87e75d1d93eb37df327c3b7bacc2e7539634e94e383a5a3e906984",
     ),
 ];
 
@@ -242,6 +246,7 @@ fn every_change_to_the_edits_names_a_new_revision() {
     let current = digest(&EDITS);
     assert_eq!(REVISIONS.last(), Some(&(REVISION, current.as_str())));
     assert_eq!(digest(&EDITS[..9]), REVISIONS[0].1);
+    assert_eq!(digest(&EDITS[..16]), REVISIONS[1].1);
     for (n, (name, sum)) in REVISIONS.iter().enumerate() {
         for (other, other_sum) in &REVISIONS[n + 1..] {
             assert_ne!(name, other);
