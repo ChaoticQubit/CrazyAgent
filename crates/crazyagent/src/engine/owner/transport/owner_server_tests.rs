@@ -155,6 +155,68 @@ async fn awaiting_a_token(client: &OwnerClient) -> UnixStream {
     stream
 }
 
+/// Opens a terminal view that sends its owner packet and no attach request, so the engine
+/// holds it as a view while it waits for the request. Input: the owner client. Output: the
+/// open connection.
+async fn terminal_waiting(client: &OwnerClient) -> UnixStream {
+    let mut stream = connected(client).await;
+    let mut packet = [0; 37];
+    packet[..4].copy_from_slice(terminal::MAGIC);
+    packet[5..].copy_from_slice(&client.token);
+    stream.write_all(&packet).await.unwrap();
+    stream
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_views_up_to_the_connection_bound_are_held_and_the_next_is_refused_by_name() {
+    assert_eq!(crate::terminal::CONNECTIONS_MAX, 40);
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let mut held = Vec::new();
+    for _ in 0..crate::terminal::CONNECTIONS_MAX {
+        held.push(terminal_waiting(&client).await);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut open = 0;
+    for stream in &mut held {
+        let mut byte = [0; 1];
+        if tokio::time::timeout(Duration::from_millis(20), stream.read(&mut byte))
+            .await
+            .is_err()
+        {
+            open += 1;
+        }
+    }
+    assert_eq!(
+        open,
+        crate::terminal::CONNECTIONS_MAX,
+        "views 9 to 40 are held like the first 8"
+    );
+
+    let mut past = terminal_waiting(&client).await;
+    let attach = crate::terminal::TerminalRequest::Attach {
+        agent_id: crate::terminal::AgentId::team(1).unwrap(),
+    };
+    past.write_all(&encode_frame(&attach).unwrap())
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut past))
+        .await
+        .expect("the view past the bound is answered in time")
+        .expect("the view past the bound gets a reply, not a dropped connection");
+    assert_eq!(
+        serde_json::from_slice::<crate::terminal::TerminalFrame>(&reply[4..]).unwrap(),
+        crate::terminal::TerminalFrame::Rejected {
+            code: "terminal_viewers_full".into()
+        }
+    );
+
+    drop(held);
+    served_again(&client, "after-views").await;
+    fixture.stop().await;
+}
+
 const _: () = assert!(DEFERRED_MAX < CLIENTS_MAX);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -13,6 +13,7 @@ pub(super) const MAGIC: &[u8; 4] = b"CAT1";
 #[cfg(unix)]
 const GRANT_CHECK: Duration = Duration::from_secs(5);
 const WRITE_TIME: Duration = Duration::from_secs(10);
+const VIEWERS_FULL: &str = "terminal_viewers_full";
 #[cfg(unix)]
 const REQUESTS_QUEUED: usize = 16;
 #[cfg(unix)]
@@ -676,6 +677,31 @@ pub(super) async fn serve(
             let _ = stream.shutdown().await;
         }
     }
+}
+
+/// Answers a terminal view the engine has no room for with `terminal_viewers_full` in the
+/// attach reply's own shape, once the peer and its owner grant check out and its attach
+/// request is read, all within the attach deadline; then closes the connection.
+/// Takes the connection, its `CAT1` packet, the authority and the attach deadline.
+pub(super) async fn refuse(
+    mut stream: UnixStream,
+    auth: [u8; 37],
+    authority: Arc<Authority>,
+    deadline: Instant,
+) {
+    let mut packet = auth;
+    packet[..4].copy_from_slice(b"CAO1");
+    let refused = async {
+        verify_peer(&stream)?;
+        authority.authenticate(&packet)?;
+        read_frame(&mut stream).await?;
+        let full = TerminalFrame::Rejected {
+            code: VIEWERS_FULL.into(),
+        };
+        write(&mut stream, &full).await
+    };
+    let _ = tokio::time::timeout_at(deadline, refused).await;
+    let _ = stream.shutdown().await;
 }
 
 #[cfg(all(test, unix))]

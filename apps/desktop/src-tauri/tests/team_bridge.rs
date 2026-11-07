@@ -773,6 +773,62 @@ async fn new_folder_limits(root: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Sends every Terminals per window choice through the desktop bridge to the real engine
+/// and reads each back the way a terminal wall window reads it and in the team status the
+/// Agent settings show; Six until the owner picks another. Takes the engine root. Returns
+/// any failure.
+async fn terminals_per_window_choices(root: &Path) -> Result<(), Box<dyn Error>> {
+    use crazyagent::team::TerminalsPerWindow::{Four, Nine, Six};
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    let spec = ProjectSpec {
+        name: "Wall".into(),
+        repositories: vec![],
+    };
+    let created = bridge.setup_project(spec, setup(), 1).await?;
+    assert!(
+        matches!(created.outcome, ActionOutcome::Applied),
+        "{created:?}"
+    );
+    let id = created.intent.project_id.clone().unwrap();
+    assert_eq!(bridge.terminals_per_window(&id).await?, Six);
+    assert_eq!(bridge.team_status(&id).await?.terminals_per_window, Six);
+    for (generation, choice) in (2..).zip([Four, Nine, Six, Nine]) {
+        let saved = bridge
+            .team_terminals_per_window(&id, choice, generation)
+            .await?;
+        assert!(matches!(saved.outcome, ActionOutcome::Applied), "{saved:?}");
+        assert_eq!(bridge.terminals_per_window(&id).await?, choice);
+        assert_eq!(bridge.team_status(&id).await?.terminals_per_window, choice);
+    }
+    Ok(())
+}
+
+/// Every Terminals per window choice the desktop sends is saved, read back by the wall and
+/// shown (owner 2026-11-07, OS-4, every-option rule).
+#[tokio::test]
+async fn desktop_saves_and_reads_every_terminals_per_window_choice() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-team-wall-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = engine_support::engine_config(root.path());
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        terminals_per_window_choices(root.path()),
+    )
+    .await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}
+
 /// Every New folder limit choice the desktop sends is saved and shown (fix/changes-vs-owner-branch
 /// DEC-107 rule 3, every-option rule).
 #[tokio::test]

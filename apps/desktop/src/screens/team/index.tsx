@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { loadTeamGraph, nextGeneration } from "../../api";
+import { loadTeamGraph, nextGeneration, openTerminalWindows } from "../../api";
 import type { Result } from "../../api";
 import { loadChanges } from "../../api-changes";
 import { AGENT_MESSAGE_BYTES_MAX, failureCopy, receiptState, sendAgentMessage, stopTeamAgent, stopTeammate } from "../../api-projects";
@@ -13,6 +13,7 @@ import {
   graphLive, graphSummary, layoutCards, layoutGraph, namedAccounts, nodeActions, nodeDetail, nodeStatus, panView, questionCount,
   receiptTicks, tipPlace, viewKey, waitingOnOwner, wheelZoom, zoomView, type Link, type PlacedCard, type Size, type View,
 } from "./graph";
+import { openAllHint, wallPages, type PerWindow } from "../terminals/pages";
 import { AgentSide } from "./agent-instructions";
 import { NodeMessages } from "./agent-messages";
 import "./team-graph.css";
@@ -125,6 +126,16 @@ type Acting =
 
 type Receipted = Awaited<ReturnType<typeof stopTeamAgent>>;
 
+/** The note Open all terminals leaves: none once the windows opened, else why not.
+ * Input: the bridge's answer. Output: the note, or null. */
+export function wallNote(result: Awaited<ReturnType<typeof openTerminalWindows>>): string | null {
+  if (result.kind === "ok") return null;
+  if (result.kind === "not_ready") return "Not ready yet: terminal windows aren't in this build.";
+  return result.code === "terminal_windows_full"
+    ? "Terminal windows are full: at most 8 open at once. Close some, or pick 9 terminals per window in Coordination."
+    : `Couldn't open the terminal windows. ${result.message}`;
+}
+
 /** The note an owner action leaves: none once the engine applied it, else why it did not.
  * Inputs: the engine's answer and what the action was, for a build without it. Output: the
  * note, or null when it applied. */
@@ -209,11 +220,14 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
  * all. Activating a card opens its terminal in the one panel beside the graph, replacing the
  * agent shown there; its menu sends a message, stops it, or opens its changes to merge. An
  * agent opened from elsewhere shows in that panel even while the graph loads, fails or is empty,
- * and keeps its terminal and draft when the graph then draws it.
- * Inputs: the project id, the agent whose terminal is open and the open action, and optional
- * harness and account name lookups. Output: the graph section. */
-export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
-  projectId: string; open: GraphNode | null; onOpen: (node: GraphNode | null) => void;
+ * and keeps its terminal and draft when the graph then draws it. Open all terminals opens the
+ * terminal wall windows, perWindow terminals each; once clicked, a team that needs more or
+ * fewer windows opens or closes them while any stays open.
+ * Inputs: the project id and name, the terminals per window, the agent whose terminal is open
+ * and the open action, and optional harness and account name lookups. Output: the graph
+ * section. */
+export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open, onOpen, harness, account }: {
+  projectId: string; name?: string; perWindow?: PerWindow; open: GraphNode | null; onOpen: (node: GraphNode | null) => void;
   harness?: (id: string) => string; account?: (id: string) => string;
 }) {
   const [read, reload] = useTeamGraph(projectId);
@@ -240,6 +254,11 @@ export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
     setSendNote(null);
     setNote(null);
   }, [projectId]);
+
+  async function openAll(windows: number) {
+    if (windows === 0) return;
+    setNote(wallNote(await openTerminalWindows(projectId, name, windows, true)));
+  }
 
   async function send() {
     if (acting?.kind !== "message" || busy) return;
@@ -332,6 +351,7 @@ export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
     <NodeMessages projectId={projectId} node={node} refresh={graph} />
   </AgentSide>;
   const team = graph?.kind === "ok" ? (account ? namedAccounts(graph.value, account) : graph.value) : null;
+  const walls = team === null ? null : wallPages(team.nodes, perWindow).length;
   const status: ReactNode = graph === undefined ? <Skeleton shape="card" />
     : graph.kind === "not_ready" ? <NotReady what="The team graph" compact />
     : graph.kind === "error" ? <LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />
@@ -367,6 +387,8 @@ export function TeamGraphView({ projectId, open, onOpen, harness, account }: {
       <span className="tg-summary" role="status">
         {graphSummary(team, layout.hidden)}{questions > 0 ? ` ${questions} ${questions === 1 ? "question" : "questions"} waiting.` : ""}
       </span>
+      <Button size="small" icon="square-terminal" className="tg-open-all" title={openAllHint(walls ?? 0, perWindow)} disabled={!walls}
+        onClick={() => void openAll(walls ?? 0)}>Open all terminals</Button>
     </div>
     {note && <Notice tone="warn" alert>
       <span className="grow">{displayText(note)}</span>

@@ -1119,10 +1119,11 @@ export function answerQuestion(id: string, message: number, text: string): Promi
 
 /** Opens a live view of one agent's terminal on a channel: the attach frame, the screen,
  * then live output. With a pane, the view is that one pane of the terminal's window, such as
- * a native teammate's. Inputs: the terminal name, the channel and the pane id, if any.
+ * a native teammate's. A wall window names its project, whose graph must show the terminal.
+ * Inputs: the terminal name, the channel, the pane id and the project id, if any.
  * Output: the view's serial once attached, which its detach names. */
-export function attachTerminal(agent: string, output: Channel<TerminalMessage>, pane: string | null = null): Promise<Result<number>> {
-  return call<number>("desktop_terminal_attach", { agent, pane, output });
+export function attachTerminal(agent: string, output: Channel<TerminalMessage>, pane: string | null = null, project: string | null = null): Promise<Result<number>> {
+  return call<number>("desktop_terminal_attach", { agent, pane, output, id: project });
 }
 
 /** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name and
@@ -1278,6 +1279,40 @@ export function setAskBeforeMerge(id: string, on: boolean): Promise<Result<Inten
  * the project id and the switch. Output: the engine receipt, not ready, or a plain error. */
 export function setReaskEmptyReply(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_reask_empty_reply", { id, on, generation: nextGeneration() });
+}
+
+/** Sets how many terminals Open all terminals puts in one terminal wall window. Inputs: the
+ * project id and the choice, 4, 6 or 9. Output: the engine receipt, not ready, or a plain
+ * error. */
+export function setTerminalsPerWindow(id: string, perWindow: 4 | 6 | 9): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_terminals_per_window", { id, perWindow, generation: nextGeneration() });
+}
+
+/** Reads how many terminals one terminal wall window holds; the wall windows may call it.
+ * Input: the project id. Output: 4, 6 or 9, not ready, or a plain error. */
+export function loadTerminalsPerWindow(id: string): Promise<Result<4 | 6 | 9>> {
+  return call<4 | 6 | 9>("desktop_terminals_per_window", { id });
+}
+
+/** Opens or updates the project's terminal wall windows: count windows titled with the
+ * project's name, closing any past the count. With focus they come to the front; without it
+ * nothing opens unless the project has one open already, and none closes. Inputs: the project id, its name,
+ * the window count and whether to focus them. Output: nothing, not ready, or a plain error. */
+export function openTerminalWindows(id: string, name: string, count: number, focus: boolean): Promise<Result<void>> {
+  return call<void>("desktop_open_terminal_windows", { id, name, count, focus });
+}
+
+/** Asks for the wall windows a wall window's growing team needs, from that wall window: the
+ * missing pages open beside it and none closes. Inputs: the project id and the window
+ * count. Output: nothing, not ready, or a plain error. */
+export function extendTerminalWindows(id: string, count: number): Promise<Result<void>> {
+  return call<void>("desktop_extend_terminal_windows", { id, count });
+}
+
+/** Closes a removed project's terminal wall windows. Input: the project id. Output:
+ * nothing, not ready, or a plain error. */
+export function closeProjectWalls(id: string): Promise<Result<void>> {
+  return call<void>("desktop_close_project_walls", { id });
 }
 
 /** Sets the most files one new top-level folder, a folder the owner's branch does not have,

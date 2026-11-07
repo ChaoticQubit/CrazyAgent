@@ -3,7 +3,7 @@ import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
 import { cancelResearch, failureCopy, loadResearchLog, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
-import type { GraphNode, IntentReceipt } from "../../engine-client";
+import type { GraphNode, IntentReceipt, TeamStatus } from "../../engine-client";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
@@ -82,7 +82,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const list = filter === "running" ? running : jobs;
   const accounts = data.assigned?.pool.members.length ?? 0;
   const team = data.team;
-  const teamValue = team.result?.kind === "ok" ? team.result.value : { agents: [], tasks: [] };
+  const teamValue: Pick<TeamStatus, "agents" | "tasks" | "terminals_per_window"> = team.result?.kind === "ok" ? team.result.value : { agents: [], tasks: [] };
   const teamCount = (shown: "running" | "all") => teamPanel(teamValue, [], (id) => id, shown, team.at).agents.length;
   const teamShown = teamPanel(teamValue, [], (id) => id, filter, team.at);
   const working = cardActivity(team.result, data.research).agents;
@@ -120,7 +120,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <QuestionsPanel projectId={data.id} onOpen={setTerminal} />
-    <TeamGraphView projectId={data.id} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)} />
+    <TeamGraphView projectId={data.id} perWindow={teamValue.terminals_per_window ?? 6} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)} />
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
     {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
     <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />

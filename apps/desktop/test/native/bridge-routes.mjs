@@ -216,8 +216,8 @@ function resolve(name, body, impls) {
  * `{ route }` or `{ skip }`; throws when a routed call does not match its type's impl block. */
 export function plan(command, impls = bridgeMethods()) {
   assert.ok(IMPL_TYPES.every((type) => impls?.get(type) instanceof Map), "plan reads the bridge's impl blocks");
-  const prefix = "main_window(&window)?;";
-  if (!command.body.startsWith(prefix)) return { skip: "no main-window check" };
+  const prefix = ["main_window(&window)?;", "terminal_window(&window)?;", "terminal_window_for(&window, &id)?;"].find((guard) => command.body.startsWith(guard));
+  if (prefix === undefined) return { skip: "no window check" };
   const args = command.params.filter((param) => param.name !== "window" && !/^State<'_, NativeState>$/.test(param.type));
   if (!command.params.some((param) => param.name === "window")) return { skip: "no window parameter" };
   if (args.some((param) => NATIVE_PARAM.test(param.type))) return { skip: "native parameter" };

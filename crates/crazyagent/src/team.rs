@@ -22,6 +22,7 @@ pub mod questions;
 pub mod runtime;
 pub mod screen_questions;
 pub mod tool;
+pub mod wall;
 
 pub use graph::{
     EdgeState, GraphEdge, GraphFacts, GraphNode, MessageEdge, NodeKind, OverlapEdge, TeamGraph,
@@ -462,6 +463,7 @@ pub const TEAMMATES_SHOWN_MAX: usize = 16;
 const _: () = assert!(TEAMMATES_SHOWN_MAX <= crate::terminal::PANES_LISTED_MAX);
 
 pub use caps::Caps;
+pub use wall::{TerminalsPerWindow, terminals_per_window};
 
 /// A project's token budget: the tokens its agents may use, the tokens they used since the
 /// owner set it or last started the team again, and whether reaching it stopped the team.
@@ -722,6 +724,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         files: u32,
     },
+    TerminalsPerWindow {
+        project_id: ProjectId,
+        per_window: TerminalsPerWindow,
+    },
     WakeAgent {
         project_id: ProjectId,
         agent: i64,
@@ -971,6 +977,7 @@ impl TeamAction {
             | Self::AgentBranches { .. }
             | Self::AskBeforeMerge { .. }
             | Self::ReaskEmptyReply { .. }
+            | Self::TerminalsPerWindow { .. }
             | Self::LiveMaster { .. }
             | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
@@ -1000,6 +1007,7 @@ impl TeamAction {
             | Self::AskBeforeMerge { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
+            | Self::TerminalsPerWindow { project_id, .. }
             | Self::MessageSettings { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
@@ -1461,6 +1469,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_reask_empty (
                 project TEXT PRIMARY KEY,
                 reask INTEGER NOT NULL CHECK(reask IN (0,1))
+            );
+            CREATE TABLE IF NOT EXISTS team_wall (
+                project TEXT PRIMARY KEY,
+                per_window INTEGER NOT NULL CHECK(per_window IN (4,6,9))
             );
             CREATE TABLE IF NOT EXISTS team_session_switches (
                 session TEXT PRIMARY KEY,
@@ -2430,6 +2442,10 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::TerminalsPerWindow { per_window, .. } => {
+            wall::store(tx, project, *per_window)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::NewFolderLimit { files, .. } => {
             tx.execute(
                 "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,?2)
@@ -3057,6 +3073,8 @@ pub struct TeamStatus {
     pub budget_reached: bool,
     #[serde(default)]
     pub spread_accounts: bool,
+    #[serde(default)]
+    pub terminals_per_window: TerminalsPerWindow,
     #[serde(default)]
     pub live_master: Option<bool>,
     #[serde(default)]
@@ -4339,6 +4357,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         budget_used: spend.map(|spend| spend.used),
         budget_reached: spend.is_some_and(|spend| spend.reached),
         spread_accounts: spread_accounts(connection, project)?,
+        terminals_per_window: terminals_per_window(connection, project)?,
         live_master,
         live_problem,
         settings_version: settings_version(connection, project)?,

@@ -1398,7 +1398,8 @@ impl OwnerServer {
             while let Some(result) = tasks.terminals.try_join_next() {
                 log_panic(&result, "owner_terminal_panicked");
             }
-            if tasks.terminals.len() >= crate::terminal::VIEWERS_MAX {
+            if tasks.terminals.len() >= crate::terminal::CONNECTIONS_MAX {
+                self.refuse_terminal(stream, auth, deadline, &mut tasks.refusals);
                 return;
             }
             let engine = self.engine.clone();
@@ -1497,6 +1498,33 @@ impl OwnerServer {
         assert!(refusals.len() <= REFUSALS_MAX);
     }
 
+    /// Answers a terminal view past `CONNECTIONS_MAX` with `terminal_viewers_full`, at most
+    /// `REFUSALS_MAX` refusals at once with the busy refusals; past that the connection is
+    /// closed and the closing is logged. Inputs: the stream, its handshake packet and
+    /// deadline, and the refusal tasks. Output: none.
+    fn refuse_terminal(
+        &self,
+        stream: UnixStream,
+        auth: [u8; 37],
+        deadline: Instant,
+        refusals: &mut tokio::task::JoinSet<()>,
+    ) {
+        while let Some(result) = refusals.try_join_next() {
+            log_panic(&result, "owner_refusal_panicked");
+        }
+        if refusals.len() >= REFUSALS_MAX {
+            eprintln!("owner_terminal_closed_full");
+            return;
+        }
+        refusals.spawn(terminal::refuse(
+            stream,
+            auth,
+            self.authority.clone(),
+            deadline,
+        ));
+        assert!(refusals.len() <= REFUSALS_MAX);
+    }
+
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
         if let Ok(root) = changes::engine_root(&self.authority) {
             crate::ide::fetch::on_engine_start(&root);
@@ -1572,7 +1600,7 @@ impl OwnerServer {
             assert!(handshakes.len() <= HANDSHAKES_MAX);
             assert!(tasks.refusals.len() <= REFUSALS_MAX);
             assert!(tasks.custody.len() <= 1);
-            assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
+            assert!(tasks.terminals.len() <= crate::terminal::CONNECTIONS_MAX);
             assert!(tasks.ides.len() <= crate::ide::bridge::CONNECTIONS_MAX);
         };
         drop(upkeep_stop);

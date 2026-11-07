@@ -1,4 +1,4 @@
-import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
+import { call, classifyFailure, closeProjectWalls, knownError, namedFailure, plainError, type Result } from "./api";
 import {
   allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
@@ -613,10 +613,14 @@ export function updateProjectSetup(id: string, setup: ProjectSetup, generation: 
   return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation });
 }
 
-/** Removes a project from CrazyAgent; its research stops and its folder stays on disk.
- * Inputs: project id and a generation. Output: the receipt. */
-export function removeProject(id: string, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_remove_project", { id, generation });
+/** Removes a project from CrazyAgent; its research stops and its folder stays on disk. Once
+ * the engine applied the removal, the project's terminal wall windows close; one that fails
+ * to close leaves the removal as it is. Inputs: project id and a generation. Output: the
+ * receipt. */
+export async function removeProject(id: string, generation: number): Promise<Result<IntentReceipt>> {
+  const result = await call<IntentReceipt>("desktop_remove_project", { id, generation });
+  if (result.kind === "ok" && receiptState(result.value).kind === "applied") await closeProjectWalls(id);
+  return result;
 }
 
 export const PAGES_MAX = 50;

@@ -22,6 +22,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::protocol::ProjectSpec;
     use crazyagent::sandbox_settings::SandboxSettings;
     use crazyagent::scheduling::ScheduleChange;
+    use crazyagent::team::TerminalsPerWindow;
     match command {
         "desktop_connect" => {
             let result: Result<_, BridgeError> = async { let mut bridge = lock(state).await?; bridge.connect().await }.await;
@@ -1194,6 +1195,34 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { read(state).await?.team_graph(&id).await }.await;
+            routed(result)
+        }
+        "desktop_team_terminals_per_window" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                per_window: TerminalsPerWindow,
+                generation: u64,
+            }
+            let Args { id, per_window, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_terminals_per_window(&id, per_window, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_terminals_per_window" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state).await?.terminals_per_window(&id).await }.await;
             routed(result)
         }
         "desktop_update_project_setup" => {

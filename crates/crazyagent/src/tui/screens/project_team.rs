@@ -736,6 +736,7 @@ impl TeamView {
             KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('R') => self.reask_empty_reply(),
             KeyCode::Char('F') => self.new_folder_limit(),
+            KeyCode::Char('W') => self.terminals_per_window(),
             KeyCode::Char('B') => self.background_at_end(),
             KeyCode::Char('G') => self.grace_time(),
             KeyCode::Char('c') => {
@@ -2045,6 +2046,33 @@ impl TeamView {
         })
     }
 
+    /// Moves "Terminals per window", how many terminals each terminal wall window holds,
+    /// to its next choice: 4, 6, 9 and back to 4. Output: the change to send, or Handled
+    /// with a notice while loading or saving.
+    fn terminals_per_window(&mut self) -> TeamReply {
+        use crate::team::TerminalsPerWindow::{Four, Nine, Six};
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let per_window = match status.terminals_per_window {
+            Four => Six,
+            Six => Nine,
+            Nine => Four,
+        };
+        self.changing = Some(format!(
+            "Open all terminals now puts {} terminals in each window.",
+            u8::from(per_window)
+        ));
+        TeamReply::Change(TeamAction::TerminalsPerWindow {
+            project_id: self.project.clone(),
+            per_window,
+        })
+    }
+
     /// Moves "New folder limit", the most files one new top-level folder may gain in a change
     /// set (DEC-107), to its next choice. Output: the change to send, or Handled with a
     /// notice while loading or saving.
@@ -2995,6 +3023,10 @@ impl TeamView {
                 format!("{} files", status.new_folder_files_max),
             ),
             setting(
+                "Terminals per window",
+                u8::from(status.terminals_per_window).to_string(),
+            ),
+            setting(
                 "Background commands",
                 background_words(status.background_at_end),
             ),
@@ -3346,6 +3378,7 @@ impl TeamView {
             ("g", "Ask before merge"),
             ("R", "Re-ask empty reply"),
             ("F", "New folder limit"),
+            ("W", "Terminals per window"),
             ("B", "Background commands"),
             ("G", "Grace time"),
             ("c", "Coordination"),
