@@ -17,6 +17,7 @@ use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, SessionId};
 use crate::tui::client::process::ProcessQuery;
+use crate::tui::client::questions::QuestionsQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::client::{Connection, OwnerEvent};
 use crate::tui::ctx::{Ctx, Load};
@@ -179,7 +180,11 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     connection.process(*query).unwrap();
                 }
                 Request::Questions(query)
-                    if *query == crate::tui::client::questions::QuestionsQuery::Counts =>
+                    if matches!(
+                        *query,
+                        crate::tui::client::questions::QuestionsQuery::Counts
+                            | crate::tui::client::questions::QuestionsQuery::List { .. }
+                    ) =>
                 {
                     connection.questions(*query).unwrap();
                 }
@@ -694,6 +699,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
+    shell.key(Key::ShiftRight);
     assert_eq!(
         shell.place(),
         Some(Place::Project {
@@ -710,6 +716,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
     leave_the_master_view(&mut shell, &notes, "Notes CLI");
     let shown = render(&mut shell, 80, 24);
     assert!(
@@ -723,6 +730,10 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             Request::Process(query) => matches!(
                 **query,
                 ProcessQuery::PendingImport { .. } | ProcessQuery::Uncommitted { .. }
+            ),
+            Request::Questions(query) => matches!(
+                **query,
+                QuestionsQuery::Counts | QuestionsQuery::List { .. }
             ),
             other => matches!(
                 other,
@@ -1142,6 +1153,7 @@ async fn the_first_message_opens_the_master_and_reaches_the_engine() {
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
     leave_the_master_view(&mut shell, &notes, "Notes CLI");
     let sent = pump(&mut shell, &mut connection).await;
     assert!(sent.contains(&"master"), "{sent:?}");
@@ -1310,6 +1322,7 @@ async fn conversation_with_a_settled_turn(
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    shell.key(Key::ShiftLeft);
     leave_the_master_view(&mut shell, &notes, "Notes CLI");
     pump(&mut shell, &mut connection).await;
     say(&mut shell, &mut connection, "Plan the first slice").await;
@@ -1332,6 +1345,7 @@ async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
     shell.key(Key::ShiftRight);
+    shell.key(Key::ShiftRight);
     pump(&mut shell, &mut connection).await;
     shell.key(Key::Enter);
     shell.key(Key::Down);
@@ -1344,6 +1358,7 @@ async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
     assert_eq!(open.as_ref(), Some(&first));
     assert_ne!(first.config_id, changed);
 
+    shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
@@ -1912,7 +1927,7 @@ async fn a_new_session_with_no_session_in_view_turns_the_live_switch_on() {
     pump(&mut shell, &mut connection).await;
     let shown = render(&mut shell, 100, 40);
     assert!(shown.contains("Main is assigned."), "{shown}");
-    for _ in 0..4 {
+    for _ in 0..5 {
         shell.key(Key::ShiftLeft);
     }
     leave_the_master_view(&mut shell, &notes, "Notes CLI");
@@ -1971,7 +1986,7 @@ async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_o
     shell.key(Key::Enter);
     shell.key(Key::Enter);
     pump(&mut shell, &mut connection).await;
-    for _ in 0..4 {
+    for _ in 0..5 {
         shell.key(Key::ShiftLeft);
     }
     leave_the_master_view(&mut shell, &notes, "Notes CLI");
@@ -1990,7 +2005,7 @@ async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_o
     let open = open.expect("the first message opened a master conversation");
     assert_eq!(open.phase, MasterSessionPhase::Configured);
 
-    for _ in 0..4 {
+    for _ in 0..5 {
         shell.key(Key::ShiftRight);
     }
     shell.key(Key::Char('x'));
@@ -2467,7 +2482,7 @@ async fn an_at_word_in_the_console_lists_the_project_files_through_the_engine() 
     pump(&mut shell, &mut connection).await;
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Main is assigned."), "{shown}");
-    for _ in 0..4 {
+    for _ in 0..5 {
         shell.key(Key::ShiftLeft);
     }
     leave_the_master_view(&mut shell, &notes, "Notes CLI");
@@ -4109,7 +4124,7 @@ async fn a_tui_team_setting_from_before_a_desktop_change_is_refused_and_the_desk
     );
     let shown = render(&mut shell, 120, 30);
     assert!(
-        shown.contains("These settings changed elsewhere."),
+        shown.contains("This changed in another window, so yours was not saved."),
         "{shown}"
     );
 
