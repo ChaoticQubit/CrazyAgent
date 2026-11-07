@@ -1,8 +1,8 @@
 use super::*;
 
-/// The pinned build's descriptors for every edited entry point, as shipped in its bundle
-/// (long preconditions cut short), with neighbors that must stay: Close Remote Connection
-/// and a command the build already keeps out of the palette.
+/// The pinned build's text at every edit, as shipped in its bundle (long preconditions and
+/// lists cut short), with neighbors that must stay: Close Remote Connection, a command the
+/// build already keeps out of the palette, and the Window node of the Settings contents.
 pub(crate) const SHIPPED: &str = concat!(
     r#"super({id:ib.REMOTE_ACTIONS_COMMAND_ID,category:e,title:H(18553,"Show Remote Menu"),f1:!0,keybinding:{weight:200,primary:2605}})"#,
     "\n",
@@ -35,6 +35,10 @@ pub(crate) const SHIPPED: &str = concat!(
     r#"super({id:"workbench.action.chat.upgradePlan",title:H(10647,"Upgrade to GitHub Copilot Pro"),category:H(10640,"Chat"),f1:!0,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
     "\n",
     r#"super({id:"workbench.action.chat.manageAdditionalSpend",title:H(10646,"Manage GitHub Copilot Budget"),category:H(10640,"Chat"),f1:!0,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
+    "\n",
+    r#"run:()=>{throw new Error('"Manage" can not be hidden')}})]}function gxt(s){return s.getBoolean(c$.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,0,!0)}function Nli(s,o){s.store(c$.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,o,0,0)}"#,
+    "\n",
+    r#"{id:"window",label:d(18304,null),settings:["window.*"],children:[{id:"window/newWindow",label:d(18283,null),settings:["window.*newwindow*"]}]},{id:"chat",label:d(18254,null),children:[{id:"chat/agent",label:d(18255,null),settings:["chat.agent.*"]}]}"#,
     "\n",
     r#"super({id:ib.CLOSE_REMOTE_COMMAND_ID,category:e,title:H(18550,"Close Remote Connection"),f1:!0,precondition:D.and(D.or(SC,mF),Jo.negate())})"#,
     "\n",
@@ -75,6 +79,10 @@ pub(crate) const HIDDEN: &str = concat!(
     r#"super({id:"workbench.action.chat.upgradePlan",title:H(10647,"Upgrade to GitHub Copilot Pro"),category:H(10640,"Chat"),f1:!1,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
     "\n",
     r#"super({id:"workbench.action.chat.manageAdditionalSpend",title:H(10646,"Manage GitHub Copilot Budget"),category:H(10640,"Chat"),f1:!1,precondition:D.has("config.chat.disableAIFeatures").negate()})"#,
+    "\n",
+    r#"run:()=>{throw new Error('"Manage" can not be hidden')}})]}function gxt(s){return!1&&s.getBoolean(c$.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,0,!0)}function Nli(s,o){s.store(c$.ACCOUNTS_VISIBILITY_PREFERENCE_KEY,o,0,0)}"#,
+    "\n",
+    r#"{id:"window",label:d(18304,null),settings:["window.*"],children:[{id:"window/newWindow",label:d(18283,null),settings:["window.*newwindow*"]}]},{id:"chat",label:d(18254,null),hide:!0,children:[{id:"chat/agent",label:d(18255,null),settings:["chat.agent.*"]}]}"#,
     "\n",
     r#"super({id:ib.CLOSE_REMOTE_COMMAND_ID,category:e,title:H(18550,"Close Remote Connection"),f1:!0,precondition:D.and(D.or(SC,mF),Jo.negate())})"#,
     "\n",

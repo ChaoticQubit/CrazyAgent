@@ -84,7 +84,6 @@ fn expected_locks() -> Value {
         "terminal.integrated.initialHint": false,
         "workbench.tips.enabled": false,
         "workbench.startupEditor": "none",
-        "workbench.activity.showAccounts": false,
         "workbench.welcomePage.extraAnnouncements": false,
         "workbench.welcomePage.walkthroughs.openOnInstall": false,
         "workbench.remoteIndicator.showExtensionRecommendations": false,
