@@ -99,7 +99,6 @@ enum Body {
         branch: Option<String>,
     },
     Note(String),
-    Relation(usize),
     Heading(&'static str),
     Blank,
     Edge(usize),
@@ -1737,8 +1736,8 @@ fn stem(glyphs: &Glyphs, last: bool) -> String {
     }
 }
 
-/// Adds the rows of agents that share one lead, each led by the label of the line from its
-/// lead, on the lead's stem, and followed by its detail row and the agents it leads in turn.
+/// Adds the rows of agents that share one lead, each followed by its detail row and the
+/// agents it leads in turn.
 /// A node already drawn is skipped, so a cycle in the parent links cannot loop. Inputs: the
 /// graph, glyphs, the agents, the indent their branches hang from, the row width, the drawn
 /// nodes and the rows. Output: none; rows are appended.
@@ -1761,13 +1760,6 @@ fn lead_rows(
             continue;
         }
         let last = index + 1 == members.len();
-        if let Some(pair) = relation_of(graph, &graph.nodes[*member]) {
-            out.push(TreeRow {
-                item: None,
-                prefix: format!("{indent}{}", stem(glyphs, false)),
-                body: Body::Relation(pair),
-            });
-        }
         out.push(TreeRow {
             item: Some(Item::Node(*member)),
             prefix: format!("{indent}{}", branch_glyph(glyphs, last)),
@@ -1836,17 +1828,28 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
     }
 }
 
-/// One tree row's text after its prefix. A master or agent row leads with its
-/// status glyph, then its label and status word; a task row leads with its
-/// status glyph, then the agent it went to and its title. The row is cut from
-/// the right with an ellipsis, so the glyph always shows. Inputs: the row, the
-/// graph and the context. Output: the line.
+/// One tree row's text after its prefix: a master or agent row's status glyph and label, the
+/// live action on the line from its lead, its status word and that line's standing relation;
+/// a task row's status glyph, the agent it went to and its title. Cut from the right with an
+/// ellipsis, so the glyph always shows. Inputs: the row, the graph and the context. Output:
+/// the line.
 fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
     let theme = &ctx.theme;
     let glyphs = ctx.glyphs;
     match &row.body {
         Body::Master(node) | Body::Agent(node) => {
             let node = &graph.nodes[*node];
+            let edge = relation_of(graph, node).map(|pair| &graph.relations[pair]);
+            let live = edge.filter(|edge| edge.live.is_some()).map(|edge| {
+                Span::styled(
+                    format!("  {} {}", glyphs.dot, edge_label(edge)),
+                    theme.style(Role::Accent),
+                )
+            });
+            let standing = edge
+                .filter(|edge| edge.live.is_none())
+                .map(|edge| Span::styled(format!("  {}", edge_label(edge)), theme.muted));
+            let mut spans = Vec::new();
             match node.status {
                 Some(status) => {
                     let kind = agent_status(status);
@@ -1854,20 +1857,23 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
                         .status_label
                         .clone()
                         .unwrap_or_else(|| status.label().to_owned());
-                    Line::from(vec![
-                        Span::styled(glyphs.status(kind), theme.style(kind.role())),
-                        Span::raw(format!(" {}", node.label)),
-                        Span::styled(format!("  {word}"), theme.style(kind.role())),
-                    ])
+                    spans.push(Span::styled(glyphs.status(kind), theme.style(kind.role())));
+                    spans.push(Span::raw(format!(" {}", node.label)));
+                    spans.extend(live);
+                    spans.push(Span::styled(format!("  {word}"), theme.style(kind.role())));
                 }
-                None => match &node.status_label {
-                    Some(word) => Line::from(vec![
-                        Span::raw(node.label.clone()),
-                        Span::styled(format!("  {word}"), theme.muted),
-                    ]),
-                    None => Line::raw(node.label.clone()),
-                },
+                None => {
+                    spans.push(Span::raw(node.label.clone()));
+                    spans.extend(live);
+                    spans.extend(
+                        node.status_label
+                            .as_ref()
+                            .map(|word| Span::styled(format!("  {word}"), theme.muted)),
+                    );
+                }
             }
+            spans.extend(standing);
+            Line::from(spans)
         }
         Body::Detail { account, branch } => {
             let account = account.as_ref().map(|account| {
@@ -1887,18 +1893,6 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
             )
         }
         Body::Note(text) => styled(text.clone(), Role::Muted, theme),
-        Body::Relation(pair) => {
-            let edge = &graph.relations[*pair];
-            if edge.live.is_some() {
-                styled(
-                    format!("{} {}", glyphs.dot, edge_label(edge)),
-                    Role::Accent,
-                    theme,
-                )
-            } else {
-                styled(edge_label(edge), Role::Muted, theme)
-            }
-        }
         Body::Heading(text) => styled(*text, Role::Muted, theme),
         Body::Blank => Line::default(),
         Body::Edge(edge) => {
