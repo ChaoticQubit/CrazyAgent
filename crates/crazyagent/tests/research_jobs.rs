@@ -527,3 +527,65 @@ fn a_run_start_and_end_are_recorded_in_the_project_activity() {
         ]
     );
 }
+
+/// A run the queue takes back for another attempt records no stop, and a run parked until
+/// its project has a pool says it waits for one, so the activity never reads a retry as
+/// stopped or leaves a start with no end (F3).
+#[test]
+fn a_requeued_run_records_no_stop_and_a_parked_run_says_it_waits_for_a_pool() {
+    use crazyagent::activity::{self, ActivityKind};
+    let (_temp, path) = store();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    activity::initialize(&db).unwrap();
+    let jobs = ResearchJobs::open(&path).unwrap();
+    for kind in ["market_research", "design_research"] {
+        jobs.enqueue("project-a", kind, "codex", true).unwrap();
+    }
+    let first = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    assert_eq!(
+        jobs.fail(&first, "harness_unavailable", 2).unwrap(),
+        ResearchStatus::Queued
+    );
+    let again = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    assert_eq!(again.id, first.id);
+    jobs.finish(&again, "context/research/market_research.md")
+        .unwrap();
+    let parked = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    assert_eq!(jobs.needs_pool(&parked).unwrap(), ResearchStatus::NeedsPool);
+
+    let project = crazyagent::protocol::ProjectId::new("project-a").unwrap();
+    let seen: Vec<(ActivityKind, String)> = activity::list(&db, &project, 50)
+        .unwrap()
+        .into_iter()
+        .map(|item| (item.kind, item.text))
+        .collect();
+
+    let research = |kind: ActivityKind, text: &str| (kind, text.to_owned());
+    assert_eq!(
+        seen,
+        vec![
+            research(
+                ActivityKind::ResearchStopped,
+                "Research waiting for a pool: Design research"
+            ),
+            research(
+                ActivityKind::ResearchStarted,
+                "Research started: Design research"
+            ),
+            research(
+                ActivityKind::ResearchSaved,
+                "Research saved: Market research"
+            ),
+            research(
+                ActivityKind::ResearchStarted,
+                "Research started: Market research"
+            ),
+            research(
+                ActivityKind::ResearchStarted,
+                "Research started: Market research"
+            ),
+        ]
+    );
+}

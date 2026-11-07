@@ -417,3 +417,163 @@ fn a_read_says_when_older_events_were_left_out_by_the_limit_or_the_byte_bound() 
     assert!(cut.more, "the byte bound left the rest out");
     assert_eq!(cut.items, list(&db, &project(), LIST_MAX).unwrap());
 }
+
+/// Every writer's text, goal and actor go through the change set subject's scrub (F1): a
+/// character a reader cannot see is shown as an escape and an absolute local path is cut
+/// to its last component, so neither reaches a row as written.
+#[test]
+fn record_shows_hidden_characters_and_cuts_local_paths_in_text_goal_and_actor() {
+    let (_folder, db) = db();
+    record(
+        &db,
+        &project(),
+        &NewActivity {
+            kind: ActivityKind::Phase,
+            actor: "Ada\u{200b}",
+            agent: None,
+            goal: Some("Ship /Users/ada/private/goal.md\u{202e}"),
+            text: "Read /Users/ada/.ssh/id_rsa and ~/notes/plan.md\u{2066} twice",
+            change_set: None,
+        },
+        1_000,
+    )
+    .unwrap();
+    let item = &list(&db, &project(), 1).unwrap()[0];
+    for shown in [
+        item.actor.as_str(),
+        item.goal.as_deref().unwrap_or_default(),
+        item.text.as_str(),
+    ] {
+        assert!(!crate::memory::hidden_text(shown), "{shown:?}");
+        assert!(
+            !shown.contains("/Users/") && !shown.contains("~/"),
+            "{shown:?}"
+        );
+    }
+    assert_eq!(item.text, "Read id_rsa and plan.md\\u2066 twice");
+    assert_eq!(item.actor, "Ada\\u200b");
+    assert_eq!(item.goal.as_deref(), Some("Ship goal.md\\u202e"));
+}
+
+/// A team agent is named the way the team list names it (F2): its kept persona and handle,
+/// the persona alone before its first job, its role number only without a kept name. A
+/// backfill after the agent's name changed adds no second row for an event it recorded.
+#[test]
+fn an_agent_is_named_by_its_kept_persona_and_a_renamed_agent_is_not_backfilled_twice() {
+    let (_folder, db) = db();
+    let ada = agent(&db, "sub");
+    let bo = agent(&db, "teammate");
+    let plain = agent(&db, "sub");
+    let lead = agent(&db, "master");
+    db.execute(
+        "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,?2,'Ada','login-fix'),(?3,?2,'Bo',NULL)",
+        params![ada, PROJECT, bo],
+    )
+    .unwrap();
+    assert_eq!(agent_actor(&db, ada).unwrap(), "Ada (@login-fix)");
+    assert_eq!(agent_actor(&db, bo).unwrap(), "Bo");
+    assert_eq!(
+        agent_actor(&db, plain).unwrap(),
+        format!("Sub-agent {plain}")
+    );
+    assert_eq!(agent_actor(&db, lead).unwrap(), "Master");
+    let unit = work(&db, ada, "Ship the login page", "active", 500);
+    db.execute(
+        "INSERT INTO coord_audit(project,work,by_kind,by_agent,action,from_version,to_version,at) VALUES (?1,?2,'agent',?3,'start',1,2,500)",
+        params![PROJECT, unit, ada],
+    )
+    .unwrap();
+    note_audit(&db, &project(), unit, ("agent", Some(ada)), "start", 500);
+    db.execute("UPDATE team_names SET persona='Cy' WHERE agent=?1", [ada])
+        .unwrap();
+    db.execute("DELETE FROM project_activity_backfill", [])
+        .unwrap();
+    assert_eq!(backfill(&db, &project()).unwrap(), 0);
+    let started: Vec<String> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == ActivityKind::WorkStarted)
+        .map(|item| item.actor)
+        .collect();
+    assert_eq!(started, vec!["Ada (@login-fix)".to_owned()]);
+}
+
+/// A research run the queue took back for another attempt is backfilled as started only,
+/// never as stopped; a cancelled run still stops (F3).
+#[test]
+fn backfill_records_a_requeued_run_as_started_only() {
+    let (_folder, db) = db();
+    for (kind, status, started, finished) in [
+        ("retry", "queued", 300, 350),
+        ("gone", "cancelled", 400, 450),
+    ] {
+        db.execute(
+            "INSERT INTO research_jobs(project,kind,harness,tools,status,created_ms,started_ms,finished_ms) VALUES (?1,?2,'codex',1,?3,1,?4,?5)",
+            params![PROJECT, kind, status, started, finished],
+        )
+        .unwrap();
+    }
+    db.execute("DELETE FROM project_activity_backfill", [])
+        .unwrap();
+    backfill(&db, &project()).unwrap();
+    let seen: Vec<(ActivityKind, i64)> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .map(|item| (item.kind, item.at_ms))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (ActivityKind::ResearchStopped, 450),
+            (ActivityKind::ResearchStarted, 400),
+            (ActivityKind::ResearchStarted, 300),
+        ]
+    );
+}
+
+/// The store keeps a project's newest `KEPT_PER_PROJECT_MAX` events with its Created event
+/// (F4): past the bound the oldest other events go first, and Created, which never churns,
+/// stays.
+#[test]
+fn the_store_keeps_its_bound_with_the_created_event_and_drops_the_oldest_others() {
+    let (_folder, db) = db();
+    note_created(&db, &project(), "Harbor Notes", 0);
+    let tx = db.unchecked_transaction().unwrap();
+    {
+        let mut insert = tx
+            .prepare(
+                "INSERT INTO project_activity(project,at_ms,kind,actor,text) VALUES (?1,?2,'phase','Master',?3)",
+            )
+            .unwrap();
+        for at in 1..KEPT_PER_PROJECT_MAX {
+            insert
+                .execute(params![PROJECT, at, format!("Event {at}")])
+                .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    for at in KEPT_PER_PROJECT_MAX..KEPT_PER_PROJECT_MAX + 5 {
+        let text = format!("Event {at}");
+        let item = NewActivity {
+            kind: ActivityKind::Phase,
+            actor: MASTER_ACTOR,
+            agent: None,
+            goal: None,
+            text: &text,
+            change_set: None,
+        };
+        record(&db, &project(), &item, at).unwrap();
+    }
+    let count = |filter: &str| -> i64 {
+        db.query_row(
+            &format!("SELECT COUNT(*) FROM project_activity WHERE project=?1 AND {filter}"),
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(count("1"), KEPT_PER_PROJECT_MAX);
+    assert_eq!(count("kind='created'"), 1);
+    assert_eq!(count("kind<>'created' AND at_ms <= 5"), 0);
+    assert_eq!(count("kind<>'created' AND at_ms = 6"), 1);
+}
