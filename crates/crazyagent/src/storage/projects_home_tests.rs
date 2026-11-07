@@ -71,7 +71,7 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
         folders: vec![web.clone(), api.clone()],
         agents: vec![4],
     };
-    let moved = std::cell::RefCell::new(Vec::<PathBuf>::new());
+    let moved = std::cell::RefCell::new(Vec::<std::path::PathBuf>::new());
     let record = |folder: &Path| -> Result<(), EngineError> {
         moved.borrow_mut().push(folder.to_path_buf());
         Ok(())
