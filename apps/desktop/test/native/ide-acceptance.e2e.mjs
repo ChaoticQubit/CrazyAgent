@@ -412,6 +412,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           commandCenter: document.querySelector(".command-center") !== null,
           remote: document.getElementById("status.host") !== null,
           chatParts: document.querySelectorAll(".interactive-session, .chat-widget, .inline-chat").length,
+          settingsEditors: [...document.querySelectorAll(".tabs-container .tab")].map((tab) => tab.getAttribute("aria-label") ?? tab.textContent).filter((name) => /settings\\.json/i.test(name)),
+          saveFailures: [...document.querySelectorAll(".notifications-toasts .notification-toast, .notifications-center .notification-list-item")].map((item) => item.innerText).filter((text) => /failed to save|unable to write|EPERM/i.test(text)),
         }))()`);
         assert.deepEqual(shown.welcome, [], "no Welcome or walkthrough editor opens on a cold start");
         assert.equal(shown.accounts, 0, "no Accounts entry in the activity bar");
@@ -424,6 +426,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           await keys.key("Escape");
           assert.deepEqual(listed.filter((label) => label.includes(query)), [], `the F1 palette offers no "${query}" command`);
         }
+        assert.deepEqual(shown.saveFailures, [], "no settings file fails to save on a cold start");
+        assert.deepEqual(shown.settingsEditors, [], "no settings.json editor opens on a cold start");
       });
 
       await t.test("the owner opens a project file, types and saves, and the edit is in the project folder", async () => {
