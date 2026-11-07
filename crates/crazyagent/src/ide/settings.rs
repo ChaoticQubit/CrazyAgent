@@ -229,7 +229,7 @@ fn machine() -> Map<String, Value> {
 fn application() -> Map<String, Value> {
     table([
         ("update.mode", json!("none")),
-        ("extensions.autoUpdate", json!(false)),
+        ("extensions.autoUpdate", json!("off")),
         ("extensions.autoCheckUpdates", json!(false)),
         ("task.allowAutomaticTasks", json!("off")),
     ])
