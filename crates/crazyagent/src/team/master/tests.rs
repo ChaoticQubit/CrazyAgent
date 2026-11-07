@@ -4539,3 +4539,64 @@ fn a_reply_turn_master_remembers_and_the_project_memory_page_lists_it() {
     );
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }
+
+/// `log_activity` (OS-5) writes one row of the project activity with the goal the caller
+/// gave: a sub-agent's phase under its team label and the master's test run as Master.
+#[cfg(target_os = "macos")]
+#[test]
+fn log_activity_writes_one_row_with_its_goal_under_the_caller() {
+    let mut fixture = Fixture::new();
+    let agent = named_sub(&fixture, "api-fix", "working");
+    let label = crate::activity::agent_actor(&fixture.connection, agent).unwrap();
+    let phase =
+        json!({"goal": "Build the service", "text": "Started building the API", "kind": "phase"});
+    assert!(
+        matches!(tool::live_call("log_activity", Some(&phase)), Some(Ok(_))),
+        "log_activity is a team tool"
+    );
+    assert_eq!(
+        as_sub(&mut fixture, agent, "log_activity", phase),
+        ("Logged.".to_owned(), false)
+    );
+    let test_run = json!({"goal": "Build the service", "text": "Ran the API tests: 12 passed", "kind": "test"});
+    assert_eq!(
+        as_master(&mut fixture, "log_activity", test_run),
+        ("Logged.".to_owned(), false)
+    );
+    let project = ProjectId::new(PROJECT).unwrap();
+    let items = crate::activity::list(&fixture.connection, &project, 10).unwrap();
+    let logged: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                crate::activity::ActivityKind::Phase | crate::activity::ActivityKind::Test
+            )
+        })
+        .map(|item| {
+            (
+                item.kind,
+                item.actor.as_str(),
+                item.goal.as_deref(),
+                item.text.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        logged,
+        vec![
+            (
+                crate::activity::ActivityKind::Test,
+                "Master",
+                Some("Build the service"),
+                "Ran the API tests: 12 passed",
+            ),
+            (
+                crate::activity::ActivityKind::Phase,
+                label.as_str(),
+                Some("Build the service"),
+                "Started building the API",
+            ),
+        ]
+    );
+}
