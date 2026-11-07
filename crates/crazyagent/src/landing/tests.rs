@@ -6585,19 +6585,14 @@ fn files_an_instruction_file_imports_or_links_to_are_marked() {
     );
 }
 
-/// Gives a case the team and activity tables of the engine database and the project the
-/// access level and master landing choice named. Inputs: the case, the access and the
-/// choice.
+/// Gives the project the access level and master landing choice named, in a case whose
+/// master is at work, so the engine's tables are there. Inputs: the case, the access and
+/// the choice.
 fn master_may_land(
     case: &Case,
     access: crate::sandbox::policy::AgentAccess,
     lands: crate::team::MasterLands,
 ) {
-    crate::team::initialize(&case.db).unwrap();
-    case.db
-        .execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
-        .unwrap();
-    crate::activity::initialize(&case.db).unwrap();
     let policy = crate::sandbox::policy::AgentPolicy {
         access,
         ..crate::sandbox::policy::AgentPolicy::default()
@@ -6606,15 +6601,10 @@ fn master_may_land(
     crate::team::set_master_lands(&case.db, &case.workspace.project, lands).unwrap();
 }
 
-/// Adds the project's master with its own linked detached worktree of the owner repository,
-/// its turn start recorded. Input: the case. Output: the master's workspace.
+/// Adds the project's master on the worktree the engine leases it, its turn start
+/// recorded. Input: the case. Output: the master's workspace.
 fn master_at_work(case: &Case) -> Workspace {
-    let mut master = numbered_agent(case, 9);
-    master.agent = ChangeAgent {
-        kind: AgentKind::Master,
-        id: "session-1".into(),
-        label: "Master".into(),
-    };
+    let master = master_agent(case);
     record_worktree_start(
         &case.db,
         &master.repository,
@@ -6654,7 +6644,6 @@ fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_mast
     use crate::activity::ActivityKind;
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
-    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
     let sub = case.turn(TurnOutcome::Succeeded).unwrap();
@@ -6672,6 +6661,7 @@ fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_mast
     write(&other.worktree.join("NOTES"), "unrelated\n");
     let unrelated = turn_of(&case, &other, "Write notes");
     let master = master_at_work(&case);
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
     let sub_head = case.view(&sub).head;
     let resolved = "one\ntwo\nthree\nfour from the owner\nfour from the agent\n";
     let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
@@ -6733,8 +6723,8 @@ fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_mast
 fn a_master_set_that_conflicts_with_main_lands_nothing() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
-    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
     let master = master_at_work(&case);
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
     write(
         &master.worktree.join("README"),
         "one\ntwo\nthree\nmaster four\n",
@@ -6762,8 +6752,8 @@ fn a_master_set_waits_for_the_owner_under_waits_or_below_full_access() {
     use crate::sandbox::policy::AgentAccess;
     use crate::team::MasterLands;
     let case = Case::new();
-    master_may_land(&case, AgentAccess::Full, MasterLands::Waits);
     let master = master_at_work(&case);
+    master_may_land(&case, AgentAccess::Full, MasterLands::Waits);
     write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
     let fix = turn_of(&case, &master, "Add four");
     let tip = case.tip();

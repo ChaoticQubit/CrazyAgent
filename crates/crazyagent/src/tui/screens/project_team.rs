@@ -3017,15 +3017,18 @@ impl TeamView {
                 "Ask before merge",
                 if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
             ),
+        ];
+        let master_lands = status.master_lands.map(|lands| {
             setting(
                 "When the master resolves conflicts",
-                match status.master_lands {
-                    Some(MasterLands::Merges) => "Merge into main itself",
-                    Some(MasterLands::Waits) => "Wait for my Accept",
-                    None => "Only at Full access",
+                match lands {
+                    MasterLands::Merges => "Merge into main itself",
+                    MasterLands::Waits => "Wait for my Accept",
                 }
                 .to_owned(),
-            ),
+            )
+        });
+        let later = [
             setting(
                 "Re-ask empty reply",
                 if status.reask_empty_reply {
@@ -3046,7 +3049,7 @@ impl TeamView {
         ];
         let mut rows = Vec::new();
         let mut right = Row::default();
-        for item in settings {
+        for item in settings.into_iter().chain(master_lands).chain(later) {
             let used = match (left.width(), right.width()) {
                 (0, 0) => 0,
                 (0, taken) | (taken, 0) => taken + 2,
