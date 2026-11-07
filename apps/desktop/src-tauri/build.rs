@@ -78,6 +78,8 @@ fn main() {
         "desktop_team_terminals_per_window",
         "desktop_terminals_per_window",
         "desktop_open_terminal_windows",
+        "desktop_extend_terminal_windows",
+        "desktop_close_project_walls",
         "desktop_update_project_setup",
         "desktop_remove_project",
         "desktop_cancel_research",

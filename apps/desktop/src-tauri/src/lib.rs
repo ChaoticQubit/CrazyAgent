@@ -83,6 +83,21 @@ fn terminal_window(window: &WebviewWindow) -> Result<(), BridgeError> {
     Ok(())
 }
 
+/// Admits the main window to one project's terminal, graph, stop and setting commands, and a
+/// terminal wall window only for the project its label was made for; any other window or
+/// project gets `window_denied`. Takes the calling window and the project id. Returns unit or
+/// the refusal.
+fn terminal_window_for(window: &WebviewWindow, id: &str) -> Result<(), BridgeError> {
+    terminal_window(window)?;
+    let label = window.label();
+    let admitted = label == "main"
+        || ProjectId::new(id).is_ok_and(|project| bridge::terminal::window_admits(label, &project));
+    if !admitted {
+        return Err(engine_failure("window_denied"));
+    }
+    Ok(())
+}
+
 async fn lock(state: &NativeState) -> Result<RwLockWriteGuard<'_, NativeBridge>, BridgeError> {
     state.0.enter().await
 }
@@ -1282,7 +1297,7 @@ async fn desktop_team_stop_agent(
     agent: i64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    terminal_window(&window)?;
+    terminal_window_for(&window, &id)?;
     lock(&state)
         .await?
         .team_stop_agent(&id, agent, generation)
@@ -1314,7 +1329,7 @@ async fn desktop_team_stop_teammate(
     pane: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    terminal_window(&window)?;
+    terminal_window_for(&window, &id)?;
     lock(&state)
         .await?
         .team_stop_teammate(&id, agent, pane, generation)
@@ -1450,7 +1465,7 @@ async fn desktop_team_graph(
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<TeamGraph, BridgeError> {
-    terminal_window(&window)?;
+    terminal_window_for(&window, &id)?;
     read(&state).await?.team_graph(&id).await
 }
 
@@ -1461,11 +1476,20 @@ async fn desktop_terminal_attach(
     terminals: State<'_, TerminalState>,
     agent: String,
     pane: Option<String>,
+    id: Option<String>,
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, BridgeError> {
     terminal_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
     let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
+    if window.label() != "main" {
+        let id = id.ok_or_else(|| engine_failure("window_denied"))?;
+        terminal_window_for(&window, &id)?;
+        let graph = read(&state).await?.team_graph(&id).await?;
+        if !bridge::terminal::graph_shows(&graph, &agent) {
+            return Err(engine_failure("window_denied"));
+        }
+    }
     let room = terminals.0.room(window.label(), &agent)?;
     let session = lock(&state).await?.open_terminal(agent, pane).await?;
     room.attach(session, output)
@@ -1554,7 +1578,7 @@ async fn desktop_terminals_per_window(
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<TerminalsPerWindow, BridgeError> {
-    terminal_window(&window)?;
+    terminal_window_for(&window, &id)?;
     read(&state).await?.terminals_per_window(&id).await
 }
 
@@ -1570,6 +1594,55 @@ async fn desktop_open_terminal_windows(
     main_window(&window)?;
     let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
     open_walls(&app, &project, &wall_name(&name), count, focus)
+}
+
+/// Lets a terminal wall window open its project's next windows as the team grows, titled
+/// with the project name its own title shows; it never closes one. Main and other projects'
+/// windows get `window_denied`. Inputs: the calling wall window, the app, the project id and
+/// the windows its team needs. Output: unit or the `open_walls` failure.
+#[tauri::command]
+async fn desktop_extend_terminal_windows(
+    window: WebviewWindow,
+    app: AppHandle,
+    id: String,
+    count: usize,
+) -> Result<(), BridgeError> {
+    terminal_window_for(&window, &id)?;
+    if window.label() == "main" {
+        return Err(engine_failure("window_denied"));
+    }
+    let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
+    let title = window
+        .title()
+        .map_err(|_| engine_failure("terminal_window_failed"))?;
+    let name = wall_name(&bridge::terminal::wall_title_name(&title));
+    open_walls(&app, &project, &name, count.max(1), false)
+}
+
+/// Closes one project's terminal wall windows once the main window removed the project.
+/// Inputs: the calling window, the app and the project id. Output: unit, `window_denied`
+/// from any window but main, or `invalid_project`.
+#[tauri::command]
+fn desktop_close_project_walls(
+    window: WebviewWindow,
+    app: AppHandle,
+    id: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
+    close_walls(&app, Some(&project));
+    Ok(())
+}
+
+/// Closes the terminal wall windows: every one, or only one project's. Inputs: the app and
+/// the project, if any. Output: none; a window that refuses to close stays open.
+fn close_walls(app: &AppHandle, project: Option<&ProjectId>) {
+    let open = app.webview_windows();
+    for label in bridge::terminal::walls_to_close(open.keys().map(String::as_str), project) {
+        if let Some(wall) = open.get(label) {
+            let _ = wall.close();
+        }
+    }
 }
 
 /// Whether a webview may load a URL: the app's own pages only, and the dev server in a
@@ -1602,13 +1675,13 @@ fn wall_name(name: &str) -> String {
 
 const WALL_NAME_CHARS_MAX: usize = 80;
 
-/// Opens one project's terminal wall windows: builds each of pages 1 to `count` not yet
-/// open, retitles the open ones and brings them forward when asked, and closes the
-/// project's windows past `count`. Without `focus` it changes nothing while none of the
-/// project's wall windows is open, so a growing team only extends a wall the owner opened.
-/// Inputs: the app, the project, its shown name, the page count and whether to focus.
-/// Output: unit, `terminal_windows_full` past WINDOWS_MAX windows in all, or
-/// `terminal_window_failed`.
+/// Opens one project's terminal wall windows, one call at a time: builds each of pages 1 to
+/// `count` not yet open, retitles the open ones and brings them forward when asked, and
+/// closes the project's windows past `count`. Without `focus` a wall is growing: it changes
+/// nothing while none of the project's wall windows is open and never closes one, so a
+/// growing team only extends a wall the owner opened. Inputs: the app, the project, its
+/// shown name, the page count and whether to focus. Output: unit, `terminal_windows_full`
+/// past WINDOWS_MAX windows in all, or `terminal_window_failed`.
 fn open_walls(
     app: &AppHandle,
     project: &ProjectId,
@@ -1616,12 +1689,22 @@ fn open_walls(
     count: usize,
     focus: bool,
 ) -> Result<(), BridgeError> {
+    static WALLS_OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _opening = WALLS_OPENING
+        .lock()
+        .map_err(|_| engine_failure("terminal_window_failed"))?;
     let prefix = bridge::terminal::wall_prefix(project);
     let open = app.webview_windows();
-    let mine = open
+    let pages: Vec<usize> = open
         .keys()
-        .filter(|label| label.starts_with(&prefix))
-        .count();
+        .filter_map(|label| label.strip_prefix(&prefix)?.parse().ok())
+        .collect();
+    let mine = pages.len();
+    let count = if focus {
+        count
+    } else {
+        pages.iter().copied().fold(count, usize::max)
+    };
     let others = open
         .keys()
         .filter(|label| {
@@ -3783,6 +3866,8 @@ pub fn run() {
             desktop_team_terminals_per_window,
             desktop_terminals_per_window,
             desktop_open_terminal_windows,
+            desktop_extend_terminal_windows,
+            desktop_close_project_walls,
             desktop_update_project_setup,
             desktop_remove_project,
             desktop_cancel_research,
@@ -3961,7 +4046,7 @@ pub fn run() {
             desktop_link_cli,
         ])
         .setup(|app| {
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("CrazyAgent")
                 .inner_size(1180.0, 800.0)
                 .min_inner_size(760.0, 560.0)
@@ -3975,6 +4060,12 @@ pub fn run() {
                     }
                 })
                 .build()?;
+            let handle = app.handle().clone();
+            main.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    close_walls(&handle, None);
+                }
+            });
             let handle = app.handle().clone();
             app.notification()
                 .on_action(move |action| bridge::notify::performed(&handle, action))?;

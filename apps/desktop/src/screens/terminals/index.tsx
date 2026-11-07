@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { loadTerminalsPerWindow, nextGeneration, type Result } from "../../api";
+import { extendTerminalWindows, loadTerminalsPerWindow, nextGeneration, type Result } from "../../api";
 import { stopTeamAgent, stopTeammate } from "../../api-projects";
 import type { GraphNode } from "../../engine-client";
 import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
-import { actionNote, panelKey, useTeamGraph } from "../team";
+import { actionNote, panelKey, useTeamGraph, wallNote } from "../team";
 import { nodeActions, nodeLine } from "../team/graph";
 import { TerminalPanel } from "../team/terminal-panel";
 import { wallPages, type PerWindow } from "./pages";
@@ -14,9 +14,9 @@ type Stopping = { node: GraphNode; stop: NonNullable<ReturnType<typeof nodeActio
 
 /** One terminal in a wall window: its agent's line, Message, which moves the cursor to the
  * message box under the terminal, Stop for an agent that can be stopped, and the terminal
- * itself, typed into directly or through the box. Inputs: the node, whether it can be
- * stopped and the stop action. Output: the tile. */
-function WallTile({ node, stoppable, onStop }: { node: GraphNode; stoppable: boolean; onStop: () => void }) {
+ * itself, typed into directly or through the box, attached for its project. Inputs: the
+ * project id, the node, whether it can be stopped and the stop action. Output: the tile. */
+function WallTile({ projectId, node, stoppable, onStop }: { projectId: string; node: GraphNode; stoppable: boolean; onStop: () => void }) {
   const tile = useRef<HTMLDivElement>(null);
   const label = displayText(node.label);
   return <div className="tw-tile" ref={tile}>
@@ -26,17 +26,17 @@ function WallTile({ node, stoppable, onStop }: { node: GraphNode; stoppable: boo
         onClick={() => tile.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus()} />
       {stoppable && <Button variant="quiet" size="small" icon="circle-stop" iconOnly={`Stop ${label}`} onClick={onStop} />}
     </div>
-    <TerminalPanel node={node} embedded input="both" />
+    <TerminalPanel node={node} projectId={projectId} embedded input="both" />
   </div>;
 }
 
 /** One terminal wall window's grid: its tiles, then a free slot for each place the window
- * still has, where the next new agent opens. Inputs: the tiles of this window, the whole
- * graph, the terminals per window and the stop action. Output: the grid. */
-export function WallGrid({ tiles, nodes, perWindow, onStop }: { tiles: GraphNode[]; nodes: GraphNode[]; perWindow: PerWindow; onStop: (node: GraphNode) => void }) {
+ * still has, where the next new agent opens. Inputs: the project id, the tiles of this
+ * window, the whole graph, the terminals per window and the stop action. Output: the grid. */
+export function WallGrid({ projectId, tiles, nodes, perWindow, onStop }: { projectId: string; tiles: GraphNode[]; nodes: GraphNode[]; perWindow: PerWindow; onStop: (node: GraphNode) => void }) {
   if (tiles.length > perWindow) throw new Error("a wall window holds at most its terminals per window");
   return <div className="tw-grid" data-per={perWindow}>
-    {tiles.map((node) => <WallTile key={panelKey(node)} node={node} stoppable={nodeActions(node, nodes).stop !== null} onStop={() => onStop(node)} />)}
+    {tiles.map((node) => <WallTile key={panelKey(node)} projectId={projectId} node={node} stoppable={nodeActions(node, nodes).stop !== null} onStop={() => onStop(node)} />)}
     {Array.from({ length: perWindow - tiles.length }, (_, index) => <div key={`free-${index}`} className="tw-free" role="note">
       <Icon name="square-terminal" size={18} />
       <span className="tw-free-title">Free slot</span>
@@ -47,8 +47,9 @@ export function WallGrid({ tiles, nodes, perWindow, onStop }: { tiles: GraphNode
 
 /** A terminal wall window of one project: its page of the team's terminals, the master
  * first, side by side, read again with the team graph. It reaches only the terminal, graph,
- * Stop and Terminals per window commands. Inputs: the project id and the window's page.
- * Output: the window's page. */
+ * Stop, Terminals per window and window growth commands, and asks for the windows a growing
+ * team needs itself, whatever the main window shows. Inputs: the project id and the window's
+ * page. Output: the window's page. */
 export function TerminalWall({ projectId, page }: { projectId: string; page: number }) {
   const [read, reload] = useTeamGraph(projectId);
   const graph = read.shown;
@@ -79,6 +80,16 @@ export function TerminalWall({ projectId, page }: { projectId: string; page: num
   const nodes = graph?.kind === "ok" ? graph.value.nodes : [];
   const perWindow = setting?.kind === "ok" ? setting.value : null;
   const pages = perWindow === null ? [] : wallPages(nodes, perWindow);
+  const extend = pages.length;
+  useEffect(() => {
+    if (extend === 0) return;
+    let current = true;
+    void extendTerminalWindows(projectId, pages.length).then((result) => {
+      const failed = wallNote(result);
+      if (current && failed !== null) setNote(failed);
+    });
+    return () => { current = false; };
+  }, [projectId, extend]);
   const tiles = pages[page - 1];
   const body = graph === undefined || setting === undefined ? <Skeleton shape="card" />
     : graph.kind === "not_ready" || setting.kind === "not_ready" ? <NotReady what="Terminal windows" compact />
@@ -87,7 +98,7 @@ export function TerminalWall({ projectId, page }: { projectId: string; page: num
     : perWindow === null || tiles === undefined ? <EmptyState icon="square-terminal" title="No terminals for this window" compact>
       The team has fewer terminals now. Close this window, or use Open all terminals on Agents.
     </EmptyState>
-    : <WallGrid tiles={tiles} nodes={nodes} perWindow={perWindow} onStop={(node) => {
+    : <WallGrid projectId={projectId} tiles={tiles} nodes={nodes} perWindow={perWindow} onStop={(node) => {
       const stop = nodeActions(node, nodes).stop;
       if (stop !== null) setStopping({ node, stop });
     }} />;

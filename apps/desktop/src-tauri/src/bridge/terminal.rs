@@ -72,30 +72,51 @@ pub fn wall_prefix(project: &ProjectId) -> String {
 /// Whether a window may act on one project: the main window on any project, a terminal wall
 /// window only on the project its label was made for. Takes the window label and the project.
 /// Returns the answer.
-pub fn window_admits(label: &str, _project: &ProjectId) -> bool {
-    window_label_valid(label)
+pub fn window_admits(label: &str, project: &ProjectId) -> bool {
+    label == "main" || (window_label_valid(label) && label.starts_with(&wall_prefix(project)))
 }
 
 /// The terminal wall windows to close among the open windows: every wall window, or only one
 /// project's. Takes the open window labels and the project, if any. Returns those labels in
 /// the order given.
 pub fn walls_to_close<'a>(
-    _labels: impl IntoIterator<Item = &'a str>,
-    _project: Option<&ProjectId>,
+    labels: impl IntoIterator<Item = &'a str>,
+    project: Option<&ProjectId>,
 ) -> Vec<&'a str> {
-    Vec::new()
+    let prefix = project.map(wall_prefix);
+    labels
+        .into_iter()
+        .filter(|label| *label != "main" && window_label_valid(label))
+        .filter(|label| {
+            prefix
+                .as_ref()
+                .is_none_or(|prefix| label.starts_with(prefix))
+        })
+        .collect()
 }
+
+const WALL_TITLE_SEPARATOR: &str = " \u{b7} Terminals ";
 
 /// The project name a wall window's title shows, for the windows a growing wall opens.
 /// Takes the title. Returns the name before " · Terminals ", or "Project" without one.
 pub fn wall_title_name(title: &str) -> String {
-    title.to_owned()
+    let name = title
+        .rsplit_once(WALL_TITLE_SEPARATOR)
+        .map_or("", |(name, _)| name.trim());
+    if name.is_empty() {
+        "Project".to_owned()
+    } else {
+        name.to_owned()
+    }
 }
 
 /// Whether a project's team graph shows a terminal, so a wall window attaches only to its own
 /// project's agents. Takes the graph and the terminal name. Returns the answer.
-pub fn graph_shows(_graph: &TeamGraph, _agent: &AgentId) -> bool {
-    true
+pub fn graph_shows(graph: &TeamGraph, agent: &AgentId) -> bool {
+    graph
+        .nodes
+        .iter()
+        .any(|node| node.terminal.as_ref() == Some(agent))
 }
 
 /// Checks a pane id the window sent for a native teammate's view, such as `%12`. Takes the

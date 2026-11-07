@@ -230,7 +230,6 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
   const [sendNote, setSendNote] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const walled = useRef(false);
 
   useEffect(() => {
     setMoved(null);
@@ -239,12 +238,10 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
     setDraft("");
     setSendNote(null);
     setNote(null);
-    walled.current = false;
   }, [projectId]);
 
   async function openAll(windows: number) {
     if (windows === 0) return;
-    walled.current = true;
     setNote(wallNote(await openTerminalWindows(projectId, name, windows, true)));
   }
 
@@ -340,13 +337,6 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
   </AgentSide>;
   const team = graph?.kind === "ok" ? (account ? namedAccounts(graph.value, account) : graph.value) : null;
   const walls = team === null ? null : wallPages(team.nodes, perWindow).length;
-  useEffect(() => {
-    if (walls === null || !walled.current) return;
-    void openTerminalWindows(projectId, name, walls, false).then((result) => {
-      const failed = wallNote(result);
-      if (failed !== null) setNote(failed);
-    });
-  }, [projectId, name, walls]);
   const status: ReactNode = graph === undefined ? <Skeleton shape="card" />
     : graph.kind === "not_ready" ? <NotReady what="The team graph" compact />
     : graph.kind === "error" ? <LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />
