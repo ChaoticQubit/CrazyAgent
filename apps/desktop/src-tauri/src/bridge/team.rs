@@ -440,8 +440,7 @@ impl NativeBridge {
     /// Reads how many terminals each of a project's terminal wall windows holds, the one
     /// team setting a wall window reads. Takes the project id. Returns the choice.
     pub async fn terminals_per_window(&self, id: &str) -> Result<TerminalsPerWindow, BridgeError> {
-        project(id)?;
-        Ok(TerminalsPerWindow::default())
+        Ok(self.team_status(id).await?.terminals_per_window)
     }
 
     /// Sets the most files one new top-level folder, a folder the owner's branch does not
