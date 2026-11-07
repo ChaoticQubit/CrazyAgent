@@ -124,7 +124,7 @@ const STEPS = ["Plan: cases listed", "Architecture done: payments go through one
 const PATHED = { kind: "ok", value: { project_id: "alpha", more: false, items: [
   ...STEPS.map((text, index) => item(10 + index, "phase", LONG_GOAL, text)),
   item(20, "task_finished", LONG_GOAL, "Juniper finished Calendar API"),
-  item(21, "phase", "Write the docs", "Writing: guides next"),
+  item(9, "phase", "Write the docs", "Writing: guides next"),
 ] } };
 
 test("in the real Overview column of a 1024 px window a long goal keeps a readable name and its phase path stays inside the panel", { timeout: 60_000 }, async () => {
