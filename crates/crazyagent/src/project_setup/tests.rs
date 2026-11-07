@@ -1,5 +1,4 @@
 use super::*;
-use crate::activity::ActivityKind;
 use crate::config::{EffectiveConfig, resolve_config_bytes};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Barrier};
@@ -569,10 +568,6 @@ fn two_claimers_cannot_both_claim_one_job() {
 fn claims_follow_pool_assignment_and_finish_records_the_report() {
     let root = tempfile::tempdir().unwrap();
     let mut connection = database(root.path());
-    connection
-        .execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
-        .unwrap();
-    crate::activity::initialize(&connection).unwrap();
     let config = config();
     {
         let tx = connection.unchecked_transaction().unwrap();
@@ -689,47 +684,6 @@ fn claims_follow_pool_assignment_and_finish_records_the_report() {
         )
         .unwrap();
     assert_eq!(stored, "needs_pool");
-    drop(tx);
-    let activity = |project: &str| -> Vec<(ActivityKind, i64, String, String)> {
-        crate::activity::list(
-            &connection,
-            &ProjectId::new(project).unwrap(),
-            crate::activity::LIST_MAX,
-        )
-        .unwrap()
-        .into_iter()
-        .map(|item| (item.kind, item.at_ms, item.actor, item.text))
-        .collect()
-    };
-    let research = |kind: ActivityKind, at: i64, text: &str| {
-        (kind, at, "Research".to_owned(), text.to_owned())
-    };
-    assert_eq!(
-        activity("assigned-project"),
-        vec![
-            research(
-                ActivityKind::ResearchStopped,
-                42,
-                "Research stopped: Tech stack research"
-            ),
-            research(
-                ActivityKind::ResearchSaved,
-                41,
-                "Research saved: Market research"
-            ),
-            research(
-                ActivityKind::ResearchStarted,
-                31,
-                "Research started: Tech stack research"
-            ),
-            research(
-                ActivityKind::ResearchStarted,
-                30,
-                "Research started: Market research"
-            ),
-        ]
-    );
-    assert_eq!(activity("unassigned-project"), Vec::new());
 }
 
 #[test]

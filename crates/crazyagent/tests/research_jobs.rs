@@ -462,3 +462,68 @@ fn a_run_whose_claim_stale_recovery_took_back_cannot_act_after_the_runner_claims
     jobs.finish(&live, "context/research/market.md").unwrap();
     assert_eq!(jobs.get(id).unwrap().unwrap().status, ResearchStatus::Done);
 }
+
+/// A research run's start and end, saved, failed or cancelled, is recorded in the
+/// project's activity when the queue is the engine database, each job named by its label.
+#[test]
+fn a_run_start_and_end_are_recorded_in_the_project_activity() {
+    use crazyagent::activity::{self, ActivityKind};
+    let (_temp, path) = store();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    activity::initialize(&db).unwrap();
+    let jobs = ResearchJobs::open(&path).unwrap();
+    for kind in ["market_research", "design_research", "tech_stack_research"] {
+        jobs.enqueue("project-a", kind, "codex", true).unwrap();
+    }
+    let saved = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    jobs.finish(&saved, "context/research/market_research.md")
+        .unwrap();
+    let failed = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    assert_eq!(
+        jobs.fail(&failed, "harness_unavailable", 1).unwrap(),
+        ResearchStatus::Failed
+    );
+    let cancelled = jobs.claim("project-a", "runner", 64).unwrap().unwrap();
+    assert!(jobs.request_cancel(cancelled.id).unwrap());
+    jobs.cancelled(&cancelled).unwrap();
+
+    let project = crazyagent::protocol::ProjectId::new("project-a").unwrap();
+    let seen: Vec<(ActivityKind, String, String)> = activity::list(&db, &project, 50)
+        .unwrap()
+        .into_iter()
+        .map(|item| (item.kind, item.actor, item.text))
+        .collect();
+
+    let research = |kind: ActivityKind, text: &str| (kind, "Research".to_owned(), text.to_owned());
+    assert_eq!(
+        seen,
+        vec![
+            research(
+                ActivityKind::ResearchStopped,
+                "Research stopped: Tech stack research"
+            ),
+            research(
+                ActivityKind::ResearchStarted,
+                "Research started: Tech stack research"
+            ),
+            research(
+                ActivityKind::ResearchStopped,
+                "Research stopped: Design research"
+            ),
+            research(
+                ActivityKind::ResearchStarted,
+                "Research started: Design research"
+            ),
+            research(
+                ActivityKind::ResearchSaved,
+                "Research saved: Market research"
+            ),
+            research(
+                ActivityKind::ResearchStarted,
+                "Research started: Market research"
+            ),
+        ]
+    );
+}
