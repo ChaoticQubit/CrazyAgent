@@ -1,11 +1,11 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { listAccounts } from "../../api";
+import { listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
 import { loadMetrics, loadUsage, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type MetricsBucket, type Tokens, type UsageReport } from "../../api-usage";
 import { useLoad, type Loaded } from "../../state";
-import { LoadError, NotReady, Panel, Segmented, Skeleton } from "../../ui";
+import { LoadError, NotReady, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { agentLabel, agoText, cacheShare, compactCount, headlineTokens, offsetMinutes, rangeStart, windowNow } from "../settings/usage";
 import { HARNESS_NAMES } from "../team/coordination";
@@ -22,7 +22,7 @@ const BARS_MAX = 64;
 
 export type MetricsRange = "today" | "7d" | "30d";
 
-export type MetricsBy = "agent" | "run" | "account" | "harness";
+export type MetricsBy = "project" | "agent" | "run" | "account" | "harness";
 
 /** The range switch's choices, shortest first. */
 export const METRIC_RANGES: { value: MetricsRange; label: string }[] = [
@@ -37,6 +37,8 @@ const BREAKDOWNS: { value: MetricsBy; label: string }[] = [
   { value: "account", label: "By account" },
   { value: "harness", label: "By harness" },
 ];
+
+const APP_BREAKDOWNS: { value: MetricsBy; label: string }[] = [{ value: "project", label: "By project" }, ...BREAKDOWNS];
 
 const RESULTS: Record<string, string> = {
   running: "Working",
@@ -57,10 +59,19 @@ export interface MetricsNames {
   accounts: Map<string, string>;
 }
 
-/** One breakdown row: its name, its tokens and the cells of the breakdown's own columns. */
+/** The app Metrics page's project filter: the engine's projects and the action that picks
+ * one, null for every project. */
+export interface MetricsFilter {
+  projects: { id: string; name: string }[];
+  onProject: (id: string | null) => void;
+}
+
+/** One breakdown row: its name, its project when the breakdown spans projects, its tokens and
+ * the cells of the breakdown's own columns. */
 interface BreakdownRow {
   key: string;
   name: string;
+  project?: string;
   tokens: Tokens;
   extra: string[];
 }
@@ -193,41 +204,74 @@ function Chart({ metrics, sinceMs, nowMs, offset, reread }: { metrics: Metrics; 
   </Panel>;
 }
 
-/** The breakdown's rows and own columns for one choice. Inputs: the choice, the reads, the
- * names and now. Output: the first column's head, the own columns' heads and the rows. */
-function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageReport, metrics: Metrics, adoption: Adoption | null, names: MetricsNames, nowMs: number): { head: string; extra: string[]; rows: BreakdownRow[] } {
-  const agent = (key: string) => names.agents.get(key) ?? agentLabel(key);
+/** The breakdown's rows and own columns for one choice. The app page (with a filter) adds By
+ * project, names each agent's harnesses and accounts and each account's and harness's
+ * projects, and shows a Project column on agents and runs across every project; the project
+ * tab shows tool counts and account limits. Inputs: the choice, the project, the reads, the
+ * names, now and the filter. Output: the first column's head, the own columns' heads, the
+ * rows and whether a Project column shows. */
+function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageReport, metrics: Metrics, adoption: Adoption | null, names: MetricsNames, nowMs: number, filter: MetricsFilter | undefined): { head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean } {
+  const projectName = (id: string) => displayText(filter?.projects.find((project) => project.id === id)?.name ?? id);
+  const agent = (key: string, label?: string | null) => names.agents.get(key) ?? (label ? displayText(label) : agentLabel(key, projectName));
+  const account = (key: string) => key === "" ? "Unattributed" : names.accounts.get(key) ?? key;
+  const harness = (key: string) => HARNESS_NAMES[key as keyof typeof HARNESS_NAMES] ?? key;
+  const listed = (kept: string[], more: number | undefined, show: (name: string) => string) =>
+    [...kept.map(show), ...(more ? [`+${more} more`] : [])].join(", ");
+  const across = filter !== undefined && projectId === null;
+  const projectColumn = across && (by === "agent" || by === "run");
+  if (by === "project") {
+    return {
+      head: "Project", extra: ["Agents", "Runs"], projectColumn,
+      rows: metrics.projects.map((row) => ({ key: row.key, name: projectName(row.key), tokens: row.tokens, extra: [String(row.agents), String(row.runs)] })),
+    };
+  }
   if (by === "run") {
     return {
-      head: "Run", extra: ["Agent", "Ended", "Result"],
+      head: "Run", extra: ["Agent", "Ended", "Result"], projectColumn,
       rows: metrics.runs.map((run) => ({
         key: `${run.project}/${run.agent}/${run.session}`,
         name: run.task !== null && run.title !== null ? `#${run.task} ${displayText(run.title)}` : "No task",
+        project: projectColumn ? projectName(run.project) : undefined,
         tokens: run.tokens,
-        extra: [agent(run.agent), run.status === "running" ? "running" : agoText(run.last_ms, nowMs), run.status === null ? "" : RESULTS[run.status] ?? run.status],
+        extra: [agent(run.agent, run.label), run.status === "running" ? "running" : agoText(run.last_ms, nowMs), run.status === null ? "" : RESULTS[run.status] ?? run.status],
       })),
+    };
+  }
+  if (by === "account" && filter) {
+    return {
+      head: "Account", extra: ["Agents", "Projects"], projectColumn,
+      rows: metrics.accounts.map((row) => ({ key: row.key, name: account(row.key), tokens: row.tokens, extra: [String(row.agents), listed(row.projects, row.more_projects, projectName)] })),
     };
   }
   if (by === "account") {
     return {
-      head: "Account", extra: ["Agents", "Limit left", "Resets"],
+      head: "Account", extra: ["Agents", "Limit left", "Resets"], projectColumn,
       rows: metrics.accounts.map((row) => {
         const limit = limitLeft(usage.limits.find((limits) => limits.account === row.key), nowMs);
-        return { key: row.key, name: row.key === "" ? "Unattributed" : names.accounts.get(row.key) ?? row.key, tokens: row.tokens, extra: [String(row.agents), limit.left, limit.resets] };
+        return { key: row.key, name: account(row.key), tokens: row.tokens, extra: [String(row.agents), limit.left, limit.resets] };
       }),
     };
   }
   if (by === "harness") {
     return {
-      head: "Harness", extra: ["Agents", "Runs"],
+      head: "Harness", extra: filter ? ["Agents", "Projects"] : ["Agents", "Runs"], projectColumn,
       rows: metrics.harnesses.map((row) => ({
-        key: row.key, name: HARNESS_NAMES[row.key as keyof typeof HARNESS_NAMES] ?? row.key, tokens: row.tokens, extra: [String(row.agents), String(row.runs)],
+        key: row.key, name: harness(row.key), tokens: row.tokens, extra: [String(row.agents), filter ? listed(row.projects, row.more_projects, projectName) : String(row.runs)],
+      })),
+    };
+  }
+  if (filter) {
+    return {
+      head: "Agent", extra: ["Harness", "Account"], projectColumn,
+      rows: metrics.agents.map((row) => ({
+        key: `${row.project}/${row.agent}`, name: agent(row.agent, row.label), project: projectColumn ? projectName(row.project) : undefined, tokens: row.tokens,
+        extra: [listed(row.harnesses, row.more_harnesses, harness), listed(row.accounts, row.more_accounts, account)],
       })),
     };
   }
   const tools = new Map((adoption?.agents ?? []).map((row) => [agentKey(projectId, row), row]));
   return {
-    head: "Agent", extra: ["graphify", "ctx_*", "Skills"],
+    head: "Agent", extra: ["graphify", "ctx_*", "Skills"], projectColumn,
     rows: usage.agents.map((row) => {
       const used = tools.get(row.key);
       const skills = used ? (used.skills ?? []).reduce((sum, count) => sum + count, 0) + (used.other_skills ?? []).reduce((sum, other) => sum + other.count, 0) : null;
@@ -241,9 +285,10 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
 
 /** The breakdown table: each listed row with its four token parts, its own columns and its
  * share of tokens, then an Other row for what a capped list leaves out of the range, then the
- * Total, which is the Tokens tile's total. Every share is out of that total. Inputs: the
- * choice, its switch, the heads, the rows and the range total. */
-function Breakdown({ by, control, head, extra, rows, total }: { by: MetricsBy; control: ReactNode; head: string; extra: string[]; rows: BreakdownRow[]; total: Tokens }) {
+ * Total, which is the Tokens tile's total. Every share is out of that total. Across all
+ * projects each row also names its project. Inputs: the choice, its switch, the heads, the
+ * rows, whether to show the project column and the range total. */
+function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { by: MetricsBy; control: ReactNode; head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean; total: Tokens }) {
   const left = (field: keyof Tokens) => Math.max(0, total[field] - rows.reduce((sum, row) => sum + row.tokens[field], 0));
   const other: Tokens = { input: left("input"), output: left("output"), cache_read: left("cache_read"), cache_write: left("cache_write") };
   const unlisted = other.input + other.output + other.cache_read + other.cache_write > 0;
@@ -260,13 +305,14 @@ function Breakdown({ by, control, head, extra, rows, total }: { by: MetricsBy; c
   return <Panel title="Breakdown" padded={false} actions={control}>
     <div className="pj-table-wrap mx-table-wrap"><table className="pj-table mx-table" data-by={by}>
       <thead><tr>
-        <th scope="col">{head}</th><th scope="col" className="num">Tokens</th><th scope="col" className="num">Input</th>
+        <th scope="col">{head}</th>{projectColumn && <th scope="col">Project</th>}<th scope="col" className="num">Tokens</th><th scope="col" className="num">Input</th>
         <th scope="col" className="num">Cache write</th><th scope="col" className="num">Output</th><th scope="col" className="num muted">Cache read</th>
         {extra.map((column) => <th scope="col" key={column}>{column}</th>)}<th scope="col">Share of tokens</th>
       </tr></thead>
       <tbody>
         {rows.map((row) => <tr key={row.key}>
           <th scope="row">{row.name}</th>
+          {projectColumn && <td>{row.project}</td>}
           <td className="num mx-headline">{compactCount(headlineTokens(row.tokens))}</td>
           {cells(row.tokens)}
           {row.extra.map((value, index) => <td key={extra[index]}>{value}</td>)}
@@ -274,6 +320,7 @@ function Breakdown({ by, control, head, extra, rows, total }: { by: MetricsBy; c
         </tr>)}
         {unlisted && <tr className="mx-other">
           <th scope="row" className="muted">Other, not listed</th>
+          {projectColumn && <td />}
           <td className="num mx-headline">{compactCount(headlineTokens(other))}</td>
           {cells(other)}
           {extra.map((column) => <td key={column} />)}
@@ -281,6 +328,7 @@ function Breakdown({ by, control, head, extra, rows, total }: { by: MetricsBy; c
         </tr>}
         <tr className="mx-total">
           <th scope="row">Total</th>
+          {projectColumn && <td />}
           <td className="num mx-headline">{compactCount(headline)}</td>
           {cells(total)}
           {extra.map((column) => <td key={column} />)}
@@ -294,10 +342,11 @@ function Breakdown({ by, control, head, extra, rows, total }: { by: MetricsBy; c
 /** The Metrics page as a pure view: the range switch and what it covers, the tiles (tokens
  * with their three parts, cache re-reads apart, runs, tasks and lines), the tokens chart and
  * the breakdown by agent, run, account or harness, each with its four token parts and its
- * share of tokens. Inputs: the project, null for every project, the usage and metrics reads,
- * the project's adoption read, the range, the breakdown, the names, the range start, now,
- * when the page last read, the viewer's offset and the actions. */
-export function MetricsPage({ projectId, usage, metrics, adoption, range, by, names, sinceMs, nowMs, updatedMs, offset, onRange, onBy, onRetry }: {
+ * share of tokens. With a filter (the app page) it also picks a project and breaks down by
+ * project. Inputs: the project, null for every project, the usage and metrics reads, the
+ * project's adoption read, the range, the breakdown, the names, the range start, now, when
+ * the page last read, the viewer's offset, the filter and the actions. */
+export function MetricsPage({ projectId, usage, metrics, adoption, range, by, names, sinceMs, nowMs, updatedMs, offset, filter, onRange, onBy, onRetry }: {
   projectId: string | null;
   usage: Loaded<UsageReport>;
   metrics: Loaded<Metrics>;
@@ -309,13 +358,21 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   nowMs: number;
   updatedMs: number | null;
   offset: number;
+  filter?: MetricsFilter;
   onRange: (range: MetricsRange) => void;
   onBy: (by: MetricsBy) => void;
   onRetry: () => void;
 }) {
+  const ranges = <Segmented label="Range" value={range} options={METRIC_RANGES} onValue={onRange} />;
+  const covers = filter === undefined ? (projectId === null ? "All projects" : "This project only")
+    : projectId === null ? `${filter.projects.length} projects` : displayText(filter.projects.find((project) => project.id === projectId)?.name ?? projectId);
   const tools = <div className="mx-tools">
-    <Segmented label="Range" value={range} options={METRIC_RANGES} onValue={onRange} />
-    <span className="mx-count">{projectId === null ? "All projects" : "This project only"} · {updatedText(updatedMs, nowMs)} · provider-reported usage per turn</span>
+    {filter ? <div className="pj-row">
+      {ranges}
+      <Select id="mx-project" label="Project" hideLabel value={projectId ?? ""} onValue={(id) => filter.onProject(id === "" ? null : id)}
+        options={[{ value: "", label: "All projects" }, ...filter.projects.map((project) => ({ value: project.id, label: displayText(project.name) }))]} />
+    </div> : ranges}
+    <span className="mx-count">{covers} · {updatedText(updatedMs, nowMs)} · provider-reported usage per turn</span>
   </div>;
   const reads = [usage, metrics];
   if (reads.some((read) => read.kind === "not_ready" || (read.kind === "error" && usageNotReady(read)))) return <NotReady what="Metrics" />;
@@ -324,21 +381,39 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
     return <div className="stack">{tools}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
   }
   if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{tools}<Skeleton shape="card" count={3} /></div>;
-  const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs);
+  const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs, filter);
   return <div className="stack mx-page">
     {tools}
     <Tiles usage={usage.value} metrics={metrics.value} />
     <Chart metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} reread={usage.value.total.cache_read} />
-    <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} />
+    <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={filter ? APP_BREAKDOWNS : BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} />
   </div>;
 }
 
+/** The projects whose team status names agents on the page: only the project tab's own,
+ * which also gives each name its harness. The app page reads no team status; the metrics read
+ * names its agents. Inputs: the project id or null, and the app page's filter. Output: the
+ * project ids. */
+export function namedProjects(projectId: string | null, filter: MetricsFilter | undefined): string[] {
+  return filter || projectId === null ? [] : [projectId];
+}
+
+/** Each named project's team status paired with its id, the project tab's own and none on
+ * the app page; a project whose read fails is left out, so its agents keep the metrics read's
+ * names or their usage labels. Input: the project ids. Output: the pairs read, in order. */
+async function teamStatuses(ids: string[]): Promise<Result<[string, TeamStatus][]>> {
+  const read = await Promise.all(ids.map((id) => loadTeamStatus(id)));
+  return { kind: "ok", value: read.flatMap((result, index): [string, TeamStatus][] => result.kind === "ok" ? [[ids[index], result.value]] : []) };
+}
+
 /** The Metrics page for one project, or every project when the id is null: reads usage and
- * metrics for the chosen range every 30 seconds, and for a project its agents' names and
- * tool counts. Input: the project id or null. */
-export function MetricsView({ projectId }: { projectId: string | null }) {
+ * metrics for the chosen range every 30 seconds, and its agents' names. The project tab (no
+ * filter) also reads its tool counts and its team status for names with their harness, and
+ * starts By agent; the app page (with a filter) takes agent names from the metrics read and
+ * starts By project. Inputs: the project id or null, and the app page's filter. */
+export function MetricsView({ projectId, filter }: { projectId: string | null; filter?: MetricsFilter }) {
   const [range, setRange] = useState<MetricsRange>("today");
-  const [by, setBy] = useState<MetricsBy>("agent");
+  const [by, setBy] = useState<MetricsBy>(filter ? "project" : "agent");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [ticks, setTicks] = useState(0);
   const [updatedMs, setUpdatedMs] = useState<number | null>(null);
@@ -349,8 +424,9 @@ export function MetricsView({ projectId }: { projectId: string | null }) {
     return loadUsage(rangeStart(range, now), offsetMinutes(now), projectId);
   }, [range, reload, projectId]);
   const [metrics, retryMetrics] = useLoad(() => loadMetrics(rangeStart(range, new Date()) ?? 0, projectId), [range, reload, projectId]);
-  const [adoption] = useLoad<Adoption | null>(() => projectId === null ? Promise.resolve({ kind: "ok" as const, value: null }) : loadAdoption(projectId), [projectId, reload]);
-  const [status] = useLoad<TeamStatus | null>(() => projectId === null ? Promise.resolve({ kind: "ok" as const, value: null }) : loadTeamStatus(projectId), [projectId, reload]);
+  const named = namedProjects(projectId, filter);
+  const [adoption] = useLoad<Adoption | null>(() => projectId === null || filter ? Promise.resolve({ kind: "ok" as const, value: null }) : loadAdoption(projectId), [projectId, reload, Boolean(filter)]);
+  const [statuses] = useLoad(() => teamStatuses(named), [named.join("\n"), reload]);
   const [accounts] = useLoad(listAccounts, [], "accounts");
   useEffect(() => {
     const timer = setInterval(() => { setNowMs(Date.now()); setTicks((old) => old + 1); }, TICK_MS);
@@ -358,15 +434,15 @@ export function MetricsView({ projectId }: { projectId: string | null }) {
   }, []);
   useEffect(() => { if (usage.kind === "ok" && metrics.kind === "ok") setUpdatedMs(Date.now()); }, [usage, metrics]);
   const agents = new Map<string, string>();
-  if (status.kind === "ok" && status.value) {
-    for (const agent of status.value.agents) {
+  for (const [id, status] of statuses.kind === "ok" ? statuses.value : []) {
+    for (const agent of status.agents) {
       const harness = HARNESS_NAMES[agent.harness as keyof typeof HARNESS_NAMES] ?? agent.harness;
-      agents.set(agentKey(projectId, { agent: agent.id, role: agent.role }), `${displayText(agent.label)} · ${harness}`);
+      agents.set(agentKey(id, { agent: agent.id, role: agent.role }), `${displayText(agent.label)} · ${harness}`);
     }
   }
   const names: MetricsNames = { agents, accounts: new Map(accounts.kind === "ok" ? accounts.value.map((row) => [row.id, row.name]) : []) };
   const adopted: Loaded<Adoption> | null = adoption.kind === "ok" ? (adoption.value === null ? null : { kind: "ok", value: adoption.value }) : adoption;
   return <MetricsPage projectId={projectId} usage={usage} metrics={metrics} adoption={adopted} range={range} by={by} names={names}
-    sinceMs={sinceMs} nowMs={nowMs} updatedMs={updatedMs} offset={offsetMinutes(new Date(nowMs))}
+    sinceMs={sinceMs} nowMs={nowMs} updatedMs={updatedMs} offset={offsetMinutes(new Date(nowMs))} filter={filter}
     onRange={(next) => { setRange(next); setNowMs(Date.now()); }} onBy={setBy} onRetry={() => { retryUsage(); retryMetrics(); }} />;
 }

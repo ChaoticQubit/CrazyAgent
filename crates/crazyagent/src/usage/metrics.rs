@@ -3,13 +3,17 @@ use super::report::{REPORT_BYTES_MAX, ROWS_MAX, SHARES, count, has_table, tokens
 use super::{failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use crate::team::events::name_reaches_running;
+use crate::team::{AGENT_COLUMNS, AgentRole, AgentStatus, agent_row};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 const SERIES_MAX: usize = 64;
 const TITLE_BYTES_MAX: usize = 120;
+const NAMES_MAX: usize = 8;
 
 /// The tokens of one chart bar: everything counted from `start_ms` until the next bar.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,12 +26,13 @@ pub struct Bucket {
 /// One run: one agent session, with its tokens in the range, when they were last counted
 /// (the start of its last usage hour for a run counted before that time was kept), and the
 /// latest team task its agent ran while it used them (its id, the prompt's first line and
-/// its status), when one did.
+/// its status), when one did, and the name clients show for its agent, when the store has it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRow {
     pub project: String,
     pub agent: String,
+    pub label: Option<String>,
     pub session: String,
     pub task: Option<i64>,
     pub title: Option<String>,
@@ -36,8 +41,9 @@ pub struct RunRow {
     pub tokens: Tokens,
 }
 
-/// The tokens one account or harness used in the range, with how many agents and runs used
-/// it.
+/// The tokens one project, account or harness used in the range, with how many agents and
+/// runs used it and the first `NAMES_MAX` projects they ran in, once each in name order,
+/// with how many more there were.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupRow {
@@ -45,11 +51,29 @@ pub struct GroupRow {
     pub tokens: Tokens,
     pub agents: u64,
     pub runs: u64,
+    pub projects: Vec<String>,
+    pub more_projects: u64,
+}
+
+/// The tokens one agent used in the range, with the name clients show for it when the store
+/// has it, and the first `NAMES_MAX` harnesses and accounts it used, once each in name order,
+/// with how many more there were.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRow {
+    pub project: String,
+    pub agent: String,
+    pub label: Option<String>,
+    pub harnesses: Vec<String>,
+    pub more_harnesses: u64,
+    pub accounts: Vec<String>,
+    pub more_accounts: u64,
+    pub tokens: Tokens,
 }
 
 /// What the Metrics page counts besides the usage report: team tasks running now, waiting
 /// now, and done or failed in the range; the tokens chart in bars of `bucket_ms`; and the
-/// breakdown by run, account and harness.
+/// breakdown by run, project, agent, account and harness.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metrics {
@@ -60,6 +84,8 @@ pub struct Metrics {
     pub bucket_ms: i64,
     pub series: Vec<Bucket>,
     pub runs: Vec<RunRow>,
+    pub projects: Vec<GroupRow>,
+    pub agents: Vec<AgentRow>,
     pub accounts: Vec<GroupRow>,
     pub harnesses: Vec<GroupRow>,
 }
@@ -179,6 +205,49 @@ fn run_task(
     .map_err(storage)
 }
 
+/// The name every client shows for a usage agent key, read in this one read so the app page
+/// needs no team status per project: "Master" for a project's master, a sub-agent's kept
+/// persona and role handle or its number, the number only for a finished sub-agent whose
+/// name a running one now holds (DEC-111 Q19), and None for an agent the store no longer has.
+/// Inputs: the store, the project and the agent key. Output: the name, or None.
+fn agent_name(db: &Connection, project: &str, key: &str) -> Result<Option<String>, EngineError> {
+    if key.starts_with("master-") {
+        return Ok(Some(AgentRole::Master.agent_label(0)));
+    }
+    let Some(id) = key
+        .strip_prefix("team-")
+        .and_then(|id| id.parse::<i64>().ok())
+    else {
+        return Ok(None);
+    };
+    if !has_table(db, "team_agents")? || !has_table(db, "team_names")? {
+        return Ok(None);
+    }
+    let Some(agent) = db
+        .query_row(
+            &format!("SELECT {AGENT_COLUMNS} FROM team_agents WHERE id=?1 AND project=?2"),
+            params![id, project],
+            agent_row,
+        )
+        .optional()
+        .map_err(storage)?
+    else {
+        return Ok(None);
+    };
+    let finished = matches!(agent.status, AgentStatus::Stopped | AgentStatus::Failed);
+    let reused = agent.role == AgentRole::Sub
+        && finished
+        && match ProjectId::new(project) {
+            Ok(project) => name_reaches_running(db, &project, id)?,
+            Err(_) => false,
+        };
+    Ok(Some(if reused {
+        AgentRole::Sub.agent_label(id)
+    } else {
+        agent.label
+    }))
+}
+
 fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<RunRow>, EngineError> {
     let mut statement = db
         .prepare(
@@ -202,6 +271,7 @@ fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<Run
                     agent: row.get(1)?,
                     session: row.get(2)?,
                     task: None,
+                    label: None,
                     title: None,
                     status: None,
                     last_ms,
@@ -223,7 +293,20 @@ fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<Run
             }
         }
     }
+    for (run, _, _) in &mut runs {
+        run.label = agent_name(db, &run.project, &run.agent)?;
+    }
     Ok(runs.into_iter().map(|(run, _, _)| run).collect())
+}
+
+/// The first `NAMES_MAX` names of a list in name order, once each, and how many more there
+/// were. Input: the names. Output: the names kept and the count of the rest.
+fn capped(mut names: Vec<String>) -> (Vec<String>, u64) {
+    names.sort();
+    names.dedup();
+    let more = names.len().saturating_sub(NAMES_MAX);
+    names.truncate(NAMES_MAX);
+    (names, more as u64)
 }
 
 fn groups(
@@ -232,7 +315,7 @@ fn groups(
     project: Option<&str>,
     since_ms: i64,
 ) -> Result<Vec<GroupRow>, EngineError> {
-    assert!(matches!(column, "account" | "harness"));
+    assert!(matches!(column, "project" | "account" | "harness"));
     let mut statement = db
         .prepare(&format!(
             "SELECT {column},TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),\
@@ -242,28 +325,125 @@ fn groups(
              ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_write) DESC,{column} LIMIT ?3"
         ))
         .map_err(storage)?;
-    statement
+    let mut rows: Vec<GroupRow> = statement
         .query_map(params![project, since_ms, ROWS_MAX as i64], |row| {
             Ok(GroupRow {
                 key: row.get(0)?,
                 tokens: tokens(row, 1)?,
                 agents: count(row.get(5)?),
                 runs: count(row.get(6)?),
+                projects: Vec::new(),
+                more_projects: 0,
             })
         })
         .map_err(storage)?
         .collect::<Result<_, _>>()
-        .map_err(storage)
+        .map_err(storage)?;
+    let index: HashMap<String, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| (row.key.clone(), at))
+        .collect();
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT DISTINCT {column},project FROM usage_tokens
+             WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1) ORDER BY project"
+        ))
+        .map_err(storage)?;
+    let pairs = statement
+        .query_map(params![project, since_ms], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage)?;
+    for pair in pairs {
+        let (key, name) = pair.map_err(storage)?;
+        if let Some(&at) = index.get(&key) {
+            rows[at].projects.push(name);
+        }
+    }
+    for row in &mut rows {
+        (row.projects, row.more_projects) = capped(std::mem::take(&mut row.projects));
+    }
+    Ok(rows)
+}
+
+/// The largest `ROWS_MAX` agents by the headline, each with the harnesses and accounts it used,
+/// once each in name order. Inputs: the store, the project or None, and the range start.
+/// Output: the rows.
+fn agents(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+) -> Result<Vec<AgentRow>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT project,agent,TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write)
+             FROM usage_tokens WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
+             GROUP BY project,agent
+             ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_write) DESC,project,agent LIMIT ?3",
+        )
+        .map_err(storage)?;
+    let mut rows: Vec<AgentRow> = statement
+        .query_map(params![project, since_ms, ROWS_MAX as i64], |row| {
+            Ok(AgentRow {
+                project: row.get(0)?,
+                agent: row.get(1)?,
+                label: None,
+                harnesses: Vec::new(),
+                more_harnesses: 0,
+                accounts: Vec::new(),
+                more_accounts: 0,
+                tokens: tokens(row, 2)?,
+            })
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    let index: HashMap<(String, String), usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| ((row.project.clone(), row.agent.clone()), at))
+        .collect();
+    let mut statement = db
+        .prepare(
+            "SELECT DISTINCT project,agent,harness,account FROM usage_tokens
+             WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)",
+        )
+        .map_err(storage)?;
+    let used = statement
+        .query_map(params![project, since_ms], |row| {
+            Ok((
+                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(storage)?;
+    for entry in used {
+        let (key, harness, account) = entry.map_err(storage)?;
+        if let Some(&at) = index.get(&key) {
+            rows[at].harnesses.push(harness);
+            rows[at].accounts.push(account);
+        }
+    }
+    for row in &mut rows {
+        (row.harnesses, row.more_harnesses) = capped(std::mem::take(&mut row.harnesses));
+        (row.accounts, row.more_accounts) = capped(std::mem::take(&mut row.accounts));
+        row.label = agent_name(db, &row.project, &row.agent)?;
+    }
+    Ok(rows)
 }
 
 /// Keeps the metrics within `REPORT_BYTES_MAX` encoded bytes so their reply fits one frame:
-/// while they are larger, runs, accounts and harnesses each keep a smaller share of
-/// `ROWS_MAX`, losing the oldest runs and the least-used accounts and harnesses first.
+/// while they are larger, runs, projects, agents, accounts and harnesses each keep a smaller
+/// share of `ROWS_MAX`, losing the oldest runs and the least-used rows first.
 /// Input: the metrics. Output: the metrics that fit, or `usage_unavailable`.
 fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
     for share in (0..=SHARES).rev() {
         let kept = ROWS_MAX * share / SHARES;
         metrics.runs.truncate(kept);
+        metrics.projects.truncate(kept);
+        metrics.agents.truncate(kept);
         metrics.accounts.truncate(kept);
         metrics.harnesses.truncate(kept);
         let encoded = serde_json::to_vec(&metrics).map_err(|_| failure("usage_unavailable"))?;
@@ -276,11 +456,11 @@ fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
 
 /// Reads the Metrics page's counts for one project, None for every project, over the range
 /// from `since_ms` to `now_ms`: tasks running and waiting now, done and failed in the range,
-/// the tokens chart in bars `bucket_for` the range, anchored at its start, and the newest
-/// `ROWS_MAX` runs and largest `ROWS_MAX` accounts and harnesses by the headline, fewer when
-/// they would not fit one reply (`fit`). Inputs: the store, the project, the range start
-/// and now. Output: the metrics; `usage_request_invalid` for a range that starts before the
-/// epoch or after now.
+/// the tokens chart in bars `bucket_for` the range, anchored at its start, the newest
+/// `ROWS_MAX` runs, and the largest `ROWS_MAX` projects, agents, accounts and harnesses by the
+/// headline, fewer of each when they would not fit one reply (`fit`).
+/// Inputs: the store, the project, the range start and now. Output: the metrics;
+/// `usage_request_invalid` for a range that starts before the epoch or after now.
 pub fn read(
     db: &Connection,
     project: Option<&ProjectId>,
@@ -304,12 +484,32 @@ pub fn read(
         bucket_ms,
         series: series(db, project, since_ms, bucket_ms)?,
         runs: runs(db, project, since_ms)?,
+        projects: groups(db, "project", project, since_ms)?,
+        agents: agents(db, project, since_ms)?,
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,
     })?;
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);
     assert!(metrics.accounts.len() <= ROWS_MAX && metrics.harnesses.len() <= ROWS_MAX);
+    assert!(metrics.projects.len() <= ROWS_MAX && metrics.agents.len() <= ROWS_MAX);
+    assert!(metrics.agents.iter().all(|row| {
+        row.harnesses.is_sorted() && row.accounts.is_sorted() && !row.harnesses.is_empty()
+    }));
+    assert!(
+        metrics
+            .agents
+            .iter()
+            .all(|row| { row.harnesses.len() <= NAMES_MAX && row.accounts.len() <= NAMES_MAX })
+    );
+    assert!(
+        metrics
+            .projects
+            .iter()
+            .chain(&metrics.accounts)
+            .chain(&metrics.harnesses)
+            .all(|row| row.projects.len() <= NAMES_MAX)
+    );
     assert!(metrics.runs.iter().all(|run| {
         run.title
             .as_ref()

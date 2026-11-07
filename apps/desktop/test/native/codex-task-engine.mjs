@@ -78,12 +78,40 @@ export function taskStatus(runtime, project) {
   }
 }
 
-/** Starts the real engine with the stand-in Codex and the bridge on a new project made from
- * the owner's repository, serves the built app to a browser page on the project's Agents
- * tab, runs the steps and stops everything. Inputs: the test context, the temporary folder
- * prefix and the steps, given the project, the engine root, the owner on the page, the page,
- * the served app and the bridge. Output: none. */
-export async function onEngine(t, prefix, steps) {
+/** Makes one of the owner's repositories a project the way the app does: onboarding, the
+ * pool its sub-agents run on, and team tools for its Codex sub-agent. Inputs: the bridge, the
+ * repository and the first of the three write generations it uses. Output: the project id. */
+async function addProject(bridge, repo, generation) {
+  const receipt = await value(bridge, "desktop_start_onboarding", { path: repo, pool: "local-pool", generation });
+  assert.equal(receipt.outcome, "applied", `the folder becomes a project: ${JSON.stringify(receipt)}`);
+  const project = receipt.project_id;
+  for (const deadline = Date.now() + SETUP_MS; ; await pause(POLL_MS * 4)) {
+    const view = await value(bridge, "desktop_onboarding", { id: project });
+    if (!["waiting", "running"].includes(view.graph.kind) && !["waiting", "running"].includes(view.mapping.kind)) break;
+    assert.ok(Date.now() < deadline, `onboarding still running: ${JSON.stringify(view)}`);
+  }
+  assert.equal((await value(bridge, "desktop_open_project", { id: project })).project_id, project, "the new project opens");
+  const pools = await value(bridge, "desktop_model_access_page", { collection: "pools", next: false });
+  assert.equal(pools.writable, true, "the test engine's settings are writable");
+  const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: generation + 1 });
+  assert.equal(assigned.outcome, "applied", `the project gets the pool its sub-agents run on: ${JSON.stringify(assigned)}`);
+  const stored = await value(bridge, "desktop_project_setup", { id: project });
+  const subs = (stored.team.sub_harnesses ?? []).map((slot) => slot.harness === "codex" ? { ...slot, tools: true } : slot);
+  assert.ok(subs.some((slot) => slot.harness === "codex"), `the project has a Codex sub-agent: ${JSON.stringify(stored.team)}`);
+  const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team: { ...stored.team, sub_harnesses: subs }, documents: [] };
+  const saved = await value(bridge, "desktop_update_project_setup", { id: project, setup, name: null, revision: stored.revision, generation: generation + 2 });
+  assert.equal(saved.outcome, "applied", `the Codex sub-agent gets its team tools: ${JSON.stringify(saved)}`);
+  return project;
+}
+
+/** Starts the real engine with the stand-in Codex and the bridge on new projects made from
+ * the owner's repositories, serves the built app to a browser page on the first project's
+ * Agents tab, runs the steps and stops everything. Inputs: the test context, the temporary
+ * folder prefix, the steps (given the first project, every project, the engine root, the
+ * owner on the page, the page, the served app and the bridge) and how many projects, one to
+ * four. Output: none. */
+export async function onEngine(t, prefix, steps, count = 1) {
+  assert.ok(Number.isInteger(count) && count >= 1 && count <= 4, `one to four projects, not ${count}`);
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
@@ -93,9 +121,9 @@ export async function onEngine(t, prefix, steps) {
   const evidence = process.env.E2E_EVIDENCE && isAbsolute(process.env.E2E_EVIDENCE) ? join(process.env.E2E_EVIDENCE, prefix) : join(root, "evidence");
   const home = join(root, "home");
   const projects = join(root, "projects");
-  const repo = join(root, "repos", "fruit-stand");
-  for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, repo]) mkdirSync(folder, { recursive: true, mode: 0o700 });
-  ownerRepo(repo);
+  const repos = Array.from({ length: count }, (_, index) => join(root, "repos", index === 0 ? "fruit-stand" : `fruit-stand-${index + 1}`));
+  for (const folder of [runtime, evidence, home, join(home, ".codex"), projects, ...repos]) mkdirSync(folder, { recursive: true, mode: 0o700 });
+  repos.forEach(ownerRepo);
   const provider = await closedPort();
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000
@@ -123,25 +151,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     assert.equal((await value(bridge, "desktop_connect")).connected, true, "the bridge connects to the test engine");
     assert.equal((await value(bridge, "desktop_save_owner_profile", { profile: { name: "E2E Owner" }, generation: 1 })).outcome, "applied");
     assert.equal((await value(bridge, "desktop_set_projects_home", { path: projects, generation: 2 })).outcome, "applied");
-    const receipt = await value(bridge, "desktop_start_onboarding", { path: repo, pool: "local-pool", generation: 3 });
-    assert.equal(receipt.outcome, "applied", `the folder becomes a project: ${JSON.stringify(receipt)}`);
-    const project = receipt.project_id;
-    for (const deadline = Date.now() + SETUP_MS; ; await pause(POLL_MS * 4)) {
-      const view = await value(bridge, "desktop_onboarding", { id: project });
-      if (!["waiting", "running"].includes(view.graph.kind) && !["waiting", "running"].includes(view.mapping.kind)) break;
-      assert.ok(Date.now() < deadline, `onboarding still running: ${JSON.stringify(view)}`);
-    }
-    assert.equal((await value(bridge, "desktop_open_project", { id: project })).project_id, project, "the new project opens");
-    const pools = await value(bridge, "desktop_model_access_page", { collection: "pools", next: false });
-    assert.equal(pools.writable, true, "the test engine's settings are writable");
-    const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 4 });
-    assert.equal(assigned.outcome, "applied", `the project gets the pool its sub-agents run on: ${JSON.stringify(assigned)}`);
-    const stored = await value(bridge, "desktop_project_setup", { id: project });
-    const subs = (stored.team.sub_harnesses ?? []).map((slot) => slot.harness === "codex" ? { ...slot, tools: true } : slot);
-    assert.ok(subs.some((slot) => slot.harness === "codex"), `the project has a Codex sub-agent: ${JSON.stringify(stored.team)}`);
-    const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team: { ...stored.team, sub_harnesses: subs }, documents: [] };
-    const saved = await value(bridge, "desktop_update_project_setup", { id: project, setup, name: null, revision: stored.revision, generation: 5 });
-    assert.equal(saved.outcome, "applied", `the Codex sub-agent gets its team tools: ${JSON.stringify(saved)}`);
+    const ids = [];
+    for (const [index, repo] of repos.entries()) ids.push(await addProject(bridge, repo, 3 + index * 3));
+    const project = ids[0];
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
@@ -155,7 +167,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
         await me.waitFor("the Hand off form on the Agents tab", (text) => text.includes("Hand off"));
-        await steps({ project, runtime, me, page, site, bridge });
+        await steps({ project, projects: ids, runtime, me, page, site, bridge });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
