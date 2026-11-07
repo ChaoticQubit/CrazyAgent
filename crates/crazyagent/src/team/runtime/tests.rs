@@ -8812,10 +8812,23 @@ fn own_folder_lines(home: &str) -> Vec<String> {
     ]
 }
 
+/// The lines an agent runs to set the user immutable flag on a folder it must not pin, then
+/// clear it so the run goes on (CTX-M1 r1). The first records its exit code in `codes.txt`
+/// as `<name>_flags`. Inputs: the step name and the folder, as a shell word. Output: the
+/// script lines.
+#[cfg(target_os = "macos")]
+fn flag_lines(name: &str, folder: &str) -> Vec<String> {
+    vec![
+        format!("/usr/bin/chflags uchg {folder} 2> /dev/null; echo {name}_flags=$? >> codes.txt"),
+        format!("/usr/bin/chflags nouchg {folder} 2> /dev/null"),
+    ]
+}
+
 /// CTX-M1: a Sandboxed agent, in the profile the engine starts it in, cannot move its own
 /// home into its worktree to change a launch file its profile protects there (LL-2) and move
-/// it back, nor move its worktree away from the engine's links, while it still makes,
-/// changes and removes files in its home and worktree and builds the project.
+/// it back, nor move its worktree away from the engine's links, nor set the immutable flag on
+/// its home, its `skills` folder or Codex's `skills/.system` (CTX-M1 r1), while it still
+/// makes, changes and removes files in its home and worktree and builds the project.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_sandboxed_agent_cannot_move_its_home_or_worktree_away_but_still_works_in_them() {
@@ -8833,6 +8846,13 @@ fn a_sandboxed_agent_cannot_move_its_home_or_worktree_away_but_still_works_in_th
         ".git",
     ));
     extra.extend(own_folder_lines("\"$CODEX_HOME\""));
+    extra.push(
+        "mkdir -p \"$CODEX_HOME\"/skills/.system/planted; echo system_made=$? >> codes.txt"
+            .to_owned(),
+    );
+    extra.extend(flag_lines("home", "\"$CODEX_HOME\""));
+    extra.extend(flag_lines("skills", "\"$CODEX_HOME\"/skills"));
+    extra.extend(flag_lines("system", "\"$CODEX_HOME\"/skills/.system"));
     let mut run = agent_at_level_running(crate::sandbox::policy::AgentAccess::Sandboxed, &extra);
     let home = agent_home(&run.fixture.base.join("team"), run.member);
     let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
@@ -8841,12 +8861,16 @@ fn a_sandboxed_agent_cannot_move_its_home_or_worktree_away_but_still_works_in_th
     assert!(!config.contains("planted"), "{config}");
     assert_ne!(run.code("worktree_away"), 0, "{:?}", run.codes);
     assert!(!link.contains("planted"), "{link}");
+    for name in ["home_flags", "skills_flags", "system_flags"] {
+        assert_ne!(run.code(name), 0, "{name}: {:?}", run.codes);
+    }
     for name in [
         "build",
         "home_files",
         "work_files",
         "mkdir_roots",
         "home_exists",
+        "system_made",
     ] {
         assert_eq!(run.code(name), 0, "{name}: {:?}", run.codes);
     }
@@ -19627,14 +19651,29 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
         format!("'{text}'")
     };
 
+    let tmp = home.parent().unwrap().join("tmp");
+    let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
+    let teams = home.join(crate::sandbox::CLAUDE_TEAM_SHARED[0]);
     let mut tried = Vec::new();
-    for (who, profile, own, folder) in [
-        ("lead", plan.sandbox_profile.clone(), &home, &work),
+    for (who, profile, own, folder, pinned) in [
+        (
+            "lead",
+            plan.sandbox_profile.clone(),
+            &home,
+            &work,
+            vec![("home", &home)],
+        ),
         (
             "teammate",
             agent_teammates_profile(&runtime.state, id),
             &mates,
             &probe,
+            vec![
+                ("home", &mates),
+                ("teams", &teams),
+                ("tmp", &tmp),
+                ("mailbox", &mailbox),
+            ],
         ),
     ] {
         let away = quoted(&folder.join("home-away"));
@@ -19646,6 +19685,10 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
             &format!("{state}/planted"),
         ));
         lines.extend(own_folder_lines(&quoted(own)));
+        for (name, path) in &pinned {
+            assert!(path.is_dir(), "{who}: {name} is made before it runs");
+            lines.extend(flag_lines(name, &quoted(path.as_path())));
+        }
         let output = crate::spawn_gate::output(
             Command::new(crate::sandbox::SANDBOX_EXEC)
                 .arg("-f")
@@ -19663,13 +19706,14 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
         )
         .unwrap();
         let text = std::fs::read_to_string(folder.join("codes.txt")).unwrap_or_default();
-        tried.push((who, text, output));
+        let pinned: Vec<&str> = pinned.iter().map(|(name, _)| *name).collect();
+        tried.push((who, text, output, pinned));
     }
     let report: Vec<String> = tried
         .iter()
-        .map(|(who, text, _)| format!("{who}: {}", text.replace('\n', " ")))
+        .map(|(who, text, _, _)| format!("{who}: {}", text.replace('\n', " ")))
         .collect();
-    for (who, text, output) in &tried {
+    for (who, text, output, pinned) in &tried {
         let code = |name: &str| {
             text.lines()
                 .filter_map(|line| line.split_once('='))
@@ -19679,6 +19723,13 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
         };
         assert_ne!(code("home_away"), 0, "{who}: {report:?}");
         assert_ne!(code("state_away"), 0, "{who}: {report:?}");
+        for name in pinned {
+            assert_ne!(
+                code(format!("{name}_flags").as_str()),
+                0,
+                "{who} {name}: {report:?}"
+            );
+        }
         for name in ["home_files", "work_files", "mkdir_roots", "home_exists"] {
             assert_eq!(code(name), 0, "{who} {name}: {report:?}");
         }

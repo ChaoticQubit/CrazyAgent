@@ -604,6 +604,126 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
     drop(relaunch);
 }
 
+/// Sets or clears the user immutable flag on one path with the system's `chflags`, as an
+/// agent would. Inputs: the flag name and the path. Output: whether `chflags` succeeded.
+#[cfg(target_os = "macos")]
+fn chflags(flag: &str, path: &Path) -> bool {
+    crate::spawn_gate::status(
+        std::process::Command::new("/usr/bin/chflags")
+            .arg(flag)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .is_ok_and(|done| done.success())
+}
+
+/// Clears the user immutable flag on test paths when dropped, so the temporary folder can
+/// always be deleted, whatever the test asserted. Holds the paths.
+#[cfg(target_os = "macos")]
+struct Unlocked(Vec<PathBuf>);
+
+#[cfg(target_os = "macos")]
+impl Drop for Unlocked {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = chflags("nouchg", path);
+        }
+    }
+}
+
+/// CTX-M1 r1: a skill an agent planted in Codex's own `skills/.system` and made immutable,
+/// or whose `skills` folder it made immutable, does not survive the next Codex launch in
+/// that home: the launch clears the flag and removes the folder, so Codex installs its
+/// system skills fresh.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
+    for pinned in [".system", "skills"] {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().canonicalize().unwrap().join("codex");
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let context = AgentContext {
+            plugins: LaunchPlugins::default(),
+            instructions: "# Project context from CrazyAgent\n".into(),
+            process: None,
+            transcripts: true,
+            off_tools: Vec::new(),
+            native_team: None,
+            relay: None,
+            model_proxy: None,
+            claude_display: ClaudeDisplay::Classic,
+        };
+        let first = context.install("codex", &home, true).unwrap();
+        drop(first);
+        let skills = home.join("skills");
+        let system = skills.join(".system");
+        let planted = system.join("planted");
+        fs::create_dir_all(&planted).unwrap();
+        fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
+        let flagged = match pinned {
+            ".system" => system.clone(),
+            _ => skills.clone(),
+        };
+        let _unlocked = Unlocked(vec![flagged.clone()]);
+        assert!(chflags("uchg", &flagged), "{pinned} is made immutable");
+
+        let relaunch = context.install("codex", &home, true);
+
+        assert!(
+            !system.exists(),
+            "{pinned}: the relaunch leaves the planted system skills for Codex to load"
+        );
+        drop(relaunch.unwrap());
+    }
+}
+
+/// CTX-M1 r1: when the planted `skills/.system` cannot be moved away even after its flags
+/// are cleared, here because the agent filled the folder the engine moves it to with a
+/// file it made immutable, the Codex launch is refused with an ordinary error rather than
+/// started with the planted system skills.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+    };
+    let first = context.install("codex", &home, true).unwrap();
+    drop(first);
+    let planted = home.join("skills").join(".system").join("planted");
+    fs::create_dir_all(&planted).unwrap();
+    fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
+    let parked = home.join(format!(".{STATE}-system-{}", std::process::id()));
+    fs::create_dir(&parked).unwrap();
+    let held = parked.join("held");
+    fs::write(&held, "held\n").unwrap();
+    let _unlocked = Unlocked(vec![held.clone()]);
+    assert!(
+        chflags("uchg", &held),
+        "the parked folder's file is immutable"
+    );
+
+    let relaunch = context.install("codex", &home, true);
+
+    assert_eq!(
+        relaunch.err().map(|problem| problem.0),
+        Some("launch_context_skills_kept".to_owned()),
+        "a launch that keeps the planted system skills is refused"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_home() {
