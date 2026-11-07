@@ -19,9 +19,10 @@ pub struct Bucket {
     pub tokens: Tokens,
 }
 
-/// One run: one agent session, with its tokens in the range, when it last used any, and
-/// the latest team task that ran in it (its id, the prompt's first line and its status),
-/// when one did.
+/// One run: one agent session, with its tokens in the range, when they were last counted
+/// (the start of its last usage hour for a run counted before that time was kept), and the
+/// latest team task its agent ran while it used them (its id, the prompt's first line and
+/// its status), when one did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRow {
@@ -163,10 +164,13 @@ fn run_task(db: &Connection, run: &RunRow) -> Result<Option<(i64, String, String
 fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<RunRow>, EngineError> {
     let mut statement = db
         .prepare(
-            "SELECT project,agent,session,MAX(hour_ms) AS last,TOTAL(input),TOTAL(output),\
-                TOTAL(cache_read),TOTAL(cache_write)
-             FROM usage_tokens WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
-             GROUP BY project,agent,session ORDER BY last DESC,agent,session LIMIT ?3",
+            "SELECT u.project,u.agent,u.session,\
+                MAX(MAX(u.hour_ms),COALESCE(MAX(s.last_ms),0)) AS last,TOTAL(u.input),\
+                TOTAL(u.output),TOTAL(u.cache_read),TOTAL(u.cache_write)
+             FROM usage_tokens u LEFT JOIN usage_seen s
+                ON s.project=u.project AND s.agent=u.agent AND s.session=u.session
+             WHERE u.hour_ms>=?2 AND (?1 IS NULL OR u.project=?1)
+             GROUP BY u.project,u.agent,u.session ORDER BY last DESC,u.agent,u.session LIMIT ?3",
         )
         .map_err(storage)?;
     let mut runs: Vec<RunRow> = statement
