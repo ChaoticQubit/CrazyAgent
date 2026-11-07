@@ -53,18 +53,32 @@ function ownerRepo(folder) {
   return { main, stage, feat: git(folder, "rev-parse", "HEAD") };
 }
 
-/** Puts a stopped sub-agent on the project's team with its worktree, the way the engine keeps
- * one between turns. Inputs: the engine root, the project, the owner repository and the
- * worktree. Output: the agent's engine id. */
-function teamAgent(runtime, project, repo, worktree) {
+/** Puts a sub-agent on the project's team, by default stopped with its worktree, the way the
+ * engine keeps one between turns, or idle, as one resting between turns that no worker of
+ * this engine runs, with or without the worktree. Inputs: the engine root, the project, the
+ * owner repository, the worktree, the status and whether it has the worktree. Output: the
+ * agent's engine id. */
+function teamAgent(runtime, project, repo, worktree, status = "stopped", tree = true) {
+  assert.ok(["stopped", "idle"].includes(status), status);
   const store = new DatabaseSync(join(runtime, "engine.db"));
   try {
     store.exec("PRAGMA busy_timeout = 5000");
     const now = Date.now();
-    const id = Number(store.prepare("INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?,'sub','codex',1,'stopped',?,?)").run(project, now, now).lastInsertRowid);
+    const id = Number(store.prepare("INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?,'sub','codex',1,?,?,?)").run(project, status, now, now).lastInsertRowid);
     assert.ok(Number.isSafeInteger(id) && id > 0, "the engine numbers the team agent");
-    store.prepare("INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?,?,?,?,?)").run(id, project, repo, worktree, join(repo, ".git", "worktrees", AGENT));
+    if (tree) store.prepare("INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?,?,?,?,?)").run(id, project, repo, worktree, join(repo, ".git", "worktrees", AGENT));
     return String(id);
+  } finally {
+    store.close();
+  }
+}
+
+/** The engine's prompts to one agent, oldest first, read from its database. Inputs: the
+ * engine root and the agent. Output: the prompt texts. */
+function prompts(runtime, agent) {
+  const store = new DatabaseSync(join(runtime, "engine.db"), { readOnly: true });
+  try {
+    return store.prepare("SELECT body FROM coord_messages WHERE from_kind='engine' AND to_agent=? AND kind='prompt' ORDER BY id").all(Number(agent)).map((row) => row.body);
   } finally {
     store.close();
   }
@@ -73,7 +87,8 @@ function teamAgent(runtime, project, repo, worktree) {
 /** Starts the real engine and the bridge on a new project made from the owner's repository,
  * serves the built app to a browser page, runs the steps and stops everything. Inputs: the
  * test context, the temporary folder prefix and the steps, given the project, its folders,
- * the branch tips, the owner on the page and a turn recorder. Output: none. */
+ * the branch tips, the owner on the page, a turn recorder, the team graph reader and a
+ * stand-in agent's start or finish of work through the engine. Output: none. */
 async function onEngine(t, prefix, steps) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -132,6 +147,12 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       return id;
     };
     const status = () => value(bridge, "desktop_team_status", { id: project });
+    const graph = () => value(bridge, "desktop_team_graph", { id: project });
+    const stand = (mode, ...args) => {
+      const result = spawnSync(bridgeBinary, [mode, runtime, ...args], { encoding: "utf8", env: { ...env } });
+      assert.equal(result.status, 0, `the stand-in agent's ${mode}: ${result.stderr}`);
+      return result.stdout.trim();
+    };
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
@@ -145,7 +166,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
         const open = (tab) => page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/${tab}` });
-        await steps({ runtime, project, repo, worktree, tips, me, page, open, status, recordTurn, addAgent: () => teamAgent(runtime, project, repo, worktree) });
+        await steps({ runtime, project, repo, worktree, tips, me, page, open, status, graph, stand, recordTurn, addAgent: (state, tree) => teamAgent(runtime, project, repo, worktree, state, tree) });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -295,5 +316,52 @@ test("Land on: a deleted Land on branch is named in the Accept dialog, which lan
     assert.equal(git(repo, "rev-parse", "HEAD"), tips.feat, "the owner's checked-out feat/x is not moved");
     assert.equal(git(repo, "symbolic-ref", "HEAD"), "refs/heads/feat/x", "the owner's checkout stays on feat/x");
     assert.equal(git(repo, "status", "--porcelain"), "", "the owner's checkout has no stray changes");
+  });
+});
+
+test("Land on: under Wait a start on a file another agent's work holds waits, the waiting agent's card and row say for which file, and accepting that work lets the start go through", { timeout: 600000 }, async (t) => {
+  await onEngine(t, "ca-lo-w-", async ({ runtime, project, repo, worktree, tips, me, open, status, graph, stand, recordTurn, addAgent }) => {
+    await open("agents");
+    await me.waitFor("the Overlapping edits setting on the Agents tab", (text) => text.includes("Overlapping edits") && text.includes("Land on"));
+    await me.click("Wait", '[role=radiogroup][aria-label="Overlapping edits"] [role=radio]');
+    for (const deadline = Date.now() + STEP_MS; (await status()).coordination?.settings.overlaps !== "wait"; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "the engine never kept Overlapping edits at Wait");
+    }
+    await saveBranch(me, "Land on", `tg-land-on-${project}`, "stage", "land_on", status);
+
+    git(repo, "worktree", "add", "-q", "--detach", worktree, tips.stage);
+    const lander = addAgent("idle");
+    const waiter = addAgent("idle", false);
+    const started = stand("start-work", project, lander, "Add plots", "README.md");
+    const work = /^started (\d+)$/.exec(started)?.[1] ?? assert.fail(`the lander's start: ${started}`);
+    const label = async (agent) => (await graph()).nodes.find((node) => node.id === `team-${agent}`)?.label ?? assert.fail(`no card for agent ${agent}`);
+    const [holder, waiting] = [await label(lander), await label(waiter)];
+    assert.equal(stand("start-work", project, waiter, "Fix plots", "README.md"),
+      `Wait: ${holder}'s work #${work} holds README.md until it lands. You will get a message when it is free.`, "the waiting start reads who holds the file");
+    assert.equal((await graph()).nodes.find((node) => node.id === `team-${waiter}`)?.waits_for, "README.md", "the engine's graph names the file the agent waits for");
+    await me.waitFor("the waiting agent's card naming the file", (text) => text.includes(waiting) && text.includes("Waiting for README.md."));
+    await me.capture("wait-card");
+    await open("conversation");
+    await me.waitFor("the waiting agent's row in the team strip naming the file", (text) => text.includes("Team") && text.includes("Waiting for README.md."));
+    await me.capture("wait-strip");
+
+    writeFileSync(join(worktree, "README.md"), `${README}Now with plots.\n`);
+    assert.equal(stand("finish-work", lander, work), "2", "the lander's work is review ready");
+    recordTurn(lander, "Add plots");
+    assert.deepEqual(prompts(runtime, waiter), [], "review-ready work holds the file until it lands");
+    await open("changes");
+    await me.waitFor("the lander's change set", (text) => text.includes(AGENT_LABEL) && /Ready to review/.test(text));
+    await me.follow(".ch-row");
+    await me.waitFor("the change set's diff", (text) => /Now with plots\./.test(text));
+    await acceptPreselected(me, "They land as one commit on stage, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are.", "stage");
+    for (const deadline = Date.now() + STEP_MS; prompts(runtime, waiter).length === 0; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "the waiting agent was never told the file is free");
+    }
+    assert.deepEqual(prompts(runtime, waiter), ["README.md is free now: start your work again."]);
+    assert.match(stand("start-work", project, waiter, "Fix plots", "README.md"), /^started \d+$/, "the start goes through once the file is free");
+    assert.equal((await graph()).nodes.find((node) => node.id === `team-${waiter}`)?.waits_for ?? null, null, "the agent waits for nothing now");
+    await open("agents");
+    await me.waitFor("the agent's card no longer waiting", (text) => text.includes(waiting) && text.includes("Overlapping edits") && !text.includes("Waiting for README.md."));
+    await me.capture("wait-over");
   });
 });

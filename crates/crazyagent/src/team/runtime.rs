@@ -223,7 +223,7 @@ const NATIVE_NEEDS_HOOKS: &str = "Native teammates need hooks, and this account 
 
 /// Why an agent with tools that Claude Code starts `--bare` does not start while Overlaps is
 /// Block: the edit guard is a hook, and no hook fires there (DEC-104 bare-hooks).
-const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block needs hooks, and this account starts Claude Code without them. Set Overlaps to Warn, or use a signed-in account.";
+const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block or Wait needs hooks, and this account starts Claude Code without them. Set Overlaps to Warn, or use a signed-in account.";
 
 impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
@@ -2469,7 +2469,9 @@ impl TeamRuntime {
     /// Settles a project's claims no turn end will, at the first step after the engine
     /// starts and then at most once each `CLAIMS_SWEEP_EVERY`: the landing sweep holds or
     /// releases stopped agents' finished claims and retries failed releases and restores,
-    /// and the owner is told once when the project's claims fill one overlap check. A
+    /// agents waiting for a file that is free now are prompted (OS-8 Wait), and the owner
+    /// is told once when the project's claims fill one overlap check and once of each pair
+    /// of agents whose waits would have closed a cycle. A
     /// failure leaves the team step running and is logged once by its plain code until a
     /// sweep succeeds again. Input: the project. Output: unit.
     fn tend_claims(&mut self, project: &ProjectId) {
@@ -2486,15 +2488,17 @@ impl TeamRuntime {
         let now = now_ms();
         let swept = u64::try_from(now)
             .map_err(|_| EngineError("team_state_unavailable".into()))
-            .and_then(|now| crate::landing::sweep_claims(&self.connection, project, now));
-        let told =
-            crate::coord::claims_full_notice(&self.connection, project, now).and_then(|full| {
+            .and_then(|now| crate::landing::sweep_claims(&self.connection, project, now))
+            .and_then(|()| crate::coord::wake_waiters(&self.connection, now).map(drop));
+        let told = crate::coord::claims_full_notice(&self.connection, project, now)
+            .and_then(|full| {
                 if full {
                     self.note(project, CLAIMS_FULL_NOTE)
                 } else {
                     Ok(())
                 }
-            });
+            })
+            .and_then(|()| self.note_wait_cycles(project, now));
         let failed = swept
             .and(told)
             .err()
@@ -2997,6 +3001,20 @@ impl TeamRuntime {
             context,
             access,
         })))
+    }
+
+    /// Tells the owner once of each pair of agents whose waits under Wait would have closed
+    /// a cycle, so a start went ahead without the file the other holds (OS-8). Inputs: the
+    /// project and the time in ms. Output: Ok or the first failure.
+    fn note_wait_cycles(&mut self, project: &ProjectId, now: i64) -> Result<(), EngineError> {
+        for (starter, holder, file) in
+            crate::coord::wait_cycle_notices(&self.connection, project, now)?
+        {
+            let starter = crate::team::events::label(&self.connection, starter)?;
+            let holder = crate::team::events::label(&self.connection, holder)?;
+            self.note(project, &wait_cycle_note(&starter, &holder, &file))?;
+        }
+        Ok(())
     }
 
     fn note(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
@@ -6661,15 +6679,17 @@ impl TeamRuntime {
             .map_err(|_| with_code("the agent's hooks state could not be saved", None))?;
         if hookless
             && tools
-            && crate::coord::settings::read(&self.connection, &stored.project_id)
-                .map_err(|e| {
-                    with_code(
-                        "the project's coordination settings could not be read",
-                        Some(&e.0),
-                    )
-                })?
-                .overlaps
-                == crate::coord::settings::Overlaps::Block
+            && matches!(
+                crate::coord::settings::read(&self.connection, &stored.project_id)
+                    .map_err(|e| {
+                        with_code(
+                            "the project's coordination settings could not be read",
+                            Some(&e.0),
+                        )
+                    })?
+                    .overlaps,
+                crate::coord::settings::Overlaps::Block | crate::coord::settings::Overlaps::Wait
+            )
         {
             return Err(with_code(
                 OVERLAP_BLOCK_NEEDS_HOOKS,
@@ -9329,6 +9349,15 @@ const CLAIMS_SWEEP_EVERY: Duration = Duration::from_secs(30);
 /// The owner's note the first time a project's claims fill one overlap check.
 const CLAIMS_FULL_NOTE: &str = "This project holds more open file claims than one overlap check reads, so agents cannot start new claimed work and their edits of claimed files are held. Accept or discard the change sets waiting in Changes, or release work no agent is on.";
 const HANDOFF_BYTES_MAX: usize = 1000;
+
+/// The owner's note of two agents whose waits under Wait would have closed a cycle (OS-8).
+/// Inputs: the labels of the agent whose start went ahead and of the one holding the file,
+/// and the file. Output: the note.
+fn wait_cycle_note(starter: &str, holder: &str, file: &str) -> String {
+    format!(
+        "{starter} and {holder} would have waited on each other under Overlapping edits Wait, so {starter}'s start went ahead without {file}: {holder} keeps editing it, and {starter}'s edits of it stay refused until {holder}'s work on it lands or is discarded."
+    )
+}
 
 /// Lists file names for an engine note one per line, each quoted with its quotes,
 /// backslashes, newlines and other control characters escaped, so no name an agent chose

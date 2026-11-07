@@ -16338,6 +16338,47 @@ fn endpoint_claude_agent_is_hookless_and_refused_under_block() {
     runtime.shutdown().unwrap();
 }
 
+/// OS-8: Wait holds edits of a claimed file through the pre-edit hook as Block does, so a
+/// hookless Claude Code agent with tools is refused under Wait too, with the same code.
+#[cfg(target_os = "macos")]
+#[test]
+fn endpoint_claude_agent_is_hookless_and_refused_under_wait() {
+    use crate::coord::settings::{CoordSettings, Overlaps, write};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut runtime = exiting_claude_runtime(&fixture);
+    write(
+        &fixture.connection,
+        &project,
+        &CoordSettings {
+            overlaps: Overlaps::Wait,
+            ..CoordSettings::default()
+        },
+    )
+    .unwrap();
+    let with_tools = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let Err(refused) = runtime.prepare(
+        &fixture.setup,
+        with_tools,
+        AgentRole::Sub,
+        "claude-code",
+        true,
+        &endpoint_account(),
+        false,
+        Layout::Linked,
+    ) else {
+        panic!("a hookless agent with tools started under Overlaps Wait");
+    };
+    assert!(refused.contains(OVERLAP_BLOCK_NEEDS_HOOKS), "{refused}");
+    assert!(refused.contains("Block or Wait"), "{refused}");
+    assert!(
+        refused.contains(crate::protocol::plain_code("overlap_block_needs_hooks")),
+        "{refused}"
+    );
+    assert!(hookless_saved(&fixture, with_tools));
+    runtime.shutdown().unwrap();
+}
+
 /// Prepares one new Claude Code sub-agent with tools on an endpoint account, as the team
 /// starts it, and builds its pane command from the plan and the kept context the runtime
 /// made. Inputs: the fixture and the runtime. Output: the display variables of that command.
@@ -22468,5 +22509,16 @@ fn a_grant_that_fails_after_a_profile_wait_drops_the_wait_record() {
         team.grant_waited.get(&7),
         None,
         "the earlier profile wait is not the newest grant answer"
+    );
+}
+
+/// OS-8 Wait, T9-FU: the owner's note of a cycle of waits says the start went ahead without
+/// the file, that its holder keeps editing it and how long the starter's edits of it stay
+/// refused.
+#[test]
+fn the_wait_cycle_note_says_who_keeps_editing_the_file() {
+    assert_eq!(
+        wait_cycle_note("Ada (@api)", "Grace (@ui)", "src/parser.rs"),
+        "Ada (@api) and Grace (@ui) would have waited on each other under Overlapping edits Wait, so Ada (@api)'s start went ahead without src/parser.rs: Grace (@ui) keeps editing it, and Ada (@api)'s edits of it stay refused until Grace (@ui)'s work on it lands or is discarded."
     );
 }

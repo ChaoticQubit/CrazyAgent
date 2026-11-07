@@ -22,7 +22,11 @@ struct WorkRow {
 /// labels. Overlaps with other agents' active claims come back at once for both sides
 /// to hear; `breadth` gives the soft "split this" note. Takes the database, the project,
 /// the agent, the title, the claims and the time in ms. Returns the work and the
-/// overlaps, or a plain refusal for a stopped agent or invalid input.
+/// overlaps, or a plain refusal for a stopped agent or invalid input. Under Wait a start on
+/// a file another agent's work holds starts nothing: it records the wait and is refused
+/// with `coord_claim_waits`, unless that wait would close a cycle of waits; then the start
+/// goes ahead without the files other agents' live claims hold, their overlaps marked
+/// `left_out`, and the owner is told of the pair once (OS-8).
 pub fn start_work(
     db: &Connection,
     project: &ProjectId,
@@ -47,10 +51,35 @@ pub fn start_work(
     let work = tx.last_insert_rowid();
     audit(tx, project, work, Party::Agent(agent), "start", 0, 1, now)?;
     super::claims::add(tx, project, agent, work, &claims, now)?;
-    let overlaps = super::claims::overlaps_for(tx, project, agent, work, now)?;
+    let mut overlaps = super::claims::overlaps_for(tx, project, agent, work, now)?;
+    if waits(tx, project)?
+        && let Some(held) = super::claims::waits_on(&overlaps)
+    {
+        let file = held.mine.pattern.clone();
+        if super::claims::closes_cycle(tx, agent, held.theirs.agent)? {
+            super::claims::note_cycle(tx, project, agent, held.theirs.agent, &file, now)?;
+            super::claims::leave_out(tx, &mut overlaps)?;
+        } else {
+            let (holder, pattern) = (held.theirs.work, held.theirs.pattern.clone());
+            drop(change);
+            super::claims::wait_for(db, project, agent, holder, &file, &pattern, now)?;
+            return Err(failure("coord_claim_waits"));
+        }
+    }
     super::presence::seen(tx, agent, now)?;
     change.commit()?;
     Ok((work, overlaps))
+}
+
+/// Says whether the project's Overlapping edits option is Wait. A store failure fails;
+/// settings that cannot be read count as the default, as the start's answer reads them.
+/// Takes the database and the project. Returns whether starts wait.
+fn waits(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    match super::settings::read(db, project) {
+        Ok(settings) => Ok(settings.overlaps == super::settings::Overlaps::Wait),
+        Err(problem) if problem.0.starts_with("coord_state_unavailable") => Err(problem),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Changes who owns a unit of work (Concord's transfer verbs), first transition wins:

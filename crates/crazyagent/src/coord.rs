@@ -40,9 +40,9 @@ pub mod watch;
 mod work;
 
 pub use claims::{
-    breadth, claims_full_notice, covers, held_sets, held_sets_in, hold_for_set, overlapping,
-    overlaps_of, path_scopes, release_claims, release_set, release_unheld, restore_set,
-    stopped_with_unheld,
+    breadth, claims_full_notice, covers, held_sets, held_sets_in, hold_for_set, latest_wait,
+    overlapping, overlaps_of, path_scopes, release_claims, release_set, release_unheld,
+    restore_set, stopped_with_unheld, wait_cycle_notices, wake_waiters,
 };
 pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread};
 pub use presence::{owner_questions, record_tool, set_waiting, snapshot, touch};
@@ -300,20 +300,26 @@ pub struct Claim {
 }
 
 /// Two active claims of different agents that may touch the same thing, with the plain
-/// reasons (same file, same folder, shared module or domain).
+/// reasons (same file, same folder, shared module or domain). `left_out` marks a start's
+/// file that a cycle of waits under Wait left out of its work, so its holder keeps it (OS-8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Overlap {
     pub mine: Claim,
     pub theirs: Claim,
     pub reasons: Vec<String>,
+    #[serde(default)]
+    pub left_out: bool,
 }
 
-/// What the graph, the Process page and the inbox show for one agent.
+/// What the graph, the Process page and the inbox show for one agent; `waits_for` is the
+/// file its newest start under Wait waits for (OS-8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentState {
     pub agent: AgentId,
     pub presence: Presence,
     pub waiting: Option<Waiting>,
+    #[serde(default)]
+    pub waits_for: Option<String>,
     pub has_worktree: bool,
     pub unread: u32,
     pub tool_counts: Vec<(String, u32)>,

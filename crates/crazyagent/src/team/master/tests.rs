@@ -1893,6 +1893,133 @@ fn the_claims_limit_refusals_name_how_claims_free_up() {
     );
 }
 
+/// OS-8 Wait: under the Wait option the master's start_work on a file a running
+/// sub-agent's work claims is refused with the plan's sentence naming that agent, its work
+/// and the file, and starts nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn under_wait_the_master_s_start_on_a_held_file_is_told_to_wait() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    known_project(&fixture);
+    let charts = named_sub(&fixture, "charts", "working");
+    let (said, refused) = as_sub(
+        &mut fixture,
+        charts,
+        tool::START_WORK_TOOL,
+        json!({"title": "Draw the chart", "claims": ["src/ui/chart.ts"]}),
+    );
+    assert!(!refused, "{said}");
+    let work = work_id(&fixture, "Draw the chart");
+    crate::coord::settings::write(
+        &fixture.connection,
+        &ProjectId::new(PROJECT).unwrap(),
+        &crate::coord::settings::CoordSettings {
+            overlaps: crate::coord::settings::Overlaps::Wait,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "Restyle the chart", "claims": ["src/ui/chart.ts"]}),
+    );
+    assert!(refused, "{said}");
+    assert_eq!(
+        said,
+        format!(
+            "Wait: Ada (@charts)'s work #{work} holds src/ui/chart.ts until it lands. You will get a message when it is free."
+        )
+    );
+    let started: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_work WHERE title='Restyle the chart'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(started, 0);
+}
+
+/// OS-8 Wait, T9-FU: the master's start whose wait would close a cycle goes ahead without
+/// the file a sub-agent's work holds and says so: the sub-agent keeps editing it, the
+/// master's edits of it are refused until that work lands or is discarded, and the
+/// sub-agent gets no overlap note for a claim the master does not hold.
+#[cfg(target_os = "macos")]
+#[test]
+fn under_wait_the_master_s_start_that_would_close_a_cycle_leaves_the_held_file_out_and_says_so() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    known_project(&fixture);
+    let charts = named_sub(&fixture, "charts", "working");
+    let (said, refused) = as_sub(
+        &mut fixture,
+        charts,
+        tool::START_WORK_TOOL,
+        json!({"title": "Draw the chart", "claims": ["src/ui/chart.ts"]}),
+    );
+    assert!(!refused, "{said}");
+    let chart = work_id(&fixture, "Draw the chart");
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "Build the API", "claims": ["src/api.rs"]}),
+    );
+    assert!(!refused, "{said}");
+    crate::coord::settings::write(
+        &fixture.connection,
+        &ProjectId::new(PROJECT).unwrap(),
+        &crate::coord::settings::CoordSettings {
+            overlaps: crate::coord::settings::Overlaps::Wait,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (said, refused) = as_sub(
+        &mut fixture,
+        charts,
+        tool::START_WORK_TOOL,
+        json!({"title": "Call the API", "claims": ["src/api.rs"]}),
+    );
+    assert!(refused, "the sub-agent waits for the master's file: {said}");
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "Restyle the chart", "claims": ["src/ui/chart.ts", "styles/theme.css"]}),
+    );
+    assert!(!refused, "{said}");
+    let work = work_id(&fixture, "Restyle the chart");
+    assert_eq!(
+        said,
+        format!(
+            "Started work #{work} at version 1: Restyle the chart.\nsrc/ui/chart.ts was left out of this work: you and Ada (@charts) would wait on each other for it under Overlapping edits Wait, so Ada (@charts) keeps editing it on work #{chart}, and your edits of it are refused until that work lands or is discarded. Work on your other files."
+        )
+    );
+    let claimed: Vec<String> = fixture
+        .connection
+        .prepare("SELECT pattern FROM coord_claims WHERE work=?1 ORDER BY pattern")
+        .unwrap()
+        .query_map([work], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(claimed, vec!["styles/theme.css".to_owned()]);
+    let noted: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_messages WHERE to_agent=?1 AND body LIKE '%Restyle the chart%'",
+            [charts],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        noted, 0,
+        "no overlap note for a claim the master does not hold"
+    );
+}
+
 /// A lead's inspect_work shows its work, its workers' work and not another agent's, what
 /// waits for it (then marked read), its workers' questions for the owner, what it sent
 /// and its workers; a plain sub-agent sees only its own sections.

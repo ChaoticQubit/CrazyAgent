@@ -47,7 +47,8 @@ pub(super) struct Sending<'a> {
 /// Starts a unit of work for the caller with its claims (DEC-104), and tells both sides of
 /// each overlap with another agent's claims unless the owner's Overlapping edits setting
 /// is Off: the caller in the answer, the other agent in an engine note. Claims too broad
-/// to share get the soft "split this" note. Takes the database, what the answers need,
+/// to share get the soft "split this" note. A file a cycle of waits under Wait left out of
+/// the work is named with who keeps editing it, and its holder gets no overlap note. Takes the database, what the answers need,
 /// the caller, the title and the claims. Returns the sentence and whether it is a refusal.
 pub(super) fn start_work(
     connection: &Connection,
@@ -67,6 +68,9 @@ pub(super) fn start_work(
         now,
     ) {
         Ok(started) => started,
+        Err(problem) if problem.0 == "coord_claim_waits" => {
+            return waiting(connection, project, agent, problem);
+        }
         Err(problem) => return refused("Not started", problem),
     };
     let mut text = format!(
@@ -86,8 +90,17 @@ pub(super) fn start_work(
         Err(problem) if stored_failure(&problem) => return Err(problem),
         Err(_) => true,
     };
+    let (left_out, overlaps): (Vec<_>, Vec<_>) =
+        overlaps.into_iter().partition(|overlap| overlap.left_out);
+    for overlap in left_out.iter().take(OVERLAPS_SHOWN_MAX) {
+        let them = who(connection, project, Party::Agent(overlap.theirs.agent))?;
+        text.push_str(&format!(
+            "\n{} was left out of this work: you and {them} would wait on each other for it under Overlapping edits Wait, so {them} keeps editing it on work #{}, and your edits of it are refused until that work lands or is discarded. Work on your other files.",
+            overlap.mine.pattern, overlap.theirs.work
+        ));
+    }
     if !warn || overlaps.is_empty() {
-        return Ok((text, false));
+        return Ok((bound_text(&text, SECTION_BYTES_MAX), false));
     }
     let me = who(connection, project, Party::Agent(agent))?;
     text.push_str("\nYour claims overlap other agents' active claims. Agree who does what before you edit: send each a note with update_work (kind note, to its number):");
@@ -976,6 +989,38 @@ fn message_line(
         "{head}:\n  > {}",
         bound_text(&message.body, BODY_SHOWN_MAX).replace('\n', "\n  > ")
     ))
+}
+
+/// The plan's answer to a start that waits under the Wait option (OS-8), as
+/// [`wait_sentence`] words it. Without a readable wait it is the plain refusal. Takes the
+/// database, the project, the agent and the refusal. Returns the refusal.
+fn waiting(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    problem: EngineError,
+) -> Result<(String, bool), EngineError> {
+    match wait_sentence(connection, project, agent)? {
+        Some(sentence) => Ok((sentence, true)),
+        None => refused("Not started", problem),
+    }
+}
+
+/// The sentence an agent whose start waits under the Wait option reads (OS-8): who holds
+/// which file on which work, and that a message follows once it is free. Takes the
+/// database, the project and the agent. Returns the sentence, None without a wait.
+pub fn wait_sentence(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Option<String>, EngineError> {
+    let Some((holder, work, file)) = coord::latest_wait(connection, agent)? else {
+        return Ok(None);
+    };
+    let name = who(connection, project, Party::Agent(holder))?;
+    Ok(Some(format!(
+        "Wait: {name}'s work #{work} holds {file} until it lands. You will get a message when it is free."
+    )))
 }
 
 /// Turns a coordination refusal into the sentence the agent reads, while a store failure

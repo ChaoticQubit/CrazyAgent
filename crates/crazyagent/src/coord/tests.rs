@@ -1108,6 +1108,580 @@ fn the_owner_hears_once_when_a_project_fills_the_claims_scan() {
     );
 }
 
+/// Sets the project's Overlapping edits option.
+#[cfg(unix)]
+fn overlaps_set(connection: &Connection, overlaps: Overlaps) {
+    settings::write(
+        connection,
+        &project(),
+        &CoordSettings {
+            overlaps,
+            ..CoordSettings::default()
+        },
+    )
+    .unwrap();
+}
+
+/// The engine's prompts to one agent, oldest first.
+#[cfg(unix)]
+fn prompts(connection: &Connection, agent: AgentId) -> Vec<String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT body FROM coord_messages WHERE from_kind='engine' AND to_agent=?1
+             AND kind='prompt' ORDER BY id",
+        )
+        .unwrap();
+    statement
+        .query_map([agent], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// How many units of work one agent owns.
+#[cfg(unix)]
+fn works_owned(connection: &Connection, agent: AgentId) -> i64 {
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_work WHERE owner_agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// One agent's start on one file.
+#[cfg(unix)]
+fn start_on(
+    connection: &Connection,
+    who: AgentId,
+    file: &str,
+) -> Result<(WorkId, Vec<Overlap>), crate::engine::EngineError> {
+    start_work(
+        connection,
+        &project(),
+        who,
+        format!("Edit {file}"),
+        vec![file.into()],
+        NOW,
+    )
+}
+
+/// The prompt a waiting agent gets once its file is free (OS-8, plan wording).
+#[cfg(unix)]
+const LEXER_FREE: &str = "src/lexer.rs is free now: start your work again.";
+
+/// OS-8 Wait: an agent starting on a file another agent's active work claims is refused
+/// with `coord_claim_waits` and starts nothing; review-ready work still holds the file, and
+/// once the change set holding it lands the waiting agent gets one prompt and starts.
+#[cfg(unix)]
+#[test]
+fn under_wait_an_overlapping_start_waits_and_its_agent_is_told_when_the_file_lands() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    assert_eq!(
+        works_owned(&connection, ada),
+        0,
+        "a waiting start starts nothing"
+    );
+    assert!(prompts(&connection, ada).is_empty());
+    finish(
+        &connection,
+        grace_work,
+        1,
+        Finish::ReviewReady,
+        "Green.".into(),
+        grace,
+        NOW,
+    )
+    .unwrap();
+    assert!(
+        prompts(&connection, ada).is_empty(),
+        "review-ready work still holds the file"
+    );
+    assert_eq!(hold_for_set(&connection, grace, SETS[0]).unwrap(), 1);
+    assert_eq!(release_set(&connection, SETS[0], NOW).unwrap(), 1);
+    assert_eq!(prompts(&connection, ada), vec![LEXER_FREE.to_owned()]);
+    let (_, overlaps) = start_on(&connection, ada, "src/lexer.rs").unwrap();
+    assert!(overlaps.is_empty(), "{overlaps:?}");
+    assert_eq!(prompts(&connection, ada).len(), 1, "one prompt per wait");
+}
+
+/// OS-8 Wait: an owner releasing the held work wakes the agent waiting for its file.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_released_claim_wakes_the_agent_waiting_for_its_file() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    transfer(
+        &connection,
+        grace_work,
+        1,
+        Transfer::Release,
+        Party::Agent(grace),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(prompts(&connection, ada), vec![LEXER_FREE.to_owned()]);
+}
+
+/// OS-8 Wait never waits forever: once the holder stops, its active claim no longer holds
+/// the file, so the engine's sweep prompts the waiting agent once and keeps no wait.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_holder_that_stops_frees_its_waiter_at_the_next_sweep() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    assert_eq!(
+        wake_waiters(&connection, NOW).unwrap(),
+        0,
+        "Grace still works"
+    );
+    connection
+        .execute(
+            "UPDATE team_agents SET status='stopped' WHERE id=?1",
+            [grace],
+        )
+        .unwrap();
+    assert_eq!(wake_waiters(&connection, NOW).unwrap(), 1);
+    assert_eq!(prompts(&connection, ada), vec![LEXER_FREE.to_owned()]);
+    assert_eq!(wake_waiters(&connection, NOW).unwrap(), 0);
+    assert_eq!(prompts(&connection, ada).len(), 1);
+}
+
+/// OS-8 Wait: a holder already away does not hold the file, so the start goes ahead and
+/// reports the overlap as stale, as under Warn.
+#[cfg(unix)]
+#[test]
+fn under_wait_an_away_holder_never_makes_a_start_wait() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    start_on(&connection, grace, "src/lexer.rs").unwrap();
+    connection
+        .execute(
+            "UPDATE coord_activity SET last_seen=?2 WHERE agent=?1",
+            params![grace, NOW - 31 * MINUTE],
+        )
+        .unwrap();
+    let (_, overlaps) = start_on(&connection, ada, "src/lexer.rs").unwrap();
+    assert_eq!(overlaps.len(), 1);
+    assert!(overlaps[0].theirs.stale);
+}
+
+/// OS-8: Warn, Block and Off keep starting the overlapping work, reporting the overlap, and
+/// prompt no one.
+#[cfg(unix)]
+#[test]
+fn warn_block_and_off_start_an_overlapping_work_and_prompt_no_one() {
+    for overlaps_option in [Overlaps::Warn, Overlaps::Block, Overlaps::Off] {
+        let connection = db();
+        overlaps_set(&connection, overlaps_option);
+        let grace = agent(&connection, "sub", None);
+        let ada = agent(&connection, "sub", None);
+        let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+        let (_, overlaps) = start_on(&connection, ada, "src/lexer.rs").unwrap();
+        assert_eq!(overlaps.len(), 1, "{overlaps_option:?}");
+        transfer(
+            &connection,
+            grace_work,
+            1,
+            Transfer::Release,
+            Party::Agent(grace),
+            NOW,
+        )
+        .unwrap();
+        assert!(prompts(&connection, ada).is_empty(), "{overlaps_option:?}");
+    }
+}
+
+/// OS-8 Wait: a waiting agent that stops is forgotten: the file's release prompts no one.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_waiter_that_stops_is_forgotten() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    connection
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=?1", [ada])
+        .unwrap();
+    transfer(
+        &connection,
+        grace_work,
+        1,
+        Transfer::Release,
+        Party::Agent(grace),
+        NOW,
+    )
+    .unwrap();
+    assert!(prompts(&connection, ada).is_empty());
+    let left: i64 = connection
+        .query_row("SELECT COUNT(*) FROM coord_waits", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+/// OS-8 Wait: one agent keeps at most 8 waits; a ninth refused start drops its oldest.
+#[cfg(unix)]
+#[test]
+fn under_wait_an_agent_keeps_at_most_eight_waits() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let ada = agent(&connection, "sub", None);
+    for index in 0..9 {
+        let holder = agent(&connection, "sub", None);
+        let file = format!("src/f{index}.rs");
+        start_on(&connection, holder, &file).unwrap();
+        assert_eq!(code(start_on(&connection, ada, &file)), "coord_claim_waits");
+    }
+    let files: Vec<String> = {
+        let mut statement = connection
+            .prepare("SELECT file FROM coord_waits WHERE agent=?1 ORDER BY file")
+            .unwrap();
+        statement
+            .query_map([ada], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(files.len(), 8, "{files:?}");
+    assert!(!files.contains(&"src/f0.rs".to_owned()), "{files:?}");
+}
+
+/// OS-8 Wait never waits forever: a holder that goes away after the start waited no longer
+/// holds the file, as a start would see it, so the next sweep prompts the waiting agent once;
+/// a holder only idle still holds it.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_holder_that_goes_away_frees_its_waiter_at_the_next_sweep() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    let quiet = |minutes: i64| {
+        connection
+            .execute(
+                "UPDATE coord_activity SET last_seen=?2 WHERE agent=?1",
+                params![grace, NOW - minutes * MINUTE],
+            )
+            .unwrap();
+    };
+    quiet(29);
+    assert_eq!(
+        wake_waiters(&connection, NOW).unwrap(),
+        0,
+        "an idle holder still holds the file"
+    );
+    quiet(31);
+    assert_eq!(wake_waiters(&connection, NOW).unwrap(), 1);
+    assert_eq!(prompts(&connection, ada), vec![LEXER_FREE.to_owned()]);
+    assert_eq!(wake_waiters(&connection, NOW).unwrap(), 0);
+    let (_, overlaps) = start_on(&connection, ada, "src/lexer.rs").unwrap();
+    assert!(overlaps[0].theirs.stale, "{overlaps:?}");
+}
+
+/// OS-8 Wait, DEC-117 Q7: finished work holds its files until its change set lands, so an
+/// away holder's review-ready work keeps its waiter waiting.
+#[cfg(unix)]
+#[test]
+fn under_wait_finished_work_of_an_away_holder_still_holds_the_file() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    finish(
+        &connection,
+        grace_work,
+        1,
+        Finish::ReviewReady,
+        "Green.".into(),
+        grace,
+        NOW,
+    )
+    .unwrap();
+    connection
+        .execute(
+            "UPDATE coord_activity SET last_seen=?2 WHERE agent=?1",
+            params![grace, NOW - 31 * MINUTE],
+        )
+        .unwrap();
+    assert_eq!(wake_waiters(&connection, NOW).unwrap(), 0);
+    assert!(prompts(&connection, ada).is_empty());
+}
+
+/// OS-8 Wait never closes a cycle: Ada waits for Grace's file, so Grace's start on Ada's
+/// file goes ahead as under Warn, reporting the overlap, and the owner hears of the pair
+/// once, however often it happens again.
+#[cfg(unix)]
+#[test]
+fn under_wait_two_agents_never_wait_on_each_other_and_the_owner_hears_once() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    start_on(&connection, grace, "src/lexer.rs").unwrap();
+    start_on(&connection, ada, "src/parser.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    let (_, overlaps) = start_on(&connection, grace, "src/parser.rs")
+        .expect("waiting on Ada, who waits on Grace, would close a cycle");
+    assert_eq!(overlaps.len(), 1, "{overlaps:?}");
+    assert_eq!(works_owned(&connection, grace), 2);
+    assert_eq!(
+        wait_cycle_notices(&connection, &project(), NOW).unwrap(),
+        vec![(grace, ada, "src/parser.rs".to_owned())]
+    );
+    assert!(
+        wait_cycle_notices(&connection, &project(), NOW)
+            .unwrap()
+            .is_empty(),
+        "the owner hears once"
+    );
+    start_on(&connection, grace, "src/parser.rs").unwrap();
+    assert!(
+        wait_cycle_notices(&connection, &project(), NOW)
+            .unwrap()
+            .is_empty(),
+        "the same pair is not told again"
+    );
+}
+
+/// OS-8 Wait: a ring of three waits never closes either. Ada waits for Grace and Grace for
+/// Lin, so Lin's start on Ada's file goes ahead and the owner hears of Lin and Ada.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_ring_of_three_waits_never_closes() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let lin = agent(&connection, "sub", None);
+    start_on(&connection, grace, "src/lexer.rs").unwrap();
+    start_on(&connection, ada, "src/parser.rs").unwrap();
+    start_on(&connection, lin, "src/main.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    assert_eq!(
+        code(start_on(&connection, grace, "src/main.rs")),
+        "coord_claim_waits",
+        "a chain that does not reach the starter still waits"
+    );
+    start_on(&connection, lin, "src/parser.rs").expect("the third wait would close the ring");
+    assert_eq!(
+        wait_cycle_notices(&connection, &project(), NOW).unwrap(),
+        vec![(lin, ada, "src/parser.rs".to_owned())]
+    );
+}
+
+/// OS-8 Wait: a chain of waits longer than one walk reads counts as a cycle, so the start
+/// at its far end goes ahead as under Warn rather than wait on a chain never read to its end.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_chain_past_the_walk_bound_goes_ahead_as_under_warn() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let agents: Vec<AgentId> = (0..super::claims::WAIT_WALK_MAX + 2)
+        .map(|_| agent(&connection, "sub", None))
+        .collect();
+    for (index, who) in agents.iter().enumerate() {
+        start_on(&connection, *who, &format!("src/f{index}.rs")).unwrap();
+    }
+    let mut went_ahead = Vec::new();
+    for index in (0..agents.len() - 1).rev() {
+        match start_on(
+            &connection,
+            agents[index],
+            &format!("src/f{}.rs", index + 1),
+        ) {
+            Ok(_) => went_ahead.push(index),
+            Err(problem) => assert_eq!(problem.0, "coord_claim_waits", "{index}"),
+        }
+    }
+    assert_eq!(went_ahead, vec![0]);
+}
+
+/// OS-8 Wait, T9-FU: a start whose wait would close a cycle goes ahead without the file
+/// another agent's live claim holds, so that holder keeps editing it and the starter's
+/// edits of it stay refused; the start's file in another folder is claimed, its overlap says
+/// the file was left out, and the owner hears who started and who holds the file.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_cycle_fallback_leaves_the_held_file_to_its_holder() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/parser.rs").unwrap();
+    start_on(&connection, ada, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, grace, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    let (work, overlaps) = start_work(
+        &connection,
+        &project(),
+        ada,
+        "Fix both".into(),
+        vec!["src/parser.rs".into(), "docs/notes.md".into()],
+        NOW,
+    )
+    .expect("waiting on Grace, who waits on Ada, would close a cycle");
+    assert_eq!(
+        overlaps
+            .iter()
+            .map(|overlap| (
+                overlap.theirs.work,
+                overlap.mine.pattern.as_str(),
+                overlap.left_out
+            ))
+            .collect::<Vec<_>>(),
+        vec![(grace_work, "src/parser.rs", true)]
+    );
+    let claimed: Vec<String> = connection
+        .prepare("SELECT pattern FROM coord_claims WHERE work=?1 ORDER BY pattern")
+        .unwrap()
+        .query_map([work], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(claimed, vec!["docs/notes.md".to_owned()]);
+    let holders = |who: AgentId| -> Vec<AgentId> {
+        overlapping(&connection, &project(), who, "src/parser.rs")
+            .unwrap()
+            .iter()
+            .map(|claim| claim.agent)
+            .collect()
+    };
+    assert_eq!(
+        holders(grace),
+        Vec::<AgentId>::new(),
+        "Grace keeps editing her own file"
+    );
+    assert_eq!(holders(ada), vec![grace], "Ada's edits of it stay refused");
+    assert_eq!(
+        wait_cycle_notices(&connection, &project(), NOW).unwrap(),
+        vec![(ada, grace, "src/parser.rs".to_owned())]
+    );
+}
+
+/// OS-8 Wait is at least as strong as Block: a start on a file another agent's folder or
+/// glob claim covers waits for that work, and its release prompts the waiting agent.
+#[cfg(unix)]
+#[test]
+fn under_wait_a_start_on_a_file_a_held_folder_or_glob_covers_waits() {
+    for held in ["src/", "src/*.rs"] {
+        let connection = db();
+        overlaps_set(&connection, Overlaps::Wait);
+        let grace = agent(&connection, "sub", None);
+        let ada = agent(&connection, "sub", None);
+        let (grace_work, _) = start_on(&connection, grace, held).unwrap();
+        assert_eq!(
+            code(start_on(&connection, ada, "src/lexer.rs")),
+            "coord_claim_waits",
+            "{held}"
+        );
+        assert_eq!(
+            latest_wait(&connection, ada).unwrap(),
+            Some((grace, grace_work, "src/lexer.rs".to_owned())),
+            "{held}"
+        );
+        transfer(
+            &connection,
+            grace_work,
+            1,
+            Transfer::Release,
+            Party::Agent(grace),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            prompts(&connection, ada),
+            vec![LEXER_FREE.to_owned()],
+            "{held}"
+        );
+    }
+}
+
+/// OS-8 Wait is visible: a waiting agent's coordination state names the file it waits for
+/// until the wait settles.
+#[cfg(unix)]
+#[test]
+fn a_waiting_agent_s_state_names_the_file_it_waits_for() {
+    let connection = db();
+    overlaps_set(&connection, Overlaps::Wait);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    let (grace_work, _) = start_on(&connection, grace, "src/lexer.rs").unwrap();
+    assert_eq!(
+        code(start_on(&connection, ada, "src/lexer.rs")),
+        "coord_claim_waits"
+    );
+    let waits = |connection: &Connection| -> Vec<(AgentId, Option<String>)> {
+        snapshot(connection, &project(), NOW)
+            .unwrap()
+            .agents
+            .into_iter()
+            .map(|state| (state.agent, state.waits_for))
+            .collect()
+    };
+    assert_eq!(
+        waits(&connection),
+        vec![(grace, None), (ada, Some("src/lexer.rs".to_owned()))]
+    );
+    transfer(
+        &connection,
+        grace_work,
+        1,
+        Transfer::Release,
+        Party::Agent(grace),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(waits(&connection), vec![(grace, None), (ada, None)]);
+}
+
 #[cfg(unix)]
 #[test]
 fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {

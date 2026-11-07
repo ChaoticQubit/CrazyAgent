@@ -2,7 +2,7 @@ mod routes;
 
 use crazyagent::agent_git::Layout;
 use crazyagent::coord::settings::SkillRole;
-use crazyagent::coord::{MessageKind, NewMessage, Party, QuestionFor, Severity};
+use crazyagent::coord::{Finish, MessageKind, NewMessage, Party, QuestionFor, Severity};
 use crazyagent::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
 use crazyagent::protocol::ProjectId;
 use crazyagent_desktop::bridge::{BridgeError, BridgeQueue, NativeBridge};
@@ -23,6 +23,8 @@ const TOKEN_BYTES: usize = 32;
 const RECORD_MODE: &str = "record-turn-end";
 const ASK_MODE: &str = "ask-owner";
 const SKILLS_MODE: &str = "role-skills";
+const START_MODE: &str = "start-work";
+const FINISH_MODE: &str = "finish-work";
 const RECORD_ARGS_MAX: usize = 10;
 const IDE_OPEN: &str = "e2e_ide_open";
 
@@ -276,15 +278,90 @@ fn ask_owner(args: &[OsString]) -> Result<String, String> {
         body,
         idempotency_key: None,
     };
-    let since = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "the clock is before 1970".to_owned())?;
-    let now =
-        i64::try_from(since.as_millis()).map_err(|_| "the clock is out of range".to_owned())?;
+    let now = now_ms()?;
     let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
     let id = crazyagent::coord::send(&db, message, now).map_err(|error| error.0)?;
     assert!(id > 0);
     Ok(id.to_string())
+}
+
+/// Starts one unit of work for a team agent on one claim the way the agent's `start_work`
+/// call does, through the engine's own `coord::start_work` on its database, so the
+/// end-to-end test reads what the Overlapping edits option answers it (OS-8). Inputs:
+/// engine root, project, agent id, title and claim. Output: `started <work>`, or the
+/// sentence the agent reads when its start waits.
+fn start_work(args: &[OsString]) -> Result<String, String> {
+    let [root, project, agent, title, claim] = args else {
+        return Err(format!(
+            "usage: desktop-e2e-bridge {START_MODE} <engine root> <project> <agent> <title> <claim>"
+        ));
+    };
+    let text = |value: &OsString| {
+        value
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "arguments must be UTF-8".to_owned())
+    };
+    let agent: i64 = text(agent)?
+        .parse()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "invalid agent id".to_owned())?;
+    let project = ProjectId::new(text(project)?).map_err(|_| "invalid project id".to_owned())?;
+    let now = now_ms()?;
+    let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
+    match crazyagent::coord::start_work(&db, &project, agent, text(title)?, vec![text(claim)?], now)
+    {
+        Ok((work, _)) => Ok(format!("started {work}")),
+        Err(problem) if problem.0 == "coord_claim_waits" => {
+            crazyagent::team::master::wait_sentence(&db, &project, agent)
+                .map_err(|error| error.0)?
+                .ok_or_else(|| "the start waits and no wait is kept".to_owned())
+        }
+        Err(problem) => Err(problem.0),
+    }
+}
+
+/// Finishes an agent's unit of work at version 1 as review ready the way the agent's
+/// `finish_work` call does, through the engine's own `coord::finish` on its database.
+/// Inputs: engine root, agent id and work id. Output: the work's new version.
+fn finish_work(args: &[OsString]) -> Result<String, String> {
+    let [root, agent, work] = args else {
+        return Err(format!(
+            "usage: desktop-e2e-bridge {FINISH_MODE} <engine root> <agent> <work>"
+        ));
+    };
+    let id = |value: &OsString| {
+        value
+            .to_str()
+            .and_then(|text| text.parse::<i64>().ok())
+            .filter(|id| *id > 0)
+            .ok_or_else(|| "ids are positive numbers".to_owned())
+    };
+    let (agent, work) = (id(agent)?, id(work)?);
+    let now = now_ms()?;
+    let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
+    let version = crazyagent::coord::finish(
+        &db,
+        work,
+        1,
+        Finish::ReviewReady,
+        "Done.".to_owned(),
+        agent,
+        now,
+    )
+    .map_err(|error| error.0)?;
+    assert!(version > 1);
+    Ok(version.to_string())
+}
+
+/// The time now in ms since 1970, as the engine stamps its rows. Output: the time, or why
+/// the clock cannot give it.
+fn now_ms() -> Result<i64, String> {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "the clock is before 1970".to_owned())?;
+    i64::try_from(since.as_millis()).map_err(|_| "the clock is out of range".to_owned())
 }
 
 /// Installs what one team role's agent is given for a project the way a team launch does,
@@ -341,10 +418,11 @@ fn role_skills(args: &[OsString]) -> Result<String, String> {
 
 /// Serves the app's `desktop_*` commands to the end-to-end test on 127.0.0.1 for as long as
 /// stdin stays open; with `record-turn-end` first, records one ended agent turn, with
-/// `ask-owner` first, puts one agent's question to the owner, and with `role-skills` first,
-/// installs one team role's skills. Input: the engine socket path. Output: prints
-/// `ready <port> <token>` once listening, or the recorded change set, the question's id or
-/// the installed skills; exits non-zero when it cannot.
+/// `ask-owner` first, puts one agent's question to the owner, with `role-skills` first,
+/// installs one team role's skills, and with `start-work` or `finish-work` first, starts or
+/// finishes one agent's work. Input: the engine socket path. Output: prints
+/// `ready <port> <token>` once listening, or the recorded change set, the question's id,
+/// the installed skills or the start's or finish's answer; exits non-zero when it cannot.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let all: Vec<OsString> = std::env::args_os().skip(1).take(RECORD_ARGS_MAX).collect();
@@ -359,6 +437,26 @@ async fn main() -> std::process::ExitCode {
                 std::process::ExitCode::FAILURE
             }
         };
+    }
+    for (mode, run) in [
+        (
+            START_MODE,
+            start_work as fn(&[OsString]) -> Result<String, String>,
+        ),
+        (FINISH_MODE, finish_work),
+    ] {
+        if all.first().is_some_and(|first| first == mode) {
+            return match run(&all[1..]) {
+                Ok(answer) => {
+                    println!("{answer}");
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{mode}: {error}");
+                    std::process::ExitCode::FAILURE
+                }
+            };
+        }
     }
     if all.first().is_some_and(|mode| mode == SKILLS_MODE) {
         return match role_skills(&all[1..]) {

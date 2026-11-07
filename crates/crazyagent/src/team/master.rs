@@ -2108,3 +2108,4 @@ mod sub_merge;
 mod work;
 
 pub(crate) use work::WAKE_TASK;
+pub use work::wait_sentence;

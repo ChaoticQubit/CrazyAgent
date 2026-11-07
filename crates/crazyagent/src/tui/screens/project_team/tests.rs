@@ -2826,7 +2826,8 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
     for (generation, overlaps) in [
         (4, Overlaps::Block),
         (5, Overlaps::Off),
-        (6, Overlaps::Warn),
+        (6, Overlaps::Wait),
+        (7, Overlaps::Warn),
     ] {
         let reply = view.key(press(KeyCode::Right));
         coord_send(&mut view, &mut controller, reply, generation).await;
@@ -2850,12 +2851,12 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
     clear_counted(&mut view);
     typed(&mut view, "a, a b*");
     let reply = view.key(press(KeyCode::Enter));
-    coord_send(&mut view, &mut controller, reply, 7).await;
+    coord_send(&mut view, &mut controller, reply, 8).await;
     assert!(!view.typing(), "an applied list closes the input");
     assert_eq!(coordination_of(&view).settings.counted_tools, ["a", "b*"]);
 
     let reply = view.key(press(KeyCode::Char('r')));
-    coord_send(&mut view, &mut controller, reply, 8).await;
+    coord_send(&mut view, &mut controller, reply, 9).await;
     assert_eq!(
         coordination_of(&view).settings.counted_tools,
         COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec()

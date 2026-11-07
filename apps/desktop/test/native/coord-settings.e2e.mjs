@@ -266,7 +266,7 @@ test("Agents tab coordination: each harness's mode and delivery, questions, over
       questions: radio("Sub-agent questions go to"), overlaps: radio("Overlapping edits"), nudges: radio("Workflow nudges"), counted: field(${JSON.stringify(counted)}),
     };
   })()`);
-  const engineWords = { questions: { lead: "Their lead", me: "Me directly" }, overlaps: { warn: "Warn", block: "Block", off: "Off" }, nudges: { off: "Off", ten_minutes: "Every 10 minutes", first_edit: "First edit" } };
+  const engineWords = { questions: { lead: "Their lead", me: "Me directly" }, overlaps: { warn: "Warn", block: "Block", off: "Off", wait: "Wait" }, nudges: { off: "Off", ten_minutes: "Every 10 minutes", first_edit: "First edit" } };
   const both = async (what, wanted) => {
     await until(`the engine keeping ${what}`, wanted, kept);
     const words = { ...wanted, questions: engineWords.questions[wanted.questions], overlaps: engineWords.overlaps[wanted.overlaps], nudges: engineWords.nudges[wanted.nudges], counted: wanted.counted.join("\n") };
@@ -293,6 +293,15 @@ test("Agents tab coordination: each harness's mode and delivery, questions, over
   await me.click("Block", radios("Overlapping edits"));
   wanted.overlaps = "block";
   await both("overlapping edits blocked", wanted);
+  await me.click("Off", radios("Overlapping edits"));
+  wanted.overlaps = "off";
+  await both("overlapping edits off", wanted);
+  await me.click("Wait", radios("Overlapping edits"));
+  wanted.overlaps = "wait";
+  await both("overlapping starts waiting", wanted);
+  await me.click("Warn", radios("Overlapping edits"));
+  wanted.overlaps = "warn";
+  await both("overlapping edits warned again", wanted);
   await me.click("Every 10 minutes", radios("Workflow nudges"));
   wanted.nudges = "ten_minutes";
   await both("nudges every 10 minutes", wanted);

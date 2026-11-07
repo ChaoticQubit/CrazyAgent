@@ -178,8 +178,8 @@ export function CoordinationControls({ projectId, status, reload }: { projectId:
     <div className="pj-row">
       <span aria-hidden="true">Overlapping edits</span>
       <Segmented label="Overlapping edits" value={view.settings.overlaps} onValue={(value: Overlaps) => void save({ overlaps: value }, "overlapping edits")}
-        options={[{ value: "warn", label: "Warn" }, { value: "block", label: "Block" }, { value: "off", label: "Off" }]} />
-      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit.</span>
+        options={[{ value: "warn", label: "Warn" }, { value: "block", label: "Block" }, { value: "off", label: "Off" }, { value: "wait", label: "Wait" }]} />
+      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit. Wait holds back an agent starting on a file another agent is on, and tells it when the file is free.</span>
     </div>
     <div className="pj-row">
       <span aria-hidden="true">Terminals per window</span>

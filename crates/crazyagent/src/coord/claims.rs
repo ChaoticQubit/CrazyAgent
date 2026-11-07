@@ -1,7 +1,7 @@
 use super::store::{Change, failure, related, state};
 use super::{
-    AGENT_CLAIMS_MAX, AgentId, CLAIMS_PER_WORK_MAX, Claim, Overlap, PATTERN_BYTES_MAX, Presence,
-    WorkId,
+    AGENT_CLAIMS_MAX, AgentId, CLAIMS_PER_WORK_MAX, Claim, MessageKind, NewMessage, Overlap,
+    PATTERN_BYTES_MAX, Party, Presence, WorkId,
 };
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -33,6 +33,14 @@ const MODULES_SOFT_MAX: usize = 3;
 const DOMAINS_SOFT_MAX: usize = 2;
 /// The stored form of a claim on the whole repository.
 const ROOT: &str = "**";
+/// The most files one agent waits for under Wait; a newer wait drops its oldest.
+const WAITS_PER_AGENT_MAX: usize = 8;
+/// The most waits one wake settles; the rest settle at the next release or sweep.
+const WAKES_MAX: usize = 64;
+/// The most agents one cycle check under Wait walks; a longer chain counts as a cycle.
+pub(super) const WAIT_WALK_MAX: usize = 64;
+/// The most wait cycles one notice read tells the owner of; the rest are told next time.
+const CYCLE_NOTICES_MAX: usize = 16;
 
 const _: () = assert!(CLAIMS_SCAN_MAX >= CLAIMS_PER_WORK_MAX * 2);
 const _: () = assert!(AGENT_CLAIMS_MAX >= CLAIMS_PER_WORK_MAX);
@@ -251,6 +259,7 @@ pub fn release_claims(
         params![agent, work, now],
     )
     .map_err(state)?;
+    wake_waiters(db, now)?;
     Ok(())
 }
 
@@ -300,6 +309,7 @@ pub fn release_set(db: &Connection, set: &str, now: i64) -> Result<usize, Engine
         marked, released,
         "a set's release frees exactly the claims it marked"
     );
+    wake_waiters(tx, now)?;
     change.commit()?;
     Ok(released)
 }
@@ -351,15 +361,18 @@ pub fn restore_set(db: &Connection, set: &str) -> Result<usize, EngineError> {
 /// nothing to land, so such claims never hold forever. Takes the database, the agent and
 /// the time in ms. Returns how many claims it released.
 pub fn release_unheld(db: &Connection, agent: AgentId, now: i64) -> Result<usize, EngineError> {
-    db.execute(
-        &format!(
-            "UPDATE coord_claims SET released=?2 WHERE agent=?1 AND released IS NULL
+    let released = db
+        .execute(
+            &format!(
+                "UPDATE coord_claims SET released=?2 WHERE agent=?1 AND released IS NULL
              AND id NOT IN (SELECT claim FROM coord_held WHERE released IS NULL)
              AND work IN (SELECT id FROM coord_work WHERE state IN {ENDED})"
-        ),
-        params![agent, now],
-    )
-    .map_err(state)
+            ),
+            params![agent, now],
+        )
+        .map_err(state)?;
+    wake_waiters(db, now)?;
+    Ok(released)
 }
 
 /// The change sets an agent's still-held claims wait on, at most `HELD_SETS_MAX`, so a
@@ -494,6 +507,7 @@ pub(super) fn overlaps_for(
                     mine: claim.clone(),
                     theirs: theirs.clone(),
                     reasons: vec![reason],
+                    left_out: false,
                 });
             }
         }
@@ -523,6 +537,7 @@ pub(super) fn all_overlaps(
                     mine: mine.clone(),
                     theirs: theirs.clone(),
                     reasons: vec![reason],
+                    left_out: false,
                 });
             }
         }
@@ -549,10 +564,294 @@ pub fn overlaps_of(
                     mine: overlap.theirs,
                     theirs: overlap.mine,
                     reasons: overlap.reasons,
+                    left_out: overlap.left_out,
                 })
             } else {
                 None
             }
+        })
+        .collect())
+}
+
+/// The overlap a start under Wait waits on: the first that [`holds`] a file the start
+/// claims. Input: the start's overlaps. Output: that overlap, if any.
+pub(super) fn waits_on(overlaps: &[Overlap]) -> Option<&Overlap> {
+    overlaps.iter().find(|overlap| holds(overlap))
+}
+
+/// Says whether an overlap's other claim, not stale, covers a file the start claims, with
+/// a file, folder or glob, so Wait holds whatever Block holds. Input: the overlap. Output:
+/// the answer.
+fn holds(overlap: &Overlap) -> bool {
+    !overlap.theirs.stale
+        && matches!(Scope::of(&overlap.mine.pattern), Scope::File(file) if covers(&overlap.theirs.pattern, file))
+}
+
+/// Leaves out of a start every file claim another agent's live claim [`holds`], when its
+/// wait would close a cycle, so each holder keeps editing its file and the starter's edits
+/// of it stay refused (OS-8). The overlaps of the files left out stay, marked `left_out`;
+/// the other overlaps of those claims go with them. Takes the start's transaction and its
+/// overlaps. Returns Ok.
+pub(super) fn leave_out(tx: &Connection, overlaps: &mut Vec<Overlap>) -> Result<(), EngineError> {
+    let mut gone: Vec<i64> = overlaps
+        .iter()
+        .filter(|overlap| holds(overlap))
+        .map(|overlap| overlap.mine.id)
+        .collect();
+    gone.sort_unstable();
+    gone.dedup();
+    for id in &gone {
+        tx.execute("DELETE FROM coord_claims WHERE id=?1", params![id])
+            .map_err(state)?;
+    }
+    overlaps.retain(|overlap| !gone.contains(&overlap.mine.id) || holds(overlap));
+    for overlap in overlaps.iter_mut() {
+        overlap.left_out = gone.contains(&overlap.mine.id);
+    }
+    Ok(())
+}
+
+/// Says whether a start's wait under Wait would close a cycle: the holder, or an agent it
+/// waits on in turn, waits on work the starter owns. The walk reads at most
+/// `WAIT_WALK_MAX` agents and counts a longer chain as a cycle, so no start waits on a
+/// chain never read to its end. Takes the database, the starting agent and the holder.
+/// Returns the answer.
+pub(super) fn closes_cycle(
+    db: &Connection,
+    starter: AgentId,
+    holder: AgentId,
+) -> Result<bool, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT DISTINCT k.owner_agent FROM coord_waits w JOIN coord_work k ON k.id=w.work
+             WHERE w.agent=?1 AND k.owner_agent IS NOT NULL LIMIT ?2",
+        )
+        .map_err(state)?;
+    let limit = i64::try_from(WAITS_PER_AGENT_MAX).map_err(state)?;
+    let mut seen = vec![holder];
+    let mut next = 0;
+    while let Some(&at) = seen.get(next) {
+        next += 1;
+        if at == starter {
+            return Ok(true);
+        }
+        let owners: Vec<AgentId> = statement
+            .query_map(params![at, limit], |row| row.get(0))
+            .map_err(state)?
+            .collect::<Result<_, _>>()
+            .map_err(state)?;
+        for owner in owners {
+            if seen.contains(&owner) {
+                continue;
+            }
+            if seen.len() == WAIT_WALK_MAX {
+                return Ok(true);
+            }
+            seen.push(owner);
+        }
+    }
+    Ok(false)
+}
+
+/// Records that a start under Wait went ahead without the held file because its wait would
+/// have closed a cycle, once per pair of agents, so [`wait_cycle_notices`] tells the owner
+/// of it once. Takes the transaction, the project, the starter, the holder, the file and
+/// the time in ms. Returns Ok.
+pub(super) fn note_cycle(
+    tx: &Connection,
+    project: &ProjectId,
+    starter: AgentId,
+    holder: AgentId,
+    file: &str,
+    now: i64,
+) -> Result<(), EngineError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO coord_wait_cycles(project,first,second,holder,file,created)
+         VALUES (?1,?2,?3,?4,?5,?6)",
+        params![
+            project.as_str(),
+            starter.min(holder),
+            starter.max(holder),
+            holder,
+            file,
+            now
+        ],
+    )
+    .map_err(state)?;
+    Ok(())
+}
+
+/// Records that an agent waits for a file another agent's work holds through its claim
+/// `held`, so a release that frees it prompts the agent, keeping its newest
+/// `WAITS_PER_AGENT_MAX` waits. Takes the database, the project, the waiting agent, the
+/// holding work, the file, the holding claim and the time in ms. Returns Ok.
+pub(super) fn wait_for(
+    db: &Connection,
+    project: &ProjectId,
+    agent: AgentId,
+    work: WorkId,
+    file: &str,
+    held: &str,
+    now: i64,
+) -> Result<(), EngineError> {
+    let change = Change::begin(db)?;
+    let tx = change.db();
+    tx.execute(
+        "INSERT OR REPLACE INTO coord_waits(project,agent,work,file,held,created)
+         VALUES (?1,?2,?3,?4,?5,?6)",
+        params![project.as_str(), agent, work, file, held, now],
+    )
+    .map_err(state)?;
+    let limit = i64::try_from(WAITS_PER_AGENT_MAX).map_err(state)?;
+    tx.execute(
+        "DELETE FROM coord_waits WHERE agent=?1 AND id NOT IN
+         (SELECT id FROM coord_waits WHERE agent=?1 ORDER BY id DESC LIMIT ?2)",
+        params![agent, limit],
+    )
+    .map_err(state)?;
+    change.commit()
+}
+
+/// An agent's newest wait, for the refusal it reads: the holding work's owner, the work
+/// and the file. Takes the database and the agent. Returns the wait, None without one.
+pub fn latest_wait(
+    db: &Connection,
+    agent: AgentId,
+) -> Result<Option<(AgentId, WorkId, String)>, EngineError> {
+    use rusqlite::OptionalExtension;
+    db.query_row(
+        "SELECT k.owner_agent,w.work,w.file FROM coord_waits w JOIN coord_work k ON k.id=w.work
+         WHERE w.agent=?1 AND k.owner_agent IS NOT NULL ORDER BY w.id DESC LIMIT 1",
+        [agent],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+    .map_err(state)
+}
+
+/// Settles the waits whose file is free now: the holding work's claim on it no longer
+/// holds, as a start would see it (released, or its agent stopped, failed or away on work
+/// it was still on), prompting each waiting agent once with the plan's sentence; a waiting
+/// agent that stopped is forgotten unprompted. Each wait goes once settled, so no agent
+/// waits for a file forever while the release or the engine's sweep runs; with nothing
+/// due it only reads. A prompt the store refuses for a reason other than a store failure
+/// drops its wait, so it never blocks the release. Takes the database and the time in ms.
+/// Returns how many agents it prompted.
+pub fn wake_waiters(db: &Connection, now: i64) -> Result<usize, EngineError> {
+    let due: Vec<(i64, String, AgentId, WorkId, String, bool)> = {
+        let mut statement = db
+            .prepare(&format!(
+                "SELECT w.id,w.project,w.agent,w.work,w.file,
+                        a.status IS NOT NULL AND a.status NOT IN ('stopped','failed')
+                 FROM coord_waits w LEFT JOIN team_agents a ON a.id=w.agent
+                 WHERE a.status IS NULL OR a.status IN ('stopped','failed') OR NOT EXISTS
+                 (SELECT 1 FROM coord_claims c JOIN coord_work k ON k.id=c.work
+                  LEFT JOIN team_agents h ON h.id=c.agent
+                  LEFT JOIN coord_activity v ON v.agent=c.agent
+                  WHERE c.work=w.work AND c.released IS NULL AND c.pattern=w.held
+                  AND k.state IN {HOLDING}
+                  AND (k.state IN {ENDED} OR (h.status IS NOT NULL AND h.status NOT IN ('stopped','failed')
+                       AND COALESCE(v.last_seen, h.created_ms) > ?2)))
+                 ORDER BY w.id LIMIT ?1"
+            ))
+            .map_err(state)?;
+        let limit = i64::try_from(WAKES_MAX).map_err(state)?;
+        let away = super::presence::away_at_or_before(now);
+        statement
+            .query_map(params![limit, away], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .map_err(state)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(state)?
+    };
+    assert!(due.len() <= WAKES_MAX);
+    if due.is_empty() {
+        return Ok(0);
+    }
+    let change = Change::begin(db)?;
+    let tx = change.db();
+    let mut prompted = 0;
+    for (id, project, agent, work, file, live) in due {
+        let settled = tx
+            .execute("DELETE FROM coord_waits WHERE id=?1", [id])
+            .map_err(state)?;
+        if settled == 0 || !live {
+            continue;
+        }
+        let message = NewMessage {
+            project: ProjectId::new(&project).map_err(|_| failure("coord_project_unknown"))?,
+            from: Party::Engine,
+            to: Party::Agent(agent),
+            kind: MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: format!("{file} is free now: start your work again."),
+            idempotency_key: Some(format!("wait-{work}-{id}")),
+        };
+        match super::messages::send(tx, message, now) {
+            Ok(_) => prompted += 1,
+            Err(problem) if problem.0.starts_with("coord_state_unavailable") => {
+                return Err(problem);
+            }
+            Err(_) => {}
+        }
+    }
+    change.commit()?;
+    Ok(prompted)
+}
+
+/// The waits under Wait that would have closed a cycle and the owner has not heard of yet,
+/// each pair once: the agent whose start went ahead without the file, the agent holding it
+/// and the file. Marks them told. Takes the database, the project and the time in ms.
+/// Returns the pairs.
+pub fn wait_cycle_notices(
+    db: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<Vec<(AgentId, AgentId, String)>, EngineError> {
+    let limit = i64::try_from(CYCLE_NOTICES_MAX).map_err(state)?;
+    let untold: Vec<(AgentId, AgentId, AgentId, String)> = {
+        let mut statement = db
+            .prepare(
+                "SELECT first,second,holder,file FROM coord_wait_cycles WHERE project=?1 AND told IS NULL
+                 ORDER BY created,first,second LIMIT ?2",
+            )
+            .map_err(state)?;
+        statement
+            .query_map(params![project.as_str(), limit], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(state)?
+            .collect::<Result<_, _>>()
+            .map_err(state)?
+    };
+    assert!(untold.len() <= CYCLE_NOTICES_MAX);
+    if untold.is_empty() {
+        return Ok(Vec::new());
+    }
+    let change = Change::begin(db)?;
+    let tx = change.db();
+    for (first, second, _, _) in &untold {
+        tx.execute(
+            "UPDATE coord_wait_cycles SET told=?4 WHERE project=?1 AND first=?2 AND second=?3",
+            params![project.as_str(), first, second, now],
+        )
+        .map_err(state)?;
+    }
+    change.commit()?;
+    Ok(untold
+        .into_iter()
+        .map(|(first, second, holder, file)| {
+            (if holder == first { second } else { first }, holder, file)
         })
         .collect())
 }

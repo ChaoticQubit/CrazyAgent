@@ -839,7 +839,7 @@ export type Delivery = "auto" | "native_only" | "typing_only";
 /** Where a sub-agent's questions for its lead go: to the lead, or straight to the owner. */
 export type QuestionsTo = "lead" | "me";
 /** What happens when two agents claim the same files: warn both, block the edit, or nothing. */
-export type Overlaps = "warn" | "block" | "off";
+export type Overlaps = "warn" | "block" | "off" | "wait";
 /** When workflow nudges remind an agent: never, with the engine's note per flag after ten
  * minutes of work, or with one hook reminder on its first edit before any code-graph query. */
 export type Nudges = "off" | "ten_minutes" | "first_edit";
@@ -1550,8 +1550,8 @@ export type Receipt = "sent" | "delivered" | "typed" | "read" | "replied" | "fai
  * names the node that leads it; `terminal` is the name the terminal commands take, for the
  * nodes that have one. `questions` counts the questions it queued for the master, `agent` is
  * its own team agent row and `pane` a native teammate's pane, for Stop. `presence`, `waiting`
- * on the owner in its terminal, `owner_questions` (open For: Me questions) and `no_worktree`
- * come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
+ * on the owner in its terminal, `waits_for` (the file its start waits for under Wait),
+ * `owner_questions` (open For: Me questions) and `no_worktree` come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
  * it has no receipts; `message_note` is the engine's sentence when the Delivery setting leaves
  * the agent no way to get messages. Older engines leave the optional fields out. */
 export interface GraphNode {
@@ -1570,6 +1570,7 @@ export interface GraphNode {
   pane?: string | null;
   presence?: Presence | null;
   waiting?: Waiting | null;
+  waits_for?: string | null;
   owner_questions?: number;
   no_worktree?: boolean;
   hookless?: boolean;

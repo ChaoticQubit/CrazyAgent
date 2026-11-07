@@ -112,6 +112,13 @@ pub(super) fn current(
     Ok(presence(last.unwrap_or(row.created), now))
 }
 
+/// The last activity at or before which an agent counts as Away or Stopped now, as
+/// [`presence`] reads it, for a query that decides on presence in SQL. Input: the time in
+/// ms. Output: that time.
+pub(super) fn away_at_or_before(now: i64) -> i64 {
+    now.saturating_sub(IDLE_MS)
+}
+
 fn presence(last: i64, now: i64) -> Presence {
     match now.saturating_sub(last) {
         quiet if quiet < LIVE_MS => Presence::Live,
@@ -122,9 +129,10 @@ fn presence(last: i64, now: i64) -> Presence {
 }
 
 /// The coordination state of one project for the graph, the Process page and the
-/// owner's inbox: each agent's presence, wait, worktree, unread count, counted tools and
-/// adoption flags (Q18), every claim overlap, the open questions for the owner by
-/// severity, and the unread messages per sender and recipient with the latest receipt.
+/// owner's inbox: each agent's presence, wait, the file it waits for under Wait, worktree,
+/// unread count, counted tools and adoption flags (Q18), every claim overlap, the open
+/// questions for the owner by severity, and the unread messages per sender and recipient
+/// with the latest receipt.
 /// Takes the database, the project and the time in ms. Returns the snapshot.
 pub fn snapshot(db: &Connection, project: &ProjectId, now: i64) -> Result<Snapshot, EngineError> {
     let settings = super::settings::read(db, project)?;
@@ -205,6 +213,7 @@ fn agent_state(
         agent: id,
         presence,
         waiting,
+        waits_for: super::claims::latest_wait(db, id)?.map(|(_, _, file)| file),
         has_worktree,
         unread: u32::try_from(unread.max(0)).unwrap_or(u32::MAX),
         tool_counts,
