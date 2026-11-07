@@ -7042,7 +7042,8 @@ fn a_tools_on_live_master_s_typed_owner_message_carries_the_task_start_reminder_
 /// OP4-L1: the Task-start reminder never cuts the owner's instruction edit. An owner message
 /// typed into a tools-on live master beside a pending edit whose whole change block fits
 /// beside it, with no room left for the reminder, arrives whole with the whole block, and
-/// the reminder is left out.
+/// the reminder is left out. Every typed line stays short: the stand-in's pane reads in
+/// canonical mode, which never completes a line past its line bound.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_live_master_s_reminder_is_left_out_when_only_the_owner_message_and_its_edit_fit() {
@@ -7076,7 +7077,7 @@ fn a_live_master_s_reminder_is_left_out_when_only_the_owner_message_and_its_edit
 
     let edited = format!(
         "{EDITED_TEXT}\n## Pages\n\n{}\n",
-        "Keep each page short and plain. ".repeat(256)
+        "Keep each page short and plain.\n".repeat(256)
     );
     crate::agent_home::save_app(&fixture.base, &edited).unwrap();
     let home = agent_home(&fixture.base.join("team"), master);
@@ -7096,10 +7097,18 @@ fn a_live_master_s_reminder_is_left_out_when_only_the_owner_message_and_its_edit
         (1..=crate::team::MESSAGE_BYTES_MAX).contains(&room),
         "the owner message fits its own bound: {room}"
     );
-    let message = format!(
-        "Plan the title {}",
-        "x".repeat(room - "Plan the title ".len())
-    );
+    let mut message = String::from("Plan the title");
+    while message.len() < room {
+        let left = room - message.len();
+        match left {
+            1 => message.push('x'),
+            _ => {
+                message.push('\n');
+                message.push_str(&"x".repeat((left - 1).min(63)));
+            }
+        }
+    }
+    assert_eq!(message.len(), room);
     tell_master(&fixture, &message);
     fixture.until(&mut team, "the live master's second turn ends", |f| {
         typed(f, master).contains(&message) && live_turns(&f.connection) == (2, false)
