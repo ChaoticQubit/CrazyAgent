@@ -95,3 +95,12 @@ test("the wall boots from main.tsx on its own address, Agents carries the button
     assert.ok(api.includes(`"${command}"`), command);
   }
 });
+
+test("a native teammate's pane, which shares its lead's terminal, takes no tile of its own, so no tile replaces another", () => {
+  const lead = { ...node("lead", "lead"), terminal: "team-4" };
+  const mate = { ...node("mate", "teammate"), terminal: "team-4", pane: "%12" };
+  const lone = { ...node("lone", "teammate"), terminal: "team-7", pane: "%3" };
+  const pages = wallPages([mate, node("m", "master"), lead, lone, { ...node("mate2", "teammate"), terminal: "team-7", pane: "%4" }], 6);
+  assert.deepEqual(ids(pages), [["m", "lead", "lone"]]);
+  assert.equal(new Set(pages.flat().map((item) => item.terminal)).size, pages.flat().length, "each tile has its own terminal");
+});
