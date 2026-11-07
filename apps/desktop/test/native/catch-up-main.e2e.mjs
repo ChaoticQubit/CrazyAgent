@@ -62,11 +62,13 @@ while IFS= read -r line; do
 done
 `;
 
-/** Makes the owner's project folder: a git repository on main with one commit. Input: the
- * folder. Output: none. */
+/** Makes the owner's project folder: a git repository on main with one commit and the owner's
+ * Git name and email, which an Accept needs to commit the landed set. Input: the folder.
+ * Output: none. */
 function ownerRepo(folder) {
   writeFileSync(join(folder, "README.md"), "# Fruit stand\n\nSells fruit.\n");
-  for (const args of [["init", "-q", "-b", "main"], ["add", "."], [...OWNER, "commit", "-q", "-m", "Start the fruit stand"]]) {
+  for (const args of [["init", "-q", "-b", "main"], ["add", "."], [...OWNER, "commit", "-q", "-m", "Start the fruit stand"],
+    ["config", "user.name", "E2E Owner"], ["config", "user.email", "owner@example.invalid"]]) {
     const result = spawnSync(GIT, ["-c", "commit.gpgsign=false", ...args], { cwd: folder, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: folder, GIT_CONFIG_NOSYSTEM: "1", LANG: "C" } });
     assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
   }
