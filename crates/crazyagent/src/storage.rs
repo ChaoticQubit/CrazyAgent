@@ -2543,11 +2543,11 @@ fn owner_read(
             project_id: project_id.clone(),
             jobs: crate::project_setup::list_jobs(&tx, config, project_id)?,
         },
-        OwnerRead::ProjectActivity { project_id, .. } => {
+        OwnerRead::ProjectActivity { project_id, limit } => {
             stored_setup(&tx, project_id)?;
             OwnerData::ProjectActivity {
                 project_id: project_id.clone(),
-                items: Vec::new(),
+                items: crate::activity::list(&tx, project_id, *limit)?,
             }
         }
         OwnerRead::ProjectContext { project_id } => OwnerData::ProjectContext {

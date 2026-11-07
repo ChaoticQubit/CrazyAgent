@@ -95,6 +95,39 @@ export interface ResearchJob {
   finished_ms: number | null;
 }
 
+export type ActivityKind =
+  | "created"
+  | "research_started"
+  | "research_saved"
+  | "research_stopped"
+  | "task_started"
+  | "task_finished"
+  | "changes_ready"
+  | "accepted"
+  | "discarded"
+  | "conflict"
+  | "sent_back"
+  | "lead_merged"
+  | "merged_into_main"
+  | "undone"
+  | "work_started"
+  | "work_review_ready"
+  | "work_complete"
+  | "work_closed"
+  | "phase"
+  | "test";
+
+export interface ActivityItem {
+  id: number;
+  at_ms: number;
+  kind: ActivityKind;
+  actor: string;
+  goal: string | null;
+  text: string;
+  change_set: string | null;
+  undone: boolean;
+}
+
 export interface ContextItem {
   path: string;
   kind: "brief" | "document" | "research" | "plan";
@@ -358,6 +391,10 @@ export function loadSetup(id: string): Promise<Result<StoredSetup | null>> {
 
 export function loadResearch(id: string): Promise<Result<{ project_id: string; jobs: ResearchJob[] }>> {
   return call<{ project_id: string; jobs: ResearchJob[] }>("desktop_research_jobs", { id });
+}
+
+export function loadActivity(id: string, limit: number): Promise<Result<{ project_id: string; items: ActivityItem[] }>> {
+  return call<{ project_id: string; items: ActivityItem[] }>("desktop_project_activity", { id, limit });
 }
 
 export function loadContext(id: string): Promise<Result<ProjectContext>> {
