@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, type Result, type SkillView } from "../../api";
-import { receiptState } from "../../api-projects";
+import { loadTeamStatus } from "../../api-projects";
 import { OVERLAP_CHOICES } from "../../engine-client";
 import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, IntentReceipt, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
@@ -12,7 +12,6 @@ import { McpServersSetting } from "./setup-rows";
 
 export const COUNTED_TOOLS_MAX = 32;
 const COUNTED_TOOL = /^[A-Za-z0-9_*-]{1,64}$/;
-const PASSED_READS_MAX = 16;
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -145,51 +144,22 @@ export function overlapOptions(current: string): { value: string; label: string 
   return knownOverlap(current) ? known : [...known, { value: current, label: displayText(current) }];
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const fields = value as Record<string, unknown>;
-    return `{${Object.keys(fields).sort().map((key) => `${JSON.stringify(key)}:${canonical(fields[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-/** One project's coordination saves: the save the next one waits for, the settings the last
- * applied save sent, and the reads that save moved past, which a row may still show. */
-interface CoordChain {
-  tail: Promise<unknown>;
-  last: CoordSettings | null;
-  passed: string[];
-}
-
-const chains = new Map<string, CoordChain>();
+const chains = new Map<string, Promise<unknown>>();
 
 /** Saves one coordination change through the project's one save path, as every row that
- * changes coordination settings does: a change waits for the save before it, and while its row
- * still shows a read an applied save moved past, it is laid over the settings that save sent,
- * so a quick second change never sends the first one's old value back. A read another window
- * moved on is taken as it is. Inputs: the project id, the settings the row shows and the
- * change. Output: the save's result. */
-export function saveCoordSettings(projectId: string, read: CoordSettings, patch: Partial<CoordSettings>): Promise<Result<IntentReceipt>> {
-  const chain = chains.get(projectId) ?? { tail: Promise.resolve(), last: null, passed: [] };
-  chains.set(projectId, chain);
-  const run = chain.tail.then(async () => {
-    const shown = canonical(read);
-    const behind = chain.last !== null && chain.passed.includes(shown);
-    if (!behind) {
-      chain.last = null;
-      chain.passed = [shown];
-    }
-    const next: CoordSettings = { ...(behind && chain.last !== null ? chain.last : read), ...patch };
-    const result = await setCoordSettings(projectId, next);
-    if (result.kind === "ok" && receiptState(result.value).kind === "applied") {
-      chain.passed = [...chain.passed, ...(chain.last === null ? [] : [canonical(chain.last)])].slice(-PASSED_READS_MAX);
-      chain.last = next;
-    }
-    assert(chain.passed.length >= 1 && chain.passed.length <= PASSED_READS_MAX, "a coordination chain keeps 1 to 16 passed reads");
-    return result;
+ * changes coordination settings does: a change waits for the save before it, then reads the
+ * engine's settings and lays only its own fields over them, so a change the TUI or another
+ * window made since stays. Inputs: the project id and the change. Output: the save's result,
+ * or the team read's failure, with nothing sent. */
+export function saveCoordSettings(projectId: string, patch: Partial<CoordSettings>): Promise<Result<IntentReceipt>> {
+  assert(Object.keys(patch).length > 0, "a coordination save changes at least one setting");
+  const run = (chains.get(projectId) ?? Promise.resolve()).then(async (): Promise<Result<IntentReceipt>> => {
+    const team = await loadTeamStatus(projectId);
+    if (team.kind !== "ok") return team;
+    assert(team.value.project_id === projectId, "a coordination save builds on its own project's team read");
+    return setCoordSettings(projectId, { ...coordination(team.value).settings, ...patch });
   });
-  chain.tail = run.catch(() => undefined);
+  chains.set(projectId, run.catch(() => undefined));
   return run;
 }
 
@@ -220,7 +190,7 @@ export function QuestionsSetting({ projectId, status, reload }: { projectId: str
   const { note, run } = useChange(reload);
   return <SettingRow label="Sub-agent questions go to">
     <span className="set-label" aria-hidden="true">Sub-agent questions go to</span>
-    <Segmented label="Sub-agent questions go to" value={view.settings.questions_to} onValue={(value: QuestionsTo) => void run(() => saveCoordSettings(projectId, view.settings, { questions_to: value }), "where questions go")}
+    <Segmented label="Sub-agent questions go to" value={view.settings.questions_to} onValue={(value: QuestionsTo) => void run(() => saveCoordSettings(projectId, { questions_to: value }), "where questions go")}
       options={[{ value: "lead", label: "Their lead" }, { value: "me", label: "Me directly" }]} />
     <span className="tg-terminal-note">A question an agent marks For: Me always reaches you; no lead or master can answer it.</span>
     <ChangeNote note={note} />
@@ -253,7 +223,7 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
   const countedCheck = countedToolsInput(countedText);
 
   const save = (patch: Partial<CoordSettings>, what: string) =>
-    run(() => saveCoordSettings(projectId, view.settings, patch), what);
+    run(() => saveCoordSettings(projectId, patch), what);
 
   async function saveCounted() {
     if (countedCheck.kind !== "ok") return;
@@ -305,7 +275,7 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
   const view = coordination(status);
   const { note, run } = useChange(reload);
   const save = (patch: Partial<CoordSettings>, what: string) =>
-    run(() => saveCoordSettings(projectId, view.settings, patch), what);
+    run(() => saveCoordSettings(projectId, patch), what);
 
   return <>
     {view.harnesses.map((row) => <div className="set-harness" role="group" aria-label={HARNESS_NAMES[row.harness]} key={row.harness}>

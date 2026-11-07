@@ -207,6 +207,14 @@ test("the MCP servers row lists the servers this project's agents can reach", ()
   assert.deepEqual(rows.reachableServers([]), []);
 });
 
+test("a moved Agent access choice says before Save that a lowering stops agents above the new level", () => {
+  assert.equal(typeof rows.accessChangeLine, "function", "setup-rows.tsx has accessChangeLine");
+  assert.equal(rows.accessChangeLine("full", "sandboxed"), "Saving lowers agent access from Full access to Sandboxed: agents running above Sandboxed stop and restart at it.");
+  assert.equal(rows.accessChangeLine("own_branch", "sandboxed"), "Saving lowers agent access from Own branch to Sandboxed: agents running above Sandboxed stop and restart at it.");
+  assert.equal(rows.accessChangeLine("sandboxed", "full"), "Saving raises agent access from Sandboxed to Full access.");
+  assert.throws(() => rows.accessChangeLine("full", "full"), /two different levels/);
+});
+
 test("the Account choices are the project's pools, any account in each, then no pool", () => {
   assert.equal(typeof rows.accountOptions, "function", "setup-rows.tsx has accountOptions");
   assert.deepEqual(rows.accountOptions(POOLS), [{ value: "pool-a", label: "Any in Pool A" }, { value: "pool-b", label: "Any in Pool B" }, { value: "", label: "No pool" }]);

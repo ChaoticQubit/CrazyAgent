@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { listMcpServers, type HarnessEntry, type McpServerView } from "../../api";
 import { failureCopy, loadAgentPolicy, type AgentAccess, type PolicyView, type PoolChoice, type StoredSetup } from "../../api-projects";
 import { useLoad } from "../../state";
-import { ConfirmDialog, Icon, Segmented, Select, Switch, type SelectOption } from "../../ui";
+import { Button, ConfirmDialog, Icon, Segmented, Select, Switch, type SelectOption } from "../../ui";
 import { displayText } from "../conversation";
-import { ACCESS_LEVELS, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, confirmFirst, policyOf } from "../project/access";
+import { ACCESS_LEVELS, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, accessLabel, confirmFirst, policyOf } from "../project/access";
 import { NO_POOL, accessSaved, saveAccess, savePool, saveTeam } from "../project/settings";
 import { valueOf, type ProjectData } from "../project/shared";
 import { harnessName } from "../new-project/team-editor";
@@ -130,14 +130,26 @@ export function SubHarnessesSetting({ data, prefix }: { data: TeamProject | unde
   </SettingRow>;
 }
 
-/** The project's agent access as a choice of its levels, saved in place through project
- * Settings' own access save with the same Full access confirmation; the network and toolchain
- * choices stay as saved. Inputs: the project id, how to tell the owner and a team reload.
- * Output: the row. */
+/** Says what saving a moved access level does, before Save: a lowering stops the agents
+ * running above the new level. Inputs: the saved level and the chosen one, which differ.
+ * Output: the line. */
+export function accessChangeLine(from: AgentAccess, to: AgentAccess): string {
+  if (from === to) throw new Error("an access change line names two different levels");
+  const rank = (access: AgentAccess) => ACCESS_LEVELS.findIndex((level) => level.access === access);
+  return rank(to) < rank(from)
+    ? `Saving lowers agent access from ${accessLabel(from)} to ${accessLabel(to)}: agents running above ${accessLabel(to)} stop and restart at it.`
+    : `Saving raises agent access from ${accessLabel(from)} to ${accessLabel(to)}.`;
+}
+
+/** The project's agent access as a choice of its levels: a click or an arrow key only moves
+ * the choice, and Save saves it through project Settings' own access save, Full access after
+ * the same confirmation; the network and toolchain choices stay as saved. Inputs: the project
+ * id, how to tell the owner and a team reload. Output: the row. */
 export function AgentAccessSetting({ projectId, notify, reload }: { projectId: string; notify?: (message: string) => void; reload: () => void }) {
   const [view, setView] = useState<PolicyView | null>(null);
   const [failure, setFailure] = useState("");
-  const [asked, setAsked] = useState<AgentAccess | null>(null);
+  const [chosen, setChosen] = useState<AgentAccess | null>(null);
+  const [asked, setAsked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const label = "Agent access";
@@ -153,11 +165,13 @@ export function AgentAccessSetting({ projectId, notify, reload }: { projectId: s
 
   async function save(access: AgentAccess) {
     if (!view) return;
-    setAsked(null);
+    setAsked(false);
     setBusy(true);
     const saved = await saveAccess(projectId, view, policyOf(view, access, view.network, view.toolchains.map((row) => row.allowed), view.ide_git_hooks));
     setBusy(false);
     if (saved.fresh) setView(saved.fresh);
+    else if (saved.note === "") setView({ ...view, access });
+    if (saved.fresh || saved.note === "") setChosen(null);
     setNote(saved.note);
     if (saved.note === "") {
       notify?.(accessSaved(access));
@@ -165,22 +179,33 @@ export function AgentAccessSetting({ projectId, notify, reload }: { projectId: s
     }
   }
 
-  function choose(access: AgentAccess) {
-    if (!view || busy || access === view.access) return;
+  function pick(access: AgentAccess) {
+    if (!view || busy) return;
     const reason = view.levels.find((level) => level.access === access)?.unavailable ?? null;
-    if (reason !== null) return setNote(`${ACCESS_LEVELS.find((level) => level.access === access)?.label ?? access} can't run here: ${reason}`);
-    if (confirmFirst(access)) setAsked(access);
-    else void save(access);
+    if (reason !== null) return setNote(`${accessLabel(access)} can't run here: ${reason}`);
+    setNote("");
+    setChosen(access === view.access ? null : access);
+  }
+
+  function submit() {
+    if (!view || busy || chosen === null) return;
+    if (confirmFirst(chosen)) setAsked(true);
+    else void save(chosen);
   }
 
   return <SettingRow label={label}>
     <span className="set-label" aria-hidden={view ? true : undefined}>{label}</span>
     {view
-      ? <Segmented label={label} value={view.access} onValue={choose} options={ACCESS_LEVELS.map((level) => ({ value: level.access, label: level.label }))} />
+      ? <Segmented label={label} value={chosen ?? view.access} onValue={pick} options={ACCESS_LEVELS.map((level) => ({ value: level.access, label: level.label }))} />
       : <span className="set-ctl tg-terminal-note" role={failure ? "alert" : "status"}>{failure || "Loading..."}</span>}
     <span className="tg-terminal-note">Sandboxed keeps agents in their worktree with today's limits. Own branch gives each agent full git on its own branch. Full access lets them run as you. {LOWERING_STOPS_AGENTS}</span>
-    <ConfirmDialog open={asked !== null} title="Give this project's agents Full access?" confirmLabel="Allow Full access" cancelLabel="Keep current access" pending={busy}
-      onCancel={() => setAsked(null)} onConfirm={() => { if (asked !== null) void save(asked); }}>
+    {view && chosen !== null && <div className="pj-row">
+      <span className="tg-terminal-note" role="status">{accessChangeLine(view.access, chosen)}</span>
+      <Button variant="primary" size="small" pending={busy} pendingLabel="Saving..." onClick={submit}>Save agent access</Button>
+      <Button size="small" disabled={busy} onClick={() => setChosen(null)}>{`Keep ${accessLabel(view.access)}`}</Button>
+    </div>}
+    <ConfirmDialog open={asked} title="Give this project's agents Full access?" confirmLabel="Allow Full access" cancelLabel="Keep current access" pending={busy}
+      onCancel={() => setAsked(false)} onConfirm={() => { if (chosen !== null) void save(chosen); }}>
       {FULL_ACCESS_WARNING}
     </ConfirmDialog>
     <RowNote note={note} />
