@@ -5,12 +5,22 @@ export type PerWindow = 4 | 6 | 9;
 
 /** Splits the project's terminals into terminal wall windows: the master first, then every
  * other agent with a terminal in graph order, perWindow to a window, the last window holding
- * the rest. Inputs: the graph's nodes and the terminals per window. Output: one list of
- * nodes per window, none when no agent has a terminal. */
+ * the rest. A window keeps one view per terminal, so a native teammate's pane, which shares
+ * its lead's terminal, takes no tile when its lead has one, and of teammates sharing a
+ * terminal only the first does. Inputs: the graph's nodes and the terminals per window.
+ * Output: one list of nodes per window, none when no agent has a terminal. */
 export function wallPages(nodes: GraphNode[], perWindow: PerWindow): GraphNode[][] {
   assert(perWindow === 4 || perWindow === 6 || perWindow === 9, "terminals per window is 4, 6 or 9");
   const open = nodes.filter((item) => item.terminal !== null);
-  const tiles = [...open.filter((item) => item.kind === "master"), ...open.filter((item) => item.kind !== "master")];
+  const ordered = [...open.filter((item) => item.kind === "master"), ...open.filter((item) => item.kind !== "master")];
+  const owned = new Set(ordered.filter((item) => item.kind !== "teammate").map((item) => item.terminal));
+  const seen = new Set<string | null>();
+  const tiles = ordered.filter((item) => {
+    if (seen.has(item.terminal) || (item.kind === "teammate" && owned.has(item.terminal))) return false;
+    seen.add(item.terminal);
+    return true;
+  });
+  assert(new Set(tiles.map((item) => item.terminal)).size === tiles.length, "each tile has its own terminal");
   const pages: GraphNode[][] = [];
   for (let start = 0; start < tiles.length; start += perWindow) pages.push(tiles.slice(start, start + perWindow));
   assert(pages.flat().length === tiles.length, "every terminal takes one tile");

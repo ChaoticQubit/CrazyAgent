@@ -342,7 +342,10 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
   const walls = team === null ? null : wallPages(team.nodes, perWindow).length;
   useEffect(() => {
     if (walls === null || !walled.current) return;
-    void openTerminalWindows(projectId, name, walls, false).then((result) => setNote(wallNote(result)));
+    void openTerminalWindows(projectId, name, walls, false).then((result) => {
+      const failed = wallNote(result);
+      if (failed !== null) setNote(failed);
+    });
   }, [projectId, name, walls]);
   const status: ReactNode = graph === undefined ? <Skeleton shape="card" />
     : graph.kind === "not_ready" ? <NotReady what="The team graph" compact />
