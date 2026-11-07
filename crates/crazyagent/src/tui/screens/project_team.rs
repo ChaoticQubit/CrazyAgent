@@ -198,7 +198,12 @@ const COORD_ROWS: [CoordRow; 15] = [
     CoordRow::Skills(SkillRole::Worker),
 ];
 const DELIVERIES: [Delivery; 3] = [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly];
-const OVERLAPS: [Overlaps; 3] = [Overlaps::Warn, Overlaps::Block, Overlaps::Off];
+const OVERLAPS: [Overlaps; 4] = [
+    Overlaps::Warn,
+    Overlaps::Block,
+    Overlaps::Off,
+    Overlaps::Wait,
+];
 const COUNTED_TEXT_BYTES_MAX: usize = COUNTED_TOOLS_MAX * (COUNTED_TOOL_BYTES_MAX + 2);
 const SKILL_NAMES_TEXT_BYTES_MAX: usize =
     ROLE_SKILLS_MAX * (crate::plugins::skill_folder::NAME_BYTES_MAX + 2);

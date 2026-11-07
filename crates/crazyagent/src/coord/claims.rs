@@ -1,7 +1,7 @@
 use super::store::{Change, failure, related, state};
 use super::{
-    AGENT_CLAIMS_MAX, AgentId, CLAIMS_PER_WORK_MAX, Claim, Overlap, PATTERN_BYTES_MAX, Presence,
-    WorkId,
+    AGENT_CLAIMS_MAX, AgentId, CLAIMS_PER_WORK_MAX, Claim, MessageKind, NewMessage, Overlap,
+    PATTERN_BYTES_MAX, Party, Presence, WorkId,
 };
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -33,6 +33,10 @@ const MODULES_SOFT_MAX: usize = 3;
 const DOMAINS_SOFT_MAX: usize = 2;
 /// The stored form of a claim on the whole repository.
 const ROOT: &str = "**";
+/// The most files one agent waits for under Wait; a newer wait drops its oldest.
+const WAITS_PER_AGENT_MAX: usize = 8;
+/// The most waits one wake settles; the rest settle at the next release or sweep.
+const WAKES_MAX: usize = 64;
 
 const _: () = assert!(CLAIMS_SCAN_MAX >= CLAIMS_PER_WORK_MAX * 2);
 const _: () = assert!(AGENT_CLAIMS_MAX >= CLAIMS_PER_WORK_MAX);
@@ -251,6 +255,7 @@ pub fn release_claims(
         params![agent, work, now],
     )
     .map_err(state)?;
+    wake_waiters(db, now)?;
     Ok(())
 }
 
@@ -300,6 +305,7 @@ pub fn release_set(db: &Connection, set: &str, now: i64) -> Result<usize, Engine
         marked, released,
         "a set's release frees exactly the claims it marked"
     );
+    wake_waiters(tx, now)?;
     change.commit()?;
     Ok(released)
 }
@@ -349,15 +355,18 @@ pub fn restore_set(db: &Connection, set: &str) -> Result<usize, EngineError> {
 /// nothing to land, so such claims never hold forever. Takes the database, the agent and
 /// the time in ms. Returns how many claims it released.
 pub fn release_unheld(db: &Connection, agent: AgentId, now: i64) -> Result<usize, EngineError> {
-    db.execute(
-        &format!(
-            "UPDATE coord_claims SET released=?2 WHERE agent=?1 AND released IS NULL
+    let released = db
+        .execute(
+            &format!(
+                "UPDATE coord_claims SET released=?2 WHERE agent=?1 AND released IS NULL
              AND id NOT IN (SELECT claim FROM coord_held WHERE released IS NULL)
              AND work IN (SELECT id FROM coord_work WHERE state IN {ENDED})"
-        ),
-        params![agent, now],
-    )
-    .map_err(state)
+            ),
+            params![agent, now],
+        )
+        .map_err(state)?;
+    wake_waiters(db, now)?;
+    Ok(released)
 }
 
 /// The change sets an agent's still-held claims wait on, at most `HELD_SETS_MAX`, so a
@@ -555,11 +564,136 @@ pub fn overlaps_of(
         .collect())
 }
 
-/// Prompts each agent waiting for a file that is free now. Takes the database and the time
-/// in ms. Returns how many it prompted.
+/// The overlap a start under Wait waits on: another agent's claim, not stale, on the very
+/// file this start claims. Input: the start's overlaps. Output: that overlap, if any.
+pub(super) fn waits_on(overlaps: &[Overlap]) -> Option<&Overlap> {
+    overlaps.iter().find(|overlap| {
+        !overlap.theirs.stale
+            && overlap.mine.pattern == overlap.theirs.pattern
+            && matches!(Scope::of(&overlap.mine.pattern), Scope::File(_))
+    })
+}
+
+/// Records that an agent waits for a file another agent's work holds, so a release that
+/// frees it prompts the agent, keeping its newest `WAITS_PER_AGENT_MAX` waits. Takes the
+/// database, the project, the waiting agent, the holding work, the file and the time in
+/// ms. Returns Ok.
+pub(super) fn wait_for(
+    db: &Connection,
+    project: &ProjectId,
+    agent: AgentId,
+    work: WorkId,
+    file: &str,
+    now: i64,
+) -> Result<(), EngineError> {
+    let change = Change::begin(db)?;
+    let tx = change.db();
+    tx.execute(
+        "INSERT OR REPLACE INTO coord_waits(project,agent,work,file,created) VALUES (?1,?2,?3,?4,?5)",
+        params![project.as_str(), agent, work, file, now],
+    )
+    .map_err(state)?;
+    let limit = i64::try_from(WAITS_PER_AGENT_MAX).map_err(state)?;
+    tx.execute(
+        "DELETE FROM coord_waits WHERE agent=?1 AND id NOT IN
+         (SELECT id FROM coord_waits WHERE agent=?1 ORDER BY id DESC LIMIT ?2)",
+        params![agent, limit],
+    )
+    .map_err(state)?;
+    change.commit()
+}
+
+/// An agent's newest wait, for the refusal it reads: the holding work's owner, the work
+/// and the file. Takes the database and the agent. Returns the wait, None without one.
+pub fn latest_wait(
+    db: &Connection,
+    agent: AgentId,
+) -> Result<Option<(AgentId, WorkId, String)>, EngineError> {
+    use rusqlite::OptionalExtension;
+    db.query_row(
+        "SELECT k.owner_agent,w.work,w.file FROM coord_waits w JOIN coord_work k ON k.id=w.work
+         WHERE w.agent=?1 AND k.owner_agent IS NOT NULL ORDER BY w.id DESC LIMIT 1",
+        [agent],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+    .map_err(state)
+}
+
+/// Settles the waits whose file is free now: no live claim of the holding work names it
+/// (released, or its agent stopped on work it was still on), prompting each waiting agent
+/// once with the plan's sentence; a waiting agent that stopped is forgotten unprompted.
+/// Each wait goes once settled, so no agent waits for a file forever while the release or
+/// the engine's sweep runs; with nothing due it only reads. A prompt the store refuses for a reason other than a store
+/// failure drops its wait, so it never blocks the release. Takes the database and the
+/// time in ms. Returns how many agents it prompted.
 pub fn wake_waiters(db: &Connection, now: i64) -> Result<usize, EngineError> {
-    let _ = (db, now);
-    Ok(0)
+    let due: Vec<(i64, String, AgentId, WorkId, String, bool)> = {
+        let mut statement = db
+            .prepare(&format!(
+                "SELECT w.id,w.project,w.agent,w.work,w.file,
+                        a.status IS NOT NULL AND a.status NOT IN ('stopped','failed')
+                 FROM coord_waits w LEFT JOIN team_agents a ON a.id=w.agent
+                 WHERE a.status IS NULL OR a.status IN ('stopped','failed') OR NOT EXISTS
+                 (SELECT 1 FROM coord_claims c JOIN coord_work k ON k.id=c.work
+                  LEFT JOIN team_agents h ON h.id=c.agent
+                  WHERE c.work=w.work AND c.released IS NULL AND c.pattern=w.file
+                  AND k.state IN {HOLDING}
+                  AND (k.state IN {ENDED} OR (h.status IS NOT NULL AND h.status NOT IN ('stopped','failed'))))
+                 ORDER BY w.id LIMIT ?1"
+            ))
+            .map_err(state)?;
+        let limit = i64::try_from(WAKES_MAX).map_err(state)?;
+        statement
+            .query_map([limit], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .map_err(state)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(state)?
+    };
+    assert!(due.len() <= WAKES_MAX);
+    if due.is_empty() {
+        return Ok(0);
+    }
+    let change = Change::begin(db)?;
+    let tx = change.db();
+    let mut prompted = 0;
+    for (id, project, agent, work, file, live) in due {
+        let settled = tx
+            .execute("DELETE FROM coord_waits WHERE id=?1", [id])
+            .map_err(state)?;
+        if settled == 0 || !live {
+            continue;
+        }
+        let message = NewMessage {
+            project: ProjectId::new(&project).map_err(|_| failure("coord_project_unknown"))?,
+            from: Party::Engine,
+            to: Party::Agent(agent),
+            kind: MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: format!("{file} is free now: start your work again."),
+            idempotency_key: Some(format!("wait-{work}-{id}")),
+        };
+        match super::messages::send(tx, message, now) {
+            Ok(_) => prompted += 1,
+            Err(problem) if problem.0.starts_with("coord_state_unavailable") => {
+                return Err(problem);
+            }
+            Err(_) => {}
+        }
+    }
+    change.commit()?;
+    Ok(prompted)
 }
 
 /// The lead and sub-agent answers one overlap check already read, so a check over many

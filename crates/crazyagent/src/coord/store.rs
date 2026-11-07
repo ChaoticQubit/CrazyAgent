@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS coord_claims (
     released INTEGER
 );
 CREATE INDEX IF NOT EXISTS coord_claims_project ON coord_claims(project, released);
+CREATE INDEX IF NOT EXISTS coord_claims_work ON coord_claims(work, released);
 CREATE TABLE IF NOT EXISTS coord_held (
     claim INTEGER PRIMARY KEY,
     project TEXT NOT NULL,
@@ -57,6 +58,15 @@ CREATE INDEX IF NOT EXISTS coord_held_set ON coord_held(change_set, released);
 CREATE TABLE IF NOT EXISTS coord_claims_full (
     project TEXT PRIMARY KEY,
     told INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS coord_waits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project TEXT NOT NULL,
+    agent INTEGER NOT NULL,
+    work INTEGER NOT NULL,
+    file TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    UNIQUE(agent, work)
 );
 CREATE TABLE IF NOT EXISTS coord_activity (
     agent INTEGER PRIMARY KEY,
@@ -103,12 +113,13 @@ CREATE TABLE IF NOT EXISTS tool_switches (
 );";
 
 /// The coordination tables a project's removal clears by their `project` column.
-const REMOVED_WITH_PROJECT: [&str; 8] = [
+const REMOVED_WITH_PROJECT: [&str; 9] = [
     "coord_work",
     "coord_messages",
     "coord_claims",
     "coord_held",
     "coord_claims_full",
+    "coord_waits",
     "coord_audit",
     "coord_settings",
     "coord_harness_settings",
@@ -122,7 +133,7 @@ pub fn ensure(db: &Connection) -> Result<(), EngineError> {
 }
 
 /// Clears a removed project's coordination rows: its work, messages, claims and their
-/// change-set holds, full-scan notice, audit, settings and tool switches, and the activity and tool counts
+/// change-set holds, full-scan notice, waits, audit, settings and tool switches, and the activity and tool counts
 /// of the stopped agents removed with it. Runs inside the removal's transaction before its agents go.
 /// Takes the database and the project. Returns Ok or the SQLite failure.
 pub fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {

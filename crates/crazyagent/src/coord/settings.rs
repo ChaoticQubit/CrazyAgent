@@ -90,7 +90,8 @@ pub enum QuestionsTo {
 }
 
 /// What an edit to a file another agent claimed does (Q15): warn both sides, block the
-/// edit where the harness has a pre-edit hook, or nothing.
+/// edit where the harness has a pre-edit hook, or nothing; Wait (OS-8) also refuses a
+/// start on a file another agent's work holds and prompts the agent once it is free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Overlaps {

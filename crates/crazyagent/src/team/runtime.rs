@@ -2467,7 +2467,8 @@ impl TeamRuntime {
     /// Settles a project's claims no turn end will, at the first step after the engine
     /// starts and then at most once each `CLAIMS_SWEEP_EVERY`: the landing sweep holds or
     /// releases stopped agents' finished claims and retries failed releases and restores,
-    /// and the owner is told once when the project's claims fill one overlap check. A
+    /// agents waiting for a file that is free now are prompted (OS-8 Wait), and the owner
+    /// is told once when the project's claims fill one overlap check. A
     /// failure leaves the team step running and is logged once by its plain code until a
     /// sweep succeeds again. Input: the project. Output: unit.
     fn tend_claims(&mut self, project: &ProjectId) {
@@ -2484,7 +2485,8 @@ impl TeamRuntime {
         let now = now_ms();
         let swept = u64::try_from(now)
             .map_err(|_| EngineError("team_state_unavailable".into()))
-            .and_then(|now| crate::landing::sweep_claims(&self.connection, project, now));
+            .and_then(|now| crate::landing::sweep_claims(&self.connection, project, now))
+            .and_then(|()| crate::coord::wake_waiters(&self.connection, now).map(drop));
         let told =
             crate::coord::claims_full_notice(&self.connection, project, now).and_then(|full| {
                 if full {

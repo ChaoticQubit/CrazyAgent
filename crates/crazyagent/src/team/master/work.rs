@@ -67,6 +67,9 @@ pub(super) fn start_work(
         now,
     ) {
         Ok(started) => started,
+        Err(problem) if problem.0 == "coord_claim_waits" => {
+            return waiting(connection, project, agent, problem);
+        }
         Err(problem) => return refused("Not started", problem),
     };
     let mut text = format!(
@@ -975,6 +978,28 @@ fn message_line(
     Ok(format!(
         "{head}:\n  > {}",
         bound_text(&message.body, BODY_SHOWN_MAX).replace('\n', "\n  > ")
+    ))
+}
+
+/// The plan's answer to a start that waits under the Wait option (OS-8): who holds which
+/// file on which work, and that a message follows once it is free. Without a readable
+/// wait it is the plain refusal. Takes the database, the project, the agent and the
+/// refusal. Returns the refusal.
+fn waiting(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    problem: EngineError,
+) -> Result<(String, bool), EngineError> {
+    let Some((holder, work, file)) = coord::latest_wait(connection, agent)? else {
+        return refused("Not started", problem);
+    };
+    let name = who(connection, project, Party::Agent(holder))?;
+    Ok((
+        format!(
+            "Wait: {name}'s work #{work} holds {file} until it lands. You will get a message when it is free."
+        ),
+        true,
     ))
 }
 

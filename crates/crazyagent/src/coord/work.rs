@@ -22,7 +22,9 @@ struct WorkRow {
 /// labels. Overlaps with other agents' active claims come back at once for both sides
 /// to hear; `breadth` gives the soft "split this" note. Takes the database, the project,
 /// the agent, the title, the claims and the time in ms. Returns the work and the
-/// overlaps, or a plain refusal for a stopped agent or invalid input.
+/// overlaps, or a plain refusal for a stopped agent or invalid input. Under Wait a start on
+/// a file another agent's work holds starts nothing: it records the wait and is refused
+/// with `coord_claim_waits`.
 pub fn start_work(
     db: &Connection,
     project: &ProjectId,
@@ -48,9 +50,28 @@ pub fn start_work(
     audit(tx, project, work, Party::Agent(agent), "start", 0, 1, now)?;
     super::claims::add(tx, project, agent, work, &claims, now)?;
     let overlaps = super::claims::overlaps_for(tx, project, agent, work, now)?;
+    if waits(tx, project)?
+        && let Some(held) = super::claims::waits_on(&overlaps)
+    {
+        let (holder, file) = (held.theirs.work, held.mine.pattern.clone());
+        drop(change);
+        super::claims::wait_for(db, project, agent, holder, &file, now)?;
+        return Err(failure("coord_claim_waits"));
+    }
     super::presence::seen(tx, agent, now)?;
     change.commit()?;
     Ok((work, overlaps))
+}
+
+/// Says whether the project's Overlapping edits option is Wait. A store failure fails;
+/// settings that cannot be read count as the default, as the start's answer reads them.
+/// Takes the database and the project. Returns whether starts wait.
+fn waits(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    match super::settings::read(db, project) {
+        Ok(settings) => Ok(settings.overlaps == super::settings::Overlaps::Wait),
+        Err(problem) if problem.0.starts_with("coord_state_unavailable") => Err(problem),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Changes who owns a unit of work (Concord's transfer verbs), first transition wins:

@@ -839,7 +839,7 @@ export type Delivery = "auto" | "native_only" | "typing_only";
 /** Where a sub-agent's questions for its lead go: to the lead, or straight to the owner. */
 export type QuestionsTo = "lead" | "me";
 /** What happens when two agents claim the same files: warn both, block the edit, or nothing. */
-export type Overlaps = "warn" | "block" | "off";
+export type Overlaps = "warn" | "block" | "off" | "wait";
 /** When workflow nudges remind an agent: never, with the engine's note per flag after ten
  * minutes of work, or with one hook reminder on its first edit before any code-graph query. */
 export type Nudges = "off" | "ten_minutes" | "first_edit";
