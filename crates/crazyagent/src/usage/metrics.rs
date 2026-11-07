@@ -11,6 +11,7 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 const SERIES_MAX: usize = 64;
 const TITLE_BYTES_MAX: usize = 120;
+const NAMES_MAX: usize = 8;
 
 /// The tokens of one chart bar: everything counted from `start_ms` until the next bar.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,12 +24,13 @@ pub struct Bucket {
 /// One run: one agent session, with its tokens in the range, when they were last counted
 /// (the start of its last usage hour for a run counted before that time was kept), and the
 /// latest team task its agent ran while it used them (its id, the prompt's first line and
-/// its status), when one did.
+/// its status), when one did, and the name clients show for its agent, when the store has it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRow {
     pub project: String,
     pub agent: String,
+    pub label: Option<String>,
     pub session: String,
     pub task: Option<i64>,
     pub title: Option<String>,
@@ -38,7 +40,8 @@ pub struct RunRow {
 }
 
 /// The tokens one project, account or harness used in the range, with how many agents and
-/// runs used it and the projects they ran in, once each in name order.
+/// runs used it and the first `NAMES_MAX` projects they ran in, once each in name order,
+/// with how many more there were.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupRow {
@@ -47,17 +50,22 @@ pub struct GroupRow {
     pub agents: u64,
     pub runs: u64,
     pub projects: Vec<String>,
+    pub more_projects: u64,
 }
 
-/// The tokens one agent used in the range, with the harnesses and accounts it used, once
-/// each in name order.
+/// The tokens one agent used in the range, with the name clients show for it when the store
+/// has it, and the first `NAMES_MAX` harnesses and accounts it used, once each in name order,
+/// with how many more there were.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRow {
     pub project: String,
     pub agent: String,
+    pub label: Option<String>,
     pub harnesses: Vec<String>,
+    pub more_harnesses: u64,
     pub accounts: Vec<String>,
+    pub more_accounts: u64,
     pub tokens: Tokens,
 }
 
@@ -218,6 +226,7 @@ fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<Run
                     agent: row.get(1)?,
                     session: row.get(2)?,
                     task: None,
+                    label: None,
                     title: None,
                     status: None,
                     last_ms,
@@ -266,6 +275,7 @@ fn groups(
                 agents: count(row.get(5)?),
                 runs: count(row.get(6)?),
                 projects: Vec::new(),
+                more_projects: 0,
             })
         })
         .map_err(storage)?
@@ -317,8 +327,11 @@ fn agents(
             Ok(AgentRow {
                 project: row.get(0)?,
                 agent: row.get(1)?,
+                label: None,
                 harnesses: Vec::new(),
+                more_harnesses: 0,
                 accounts: Vec::new(),
+                more_accounts: 0,
                 tokens: tokens(row, 2)?,
             })
         })
