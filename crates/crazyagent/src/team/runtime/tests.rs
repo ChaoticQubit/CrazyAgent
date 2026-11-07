@@ -2553,9 +2553,11 @@ fn save_access(fixture: &Fixture, access: crate::sandbox::policy::AgentAccess) {
     .unwrap();
 }
 
-/// Prepares agent `id` in `role` on a local endpoint account, as every launch, relaunch
-/// and resume does, and reads the agent's own `git` script. Inputs: the runtime, the agent
-/// and its role. Output: the script's lines.
+/// Prepares agent `id` in `role` on a local endpoint account as `start_agent` does: a new
+/// agent in a new worktree whose row and starting commit are then recorded, a relaunched or
+/// resumed one in the worktree recorded for it, each launch's ledger intent settled after. Reads the
+/// agent's own `git` script. Inputs: the runtime, the agent and its role. Output: the
+/// script's lines.
 #[cfg(target_os = "macos")]
 fn prepared_git(runtime: &TeamRuntime, fixture: &Fixture, id: i64, role: AgentRole) -> Vec<String> {
     let account = TeamAccount {
@@ -2565,7 +2567,18 @@ fn prepared_git(runtime: &TeamRuntime, fixture: &Fixture, id: i64, role: AgentRo
             model: "qwen2.5:0.5b".into(),
         },
     };
-    runtime
+    let project = fixture.setup.project_id.as_str();
+    let kept = runtime
+        .connection
+        .query_row(
+            "SELECT 1 FROM team_worktrees WHERE agent=?1 AND project=?2",
+            params![id, project],
+            |_| Ok(()),
+        )
+        .optional()
+        .unwrap()
+        .is_some();
+    let (root, plan, _) = runtime
         .prepare(
             &fixture.setup,
             id,
@@ -2573,10 +2586,31 @@ fn prepared_git(runtime: &TeamRuntime, fixture: &Fixture, id: i64, role: AgentRo
             "codex",
             false,
             &account,
-            false,
+            kept,
             crate::agent_git::Layout::Linked,
         )
         .unwrap();
+    if !kept {
+        let landing =
+            agent_git_dir(&root, &plan.working_dir, crate::agent_git::Layout::Linked).unwrap();
+        runtime
+            .connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![id, project, landing[0], landing[1], landing[2]],
+            )
+            .unwrap();
+        let named = crate::team::agent_branches(&runtime.connection, &fixture.setup.project_id)
+            .unwrap()
+            == crate::team::BranchMode::Named;
+        let paths = landing.each_ref().map(Path::new);
+        let db = crate::landing::open(&runtime.root).unwrap();
+        if named {
+            crate::landing::name_agent_branch(&db, paths[0], paths[1], paths[2]).unwrap();
+        }
+        crate::landing::record_worktree_start(&db, paths[0], paths[1], paths[2]).unwrap();
+    }
+    spawn_ledger::settle(&runtime.connection, &runtime.root, id, false);
     let home = agent_home(&runtime.state, id);
     let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
     std::fs::read_to_string(scratch.join("bin").join("git"))
