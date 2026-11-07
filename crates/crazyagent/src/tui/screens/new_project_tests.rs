@@ -928,7 +928,11 @@ fn create_sends_every_field_and_then_waits_for_the_engine() {
     assert_eq!(setup.platforms, [Platform::Website, Platform::Cli]);
     assert_eq!(
         setup.research,
-        [ResearchKind::MarketResearch, ResearchKind::FrontEndDesign]
+        [
+            ResearchKind::MarketResearch,
+            ResearchKind::FrontEndDesign,
+            ResearchKind::RoadmapPlanning
+        ]
     );
     assert_eq!(
         setup.pool.as_ref().map(CredentialRef::as_str),

@@ -192,6 +192,14 @@ async fn a_stale_agent_settings_save_is_refused_and_the_re_read_settings_save() 
             .unwrap(),
         opened
     );
+    for scope in [None, Some(project.clone())] {
+        assert!(matches!(
+            desk.save_process_text(scope, TUI_TEXT.into(), 0, None)
+                .await
+                .unwrap(),
+            SavedText::Saved { version: 1, .. }
+        ));
+    }
 
     let quiet = InstructionSettings {
         mode: Mode::ProjectOnly,

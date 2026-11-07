@@ -696,7 +696,7 @@ fn a_recent_failure_backs_off_the_engine_start_but_not_the_retry() {
         ready,
         BuildState::Ready {
             version: VERSION.into(),
-            root: runtime.join("ide/builds").join(VERSION)
+            root: runtime.join("ide/builds").join(installed_folder())
         }
     );
     assert!(!backing_off(&runtime));

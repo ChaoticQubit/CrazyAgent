@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::{AccountPool, ModelAccessEdit};
 use crate::engine::owner::{ModelAccessCollection, Started};
 use crate::master_session::MasterSelection;
 use crate::master_sessions::{MasterSessionSummary, ResumePlan, SESSIONS_LISTED_MAX};
@@ -946,6 +947,111 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
             code: "master_source_conflict".into()
         },
         "the session's own pool changed, so it no longer runs under the current settings"
+    );
+    assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
+    case.close().await;
+}
+
+/// Has the owner replace the native pool with one serving the given projects, its
+/// members, roles, fallback and quota policy as in CONFIG. Inputs: the case, the edit id
+/// and the projects. Output: the owner's result.
+async fn replace_native_pool(case: &Case, id: &str, projects: &[&str]) -> OwnerResult {
+    let (expected_config_id, expected_source_hash, _) = case.basis().await;
+    case.apply(
+        id,
+        OwnerMutation::ModelAccess {
+            expected_config_id,
+            expected_source_hash,
+            edit: ModelAccessEdit::ReplacePool {
+                pool: AccountPool {
+                    id: reference("native-pool"),
+                    name: None,
+                    members: vec![reference("native-connection")],
+                    projects: projects.iter().copied().map(reference).collect(),
+                    roles: vec![reference("project_leader")],
+                    fallback_allowed: false,
+                    provider_quota_policy: Default::default(),
+                },
+            },
+        },
+    )
+    .await
+}
+
+/// Parks a used native session behind a fresh one, then has the owner replace the native
+/// pool with one serving the given projects, as adding a folder again did in run 7 (N-D15).
+/// A second project exists first so the pool can name it, and one unchanged pool edit runs
+/// before any session opens: every pool edit writes the assigned pools' approvals and
+/// destinations into the settings (config.rs:912-975), which CONFIG lacks for the native
+/// connection. Inputs: the case and the projects. Output: the parked session.
+async fn parked_native_after_pool_edit(case: &Case, projects: &[&str]) -> SessionId {
+    let repository = case.root.path().join("joined-repository");
+    std::fs::create_dir(&repository).unwrap();
+    std::fs::write(repository.join("README.md"), "Joined repository\n").unwrap();
+    assert_eq!(
+        case.apply(
+            "create-joined-project",
+            OwnerMutation::CreateProject {
+                project_id: ProjectId::new("joined-project").unwrap(),
+                spec: ProjectSpec {
+                    name: "Joined project".into(),
+                    repositories: vec![repository.to_str().unwrap().into()],
+                },
+            },
+        )
+        .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        replace_native_pool(case, "settle-native-pool", &["session-project"]).await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
+    let rcli = case.shown().await;
+    case.used_in_terminal(&rcli.session_id);
+    assert_eq!(
+        case.renew_with("renew-native", false, MasterBackend::Claude)
+            .await,
+        OwnerResult::Applied
+    );
+    let native = case.shown().await;
+    case.used_in_terminal(&native.session_id);
+    assert_eq!(case.renew("renew-last", false).await, OwnerResult::Applied);
+    let (bound, _, _) = case.basis().await;
+    assert_eq!(native.config_id, bound);
+    assert_eq!(
+        replace_native_pool(case, "replace-native-pool", projects).await,
+        OwnerResult::Applied
+    );
+    let (after, _, _) = case.basis().await;
+    assert_ne!(after, bound, "the pool edit changes the settings");
+    native.session_id
+}
+
+#[tokio::test]
+async fn resume_continues_a_session_after_another_project_joins_its_pool() {
+    let case = Case::new().await;
+    let native = parked_native_after_pool_edit(&case, &["session-project", "joined-project"]).await;
+    assert_eq!(
+        case.resume("resume-joined", &native, false).await,
+        OwnerResult::Applied,
+        "another project joining the session's pool leaves what the session runs on as it was"
+    );
+    assert_eq!(case.shown().await.session_id, native);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn resume_refuses_a_session_whose_own_project_left_its_pool() {
+    let case = Case::new().await;
+    let native = parked_native_after_pool_edit(&case, &["joined-project"]).await;
+    let before = snapshot(&case);
+    assert_eq!(
+        case.resume("resume-left", &native, false).await,
+        OwnerResult::Rejected {
+            code: "master_source_conflict".into()
+        },
+        "the session's own project left its pool, so it no longer runs under the current settings"
     );
     assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
     case.close().await;

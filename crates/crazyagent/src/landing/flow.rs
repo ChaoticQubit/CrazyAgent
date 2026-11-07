@@ -2206,9 +2206,18 @@ pub(super) fn discard_held(
     Ok(until)
 }
 
+/// Whether a discarded change set can no longer come back: pruned, never given a restore
+/// window, or past it. Inputs: the record and the time now. Output: true when expired.
+fn restore_expired(record: &Record, now: u64) -> bool {
+    record.pruned || record.restorable_until_ms.is_none_or(|until| now >= until)
+}
+
 /// Brings a discarded change set back as pending, takes back the claims its discard
 /// released, and puts its head back in the agent's worktree. An agent's own clone is read
-/// by the engine's fetch of its branch, before the repository hold. Inputs: the store, the change set and the time now. Output: Ok once
+/// by the engine's fetch of its branch, before the repository hold, and only for a change
+/// set still inside its restore window, so a set that can never come back is refused as
+/// expired and not by its clone's branch. Inputs: the store, the change set and the time
+/// now. Output: Ok once
 /// pending; refused once the restore window passed, while the worktree has another
 /// open change set, or while it holds unrecorded work or a HEAD, or a clone a branch tip,
 /// other than the commit the worktree's next change set would open above, so commits
@@ -2217,6 +2226,9 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     store::initialize(db)?;
     let loaded = store::load(db, id)?;
     let clone_tip = if in_clone(&loaded) && loaded.state == ChangeState::Discarded {
+        if restore_expired(&loaded, now) {
+            return Err(failure("changes_restore_expired"));
+        }
         Some(clone::fetch(
             &shared(&loaded.repository)?,
             &loaded.repository,
@@ -2233,7 +2245,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     if record.state != ChangeState::Discarded {
         return Err(failure("changes_stale"));
     }
-    if record.pruned || record.restorable_until_ms.is_none_or(|until| now >= until) {
+    if restore_expired(&record, now) {
         return Err(failure("changes_restore_expired"));
     }
     let worktree = record.worktree.to_str().ok_or_else(invalid)?;

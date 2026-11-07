@@ -19,7 +19,7 @@ const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const TASK = "Write fruit.md with one line about apples.";
 const SKILL = "meal-tips";
-const REMINDER = `Task start reminder: before you work on this task, use the \`ctx_batch_execute\`, \`ctx_execute\`, \`ctx_execute_file\`, \`ctx_fetch_and_index\`, \`ctx_search\` tools of the \`plugin_context-mode_context-mode\` MCP server for any command, test, search or file read whose output may pass 20 lines, and read the SKILL.md of each of these skills that fits this task and follow it: \`${SKILL}\`.`;
+const REMINDER = `Task start reminder: before you work on this task, run every command, test, search or file read whose output is not short and fixed through the \`ctx_batch_execute\`, \`ctx_execute\`, \`ctx_execute_file\`, \`ctx_fetch_and_index\`, \`ctx_search\` tools of the \`plugin_context-mode_context-mode\` MCP server (the shell only for short fixed output, state changes and edits), query the project graph with \`graphify query "<question>"\` before you read or search source, and check these skills and read and follow the SKILL.md of each one that applies: \`${SKILL}\`.`;
 const OPTIONS = '[role=radiogroup][aria-label="Task-start reminder"] [role=radio]';
 
 /** The Codex stand-in the engine runs every team agent with: it keeps a conversation file as

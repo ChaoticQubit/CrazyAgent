@@ -1448,9 +1448,9 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
     help.extend([
         ("Enter", "Open report"),
         ("t", "Team"),
-        ("s", "Team settings"),
         TABS,
         ("Esc", "Home"),
+        ("s", "Team settings"),
     ]);
     if screen.pool_ready && !screen.pool.as_ref().is_some_and(|pool| pool.assigned) {
         lines.push(Row::of(
@@ -2046,7 +2046,7 @@ fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
         Some([one]) => one.clone(),
         Some(many) => format!("{} hidden folders", many.len()),
     };
-    Row::of(text, look.fg).push("   p Edit hidden folders", look.muted)
+    Row::of(text, look.fg).push("   k Edit hidden folders", look.muted)
 }
 
 fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {

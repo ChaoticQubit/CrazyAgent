@@ -1,22 +1,61 @@
 import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
-import { type ImportFile, type Nudges } from "../engine-client";
+import { loadTeamStatus } from "../api-projects";
+import { type ImportFile, type TeamStatus } from "../engine-client";
 import {
-  AGENT_SETTINGS_STALE, DEFAULT_INSTRUCTION_SETTINGS, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport,
-  defaultProcess, flagWords, importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadProcess, processMessage,
-  processTextError, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionSettings,
-  type InstructionView, type SavedText, type SkillEntry,
+  DEFAULT_INSTRUCTION_SETTINGS, afterSettingsSave, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport,
+  defaultProcess, flagWords, importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadGivenText, loadProcess, processMessage,
+  processTextError, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionMode,
+  type InstructionSettings, type InstructionView, type SavedText, type SkillEntry, type EditDelivery,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
-import { Button, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
+import { Button, ConfirmDialog, Dialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
 import { navigate } from "../ui/router";
 import { displayText } from "./conversation";
 import { ConflictView, keepMine, type Conflict } from "./conflict";
 import { SkillTag, skillEntries } from "./skill-tag";
+import { HARNESS_NAMES } from "./team/coordination";
 import "./process.css";
 
 /** Where an instructions text applies: every project, or one project. */
 export type ProcessScope = { kind: "app" } | { kind: "project"; id: string; name: string };
+
+/** How a project's Process page shows its instructions: as agents read them, or the editor. */
+export type InstructionsView = "read" | "edit";
+
+const INSTRUCTION_VIEWS: { value: InstructionsView; label: string }[] = [
+  { value: "read", label: "As agents read it" },
+  { value: "edit", label: "Edit" },
+];
+
+const FOLD_LINES = 12;
+
+const MODE_SUBTITLES: Record<InstructionMode, string> = {
+  both: "App default plus this project's file",
+  project_only: "This project's file only",
+  app_only: "App default only",
+};
+
+const TASK_STEPS = [
+  "Master writes the task and picks an agent.",
+  "Agent reads instructions, asks the graph, works on its branch.",
+  "Reviewer checks the change set.",
+  "Master merges into main (Full access) or it waits for your accept.",
+];
+
+/** How many lines a text shows, a final line break adding none. Input: the text. Output: the
+ * count, 0 for an empty text. */
+export function lineCount(text: string): number {
+  const body = text.replace(/\n+$/u, "");
+  return body === "" ? 0 : body.split("\n").length;
+}
+
+/** The line a project's editor shows on when running agents get an edit. Input: the edit
+ * delivery, undefined for the default. Output: the line. */
+export function editNote(edits: EditDelivery | undefined): string {
+  const delivery = EDIT_DELIVERIES.find((option) => option.value === edits) ?? EDIT_DELIVERIES[0];
+  return delivery.value === "next_message" ? "Running agents get the change at their next task." : delivery.note;
+}
 
 /** A seed text the owner opened for a preview before it goes into the editor. */
 export interface ProcessPreview {
@@ -61,7 +100,8 @@ export function conflictOf(stale: Extract<SavedText, { kind: "stale" }>): Confli
  * preview, the conflict, the skill the owner asked to open over unsaved text and the
  * actions. The editor is read-only while saving. Nothing reads the owner's files or saves
  * without the matching click. */
-export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, leaving = null, onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onReload, onKeepMine, onOpenSkill, onLeave, onStay }: {
+export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, leaving = null, view = "read", all = false, given = { kind: "loading" }, mode = "both", subtitle = MODE_SUBTITLES.both, editNote: note = "",
+  onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onReload, onKeepMine, onOpenSkill, onLeave, onStay, onView, onAll, onUseDefault }: {
   scope: ProcessScope;
   saved: Loaded<string>;
   draft: string;
@@ -71,6 +111,12 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   preview: ProcessPreview | null;
   conflict: Conflict<string> | null;
   leaving?: SkillEntry | null;
+  view?: InstructionsView;
+  all?: boolean;
+  given?: Loaded<string>;
+  mode?: InstructionMode | null;
+  subtitle?: string;
+  editNote?: string;
   onDraft: (text: string) => void;
   onSave: () => void;
   onImport: () => void;
@@ -83,6 +129,9 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   onOpenSkill?: (skill: SkillEntry) => void;
   onLeave?: () => void;
   onStay?: () => void;
+  onView?: (view: InstructionsView) => void;
+  onAll?: () => void;
+  onUseDefault?: () => void;
 }) {
   const intro = scope.kind === "app"
     ? "Instructions every master and sub-agent gets, in every project. A project's own instructions come after these."
@@ -90,8 +139,49 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   if (saved.kind === "loading") return <Skeleton shape="card" count={2} />;
   if (saved.kind === "not_ready") return <NotReady what="Instructions" />;
   if (saved.kind === "error") return <LoadError message={saved.message} onRetry={onRetry} />;
-  const invalid = processTextError(draft);
+  const invalid = processTextError(draft)
+    ?? (scope.kind === "project" && mode === "project_only" && draft.trim() === "" ? "Under Project only an empty file leaves agents with no instructions." : undefined);
   const changed = draft !== saved.value;
+  const leave = <ConfirmDialog open={leaving !== null} title={`Open ${leaving?.name ?? "the skill"} without saving?`} confirmLabel="Open skill"
+    cancelLabel="Keep editing" onConfirm={() => onLeave?.()} onCancel={() => onStay?.()}>
+    Your instructions changes will be lost.
+  </ConfirmDialog>;
+  if (scope.kind === "project") {
+    const editing = view === "edit" || Boolean(conflict);
+    const lines = given.kind === "ok" ? lineCount(given.value) : 0;
+    const read = given.kind === "loading" ? <p className="small muted" role="status">Reading what agents get...</p>
+      : given.kind !== "ok" ? <Notice tone="danger" alert>{"What agents get could not be read. "}{processMessage(given)}</Notice>
+      : given.value.trim() === "" ? <Notice>Agents get no instructions from you now.</Notice>
+      : <>
+        <div className={`pr-instr${all ? " all" : ""}`}><TaggedText text={given.value} skills={skills} onOpen={onOpenSkill} /></div>
+        {lines > FOLD_LINES && <span><button type="button" className="pr-link" onClick={() => onAll?.()}>{all ? "Show less" : `Show all ${lines} lines`}</button></span>}
+      </>;
+    return <div className="stack">
+      {failure && <Notice tone="danger" alert>{failure}</Notice>}
+      {conflict && <ConflictView conflict={conflict} busy={busy === "save"} onReload={onReload} onKeepMine={onKeepMine}>
+        <TaggedText text={conflict.current} skills={skills} />
+      </ConflictView>}
+      <Panel title={<div className="pr-head"><h2>Instructions</h2><p className="small muted">{subtitle}{given.kind === "ok" ? ` · ${lines} lines` : ""}</p></div>}
+        actions={<Segmented label="How the instructions show" value={editing ? "edit" : "read"} options={INSTRUCTION_VIEWS} onValue={(next) => onView?.(next)} />}>
+        {editing
+          ? <form className="stack-small" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed && !conflict) onSave(); }}>
+            <TextArea id="process-project" label="Instructions for agents" value={draft} onValue={onDraft} rows={16} error={invalid} readOnly={busy === "save"}
+              helper={`${byteSize(textBytes(draft))} of ${byteSize(PROCESS_TEXT_BYTES_MAX)}${changed ? ". Not saved yet." : ""}`} />
+            <span className="row">
+              <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
+                disabled={Boolean(invalid) || !changed || busy !== null || Boolean(conflict)}>Save</Button>
+              {changed && !conflict && <Button disabled={busy !== null} onClick={() => onDraft(saved.value)}>Discard edits</Button>}
+              {mode === "project_only"
+                ? <span className="small muted">Project only gives agents this file alone. To use the app default, pick Both or App only under Delivery.</span>
+                : mode !== null && <Button disabled={busy !== null || draft === ""} onClick={() => onUseDefault?.()}>Use app default</Button>}
+              <span className="small muted">{note}</span>
+            </span>
+          </form>
+          : <div className="stack-small">{read}</div>}
+      </Panel>
+      {leave}
+    </div>;
+  }
   const seeds = scope.kind === "app" && <span className="row">
     <Button icon="upload" pending={busy === "import"} pendingLabel="Reading..." disabled={busy !== null} onClick={onImport}>Import from file</Button>
     <Button icon="sparkles" pending={busy === "default"} pendingLabel="Reading..." disabled={busy !== null} onClick={onDefault}>Use the CrazyAgent default process</Button>
@@ -126,10 +216,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
         : "It replaces the editor's text; nothing is saved until you click Save."}</p>
       {preview && <TaggedText text={preview.text} skills={skills} onOpen={onOpenSkill} />}
     </Dialog>
-    <ConfirmDialog open={leaving !== null} title={`Open ${leaving?.name ?? "the skill"} without saving?`} confirmLabel="Open skill"
-      cancelLabel="Keep editing" onConfirm={() => onLeave?.()} onCancel={() => onStay?.()}>
-      Your instructions changes will be lost.
-    </ConfirmDialog>
+    {leave}
   </div>;
 }
 
@@ -149,7 +236,7 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
   const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[2];
   const delivery = EDIT_DELIVERIES.find((option) => option.value === current.edits) ?? EDIT_DELIVERIES[0];
   const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
-  return <Panel title="Agent settings">
+  return <Panel title="Delivery">
     <div className="stack-small">
       {settings.kind === "error" && <Notice tone="danger" alert>{processMessage(settings)}</Notice>}
       {failure && <Notice tone="danger" alert>{failure}</Notice>}
@@ -173,9 +260,10 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
 }
 
 /** A project's agent settings: reads them from the engine and saves each change at once at
- * the version read; a save refused because they changed since reads them again and says so.
- * Input: the project id. */
-export function AgentSettings({ projectId }: { projectId: string }) {
+ * the version read; a save refused because they changed since, or one the engine could not
+ * confirm, reads them again and says so, as `afterSettingsSave` decides. Inputs: the project id
+ * and what to do after a save landed. */
+export function AgentSettings({ projectId, onSaved }: { projectId: string; onSaved?: () => void }) {
   const session = useAppSession();
   const [settings, reload] = useLoad(() => loadInstructionSettings(projectId), [projectId]);
   const [busy, setBusy] = useState(false);
@@ -187,19 +275,13 @@ export function AgentSettings({ projectId }: { projectId: string }) {
     setBusy(false);
     if (result.kind === "ok") {
       session.showToast("Agent settings saved. Agents started from now on follow them.");
-      reload();
-    } else if (result.kind === "error" && result.code === "stale_revision") {
-      reload();
-      setFailure(AGENT_SETTINGS_STALE);
-    } else setFailure(processMessage(result));
+      onSaved?.();
+    }
+    const after = afterSettingsSave(result);
+    if (after.reload) reload();
+    setFailure(after.failure);
   };
   return <AgentSettingsView settings={settings} busy={busy} failure={failure} onSave={(next) => void store(next)} />;
-}
-
-/** Names one agent of an adoption row the way the team lists it: its id, role and harness.
- * Input: the row. Output: the label. */
-export function adoptionLabel(agent: Pick<AgentAdoption, "agent" | "role" | "harness">): string {
-  return `#${agent.agent} ${agent.role} ${agent.harness}`.trim();
 }
 
 /** One agent's grounding and skill counts: graphify, ctx_*, then every skill its project
@@ -244,49 +326,116 @@ export function AgentSkillsDialog({ projectId, agent, label, onClose }: { projec
   </Dialog>;
 }
 
-const NUDGES_NOTES: Record<Nudges, string> = {
-  off: "Nudges are off: flags show here, and agents get no reminder.",
-  ten_minutes: "Nudges run every 10 minutes: each red flag sends that agent one reminder.",
-  first_edit: "Nudges run on the first edit: an edit before any graph query gets one reminder, and flags send none.",
-};
+/** Whether an agent asked the graph before its edits: missed when it edited without
+ * start_work, yes once it queried the graph, else not yet. Input: the agent's row. */
+function graphState(agent: AgentAdoption): "yes" | "missed" | "none" {
+  if (agent.flags.includes("edits_without_start_work")) return "missed";
+  return (agent.graphify ?? 0) > 0 ? "yes" : "none";
+}
 
-/** A project's workflow adoption as a pure view: one row per recent agent with its count for
- * each counted tool, its graphify, ctx_* and per-skill counts, and its flags in red, marked
- * once the agent was reminded, and the nudges option. Stopped agents are dimmed. Inputs:
- * the read and the refresh action. */
-export function AdoptionView({ adoption, onRefresh }: { adoption: Loaded<Adoption>; onRefresh: () => void }) {
-  if (adoption.kind === "loading") return <Skeleton shape="card" count={1} />;
+/** Whether an agent reads through the context tools: missed when it went 10 minutes without
+ * graphify or context-mode, yes once it used ctx_*, else not yet. Input: the agent's row. */
+function contextState(agent: AgentAdoption): "yes" | "missed" | "none" {
+  if (agent.flags.includes("no_graphify_or_context_mode")) return "missed";
+  return (agent.context_mode ?? 0) > 0 ? "yes" : "none";
+}
+
+function Check({ state }: { state: "yes" | "missed" | "none" }) {
+  if (state === "none") return <span className="secondary">Not yet</span>;
+  return <span className={`pr-check ${state}`}><Icon name={state === "yes" ? "circle-check" : "circle-x"} size={14} />{state === "yes" ? "Yes" : "Missed"}</span>;
+}
+
+/** The skills an agent used: its project's enabled skills it called, then the others it
+ * called. Inputs: the view's skill names and the agent's row. Output: "tdd, other-one" or
+ * "None". */
+function skillsUsed(skills: readonly string[], agent: AgentAdoption): string {
+  const counts = agent.skills ?? [];
+  const used = [
+    ...skills.filter((_, index) => (counts[index] ?? 0) > 0),
+    ...(agent.other_skills ?? []).filter((other) => other.count > 0).map((other) => other.name),
+  ];
+  return used.length === 0 ? "None" : used.join(", ");
+}
+
+/** Who follows a project's instructions, as a pure view: one row per agent with whether it
+ * asked the graph before its edits and used the context tools, the skills it used and its
+ * flags, marked once it was reminded. A clicked row shows the agent's counts; stopped agents
+ * wait behind Show finished. Inputs: the adoption read, the agents' names by id, whether
+ * finished agents show, the open row and the actions. */
+export function FollowingView({ adoption, names, finished, expanded, onFinished, onExpand, onMetrics, onRetry }: {
+  adoption: Loaded<Adoption>;
+  names: Map<number, string>;
+  finished: boolean;
+  expanded: number | null;
+  onFinished: () => void;
+  onExpand: (agent: number | null) => void;
+  onMetrics: () => void;
+  onRetry: () => void;
+}) {
+  const head = <div className="pr-head"><h2>Are agents following it</h2><p className="small muted">One row per agent. Click a row for details. Counts are in Metrics.</p></div>;
+  const open = <Button size="small" icon="trending-up" onClick={onMetrics}>Open Metrics</Button>;
+  if (adoption.kind === "loading") return <Panel title={head} actions={open}><Skeleton shape="row" count={3} /></Panel>;
   if (adoption.kind === "not_ready") return <NotReady what="Workflow adoption" />;
-  if (adoption.kind === "error") return <LoadError message={processMessage(adoption)} onRetry={onRefresh} />;
-  const { nudges, counted, agents } = adoption.value;
+  if (adoption.kind === "error") return <Panel title={head} actions={open}><LoadError message={processMessage(adoption)} onRetry={onRetry} /></Panel>;
+  const { counted, agents } = adoption.value;
   const skills = adoption.value.skills ?? [];
   const hidden = adoption.value.hidden ?? 0;
-  return <Panel title="Workflow adoption" padded={false} actions={<Button icon="refresh-cw" onClick={onRefresh}>Refresh</Button>}>
-    <p className="secondary adoption-note">{NUDGES_NOTES[nudges]} Nudges and the counted tools are coordination settings.</p>
+  const stopped = agents.filter((agent) => !agent.active).length;
+  const shown = agents.filter((agent) => agent.active || finished);
+  return <Panel title={head} actions={open} padded={false}>
     {agents.length === 0
       ? <EmptyState compact icon="users" title="No agents yet">Counts appear once this project's agents use tools.</EmptyState>
-      : <div className="pj-table-wrap"><table className="pj-table adoption-table">
-        <thead><tr><th scope="col">Agent</th>{counted.map((tool) => <th scope="col" key={tool}>{tool}</th>)}<th scope="col">Skills</th><th scope="col">Flags</th></tr></thead>
-        <tbody>{agents.map((agent) => <tr key={agent.agent} className={agent.active ? undefined : "adoption-stopped"}>
-          <th scope="row">{adoptionLabel(agent)}</th>
-          {counted.map((tool, index) => <td key={tool}>{agent.counts[index] ?? 0}</td>)}
-          <td><SkillCounts skills={skills} agent={agent} /></td>
-          <td><span className="adoption-flags">{agent.flags.length === 0
-            ? <span className="secondary">None</span>
-            : agent.flags.map((flag) => <StatusBadge key={flag} tone="danger"
-              word={agent.reminded.includes(flag) ? `${flagWords(flag)}, reminded` : flagWords(flag)} />)}</span></td>
-        </tr>)}</tbody>
+      : <div className="pj-table-wrap pr-table-wrap"><table className="pj-table pr-table">
+        <thead><tr><th scope="col">Agent</th><th scope="col">Graph before edits</th><th scope="col">Context tools</th><th scope="col">Skills used</th><th scope="col">Flags</th></tr></thead>
+        <tbody>{shown.flatMap((agent) => {
+          const name = names.get(agent.agent) ?? (agent.role === "master" ? "Master" : `Agent ${agent.agent}`);
+          const isOpen = expanded === agent.agent;
+          const row = <tr key={agent.agent} className={agent.active ? undefined : "adoption-stopped"}>
+            <th scope="row"><button type="button" className="pr-link pr-agent" aria-expanded={isOpen} onClick={() => onExpand(isOpen ? null : agent.agent)}>{name}</button>
+              {" "}<span className="muted small">{HARNESS_NAMES[agent.harness as keyof typeof HARNESS_NAMES] ?? agent.harness}</span></th>
+            <td><Check state={graphState(agent)} /></td>
+            <td><Check state={contextState(agent)} /></td>
+            <td className="secondary">{skillsUsed(skills, agent)}</td>
+            <td><span className="adoption-flags">{agent.flags.length === 0
+              ? <span className="secondary">None</span>
+              : agent.flags.map((flag) => <span key={flag}><StatusBadge tone="danger" word={flagWords(flag)} />
+                {agent.reminded.includes(flag) && <span className="small muted"> reminded</span>}</span>)}</span></td>
+          </tr>;
+          if (!isOpen) return [row];
+          return [row, <tr key={`${agent.agent}-detail`} className="pr-expand"><td colSpan={5}>
+            <span className="adoption-skills">{counted.map((tool, index) => <span key={tool}>{tool} <strong>{agent.counts[index] ?? 0}</strong></span>)}</span>
+            <SkillCounts skills={skills} agent={agent} />
+          </td></tr>];
+        })}</tbody>
       </table>
-      {hidden > 0 && <p className="secondary adoption-note">{hidden} older {hidden === 1 ? "agent is" : "agents are"} not listed.</p>}
+      {(stopped > 0 || hidden > 0) && <p className="secondary adoption-note">
+        {stopped > 0 && <button type="button" className="pr-link" onClick={onFinished}>{finished ? "Hide finished" : `Show finished (${stopped})`}</button>}
+        {stopped > 0 && hidden > 0 && " "}
+        {hidden > 0 && `${hidden} older ${hidden === 1 ? "agent is" : "agents are"} not listed.`}
+      </p>}
       </div>}
   </Panel>;
 }
 
-/** A project's workflow adoption: reads it from the engine, again on Refresh. Input: the
- * project id. */
-export function ProjectAdoption({ projectId }: { projectId: string }) {
+/** Who follows a project's instructions: reads its workflow adoption and its agents' names
+ * from the engine, and keeps which finished agents and which row show. Input: the project id. */
+export function ProjectFollowing({ projectId }: { projectId: string }) {
   const [adoption, reload] = useLoad(() => loadAdoption(projectId), [projectId]);
-  return <AdoptionView adoption={adoption} onRefresh={reload} />;
+  const [status] = useLoad<TeamStatus>(() => loadTeamStatus(projectId), [projectId]);
+  const [finished, setFinished] = useState(false);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const names = new Map(status.kind === "ok" ? status.value.agents.map((agent) => [agent.id, displayText(agent.label)]) : []);
+  return <FollowingView adoption={adoption} names={names} finished={finished} expanded={expanded}
+    onFinished={() => setFinished((old) => !old)} onExpand={setExpanded} onRetry={reload}
+    onMetrics={() => navigate({ name: "project", id: projectId, tab: "metrics" })} />;
+}
+
+/** How a task runs on a project, in four steps, beside its Process page. */
+export function TaskSteps() {
+  return <Panel>
+    <h3 className="pr-steps-title">How a task runs</h3>
+    {TASK_STEPS.map((step, index) => <div key={step} className="pr-step"><span className="pr-n">{index + 1}</span><span>{step}</span></div>)}
+  </Panel>;
 }
 
 /** The skill catalog the tags name, from the engine's skill list. Input: the read, whose
@@ -308,6 +457,10 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   const [loaded, reload] = useLoad(() => loadProcess(projectId), [projectId]);
   const saved: Loaded<string> = loaded.kind === "ok" ? { kind: "ok", value: loaded.value.text } : loaded;
   const [skills] = useLoad(() => listSkills(projectId ?? undefined), [projectId]);
+  const [given, reloadGiven] = useLoad<string>(() => projectId === null ? Promise.resolve({ kind: "ok", value: "" }) : loadGivenText(projectId), [projectId]);
+  const [settings, readSettings] = useLoad<InstructionView | null>(() => projectId === null ? Promise.resolve({ kind: "ok", value: null }) : loadInstructionSettings(projectId), [projectId]);
+  const [view, setView] = useState<InstructionsView>("read");
+  const [all, setAll] = useState(false);
   const [draft, setDraft] = useState("");
   const [failure, setFailure] = useState("");
   const [busy, setBusy] = useState<"save" | "import" | "default" | null>(null);
@@ -351,6 +504,7 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
       setConflict(null);
       session.showToast(savedMessage(result.value.size));
       reload();
+      reloadGiven();
     }
   };
   const reloadConflict = () => {
@@ -358,17 +512,28 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     setConflict(null);
     setFailure("");
     reload();
+    reloadGiven();
   };
+  const current = settings.kind === "ok" && settings.value !== null ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS;
+  const reloadSettings = () => { readSettings(); reloadGiven(); };
+  const mode = settings.kind === "ok" && settings.value !== null ? settings.value.settings.mode : null;
   const editor = <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview} conflict={conflict}
+    view={view} all={all} given={given} mode={mode} subtitle={MODE_SUBTITLES[current.mode]} editNote={editNote(current.edits)}
+    onView={setView} onAll={() => setAll((old) => !old)} onUseDefault={() => setDraft("")}
     onDraft={setDraft} onSave={() => void save(null)} onImport={() => void seed("import")} onDefault={() => void seed("default")}
     onUsePreview={() => { if (preview) setDraft(preview.text); setPreview(null); }} onClosePreview={() => setPreview(null)} onRetry={reload}
     onReload={reloadConflict} onKeepMine={() => void save(conflict)}
     leaving={leaving} onOpenSkill={openSkill} onLeave={() => { if (leaving) open(leaving); setLeaving(null); }} onStay={() => setLeaving(null)} />;
   if (scope.kind === "app") return editor;
-  return <div className="stack">
-    <AgentSettings projectId={scope.id} />
-    <ProjectAdoption projectId={scope.id} />
-    {editor}
+  return <div className="pr">
+    <div className="stack">
+      {editor}
+      <ProjectFollowing projectId={scope.id} />
+    </div>
+    <aside className="pr-side">
+      <AgentSettings projectId={scope.id} onSaved={reloadSettings} />
+      <TaskSteps />
+    </aside>
   </div>;
 }
 

@@ -219,6 +219,10 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.pane_pid(agent)
     }
 
+    fn unkept(&self, agent: &AgentId) -> bool {
+        self.inner.unkept(agent)
+    }
+
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
         self.inner.alive()
     }

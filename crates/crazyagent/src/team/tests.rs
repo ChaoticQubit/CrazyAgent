@@ -3994,7 +3994,7 @@ fn the_team_status_counts_an_agent_stored_under_a_harness_alias_as_live() {
 /// launch names nothing give none, and with the setting Off no prompt gets it.
 #[test]
 fn a_native_teammate_gets_the_task_start_reminder_on_the_first_prompt_of_each_task_while_on() {
-    const TEXT: &str = "Task start reminder: before you work on this task, call the Skill tool for each of these skills that fits this task: `crazyagent:tdd`.";
+    const TEXT: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and call the Skill tool for each one that applies: `crazyagent:tdd`.";
     let (_directory, connection) = database();
     let project = crate::protocol::ProjectId::new("tidepool").unwrap();
     connection
@@ -5198,6 +5198,110 @@ fn token_budget_each_choice_pauses_and_notifies_once_at_the_budget() {
         assert!(!paused(&connection, &project).unwrap());
         assert!(!budget_stop(&connection, &project, now_ms()).unwrap());
     }
+}
+
+/// A token budget spends the headline count (DEC-117 Q6): new input, cache writes and
+/// output reach it, and cache re-reads, however many, never do.
+#[test]
+fn a_token_budget_spends_new_input_cache_writes_and_output_but_never_cache_reads() {
+    let (_directory, mut connection, project) = team_database("team-budget-headline");
+    crate::usage::initialize(&connection).unwrap();
+    let tokens = BUDGET_CHOICES[0];
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(tokens),
+        },
+    );
+    let now = now_ms();
+    let headline = i64::try_from(tokens).unwrap() - 1;
+    connection
+        .execute(
+            "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
+             VALUES (?1,'agent',?2,'pool-a','account-a','7','claude-code','cached',?3,?4,?5,?6)",
+            params![
+                hour_of(now),
+                project.as_str(),
+                headline - 30,
+                10,
+                i64::try_from(tokens).unwrap() * 40,
+                20
+            ],
+        )
+        .unwrap();
+    let read = budget(&connection, &project).unwrap().unwrap();
+    assert_eq!(read.used, tokens - 1);
+    assert!(!budget_stop(&connection, &project, now).unwrap());
+    used_tokens(&connection, &project, "last", now, 1, 0);
+    assert!(budget_stop(&connection, &project, now).unwrap());
+}
+
+/// The plan's known run (Task 13, T13-L1): one real capture of a Claude transcript that
+/// holds a message written three times and one that re-read 17.5 M tokens from cache spends
+/// the team's token budget by exactly the headline the usage report shows for that agent:
+/// new input, cache writes and output, once per message id.
+#[test]
+fn a_captured_run_spends_the_budget_by_the_headline_its_usage_row_shows() {
+    let (_directory, mut connection, project) = team_database("team-budget-known-run");
+    crate::usage::initialize(&connection).unwrap();
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(BUDGET_CHOICES[0]),
+        },
+    );
+    let message = |id: &str, input: u64, output: u64, read: u64, written: u64| {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"id": id, "usage": {
+                    "input_tokens": input, "output_tokens": output,
+                    "cache_read_input_tokens": read, "cache_creation_input_tokens": written
+                }}
+            })
+        )
+    };
+    let mut transcript = message("k1", 100, 70_000, 182_114, 150_000).repeat(3);
+    transcript.push_str(&message("k2", 94, 69_484, 17_482_981, 138_322));
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/f/k.jsonl");
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(&record, transcript).unwrap();
+    let now = now_ms();
+    let ken = crate::usage::capture::Attribution {
+        kind: crate::usage::capture::RunKind::Agent,
+        project: Some(project.clone()),
+        pool: None,
+        account: Some(crate::protocol::CredentialRef::new("claude-1").unwrap()),
+        agent: "team-ken".into(),
+        harness: "claude-code".into(),
+    };
+    crate::usage::capture::scan_home(
+        &connection,
+        home.path(),
+        crate::usage::capture::Format::Claude,
+        &ken,
+        now,
+    )
+    .unwrap();
+    let report =
+        crate::usage::report::report(&connection, Some(&project), None, 0, now, &[]).unwrap();
+    let row = report
+        .agents
+        .iter()
+        .find(|row| row.key == "team-ken")
+        .unwrap();
+    assert_eq!(row.tokens.cache_read, 182_114 + 17_482_981);
+    assert_eq!(
+        row.tokens.headline(),
+        (100 + 70_000 + 150_000) + (94 + 69_484 + 138_322)
+    );
+    let read = budget(&connection, &project).unwrap().unwrap();
+    assert_eq!(read.used, row.tokens.headline());
+    assert!(!read.reached);
 }
 
 /// Inserts one agent row. Takes the connection, the project, the role, its lead and its

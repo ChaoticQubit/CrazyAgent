@@ -42,7 +42,7 @@ use crazyagent::pools::PoolSummary;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
-use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
+use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
 use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
@@ -50,6 +50,7 @@ use crazyagent::setup::SetupStatus;
 use crazyagent::team::cleanup::FinishedAgent;
 use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
+use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -1661,12 +1662,13 @@ async fn desktop_add_existing_folder(
     state: State<'_, NativeState>,
     source: String,
     mode: AddMode,
+    overrides: Vec<AddOverride>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .add_existing_folder(source, mode, generation)
+        .add_existing_folder(source, mode, overrides, generation)
         .await
 }
 
@@ -2697,6 +2699,18 @@ async fn desktop_usage_report(
 }
 
 #[tauri::command]
+async fn desktop_usage_metrics(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    since_ms: i64,
+) -> Result<Metrics, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.usage_metrics(project_id, since_ms)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_usage_refresh(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3271,6 +3285,17 @@ async fn desktop_default_process(
 }
 
 #[tauri::command]
+async fn desktop_process_given(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<String, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.given_text(project_id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_pick_folder(
     window: WebviewWindow,
     purpose: FolderPurpose,
@@ -3740,6 +3765,7 @@ pub fn run() {
             desktop_uncommitted_instruction_import,
             desktop_commit_instruction_import,
             desktop_default_process,
+            desktop_process_given,
             desktop_agent_instructions,
             desktop_recovery_banner,
             desktop_retry_recovery,
@@ -3754,6 +3780,7 @@ pub fn run() {
             desktop_save_instruction_settings,
             desktop_adoption,
             desktop_usage_report,
+            desktop_usage_metrics,
             desktop_usage_refresh,
             desktop_usage_set_reset,
             desktop_ide_extension_asks,

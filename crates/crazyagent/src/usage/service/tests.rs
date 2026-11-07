@@ -98,10 +98,10 @@ fn a_live_agent_on_a_harness_without_a_reader_is_marked_not_reported() {
     let db = crate::usage::open(&root).unwrap();
     db.execute_batch(
         "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
-            connection TEXT, status TEXT, stopped_ms INTEGER);
-         INSERT INTO team_agents VALUES (1,'alpha','master','claude-code','claude-a','idle',NULL);
-         INSERT INTO team_agents VALUES (2,'alpha','sub_agent','opencode',NULL,'working',NULL);
-         INSERT INTO team_agents VALUES (3,'beta','sub_agent','gemini-cli',NULL,'stopped',0);",
+            connection TEXT, status TEXT, stopped_ms INTEGER, hookless INTEGER NOT NULL DEFAULT 0);
+         INSERT INTO team_agents VALUES (1,'alpha','master','claude-code','claude-a','idle',NULL,0);
+         INSERT INTO team_agents VALUES (2,'alpha','sub_agent','opencode',NULL,'working',NULL,0);
+         INSERT INTO team_agents VALUES (3,'beta','sub_agent','gemini-cli',NULL,'stopped',0,0);",
     )
     .unwrap();
     append(
@@ -111,7 +111,7 @@ fn a_live_agent_on_a_harness_without_a_reader_is_marked_not_reported() {
     let mut usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
     usage.step(NOW).unwrap();
     usage.step(NOW + 1).unwrap();
-    let report = crate::usage::report::report(&db, None, None, 0, NOW + 2).unwrap();
+    let report = crate::usage::report::report(&db, None, None, 0, NOW + 2, &[]).unwrap();
     assert_eq!(report.total.input, 50);
     assert_eq!(report.not_reported_by, ["OpenCode"]);
     assert_eq!(
@@ -271,7 +271,7 @@ fn a_panicking_step_kind_is_counted_marked_working_again_and_forgotten_on_restar
         UsageStep::Runs,
         "a whole step ends in its last part"
     );
-    let report = crate::usage::report::report(&db, None, None, 0, NOW + 11_000).unwrap();
+    let report = crate::usage::report::report(&db, None, None, 0, NOW + 11_000, &[]).unwrap();
     assert_eq!(
         report.health,
         [crate::usage::health::StepHealth {

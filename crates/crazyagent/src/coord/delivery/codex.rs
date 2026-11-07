@@ -12,12 +12,17 @@ pub const CONTROL_SOCKET: &str = "app-server-control/app-server-control.sock";
 pub const VERSIONS: [(u64, u64); 1] = [(0, 164)];
 
 /// What one bridge attempt did: the text reached the agent's Codex thread through
-/// `turn/start` or `turn/steer`, or the bridge cannot be used now, with a plain reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `turn/start` or `turn/steer`, into the turn whose id the server named (none when its
+/// answer named none of at most `TURN_ID_BYTES_MAX` bytes), or the bridge cannot be used
+/// now, with a plain reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bridged {
-    Delivered,
+    Delivered(Option<String>),
     Unavailable(&'static str),
 }
+
+/// The longest Codex turn id the bridge keeps; 0.164 names turns by UUID.
+pub const TURN_ID_BYTES_MAX: usize = 64;
 
 /// The real socket a Codex app-server binds for an agent home on this machine: Codex
 /// hashes the canonical control socket path with SHA-256 into
@@ -50,9 +55,22 @@ pub fn deliver(home: &Path, text: &str, start: bool) -> Bridged {
         return Bridged::Unavailable("codex_bridge_unsupported");
     };
     match wire::deliver(&socket, text, start) {
-        Ok(()) => Bridged::Delivered,
+        Ok(turn) => Bridged::Delivered(turn),
         Err(reason) => Bridged::Unavailable(reason),
     }
+}
+
+/// Keeps a turn id the app-server named when it is short, plain text, so a stored id
+/// never carries more than `TURN_ID_BYTES_MAX` printable ASCII bytes. Takes the id, if
+/// any. Returns it, or none for a missing, empty, long or unprintable one.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn turn_id(id: Option<&str>) -> Option<String> {
+    id.filter(|id| {
+        !id.is_empty()
+            && id.len() <= TURN_ID_BYTES_MAX
+            && id.bytes().all(|byte| byte.is_ascii_graphic())
+    })
+    .map(str::to_owned)
 }
 
 /// The shared folder Codex binds app-server sockets in. Takes nothing. Returns
@@ -88,7 +106,7 @@ mod tests;
 
 #[cfg(target_os = "macos")]
 mod wire {
-    use super::supported;
+    use super::{supported, turn_id};
     use serde_json::{Value, json};
     use std::io::{Read, Write};
     use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
@@ -117,6 +135,14 @@ mod wire {
         next_id: i64,
     }
 
+    /// What one try to put text into a thread did: it went into a turn, named by the id
+    /// the server gave when that id is a plain one (`turn_id`), or the turn changed under
+    /// the request.
+    enum Sent {
+        Into(Option<String>),
+        Moved,
+    }
+
     pub(super) fn private_folder(folder: &Path) -> Result<(), &'static str> {
         match std::fs::DirBuilder::new().mode(0o700).create(folder) {
             Ok(()) => {}
@@ -132,7 +158,11 @@ mod wire {
         Ok(())
     }
 
-    pub(super) fn deliver(socket: &Path, text: &str, start: bool) -> Result<(), &'static str> {
+    pub(super) fn deliver(
+        socket: &Path,
+        text: &str,
+        start: bool,
+    ) -> Result<Option<String>, &'static str> {
         let folder = socket.parent().ok_or("codex_bridge_unsupported")?;
         private_folder(folder)?;
         let metadata = match std::fs::symlink_metadata(socket) {
@@ -158,8 +188,8 @@ mod wire {
         wire.notify("initialized")?;
         let thread = wire.thread()?;
         for _ in 0..ATTEMPTS_MAX {
-            if wire.send_into(&thread, text, start)? {
-                return Ok(());
+            if let Sent::Into(turn) = wire.send_into(&thread, text, start)? {
+                return Ok(turn);
             }
         }
         Err("codex_bridge_turn_moved")
@@ -411,14 +441,15 @@ mod wire {
 
         /// Puts the text into the thread: a new turn while it is idle, when `start` allows
         /// one, a steer of the running turn while it works. Takes the thread id, the text
-        /// and `start`. Returns true once the server took it, false when the turn changed
-        /// under the request.
+        /// and `start`. Returns the turn it went into once the server took it (the started
+        /// turn's id from the answer, or the steered turn the server checked), or `Moved`
+        /// when the turn changed under the request.
         fn send_into(
             &mut self,
             thread: &str,
             text: &str,
             start: bool,
-        ) -> Result<bool, &'static str> {
+        ) -> Result<Sent, &'static str> {
             let input = json!([{"type": "text", "text": text, "text_elements": []}]);
             let read = self.call(
                 "thread/read",
@@ -432,8 +463,10 @@ mod wire {
                 "idle" if !start => Err("codex_bridge_thread_idle"),
                 "idle" => {
                     match self.call("turn/start", json!({"threadId": thread, "input": input})) {
-                        Ok(_) => Ok(true),
-                        Err("codex_bridge_refused") => Ok(false),
+                        Ok(started) => Ok(Sent::Into(turn_id(
+                            started.pointer("/turn/id").and_then(Value::as_str),
+                        ))),
+                        Err("codex_bridge_refused") => Ok(Sent::Moved),
                         Err(reason) => Err(reason),
                     }
                 }
@@ -450,12 +483,12 @@ mod wire {
                         .and_then(|turn| turn.get("id"))
                         .and_then(Value::as_str)
                     else {
-                        return Ok(false);
+                        return Ok(Sent::Moved);
                     };
                     let steer = json!({"threadId": thread, "expectedTurnId": turn, "input": input});
                     match self.call("turn/steer", steer) {
-                        Ok(_) => Ok(true),
-                        Err("codex_bridge_refused") => Ok(false),
+                        Ok(_) => Ok(Sent::Into(turn_id(Some(turn)))),
+                        Err("codex_bridge_refused") => Ok(Sent::Moved),
                         Err(reason) => Err(reason),
                     }
                 }
@@ -473,7 +506,11 @@ mod wire {
         Err("codex_bridge_unsupported")
     }
 
-    pub(super) fn deliver(_socket: &Path, _text: &str, _start: bool) -> Result<(), &'static str> {
+    pub(super) fn deliver(
+        _socket: &Path,
+        _text: &str,
+        _start: bool,
+    ) -> Result<Option<String>, &'static str> {
         Err("codex_bridge_unsupported")
     }
 }

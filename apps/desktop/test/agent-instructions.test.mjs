@@ -120,7 +120,8 @@ test("every agent view refusal has a plain sentence and is an engine code", () =
 
 test("the agent panel reads the view for the open card only", () => {
   const source = readFileSync(new URL("../src/screens/team/index.tsx", import.meta.url), "utf8");
-  assert.match(source, /<AgentSide key=\{openNode\.id\} projectId=\{projectId\} node=\{openNode\} /);
+  assert.match(source, /<AgentSide key=\{panelKey\(node\)\} projectId=\{projectId\} node=\{node\} /);
+  assert.match(source, /\{openNode && side\(openNode\)\}/);
 });
 
 test("the open agent's terminal head carries the reported line once the read is in", () => {

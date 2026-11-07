@@ -178,6 +178,7 @@ mod tests {
             edges,
             messages: Vec::new(),
             overlaps: Vec::new(),
+            relations: Vec::new(),
         }))
     }
 

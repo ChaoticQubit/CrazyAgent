@@ -397,6 +397,126 @@ pub(super) fn owner_arrival(event: OwnerEvent) -> Arrival {
     }
 }
 
+/// Turns a request the full request queue refused into the reply the engine worker gives
+/// a request that failed, with `owner_busy`, so the screen that asked stops waiting on it
+/// and says so; a refused terminal attach comes back as a terminal the engine refused, so
+/// the view closes and Enter attaches again. A refused creation Reconcile or Retry stays
+/// retained: the worker never saw it and still holds that submission. Reads of the shared
+/// profile, pools and projects and terminal keys, sizes and detaches get none: a refused
+/// read leaves the data alone, and the message line says the queue is full.
+/// Input: the refused request. Output: its failed arrival, or none.
+pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
+    use super::client::{ConversationEvent, ConversationJob, CreationEvent, MutationDelivery};
+    use super::master_session::{Event as MasterEvent, Job as MasterJob};
+    use super::seam::OWNER_BUSY;
+    let busy = || OWNER_BUSY.to_owned();
+    let event = match request {
+        Request::Profile
+        | Request::Pools
+        | Request::PoolProjects
+        | Request::Projects
+        | Request::Reconnect
+        | Request::TerminalInput { .. }
+        | Request::TerminalResize { .. }
+        | Request::TerminalDetach { .. } => return None,
+        Request::TerminalAttach { agent } | Request::TerminalAttachPane { agent, .. } => {
+            return Some(Arrival::Terminal {
+                agent,
+                frame: crate::terminal::TerminalFrame::Rejected { code: busy() },
+            });
+        }
+        Request::SaveProfile { .. } => return Some(Arrival::ProfileSaved(Err(busy()))),
+        Request::EditPool { .. } => return Some(Arrival::PoolEdited(Err(busy()))),
+        Request::Wire { .. } => return Some(Arrival::Wire(Err(busy()))),
+        Request::TeamGraph { project } => {
+            return Some(Arrival::TeamGraph {
+                project,
+                result: Err(busy()),
+            });
+        }
+        Request::ProjectFiles { project, query } => {
+            return Some(Arrival::ProjectFiles {
+                project,
+                query,
+                result: Err(busy()),
+            });
+        }
+        Request::Setup(query) => OwnerEvent::Setup(Box::new(super::client::SetupEvent {
+            query,
+            result: Err(busy()),
+        })),
+        Request::Creation(job) => {
+            let retained = !matches!(job.delivery, MutationDelivery::Submit);
+            OwnerEvent::Creation(Box::new(CreationEvent {
+                submission: job.submission,
+                operation: None,
+                result: Err(busy()),
+                retained,
+            }))
+        }
+        Request::Conversation(job) => OwnerEvent::Conversation(Box::new(match *job {
+            ConversationJob::Read { context, .. } => ConversationEvent::Read {
+                context,
+                result: Err(busy()),
+            },
+            ConversationJob::Mutation { submission, .. } => ConversationEvent::Mutation {
+                submission,
+                operation: None,
+                result: Err(busy()),
+                retained: false,
+            },
+        })),
+        Request::Master(job) => OwnerEvent::Master(Box::new(match *job {
+            MasterJob::Catalog { context } => MasterEvent::Catalog {
+                context,
+                result: Err(busy()),
+            },
+            MasterJob::Read { context, .. } => MasterEvent::Read {
+                context,
+                result: Err(busy()),
+            },
+            MasterJob::Mutation { submission, .. } => MasterEvent::Mutation {
+                submission,
+                operation: None,
+                result: Err(busy()),
+                retained: false,
+            },
+        })),
+        Request::Settings(job) => OwnerEvent::Settings(Box::new(
+            super::client::settings::SettingsEvent::failed(&job, OWNER_BUSY),
+        )),
+        Request::Intake(job) => OwnerEvent::Intake(Box::new(
+            super::client::intake::IntakeEvent::failed(&job, OWNER_BUSY),
+        )),
+        Request::Changes(query) => OwnerEvent::Changes(Box::new(
+            super::client::changes::ChangesEvent::failed(*query, OWNER_BUSY),
+        )),
+        Request::Process(query) => OwnerEvent::Process(Box::new(
+            super::client::process::ProcessEvent::failed(*query, OWNER_BUSY),
+        )),
+        Request::Cleanup(query) => OwnerEvent::Cleanup(Box::new(
+            super::client::cleanup::CleanupEvent::failed(*query, OWNER_BUSY),
+        )),
+        Request::Recovery(query) => {
+            OwnerEvent::Recovery(Box::new(super::client::recovery::RecoveryEvent {
+                query: *query,
+                result: Err(busy()),
+            }))
+        }
+        Request::Questions(query) => {
+            OwnerEvent::Questions(Box::new(super::client::questions::QuestionsEvent {
+                query: *query,
+                result: Err(busy()),
+            }))
+        }
+        Request::Reveal(query) => OwnerEvent::Reveal(Box::new(super::client::ide::RevealEvent {
+            query: *query,
+            result: Err(busy()),
+        })),
+    };
+    Some(owner_arrival(event))
+}
+
 /// Sends one queued request on the idle, connected engine connection, or to
 /// the agent terminal on its own connection.
 /// Inputs: the request, the shell, the connection and the terminals.

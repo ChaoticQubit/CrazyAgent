@@ -136,6 +136,22 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 SetupAction::PlanRoadmap { project_id } => {
                     controller.plan_roadmap(project_id, generation).await
                 }
+                SetupAction::Update {
+                    project_id,
+                    expected_revision,
+                    name,
+                    setup,
+                } => {
+                    controller
+                        .update_project_setup(
+                            project_id,
+                            expected_revision,
+                            name,
+                            setup,
+                            generation,
+                        )
+                        .await
+                }
                 other => panic!("the project screen never sends {other:?}"),
             }
             .map_err(problem)?,
@@ -768,6 +784,129 @@ fn report_paths_map_back_to_their_research() {
 }
 
 #[test]
+fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
+    let families = [
+        "agent_access_",
+        "agent_policy_",
+        "agent_network_",
+        "agent_toolchain_",
+        "agent_project_",
+    ];
+    let mut missing = Vec::new();
+    for source in [
+        include_str!("../../sandbox/policy.rs"),
+        include_str!("../../project_setup.rs"),
+        include_str!("../../storage.rs"),
+    ] {
+        for code in source.split('"').filter(|text| {
+            families.iter().any(|family| text.starts_with(family))
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        }) {
+            if plain_problem(code).contains("(code: ") && !missing.contains(&code) {
+                missing.push(code);
+            }
+        }
+    }
+    assert_eq!(
+        missing,
+        Vec::<&str>::new(),
+        "every access, policy, network, toolchain and project refusal has a sentence"
+    );
+    for (code, sentence) in [
+        (
+            "agent_access_lowered",
+            "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
+        ),
+        (
+            "agent_network_narrowed",
+            "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
+        ),
+        (
+            "agent_toolchain_lowered",
+            "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
+        ),
+        (
+            "agent_project_unreadable",
+            "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
+        ),
+    ] {
+        assert_eq!(
+            plain_problem(code),
+            sentence,
+            "{code} reads as on the desktop"
+        );
+    }
+}
+
+/// TN-L1: every cause a process stops for under a narrowed policy reads its own sentence,
+/// word for word the same in the TUI and in the desktop's copy table. The walk follows one
+/// match with no catch-all arm, whose arm for each Narrowing names its code and the next
+/// Narrowing, so a new one fails to compile here until it has an arm, and that arm puts it
+/// on the walk, where its sentence is checked, whatever its code's family and wherever that
+/// code is defined (TN-L1 r1).
+#[test]
+fn every_narrowing_stop_reads_the_same_sentence_in_both_uis() {
+    use crate::sandbox::policy::Narrowing;
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/desktop/src/api.ts"
+    ))
+    .unwrap();
+    let start = source
+        .find("const COPY: Record<string, string> = {")
+        .unwrap();
+    let body = &source[start..];
+    let body = &body[..body.find("\n};").unwrap()];
+    let desktop: std::collections::BTreeMap<&str, &str> = body
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (code, sentence) = line.trim().split_once(": ")?;
+            Some((
+                code,
+                sentence
+                    .strip_suffix(',')?
+                    .strip_prefix('"')?
+                    .strip_suffix('"')?,
+            ))
+        })
+        .collect();
+    let mut walked = Vec::new();
+    let mut next = Some(Narrowing::Access);
+    while let Some(narrowing) = next {
+        assert!(
+            !walked.contains(&narrowing),
+            "the walk reaches {narrowing:?} once"
+        );
+        walked.push(narrowing);
+        let (code, after) = match narrowing {
+            Narrowing::Access => ("agent_access_lowered", Some(Narrowing::Network)),
+            Narrowing::Network => ("agent_network_narrowed", Some(Narrowing::TurnedOff)),
+            Narrowing::TurnedOff => ("agent_toolchain_lowered", Some(Narrowing::NotAllowed)),
+            Narrowing::NotAllowed => ("agent_toolchain_lowered", Some(Narrowing::PolicyUnreadable)),
+            Narrowing::PolicyUnreadable => {
+                ("agent_policy_unreadable", Some(Narrowing::FolderUnreadable))
+            }
+            Narrowing::FolderUnreadable => ("agent_project_unreadable", None),
+        };
+        next = after;
+        assert_eq!(narrowing.code(), code, "{narrowing:?} reports its code");
+        let sentence = plain_problem(code);
+        assert!(
+            !sentence.contains("(code: "),
+            "{code} has its own sentence in the TUI: {sentence}"
+        );
+        assert_eq!(
+            desktop.get(code).copied(),
+            Some(sentence.as_str()),
+            "{code} reads the same on the desktop"
+        );
+    }
+}
+
+#[test]
 fn a_memory_stands_for_itself_by_its_first_line_of_prose() {
     use super::project_view::memory_quote;
     assert_eq!(
@@ -1272,6 +1411,7 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
         edges: Vec::new(),
         messages: Vec::new(),
         overlaps: Vec::new(),
+        relations: Vec::new(),
     }));
     screen.open(Tab::Conversation);
     let look = Look::plain();
@@ -1695,7 +1835,7 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     );
     let general = screen.general.as_ref().unwrap();
     assert_eq!(general.name.value(), "Notes Pro", "the typed draft is kept");
-    assert_eq!(general.stack.value(), "rust, sqlite, tauri");
+    assert_eq!(general.stack.value(), "rust, sqlite, tauri, ,");
     assert_eq!(general.revision, 5, "the form takes the saved revision");
     assert!(!general.stale);
     assert_eq!(
@@ -2558,6 +2698,52 @@ fn a_stale_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
     );
 }
 
+/// Once the research jobs and a context with no roadmap document are read, `p` on the
+/// Settings tab plans a roadmap at once and `k` opens the hidden folders box, so neither
+/// action takes the other's key.
+#[test]
+fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
+    let look = Look::plain();
+    let project = ProjectId::new("hidden").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.jobs = Some(Vec::new());
+    screen.hidden_paths = Some(vec!["/Users/owner/secret".into()]);
+    screen.context = Some(crate::project_setup::ProjectContext {
+        project_id: project.clone(),
+        folder: "/Users/owner/hidden".into(),
+        items: vec![],
+    });
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Roadmap   Not planned   p Plan roadmap now"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Hidden    /Users/owner/secret   k Edit hidden folders"),
+        "{shown}"
+    );
+
+    let ProjectReply::Change(action) = screen.key(key(KeyCode::Char('p'))) else {
+        panic!("p asks the engine to plan");
+    };
+    assert_eq!(
+        *action,
+        SetupAction::PlanRoadmap {
+            project_id: project.clone(),
+        }
+    );
+    assert!(
+        screen.hidden.is_none(),
+        "p never opens the hidden folders box"
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.hidden.as_ref().unwrap().input.value(),
+        "/Users/owner/secret"
+    );
+}
+
 #[test]
 fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     let look = Look::plain();
@@ -2568,7 +2754,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
         paths: vec![],
         version: 0,
     });
-    assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
     assert!(screen.hidden.is_none());
     assert_eq!(
         screen.problem.as_deref(),
@@ -2576,7 +2762,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
-        shown.contains("Hidden    Loading...   p Edit hidden folders"),
+        shown.contains("Hidden    Loading...   k Edit hidden folders"),
         "{shown}"
     );
 
@@ -2602,11 +2788,11 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
-        shown.contains("Hidden    /Users/owner/secret   p Edit hidden folders"),
+        shown.contains("Hidden    /Users/owner/secret   k Edit hidden folders"),
         "{shown}"
     );
 
-    assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
     assert_eq!(
         screen.hidden.as_ref().unwrap().input.value(),
         "/Users/owner/secret"
@@ -2675,7 +2861,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     assert_eq!(screen.hidden_paths, None);
 
     screen.hidden_paths = Some(vec![]);
-    screen.key(key(KeyCode::Char('p')));
+    screen.key(key(KeyCode::Char('k')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
     assert_eq!(
@@ -2748,6 +2934,7 @@ fn console_screen() -> ProjectScreen {
         edges: vec![],
         messages: Vec::new(),
         overlaps: Vec::new(),
+        relations: Vec::new(),
     }));
     screen.context = Some(ProjectContext {
         project_id: project,

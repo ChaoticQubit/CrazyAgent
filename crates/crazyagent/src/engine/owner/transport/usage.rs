@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::{CredentialRef, ProjectId, encode_frame};
+use crate::usage::metrics::Metrics;
 use crate::usage::report::UsageReport;
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,11 @@ enum Action {
         since_ms: Option<i64>,
         offset_minutes: i32,
     },
+    Metrics {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<ProjectId>,
+        since_ms: i64,
+    },
     Refresh,
     SetReset {
         account: CredentialRef,
@@ -55,6 +61,7 @@ struct Envelope {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
     Report { report: Box<UsageReport> },
+    Metrics { metrics: Box<Metrics> },
     Done,
     Rejected { code: String },
 }
@@ -81,6 +88,23 @@ impl OwnerClient {
         };
         match self.usage_exchange(action).await? {
             Reply::Report { report } => Ok(*report),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the Metrics page's task counts, tokens chart and run, account and harness rows
+    /// for one project, None for every project, over the range starting at `since_ms`.
+    /// Inputs: the project and the range start. Output: the metrics.
+    pub async fn usage_metrics(
+        &self,
+        project: Option<ProjectId>,
+        since_ms: i64,
+    ) -> Result<Metrics, EngineError> {
+        match self
+            .usage_exchange(Action::Metrics { project, since_ms })
+            .await?
+        {
+            Reply::Metrics { metrics } => Ok(*metrics),
             _ => Err(unknown()),
         }
     }
@@ -156,10 +180,11 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
-/// A usage request read and checked once: a report already built, or a change still to
-/// make under the owner barrier, with the engine folder whose store it changes.
+/// A usage request read and checked once: a report or metrics already built, or a change
+/// still to make under the owner barrier, with the engine folder whose store it changes.
 enum Prepared {
     Report(Box<UsageReport>),
+    Metrics(Box<Metrics>),
     Change(PathBuf, Change),
 }
 
@@ -198,7 +223,8 @@ pub(super) async fn serve(
     write_reply(stream, &frame).await
 }
 
-/// Reads and checks a usage request, and builds a report outside the owner barrier.
+/// Reads and checks a usage request, and builds a report or metrics outside the owner
+/// barrier.
 /// Inputs: the engine, authority, packet, admission and request body.
 /// Output: the prepared request, or the refusal.
 async fn prepare(
@@ -225,16 +251,28 @@ async fn prepare(
             project,
             since_ms,
             offset_minutes,
-        } => Prepared::Report(Box::new(
+        } => {
+            let held = held_accounts(engine, admission).await?;
+            Prepared::Report(Box::new(
+                tokio::task::spawn_blocking(move || {
+                    let db = usage::open(&root)?;
+                    usage::report::report(
+                        &db,
+                        project.as_ref(),
+                        since_ms,
+                        offset_minutes,
+                        crate::team::now_ms(),
+                        &held,
+                    )
+                })
+                .await
+                .map_err(|_| failure("usage_unavailable"))??,
+            ))
+        }
+        Action::Metrics { project, since_ms } => Prepared::Metrics(Box::new(
             tokio::task::spawn_blocking(move || {
                 let db = usage::open(&root)?;
-                usage::report::report(
-                    &db,
-                    project.as_ref(),
-                    since_ms,
-                    offset_minutes,
-                    crate::team::now_ms(),
-                )
+                usage::metrics::read(&db, project.as_ref(), since_ms, crate::team::now_ms())
             })
             .await
             .map_err(|_| failure("usage_unavailable"))??,
@@ -246,6 +284,28 @@ async fn prepare(
             at_ms,
         } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
     })
+}
+
+/// The accounts the live config holds, which storage alone knows, so the report shows
+/// limits only for accounts that exist now. Inputs: the engine and the owner admission.
+/// Output: the account ids, or storage's refusal.
+async fn held_accounts(
+    engine: &Engine,
+    admission: &Admission,
+) -> Result<Vec<CredentialRef>, EngineError> {
+    match engine
+        .native_auth_job(|reply| {
+            Job::Accounts(
+                admission.clone(),
+                crate::storage::accounts::Command::Held,
+                reply,
+            )
+        })
+        .await?
+    {
+        crate::storage::accounts::ResultValue::Held(held) => Ok(held),
+        _ => Err(unknown()),
+    }
 }
 
 /// Answers a prepared request under the owner barrier its caller holds: checks the grant
@@ -263,6 +323,7 @@ async fn finish(
     }
     let (root, change) = match prepared {
         Prepared::Report(report) => return Ok(Reply::Report { report }),
+        Prepared::Metrics(metrics) => return Ok(Reply::Metrics { metrics }),
         Prepared::Change(root, change) => (root, change),
     };
     tokio::task::spawn_blocking(move || {

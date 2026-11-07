@@ -1,12 +1,13 @@
 import { harnessCatalog, nextGeneration, type Result } from "../../api";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { cancelTeamTask, failureCopy, loadContext, loadPools, loadResearch, loadSetup, receiptState, revealProjectFolder } from "../../api-projects";
 import { SessionContext, useLoad, type Loaded } from "../../state";
-import { ConfirmDialog, Menu, PageHeader, Tabs, formatRoute, shortcutKey, type IconName } from "../../ui";
+import { ConfirmDialog, Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { HEARTBEAT_MS, closeIde, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
+import { MetricsView } from "../metrics/view";
 import { WaitingChanges } from "../changes/waiting";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
@@ -14,6 +15,7 @@ import { IdeExtensionConfirm } from "./ide-extensions";
 import { IDE_POLL_MS, IdeTab, IdeUnavailable } from "./ide";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
+import { ProjectHead, useProjectHead } from "./head";
 import { IdeConfirm } from "./ide-confirm";
 import { OverviewTab } from "./overview";
 import { ImportMoveBanner, InstructionImportPrompt, ProcessEditor } from "../process";
@@ -35,6 +37,7 @@ export const TABS = [
   { id: "questions", label: "Questions", icon: "inbox" },
   { id: "context", label: "Context", icon: "folder-open" },
   { id: "process", label: "Process", icon: "list-checks" },
+  { id: "metrics", label: "Metrics", icon: "trending-up" },
   { id: "settings", label: "Settings", icon: "settings" },
 ] as const satisfies readonly { id: string; label: string; icon: IconName }[];
 
@@ -242,14 +245,15 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
     return () => window.removeEventListener("keydown", onKey);
   }, [projectId, tabs.map((item) => item.id).join(" ")]);
 
-  return <div className="pj pj-project">
-    <PageHeader title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
-      description={setup?.about ? <span className="pj-truncate" title={setup.about}>{displayText(setup.about.split("\n")[0])}</span> : undefined}
-      actions={<ProjectMenu data={data} replaced={replacedTabs(view)} />} />
+  const root = useRef<HTMLDivElement>(null);
+  const scrolled = useProjectHead(root, projectId);
+
+  return <div className="pj pj-project" ref={root}>
+    <ProjectHead title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
+      about={setup?.about ?? ""} actions={<ProjectMenu data={data} replaced={replacedTabs(view)} />} current={active} scrolled={scrolled}
+      tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <RecoveryBanner key={projectId} project={projectId} />
     <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />
-    <Tabs label="Project" current={active}
-      tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     {active !== "changes" && <WaitingChanges projectId={projectId} />}
     <ImportMoveBanner projectId={projectId} version={importMoves} />
     <InstructionImportPrompt projectId={projectId} name={data.name ? displayText(data.name) : projectId} onMoved={() => setImportMoves((count) => count + 1)} />
@@ -261,6 +265,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "questions" && <QuestionsTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
+      {active === "metrics" && <MetricsView key={data.id} projectId={data.id} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
       {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={(value) => setIde({ kind: "ok", value })} />}
     </div>

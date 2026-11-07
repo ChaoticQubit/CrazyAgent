@@ -13,8 +13,8 @@ export interface SidebarProject {
   flag?: string;
 }
 
-/** The fixed 220 px sidebar: brand, Home, the project list with New project, Settings, and a
- * footer with the profile name and the engine state. Inputs: current route, projects,
+/** The fixed 220 px sidebar: brand, Home, the project list with New project, Settings, the
+ * app-wide Metrics page at the bottom, and a footer with the profile name and the engine state. Inputs: current route, projects,
  * profile name, engine state and a retry action. */
 export function Sidebar({ route, projects, profileName, engine, onRetry }: {
   route: Route;
@@ -42,6 +42,11 @@ export function Sidebar({ route, projects, profileName, engine, onRetry }: {
       </div>
       <a className="nav-item" href={formatRoute({ name: "settings", tab: "accounts" })} aria-current={current(route.name === "settings" && route.tab !== "profile")}>
         <Icon name="settings" /><span className="name">Settings</span>
+      </a>
+    </nav>
+    <nav className="nav app-nav" aria-label="App">
+      <a className="nav-item" href={formatRoute({ name: "metrics" })} aria-current={current(route.name === "metrics")}>
+        <Icon name="trending-up" /><span className="name">Metrics</span>
       </a>
     </nav>
     <div className="sidebar-foot">

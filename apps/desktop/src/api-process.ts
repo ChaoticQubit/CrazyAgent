@@ -31,6 +31,7 @@ const REFUSALS: Record<string, string> = {
   process_import_missing: "That file no longer exists. Pick another one.",
   process_import_unsafe: "That file isn't a plain file you own, so CrazyAgent won't read it.",
   process_import_unreadable: "That file couldn't be read. Check it, then try again.",
+  process_instructions_would_be_empty: "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first.",
   process_import_outside: "That file links outside the project folder, so it stays where it is.",
   process_import_unmovable: "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.",
   process_request_invalid: "CrazyAgent couldn't read that path. Pick the file again.",
@@ -44,6 +45,7 @@ const REFUSALS: Record<string, string> = {
   process_folder_missing: "CrazyAgent's data folder is missing. Restart the engine, then try again.",
   process_folder_unsafe: "CrazyAgent's data folder isn't a plain folder, so nothing was saved.",
   process_unavailable: "Instructions aren't ready in this engine yet.",
+  process_save_unavailable: "The engine couldn't save right now, so nothing was saved. Save again.",
   process_outcome_unknown: "CrazyAgent couldn't confirm what happened. Reload before you try again.",
   process_agent_unknown: "This agent isn't part of this project's team.",
   process_agent_unsupported: "CrazyAgent doesn't write instructions for this agent's harness.",
@@ -53,6 +55,7 @@ const REFUSALS: Record<string, string> = {
   agent_instructions_unreadable: "This agent's instructions file couldn't be read. Try again.",
   instruction_settings_invalid: "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.",
   instruction_settings_unavailable: "This project's agent settings couldn't be read. Try again.",
+  instruction_settings_save_unavailable: "The engine couldn't save right now, so nothing was saved. Change it again.",
   process_adoption_unavailable: "Workflow adoption couldn't be read. Try again.",
 };
 
@@ -176,6 +179,13 @@ export function defaultProcess(): Promise<Result<string>> {
   return call<string>("desktop_default_process");
 }
 
+/** Reads the instructions a project's agents get, composed by the engine as launches compose
+ * them for the project's mode. Input: the project id. Output: the text, empty when agents get
+ * none. */
+export function loadGivenText(projectId: string): Promise<Result<string>> {
+  return call<string>("desktop_process_given", { projectId });
+}
+
 /** A skill the tags can name: its engine id, its name and its one-line description. */
 export interface SkillEntry {
   id: string;
@@ -289,6 +299,21 @@ export function saveInstructionSettings(projectId: string, settings: Instruction
 /** What the agent settings say after a save refused because they changed since the page
  * read them, once it shows the saved ones again. */
 export const AGENT_SETTINGS_STALE = "These agent settings changed since you opened them. The page now shows the saved ones; make your change again.";
+
+/** What the agent settings say after a save the engine could not confirm, once the page
+ * shows the saved ones again. */
+export const AGENT_SETTINGS_UNCONFIRMED = "CrazyAgent couldn't confirm these agent settings were saved. The page now shows the saved ones; check them before you change them again.";
+
+/** What the agent settings page does after a save: reads the settings and their version again
+ * after one that landed, one refused as stale or one the engine could not confirm, which may
+ * have landed, and says what happened. Input: the save's result. Output: whether to read the
+ * settings again, and the failure to show, empty for none. */
+export function afterSettingsSave(result: Result<InstructionView>): { reload: boolean; failure: string } {
+  if (result.kind === "ok") return { reload: true, failure: "" };
+  if (result.kind === "error" && result.code === "stale_revision") return { reload: true, failure: AGENT_SETTINGS_STALE };
+  if (result.kind === "error" && result.code === "process_outcome_unknown") return { reload: true, failure: AGENT_SETTINGS_UNCONFIRMED };
+  return { reload: false, failure: processMessage(result) };
+}
 
 /** The version an agent settings save names: the one read, or null when the stored settings
  * could not be read and the save replaces them. Input: the read. Output: the version. */

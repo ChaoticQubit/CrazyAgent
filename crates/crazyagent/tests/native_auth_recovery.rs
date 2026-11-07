@@ -205,6 +205,23 @@ done
         .unwrap()
     }
 
+    /// Reads the stored phase of one sign-in attempt, read only, or none once its row is gone.
+    /// Input: the attempt id. Output: the phase column.
+    fn attempt_phase(&self, operation: &RequestId) -> Option<String> {
+        let db = rusqlite::Connection::open_with_flags(
+            self.root().join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        db.busy_timeout(Duration::from_secs(2)).unwrap();
+        db.query_row(
+            "SELECT phase FROM native_auth_operations WHERE id=?1",
+            [operation.as_str()],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
     async fn no_fence(&self) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.fences() != 0 {
@@ -463,6 +480,55 @@ async fn cancelling_a_waiting_claude_sign_in_settles_cancelled_and_frees_the_acc
         case.log()
     );
     waiting(&client, &scope).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_an_account_while_its_sign_in_runs_leaves_other_accounts_free_to_sign_in() {
+    let case = Case::new();
+    let (client, database) = owner(case.root()).await;
+    let removed = subscription(&client, Provider::Claude, "Work Claude").await;
+    let other = subscription(&client, Provider::Claude, "Home Claude").await;
+    let (scope, _) = scope(&client, &database, &removed).await;
+    let begun = waiting(&client, &scope).await;
+    let login = case.logins();
+    assert_eq!(login.len(), 1);
+    client.remove_account(removed).await.unwrap();
+    rustix::process::kill_process(login[0], Signal::KILL).unwrap();
+    gone(login[0]).await;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut phase = case.attempt_phase(&begun.operation_id);
+    while matches!(
+        phase.as_deref(),
+        Some("starting" | "awaiting_owner" | "checking_account" | "cancelling")
+    ) {
+        assert!(
+            Instant::now() < deadline,
+            "the removed account's sign-in stayed {phase:?}: {}",
+            case.log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        phase = case.attempt_phase(&begun.operation_id);
+    }
+    assert_ne!(
+        phase.as_deref(),
+        Some("uncertain"),
+        "the removed account's sign-in ended uncertain, which no account can clear: {}",
+        case.log()
+    );
+    case.no_fence().await;
+    let (elsewhere, _) = self::scope(&client, &database, &other).await;
+    let started = start(&client, &elsewhere, NativeAuthMethod::ClaudeOfficial).await;
+    assert_eq!(
+        started.as_ref().err().map(String::as_str),
+        None,
+        "a sign-in on another account starts once the removed account's sign-in ended: {}",
+        case.log()
+    );
+    let proceeds = settle(&client, &elsewhere, &started.unwrap(), shown).await;
+    assert_eq!(proceeds.phase, NativeAuthPhase::AwaitingOwner);
+    cancel(&client, &elsewhere, &proceeds).await;
+    settle(&client, &elsewhere, &proceeds, ended).await;
+    case.no_fence().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -11,6 +11,7 @@ import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
 import { CloneFromGitHub } from "./screens/intake/clone";
 import { OnboardingReview } from "./screens/intake/onboarding";
+import { AppMetrics } from "./screens/metrics";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
@@ -133,6 +134,7 @@ export function Screen({ route, session, alerts }: { route: Route; session: Sess
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
+    case "metrics": return <AppMetrics projects={projects ?? []} />;
     case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
     default: return <Home alerts={alerts} />;
   }

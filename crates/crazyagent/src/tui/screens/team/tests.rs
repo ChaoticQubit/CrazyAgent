@@ -1,5 +1,6 @@
 use crate::engine::owner::AgentInstructions;
 use crate::protocol::{CredentialRef, ProjectId};
+use crate::team::graph::{LiveAction, Relation, RelationEdge};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
 use crate::terminal::{AgentId, TerminalFrame};
 use crate::tui::client::OwnerEvent;
@@ -134,6 +135,7 @@ fn graph() -> Box<TeamGraph> {
         ],
         messages: Vec::new(),
         overlaps: Vec::new(),
+        relations: Vec::new(),
     })
 }
 
@@ -254,6 +256,146 @@ fn the_tree_draws_who_leads_whom_and_the_tasks_from_a_team_graph() {
     let drawn: Vec<String> = rows[2..22].iter().map(|row| chars(row, 2, 32)).collect();
     assert_eq!(drawn, expected);
     assert!(rows[0].contains("Tidepool  /  Team"), "{}", rows[0]);
+}
+
+fn relation(from: &str, to: &str, relation: Relation, live: Option<LiveAction>) -> RelationEdge {
+    RelationEdge {
+        from: from.into(),
+        to: to.into(),
+        relation,
+        live,
+    }
+}
+
+#[test]
+fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
+    let mut team = graph();
+    team.relations = vec![
+        relation(
+            "master",
+            "agent-2",
+            Relation::Leads,
+            Some(LiveAction::HandingOff {
+                task: "Fix the login bug\nThe token expires early.".into(),
+            }),
+        ),
+        relation("agent-2", "agent-3", Relation::TeammateOf, None),
+        relation("master", "agent-5", Relation::DelegatedTo, None),
+    ];
+    let mut shell = fresh(80, 24);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    let rows = render(&mut shell);
+    let mut expected = Vec::new();
+    for line in [
+        "> ▸ Master  Working",
+        "  │  ChatGPT Pro - main",
+        "  ├─ ▸ claude-1  • handing …",
+        "  │  │  Claude Max - work",
+        "  │  └─ ◌ claude-2  Waiting…",
+        "  └─ ▸ codex-1  Starting  d…",
+        "     ChatGPT Plus",
+        "",
+        "  Tasks",
+        "  ▸ claude-1  Fix the login…",
+        "  ✓ codex-1  Write tests",
+        "",
+        "",
+        "",
+    ] {
+        expected.push(format!("│{line:<28}│"));
+    }
+    let drawn: Vec<String> = rows[3..17].iter().map(|row| chars(row, 2, 32)).collect();
+    assert_eq!(
+        drawn, expected,
+        "each agent's line names its relation on that same line, so 80x24 shows as many agents as with no labels: the live action right after the name, cut to the width left, and the standing word after the status word"
+    );
+    let mut bare = graph();
+    bare.relations.clear();
+    let mut plain_shell = fresh(80, 24);
+    plain_shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(bare),
+    });
+    let drawn_lines = |rows: &[String]| {
+        rows[3..22]
+            .iter()
+            .filter(|row| !chars(row, 3, 31).trim().is_empty())
+            .count()
+    };
+    assert_eq!(
+        drawn_lines(&rows),
+        drawn_lines(&render(&mut plain_shell)),
+        "the labels take no row of their own"
+    );
+    let label = |relation, live| {
+        super::edge_label(&RelationEdge {
+            from: "a".into(),
+            to: "b".into(),
+            relation,
+            live,
+        })
+    };
+    assert_eq!(label(Relation::Leads, None), "leads");
+    assert_eq!(label(Relation::DelegatedTo, None), "delegated to");
+    assert_eq!(label(Relation::TeammateOf, None), "teammate of");
+    assert_eq!(
+        label(
+            Relation::DelegatedTo,
+            Some(LiveAction::HandingOff {
+                task: "\n  Fix\tthe   login bug\nThe token expires early.".into()
+            })
+        ),
+        "handing off: Fix the login bug"
+    );
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::HandingOff {
+                task: " \n\t ".into()
+            })
+        ),
+        "handing off: Untitled task"
+    );
+    assert_eq!(
+        label(Relation::Leads, Some(LiveAction::Messaging)),
+        "messaging"
+    );
+    assert_eq!(
+        label(
+            Relation::DelegatedTo,
+            Some(LiveAction::WaitingOn { owner: false })
+        ),
+        "waiting on"
+    );
+    assert_eq!(
+        label(
+            Relation::DelegatedTo,
+            Some(LiveAction::WaitingOn { owner: true })
+        ),
+        "waiting on: your answer"
+    );
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::Reviewing {
+                agent: "Wren (@checkout)".into()
+            })
+        ),
+        "reviewing: Wren (@checkout)'s change set"
+    );
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::Reviewing {
+                agent: "Wren\u{1b}[31m\nnow".into()
+            })
+        ),
+        "reviewing: Wren[31m now's change set",
+        "a reviewed name keeps no control character"
+    );
 }
 
 #[test]
@@ -1259,33 +1401,41 @@ fn a_finished_agents_change_from_an_older_read_is_refused_and_the_box_reads_the_
     );
 }
 
-/// The live master switch names the team settings version the master view read; a switch the
-/// engine refuses as stale drops the owner's change and reads the switch again, and any other
-/// refusal of a start keeps the master shown as refused, never as on.
+/// The live master switch the master view sends on its read names the team settings version
+/// it read; a switch the engine refuses as stale drops that change, reads the switch again and
+/// starts the live master once more from the newer read while that read still shows it off;
+/// any other refusal of a start keeps the master shown as refused, never as on, and the next
+/// read does not start it again.
 #[test]
 fn a_live_master_switch_from_an_older_read_reads_the_switch_again() {
     use crate::project_setup::{SetupQuery, SetupView};
     let mut view = master_view(80, 24);
     requests(&mut view);
-    let mut status = finished_team();
-    status.live_master = Some(false);
-    status.settings_version = 5;
-    view.arrive(setup_reply(
-        SetupQuery::Team { project: project() },
-        Ok(SetupView::Team(Box::new(status))),
-    ));
-    requests(&mut view);
-    view.key(Key::Char('s'));
-    let sent = requests(&mut view);
-    let Some(Request::Setup(SetupQuery::TeamChange { action, generation })) = sent
-        .iter()
-        .find(|request| live_master_change(request, true))
-    else {
-        panic!("{sent:?}");
+    let read = |view: &mut Shell, version: u64| {
+        let mut status = finished_team();
+        status.live_master = Some(false);
+        status.settings_version = version;
+        view.arrive(setup_reply(
+            SetupQuery::Team { project: project() },
+            Ok(SetupView::Team(Box::new(status))),
+        ));
     };
+    let started = |view: &mut Shell| {
+        requests(view)
+            .into_iter()
+            .find_map(|request| match request {
+                Request::Setup(SetupQuery::TeamChange {
+                    action: action @ crate::team::TeamAction::LiveMaster { on: true, .. },
+                    generation,
+                }) => Some((action, generation)),
+                _ => None,
+            })
+    };
+    read(&mut view, 5);
+    let (action, generation) = started(&mut view).expect("the read starts the live master");
     assert_eq!(
         action,
-        &crate::team::TeamAction::LiveMaster {
+        crate::team::TeamAction::LiveMaster {
             project_id: project(),
             on: true,
             version: 5,
@@ -1295,7 +1445,7 @@ fn a_live_master_switch_from_an_older_read_reads_the_switch_again() {
     view.arrive(setup_reply(
         SetupQuery::TeamChange {
             action: action.clone(),
-            generation: *generation,
+            generation,
         },
         Ok(SetupView::Changed(
             crate::engine::owner::OwnerResult::Rejected {
@@ -1313,28 +1463,9 @@ fn a_live_master_switch_from_an_older_read_reads_the_switch_again() {
         "a stale switch is not resent from the old read: {sent:?}"
     );
 
-    let mut newer = finished_team();
-    newer.live_master = Some(false);
-    newer.settings_version = 6;
-    view.arrive(setup_reply(
-        SetupQuery::Team { project: project() },
-        Ok(SetupView::Team(Box::new(newer))),
-    ));
-    requests(&mut view);
-    let start = |view: &mut Shell| {
-        view.key(Key::Char('s'));
-        requests(view)
-            .into_iter()
-            .find_map(|request| match request {
-                Request::Setup(SetupQuery::TeamChange {
-                    action: action @ crate::team::TeamAction::LiveMaster { on: true, .. },
-                    generation,
-                }) => Some((action, generation)),
-                _ => None,
-            })
-            .expect("s starts the live master")
-    };
-    let (action, generation) = start(&mut view);
+    read(&mut view, 6);
+    let (action, generation) =
+        started(&mut view).expect("the newer read starts the live master once more");
     assert_eq!(
         action,
         crate::team::TeamAction::LiveMaster {
@@ -1358,15 +1489,147 @@ fn a_live_master_switch_from_an_older_read_reads_the_switch_again() {
         "an engine refusal is not shown as on: {}",
         rows[2]
     );
-    let (action, _) = start(&mut view);
-    assert_eq!(
-        action,
-        crate::team::TeamAction::LiveMaster {
-            project_id: project(),
-            on: true,
-            version: 6,
+    read(&mut view, 6);
+    assert!(
+        started(&mut view).is_none(),
+        "a refused start is not sent again by the next read"
+    );
+}
+
+/// Keys the owner types while the master view starts the live master wait through a stale
+/// refusal of that start: the view reads the switch again, starts the master from the newer
+/// read and types the keys in once its terminal attaches, and never says they were lost.
+#[test]
+fn keys_typed_before_a_stale_live_master_start_reach_the_terminal_after_the_retry() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(false), None));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| live_master_change(request, true)),
+        "the read starts the live master: {sent:?}"
+    );
+    for character in "hello".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.arrive(turned(true, Err(crate::storage::versioned::STALE_CODE)));
+    let text = render(&mut shell).join("\n");
+    assert!(
+        !text.contains("What you typed for the master was not sent."),
+        "the keys wait for the retry: {text}"
+    );
+    let sent = requests(&mut shell);
+    assert!(sent.iter().any(switch_read), "{sent:?}");
+    assert!(
+        sent.iter().all(|request| input(request).is_none()),
+        "{sent:?}"
+    );
+
+    shell.arrive(switch(Some(false), None));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| live_master_change(request, true)),
+        "the newer read starts the live master once more: {sent:?}"
+    );
+    shell.arrive(turned(true, Ok(())));
+    requests(&mut shell);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(&sent[0], Request::TerminalAttach { agent } if agent.as_str() == "team-1"),
+        "{sent:?}"
+    );
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 74,
+            rows: 17,
         },
-        "a refused switch does not move the version"
+    });
+    let sent = requests(&mut shell);
+    let typed: Vec<_> = sent.iter().filter_map(input).collect();
+    assert_eq!(typed, vec![("team-1", &b"hello"[..])], "{sent:?}");
+}
+
+/// A retry whose switch read fails starts nothing more, so the keys the owner typed for the
+/// master are dropped at once and the owner is told to type them again.
+#[test]
+fn a_retry_whose_switch_read_fails_drops_the_keys_typed_for_the_master_and_says_so() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(false), None));
+    requests(&mut shell);
+    for character in "hello".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.arrive(turned(true, Err(crate::storage::versioned::STALE_CODE)));
+    requests(&mut shell);
+    shell.arrive(failed_read("team_status_unavailable"));
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("What you typed for the master was not sent."),
+        "{text}"
+    );
+    let sent = requests(&mut shell);
+    assert!(
+        !sent.iter().any(|request| live_master_change(request, true)),
+        "a failed read starts nothing: {sent:?}"
+    );
+}
+
+/// A master view retries its live master start once per open: after a second stale refusal
+/// the next read that still shows the master off starts nothing more, so two windows that
+/// keep changing the team settings never make it loop.
+#[test]
+fn a_second_stale_live_master_switch_in_one_open_is_not_retried() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    let mut view = master_view(80, 24);
+    requests(&mut view);
+    let read = |view: &mut Shell, version: u64| {
+        let mut status = finished_team();
+        status.live_master = Some(false);
+        status.settings_version = version;
+        view.arrive(setup_reply(
+            SetupQuery::Team { project: project() },
+            Ok(SetupView::Team(Box::new(status))),
+        ));
+    };
+    let started = |view: &mut Shell| {
+        requests(view)
+            .into_iter()
+            .find_map(|request| match request {
+                Request::Setup(SetupQuery::TeamChange {
+                    action: action @ crate::team::TeamAction::LiveMaster { on: true, .. },
+                    generation,
+                }) => Some((action, generation)),
+                _ => None,
+            })
+    };
+    let stale = |view: &mut Shell, action, generation| {
+        view.arrive(setup_reply(
+            SetupQuery::TeamChange { action, generation },
+            Ok(SetupView::Changed(
+                crate::engine::owner::OwnerResult::Rejected {
+                    code: crate::storage::versioned::STALE_CODE.to_owned(),
+                },
+            )),
+        ));
+    };
+    read(&mut view, 5);
+    let (action, generation) = started(&mut view).expect("the read starts the live master");
+    stale(&mut view, action, generation);
+    read(&mut view, 6);
+    let (action, generation) =
+        started(&mut view).expect("the newer read starts the live master once more");
+    stale(&mut view, action, generation);
+    read(&mut view, 7);
+    assert!(
+        started(&mut view).is_none(),
+        "a second stale switch in one open is not retried"
     );
 }
 
@@ -3963,7 +4226,7 @@ fn messages_asked(shell: &mut Shell) -> Vec<crate::project_setup::SetupQuery> {
 fn m_on_an_agent_card_opens_its_messages_in_the_right_box_and_esc_closes_it() {
     use crate::project_setup::{SetupQuery, SetupView};
     let mut team = graph();
-    team.nodes[2].id = "team-2".into();
+    team.nodes[1].id = "team-2".into();
     team.edges[0].to = "team-2".into();
     for (width, height) in [(120, 30), (80, 24)] {
         let mut shell = fresh(width, height);
@@ -4111,5 +4374,336 @@ fn an_agent_the_delivery_setting_leaves_without_messages_says_so_under_its_row()
         tree.iter()
             .all(|row| !row.contains("Can't receive") || tree[under + 2..].contains(row)),
         "only the noted agent says it: {tree:#?}"
+    );
+}
+
+fn fill_queue(shell: &mut Shell) {
+    let mut filled = 0;
+    while filled < 64
+        && shell
+            .ctx
+            .try_request(Request::TeamGraph { project: project() })
+    {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+}
+
+#[test]
+fn a_team_tab_settings_change_the_full_queue_refuses_says_busy_and_can_be_made_again() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::TeamAction;
+    let mut shell = fresh(100, 40);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('s'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(finished_team()))),
+    ));
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.key(Key::Char('w'));
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("CrazyAgent is busy"),
+        "the refused change is said, not dropped: {text}"
+    );
+    assert!(!text.contains("Still saving"), "{text}");
+    requests(&mut shell);
+    shell.key(Key::Char('w'));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| matches!(
+            request,
+            Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::KeepWarm { .. },
+                ..
+            })
+        )),
+        "the change goes out once the queue has room: {sent:?}"
+    );
+}
+
+#[test]
+fn a_team_tab_settings_read_the_full_queue_refuses_is_asked_again_on_the_next_key() {
+    use crate::project_setup::SetupQuery;
+    let mut shell = team();
+    fill_queue(&mut shell);
+    shell.key(Key::Char('s'));
+    requests(&mut shell);
+    shell.key(Key::Down);
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| matches!(
+            request,
+            Request::Setup(SetupQuery::Team { project: asked }) if *asked == project()
+        )),
+        "the dropped read is not counted as out: {sent:?}"
+    );
+}
+
+fn busy(shell: &Shell) -> bool {
+    shell
+        .ctx
+        .message()
+        .is_some_and(|said| said.rest.contains("CrazyAgent is busy"))
+}
+
+#[test]
+fn a_live_master_start_the_full_queue_refuses_says_busy_instead_of_waiting_forever() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.arrive(switch(Some(false), None));
+    let rows = render(&mut shell);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("The master terminal could not start.")),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("CrazyAgent is busy")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn an_open_session_check_the_full_queue_refuses_says_busy() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.arrive(switch(Some(true), None));
+    assert!(busy(&shell), "{:?}", shell.ctx.message());
+}
+
+#[test]
+fn a_start_all_the_full_queue_refuses_says_busy_and_s_asks_again() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(paused_read(Some(true)));
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.key(Key::Char('S'));
+    let lead = shell.ctx.message().unwrap().lead.clone();
+    assert!(
+        lead.contains("CrazyAgent is busy"),
+        "the refused Start all is said in words: {lead}"
+    );
+    requests(&mut shell);
+    shell.key(Key::Char('S'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [change] if resume_sent(change)),
+        "S asks again once the queue has room: {sent:?}"
+    );
+}
+
+/// Opens the Finished box of a team with two finished agents and picks Sub-agent 3, the one
+/// that can wake. Takes nothing. Returns the shell with an empty request queue.
+fn finished_box() -> Shell {
+    use crate::project_setup::{SetupQuery, SetupView};
+    let mut shell = fresh(120, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('f'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(finished_team()))),
+    ));
+    shell.key(Key::Down);
+    requests(&mut shell);
+    shell
+}
+
+#[test]
+fn a_wake_the_full_queue_refuses_says_busy_and_w_wakes_again() {
+    use crate::project_setup::SetupQuery;
+    use crate::team::TeamAction;
+    let mut shell = finished_box();
+    fill_queue(&mut shell);
+    shell.key(Key::Char('w'));
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Could not wake Sub-agent 3."), "{text}");
+    assert!(busy(&shell), "{:?}", shell.ctx.message());
+    requests(&mut shell);
+    shell.key(Key::Char('w'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::WakeAgent { agent: 3, .. },
+                ..
+            })]
+        ),
+        "w wakes again once the queue has room: {sent:?}"
+    );
+}
+
+#[test]
+fn a_finished_setting_switch_the_full_queue_refuses_says_busy_and_h_switches_again() {
+    use crate::project_setup::SetupQuery;
+    use crate::team::TeamAction;
+    let mut shell = finished_box();
+    fill_queue(&mut shell);
+    shell.key(Key::Char('h'));
+    let lead = shell.ctx.message().unwrap().lead.clone();
+    assert_eq!(lead, "Could not change where finished agents show.");
+    assert!(busy(&shell), "{:?}", shell.ctx.message());
+    requests(&mut shell);
+    shell.key(Key::Char('h'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::FinishedAgents { .. },
+                ..
+            })]
+        ),
+        "h switches again once the queue has room: {sent:?}"
+    );
+}
+
+#[test]
+fn an_answer_the_full_queue_refuses_is_kept_said_busy_and_sent_again_with_enter() {
+    use crate::coord::{QuestionFor, Severity};
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::TeamAction;
+    use crate::team::questions::{Inbox, OwnerQuestion};
+    let mut shell = fresh(120, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('q'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::CoordQuestions { project: project() },
+        Ok(SetupView::CoordQuestions(Box::new(Inbox {
+            project_id: project(),
+            questions: vec![OwnerQuestion {
+                id: 41,
+                agent: 3,
+                label: "Sub-agent 3".into(),
+                severity: Severity::High,
+                asked_for: QuestionFor::Me,
+                for_label: "Me".into(),
+                text: "May I delete the old fixtures?".into(),
+                assumption: None,
+                created_ms: 1,
+                terminal: None,
+            }],
+            more: 0,
+            waiting: Vec::new(),
+        }))),
+    ));
+    shell.key(Key::Enter);
+    for typed in "Keep them.".chars() {
+        shell.key(Key::Char(typed));
+    }
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.key(Key::Enter);
+    let lead = shell.ctx.message().unwrap().lead.clone();
+    assert_eq!(lead, "The answer was not sent.");
+    assert!(busy(&shell), "{:?}", shell.ctx.message());
+    assert!(
+        render(&mut shell).join("\n").contains("Keep them."),
+        "the owner's answer stays in the box"
+    );
+    requests(&mut shell);
+    shell.key(Key::Enter);
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::AnswerQuestion { message: 41, text, .. },
+                ..
+            })] if text == "Keep them."
+        ),
+        "Enter sends the same answer once the queue has room: {sent:?}"
+    );
+}
+
+#[test]
+fn a_cleanup_read_the_full_queue_refuses_says_busy_and_c_reads_again() {
+    use crate::tui::client::cleanup::CleanupQuery;
+    let mut shell = team();
+    fill_queue(&mut shell);
+    shell.key(Key::Char('c'));
+    assert!(busy(&shell), "{:?}", shell.ctx.message());
+    assert!(
+        !render(&mut shell)
+            .join("\n")
+            .contains("Reading finished agents"),
+        "the box does not wait for a read that never went out"
+    );
+    requests(&mut shell);
+    shell.key(Key::Char('c'));
+    assert_eq!(
+        cleanup_sent(&mut shell),
+        vec![CleanupQuery::Finished { project: project() }]
+    );
+}
+
+#[test]
+fn a_cleanup_removal_the_full_queue_refuses_says_nothing_was_removed() {
+    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
+    let mut shell = team();
+    shell.key(Key::Char('c'));
+    let read = CleanupQuery::Finished { project: project() };
+    assert_eq!(cleanup_sent(&mut shell), vec![read.clone()]);
+    shell.arrive(cleanup_reply(
+        read,
+        Ok(CleanupReply::Finished(vec![finished(
+            4,
+            "Ada (@login-page)",
+            1024 * 1024,
+        )])),
+    ));
+    fill_queue(&mut shell);
+    shell.key(Key::Char('y'));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Nothing was removed.");
+    assert!(busy(&shell), "{message:?}");
+    assert!(
+        !render(&mut shell).join("\n").contains("Removing"),
+        "the box does not wait for a removal that never went out"
+    );
+}
+
+#[test]
+fn a_terminal_attach_the_full_queue_refuses_says_busy_and_enter_attaches_again() {
+    let mut shell = team();
+    fill_queue(&mut shell);
+    shell.key(Key::Enter);
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("The terminal closed."),
+        "the refused attach closes the box instead of waiting for frames: {text}"
+    );
+    assert!(text.contains("CrazyAgent is busy"), "{text}");
+    requests(&mut shell);
+    shell.key(LEADER);
+    shell.key(Key::Enter);
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| matches!(
+            request,
+            Request::TerminalAttach { agent } if agent.as_str() == "team-1"
+        )),
+        "Enter on the agent asks for its terminal again: {sent:?}"
     );
 }

@@ -25,7 +25,12 @@ async fn add(owner: &mut Owner, source: &Path, mode: AddMode) -> OwnerResult {
     result(
         owner
             .controller
-            .add_existing_folder(source.to_str().unwrap().into(), mode, generation)
+            .add_existing_folder(
+                source.to_str().unwrap().into(),
+                mode,
+                Vec::new(),
+                generation,
+            )
             .await
             .unwrap(),
     )

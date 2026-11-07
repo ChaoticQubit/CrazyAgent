@@ -288,7 +288,7 @@ export function useSignIn(accountId: string | undefined) {
   }, [state, act]);
 
   const start = useCallback(async (method: NativeAuthMethod) => {
-    if (!current.current?.valid) await open();
+    await open();
     await act(method);
   }, [act, open]);
 

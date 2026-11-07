@@ -126,10 +126,23 @@ const REMOVED_WITH_PROJECT: [&str; 9] = [
 ];
 
 /// Creates the coordination tables (DEC-104) when they are missing, like the team
-/// tables, so no migration step exists. Runs after `team::initialize`, whose agent rows
+/// tables, and adds `coord_messages.turn` (the Codex turn a bridge delivery went into,
+/// b19 P2) to a database made before it. Runs after `team::initialize`, whose agent rows
 /// the layer reads. Takes the engine database. Returns Ok, or the SQLite failure.
 pub fn ensure(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(SCHEMA).map_err(state)
+    db.execute_batch(SCHEMA).map_err(state)?;
+    let present: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('coord_messages') WHERE name='turn')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if !present {
+        db.execute_batch("ALTER TABLE coord_messages ADD COLUMN turn TEXT")
+            .map_err(state)?;
+    }
+    Ok(())
 }
 
 /// Clears a removed project's coordination rows: its work, messages, claims and their

@@ -134,24 +134,35 @@ fn the_report_sums_ranges_groups_local_days_lines_and_limits() {
         )
         .unwrap();
     }
-    record_observation(
+    let claude_1 = CredentialRef::new("claude-1").unwrap();
+    for account in [&claude_1, &CredentialRef::new("claude-gone").unwrap()] {
+        record_observation(
+            &db,
+            account,
+            &Observation {
+                plan: Some("max".into()),
+                five_hour: Some(LimitWindow {
+                    used_percent: 20.0,
+                    resets_at_ms: Some(MIDNIGHT + 2 * HOUR),
+                }),
+                weekly: None,
+                provider: Some(crate::usage::poll::Provider::Claude),
+            },
+            LimitSource::Poll,
+            MIDNIGHT,
+        )
+        .unwrap();
+    }
+
+    let all = report(
         &db,
-        &CredentialRef::new("claude-1").unwrap(),
-        &Observation {
-            plan: Some("max".into()),
-            five_hour: Some(LimitWindow {
-                used_percent: 20.0,
-                resets_at_ms: Some(MIDNIGHT + 2 * HOUR),
-            }),
-            weekly: None,
-            provider: Some(crate::usage::poll::Provider::Claude),
-        },
-        LimitSource::Poll,
-        MIDNIGHT,
+        None,
+        None,
+        0,
+        MIDNIGHT + DAY,
+        std::slice::from_ref(&claude_1),
     )
     .unwrap();
-
-    let all = report(&db, None, None, 0, MIDNIGHT + DAY).unwrap();
     assert_eq!(
         all.total,
         Tokens {
@@ -191,15 +202,16 @@ fn the_report_sums_ranges_groups_local_days_lines_and_limits() {
         }]
     );
     assert_eq!(all.limits.len(), 1);
+    assert_eq!(all.limits[0].account, claude_1);
     assert_eq!(all.limits[0].plan.as_deref(), Some("max"));
 
-    let today = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let today = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(today.total.input, 48);
     assert_eq!(keys(&today.agents), vec!["team-2", "research-r1"]);
     assert_eq!(today.lines[0].change_sets, 2);
     assert_eq!(today.lines[0].commits, 1);
 
-    let east = report(&db, None, Some(MIDNIGHT), 120, MIDNIGHT + DAY).unwrap();
+    let east = report(&db, None, Some(MIDNIGHT), 120, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(
         east.days
             .iter()
@@ -208,11 +220,13 @@ fn the_report_sums_ranges_groups_local_days_lines_and_limits() {
         vec![(MIDNIGHT - 2 * HOUR, 47), (MIDNIGHT + 22 * HOUR, 1)]
     );
     assert_eq!(
-        report(&db, None, None, 15 * 60, MIDNIGHT).unwrap_err().0,
+        report(&db, None, None, 15 * 60, MIDNIGHT, &[])
+            .unwrap_err()
+            .0,
         "usage_request_invalid"
     );
     assert_eq!(
-        report(&db, None, Some(MIDNIGHT + 1), 0, MIDNIGHT)
+        report(&db, None, Some(MIDNIGHT + 1), 0, MIDNIGHT, &[])
             .unwrap_err()
             .0,
         "usage_request_invalid"
@@ -234,7 +248,7 @@ fn runs_tied_to_no_project_or_account_show_as_unattributed_rows() {
         harness: "claude-code".into(),
     };
     scan_home(&db, home.path(), Format::Claude, &lost, MIDNIGHT).unwrap();
-    let all = report(&db, None, None, 0, MIDNIGHT + HOUR).unwrap();
+    let all = report(&db, None, None, 0, MIDNIGHT + HOUR, &[]).unwrap();
     assert_eq!(all.total.input, 9);
     assert_eq!(
         all.projects
@@ -295,7 +309,7 @@ fn a_project_report_keeps_only_its_runs_and_names_lines_by_the_agent_that_made_t
         .unwrap();
     }
     let alpha = crate::protocol::ProjectId::new("alpha").unwrap();
-    let only = report(&db, Some(&alpha), None, 0, MIDNIGHT + HOUR).unwrap();
+    let only = report(&db, Some(&alpha), None, 0, MIDNIGHT + HOUR, &[]).unwrap();
     assert_eq!(only.total.input, 60);
     assert_eq!(only.runs, 2);
     let keys = |rows: &[UsageRow]| rows.iter().map(|r| r.key.clone()).collect::<Vec<_>>();
@@ -326,10 +340,76 @@ fn a_project_report_keeps_only_its_runs_and_names_lines_by_the_agent_that_made_t
             },
         ]
     );
-    let all = report(&db, None, None, 0, MIDNIGHT + HOUR).unwrap();
+    let all = report(&db, None, None, 0, MIDNIGHT + HOUR, &[]).unwrap();
     assert_eq!(all.total.input, 560);
     assert_eq!(all.agent_lines[0].agent, "team-9");
     assert_eq!(all.agent_lines.len(), 3);
+}
+
+fn cached_line(id: &str, input: u64, output: u64, read: u64, written: u64) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"id": id, "usage": {
+                "input_tokens": input, "output_tokens": output,
+                "cache_read_input_tokens": read, "cache_creation_input_tokens": written
+            }}
+        })
+    )
+}
+
+/// The headline counts new input, cache writes and output once per message and never the
+/// cache re-reads (DEC-117 Q6), and rows rank by it: an agent that mostly re-read its
+/// cache, as Ken did on HackerBlog (428,000 headline, 17.67 M re-read), ranks below one
+/// with a larger headline, while all four counts stay in the report.
+#[test]
+fn rows_count_and_rank_by_the_headline_and_never_by_cache_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let homes = tempfile::tempdir().unwrap();
+    let ken = homes.path().join("ken");
+    let ada = homes.path().join("ada");
+    let record = ken.join("projects/f/k.jsonl");
+    for _ in 0..3 {
+        append(&record, &cached_line("k1", 100, 70_000, 182_114, 150_000));
+    }
+    append(&record, &cached_line("k2", 94, 69_484, 17_482_981, 138_322));
+    let at = MIDNIGHT + HOUR;
+    scan_home(
+        &db,
+        &ken,
+        Format::Claude,
+        &who("alpha", None, "claude-1", "team-ken", RunKind::Agent),
+        at,
+    )
+    .unwrap();
+    append(&ada.join("projects/f/a.jsonl"), &line("a1", 500_000, 0));
+    scan_home(
+        &db,
+        &ada,
+        Format::Claude,
+        &who("alpha", None, "claude-2", "team-ada", RunKind::Agent),
+        at,
+    )
+    .unwrap();
+    let report = report(&db, None, None, 0, at + HOUR, &[]).unwrap();
+    let keys: Vec<&str> = report.agents.iter().map(|row| row.key.as_str()).collect();
+    assert_eq!(keys, ["team-ada", "team-ken"]);
+    let ken = &report.agents[1].tokens;
+    assert_eq!(
+        *ken,
+        Tokens {
+            input: 194,
+            output: 139_484,
+            cache_read: 17_665_095,
+            cache_write: 288_322,
+        }
+    );
+    assert_eq!(ken.headline(), 428_000);
+    assert_eq!(report.agents[0].tokens.headline(), 500_000);
+    assert_eq!(report.total.headline(), 928_000);
+    assert_eq!(report.total.cache_read, 17_665_095);
 }
 
 #[test]
@@ -350,7 +430,7 @@ fn token_sums_past_the_integer_range_still_report_saturated() {
         )
         .unwrap();
     }
-    let report = report(&db, None, None, 0, MIDNIGHT + DAY).unwrap();
+    let report = report(&db, None, None, 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(report.total.input, u64::MAX);
     assert_eq!(report.total.output, 3);
     assert_eq!(report.projects[0].tokens.input, u64::MAX);
@@ -417,7 +497,7 @@ fn harness_without_reader_reports_not_reported_never_zero() {
         .unwrap();
     assert_eq!(hours, 2, "one row per hour an agent ran");
 
-    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(all.total.input, 70, "unreported runs add no tokens");
     assert_eq!(all.not_reported_by, ["Gemini CLI", "OpenCode"]);
     assert_eq!(
@@ -446,14 +526,14 @@ fn harness_without_reader_reports_not_reported_never_zero() {
     assert!(all.accounts.iter().all(|row| row.not_reported_by.is_none()));
 
     let only = crate::protocol::ProjectId::new("beta").unwrap();
-    let beta_report = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let beta_report = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(beta_report.total, Tokens::default());
     assert_eq!(beta_report.not_reported_by, ["Gemini CLI"]);
     assert_eq!(
         flagged(&beta_report.agents),
         [("master-beta", 0, Some("Gemini CLI"))]
     );
-    let earlier = report(&db, None, Some(MIDNIGHT - 4 * DAY), 0, MIDNIGHT + DAY).unwrap();
+    let earlier = report(&db, None, Some(MIDNIGHT - 4 * DAY), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert!(earlier.agents.iter().any(|row| row.key == "team-5"));
 
     let counted = who("alpha", None, "claude-1", "team-2", RunKind::Agent);
@@ -501,7 +581,7 @@ fn rcli_counted_from_host_frames_is_reported_and_never_marked_unreported() {
     let opencode = readerless("alpha", "team-4", "opencode", RunKind::Agent);
     mark_unreported(&db, &opencode, MIDNIGHT + HOUR).unwrap();
 
-    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(all.total.input, 300);
     assert_eq!(all.not_reported_by, ["OpenCode"]);
     assert_eq!(
@@ -516,7 +596,7 @@ fn a_report_from_an_engine_without_step_health_reads_as_healthy() {
     let root = tempfile::tempdir().unwrap();
     let db = crate::usage::open(root.path()).unwrap();
     crate::usage::health::record_panic(&db, crate::usage::health::UsageStep::Poll, 7).unwrap();
-    let report = report(&db, None, None, 0, MIDNIGHT).unwrap();
+    let report = report(&db, None, None, 0, MIDNIGHT, &[]).unwrap();
     assert_eq!(report.health.len(), 1);
     let mut older = serde_json::to_value(&report).unwrap();
     older.as_object_mut().unwrap().remove("health");
@@ -557,7 +637,7 @@ fn a_flagged_key_outside_the_top_rows_keeps_its_full_count() {
     let readerless_only = readerless("p-01", "team-99", "opencode", RunKind::Agent);
     mark_unreported(&db, &readerless_only, MIDNIGHT + HOUR + 5).unwrap();
 
-    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(all.agents.len(), ROWS_MAX + 2);
     assert!(
         all.agents[..ROWS_MAX]
@@ -589,7 +669,7 @@ fn a_flagged_key_outside_the_top_rows_keeps_its_full_count() {
     );
 
     let only = crate::protocol::ProjectId::new(last_project.as_str()).unwrap();
-    let alone = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let alone = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(
         flagged(&alone.agents),
         [(last.as_str(), 1000 - listed, Some("OpenCode"))]
@@ -640,7 +720,7 @@ fn trimmed_flagged_keys_are_counted_together_and_an_unattributed_agent_mark_stay
     )
     .unwrap();
 
-    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert!(
         !all.agents.iter().any(|row| row.key.is_empty()),
         "the agents list leaves the unattributed key out, marked or not"
@@ -691,13 +771,15 @@ pub(crate) fn wide(prefix: &str, index: usize) -> String {
     format!("{:x<128}", format!("{prefix}-{index:03}-"))
 }
 
-/// Fills a usage store past what one reply frame holds: `WIDE_ROWS` accounts' limits with
-/// every field at its widest, and one run on each of `WIDE_ROWS` days with its own 128-byte
-/// project, pool, account and agent, the newest run spending the most tokens.
+/// Fills a usage store past what one reply frame holds: `WIDE_ROWS` saved accounts' limits
+/// with every field at its widest, and one run on each of `WIDE_ROWS` days with its own
+/// 128-byte project, pool, account and agent, the newest run spending the most tokens.
 /// Inputs: the store and the time of the newest run.
 pub(crate) fn fill_past_one_frame(db: &Connection, now_ms: i64) {
     let percent = 100.0_f64 / 3.0;
+    crate::storage::accounts::initialize(db).unwrap();
     for index in 0..WIDE_ROWS {
+        save_account(db, &wide("account", index));
         db.execute(
             "INSERT INTO account_limits (account,plan,five_hour_percent,five_hour_resets_ms,
                 weekly_percent,weekly_resets_ms,five_hour_reset_override_ms,
@@ -731,6 +813,41 @@ pub(crate) fn fill_past_one_frame(db: &Connection, now_ms: i64) {
     }
 }
 
+/// Saves one API key account in the accounts table as Settings > Accounts stores it.
+/// Inputs: the engine store and the account id.
+fn save_account(db: &Connection, id: &str) {
+    let reference = |value: &str| CredentialRef::new(value).unwrap();
+    let connection = crate::config::ModelConnection {
+        id: reference(id),
+        provider: reference("openai-compatible"),
+        harness: reference("rcli"),
+        protocol: reference("openai-chat"),
+        account_ref: reference("local-account"),
+        endpoint: crate::config::ModelEndpoint::Http {
+            url: "http://127.0.0.1:8000/v1".into(),
+        },
+        model: crate::config::ModelReference {
+            id: "m".into(),
+            author: reference("openai-compatible"),
+        },
+        auth: crate::config::ModelAuthentication::ApiKey {
+            credential_ref: reference("wide-key"),
+        },
+    };
+    let details = crate::accounts::AccountDetails {
+        name: "Wide".into(),
+        provider: crate::accounts::Provider::OpenaiCompatible,
+    };
+    let body =
+        serde_json::to_vec(&serde_json::json!({"connection": connection, "details": details}))
+            .unwrap();
+    db.execute(
+        "INSERT INTO accounts(id, body) VALUES (?1, ?2)",
+        params![id, body],
+    )
+    .unwrap();
+}
+
 /// Tokens the run at `index` spent: near the integer range, falling with the index.
 /// Input: the index. Output: the tokens.
 fn spent(index: usize) -> i64 {
@@ -743,14 +860,16 @@ fn an_offset_beyond_fourteen_hours_is_refused_even_at_the_integer_edges() {
     let db = crate::usage::open(root.path()).unwrap();
     for offset in [i32::MIN, i32::MIN + 1, -841, 841, i32::MAX] {
         assert_eq!(
-            report(&db, None, None, offset, MIDNIGHT).unwrap_err().0,
+            report(&db, None, None, offset, MIDNIGHT, &[])
+                .unwrap_err()
+                .0,
             "usage_request_invalid",
             "offset {offset}"
         );
     }
     for offset in [-840, 0, 840] {
         assert!(
-            report(&db, None, None, offset, MIDNIGHT).is_ok(),
+            report(&db, None, None, offset, MIDNIGHT, &[]).is_ok(),
             "offset {offset}"
         );
     }
@@ -771,7 +890,7 @@ fn a_report_past_one_reply_frame_keeps_its_largest_rows_and_newest_days_and_fits
         .unwrap();
     }
 
-    let report = report(&db, None, None, 0, now).unwrap();
+    let report = report(&db, None, None, 0, now, &[]).unwrap();
     let encoded = serde_json::to_vec(&report).unwrap();
     assert!(encoded.len() <= REPORT_BYTES_MAX, "{} bytes", encoded.len());
     assert!(

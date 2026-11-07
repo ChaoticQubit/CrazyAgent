@@ -196,6 +196,7 @@ fn the_team_graph_is_a_tree_of_who_leads_whom() {
             (7, "crazyagent/charts--axis".to_owned()),
         ]),
         coord: None,
+        ..none()
     };
     let graph = graph(&tree(), &facts);
     assert_eq!(graph.project_id.as_str(), "tidepool");
@@ -786,6 +787,7 @@ fn coordination_shows_presence_waits_unread_messages_and_overlaps_between_shown_
                 (Party::Agent(3), Party::Agent(3), 1, Receipt::Sent),
             ],
         }),
+        ..none()
     };
     let graph = graph(&tree(), &facts);
     let node = |id: &str| graph.nodes.iter().find(|node| node.id == id).unwrap();
@@ -873,6 +875,7 @@ fn coordination_edges_stay_within_their_caps() {
                 .map(|(a, b)| (Party::Agent(*a), Party::Agent(*b), 1, Receipt::Sent))
                 .collect(),
         }),
+        ..none()
     };
     let graph = graph(&status, &facts);
     assert_eq!(graph.messages.len(), MESSAGE_EDGES_MAX);
@@ -901,6 +904,7 @@ fn an_adopted_teammate_row_replaces_its_pane_and_opens_its_own_terminal() {
             questions_for_owner: Vec::new(),
             unread_edges: vec![(Party::Owner, Party::Agent(9), 1, Receipt::Sent)],
         }),
+        ..none()
     };
     type MateRow = (String, Option<String>, Option<i64>, Option<String>);
     let mates = |graph: &TeamGraph| -> Vec<MateRow> {
@@ -1319,4 +1323,435 @@ fn naming_more_kept_screens_than_a_host_keeps_is_refused() {
             > crate::terminal::KEPT_MAX
     );
     name_kept(&mut shown, |_| true);
+}
+
+fn relations(graph: &TeamGraph) -> Vec<(&str, &str, Relation, Option<LiveAction>)> {
+    graph
+        .relations
+        .iter()
+        .map(|edge| {
+            (
+                edge.from.as_str(),
+                edge.to.as_str(),
+                edge.relation,
+                edge.live.clone(),
+            )
+        })
+        .collect()
+}
+
+fn handing(task: &str) -> Option<LiveAction> {
+    Some(LiveAction::HandingOff { task: task.into() })
+}
+
+fn unread(edges: Vec<(Party, Party, u32, Receipt)>) -> Option<Snapshot> {
+    Some(Snapshot {
+        agents: Vec::new(),
+        overlaps: Vec::new(),
+        questions_for_owner: Vec::new(),
+        unread_edges: edges,
+    })
+}
+
+fn finish(status: &mut TeamStatus, tasks: &[i64]) {
+    for task in status
+        .tasks
+        .iter_mut()
+        .filter(|task| tasks.contains(&task.id))
+    {
+        task.status = TaskStatus::Done;
+        task.result = Some(format!("Result {}", task.id));
+    }
+}
+
+#[test]
+fn relations_name_each_pair_and_a_live_handoff_overrides_then_falls_back() {
+    let facts = GraphFacts {
+        coord: unread(vec![
+            (Party::Agent(7), Party::Agent(3), 1, Receipt::Delivered),
+            (Party::Agent(8), Party::Agent(7), 1, Receipt::Delivered),
+        ]),
+        ..none()
+    };
+    let mut status = tree();
+    let shown = graph(&status, &facts);
+    assert_eq!(
+        relations(&shown),
+        [
+            ("master", "team-3", Relation::Leads, None),
+            ("team-3", "teammate-3-12", Relation::TeammateOf, None),
+            (
+                "team-3",
+                "team-7",
+                Relation::TeammateOf,
+                Some(LiveAction::Messaging)
+            ),
+            ("team-7", "team-8", Relation::TeammateOf, handing("Task 16")),
+            ("master", "team-4", Relation::DelegatedTo, None),
+            ("master", "team-5", Relation::DelegatedTo, None),
+            ("master", "team-6", Relation::DelegatedTo, None),
+        ],
+        "as in the approved mockup the master leads an agent that leads workers and delegates to one that leads none, every agent under a lead is its teammate, a task sent and not yet picked up hands off over an unread message, and a running one leaves its pair's standing word or message"
+    );
+    let pairs: BTreeSet<(&str, &str)> = shown
+        .relations
+        .iter()
+        .map(|edge| (edge.from.as_str(), edge.to.as_str()))
+        .collect();
+    let tree_pairs: BTreeSet<(&str, &str)> = shown
+        .nodes
+        .iter()
+        .filter_map(|node| Some((node.parent.as_deref()?, node.id.as_str())))
+        .collect();
+    assert_eq!(
+        (pairs.len(), &pairs),
+        (shown.relations.len(), &tree_pairs),
+        "every pair of connected agents has exactly one relation edge"
+    );
+
+    finish(&mut status, &[16]);
+    let finished = graph(&status, &facts);
+    assert_eq!(
+        relations(&finished)
+            .into_iter()
+            .map(|(from, to, _, live)| (from, to, live))
+            .take(4)
+            .collect::<Vec<_>>(),
+        [
+            ("master", "team-3", None),
+            ("team-3", "teammate-3-12", None),
+            ("team-3", "team-7", Some(LiveAction::Messaging)),
+            ("team-7", "team-8", Some(LiveAction::Messaging)),
+        ],
+        "a finished handoff leaves the pair at the unread message still between them"
+    );
+}
+
+/// A task hands off only while it is sent and not yet picked up, a moment as in the approved
+/// mockup: once its agent runs it, the pair shows its standing word again, or the child's
+/// wait on the owner's answer, as the agents with no task do (T14-F1).
+#[test]
+fn a_running_task_leaves_its_pair_s_standing_word_or_owner_wait_and_a_sent_one_hands_off() {
+    let mut status = tree();
+    let facts = GraphFacts {
+        coord: Some(Snapshot {
+            questions_for_owner: vec![question(1, Party::Agent(7))],
+            ..unread(Vec::new()).unwrap()
+        }),
+        ..none()
+    };
+    let shown = |status: &TeamStatus| -> Vec<(String, String, Relation, Option<LiveAction>)> {
+        relations(&graph(status, &facts))
+            .into_iter()
+            .take(4)
+            .map(|(from, to, relation, live)| (from.to_owned(), to.to_owned(), relation, live))
+            .collect()
+    };
+    let row =
+        |from: &str, to: &str, relation, live| (from.to_owned(), to.to_owned(), relation, live);
+    assert_eq!(
+        shown(&status),
+        [
+            row("master", "team-3", Relation::Leads, None),
+            row("team-3", "teammate-3-12", Relation::TeammateOf, None),
+            row(
+                "team-3",
+                "team-7",
+                Relation::TeammateOf,
+                Some(LiveAction::WaitingOn { owner: true })
+            ),
+            row("team-7", "team-8", Relation::TeammateOf, handing("Task 16")),
+        ],
+        "a running task hides neither the standing word nor the wait on the owner's answer, and only the task not yet picked up hands off"
+    );
+    for task in status.tasks.iter_mut().filter(|task| task.id == 16) {
+        task.status = TaskStatus::Running;
+    }
+    assert_eq!(
+        shown(&status)[3],
+        row("team-7", "team-8", Relation::TeammateOf, None),
+        "the handoff ends when its agent picks the task up"
+    );
+    for task in status.tasks.iter_mut().filter(|task| task.id == 16) {
+        task.status = TaskStatus::NeedsPool;
+    }
+    assert_eq!(
+        shown(&status)[3],
+        row("team-7", "team-8", Relation::TeammateOf, handing("Task 16")),
+        "a task waiting for a pool is still sent and not yet picked up"
+    );
+}
+
+#[test]
+fn waits_reviews_and_messages_show_on_their_pair_under_a_handoff() {
+    let mut status = tree();
+    status
+        .tasks
+        .push(task(17, "claude-code", TaskStatus::Queued, Some(3)));
+    let long = "x".repeat(400);
+    status
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == 16)
+        .unwrap()
+        .prompt
+        .clone_from(&long);
+    let mut facts = GraphFacts {
+        coord: Some(Snapshot {
+            questions_for_owner: vec![question(1, Party::Agent(5)), question(2, Party::Engine)],
+            ..unread(vec![(Party::Agent(6), Party::Agent(2), 1, Receipt::Sent)]).unwrap()
+        }),
+        review_ready: vec![8, 7, 4],
+        asking: BTreeSet::from([(7, 3), (8, 7), (5, 2), (99, 3)]),
+        ..none()
+    };
+    let waiting = |owner| Some(LiveAction::WaitingOn { owner });
+    let reviewing = |agent: &str| {
+        Some(LiveAction::Reviewing {
+            agent: agent.into(),
+        })
+    };
+    let cut = handing(&long[..HANDOFF_TASK_BYTES_MAX]);
+    assert_eq!(
+        relations(&graph(&status, &facts))
+            .into_iter()
+            .map(|(from, to, _, live)| (from, to, live))
+            .collect::<Vec<_>>(),
+        [
+            ("master", "team-3", handing("Task 17")),
+            ("team-3", "teammate-3-12", None),
+            ("team-3", "team-7", waiting(false)),
+            ("team-7", "team-8", cut),
+            ("master", "team-4", None),
+            ("master", "team-5", waiting(true)),
+            ("master", "team-6", Some(LiveAction::Messaging)),
+        ],
+        "the newest open task hands off over a wait and a review, an agent with a question for the owner waits on the owner's answer over its question to the master, the master's own review of a top-level agent sits on no line, and a message shows alone"
+    );
+
+    finish(&mut status, &[11, 15, 16, 17]);
+    let rested = |facts: &GraphFacts| -> Vec<Option<LiveAction>> {
+        relations(&graph(&status, facts))
+            .into_iter()
+            .map(|(_, _, _, live)| live)
+            .collect()
+    };
+    assert_eq!(
+        rested(&facts),
+        [
+            reviewing("Sub-agent 7"),
+            None,
+            waiting(false),
+            waiting(false),
+            None,
+            waiting(true),
+            Some(LiveAction::Messaging),
+        ],
+        "a lead reviewing its worker's change set shows on the line down to that lead, and a wait between two agents shows over the review"
+    );
+    facts.asking.remove(&(7, 3));
+    facts.coord.as_mut().unwrap().questions_for_owner.clear();
+    assert_eq!(
+        rested(&facts),
+        [
+            reviewing("Sub-agent 7"),
+            None,
+            reviewing("Sub-agent 8"),
+            waiting(false),
+            None,
+            waiting(false),
+            Some(LiveAction::Messaging),
+        ],
+        "once answered, the worker's line names the agent whose change set it reviews as Changes names it, and an agent whose owner question is answered still waits on the master"
+    );
+}
+
+#[test]
+fn relation_facts_read_review_ready_work_and_open_questions_between_agents() {
+    use crate::coord::{Finish, MessageKind, NewMessage, QuestionFor, Severity};
+    let connection = Connection::open_in_memory().unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    for project in ["tidepool", "other"] {
+        let row = crate::protocol::StoredProject {
+            project_id: ProjectId::new(project).unwrap(),
+            spec: crate::protocol::ProjectSpec {
+                name: project.into(),
+                repositories: vec![],
+            },
+        };
+        connection
+            .execute(
+                "INSERT INTO projects VALUES (?1,?2)",
+                params![project, serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+    }
+    let add = |project: &str, role: &str, parent: Option<i64>| -> i64 {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent) VALUES (?1,?2,'codex',1,'working',1,1,?3)",
+                params![project, role, parent],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let project = ProjectId::new("tidepool").unwrap();
+    let other = ProjectId::new("other").unwrap();
+    let master = add("tidepool", "master", None);
+    let lead = add("tidepool", "sub", None);
+    let sub = add("tidepool", "sub", Some(lead));
+    add("other", "master", None);
+    let stranger = add("other", "sub", None);
+    let ready = |project: &ProjectId, agent: i64| {
+        let (work, _) =
+            crate::coord::start_work(&connection, project, agent, "Tests".into(), vec![], 1)
+                .unwrap();
+        crate::coord::finish(
+            &connection,
+            work,
+            1,
+            Finish::ReviewReady,
+            "Green.".into(),
+            agent,
+            1,
+        )
+        .unwrap();
+        work
+    };
+    let reviewed = ready(&project, sub);
+    ready(&other, stranger);
+    crate::coord::start_work(&connection, &project, lead, "Lead".into(), vec![], 1).unwrap();
+    let ask = |project: &ProjectId, from: i64, target: QuestionFor| {
+        crate::coord::send(
+            &connection,
+            NewMessage {
+                project: project.clone(),
+                from: Party::Agent(from),
+                to: Party::Owner,
+                kind: MessageKind::Question,
+                question: Some((target, Severity::Normal)),
+                work: None,
+                reply_to: None,
+                body: "Which branch?".into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap()
+    };
+    let asked = ask(&project, sub, QuestionFor::Lead);
+    ask(&project, lead, QuestionFor::Master);
+    ask(&project, sub, QuestionFor::Me);
+    ask(&other, stranger, QuestionFor::Master);
+
+    assert_eq!(
+        review_ready(&connection, &project).unwrap(),
+        [sub],
+        "only this project's review-ready work counts, by the agent that owns it, not active work"
+    );
+    assert_eq!(
+        asking(&connection, &project).unwrap(),
+        BTreeSet::from([(sub, lead), (lead, master)]),
+        "a question for the lead or the master waits on that agent; one for the owner is no agent's"
+    );
+    crate::coord::reply(&connection, Party::Agent(lead), asked, "main".into(), 2).unwrap();
+    crate::coord::finish(
+        &connection,
+        reviewed,
+        2,
+        Finish::Complete,
+        "Reviewed.".into(),
+        lead,
+        2,
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            review_ready(&connection, &project).unwrap(),
+            asking(&connection, &project).unwrap()
+        ),
+        (Vec::new(), BTreeSet::from([(lead, master)])),
+        "an answered question and completed work leave the facts"
+    );
+}
+
+#[test]
+fn relation_facts_keep_each_owner_and_pair_past_one_agents_many_rows() {
+    let connection = Connection::open_in_memory().unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let project = ProjectId::new("tidepool").unwrap();
+    let work = |owner: i64, updated: i64| -> i64 {
+        connection
+            .execute(
+                "INSERT INTO coord_work(project,title,owner_agent,state,version,created,updated) VALUES ('tidepool','Tests',?1,'review_ready',1,?2,?2)",
+                params![owner, updated],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let question = |from: i64, to: i64| {
+        connection
+            .execute(
+                "INSERT INTO coord_messages(project,from_kind,from_agent,to_kind,to_agent,kind,body,receipt,created,receipt_at) VALUES ('tidepool','agent',?1,'agent',?2,'question','Which branch?','sent',1,1)",
+                params![from, to],
+            )
+            .unwrap();
+    };
+    work(4, 1);
+    question(4, 2);
+    for at in 0..=RELATION_SCAN_MAX {
+        work(3, 10 + at);
+        question(3, 2);
+    }
+    assert_eq!(
+        review_ready(&connection, &project).unwrap(),
+        [3, 4],
+        "one owner's many review-ready rows count once, newest first, and leave room for every other owner"
+    );
+    assert_eq!(
+        asking(&connection, &project).unwrap(),
+        BTreeSet::from([(3, 2), (4, 2)]),
+        "one pair's many open questions count once and leave room for every other pair"
+    );
+}
+
+#[test]
+fn a_review_shows_on_its_drawn_reviewer_line_whether_or_not_its_worker_is_drawn() {
+    let mut status = tree();
+    status.agents[2].finished = true;
+    status.agents[2].teammates.clear();
+    status.agents.last_mut().unwrap().finished = true;
+    finish(&mut status, &[11, 15, 16]);
+    let long = format!("Ada{}", "\u{e9}".repeat(REVIEWED_AGENT_BYTES_MAX));
+    status.agents.last_mut().unwrap().label.clone_from(&long);
+    let facts = GraphFacts {
+        review_ready: vec![8, 7],
+        ..none()
+    };
+    let mut cut = REVIEWED_AGENT_BYTES_MAX;
+    while !long.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    assert_eq!(
+        relations(&graph(&status, &facts)),
+        [
+            ("master", "team-4", Relation::DelegatedTo, None),
+            ("master", "team-5", Relation::DelegatedTo, None),
+            ("master", "team-6", Relation::DelegatedTo, None),
+            (
+                "master",
+                "team-7",
+                Relation::DelegatedTo,
+                Some(LiveAction::Reviewing {
+                    agent: long[..cut].to_owned()
+                })
+            ),
+        ],
+        "a drawn lead reviewing its hidden worker's change set names that worker on its own line, cut at a character within the bound, and a review by a hidden lead sits on no line"
+    );
+    assert_eq!(
+        cut,
+        REVIEWED_AGENT_BYTES_MAX - 1,
+        "the bound falls inside a character"
+    );
 }

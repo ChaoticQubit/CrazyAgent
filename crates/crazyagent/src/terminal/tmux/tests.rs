@@ -1,6 +1,10 @@
 use super::*;
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
+#[path = "../../../tests/pgid_support/mod.rs"]
+mod pgid_support;
+
 #[test]
 fn tmux_output_octal_escapes_decode_to_the_exact_bytes() {
     assert_eq!(
@@ -225,6 +229,100 @@ fn the_attach_history_fills_a_fresh_view_scrollback_and_leaves_the_screen_to_red
             parser.screen().rows(0, 20).next().unwrap(),
             top,
             "{count} history rows"
+        );
+    }
+}
+
+/// A native lead's own server takes the lead's command back out of the engine's own keeper
+/// and pane shim, which cannot run inside the server's sandbox, and checks what is left as
+/// strictly as a plain command; any other wrapper, keeper or shim text is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_lead_line_takes_only_the_engines_own_keeper_back_out() {
+    use crate::sandbox::{KEEPER, PANE_SHIM, SANDBOX_EXEC, kept_pane};
+    let agent = AgentId::team(4).unwrap();
+    let profile = Path::new("/private/tmp/lead.sb");
+    let plain = |profile: &str| -> Vec<String> {
+        [
+            SANDBOX_EXEC,
+            "-f",
+            profile,
+            "/usr/local/bin/claude",
+            "--resume",
+        ]
+        .map(String::from)
+        .to_vec()
+    };
+    let command = |argv: Vec<String>| InteractiveCommand {
+        argv,
+        cwd: PathBuf::from("/private/tmp/project"),
+        env: vec![],
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    let line = |argv: Vec<String>| confined_line(&agent, &command(argv), profile, &[]);
+    let lead = plain("/private/tmp/lead.sb");
+    let kept = kept_pane(lead.clone()).unwrap();
+    assert_eq!(
+        line(kept.clone()).map_err(|error| error.0),
+        Ok(line(lead.clone()).unwrap()),
+        "the lead command the engine kept is checked as the plain one"
+    );
+
+    let shim = KEEPER.len() + 3;
+    let mut keeper_text = kept.clone();
+    keeper_text[KEEPER.len() - 2].push(' ');
+    let mut shim_text = kept.clone();
+    shim_text[shim + PANE_SHIM.len() - 2].push(' ');
+    let mut no_shim = kept.clone();
+    no_shim.drain(shim..shim + PANE_SHIM.len());
+    let mut not_sandboxed = kept.clone();
+    not_sandboxed[KEEPER.len()] = "/bin/sh".into();
+    let mut wrapped = vec![
+        "/usr/bin/perl".to_owned(),
+        "-e".into(),
+        "exec @ARGV".into(),
+        "--".into(),
+    ];
+    wrapped.extend(lead.clone());
+    let refused = [
+        kept_pane(plain("/private/tmp/other.sb")).unwrap(),
+        keeper_text,
+        shim_text,
+        no_shim,
+        not_sandboxed,
+        wrapped,
+        kept[..KEEPER.len()]
+            .iter()
+            .chain(&kept[shim..])
+            .cloned()
+            .collect(),
+    ];
+    for argv in refused {
+        assert_eq!(
+            line(argv.clone()).unwrap_err().0,
+            "terminal_command_invalid",
+            "accepted {argv:?}"
+        );
+    }
+}
+
+/// Keeper r1 KP-L3: a pane's keeper is a perl outside the sandbox, so no pane command may
+/// carry a variable that makes perl load code from elsewhere, in any letter case.
+#[test]
+fn a_pane_command_with_a_perl_load_variable_is_refused() {
+    let agent = AgentId::team(4).unwrap();
+    let command = |name: &str| InteractiveCommand {
+        argv: vec!["/usr/local/bin/claude".into()],
+        cwd: PathBuf::from("/private/tmp/project"),
+        env: vec![(name.into(), "/private/tmp/planted".into())],
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    assert!(spawn_line(&agent, &command("TERM")).is_ok());
+    for name in ["PERL5LIB", "PERL5OPT", "PERLLIB", "PERL5DB", "perl5opt"] {
+        assert_eq!(
+            spawn_line(&agent, &command(name)).map_err(|error| error.0),
+            Err("terminal_command_invalid".to_owned()),
+            "{name}"
         );
     }
 }
@@ -789,16 +887,12 @@ fn hangup_ignored_agent(cwd: &Path, started: &Path) -> InteractiveCommand {
 }
 
 /// Waits for the child of a `hangup_ignored` pane and checks that it is in the group the
-/// pane's first process leads, as tmux starts every pane. Takes the pane's first process id
-/// and the child's pid file. Returns the group, killed when dropped, and the child.
+/// pane's first process leads, once `pgid_support::pane_group` sees that process lead it.
+/// Takes the pane's first process id and the child's pid file. Returns the group, killed
+/// when dropped, and the child.
 #[cfg(target_os = "macos")]
 fn left_in_group(pane: u32, started: &Path) -> (Group, rustix::process::Pid) {
-    let leader = rustix::process::Pid::from_raw(i32::try_from(pane).unwrap()).unwrap();
-    assert_eq!(
-        rustix::process::getpgid(Some(leader)),
-        Ok(leader),
-        "tmux makes a pane's first process lead its own group"
-    );
+    let leader = pgid_support::pane_group(pane);
     let group = Group(leader, std::cell::Cell::new(false));
     let deadline = Instant::now() + Duration::from_secs(10);
     let child = loop {
@@ -998,11 +1092,13 @@ fn a_group_once_gone_is_never_tested_or_signalled_again() {
     .unwrap();
     let survivor_group = rustix::process::Pid::from_child(&survivor);
     let guard = Group(survivor_group, std::cell::Cell::new(false));
+    let held = [ended.id(), survivor.id()]
+        .map(|group| Ending::claim(group).expect("no path holds a new group"));
     let reaped = std::thread::spawn(move || survivor.wait());
     let calls = std::cell::RefCell::new(Vec::new());
 
     end_groups_with(
-        vec![ended_group, survivor_group],
+        held.into(),
         |group| {
             let answer = rustix::process::test_kill_process_group(group);
             calls.borrow_mut().push(("test", group, answer));
@@ -1120,6 +1216,44 @@ fn close_waits_one_hangup_grace_for_all_its_panes() {
         );
         group.1.set(true);
     }
+}
+
+/// CB-2 one signal: a close leaves a pane group another path holds to that path, as the
+/// stop that ends the pane holds its group from before the host's kill, so the host never
+/// signals that group as well. The holder then ends it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_close_leaves_a_pane_group_another_path_holds_to_that_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let started = home.path().join("child.pid");
+    let agent = AgentId::team(1).unwrap();
+    host.spawn(&agent, &hangup_ignored_agent(home.path(), &started))
+        .unwrap();
+    let pane = host.panes(&agent).unwrap().remove(0);
+    let (group, child) = left_in_group(pane.pid, &started);
+    let held = crate::harnesses::launch::Ending::claim(pane.pid)
+        .expect("no path holds the new pane's group");
+
+    host.kill(&agent).unwrap();
+    host.join_reapers();
+    let survived = rustix::process::test_kill_process(child).is_ok();
+    let ended = crate::harnesses::launch::end_pane_group(pane.pid, Some(held));
+    assert!(
+        survived,
+        "the host signalled a pane group another path holds"
+    );
+    assert!(ended, "the holder ends the group");
+    assert!(gone(&group, child), "the pane's group is gone");
 }
 
 #[cfg(target_os = "macos")]

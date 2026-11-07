@@ -31,7 +31,7 @@ fn codex_account(managed: &Path) -> String {
     let record = json!({
         "OPENAI_API_KEY": null,
         "tokens": {
-            "id_token": "unit-identity",
+            "id_token": format!("unit-header.{claims}.unit-identity-signature"),
             "access_token": access,
             "refresh_token": "unit-refresh-secret",
             "account_id": "unit-account"
@@ -179,6 +179,9 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         serde_json::from_slice(&std::fs::read(home.join("auth.json")).unwrap()).unwrap();
     assert_eq!(written["tokens"]["access_token"], access);
     assert_eq!(written["tokens"]["refresh_token"], "");
+    let identity = written["tokens"]["id_token"].as_str().unwrap();
+    assert!(identity.ends_with(".unexchangeable"), "{identity}");
+    assert!(!identity.contains("unit-identity-signature"), "{identity}");
     assert!(tool_record.is_none());
     let today = master_command(&codex, &home, &worktree, "unit-model", None).unwrap();
     assert!(command.get_args().eq(today.get_args()));

@@ -238,6 +238,61 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
     );
 }
 
+/// A context-less launch's hold takes the same home lock as an install and leaves the home's
+/// files as they were (aabe420f): an install or a second hold on the held home is refused, the
+/// home keeps its own file and gains only the lock file, and the home is free once the hold
+/// ends.
+#[cfg(unix)]
+#[test]
+fn lock_only_holds_the_home_and_leaves_no_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    fs::write(home.join("config.toml"), "model = \"kept\"\n").unwrap();
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+    };
+
+    let held = lock_only(&home).unwrap();
+    assert_eq!(
+        context
+            .install("codex", &home, false)
+            .err()
+            .map(|error| error.0),
+        Some("launch_home_busy".to_owned()),
+        "an install waits for the held home"
+    );
+    assert_eq!(
+        lock_only(&home).err().map(|error| error.0),
+        Some("launch_home_busy".to_owned()),
+        "a second hold waits for the held home"
+    );
+    drop(held);
+
+    let mut names: Vec<String> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["config.toml", LOCK]);
+    assert_eq!(
+        fs::read_to_string(home.join("config.toml")).unwrap(),
+        "model = \"kept\"\n"
+    );
+    assert!(
+        lock_only(&home).is_ok(),
+        "the ended hold still kept its home busy"
+    );
+}
+
 /// RV-DS-74: a second keyed launch on an account home whose agent is already running is
 /// refused at the home lock before it writes the key file, so the running agent's relay key
 /// file survives. The lock is taken by `command_with_context` ahead of `write_key_file`; the
@@ -547,6 +602,126 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         "the relaunch leaves the planted system skills for Codex to load"
     );
     drop(relaunch);
+}
+
+/// Sets or clears the user immutable flag on one path with the system's `chflags`, as an
+/// agent would. Inputs: the flag name and the path. Output: whether `chflags` succeeded.
+#[cfg(target_os = "macos")]
+fn chflags(flag: &str, path: &Path) -> bool {
+    crate::spawn_gate::status(
+        std::process::Command::new("/usr/bin/chflags")
+            .arg(flag)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .is_ok_and(|done| done.success())
+}
+
+/// Clears the user immutable flag on test paths when dropped, so the temporary folder can
+/// always be deleted, whatever the test asserted. Holds the paths.
+#[cfg(target_os = "macos")]
+struct Unlocked(Vec<PathBuf>);
+
+#[cfg(target_os = "macos")]
+impl Drop for Unlocked {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = chflags("nouchg", path);
+        }
+    }
+}
+
+/// CTX-M1 r1: a skill an agent planted in Codex's own `skills/.system` and made immutable,
+/// or whose `skills` folder it made immutable, does not survive the next Codex launch in
+/// that home: the launch clears the flag and removes the folder, so Codex installs its
+/// system skills fresh.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
+    for pinned in [".system", "skills"] {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().canonicalize().unwrap().join("codex");
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let context = AgentContext {
+            plugins: LaunchPlugins::default(),
+            instructions: "# Project context from CrazyAgent\n".into(),
+            process: None,
+            transcripts: true,
+            off_tools: Vec::new(),
+            native_team: None,
+            relay: None,
+            model_proxy: None,
+            claude_display: ClaudeDisplay::Classic,
+        };
+        let first = context.install("codex", &home, true).unwrap();
+        drop(first);
+        let skills = home.join("skills");
+        let system = skills.join(".system");
+        let planted = system.join("planted");
+        fs::create_dir_all(&planted).unwrap();
+        fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
+        let flagged = match pinned {
+            ".system" => system.clone(),
+            _ => skills.clone(),
+        };
+        let _unlocked = Unlocked(vec![flagged.clone()]);
+        assert!(chflags("uchg", &flagged), "{pinned} is made immutable");
+
+        let relaunch = context.install("codex", &home, true);
+
+        assert!(
+            !system.exists(),
+            "{pinned}: the relaunch leaves the planted system skills for Codex to load"
+        );
+        drop(relaunch.unwrap());
+    }
+}
+
+/// CTX-M1 r1: when the planted `skills/.system` cannot be moved away even after its flags
+/// are cleared, here because the agent filled the folder the engine moves it to with a
+/// file it made immutable, the Codex launch is refused with an ordinary error rather than
+/// started with the planted system skills.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+    };
+    let first = context.install("codex", &home, true).unwrap();
+    drop(first);
+    let planted = home.join("skills").join(".system").join("planted");
+    fs::create_dir_all(&planted).unwrap();
+    fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
+    let parked = home.join(format!(".{STATE}-system-{}", std::process::id()));
+    fs::create_dir(&parked).unwrap();
+    let held = parked.join("held");
+    fs::write(&held, "held\n").unwrap();
+    let _unlocked = Unlocked(vec![held.clone()]);
+    assert!(
+        chflags("uchg", &held),
+        "the parked folder's file is immutable"
+    );
+
+    let relaunch = context.install("codex", &home, true);
+
+    assert_eq!(
+        relaunch.err().map(|problem| problem.0),
+        Some("launch_context_skills_kept".to_owned()),
+        "a launch that keeps the planted system skills is refused"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -1658,6 +1833,96 @@ fn tools_section(text: &str) -> &str {
     &rest[..end]
 }
 
+/// DEC-116: every tools-on launch delivers the tool rules as firm rules, not choices left to
+/// the agent: Claude Code's own instructions and its native teammates' file, which every
+/// master, lead, sub-agent, teammate and research launch is given, and Codex's developer
+/// instructions. Each says to query graphify before reading source, to run any output that is
+/// not short and fixed through context-mode, and to check the skills and use any that applies.
+#[test]
+fn every_tools_on_launch_delivers_the_tool_rules_as_firm_rules() {
+    const LOOSE: [&str; 6] = [
+        "may pass 20 lines",
+        "that fits",
+        "keep Bash for",
+        "keep the shell for",
+        "when `graphify-out/graph.json` is in your worktree",
+        "look here for a skill",
+    ];
+    const SHARED: [&str; 3] = [
+        "These rules apply to every task;",
+        "whose output is not short and fixed through",
+        "- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first,",
+    ];
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let folder = root.join("skill-store").join("tdd");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("SKILL.md"),
+        "---\nname: tdd\ndescription: Teaches tdd.\n---\n\nSteps.\n",
+    )
+    .unwrap();
+    let context = || {
+        context_with(
+            &root,
+            LaunchPlugins {
+                skills: vec![EffectiveSkill {
+                    name: "tdd".into(),
+                    folder: folder.clone(),
+                }],
+                servers: vec![command_server("context-mode")],
+            },
+            Vec::new(),
+        )
+    };
+    let worktree = root.join("lead-worktree");
+    fs::create_dir_all(&worktree).unwrap();
+    let lead = private_home(&root, "lead");
+    let installed = context()
+        .with_native_team(&root.join("bin").join("tmux"), &worktree)
+        .install("claude-code", &lead, true)
+        .unwrap();
+    let own = fs::read_to_string(lead.join(STATE).join("instructions.md")).unwrap();
+    let mate = fs::read_to_string(&installed.native().unwrap().instructions).unwrap();
+    drop(installed);
+    let codex = private_home(&root, "codex");
+    let installed = context().install("codex", &codex, true).unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let developer = config["developer_instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(installed);
+    let claude_rules = [
+        ". Use Bash only for short fixed output, state changes and edits. These tools load on demand: first run ToolSearch with `select:",
+        "- Skills: before each task, check the Skills section below and call the Skill tool for every skill there that applies, by its name there, such as `crazyagent:tdd`.",
+        "Check this list before every task and use every skill here that applies to it.",
+    ];
+    let codex_rules = [
+        " MCP server. Use the shell only for short fixed output, state changes and edits.",
+        "- Skills: before each task, check the Skills section below, then read the SKILL.md of every skill there that applies and follow it.",
+        "Check this list before every task and use every skill here that applies to it.",
+    ];
+    for (launch, text, rules) in [
+        ("claude-code", &own, claude_rules),
+        ("native teammate", &mate, claude_rules),
+        ("codex", &developer, codex_rules),
+    ] {
+        for rule in SHARED.iter().chain(rules.iter()) {
+            assert!(text.contains(rule), "{launch} lacks {rule:?}: {text}");
+        }
+        for loose in LOOSE {
+            assert!(
+                !text.contains(loose),
+                "{launch} still says {loose:?}: {text}"
+            );
+        }
+    }
+}
+
 /// T3-15: the Task-start reminder names the exact ToolSearch select string the launch's own
 /// "Tools to use" section gives Claude Code and the approved skills by their Skill tool
 /// names, Codex's context-mode tools on their MCP server and its skills by SKILL.md, and
@@ -1701,7 +1966,7 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
         both.task_start("claude-code", true).as_deref(),
         Some(
             format!(
-                "Task start reminder: before you work on this task, run ToolSearch with `{select}` and use those context-mode tools for any command, test, search or file read whose output may pass 20 lines, and call the Skill tool for each of these skills that fits this task: `crazyagent:brainstorming`, `crazyagent:tdd`."
+                "Task start reminder: before you work on this task, run ToolSearch with `{select}` and run every command, test, search or file read whose output is not short and fixed through those context-mode tools (Bash only for short fixed output, state changes and edits), query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and call the Skill tool for each one that applies: `crazyagent:brainstorming`, `crazyagent:tdd`."
             )
             .as_str()
         )
@@ -1721,7 +1986,7 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
     assert_eq!(
         both.task_start("codex", true).as_deref(),
         Some(
-            "Task start reminder: before you work on this task, use the `ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_search` tools of the `plugin_context-mode_context-mode` MCP server for any command, test, search or file read whose output may pass 20 lines, and read the SKILL.md of each of these skills that fits this task and follow it: `brainstorming`, `tdd`."
+            "Task start reminder: before you work on this task, run every command, test, search or file read whose output is not short and fixed through the `ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_search` tools of the `plugin_context-mode_context-mode` MCP server (the shell only for short fixed output, state changes and edits), query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and read and follow the SKILL.md of each one that applies: `brainstorming`, `tdd`."
         )
     );
     assert_eq!(both.task_start("claude-code", false), None, "tools off");
@@ -1732,14 +1997,14 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
     assert_eq!(
         skills_only.task_start("claude-code", true).as_deref(),
         Some(
-            "Task start reminder: before you work on this task, call the Skill tool for each of these skills that fits this task: `crazyagent:tdd`."
+            "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and call the Skill tool for each one that applies: `crazyagent:tdd`."
         )
     );
     let tools_only = context_with(&root, plugins(Vec::new(), true), Vec::new());
     assert_eq!(
         tools_only.task_start("codex", true).as_deref(),
         Some(
-            "Task start reminder: before you work on this task, use the `ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_fetch_and_index`, `ctx_search` tools of the `plugin_context-mode_context-mode` MCP server for any command, test, search or file read whose output may pass 20 lines."
+            "Task start reminder: before you work on this task, run every command, test, search or file read whose output is not short and fixed through the `ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_fetch_and_index`, `ctx_search` tools of the `plugin_context-mode_context-mode` MCP server (the shell only for short fixed output, state changes and edits), and query the project graph with `graphify query \"<question>\"` before you read or search source."
         )
     );
     let every_tool_off = context_with(
@@ -1988,14 +2253,14 @@ fn the_skills_index_gives_each_skill_its_description_and_path_and_says_check_it_
     assert_eq!(
         index,
         format!(
-            "\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. Use one with the Skill tool, where it is named crazyagent:NAME; without a Skill tool, read its SKILL.md at the path shown.\n\n- skill-000: Does task 0. (/private/tmp/home/crazyagent/plugin/skills/skill-000/SKILL.md)\n- skill-001: {}... (/private/tmp/home/crazyagent/plugin/skills/skill-001/SKILL.md)\n- skill-002 (/private/tmp/home/crazyagent/plugin/skills/skill-002/SKILL.md)\n",
+            "\n## Skills\n\nThe owner approved these skills for this project. Check this list before every task and use every skill here that applies to it. Use one with the Skill tool, where it is named crazyagent:NAME; without a Skill tool, read its SKILL.md at the path shown.\n\n- skill-000: Does task 0. (/private/tmp/home/crazyagent/plugin/skills/skill-000/SKILL.md)\n- skill-001: {}... (/private/tmp/home/crazyagent/plugin/skills/skill-001/SKILL.md)\n- skill-002 (/private/tmp/home/crazyagent/plugin/skills/skill-002/SKILL.md)\n",
             ["word"; 31].join(" ")
         ),
         "a long description is cut at a word within its bound, and a skill whose description cannot be read keeps its name and path"
     );
     assert_eq!(
         skills_index(folder, &skills[..1], false),
-        "\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. To use one, read its SKILL.md at the path shown and follow it.\n\n- skill-000: Does task 0. (/private/tmp/home/crazyagent/plugin/skills/skill-000/SKILL.md)\n",
+        "\n## Skills\n\nThe owner approved these skills for this project. Check this list before every task and use every skill here that applies to it. To use one, read its SKILL.md at the path shown and follow it.\n\n- skill-000: Does task 0. (/private/tmp/home/crazyagent/plugin/skills/skill-000/SKILL.md)\n",
         "a harness with no Skill tool is told to read the file"
     );
     assert_eq!(short_description("one two", 6), "one...");
@@ -2321,16 +2586,24 @@ fn a_fresh_agent_home_starts_context_mode_from_the_engine_install_not_npx() {
     );
 }
 
-/// Starts one MCP server under the agent sandbox and completes the MCP initialize handshake
-/// and a tool listing. Inputs: the sandboxed command, with its program and arguments, and the
-/// time allowed. Output: the seconds the handshake took and the tool names.
-fn mcp_handshake(mut command: std::process::Command, limit: Duration) -> (Duration, Vec<String>) {
+/// Starts one MCP server under the agent sandbox and completes the MCP initialize handshake,
+/// a tool listing and then each given tool call in turn, quoting the end of the server's
+/// stderr when it stops answering. Inputs: the sandboxed command, with its program and
+/// arguments, the `tools/call` params to send and the time allowed for all. Output: the
+/// seconds the handshake took, the tool names and each call's reply.
+fn mcp_handshake(
+    mut command: std::process::Command,
+    calls: &[serde_json::Value],
+    limit: Duration,
+) -> (Duration, Vec<String>, Vec<serde_json::Value>) {
     use std::io::{BufRead, BufReader, Write};
     use std::process::Stdio;
+    const STDERR_TAIL_BYTES: usize = 4096;
+    let errors = tempfile::NamedTempFile::new().unwrap();
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(errors.reopen().unwrap());
     let started = std::time::Instant::now();
     let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -2346,11 +2619,21 @@ fn mcp_handshake(mut command: std::process::Command, limit: Duration) -> (Durati
     let reply = |stdin: &mut std::process::ChildStdin, request: serde_json::Value| {
         writeln!(stdin, "{request}").unwrap();
         stdin.flush().unwrap();
-        let left = limit.saturating_sub(started.elapsed());
-        let line = replies
-            .recv_timeout(left)
-            .unwrap_or_else(|_| panic!("the context-mode server answers within {limit:?}"));
-        serde_json::from_str::<serde_json::Value>(&line.unwrap()).unwrap()
+        loop {
+            let left = limit.saturating_sub(started.elapsed());
+            let line = replies.recv_timeout(left).unwrap_or_else(|_| {
+                let text = fs::read(errors.path()).unwrap_or_default();
+                let tail = &text[text.len().saturating_sub(STDERR_TAIL_BYTES)..];
+                panic!(
+                    "the context-mode server answers within {limit:?}; its stderr ends: {}",
+                    String::from_utf8_lossy(tail)
+                )
+            });
+            let answer = serde_json::from_str::<serde_json::Value>(&line.unwrap()).unwrap();
+            if answer["id"] == request["id"] {
+                break answer;
+            }
+        }
     };
     let hello = reply(
         &mut stdin,
@@ -2378,6 +2661,13 @@ fn mcp_handshake(mut command: std::process::Command, limit: Duration) -> (Durati
         &mut stdin,
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
     );
+    let mut called = Vec::with_capacity(calls.len());
+    for (at, params) in calls.iter().enumerate() {
+        called.push(reply(
+            &mut stdin,
+            serde_json::json!({"jsonrpc": "2.0", "id": 3 + at, "method": "tools/call", "params": params}),
+        ));
+    }
     let _ = child.kill();
     let _ = child.wait();
     let tools = listed["result"]["tools"]
@@ -2386,7 +2676,7 @@ fn mcp_handshake(mut command: std::process::Command, limit: Duration) -> (Durati
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect();
-    (took, tools)
+    (took, tools, called)
 }
 
 /// Finds a program on the test's own PATH without following links, as the setup pack's
@@ -2464,7 +2754,7 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
     sandbox.install(&profile).unwrap();
     let mut server = sandbox.command(&profile, Path::new(&command));
     server.args(&args);
-    let (took, tools) = mcp_handshake(server, CLAUDE_CONNECT_LIMIT);
+    let (took, tools, _) = mcp_handshake(server, &[], CLAUDE_CONNECT_LIMIT);
     assert!(
         took < CLAUDE_CONNECT_LIMIT,
         "the server answers well inside Claude Code's connect limit: {took:?}"
@@ -2477,6 +2767,214 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
         fs::read_dir(&install).unwrap().count() > 0,
         "the shared install stays in place for the next agent"
     );
+}
+
+/// T3-15/18: an agent's `ctx_execute` runs. The engine install of context-mode, started from
+/// the launch's own config under the deny-default profile the runtime builds for a tools-on
+/// agent with its short temp folder, with the harness's variables and the ones Claude Code
+/// adds for an MCP server, runs a script whose temp folder is in that short folder, where the
+/// launch's own `getconf` points context-mode, not in the per-user temp folder the profile
+/// denies.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
+    use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    const MARKER: &str = "ctx-execute-4471";
+    const CALL_LIMIT: Duration = Duration::from_secs(60);
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let (context, _connection, _install) = shared_context_mode(&base);
+    let home = private_folder(&base.join("home"));
+    let scratch = toolchains::make_tmp(&home).unwrap();
+    let installed = context.install("claude-code", &home, true).unwrap();
+    let mcp: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.join(STATE).join("mcp.json")).unwrap())
+            .unwrap();
+    let server = &mcp["mcpServers"]["plugin_context-mode_context-mode"];
+    let args: Vec<&str> = server["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap())
+        .collect();
+
+    let project = private_folder(&base.join("project"));
+    let tmp = private_folder(&base.join("tmp"));
+    let mut sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+        .unwrap()
+        .allow_tools(&Toolchains::grant(
+            &ToolHomes::owner().unwrap(),
+            &[Toolchain::Node],
+        ))
+        .unwrap()
+        .allow_scratch(&scratch)
+        .unwrap();
+    for read in context.read_paths() {
+        sandbox = sandbox.allow_read(read.parent().unwrap()).unwrap();
+    }
+    let profile = base.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    let mut harness = std::process::Command::new(server["command"].as_str().unwrap());
+    harness.args(&args).current_dir(&project);
+    let mut command = sandbox.wrap(&profile, &harness).unwrap();
+    command
+        .env("CLAUDE_PROJECT_DIR", &project)
+        .env("CLAUDECODE", "1");
+    for (name, value) in server["env"].as_object().into_iter().flatten() {
+        command.env(name, value.as_str().unwrap());
+    }
+    let call = serde_json::json!({
+        "name": "ctx_execute",
+        "arguments": {
+            "language": "shell",
+            "code": format!("printf '%s %s\\n' {MARKER} \"$TMPDIR\""),
+        },
+    });
+    let (_, _, replies) = mcp_handshake(command, &[call], CALL_LIMIT);
+    let reply = &replies[0];
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reply["result"]["isError"] != true
+            && text.contains(&format!("{MARKER} {}/.ctx-mode-", scratch.display())),
+        "ctx_execute runs with its temp folder in the agent's own: {reply}"
+    );
+    drop(installed);
+    toolchains::remove_tmp(&home).unwrap();
+}
+
+/// T3-15/18: under the deny-default agent profile with its short temp folder, the agent can
+/// neither change nor replace its launch's own `getconf`, add a program beside it or move its
+/// folder: the file stays the one the engine wrote.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_cannot_change_its_launch_getconf() {
+    use crate::sandbox::toolchains;
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    const CHANGE: &str = r#"printf x 2>/dev/null >> "$1/getconf" && echo changed
+printf x 2>/dev/null > "$1/getconf.new" && mv "$1/getconf.new" "$1/getconf" 2>/dev/null && echo replaced
+mkdir "$1/planted" 2>/dev/null && echo planted
+mv "$1" "$1-moved" 2>/dev/null && echo moved
+[ -f "$1/getconf" ] || echo missing
+exit 0"#;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = private_folder(&root.join("home"));
+    let scratch = toolchains::make_tmp(&home).unwrap();
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .install("claude-code", &home, true)
+        .unwrap();
+    let project = private_folder(&root.join("work"));
+    let tmp = private_folder(&root.join("tmp"));
+    let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+        .unwrap()
+        .allow_scratch(&scratch)
+        .unwrap();
+    let profile = root.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    let bin = home.join(STATE).join("bin");
+    let written = fs::read(bin.join("getconf")).ok();
+    let mut change = sandbox.command(&profile, Path::new("/bin/sh"));
+    change
+        .args(["-c", CHANGE, "sh"])
+        .arg(&bin)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let changed = crate::spawn_gate::output(&mut change).unwrap();
+    assert!(changed.status.success(), "{changed:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&changed.stdout),
+        "",
+        "the agent's getconf stays the one the engine wrote: {changed:?}"
+    );
+    assert!(written.is_some());
+    assert_eq!(fs::read(bin.join("getconf")).ok(), written);
+    drop(installed);
+    toolchains::remove_tmp(&home).unwrap();
+}
+
+/// T3-15/18: the `getconf` each launch writes into its own folder answers
+/// DARWIN_USER_TEMP_DIR with the agent's TMPDIR, ending in a slash as the system one does:
+/// the short temp folder for an agent, the lead's own folder in it for a native lead, and the
+/// shared one for that lead's teammates, whose HOME is their own home. Any other name goes to
+/// the system getconf. The folder leads the harness search path, ahead of the agent's own
+/// git, and goes with the launch's files.
+#[cfg(target_os = "macos")]
+#[test]
+fn each_launch_getconf_answers_its_agent_temp_folder_first_on_the_path() {
+    use crate::sandbox::toolchains;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let worktree = root.join("lead-worktree");
+    fs::create_dir_all(&worktree).unwrap();
+    let tmux = root.join("bin").join("tmux");
+    let agent = private_home(&root, "agent");
+    let lead = private_home(&root, "lead");
+    let agent_tmp = toolchains::make_tmp(&agent).unwrap();
+    let lead_tmp = toolchains::make_tmp(&lead).unwrap();
+    let plain = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .install("claude-code", &agent, true)
+        .unwrap();
+    let native = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_native_team(&tmux, &worktree)
+        .install("claude-code", &lead, true)
+        .unwrap();
+    let piped = |command: &mut std::process::Command| {
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        crate::spawn_gate::output(command).unwrap()
+    };
+    let answer = |home: &Path, user: &Path, name: &str| {
+        let getconf = home.join(STATE).join("bin").join("getconf");
+        let metadata = fs::symlink_metadata(&getconf);
+        assert!(
+            metadata
+                .as_ref()
+                .is_ok_and(|found| found.is_file() && found.mode() & 0o777 == 0o700),
+            "the launch writes its own getconf: {metadata:?}"
+        );
+        let mut run = std::process::Command::new(&getconf);
+        run.arg(name).env_clear().env("HOME", user);
+        let output = piped(&mut run);
+        assert!(output.status.success(), "{name}: {output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let slashed = |folder: &Path| format!("{}/\n", folder.display());
+    assert_eq!(
+        answer(&agent, &agent, "DARWIN_USER_TEMP_DIR"),
+        slashed(&agent_tmp)
+    );
+    assert_eq!(
+        answer(&lead, &lead, "DARWIN_USER_TEMP_DIR"),
+        slashed(&toolchains::native_lead_tmp(&lead_tmp))
+    );
+    assert_eq!(
+        answer(&lead, &mates_home(&lead), "DARWIN_USER_TEMP_DIR"),
+        slashed(&lead_tmp)
+    );
+    let mut system = std::process::Command::new("/usr/bin/getconf");
+    system.arg("ARG_MAX");
+    let system = piped(&mut system);
+    assert_eq!(
+        answer(&agent, &agent, "ARG_MAX").into_bytes(),
+        system.stdout
+    );
+    let bin = agent.join(STATE).join("bin");
+    let path = toolchains::with_agent_git(&agent, "/usr/bin:/bin".to_owned());
+    let entries: Vec<&str> = path.split(':').collect();
+    assert_eq!(entries.first().copied(), bin.to_str(), "{path}");
+    assert_eq!(entries[entries.len() - 2..], ["/usr/bin", "/bin"], "{path}");
+    drop(plain);
+    drop(native);
+    let path = toolchains::with_agent_git(&agent, "/usr/bin:/bin".to_owned());
+    assert!(!path.contains(bin.to_str().unwrap()), "{path}");
+    toolchains::remove_tmp(&agent).unwrap();
+    toolchains::remove_tmp(&lead).unwrap();
 }
 
 #[test]

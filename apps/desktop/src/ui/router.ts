@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "pack", "home", "github", "sandbox", "memory", "usage", "alerts", "profile", "updates"] as const;
-export const PROJECT_TABS = ["overview", "conversation", "agents", "changes", "questions", "context", "process", "settings", "ide"] as const;
+export const PROJECT_TABS = ["overview", "conversation", "agents", "changes", "questions", "context", "process", "metrics", "settings", "ide"] as const;
 export const NEW_PROJECT_STEPS = ["basics", "documents", "work", "pool", "team"] as const;
 const SETTINGS_ACTIONS = ["add", "new", "sign_in"] as const;
 export const ADD_PROJECT_WAYS = ["clone", "folder"] as const;
@@ -22,6 +22,7 @@ export type Route =
   | { name: "project"; id: string; tab: ProjectTab }
   | { name: "add-project"; way: AddProjectWay }
   | { name: "onboarding"; id: string }
+  | { name: "metrics" }
   | { name: "settings"; tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string };
 
 function pick<T extends string>(choices: readonly T[], value: string | null | undefined, fallback: T): T {
@@ -38,6 +39,7 @@ export function parseRoute(hash: string): Route {
   const parts = path.split("/").filter(Boolean);
   const params = new URLSearchParams(query);
   if (parts[0] === "welcome" && parts.length === 1) return { name: "welcome" };
+  if (parts[0] === "metrics" && parts.length === 1) return { name: "metrics" };
   if (parts[0] === "settings" && parts.length <= 2) {
     const tab = pick(SETTINGS_TABS, parts[1], "accounts");
     const action = SETTINGS_ACTIONS.find((choice) => choice === params.get("action"));
@@ -74,6 +76,7 @@ export function formatRoute(route: Route): string {
     case "project": return `#/projects/${encodeURIComponent(route.id)}/${route.tab}`;
     case "add-project": return `#/projects/add/${route.way}`;
     case "onboarding": return `#/projects/${encodeURIComponent(route.id)}/setup`;
+    case "metrics": return "#/metrics";
     case "settings": {
       const account = route.action && route.account ? `&account=${encodeURIComponent(route.account)}` : "";
       if (!route.action && route.tab === "plugins" && route.skill) return `#/settings/plugins?skill=${encodeURIComponent(route.skill)}`;

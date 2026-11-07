@@ -64,9 +64,9 @@ export function compactCount(value: number): string {
   return COMPACT.format(value);
 }
 
-/** Every token a run's model read or wrote, cached or not. Input: the tokens. */
-export function totalTokens(tokens: Tokens): number {
-  return tokens.input + tokens.output + tokens.cache_read + tokens.cache_write;
+/** The headline count usage shows and budgets spend (DEC-117 Q6): new input, cache writes and output, never cache re-reads. Input: the tokens. */
+export function headlineTokens(tokens: Tokens): number {
+  return tokens.input + tokens.output + tokens.cache_write;
 }
 
 /** The share of prompt tokens served from the provider's cache, as a whole percent.
@@ -212,13 +212,15 @@ function Totals({ report }: { report: UsageReport }) {
   const added = report.lines.reduce((sum, row) => sum + row.added, 0);
   const removed = report.lines.reduce((sum, row) => sum + row.removed, 0);
   const unreported = (report.not_reported_by ?? []).join(", ");
-  const onlyUnreported = unreported !== "" && totalTokens(report.total) === 0;
+  const onlyUnreported = unreported !== "" && headlineTokens(report.total) === 0;
   return <>
     <div className="usage-tiles">
       {onlyUnreported
         ? <Tile label="Tokens" value="Not reported" detail={`Usage not reported by ${unreported}`} />
-        : <Tile label="Tokens" value={compactCount(totalTokens(report.total))} detail={`${compactCount(report.total.input)} in, ${compactCount(report.total.output)} out`} />}
-      <Tile label="Cache" value={share === null ? "None" : `${share}%`} detail={`${compactCount(report.total.cache_read)} read, ${compactCount(report.total.cache_write)} written`} />
+        : <Tile label="Tokens" value={compactCount(headlineTokens(report.total))}
+          detail={`${compactCount(report.total.input)} input, ${compactCount(report.total.cache_write)} cache write, ${compactCount(report.total.output)} output`} />}
+      <Tile label="Re-read from cache" value={compactCount(report.total.cache_read)}
+        detail={share === null ? "Billed far lower, not in Tokens" : `${share}% of everything read; billed far lower, not in Tokens`} />
       <Tile label="Runs" value={String(report.runs)} />
       <Tile label="Lines changed" value={`+${compactCount(added)} -${compactCount(removed)}`} />
     </div>
@@ -230,16 +232,17 @@ function UsageTable({ title, rows, name, nowMs }: { title: string; rows: UsageRo
   if (rows.length === 0) return null;
   return <Panel title={title} padded={false}>
     <div className="pj-table-wrap usage-table"><table className="pj-table">
-      <thead><tr><th scope="col">Name</th><th scope="col">Tokens</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cache read</th><th scope="col">Runs</th><th scope="col">Last used</th></tr></thead>
+      <thead><tr><th scope="col">Name</th><th scope="col">Tokens</th><th scope="col">Input</th><th scope="col">Cache write</th><th scope="col">Output</th><th scope="col" className="muted">Cache read</th><th scope="col">Runs</th><th scope="col">Last used</th></tr></thead>
       <tbody>{rows.map((row) => <tr key={row.key}>
         <th scope="row">{name(row.key)}</th>
-        {row.not_reported_by && totalTokens(row.tokens) === 0
-          ? <td colSpan={5}>{tokenText(0, row.not_reported_by)}</td>
+        {row.not_reported_by && headlineTokens(row.tokens) === 0
+          ? <td colSpan={6}>{tokenText(0, row.not_reported_by)}</td>
           : <>
-            <td>{tokenText(totalTokens(row.tokens), row.not_reported_by)}</td>
+            <td>{tokenText(headlineTokens(row.tokens), row.not_reported_by)}</td>
             <td>{compactCount(row.tokens.input)}</td>
+            <td>{compactCount(row.tokens.cache_write)}</td>
             <td>{compactCount(row.tokens.output)}</td>
-            <td>{compactCount(row.tokens.cache_read)}</td>
+            <td className="muted">{compactCount(row.tokens.cache_read)}</td>
             <td>{row.runs}</td>
           </>}
         <td>{agoText(row.last_ms, nowMs)}</td>
@@ -268,13 +271,14 @@ function DaysTable({ days, offset }: { days: DayTokens[]; offset: number }) {
   if (days.length === 0) return null;
   return <Panel title="By day" padded={false}>
     <div className="pj-table-wrap usage-table"><table className="pj-table">
-      <thead><tr><th scope="col">Day</th><th scope="col">Tokens</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cache read</th></tr></thead>
+      <thead><tr><th scope="col">Day</th><th scope="col">Tokens</th><th scope="col">Input</th><th scope="col">Cache write</th><th scope="col">Output</th><th scope="col" className="muted">Cache read</th></tr></thead>
       <tbody>{days.map((day) => <tr key={day.day_ms}>
         <th scope="row">{dayLabel(day.day_ms, offset)}</th>
-        <td>{compactCount(totalTokens(day.tokens))}</td>
+        <td>{compactCount(headlineTokens(day.tokens))}</td>
         <td>{compactCount(day.tokens.input)}</td>
+        <td>{compactCount(day.tokens.cache_write)}</td>
         <td>{compactCount(day.tokens.output)}</td>
-        <td>{compactCount(day.tokens.cache_read)}</td>
+        <td className="muted">{compactCount(day.tokens.cache_read)}</td>
       </tr>)}</tbody>
     </table></div>
   </Panel>;
@@ -381,7 +385,7 @@ export function UsageView({ report, range, names, nowMs, failure, busy, next, on
   if (report.kind === "loading") return <div className="stack">{head}<Skeleton shape="card" count={3} /></div>;
   if (report.kind === "error") return <div className="stack">{head}<LoadError message={usageRefusal(report)} onRetry={onRetry} /></div>;
   const value = report.value;
-  const empty = totalTokens(value.total) === 0 && value.lines.length === 0 && (value.not_reported_by ?? []).length === 0;
+  const empty = headlineTokens(value.total) === 0 && value.lines.length === 0 && (value.not_reported_by ?? []).length === 0;
   return <div className="stack">
     <p className="secondary">Tokens your agents used and each account's limits. Counts come from each run's own record; limits are checked every 10 minutes.</p>
     {head}

@@ -188,6 +188,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "process_import_missing" => "That file doesn't exist. Check the path.".into(),
         "process_import_unsafe" => "That file isn't a plain file you own, so CrazyAgent won't read it.".into(),
         "process_import_unreadable" => "That file couldn't be read. Check it, then try again.".into(),
+        "process_instructions_would_be_empty" => "That would leave agents with no instructions, so nothing was saved; write the instructions they should get first.".into(),
         "process_import_outside" => "That file links outside the project folder, so it stays where it is.".into(),
         "process_import_unmovable" => "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.".into(),
         "process_request_invalid" => "Type the file's full path, starting with / or ~/.".into(),
@@ -201,6 +202,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "process_folder_missing" => "CrazyAgent's data folder is missing. Restart the engine, then try again.".into(),
         "process_folder_unsafe" => "CrazyAgent's data folder isn't a plain folder, so nothing was saved.".into(),
         "process_unavailable" => "Instructions aren't ready in this engine yet.".into(),
+        "process_save_unavailable" => "The engine couldn't save right now, so nothing was saved. Save again.".into(),
         "process_agent_unknown" => "This agent isn't part of this project's team.".into(),
         "process_agent_unsupported" => "CrazyAgent doesn't write instructions for this agent's harness.".into(),
         "agent_instructions_unsafe" => "This agent's instructions file is a link or not a plain file, so CrazyAgent won't read it.".into(),
@@ -210,6 +212,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "trusted_connection_unavailable" => "Not connected to the engine. Try again once it reconnects.".into(),
         "instruction_settings_invalid" => "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.".into(),
         "instruction_settings_unavailable" => "This project's agent settings couldn't be read. Try again.".into(),
+        "instruction_settings_save_unavailable" => "The engine couldn't save right now, so nothing was saved. Change it again.".into(),
         "process_adoption_unavailable" => "Workflow adoption couldn't be read. Try again.".into(),
         other => coded("CrazyAgent couldn't finish that.", other),
     }
@@ -794,7 +797,8 @@ impl ProcessPage {
                 ));
             }
             (ProcessQuery::SaveSettings { project, .. }, Err(code))
-                if code == crate::storage::versioned::STALE_CODE =>
+                if code == crate::storage::versioned::STALE_CODE
+                    || code == "process_outcome_unknown" =>
             {
                 self.settings = None;
                 self.send(
@@ -803,10 +807,16 @@ impl ProcessPage {
                     },
                     ctx,
                 );
-                ctx.say(Message::warning(
-                    "These agent settings changed since you opened them.",
-                    "The page now shows the saved ones; make your change again.",
-                ));
+                ctx.say(match code == crate::storage::versioned::STALE_CODE {
+                    true => Message::warning(
+                        "These agent settings changed since you opened them.",
+                        "The page now shows the saved ones; make your change again.",
+                    ),
+                    false => Message::warning(
+                        "CrazyAgent couldn't confirm these agent settings were saved.",
+                        "The page now shows the saved ones; check them before you change them again.",
+                    ),
+                });
             }
             (ProcessQuery::SaveSettings { .. }, Err(code)) => {
                 ctx.say(Message::error(&message(code), ""));

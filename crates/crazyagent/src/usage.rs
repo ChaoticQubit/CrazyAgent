@@ -7,6 +7,7 @@ use std::time::Duration;
 
 pub mod capture;
 pub mod health;
+pub mod metrics;
 pub mod poll;
 pub mod report;
 pub mod service;
@@ -393,6 +394,27 @@ pub fn record_failure(
         params![account.as_str(), now_ms, code],
     )
     .map_err(storage)?;
+    Ok(())
+}
+
+/// Forgets one removed account's stored limits, so no limits card stays for it.
+/// Inputs: the engine store or a transaction on it, and the account. Output: done, nothing
+/// to do in a store that never kept limits, or `usage_unavailable`.
+pub(crate) fn forget_limits(db: &Connection, account: &CredentialRef) -> Result<(), EngineError> {
+    let kept: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_limits')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if kept {
+        db.execute(
+            "DELETE FROM account_limits WHERE account=?1",
+            params![account.as_str()],
+        )
+        .map_err(storage)?;
+    }
     Ok(())
 }
 

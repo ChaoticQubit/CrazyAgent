@@ -18,6 +18,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::project_setup::ProjectSetup;
     use crazyagent::project_setup::ResearchKind;
     use crazyagent::projects_home::AddMode;
+    use crazyagent::projects_home::AddOverride;
     use crazyagent::protocol::ProjectSpec;
     use crazyagent::sandbox_settings::SandboxSettings;
     use crazyagent::scheduling::ScheduleChange;
@@ -1339,13 +1340,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 source: String,
                 mode: AddMode,
+                overrides: Vec<AddOverride>,
                 generation: u64,
             }
-            let Args { source, mode, generation } = match parse(args) {
+            let Args { source, mode, overrides, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .add_existing_folder(source, mode, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .add_existing_folder(source, mode, overrides, generation) .await }.await;
             routed(result)
         }
         "desktop_start_onboarding" => {
@@ -2350,6 +2352,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state) .await? .usage_report(project_id, since_ms, offset_minutes)?; call.await }.await;
             routed(result)
         }
+        "desktop_usage_metrics" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: Option<String>,
+                since_ms: i64,
+            }
+            let Args { project_id, since_ms } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_metrics(project_id, since_ms)?; call.await }.await;
+            routed(result)
+        }
         "desktop_usage_refresh" => {
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_refresh()?; call.await }.await;
             routed(result)
@@ -2762,6 +2778,19 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
         }
         "desktop_default_process" => {
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.default_process()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_process_given" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.given_text(project_id)?; call.await }.await;
             routed(result)
         }
         "desktop_reveal_project_folder" => {

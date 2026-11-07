@@ -1261,15 +1261,31 @@ export interface FoundProject {
   project_id?: string | null;
 }
 
+/** What the native bridge read about a picked folder: its bytes, or null with the size code when
+ * it could not be measured, its GitHub repository, its linked worktrees and their folders, whether
+ * the engine lets it move and be copied without an override and which git link a Move breaks,
+ * whether it has git, and whether it shares a disk with the projects folder (null when that is
+ * unknown). */
 export interface FolderSize {
-  bytes: number;
+  bytes: number | null;
+  size_problem?: string | null;
   github?: string | null;
   worktrees?: number;
+  worktree_paths?: string[];
   movable?: boolean;
+  git_link?: GitLink;
   copyable?: boolean;
+  git?: boolean;
+  same_volume?: boolean | null;
 }
 
+/** Which git link outside a folder a Move breaks, as the engine reads it. */
+export type GitLink = "none" | "worktrees" | "linked_worktree" | "submodule" | "unreadable";
+
 export type AddFolderMode = "move" | "copy";
+
+/** A soft refusal of one add that the owner was shown and chose to go past for that add only. */
+export type AddOverride = "worktrees" | "linked_checkout" | "too_large";
 
 export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
@@ -1476,9 +1492,10 @@ export function folderSize(path: string): Promise<FolderSize> {
 }
 
 /** Moves or copies an existing folder into the projects home.
- * Inputs: the source folder, move or copy, and a generation. Output: the engine receipt. */
-export function addExistingFolder(source: string, mode: AddFolderMode, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_add_existing_folder", { source, mode, generation });
+ * Inputs: the source folder, move or copy, the soft refusals the owner chose to go past and a
+ * generation. Output: the engine receipt. */
+export function addExistingFolder(source: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_add_existing_folder", { source, mode, overrides, generation });
 }
 
 /** Starts onboarding a found folder on a pool. Inputs: the folder, the pool id and a
@@ -1593,14 +1610,36 @@ export interface GraphEdge {
   agent_label?: string | null;
 }
 
-/** One project's team as a tree of who leads whom, its assignment edges, and the unread
- * message and claim overlap edges of the coordination layer. */
+/** How the upper node of one tree pair relates to the lower one. */
+export type Relation = "leads" | "delegated_to" | "teammate_of";
+
+/** What one tree pair is doing now: a handoff names its task, cut to 160 bytes, and a review
+ * the agent whose change set it reviews by its node name, cut to 96 bytes. */
+export type LiveAction =
+  | { action: "handing_off"; task: string }
+  | { action: "messaging" }
+  | { action: "waiting_on"; owner: boolean }
+  | { action: "reviewing"; agent: string };
+
+/** The one relation edge of a tree pair, from the node that leads to the node it leads,
+ * with the pair's live action while one holds. */
+export interface RelationEdge {
+  from: string;
+  to: string;
+  relation: Relation;
+  live: LiveAction | null;
+}
+
+/** One project's team as a tree of who leads whom, its assignment edges, the unread
+ * message and claim overlap edges of the coordination layer, and one relation edge per
+ * tree pair. */
 export interface TeamGraph {
   project_id: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
   messages?: MessageEdge[];
   overlaps?: OverlapEdge[];
+  relations?: RelationEdge[];
 }
 
 /** A control message on an attached terminal channel: the terminal's size once attached,

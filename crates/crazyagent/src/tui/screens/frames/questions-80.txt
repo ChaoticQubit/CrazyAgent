@@ -1,0 +1,24 @@
+ [◆▪◆▪] CrazyAgent  /  Home  /  Plant Shop  /  Questions
+────────────────────────────────────────────────────────────────────────────────
+  Overview   Conversation   Agents   Changes   Questions   Context   Settings
+───────────────────────────────────────────────━━━━━━━━━────────────────────────
+  Questions  1 waiting
+  > Which hosting region should the sho…  the master                Waiting
+    Should the shop send a weekly newsl…  the master                Dismissed
+
+  Which hosting region should the shop use?
+  From      the master                                             Asked hh:mm
+  Options   1. Europe (recommended)
+            2. North America
+  Context   The shop keeps orders and stock.
+
+
+
+
+
+
+
+
+
+
+ a Answer  d Dismiss  v Read all  ↑↓ Move  Shift-←→ Tabs     1 question  ? Help
