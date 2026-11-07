@@ -265,6 +265,88 @@ pub(super) fn add_plan(
     )
 }
 
+/// What a Delete everything of a project would take, read in one transaction: the project's
+/// name, its folder followed by every repository it declares, and the canonical projects
+/// home. Inputs: the transaction and the project. Output: None for an unknown project, else
+/// the name, the folders and the home, None while no home is set or it cannot be resolved.
+pub(crate) fn delete_target(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+) -> Result<Option<(String, Vec<PathBuf>, Option<PathBuf>)>, EngineError> {
+    let Some(found) = guarded(tx)?
+        .into_iter()
+        .find(|registered| &registered.project_id == project)
+    else {
+        return Ok(None);
+    };
+    let mut folders = vec![found.folder];
+    folders.extend(found.repositories);
+    let home = home::load(tx)?.and_then(|saved| std::fs::canonicalize(saved).ok());
+    Ok(Some((found.name, folders, home)))
+}
+
+const DELETE_ROWS_MAX: i64 = 100_000;
+
+/// Plans a Delete everything before the owner transport moves anything: the owner's grant
+/// and revision, the project, its exact name and every folder inside the projects home are
+/// checked, then Stop all is recorded in the same write, so the runtime stops the project's
+/// agents while the transport waits. Inputs: the connection, database path, admission and the
+/// DeleteProject request. Output: the plan with the project's research jobs, or the refusal
+/// code, with nothing written on a refusal.
+pub(super) fn delete_plan(
+    db: &mut Connection,
+    path: &Path,
+    a: &Admission,
+    request: &OwnerRequest,
+) -> Result<Result<(home::DeletePlan, Vec<i64>), String>, EngineError> {
+    let OwnerOperation::Apply {
+        mutation: OwnerMutation::DeleteProject { project_id, name },
+    } = &request.operation
+    else {
+        return Err(error("delete_plan_invalid"));
+    };
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    if owner_revision(&tx)? != request.expected_revision.value() {
+        return Ok(Err("stale_revision".into()));
+    }
+    let Some((stored, folders, home)) = delete_target(&tx, project_id)? else {
+        return Ok(Err("invalid_project".into()));
+    };
+    if &stored != name {
+        return Ok(Err("delete_name_mismatch".into()));
+    }
+    let Some(home) = home else {
+        return Ok(Err("projects_home_unset".into()));
+    };
+    if let Err(refusal) = home::plan_delete(&home, &folders) {
+        return Ok(Err(refusal.0));
+    }
+    let ids = |sql: &str| -> Result<Vec<i64>, EngineError> {
+        let mut statement = tx.prepare(sql).map_err(error)?;
+        let rows = statement
+            .query_map(params![project_id.as_str(), DELETE_ROWS_MAX], |row| {
+                row.get(0)
+            })
+            .map_err(error)?;
+        rows.collect::<Result<_, _>>().map_err(error)
+    };
+    let agents = ids("SELECT id FROM team_agents WHERE project=?1 ORDER BY id LIMIT ?2")?;
+    let research = ids("SELECT id FROM research_jobs WHERE project=?1 ORDER BY id LIMIT ?2")?;
+    crate::team::pause(&tx, project_id, crate::team::now_ms())?;
+    tx.commit().map_err(error)?;
+    let plan = home::DeletePlan {
+        database: path.to_path_buf(),
+        project: project_id.clone(),
+        home,
+        folders,
+        agents,
+    };
+    Ok(Ok((plan, research)))
+}
+
 /// Plans a MoveProjectsHome that moves the project folders and records the
 /// move as pending before any disk work, so a move whose result is never
 /// recorded is still finished from what landed on disk. The pending record is

@@ -162,7 +162,7 @@ function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly
       ...replaced.map((item) => ({ label: `Open ${item.label}`, icon: item.icon, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/${item.id}`) })),
       { label: "Show folder in Finder", icon: "folder-open", onSelect: () => void reveal() },
       { label: "Pause all agents", icon: "circle-pause", onSelect: askPause },
-      { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove`) },
+      { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove&ask=remove`) },
     ]} />
     <ConfirmDialog open={pausing} title="Pause all agents?" confirmLabel="Pause all agents" cancelLabel="Keep working" pending={busy}
       onCancel={() => setPausing(false)} onConfirm={() => void pause()}>

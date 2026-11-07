@@ -306,7 +306,10 @@ impl OwnerController {
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.project_setup(project_id.clone()).await?;
-        self.begin_mutation(OwnerMutation::DeleteProject { project_id, name }, generation)?;
+        self.begin_mutation(
+            OwnerMutation::DeleteProject { project_id, name },
+            generation,
+        )?;
         self.send_pending().await
     }
 

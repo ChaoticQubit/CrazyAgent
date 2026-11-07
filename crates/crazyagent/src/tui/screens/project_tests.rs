@@ -2096,9 +2096,15 @@ fn remove_preselects_the_dashboard_choice_and_deletes_only_after_the_exact_name(
         "nothing is sent before the name is typed"
     );
     for letter in "Gone app ".chars() {
-        assert_eq!(screen.key(key(KeyCode::Char(letter))), ProjectReply::Handled);
+        assert_eq!(
+            screen.key(key(KeyCode::Char(letter))),
+            ProjectReply::Handled
+        );
     }
-    assert!(screen.confirm_remove, "typing n or y is text, not an answer");
+    assert!(
+        screen.confirm_remove,
+        "typing n or y is text, not an answer"
+    );
     assert_eq!(
         screen.key(key(KeyCode::Enter)),
         ProjectReply::Handled,
@@ -2120,7 +2126,10 @@ fn remove_preselects_the_dashboard_choice_and_deletes_only_after_the_exact_name(
     let read = screen.next_query(60).unwrap();
     screen.apply(&read, Ok(SetupView::Removal(Box::new(removal(false)))));
     let shown = text(&project_screen(&mut screen, 90, 30, &Look::plain()).rows);
-    assert!(shown.contains("Remove from dashboard (keep files)"), "{shown}");
+    assert!(
+        shown.contains("Remove from dashboard (keep files)"),
+        "{shown}"
+    );
     assert!(
         !shown.contains("Delete everything"),
         "a project outside the projects home offers no delete: {shown}"

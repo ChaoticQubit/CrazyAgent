@@ -1,6 +1,8 @@
 use super::*;
 use crate::project_setup::{NewProjectPlan, Staged};
-use crate::projects_home::{AddMode, AddOverride, AddPlan, HomeEffect, MovePlan, folder_size};
+use crate::projects_home::{
+    AddMode, AddOverride, AddPlan, DeletePlan, HomeEffect, MovePlan, folder_size,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
@@ -13,12 +15,14 @@ enum Step {
     Record(HomeEffect),
     Staged(Result<Staged, String>),
     Size(u64),
+    Deleted(Result<(DeletePlan, Vec<i64>), String>),
 }
 
 enum Work {
     Add(AddPlan),
     Move(MovePlan),
     New(NewProjectPlan),
+    Delete(DeletePlan, Vec<i64>),
 }
 
 impl Work {
@@ -27,6 +31,7 @@ impl Work {
             Self::Add(_) => "home_add_interrupted",
             Self::Move(_) => "home_move_interrupted",
             Self::New(_) => "home_new_project_interrupted",
+            Self::Delete(..) => "project_delete_interrupted",
         }
     }
 
@@ -38,6 +43,7 @@ impl Work {
             }
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::New(plan) => Step::Staged(plan.run()),
+            Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| (plan, research))),
         }
     }
 }
@@ -49,8 +55,9 @@ enum Planned {
 
 /// True for the owner requests that touch folders outside the engine data:
 /// AddExistingFolder, MoveProjectsHome that moves the projects, SetupProject
-/// (New Project), FolderSize and ProjectFiles. These run their slow disk work
-/// here, off the storage actor, and only then reach the engine database.
+/// (New Project), DeleteProject (Delete everything), FolderSize and ProjectFiles.
+/// These run their slow disk work here, off the storage actor, and only then
+/// reach the engine database.
 pub(super) fn handles(request: &OwnerRequest) -> bool {
     matches!(
         &request.operation,
@@ -61,6 +68,7 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
                     ..
                 }
                 | OwnerMutation::SetupProject { .. }
+                | OwnerMutation::DeleteProject { .. }
         } | OwnerOperation::Read {
             query: OwnerRead::FolderSize { .. } | OwnerRead::ProjectFiles { .. }
         }
@@ -144,6 +152,10 @@ pub(super) async fn serve(
         Ok(Step::Staged(Ok(staged))) => Some(staged.staging().to_path_buf()),
         _ => None,
     };
+    let deleted = match &step {
+        Ok(Step::Deleted(Ok((plan, research)))) => Some((plan.clone(), research.clone())),
+        _ => None,
+    };
     let answer = async {
         let _barrier = engine.owner_egress.write().await;
         let result = match authority.authenticate(packet) {
@@ -157,9 +169,21 @@ pub(super) async fn serve(
         {
             remove_staging(staging).await;
         }
-        write_owner_reply(stream, result, id, mutation).await
+        let removed = matches!(
+            &result,
+            Ok(OwnerReply { response: OwnerResponse::Applied { operation }, .. })
+                if operation.result == OwnerResult::Applied && !operation.historical_replay
+        );
+        (
+            write_owner_reply(stream, result, id, mutation).await,
+            removed,
+        )
     };
     let answered = tokio::time::timeout_at(deadline, answer).await;
+    if let (Ok((_, true)), Some((plan, research))) = (&answered, deleted) {
+        let _ = tokio::task::spawn_blocking(move || plan.remove_engine_files(&research)).await;
+    }
+    let answered = answered.map(|(written, _)| written);
     if moving
         && let Err(e) = engine
             .owner_job(|reply| Job::HomeMoveSettle(exchange, ran, reply))
@@ -224,6 +248,18 @@ async fn plan(
                 })
                 .await
                 .map(Work::Move)
+        }
+        OwnerMutation::DeleteProject { .. } => {
+            let request = Box::new(request.clone());
+            return Ok(
+                match engine
+                    .owner_job(|reply| Job::DeletePlan(a.clone(), request, reply))
+                    .await?
+                {
+                    Ok((plan, research)) => Planned::Work(Work::Delete(plan, research)),
+                    Err(code) => Planned::Step(Step::Deleted(Err(code))),
+                },
+            );
         }
         OwnerMutation::SetupProject { .. } => {
             let request = Box::new(request.clone());
@@ -366,6 +402,13 @@ async fn finish(
         Step::Staged(staged) => OwnerResponse::Applied {
             operation: engine
                 .owner_job(|reply| Job::SetupRecord(a.clone(), Box::new(request), staged, reply))
+                .await?,
+        },
+        Step::Deleted(outcome) => OwnerResponse::Applied {
+            operation: engine
+                .owner_job(|reply| {
+                    Job::DeleteRecord(a.clone(), Box::new(request), outcome.map(|_| ()), reply)
+                })
                 .await?,
         },
         Step::Size(bytes) => {

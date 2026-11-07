@@ -128,9 +128,8 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
     stopper.join().unwrap();
     assert_eq!(*moved.borrow(), vec![web.clone(), api.clone()]);
 
-    let first_fails = |_: &Path| -> Result<(), EngineError> {
-        Err(EngineError("home_trash_failed".into()))
-    };
+    let first_fails =
+        |_: &Path| -> Result<(), EngineError> { Err(EngineError("home_trash_failed".into())) };
     assert_eq!(
         plan.run_with(std::time::Duration::from_secs(1), &first_fails),
         Err("home_trash_failed".to_owned())

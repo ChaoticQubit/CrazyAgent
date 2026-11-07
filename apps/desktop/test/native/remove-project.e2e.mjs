@@ -176,7 +176,7 @@ test("Delete everything lists the loss, waits for the typed name, then moves the
   execFileSync(SQLITE, [run.database, `INSERT INTO usage_tokens VALUES ((strftime('%s','now')/3600)*3600000,'agent','${id}','local-pool','local-account','1','rcli','s1',1200,300,8000,0)`]);
   await onPage("delete", async (page, me) => {
     await openRemove(page, me, id, name);
-    await me.click(DELETE, "dialog[open] label");
+    await me.click(DELETE, "dialog[open] input[type=radio]");
     await me.waitFor("the loss list and the name box", (text) => text.includes(folder) && text.includes("Type"));
     let shown = await dialog(page);
     assert.equal(shown.checked, "everything");

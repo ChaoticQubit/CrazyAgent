@@ -10,6 +10,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 pub const RECLAIMABLE_MAX: usize = 32;
 const CANDIDATES_MAX: usize = 2 * RECLAIMABLE_MAX;
 const DISK_ENTRIES_MAX: usize = 200_000;
+const LOSSES_MAX: usize = 256;
 
 static RUNNING: Mutex<()> = Mutex::new(());
 
@@ -82,8 +83,129 @@ pub fn removal_loss(
     project: &ProjectId,
     now_ms: i64,
 ) -> Result<Vec<AgentLoss>, EngineError> {
-    let _ = (db, project, now_ms);
-    Ok(Vec::new())
+    let _running = running();
+    let now = landing_time(now_ms)?;
+    let agents: Vec<TeamAgent> = {
+        let mut statement = db
+            .prepare(&format!(
+                "SELECT {AGENT_COLUMNS} FROM team_agents WHERE project=?1
+                 AND id IN (SELECT agent FROM team_worktrees WHERE project=?1)
+                 ORDER BY id LIMIT ?2"
+            ))
+            .map_err(unavailable)?;
+        statement
+            .query_map(params![project.as_str(), LOSSES_MAX as i64], agent_row)
+            .map_err(unavailable)?
+            .collect::<Result<_, _>>()
+            .map_err(unavailable)?
+    };
+    let mut losses = Vec::new();
+    for agent in agents {
+        let Some(place) = place(db, Record::Live, project, agent.id)? else {
+            continue;
+        };
+        if missing(&place.worktree) {
+            continue;
+        }
+        let code = match crate::landing::retire_blocker(
+            db,
+            &place.repository,
+            &place.worktree,
+            &place.git_dir,
+            now,
+        ) {
+            Ok(None) => continue,
+            Ok(Some(code)) => code,
+            Err(_) => "cleanup_worktree_unreadable",
+        };
+        losses.push(AgentLoss {
+            id: agent.id,
+            label: agent.label,
+            code: code.into(),
+        });
+    }
+    assert!(losses.len() <= LOSSES_MAX);
+    Ok(losses)
+}
+
+/// Reads what removing a project would do, before anything stops: its stored name and
+/// folders, whether Delete everything may move them (every folder a real folder strictly
+/// inside the projects home), its running agents, its open change sets and each agent's
+/// loss. Inputs: the store, the project and the time now. Output: the preview, or
+/// `invalid_project` for a project the engine does not know.
+pub fn removal_preview(
+    db: &mut Connection,
+    project: &ProjectId,
+    now_ms: i64,
+) -> Result<RemovalPreview, EngineError> {
+    let (name, folders, home) = crate::storage::delete_target(db, project)?
+        .ok_or_else(|| EngineError("invalid_project".into()))?;
+    let moved = home.and_then(|home| crate::projects_home::plan_delete(&home, &folders).ok());
+    let can_delete = moved.as_ref().is_some_and(|moved| !moved.is_empty());
+    let shown = match moved {
+        Some(moved) if can_delete => moved,
+        _ => folders,
+    };
+    let running: Vec<String> = {
+        let mut statement = db
+            .prepare(&format!(
+                "SELECT {AGENT_COLUMNS} FROM team_agents WHERE project=?1
+                 AND status NOT IN ('stopped','failed') ORDER BY id LIMIT ?2"
+            ))
+            .map_err(unavailable)?;
+        statement
+            .query_map(params![project.as_str(), LOSSES_MAX as i64], agent_row)
+            .map_err(unavailable)?
+            .map(|agent| agent.map(|agent| agent.label))
+            .collect::<Result<_, _>>()
+            .map_err(unavailable)?
+    };
+    let open: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM landing_change_sets WHERE project=?1
+             AND state IN ('pending','conflict','updating')",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    Ok(RemovalPreview {
+        name,
+        folders: shown
+            .iter()
+            .map(|folder| folder.to_string_lossy().into_owned())
+            .collect(),
+        can_delete,
+        running,
+        open_change_sets: u32::try_from(open).unwrap_or(u32::MAX),
+        losses: removal_loss(db, project, now_ms)?,
+    })
+}
+
+/// Says what Delete everything would lose, one plain line each, in the words the desktop
+/// dialog uses. Input: the preview. Output: the running agents, then the open change sets,
+/// then each agent's unlanded work.
+pub fn loss_lines(preview: &RemovalPreview) -> Vec<String> {
+    let mut lines: Vec<String> = preview
+        .running
+        .iter()
+        .map(|label| format!("{label} is running and will be stopped"))
+        .collect();
+    match preview.open_change_sets {
+        0 => {}
+        1 => lines.push("1 change set not accepted or discarded".into()),
+        count => lines.push(format!("{count} change sets not accepted or discarded")),
+    }
+    lines.extend(preview.losses.iter().map(|loss| {
+        let what = match loss.code.as_str() {
+            "cleanup_worktree_dirty" => "has uncommitted edits",
+            "cleanup_worktree_unreadable" => "may have uncommitted edits",
+            "cleanup_commits_unlanded" | "cleanup_refs_unlanded" => "has commits that never landed",
+            "cleanup_changes_open" => "has a change set not accepted",
+            _ => "has work that never landed",
+        };
+        format!("{} {what}", loss.label)
+    }));
+    lines
 }
 
 /// Where one agent's worktree lives: the owner's checkout root, the worktree and its git

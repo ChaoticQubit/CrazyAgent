@@ -2,12 +2,12 @@ import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api"
 import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
-import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
+import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, RemovalPreview, StoredSetup } from "../../api-projects";
 import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
 import { AccessLevels, FULL_ACCESS_WARNING, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
-import { Button, ConfirmDialog, Segmented, Select } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -17,6 +17,8 @@ import { basicsErrors, draftOf, editRequest, poolName, researchChoices, teamVali
 import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
+import { RemoveDialogView, deleteReady } from "./remove-dialog";
+import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
 import { SessionContext, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
@@ -38,10 +40,14 @@ const SECTIONS = [
 
 type SectionId = typeof SECTIONS[number]["id"];
 
-function hashSection(): string | null {
+function hashParam(name: string): string | null {
   if (typeof window === "undefined") return null;
   const query = window.location.hash.split("?")[1];
-  return query ? new URLSearchParams(query).get("section") : null;
+  return query ? new URLSearchParams(query).get(name) : null;
+}
+
+function hashSection(): string | null {
+  return hashParam("section");
 }
 
 /** The project setup Project Settings saves: the stored details with this team, as the engine
@@ -182,13 +188,28 @@ export function removeLine(folder: string | null): string {
 
 function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {
   const session = useContext(SessionContext);
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState(() => hashParam("ask") === "remove");
+  const [preview, setPreview] = useState<Result<RemovalPreview>>();
+  const [choice, setChoice] = useState<RemoveChoice>("dashboard");
+  const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const line = removeLine(setup ? projectFolder(setup.folder) : null);
+  const read = preview?.kind === "ok" ? preview.value : null;
+  useEffect(() => {
+    if (!confirming) return;
+    let live = true;
+    setPreview(undefined);
+    setChoice("dashboard");
+    setTyped("");
+    void loadRemovalPreview(data.id).then((result) => { if (live) setPreview(result); });
+    return () => { live = false; };
+  }, [confirming, data.id]);
   async function remove() {
+    const deleting = choice === "everything";
+    if (deleting && !deleteReady(read, typed)) return;
     setBusy(true);
-    const result = await removeProject(data.id, nextGeneration());
+    const result = await removeProject(data.id, nextGeneration(), deleting ? typed : null);
     setBusy(false);
     setConfirming(false);
     if (result.kind === "not_ready") return setNote("Not ready yet: removing a project isn't in this build.");
@@ -196,7 +217,8 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     const state = receiptState(result.value);
     if (state.kind === "applied") {
       await session?.refreshProjects();
-      data.notify(`${data.name || "The project"} was removed. Its folder stays on disk.`);
+      const name = data.name || "The project";
+      data.notify(deleting ? `${name} was deleted. Its folder is in the Trash.` : `${name} was removed. Its folder stays on disk.`);
       data.navigate("/home");
       return;
     }
@@ -207,10 +229,15 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     <p>Remove {displayText(data.name)} from CrazyAgent? {displayText(line)}</p>
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><button type="button" className="btn danger" onClick={() => setConfirming(true)}>Remove project</button></div>
-    <ConfirmDialog open={confirming} title={`Remove ${displayText(data.name)} from CrazyAgent?`} confirmLabel="Remove project" cancelLabel="Keep project" pending={busy}
-      onCancel={() => setConfirming(false)} onConfirm={() => void remove()}>
-      {displayText(line)}
-    </ConfirmDialog>
+    <Dialog open={confirming} title={`Remove ${displayText(data.name)} from CrazyAgent?`} onClose={() => setConfirming(false)} busy={busy} wide>
+      {preview === undefined
+        ? <p className="pj-muted" role="status">Reading what removing would do...</p>
+        : <>
+          {preview.kind !== "ok" && <p className="pj-note warn" role="status">We couldn't read what deleting would remove, so only Remove from dashboard is offered.</p>}
+          <RemoveDialogView preview={read} choice={choice} typed={typed} pending={busy} onChoice={setChoice} onTyped={setTyped}
+            onConfirm={() => void remove()} onCancel={() => setConfirming(false)} />
+        </>}
+    </Dialog>
   </div>;
 }
 

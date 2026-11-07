@@ -2595,6 +2595,7 @@ fn remove(
     }
     crate::scheduling::forget_project(tx, project_id.as_str())?;
     crate::coord::forget_project(tx, project_id)?;
+    crate::usage::forget_project(tx, project_id.as_str())?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
@@ -2617,6 +2618,25 @@ fn remove(
     assert_eq!(removed, 1);
     crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
+}
+
+/// Records a Delete everything once the owner transport finished its disk work: the
+/// project's records go as in Remove from dashboard when every folder reached the Trash, and
+/// otherwise the refusal is kept with nothing removed. Inputs: the transaction, the action,
+/// the transport's outcome and the revision. Output: the outcome to record.
+pub(crate) fn record_delete(
+    tx: &Transaction<'_>,
+    action: &SetupAction,
+    outcome: &Result<(), String>,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    let SetupAction::Delete { project_id, .. } = action else {
+        return Err(failure("delete_record_invalid"));
+    };
+    match outcome {
+        Ok(()) => remove(tx, project_id, revision),
+        Err(code) => Ok(rejected(code)),
+    }
 }
 
 /// The team a New Project gets and the folder it lands in, after the checks

@@ -697,6 +697,7 @@ pub(in crate::tui) struct ProjectScreen {
     agent_policy_read_ms: Option<i64>,
     access_stale: bool,
     memories_read_ms: Option<i64>,
+    removal_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
     pub setup_due: bool,
     waiting: Option<SetupQuery>,
@@ -774,6 +775,7 @@ impl ProjectScreen {
             agent_policy_read_ms: None,
             access_stale: false,
             memories_read_ms: None,
+            removal_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
             waiting: None,
@@ -788,7 +790,7 @@ impl ProjectScreen {
         self.reading = false;
         self.confirm_delete = None;
         self.confirm_stop = None;
-        self.confirm_remove = false;
+        self.close_remove();
         self.confirm_plan = None;
         self.adding = None;
         self.folders = None;
@@ -814,7 +816,9 @@ impl ProjectScreen {
         let project = self.project.clone();
         let due = |last: Option<i64>| last.is_none_or(|last| now_ms - last >= REFRESH_MS);
         let setup_wanted = (self.setup.is_none() || self.setup_due) && !self.setup_missing;
-        let query = if setup_wanted && due(self.setup_failed_ms) {
+        let query = if self.confirm_remove && self.removal.is_none() && due(self.removal_read_ms) {
+            SetupQuery::Removal { project }
+        } else if setup_wanted && due(self.setup_failed_ms) {
             SetupQuery::Setup { project }
         } else if self.setup_missing || self.setup.is_none() {
             return None;
@@ -967,6 +971,7 @@ impl ProjectScreen {
                         self.agent_policy_read_ms = Some(self.now_ms);
                     }
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
+                    SetupQuery::Removal { .. } => self.removal_read_ms = Some(self.now_ms),
                     SetupQuery::Item { path, offset, .. } => {
                         if let Some(preview) = self
                             .preview
@@ -1092,11 +1097,19 @@ impl ProjectScreen {
                     crate::tui::screens::team::unopened(&why)
                 ));
             }
+            SetupView::Removal(preview) => {
+                self.removal_read_ms = Some(self.now_ms);
+                if self.confirm_remove {
+                    if !preview.can_delete {
+                        self.remove_choice = RemoveChoice::Dashboard;
+                    }
+                    self.removal = Some(*preview);
+                }
+            }
             SetupView::Catalog(_)
             | SetupView::Team(_)
             | SetupView::TeamMessages(_)
             | SetupView::CoordQuestions(_)
-            | SetupView::Removal(_)
             | SetupView::Library(_) => {}
         }
         self.assert_consistent();
@@ -1203,7 +1216,7 @@ impl ProjectScreen {
                 }
             }
             SetupQuery::Change {
-                action: SetupAction::Remove { .. },
+                action: SetupAction::Remove { .. } | SetupAction::Delete { .. },
                 ..
             } => self.removed = applied,
             SetupQuery::Change {
@@ -1426,19 +1439,7 @@ impl ProjectScreen {
             return self.general_key(key);
         }
         if self.confirm_remove {
-            return match key.code {
-                KeyCode::Char('y') => {
-                    self.confirm_remove = false;
-                    ProjectReply::Change(Box::new(SetupAction::Remove {
-                        project_id: self.project.clone(),
-                    }))
-                }
-                KeyCode::Char('n') | KeyCode::Esc => {
-                    self.confirm_remove = false;
-                    ProjectReply::Handled
-                }
-                _ => ProjectReply::Handled,
-            };
+            return self.remove_key(key);
         }
         if let Some(cursor) = self.pool_picker {
             return self.picker_key(key, cursor);
@@ -2224,6 +2225,90 @@ impl ProjectScreen {
         }
     }
 
+    /// Answers one key in the remove ask. Remove from dashboard sends on y; Delete everything
+    /// is offered only when the preview allows it and sends on Enter once the typed text is the
+    /// project's exact name. Takes the key. Returns the change to send, or Handled.
+    fn remove_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let can_delete = self
+            .removal
+            .as_ref()
+            .is_some_and(|removal| removal.can_delete);
+        if key.code == KeyCode::Esc {
+            self.close_remove();
+            return ProjectReply::Handled;
+        }
+        if can_delete
+            && matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab
+            )
+        {
+            self.remove_choice = match self.remove_choice {
+                RemoveChoice::Dashboard => RemoveChoice::Everything,
+                RemoveChoice::Everything => RemoveChoice::Dashboard,
+            };
+            return ProjectReply::Handled;
+        }
+        match self.remove_choice {
+            RemoveChoice::Dashboard => match key.code {
+                KeyCode::Char('y') => {
+                    self.close_remove();
+                    ProjectReply::Change(Box::new(SetupAction::Remove {
+                        project_id: self.project.clone(),
+                    }))
+                }
+                KeyCode::Char('n') => {
+                    self.close_remove();
+                    ProjectReply::Handled
+                }
+                _ => ProjectReply::Handled,
+            },
+            RemoveChoice::Everything => {
+                match key.code {
+                    KeyCode::Enter => {
+                        let name = self
+                            .removal
+                            .as_ref()
+                            .filter(|removal| {
+                                removal.can_delete && removal.name == self.remove_typed
+                            })
+                            .map(|removal| removal.name.clone());
+                        let Some(name) = name else {
+                            self.problem =
+                                Some("Type the project's exact name to delete everything.".into());
+                            return ProjectReply::Handled;
+                        };
+                        self.close_remove();
+                        return ProjectReply::Change(Box::new(SetupAction::Delete {
+                            project_id: self.project.clone(),
+                            name,
+                        }));
+                    }
+                    KeyCode::Backspace => {
+                        self.remove_typed.pop();
+                    }
+                    KeyCode::Char(letter)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && self.remove_typed.len() + letter.len_utf8() <= NAME_BYTES_MAX =>
+                    {
+                        self.remove_typed.push(letter);
+                    }
+                    _ => {}
+                }
+                ProjectReply::Handled
+            }
+        }
+    }
+
+    /// Closes the remove ask and forgets its preview, choice and typed name.
+    /// Takes the screen. Returns nothing.
+    fn close_remove(&mut self) {
+        self.confirm_remove = false;
+        self.removal = None;
+        self.remove_choice = RemoveChoice::Dashboard;
+        self.remove_typed.clear();
+    }
+
     /// Moves the pool picker or settles it. The rows are the pools, then "No pool" last.
     /// Takes the key and the cursor. Returns the chosen pool, None for "No pool", or Handled.
     fn picker_key(&mut self, key: KeyEvent, cursor: usize) -> ProjectReply {
@@ -2282,7 +2367,9 @@ impl ProjectScreen {
                 ProjectReply::Handled
             }
             KeyCode::Char('x') => {
+                self.close_remove();
                 self.confirm_remove = true;
+                self.removal_read_ms = None;
                 ProjectReply::Handled
             }
             KeyCode::Char('f') => {
@@ -2658,6 +2745,16 @@ impl ProjectScreen {
             self.confirm_remove,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
+        if self.remove_choice == RemoveChoice::Everything {
+            assert!(self.confirm_remove);
+            assert!(
+                self.removal
+                    .as_ref()
+                    .is_some_and(|removal| removal.can_delete)
+            );
+        }
+        assert!(self.confirm_remove || (self.removal.is_none() && self.remove_typed.is_empty()));
+        assert!(self.remove_typed.len() <= NAME_BYTES_MAX);
         if let Some(review) = &self.review {
             assert!(review.scroll < review.lines().len().max(1));
         }

@@ -6,8 +6,8 @@ use super::new_project_view::{
 };
 use super::planning_line::{planning, planning_value};
 use super::project::{
-    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, Picks, ProjectScreen, REVIEW_ROWS, Speaker,
-    Tab, Transcript, memory_source, research_kind,
+    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, Picks, ProjectScreen, REVIEW_ROWS,
+    RemoveChoice, Speaker, Tab, Transcript, memory_source, research_kind,
 };
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render};
@@ -19,6 +19,10 @@ use crate::project_setup::{
 use ratatui::style::Style;
 
 const SPINNER: &str = "\u{283c}";
+const REMOVE_BOX: usize = 64;
+const REMOVE_BOX_MIN: usize = 32;
+const REMOVE_FOLDERS_SHOWN: usize = 3;
+const REMOVE_LOSSES_SHOWN: usize = 6;
 
 /// The project tabs for the tab strip: each label after its section glyph, with the count of
 /// running agents on Agents. When the labels with glyphs and the narrowest gaps do not fit
@@ -402,26 +406,10 @@ pub(in crate::tui) fn project_screen(
         };
     }
     if screen.confirm_remove {
-        let mut body = vec![Row::of(
-            format!("Remove {} from CrazyAgent?", screen.name),
-            look.fg,
-        )];
-        body.extend(
-            wrap_words(
-                "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
-                50,
-            )
-            .into_iter()
-            .map(|line| Row::of(line, look.muted)),
-        );
-        body.push(Row::default());
-        body.push(
-            Row::of("[ Remove project ]", look.fg)
-                .push("   ", Style::new())
-                .push("[> Keep project ]", look.selection),
-        );
-        rows = modal(&rows, width, 56, "Remove project", body, 5, look);
-        help = vec![("y", "Remove"), ("n", "Keep"), ("Esc", "Keep")];
+        let box_width = REMOVE_BOX.min(width).max(REMOVE_BOX_MIN);
+        let (body, keys) = remove_ask(screen, box_width - 4, look);
+        rows = modal(&rows, width, box_width, "Remove project", body, 2, look);
+        help = keys;
     }
     if let Some(path) = &screen.confirm_delete {
         let name = path.rsplit('/').next().unwrap_or(path).to_owned();
@@ -565,6 +553,106 @@ fn header_status(running: usize, look: &Look) -> Option<Row> {
 }
 
 type Help = Vec<(&'static str, &'static str)>;
+
+/// Draws the remove ask: Remove from dashboard, which keeps every file, and Delete everything
+/// when the engine's preview allows it, with the folders it moves to the Trash, what would be
+/// lost and the name typed so far. Inputs: the screen, the box's inner width and the look.
+/// Output: the box rows and the help keys.
+fn remove_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> (Vec<Row>, Help) {
+    assert!(inner >= REMOVE_BOX_MIN - 4);
+    let removal = screen.removal.as_ref();
+    let can_delete = removal.is_some_and(|removal| removal.can_delete);
+    let everything = screen.remove_choice == RemoveChoice::Everything;
+    assert!(!everything || can_delete);
+    let name = removal.map_or(screen.name.as_str(), |removal| removal.name.as_str());
+    let pick = |chosen: bool, label: &str| {
+        let mark = if chosen { "(*)" } else { "( )" };
+        let style = if chosen { look.selection } else { look.fg };
+        Row::of(format!("{mark} {label}"), style)
+    };
+    let indented = |line: &str, style: Style| Row::of(format!("    {line}"), style);
+    let mut body = vec![
+        Row::of(format!("Remove {name} from CrazyAgent?"), look.fg),
+        Row::default(),
+        pick(!everything, "Remove from dashboard (keep files)"),
+    ];
+    body.extend(
+        wrap_words(
+            "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
+            inner - 4,
+        )
+        .iter()
+        .map(|line| indented(line, look.muted)),
+    );
+    match removal {
+        None => {
+            body.push(Row::default());
+            body.push(Row::of("Reading what removing would do...", look.muted));
+        }
+        Some(removal) if removal.can_delete => {
+            body.push(Row::default());
+            body.push(pick(everything, "Delete everything"));
+            body.push(indented("Moves to the Trash:", look.muted));
+            for folder in removal.folders.iter().take(REMOVE_FOLDERS_SHOWN) {
+                for line in wrap_words(folder, inner - 6) {
+                    body.push(indented(&format!("  {line}"), look.fg));
+                }
+            }
+            if removal.folders.len() > REMOVE_FOLDERS_SHOWN {
+                let more = removal.folders.len() - REMOVE_FOLDERS_SHOWN;
+                body.push(indented(&format!("  and {more} more"), look.muted));
+            }
+            let losses = crate::team::cleanup::loss_lines(removal);
+            if losses.is_empty() {
+                body.push(indented(
+                    "No agent is running and no work is unlanded.",
+                    look.muted,
+                ));
+            }
+            for loss in losses.iter().take(REMOVE_LOSSES_SHOWN) {
+                for line in wrap_words(loss, inner - 4) {
+                    body.push(indented(&line, look.warning));
+                }
+            }
+            if losses.len() > REMOVE_LOSSES_SHOWN {
+                let more = losses.len() - REMOVE_LOSSES_SHOWN;
+                body.push(indented(&format!("and {more} more"), look.warning));
+            }
+            let typed = if everything { look.fg } else { look.muted };
+            body.push(indented(
+                &format!("Type the project name: {}", screen.remove_typed),
+                typed,
+            ));
+        }
+        Some(_) => {}
+    }
+    body.push(Row::default());
+    let send = if everything {
+        "[ Delete everything ]"
+    } else {
+        "[ Remove project ]"
+    };
+    body.push(
+        Row::of(send, look.fg)
+            .push("   ", Style::new())
+            .push("[> Keep project ]", look.selection),
+    );
+    let help = match (everything, can_delete) {
+        (true, _) => vec![
+            ("Enter", "Delete everything"),
+            ("Up/Down", "Choose"),
+            ("Esc", "Keep"),
+        ],
+        (false, true) => vec![
+            ("y", "Remove"),
+            ("Up/Down", "Choose"),
+            ("n", "Keep"),
+            ("Esc", "Keep"),
+        ],
+        (false, false) => vec![("y", "Remove"), ("n", "Keep"), ("Esc", "Keep")],
+    };
+    (body, help)
+}
 type Drawn = (Vec<Row>, Option<(usize, usize)>, Help);
 
 const PICKER_ROWS: usize = 8;

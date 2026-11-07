@@ -21,7 +21,7 @@ const RUN_SCAN_MS: i64 = 24 * HOUR_MS;
 const FINISHED_RUNS_PER_SCAN: i64 = 64;
 /// The most tokens one record line or one provider call counts in each field.
 pub const LINE_TOKENS_MAX: u64 = 1_000_000_000;
-const ROW_TOKENS_MAX: i64 = 1_000_000_000_000_000;
+pub(super) const ROW_TOKENS_MAX: i64 = 1_000_000_000_000_000;
 const TOOLS_PER_READ_MAX: usize = 4096;
 const ARGUMENTS_BYTES_MAX: usize = 64 * 1024;
 

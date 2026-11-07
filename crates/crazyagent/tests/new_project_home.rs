@@ -166,8 +166,14 @@ fn delete_everything_takes_only_real_folders_strictly_inside_the_home() {
         "a project whose folders are all gone has nothing to move"
     );
     for (folders, why) in [
-        (vec![home.join("leads-out")], "a link inside the home that leads out"),
-        (vec![home.join("leads-in")], "a link, even one that stays inside"),
+        (
+            vec![home.join("leads-out")],
+            "a link inside the home that leads out",
+        ),
+        (
+            vec![home.join("leads-in")],
+            "a link, even one that stays inside",
+        ),
         (
             vec![home.join("leads-out").join("inner")],
             "a folder reached through a link that leads out",
@@ -191,7 +197,10 @@ fn delete_everything_takes_only_real_folders_strictly_inside_the_home() {
         );
     }
     assert!(plain_problem("delete_outside_home").is_some());
-    assert_eq!(names(&home), ["app", "leads-in", "leads-out", "notes.txt", "org"]);
+    assert_eq!(
+        names(&home),
+        ["app", "leads-in", "leads-out", "notes.txt", "org"]
+    );
     assert!(root.join("outside").join("inner").is_dir());
 }
 

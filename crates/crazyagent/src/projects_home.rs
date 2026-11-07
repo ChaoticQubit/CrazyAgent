@@ -615,13 +615,45 @@ pub fn trash(folder: &Path) -> Result<(), EngineError> {
 /// missing skipped, or `delete_outside_home` for any that is a link, not a folder, or not
 /// strictly below the home.
 pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, EngineError> {
-    let _ = (home, folders);
-    Err(refused("delete_unavailable"))
+    assert!(home.is_absolute());
+    let mut real = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let climbs = folder
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir));
+        if !folder.is_absolute() || climbs {
+            return Err(refused("delete_outside_home"));
+        }
+        match real_folder(folder, "delete_folder_missing", "delete_outside_home") {
+            Ok(path) if path.starts_with(home) && path != home => real.push(path),
+            Ok(_) => return Err(refused("delete_outside_home")),
+            Err(missing) if missing.0 == "delete_folder_missing" => {}
+            Err(refusal) => return Err(refusal),
+        }
+    }
+    let mut moved: Vec<PathBuf> = Vec::with_capacity(real.len());
+    for path in &real {
+        let held = real
+            .iter()
+            .any(|other| other != path && path.starts_with(other));
+        if !held && !moved.contains(path) {
+            moved.push(path.clone());
+        }
+    }
+    assert!(
+        moved
+            .iter()
+            .all(|path| path.starts_with(home) && path != home)
+    );
+    Ok(moved)
 }
 
 /// How long a Delete everything waits for the project's agents to stop after Stop all,
 /// before it refuses with nothing moved.
 pub const DELETE_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+const DELETE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const RESEARCH_RUNS_MAX: usize = 100_000;
 
 /// A checked Delete everything, after Stop all was recorded: the engine database, the
 /// project, the canonical home, the folders `plan_delete` gave and the project's agents,
@@ -651,8 +683,88 @@ impl DeletePlan {
         wait: std::time::Duration,
         mover: &dyn Fn(&Path) -> Result<(), EngineError>,
     ) -> Result<(), String> {
-        let _ = (wait, mover);
-        Err("delete_unavailable".into())
+        let unavailable = |_| "delete_unavailable".to_owned();
+        let db = rusqlite::Connection::open_with_flags(
+            &self.database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(unavailable)?;
+        db.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(unavailable)?;
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let running: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM team_agents WHERE project=?1 AND status NOT IN ('stopped','failed')",
+                    [self.project.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(unavailable)?;
+            if running == 0 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("delete_agents_running".into());
+            }
+            std::thread::sleep(DELETE_POLL);
+        }
+        let folders = plan_delete(&self.home, &self.folders).map_err(|refusal| refusal.0)?;
+        for (moved, folder) in folders.iter().enumerate() {
+            if mover(folder).is_err() {
+                return Err(if moved == 0 {
+                    "home_trash_failed"
+                } else {
+                    "delete_trash_partial"
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Deletes the engine's own folders of a deleted project once its records are gone: each
+    /// agent's state folder and sandbox profile, and each research run of its jobs. A folder
+    /// left behind is logged as `project_files_left` and never undoes the removal. Input: the
+    /// project's research jobs. Output: none.
+    pub fn remove_engine_files(&self, research: &[i64]) {
+        let Some(root) = self.database.parent() else {
+            return;
+        };
+        let team = root.join("team");
+        let mut left = Vec::new();
+        for agent in &self.agents {
+            left.push(team.join("agents").join(format!("agent-{agent}")));
+            left.push(team.join("profiles").join(format!("agent-{agent}.sb")));
+        }
+        let runs = root.join("research").join("agents");
+        if let Ok(entries) = std::fs::read_dir(&runs) {
+            for entry in entries.flatten().take(RESEARCH_RUNS_MAX) {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if research
+                    .iter()
+                    .any(|job| name.starts_with(&format!("job-{job}-")))
+                {
+                    left.push(entry.path());
+                }
+            }
+        }
+        for path in left {
+            let gone = match std::fs::symlink_metadata(&path) {
+                Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    std::fs::remove_dir_all(&path)
+                }
+                Ok(_) => std::fs::remove_file(&path),
+                Err(problem) => Err(problem),
+            };
+            if gone.is_err() {
+                eprintln!(
+                    "project_files_left project={} kind=engine_folder",
+                    self.project.as_str()
+                );
+            }
+        }
     }
 }
 
@@ -866,6 +978,22 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_trash_still_set_up" => "Remove the project from CrazyAgent first.",
         "home_trash_failed" => "The folder could not be moved to the Trash. Nothing was deleted.",
+        "delete_outside_home" => {
+            "Only a project whose folders are all inside your projects folder can be deleted here. Remove it from the dashboard instead."
+        }
+        "delete_name_mismatch" => "Type the project's name exactly as shown to delete it.",
+        "delete_unavailable" => {
+            "The engine could not check the project's agents. Nothing was deleted."
+        }
+        "delete_agents_running" => {
+            "Its agents did not stop in time, so nothing was deleted. They stay stopped; try again."
+        }
+        "delete_trash_partial" => {
+            "Some of its folders are in the Trash and the rest could not be moved. The project stays listed; try again."
+        }
+        "project_delete_requires_transport" => {
+            "This engine cannot delete projects. Remove it from the dashboard instead."
+        }
         "home_new_project_failed" => "The project folder could not be created. Nothing was kept.",
         "home_source_missing" => "That folder is no longer there.",
         "home_source_not_folder" => "Pick a folder, not a file or a link.",

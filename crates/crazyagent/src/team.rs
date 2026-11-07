@@ -2476,12 +2476,7 @@ fn perform(
             Ok(Outcome::Applied)
         }
         TeamAction::Pause { .. } => {
-            tx.execute(
-                "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,?2)
-                 ON CONFLICT(project) DO NOTHING",
-                params![project.as_str(), now],
-            )
-            .map_err(error)?;
+            pause(tx, project, now)?;
             Ok(Outcome::Applied)
         }
         TeamAction::Resume { .. } => {
@@ -3685,6 +3680,24 @@ pub fn live_switch(
         mode,
         note,
     }))
+}
+
+/// Records the owner's Stop all for a project, which the runtime acts on at its next tick by
+/// stopping the master and every agent of it. Inputs: the store, the project and the time
+/// now. Output: Ok; a project already stopped keeps its first time.
+pub(crate) fn pause(
+    connection: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,?2)
+             ON CONFLICT(project) DO NOTHING",
+            params![project.as_str(), now],
+        )
+        .map_err(error)?;
+    Ok(())
 }
 
 /// Tells whether the owner paused the project's whole team.

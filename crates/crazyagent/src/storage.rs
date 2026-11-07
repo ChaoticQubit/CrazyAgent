@@ -183,6 +183,19 @@ pub(crate) enum Job {
         u64,
         oneshot::Sender<Result<Result<(), String>, EngineError>>,
     ),
+    DeletePlan(
+        Admission,
+        Box<OwnerRequest>,
+        oneshot::Sender<
+            Result<Result<(crate::projects_home::DeletePlan, Vec<i64>), String>, EngineError>,
+        >,
+    ),
+    DeleteRecord(
+        Admission,
+        Box<OwnerRequest>,
+        Result<(), String>,
+        oneshot::Sender<Result<OwnerApplied, EngineError>>,
+    ),
     SetupPlan(
         Admission,
         Box<OwnerRequest>,
@@ -607,6 +620,20 @@ impl Storage {
                             if restart {
                                 home_watch.restart(&connection);
                             }
+                        }
+                        Job::DeletePlan(admission, request, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::delete_plan(&mut connection, &path, &admission, &request)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::DeleteRecord(admission, request, outcome, reply) => {
+                            let result = settings::ensure_clear(&connection).and_then(|()| {
+                                owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::Delete(&outcome)))
+                            });
+                            let _ = reply.send(result);
                         }
                         Job::SetupPlan(admission, request, reply) => {
                             let result = if readonly {
@@ -2143,6 +2170,18 @@ fn owner_apply(
 enum Effect<'a> {
     Home(&'a crate::projects_home::HomeEffect),
     NewProject(&'a Result<crate::project_setup::Staged, String>),
+    Delete(&'a Result<(), String>),
+}
+
+/// Reads what a Delete everything of a project would take: its name, its folder and the
+/// repositories it declares, and the canonical projects home. Inputs: the engine store and
+/// the project. Output: None for an unknown project, else the name, folders and home.
+pub(crate) fn delete_target(
+    db: &mut Connection,
+    project: &ProjectId,
+) -> Result<Option<(String, Vec<std::path::PathBuf>, Option<std::path::PathBuf>)>, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    projects_home::delete_target(&tx, project)
 }
 
 /// Plans a New Project before the owner transport builds its folder.
@@ -2220,6 +2259,10 @@ fn owner_apply_with(
             crate::project_setup::record_new(&tx, config, action, staged)?
         }
         (Some(Effect::NewProject(_)), _) => return Err(error("setup_record_invalid")),
+        (Some(Effect::Delete(outcome)), Command::ProjectSetup { action }) => {
+            crate::project_setup::record_delete(&tx, action, outcome, revision)?
+        }
+        (Some(Effect::Delete(_)), _) => return Err(error("delete_record_invalid")),
         (None, _) if request.expected_revision.value() != revision => Outcome::Rejected {
             code: "stale_revision".into(),
         },

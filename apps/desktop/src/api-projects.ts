@@ -630,10 +630,12 @@ export function loadRemovalPreview(id: string): Promise<Result<RemovalPreview>> 
   return call<RemovalPreview>("desktop_project_removal", { id });
 }
 
-/** Removes a project from CrazyAgent; its research stops and its folder stays on disk.
- * Inputs: project id and a generation. Output: the receipt. */
-export function removeProject(id: string, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_remove_project", { id, generation });
+/** Removes a project from CrazyAgent. Without a name its folder stays on disk; with the name the
+ * owner typed, the engine stops its agents and moves its folders to the Trash, only when the name
+ * is the project's exact name. Inputs: project id, a generation and the typed name or null.
+ * Output: the receipt. */
+export function removeProject(id: string, generation: number, deleteName: string | null = null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_remove_project", { id, generation, deleteName });
 }
 
 export const PAGES_MAX = 50;

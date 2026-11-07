@@ -150,7 +150,11 @@ async fn delete_everything_of_a_project_whose_folder_is_gone_removes_its_records
         .await
         .unwrap();
     assert_eq!(result(response), OwnerResult::Applied);
-    assert_eq!(kept(&engine), 0, "a missing folder still removes the records");
+    assert_eq!(
+        kept(&engine),
+        0,
+        "a missing folder still removes the records"
+    );
     assert_eq!(
         engine.rows("SELECT count(*) FROM team_agents WHERE project='setup-pooled'"),
         0
