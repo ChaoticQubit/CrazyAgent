@@ -542,7 +542,7 @@ fn the_store_keeps_its_bound_with_the_created_event_and_drops_the_oldest_others(
     {
         let mut insert = tx
             .prepare(
-                "INSERT INTO project_activity(project,at_ms,kind,actor,text) VALUES (?1,?2,'phase','Master',?3)",
+                "INSERT INTO project_activity(project,at_ms,kind,actor,text) VALUES (?1,?2,'task_started','Master',?3)",
             )
             .unwrap();
         for at in 1..KEPT_PER_PROJECT_MAX {
@@ -555,7 +555,7 @@ fn the_store_keeps_its_bound_with_the_created_event_and_drops_the_oldest_others(
     for at in KEPT_PER_PROJECT_MAX..KEPT_PER_PROJECT_MAX + 5 {
         let text = format!("Event {at}");
         let item = NewActivity {
-            kind: ActivityKind::Phase,
+            kind: ActivityKind::TaskStarted,
             actor: MASTER_ACTOR,
             agent: None,
             goal: None,
@@ -576,4 +576,60 @@ fn the_store_keeps_its_bound_with_the_created_event_and_drops_the_oldest_others(
     assert_eq!(count("kind='created'"), 1);
     assert_eq!(count("kind<>'created' AND at_ms <= 5"), 0);
     assert_eq!(count("kind<>'created' AND at_ms = 6"), 1);
+}
+
+/// Phases and test runs agents log keep their own newest 1,000 (T11 r1 M1): a looping
+/// agent's 10,001 phases never push out the owner's Accept, which the store keeps.
+#[test]
+fn agent_logged_rows_keep_their_own_share_and_never_push_out_other_events() {
+    let (_folder, db) = db();
+    let accepted = NewActivity {
+        kind: ActivityKind::Accepted,
+        actor: OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text: "Accepted the changes of Ada (@api): Add the login form",
+        change_set: None,
+    };
+    record(&db, &project(), &accepted, 1).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000)
+         INSERT INTO project_activity(project,at_ms,kind,actor,text)
+         SELECT ?1, 1 + i, 'phase', 'Ada (@api)', 'Phase ' || i FROM n",
+        [PROJECT],
+    )
+    .unwrap();
+    let phase = NewActivity {
+        kind: ActivityKind::Phase,
+        actor: "Ada (@api)",
+        agent: None,
+        goal: Some("Build the service"),
+        text: "One more phase",
+        change_set: None,
+    };
+    record(&db, &project(), &phase, 20_000).unwrap();
+    let count = |kind: &str| -> i64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM project_activity WHERE project=?1 AND kind=?2",
+            [PROJECT, kind],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        count("accepted"),
+        1,
+        "an agent's phases never push out the owner's Accept"
+    );
+    assert_eq!(
+        count("phase"),
+        1_000,
+        "agents' rows keep their newest 1,000"
+    );
+    let listed: Vec<String> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(listed.first().map(String::as_str), Some("One more phase"));
 }

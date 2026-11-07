@@ -4600,3 +4600,35 @@ fn log_activity_writes_one_row_with_its_goal_under_the_caller() {
         ]
     );
 }
+
+/// One caller logs at most 30 phases or test runs an hour (T11 r1 M1): the 31st call gets a
+/// plain refusal and adds no row, while another caller still logs.
+#[cfg(target_os = "macos")]
+#[test]
+fn log_activity_refuses_a_caller_past_its_hourly_rate_and_another_caller_still_logs() {
+    let mut fixture = Fixture::new();
+    let agent = named_sub(&fixture, "api-fix", "working");
+    let phase = |n: usize| json!({"goal": "Build the service", "text": format!("Phase {n} of the API"), "kind": "phase"});
+    for n in 1..=30 {
+        assert_eq!(
+            as_sub(&mut fixture, agent, "log_activity", phase(n)),
+            ("Logged.".to_owned(), false),
+            "call {n} is within the rate"
+        );
+    }
+    let (said, refused) = as_sub(&mut fixture, agent, "log_activity", phase(31));
+    assert!(refused, "the 31st call in an hour is refused: {said}");
+    assert!(said.starts_with("Not logged: "), "{said}");
+    assert_eq!(
+        as_master(&mut fixture, "log_activity", phase(1)),
+        ("Logged.".to_owned(), false),
+        "the master's own rate is apart"
+    );
+    let project = ProjectId::new(PROJECT).unwrap();
+    let phases = crate::activity::list(&fixture.connection, &project, crate::activity::LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == crate::activity::ActivityKind::Phase)
+        .count();
+    assert_eq!(phases, 31, "30 of the sub-agent's and 1 of the master's");
+}
