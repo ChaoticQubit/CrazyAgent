@@ -5966,8 +5966,11 @@ fn at_full_access_the_master_s_merge_of_a_foreign_commit_or_a_closed_set_is_refu
     ] {
         merge_in(&case, &master, commit);
         assert_eq!(
-            refused(record_turn_end(&case.db, &master, &merge_turn())),
-            "changes_outside_merge",
+            record_turn_end(&case.db, &master, &merge_turn())
+                .err()
+                .map(|refusal| refusal.0)
+                .as_deref(),
+            Some("changes_outside_merge"),
             "the master's merge of {what} at Full access"
         );
         git_in(
@@ -6025,8 +6028,11 @@ fn at_full_access_a_sub_agent_s_or_a_lead_s_merge_of_an_open_set_is_refused() {
             .unwrap();
         merge_in(&case, agent, &open_head);
         assert_eq!(
-            refused(record_turn_end(&case.db, agent, &merge_turn())),
-            "changes_outside_merge",
+            record_turn_end(&case.db, agent, &merge_turn())
+                .err()
+                .map(|refusal| refusal.0)
+                .as_deref(),
+            Some("changes_outside_merge"),
             "{what}'s merge of an open set at Full access"
         );
     }
