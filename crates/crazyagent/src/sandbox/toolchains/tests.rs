@@ -215,6 +215,92 @@ fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
     }
 }
 
+/// The worker copy merges only the commit the engine keeps at `refs/crazyagent/main`: with
+/// that ref missing, a branch the agent named `crazyagent/main` holding other work is
+/// refused under either name and the agent's branch keeps its commit.
+#[test]
+fn the_worker_copy_refuses_a_crazyagent_main_that_is_not_the_engine_s_ref() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&self.0);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = crate::research::runner::sandboxed_git();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+        &["checkout", "-q", "-b", "crazyagent/main"],
+        &["commit", "-q", "--allow-empty", "-m", "foreign work"],
+        &["checkout", "-q", "-b", "own", "main"],
+    ] {
+        let done = git_run(git, repo.path(), home.path(), args);
+        assert!(done.status.success(), "{args:?} {done:?}");
+    }
+    let tmp = make_tmp(home.path()).unwrap();
+    let _removed = Removed(home.path().to_path_buf());
+    let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let before = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+    for name in ["crazyagent/main", "refs/crazyagent/main"] {
+        let done = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "--no-edit", name],
+        );
+        assert!(!done.status.success(), "{name} was merged");
+        let stderr = String::from_utf8_lossy(&done.stderr);
+        assert!(stderr.contains("git merge is refused"), "{name} {stderr}");
+    }
+    let after = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(after.stdout, before.stdout);
+}
+
+/// The copy of an agent's own `git` that every agent gets first, before its launch knows
+/// the project's "Catch up with main" choice, refuses `crazyagent/main`, so an agent whose
+/// later copy could not be written never merges main against an Off.
+#[test]
+fn the_copy_every_agent_gets_first_refuses_crazyagent_main() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&self.0);
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let git = crate::research::runner::sandboxed_git();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+        &["checkout", "-q", "-b", "landed"],
+        &["commit", "-q", "--allow-empty", "-m", "landed work"],
+        &["update-ref", "refs/crazyagent/main", "landed"],
+        &["checkout", "-q", "-b", "own", "main"],
+    ] {
+        let done = git_run(git, repo.path(), home.path(), args);
+        assert!(done.status.success(), "{args:?} {done:?}");
+    }
+    let tmp = make_tmp(home.path()).unwrap();
+    let _removed = Removed(home.path().to_path_buf());
+    let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let done = git_run(
+        &wrapper,
+        repo.path(),
+        home.path(),
+        &["merge", "--no-edit", "crazyagent/main"],
+    );
+    assert!(
+        !done.status.success(),
+        "the first copy merged crazyagent/main"
+    );
+    let stderr = String::from_utf8_lossy(&done.stderr);
+    assert!(stderr.contains("git merge is refused"), "{stderr}");
+    assert!(!stderr.contains("crazyagent/main"), "{stderr}");
+}
+
 /// With "Catch up with main" off, the strict copy of an agent's own `git` refuses
 /// `crazyagent/main` too, with the reason the worker copy gave before the setting.
 #[test]
