@@ -1103,6 +1103,22 @@ pub fn accept_into_as(
     }
 }
 
+/// Lands the change set the project's master made, such as its fix of a conflicted set, the
+/// way an Accept does, when `team::master_lands` says Merges at that moment: one squash
+/// commit on the Land on branch, every open set of the project the master's head holds
+/// closed with it, and one MergedIntoMain activity row naming them. Any other set, a set
+/// that is not pending, or Waits leaves everything as it was. Inputs: the store, the
+/// owner's home and the change set. Output: the outcome of the land, or None when nothing
+/// was tried.
+pub fn land_master_set(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+) -> Result<Option<AcceptOutcome>, EngineError> {
+    let _ = (db, owner_home, id);
+    Ok(None)
+}
+
 /// Lists the local branches an Accept of a change set can land on and the owner's
 /// checked-out branch. Inputs: the store and the change set. Output: the branches.
 pub fn target_branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranches, EngineError> {

@@ -3577,6 +3577,55 @@ pub fn ask_before_merge(connection: &Connection, project: &ProjectId) -> Result<
     Ok(ask.unwrap_or(false))
 }
 
+/// What a Full-access master does with the change set its own turn makes, such as a conflict
+/// fix (DEC-117 Q2): merge it into the project's main itself, or leave it waiting for the
+/// owner's Accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MasterLands {
+    Merges,
+    Waits,
+}
+
+impl MasterLands {
+    /// The stored and sent name of the choice.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Merges => "merges",
+            Self::Waits => "waits",
+        }
+    }
+
+    /// Reads a stored or sent name. Input: the name. Output: the choice, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Merges, Self::Waits]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
+/// What the project's master does with its own change set, read at the moment it would land:
+/// Waits whenever the project's access is not Full, else the owner's choice, Merges when none
+/// was saved. Takes a connection and the project. Returns the choice.
+pub fn master_lands(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<MasterLands, EngineError> {
+    let _ = (connection, project);
+    Ok(MasterLands::Waits)
+}
+
+/// Saves what the project's master does with its own change set. Takes a connection, the
+/// project and the choice. Returns Ok once saved.
+pub fn set_master_lands(
+    connection: &Connection,
+    project: &ProjectId,
+    mode: MasterLands,
+) -> Result<(), EngineError> {
+    let _ = (connection, project, mode);
+    Ok(())
+}
+
 /// Tells whether the engine asks a sub-agent once more for its reply when a task turn
 /// ends with no reply text, before it reports the task; on by default (DEC-111). Takes a
 /// connection and the project. Returns the setting.

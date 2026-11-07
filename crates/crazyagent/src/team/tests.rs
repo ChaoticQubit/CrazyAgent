@@ -5801,3 +5801,52 @@ fn only_a_tools_off_codex_agent_on_a_keyless_endpoint_says_it_cannot_receive_mes
         );
     }
 }
+
+#[test]
+fn master_lands_defaults_to_merges_at_full_access_and_is_always_waits_otherwise() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let connection = Connection::open_in_memory().unwrap();
+    initialize(&connection).unwrap();
+    let project = ProjectId::new("lands").unwrap();
+    let access = |level: AgentAccess| {
+        let policy = AgentPolicy {
+            access: level,
+            ..AgentPolicy::default()
+        };
+        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+    };
+    access(AgentAccess::Full);
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Merges,
+        "Full access with no choice saved merges"
+    );
+    set_master_lands(&connection, &project, MasterLands::Waits).unwrap();
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Waits
+    );
+    set_master_lands(&connection, &project, MasterLands::Merges).unwrap();
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Merges
+    );
+    for level in [AgentAccess::OwnBranch, AgentAccess::Sandboxed] {
+        access(level);
+        assert_eq!(
+            master_lands(&connection, &project).unwrap(),
+            MasterLands::Waits,
+            "{level:?} never lets the master merge into main"
+        );
+    }
+    let unset = ProjectId::new("unset").unwrap();
+    set_master_lands(&connection, &unset, MasterLands::Merges).unwrap();
+    assert_eq!(
+        master_lands(&connection, &unset).unwrap(),
+        MasterLands::Waits,
+        "a project with no saved access is Sandboxed"
+    );
+    assert_eq!(MasterLands::named("merges"), Some(MasterLands::Merges));
+    assert_eq!(MasterLands::named("waits"), Some(MasterLands::Waits));
+    assert_eq!(MasterLands::named("Merges"), None);
+}
