@@ -410,13 +410,18 @@ pub fn summary(
         )));
     } else {
         lines.push(Line::raw(format!(
-            "Tokens {} ({} in, {} out)  Cache {cache}  Runs {}  Lines +{} -{}",
+            "Tokens {} ({} input, {} cache write, {} output)  Cache {cache}  Runs {}  Lines +{} -{}",
             compact(total.headline()),
             compact(total.input),
+            compact(total.cache_write),
             compact(total.output),
             report.runs,
             compact(added),
             compact(removed)
+        )));
+        lines.push(Line::raw(format!(
+            "Re-read from cache: {}, counted apart.",
+            compact(total.cache_read)
         )));
         if !unreported.is_empty() {
             lines.push(styled(

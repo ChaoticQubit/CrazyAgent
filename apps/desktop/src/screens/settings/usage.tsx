@@ -217,7 +217,7 @@ function Totals({ report }: { report: UsageReport }) {
     <div className="usage-tiles">
       {onlyUnreported
         ? <Tile label="Tokens" value="Not reported" detail={`Usage not reported by ${unreported}`} />
-        : <Tile label="Tokens" value={compactCount(headlineTokens(report.total))} detail={`${compactCount(report.total.input)} in, ${compactCount(report.total.output)} out`} />}
+        : <Tile label="Tokens" value={compactCount(headlineTokens(report.total))} detail={`Re-read from cache: ${compactCount(report.total.cache_read)}, counted apart.`} />}
       <Tile label="Cache" value={share === null ? "None" : `${share}%`} detail={`${compactCount(report.total.cache_read)} read, ${compactCount(report.total.cache_write)} written`} />
       <Tile label="Runs" value={String(report.runs)} />
       <Tile label="Lines changed" value={`+${compactCount(added)} -${compactCount(removed)}`} />
@@ -230,16 +230,17 @@ function UsageTable({ title, rows, name, nowMs }: { title: string; rows: UsageRo
   if (rows.length === 0) return null;
   return <Panel title={title} padded={false}>
     <div className="pj-table-wrap usage-table"><table className="pj-table">
-      <thead><tr><th scope="col">Name</th><th scope="col">Tokens</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cache read</th><th scope="col">Runs</th><th scope="col">Last used</th></tr></thead>
+      <thead><tr><th scope="col">Name</th><th scope="col">Tokens</th><th scope="col">Input</th><th scope="col">Cache write</th><th scope="col">Output</th><th scope="col" className="muted">Cache read</th><th scope="col">Runs</th><th scope="col">Last used</th></tr></thead>
       <tbody>{rows.map((row) => <tr key={row.key}>
         <th scope="row">{name(row.key)}</th>
         {row.not_reported_by && headlineTokens(row.tokens) === 0
-          ? <td colSpan={5}>{tokenText(0, row.not_reported_by)}</td>
+          ? <td colSpan={6}>{tokenText(0, row.not_reported_by)}</td>
           : <>
             <td>{tokenText(headlineTokens(row.tokens), row.not_reported_by)}</td>
             <td>{compactCount(row.tokens.input)}</td>
+            <td>{compactCount(row.tokens.cache_write)}</td>
             <td>{compactCount(row.tokens.output)}</td>
-            <td>{compactCount(row.tokens.cache_read)}</td>
+            <td className="muted">{compactCount(row.tokens.cache_read)}</td>
             <td>{row.runs}</td>
           </>}
         <td>{agoText(row.last_ms, nowMs)}</td>
@@ -268,13 +269,14 @@ function DaysTable({ days, offset }: { days: DayTokens[]; offset: number }) {
   if (days.length === 0) return null;
   return <Panel title="By day" padded={false}>
     <div className="pj-table-wrap usage-table"><table className="pj-table">
-      <thead><tr><th scope="col">Day</th><th scope="col">Tokens</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cache read</th></tr></thead>
+      <thead><tr><th scope="col">Day</th><th scope="col">Tokens</th><th scope="col">Input</th><th scope="col">Cache write</th><th scope="col">Output</th><th scope="col" className="muted">Cache read</th></tr></thead>
       <tbody>{days.map((day) => <tr key={day.day_ms}>
         <th scope="row">{dayLabel(day.day_ms, offset)}</th>
         <td>{compactCount(headlineTokens(day.tokens))}</td>
         <td>{compactCount(day.tokens.input)}</td>
+        <td>{compactCount(day.tokens.cache_write)}</td>
         <td>{compactCount(day.tokens.output)}</td>
-        <td>{compactCount(day.tokens.cache_read)}</td>
+        <td className="muted">{compactCount(day.tokens.cache_read)}</td>
       </tr>)}</tbody>
     </table></div>
   </Panel>;
