@@ -1153,14 +1153,22 @@ pub(super) fn conflicts_with_tip(
 
 /// Sends an agent's change set that conflicts with the tip it lands on back to its agent
 /// at its turn end, merged with conflict markers as `update` makes it, so the owner never
-/// sees it waiting (OS-8). Only a Pending set of a team agent is checked; a master's set
-/// keeps the owner's Accept and Update. Inputs: the store and the change set. Output: Ok,
-/// or the plain code of a check or merge that could not run.
+/// sees it waiting (OS-8). Only a Pending set of an agent that takes its own resolve task
+/// is checked: a master's set keeps the owner's Accept and Update, and a lead's worker
+/// while its lead merges it, or a native teammate, keeps its lead's merge, which tells the
+/// lead the files. Inputs: the store and the change set. Output: Ok, or the plain code of
+/// a check or merge that could not run.
 pub(super) fn catch_up(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     let record = store::load(db, id)?;
     if record.state != ChangeState::Pending
         || record.intent.is_some()
         || record.agent.kind == AgentKind::Master
+    {
+        return Ok(());
+    }
+    let lead = super::subagent::lead_of(db, &record.project, &record.agent, &record.repository);
+    if !matches!(lead, Ok(None))
+        || super::subagent::is_teammate(db, &record.project, &record.agent)?
     {
         return Ok(());
     }

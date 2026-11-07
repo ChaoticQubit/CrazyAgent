@@ -369,16 +369,6 @@ fn conflicting_file_names_with_line_separators_reach_the_resolve_prompt_escaped_
             std::fs::write(path, text).unwrap();
         }
     };
-    add(case.worktree.as_path(), "agent\n");
-    let end = TurnEnd {
-        outcome: TurnOutcome::Succeeded,
-        turn: "turn-2".into(),
-        prompt_line: "Add the files".into(),
-    };
-    assert_eq!(
-        landing::record_turn_end(&case.db, &case.workspace, &end).unwrap(),
-        Some(case.id.clone())
-    );
     add(case.repo.as_path(), "owner\n");
     git_in(&home, &case.repo, &["add", "-A"]);
     git_in(
@@ -386,8 +376,17 @@ fn conflicting_file_names_with_line_separators_reach_the_resolve_prompt_escaped_
         &case.repo,
         &["commit", "-q", "-m", "Add the same files"],
     );
-
-    assert!(update(&case.db, &case.id).unwrap());
+    add(case.worktree.as_path(), "agent\n");
+    let end = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-2".into(),
+        prompt_line: "Add the files".into(),
+    };
+    assert_eq!(
+        record(&case.db, &case.workspace, &end).unwrap(),
+        Landed::Waiting(case.id.clone()),
+        "the turn end sends the clashing set back and hands over its resolve work"
+    );
     let tasks = case.resolve_tasks();
     assert_eq!(tasks.len(), 1, "{tasks:?}");
     let prompt = &tasks[0];
@@ -422,16 +421,6 @@ fn conflicting_file_names_with_newlines_stay_one_resolve_prompt_line_each() {
             std::fs::write(root.join(name), text).unwrap();
         }
     };
-    add(case.worktree.as_path(), "agent\n");
-    let end = TurnEnd {
-        outcome: TurnOutcome::Succeeded,
-        turn: "turn-2".into(),
-        prompt_line: "Add the files".into(),
-    };
-    assert_eq!(
-        landing::record_turn_end(&case.db, &case.workspace, &end).unwrap(),
-        Some(case.id.clone())
-    );
     add(case.repo.as_path(), "owner\n");
     git_in(&home, &case.repo, &["add", "-A"]);
     git_in(
@@ -439,8 +428,17 @@ fn conflicting_file_names_with_newlines_stay_one_resolve_prompt_line_each() {
         &case.repo,
         &["commit", "-q", "-m", "Add the same files"],
     );
-
-    assert!(update(&case.db, &case.id).unwrap());
+    add(case.worktree.as_path(), "agent\n");
+    let end = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-2".into(),
+        prompt_line: "Add the files".into(),
+    };
+    assert_eq!(
+        record(&case.db, &case.workspace, &end).unwrap(),
+        Landed::Waiting(case.id.clone()),
+        "the turn end sends the clashing set back and hands over its resolve work"
+    );
     let set = case.set();
     assert_eq!((set.state, set.waiting), (ChangeState::Updating, false));
     assert_eq!(set.conflicts.len(), names.len() + 1, "{:?}", set.conflicts);
