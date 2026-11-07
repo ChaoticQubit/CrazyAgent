@@ -5677,6 +5677,46 @@ fn with_the_task_limit_off_a_turn_runs_past_where_a_limit_would_stop_it() {
     team.shutdown().unwrap();
 }
 
+/// A sub-agent starting a task is recorded in the project's activity, named as the team
+/// list names it, with the first line of the task.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_start_is_recorded_in_the_project_activity() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[hand_off(&fixture, "Write page.md\nKeep it short.")],
+    );
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        task_of(f, "Write page.md\nKeep it short.").0 == "running"
+    });
+    let agent = task_and_agent(&fixture, "Write page.md\nKeep it short.")
+        .1
+        .unwrap();
+
+    let started: Vec<(String, String)> = crate::activity::list(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        crate::activity::LIST_MAX,
+    )
+    .unwrap()
+    .into_iter()
+    .filter(|item| item.kind == crate::activity::ActivityKind::TaskStarted)
+    .map(|item| (item.actor, item.text))
+    .collect();
+
+    assert_eq!(
+        started,
+        vec![(
+            format!("Sub-agent {agent}"),
+            "Started a task: Write page.md".to_owned()
+        )]
+    );
+    team.shutdown().unwrap();
+}
+
 /// A master whose idle bound is tiny is not stopped while a sub-agent works on a task;
 /// once that task ends and its result reached the master, its idle time runs out and it stops.
 #[cfg(target_os = "macos")]
