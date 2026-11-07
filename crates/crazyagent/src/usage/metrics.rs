@@ -3,6 +3,8 @@ use super::report::{REPORT_BYTES_MAX, ROWS_MAX, SHARES, count, has_table, tokens
 use super::{failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use crate::team::events::name_reaches_running;
+use crate::team::{AGENT_COLUMNS, AgentRole, AgentStatus, agent_row};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -203,6 +205,49 @@ fn run_task(
     .map_err(storage)
 }
 
+/// The name every client shows for a usage agent key, read in this one read so the app page
+/// needs no team status per project: "Master" for a project's master, a sub-agent's kept
+/// persona and role handle or its number, the number only for a finished sub-agent whose
+/// name a running one now holds (DEC-111 Q19), and None for an agent the store no longer has.
+/// Inputs: the store, the project and the agent key. Output: the name, or None.
+fn agent_name(db: &Connection, project: &str, key: &str) -> Result<Option<String>, EngineError> {
+    if key.starts_with("master-") {
+        return Ok(Some(AgentRole::Master.agent_label(0)));
+    }
+    let Some(id) = key
+        .strip_prefix("team-")
+        .and_then(|id| id.parse::<i64>().ok())
+    else {
+        return Ok(None);
+    };
+    if !has_table(db, "team_agents")? || !has_table(db, "team_names")? {
+        return Ok(None);
+    }
+    let Some(agent) = db
+        .query_row(
+            &format!("SELECT {AGENT_COLUMNS} FROM team_agents WHERE id=?1 AND project=?2"),
+            params![id, project],
+            agent_row,
+        )
+        .optional()
+        .map_err(storage)?
+    else {
+        return Ok(None);
+    };
+    let finished = matches!(agent.status, AgentStatus::Stopped | AgentStatus::Failed);
+    let reused = agent.role == AgentRole::Sub
+        && finished
+        && match ProjectId::new(project) {
+            Ok(project) => name_reaches_running(db, &project, id)?,
+            Err(_) => false,
+        };
+    Ok(Some(if reused {
+        AgentRole::Sub.agent_label(id)
+    } else {
+        agent.label
+    }))
+}
+
 fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<RunRow>, EngineError> {
     let mut statement = db
         .prepare(
@@ -247,6 +292,9 @@ fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<Run
                 run.status = Some(status);
             }
         }
+    }
+    for (run, _, _) in &mut runs {
+        run.label = agent_name(db, &run.project, &run.agent)?;
     }
     Ok(runs.into_iter().map(|(run, _, _)| run).collect())
 }
@@ -381,6 +429,7 @@ fn agents(
     for row in &mut rows {
         (row.harnesses, row.more_harnesses) = capped(std::mem::take(&mut row.harnesses));
         (row.accounts, row.more_accounts) = capped(std::mem::take(&mut row.accounts));
+        row.label = agent_name(db, &row.project, &row.agent)?;
     }
     Ok(rows)
 }
