@@ -489,6 +489,58 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_questions_recovery_or_reveal_request_gets_its_busy_reply() {
+        use crate::tui::client::OwnerEvent;
+        use crate::tui::client::ide::RevealQuery;
+        use crate::tui::client::recovery::RecoveryQuery;
+        fn busy<T>() -> Result<T, String> {
+            Err(crate::tui::seam::OWNER_BUSY.to_owned())
+        }
+        let project = ProjectId::new("harbor-notes").unwrap();
+        let questions = QuestionsQuery::List {
+            project: project.clone(),
+        };
+        let recovery = RecoveryQuery::Read {
+            project: project.clone(),
+        };
+        let reveal = RevealQuery {
+            project,
+            target: crate::ide::bridge::reveal::RevealTarget::Project {
+                path: "src/main.rs".into(),
+            },
+        };
+        let mut ctx = full();
+        ctx.request(Request::Questions(Box::new(questions.clone())));
+        ctx.request(Request::Recovery(Box::new(recovery.clone())));
+        ctx.request(Request::Reveal(Box::new(reveal.clone())));
+        let replies: Vec<OwnerEvent> = ctx
+            .take_refused()
+            .into_iter()
+            .map(|arrival| match arrival {
+                Arrival::Owner(event) => *event,
+                _ => panic!("a refused owner request answers as the owner worker does"),
+            })
+            .collect();
+        assert_eq!(
+            replies.len(),
+            3,
+            "each refused request gets the reply its screen waits on"
+        );
+        assert!(matches!(
+            &replies[0],
+            OwnerEvent::Questions(event) if event.query == questions && event.result == busy()
+        ));
+        assert!(matches!(
+            &replies[1],
+            OwnerEvent::Recovery(event) if event.query == recovery && event.result == busy()
+        ));
+        assert!(matches!(
+            &replies[2],
+            OwnerEvent::Reveal(event) if event.query == reveal && event.result == busy()
+        ));
+    }
+
+    #[test]
     fn a_refresh_keeps_shown_data_instead_of_a_spinner() {
         let mut ctx = ctx();
         ctx.store.pools = Load::Ready(Vec::new());
