@@ -34,6 +34,7 @@ const SHIFT = 8;
 const KEYS = { F1: ["F1", 112], Enter: ["Enter", 13], Escape: ["Escape", 27], ArrowLeft: ["ArrowLeft", 37], ArrowRight: ["ArrowRight", 39] };
 const LEFTOVER_COMMANDS = ["Chat:", "Inline Chat", "Snooze Inline Suggestions", "Sync Account Policy", "Manage Accounts", "Accounts:", "Show Remote Menu", "Install Remote Development Extensions", "Settings Sync"];
 const LOOPBACK = /^(127\.0\.0\.1|localhost|[0-9a-v]{52}\.localhost)$/;
+const IDE_FAILED = /didn't match its published checksum|couldn't be downloaded|couldn't start|stopped while it started|unavailable on/;
 
 /** Runs git with no system or user config, so only the repository's own config counts.
  * Inputs: the folder and git's arguments. Output: git's trimmed stdout. */
@@ -185,25 +186,6 @@ function input({ send }) {
     }
   };
   return { key, text, hover, click };
-}
-
-/** Clicks the first visible control whose text holds a phrase, as the owner does.
- * Inputs: the page, its input helpers and the phrase. Output: none. */
-async function pressText(page, keys, phrase) {
-  const deadline = Date.now() + STEP_MS;
-  for (;;) {
-    const box = await page.evaluate(`(() => {
-      const found = [...document.querySelectorAll("button, a, label, [role=button], [role=radio], [role=tab]")]
-        .find((item) => item.getClientRects().length && !item.disabled && (item.innerText ?? "").includes(${JSON.stringify(phrase)}));
-      if (!found) return null;
-      found.scrollIntoView({ block: "center" });
-      const rect = found.getBoundingClientRect();
-      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    })()`);
-    if (box) return keys.click(box);
-    assert.ok(Date.now() < deadline, `no control showing "${phrase}" to click`);
-    await pause(POLL_MS);
-  }
 }
 
 /** The workbench as the owner works it: waiting for what it shows, the F1 palette and its
@@ -365,19 +347,31 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     await t.test("the IDE tab downloads the pinned build and opens the project's IDE", async () => {
       await withPage(async (page) => {
         const me = owner(page, evidence);
-        const keys = input(page);
+        const tabs = () => page.evaluate(`[...document.querySelectorAll("[role=tab]")].map((item) => item.id)`);
+        const swapped = async () => (await tabs()).filter((id) => ["tab-ide", "tab-changes", "tab-context"].includes(id));
         await page.send("Page.enable");
         await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}` });
-        await me.waitFor("the project page with its IDE tab", (text) => /\bIDE\b/.test(text));
-        await me.click("IDE");
-        const shown = await me.waitFor("the IDE tab's status", (text) => text.includes("The IDE isn't downloaded yet.") || text.includes("Opening the IDE.") || /Downloading the IDE|Checking the IDE download/.test(text));
+        for (const deadline = Date.now() + STEP_MS; !(await tabs()).includes("tab-overview"); await pause(POLL_MS)) {
+          assert.ok(Date.now() < deadline, "the project page never showed its tabs");
+        }
+        await me.waitFor("the project page's line that the IDE isn't downloaded yet", (text) => /IDE unavailable on [^:\n]+: The IDE isn't downloaded yet\./.test(text));
+        await me.capture("ide-missing");
+        assert.deepEqual(await swapped(), ["tab-changes", "tab-context"], "a Missing build keeps Context and Changes and lists no IDE tab");
+        await me.click("Download", ".pj-ide-unavailable button");
+        await me.waitFor("the download under way", (text) => !text.includes("The IDE isn't downloaded yet."));
+        for (const deadline = Date.now() + BUILD_MS; !(await tabs()).includes("tab-ide"); await pause(POLL_MS * 10)) {
+          const text = await me.seen();
+          assert.ok(!IDE_FAILED.test(text), `the IDE download reports a failure: ${text.slice(0, 600)}`);
+          assert.ok(Date.now() < deadline, "the IDE build never became Ready");
+        }
+        assert.deepEqual(await swapped(), ["tab-ide"], "a Ready build lists the IDE in place of Changes and Context");
+        await me.click("IDE", "[role=tab]");
         await me.capture("ide-tab");
-        if (shown.includes("The IDE isn't downloaded yet.")) await pressText(page, keys, "Download");
         for (const deadline = Date.now() + BUILD_MS; opened.length === 0; await pause(POLL_MS * 10)) {
           const text = await me.seen();
-          assert.ok(!/didn't match its published checksum|couldn't be downloaded|couldn't start|stopped while it started|unavailable on/.test(text), `the IDE tab reports a failure: ${text.slice(0, 600)}`);
+          assert.ok(!IDE_FAILED.test(text), `the IDE tab reports a failure: ${text.slice(0, 600)}`);
           assert.ok(Date.now() < deadline, "the IDE never opened");
         }
         await me.capture("ide-opened");
