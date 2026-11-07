@@ -678,10 +678,10 @@ pub fn research_text(kind: ActivityKind, job: &str) -> String {
         ActivityKind::ResearchStopped => "stopped",
         _ => unreachable!("research_text takes a research event"),
     };
-    let shown = crate::project_setup::ResearchKind::CHOICES
-        .into_iter()
-        .find(|known| known.name() == job)
-        .map_or(job, crate::project_setup::ResearchKind::label);
+    let shown = match crate::project_setup::ResearchKind::parse(job) {
+        Some(known) => known.label(),
+        None => job,
+    };
     format!("Research {verb}: {shown}")
 }
 
