@@ -444,11 +444,12 @@ pub fn land_on(
 
 /// Points `refs/crazyagent/main` at the tip of the project's Land on branch in every agent
 /// worktree the team records for it, so each agent brings main into its own branch with
-/// `git merge crazyagent/main` (OS-8). A worktree it cannot reach is logged and skipped.
-/// Inputs: the engine database and the project. Output: Ok, else `changes_unavailable`.
+/// `git merge crazyagent/main` (OS-8), under each owner repository's hold, which it waits
+/// for. A worktree it cannot reach is logged and skipped. Inputs: the engine database and
+/// the project. Output: Ok, else `changes_unavailable`.
 pub fn refresh_main(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return owner::refresh_main(db, project);
+    return owner::refresh_main(db, project, None);
     #[cfg(not(unix))]
     {
         let _ = (db, project);

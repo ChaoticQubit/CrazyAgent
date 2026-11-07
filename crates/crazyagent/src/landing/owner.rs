@@ -413,37 +413,63 @@ pub(super) fn land_on(
 /// Points `refs/crazyagent/main` at the tip of the project's Land on branch for every agent
 /// worktree the team records: in each own clone through [`clone::give_main`], with no git
 /// run there, and once in the owner repository for linked worktrees, which share its refs.
+/// Each repository's tip is read and given under its hold, so a start never writes a tip
+/// read before an Accept after that Accept gave the newer one: taken here when `held` is
+/// None, else the caller's, and a repository other than the held one is logged and skipped.
 /// A worktree or repository it cannot reach is logged by its plain code and skipped, so
-/// one never stops the rest. Inputs: the store and the project. Output: Ok once each was
-/// given or skipped, else `changes_unavailable` when the team records cannot be read.
-pub(super) fn refresh_main(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+/// one never stops the rest. Inputs: the store, the project and the repository the caller
+/// holds. Output: Ok once each was given or skipped, else `changes_unavailable` when the
+/// team records cannot be read.
+pub(super) fn refresh_main(
+    db: &Connection,
+    project: &ProjectId,
+    held: Option<&Path>,
+) -> Result<(), EngineError> {
     let places = main_places(db, project)?;
-    let mut tips: BTreeMap<PathBuf, Option<String>> = BTreeMap::new();
-    for [repository, _, _] in &places {
-        if tips.contains_key(repository) {
-            continue;
-        }
-        let tip = match land_on_branch(db, repository, project) {
-            Ok(found) => found.map(|(_, tip)| tip),
-            Err(error) => {
-                eprintln!(
-                    "landing_main_unresolved code={}",
-                    crate::protocol::plain_code(&error.0)
-                );
-                None
+    let mut by_repository: BTreeMap<&Path, Vec<&[PathBuf; 3]>> = BTreeMap::new();
+    for place in &places {
+        by_repository
+            .entry(place[0].as_path())
+            .or_default()
+            .push(place);
+    }
+    for (repository, places) in by_repository {
+        let _hold = match held {
+            None => Some(hold(repository)),
+            Some(own) if own == repository => None,
+            Some(_) => {
+                eprintln!("landing_main_not_given code=changes_repository_not_held");
+                continue;
             }
         };
-        tips.insert(repository.clone(), tip);
+        give_main_in(db, project, repository, &places);
     }
-    let mut linked = BTreeSet::new();
-    for [repository, worktree, git_dir] in &places {
-        let Some(Some(tip)) = tips.get(repository) else {
-            continue;
-        };
+    Ok(())
+}
+
+/// Gives one owner repository's agent worktrees the project's Land on tip as
+/// [`refresh_main`] says, logging by plain code each one it cannot reach. The caller holds
+/// the repository's hold. Inputs: the store, the project, the repository and its places.
+fn give_main_in(db: &Connection, project: &ProjectId, repository: &Path, places: &[&[PathBuf; 3]]) {
+    let tip = match land_on_branch(db, repository, project) {
+        Ok(found) => found.map(|(_, tip)| tip),
+        Err(error) => {
+            eprintln!(
+                "landing_main_unresolved code={}",
+                crate::protocol::plain_code(&error.0)
+            );
+            None
+        }
+    };
+    let Some(tip) = tip else {
+        return;
+    };
+    let mut linked = false;
+    for [_, worktree, git_dir] in places.iter().copied() {
         let given = match flow::check_places(repository, worktree, git_dir) {
-            Ok(Layout::Clone) => clone::give_main(repository, worktree, tip),
+            Ok(Layout::Clone) => clone::give_main(repository, worktree, &tip),
             Ok(Layout::Linked) => {
-                linked.insert(repository);
+                linked = true;
                 Ok(())
             }
             Err(error) => Err(error),
@@ -455,21 +481,18 @@ pub(super) fn refresh_main(db: &Connection, project: &ProjectId) -> Result<(), E
             );
         }
     }
-    for repository in linked {
-        let Some(Some(tip)) = tips.get(repository) else {
-            continue;
-        };
-        let given = shared(repository).and_then(|repo| {
-            flow::set_engine_ref(&repo, repository, clone::MAIN_REF, Some(tip.as_str()))
-        });
-        if let Err(error) = given {
-            eprintln!(
-                "landing_main_not_given code={}",
-                crate::protocol::plain_code(&error.0)
-            );
-        }
+    if !linked {
+        return;
     }
-    Ok(())
+    let given = shared(repository).and_then(|repo| {
+        flow::set_engine_ref(&repo, repository, clone::MAIN_REF, Some(tip.as_str()))
+    });
+    if let Err(error) = given {
+        eprintln!(
+            "landing_main_not_given code={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
 }
 
 /// The repository, worktree and git folder of each agent worktree the team records for a
@@ -792,7 +815,7 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
     super::owner_edit::logged("forget", super::owner_edit::forget(db, &record.id));
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)?;
-    if let Err(error) = refresh_main(db, &record.project) {
+    if let Err(error) = refresh_main(db, &record.project, Some(record.repository.as_path())) {
         eprintln!(
             "landing_main_not_refreshed code={}",
             crate::protocol::plain_code(&error.0)
