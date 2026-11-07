@@ -524,12 +524,13 @@ fn git_script(git: &Path, copy: GitCopy, main: bool) -> Option<String> {
 }
 
 /// Rewrites the agent's own `git` in its short temp folder as a lead's copy, which lets the
-/// lead merge its own workers' branches (DEC-107 rule 2), after [`make_tmp`] wrote the
-/// copy every agent gets. Input: the folder `make_tmp` returned. Output: Ok, also when git
-/// is the shim and no copy is written, or the write failure.
+/// lead merge its own workers' branches (DEC-107 rule 2), and `crazyagent/main` while
+/// "Catch up with main" is on, after [`make_tmp`] wrote the copy every agent gets. Inputs:
+/// the folder `make_tmp` returned and the setting. Output: Ok, also when git is the shim
+/// and no copy is written, or the write failure.
 #[cfg(unix)]
-pub fn lead_git(tmp: &Path) -> io::Result<()> {
-    match git_script(crate::research::runner::sandboxed_git(), GitCopy::Lead, true) {
+pub fn lead_git(tmp: &Path, catch_up: bool) -> io::Result<()> {
+    match git_script(crate::research::runner::sandboxed_git(), GitCopy::Lead, catch_up) {
         Some(script) => write_git(tmp, &script),
         None => Ok(()),
     }
@@ -873,9 +874,10 @@ pub fn fresh_native_lead_tmp(_scratch: &Path) -> io::Result<PathBuf> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-/// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
+/// No agent `git` outside Unix. Takes the agent temp folder and the setting, unused.
+/// Returns `Unsupported`.
 #[cfg(not(unix))]
-pub fn lead_git(_tmp: &Path) -> io::Result<()> {
+pub fn lead_git(_tmp: &Path, _catch_up: bool) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
