@@ -8,13 +8,17 @@ const YARN: &[&str] = &["yarn", "install", "--mode", "update-lockfile"];
 const POETRY: &[&str] = &["poetry", "lock"];
 const POETRY_1: &[&str] = &["poetry", "lock", "--no-update"];
 
+/// One row of the plan's table: a lockfile path, the major version its tool printed
+/// (None when the tool is missing) and the command that path names, if any.
+type Row = (&'static str, Option<u32>, Option<&'static [&'static str]>);
+
 /// Every row of the plan's table: each known lockfile names its tool's lockfile-only
 /// command at any version, Yarn 2 or later and Poetry 2 or later by their own commands,
 /// Yarn 1 none and Poetry 1 `--no-update`; a missing tool, another file or a path that
 /// leaves the repository names none.
 #[test]
 fn every_known_lockfile_names_its_tool_command_by_the_tool_major_version() {
-    let rows: [(&str, Option<u32>, Option<&[&str]>); 21] = [
+    let rows: [Row; 21] = [
         ("Cargo.lock", Some(1), Some(CARGO)),
         ("crates/web/Cargo.lock", Some(1), Some(CARGO)),
         ("uv.lock", Some(0), Some(UV)),
