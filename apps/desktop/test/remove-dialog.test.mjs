@@ -24,9 +24,10 @@ test("the remove dialog preselects Remove from dashboard and offers Delete every
   assert.deepEqual(removeChoices(null), ["dashboard"]);
   const html = view({ preview: preview(), choice: "dashboard" });
   assert.match(html, /Remove from dashboard \(keep files\)/);
-  assert.match(html, /<input[^>]*value="dashboard"[^>]*checked=""/);
+  assert.match(html, /<input(?=[^>]*value="dashboard")(?=[^>]*checked="")[^>]*>/);
   assert.match(html, /Delete everything/);
-  assert.doesNotMatch(html, /<input[^>]*value="everything"[^>]*checked=""/);
+  assert.match(html, /<input(?=[^>]*value="everything")[^>]*>/);
+  assert.doesNotMatch(html, /<input(?=[^>]*value="everything")(?=[^>]*checked="")[^>]*>/);
   const outside = view({ preview: preview({ can_delete: false }), choice: "dashboard" });
   assert.match(outside, /Remove from dashboard \(keep files\)/);
   assert.doesNotMatch(outside, /Delete everything/, "a project outside the projects home has no Delete option");

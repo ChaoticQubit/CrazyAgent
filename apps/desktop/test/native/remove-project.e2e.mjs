@@ -52,7 +52,7 @@ async function listed(id) {
 async function openRemove(page, me, id, name) {
   await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/projects/${encodeURIComponent(id)}/settings?section=remove` });
   await me.waitFor(`${name}'s Remove project section`, (text) => text.includes(name) && text.includes("Remove project"));
-  await me.click("Remove project", "button");
+  await me.click("Remove project", "button.danger");
   await me.waitFor("the remove dialog with its choices", (text) => text.includes(KEEP));
 }
 
@@ -173,6 +173,7 @@ test("Delete everything lists the loss, waits for the typed name, then moves the
   const name = "Trash Me";
   const { id, folder } = await made(name);
   assert.ok(folder.startsWith(`${run.projects}/`), `the project sits on the test disk image: ${folder}`);
+  await value(run.bridge, "desktop_usage_metrics", { projectId: null, sinceMs: 0 });
   execFileSync(SQLITE, [run.database, `INSERT INTO usage_tokens VALUES ((strftime('%s','now')/3600)*3600000,'agent','${id}','local-pool','local-account','1','rcli','s1',1200,300,8000,0)`]);
   await onPage("delete", async (page, me) => {
     await openRemove(page, me, id, name);
