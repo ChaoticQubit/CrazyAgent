@@ -5200,6 +5200,43 @@ fn token_budget_each_choice_pauses_and_notifies_once_at_the_budget() {
     }
 }
 
+/// A token budget spends the headline count (DEC-117 Q6): new input, cache writes and
+/// output reach it, and cache re-reads, however many, never do.
+#[test]
+fn a_token_budget_spends_new_input_cache_writes_and_output_but_never_cache_reads() {
+    let (_directory, mut connection, project) = team_database("team-budget-headline");
+    crate::usage::initialize(&connection).unwrap();
+    let tokens = BUDGET_CHOICES[0];
+    applied(
+        &mut connection,
+        TeamAction::TokenBudget {
+            project_id: project.clone(),
+            tokens: Some(tokens),
+        },
+    );
+    let now = now_ms();
+    let headline = i64::try_from(tokens).unwrap() - 1;
+    connection
+        .execute(
+            "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
+             VALUES (?1,'agent',?2,'pool-a','account-a','7','claude-code','cached',?3,?4,?5,?6)",
+            params![
+                hour_of(now),
+                project.as_str(),
+                headline - 30,
+                10,
+                i64::try_from(tokens).unwrap() * 40,
+                20
+            ],
+        )
+        .unwrap();
+    let read = budget(&connection, &project).unwrap().unwrap();
+    assert_eq!(read.used, tokens - 1);
+    assert!(!budget_stop(&connection, &project, now).unwrap());
+    used_tokens(&connection, &project, "last", now, 1, 0);
+    assert!(budget_stop(&connection, &project, now).unwrap());
+}
+
 /// Inserts one agent row. Takes the connection, the project, the role, its lead and its
 /// status. Returns its id.
 fn agent_row(

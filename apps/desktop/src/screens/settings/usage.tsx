@@ -69,6 +69,11 @@ export function totalTokens(tokens: Tokens): number {
   return tokens.input + tokens.output + tokens.cache_read + tokens.cache_write;
 }
 
+/** The headline count usage shows and budgets spend (DEC-117 Q6): new input, cache writes and output. Input: the tokens. */
+export function headlineTokens(tokens: Tokens): number {
+  return tokens.input + tokens.output + tokens.cache_read + tokens.cache_write;
+}
+
 /** The share of prompt tokens served from the provider's cache, as a whole percent.
  * Input: the tokens. Output: 0 to 100, or null when no prompt tokens were counted. */
 export function cacheShare(tokens: Tokens): number | null {
