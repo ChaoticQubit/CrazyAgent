@@ -355,6 +355,10 @@
   box-shadow: var(--elev-1);
 }
 
+.tg-badges .tg-edge-label {
+  pointer-events: auto;
+}
+
 .tg-edge-label.live {
   border-color: var(--accent);
   background: var(--accent-soft);
