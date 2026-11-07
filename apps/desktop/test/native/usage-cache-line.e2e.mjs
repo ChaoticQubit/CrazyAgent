@@ -19,7 +19,8 @@ const USAGE_MS = 60000;
 const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const TASK = "Write fruit.md with one line about apples.";
-const TILE = ["Tokens", "1.5K", "Re-read from cache: 8K, counted apart."];
+const TILE = ["Tokens", "1.5K", "1.2K input, 0 cache write, 300 output"];
+const REREAD = ["Re-read from cache", "8K", "87% of everything read; billed far lower, not in Tokens"];
 const HEAD = ["Name", "Tokens", "Input", "Cache write", "Output", "Cache read", "Runs", "Last used"];
 const PARTS = ["1.5K", "1.2K", "0", "300", "8K"];
 
@@ -204,24 +205,27 @@ async function handOff(me, page, project, runtime) {
   }
 }
 
-/** Reads what Settings, Usage shows: the Tokens tile's lines and the By project table's
- * header and first row, each cell's text in screen order. Input: the page. Output: { tile,
- * head, row }, each null while it is missing. */
+/** Reads what Settings, Usage shows: the Tokens and Re-read from cache tiles' lines and the
+ * By project table's header and first row, each cell's text in screen order. Input: the
+ * page. Output: { tile, reread, head, row }, each null while it is missing. */
 function usageShown(page) {
   return page.evaluate(`(() => {
     const words = (node) => (node.innerText ?? "").replace(/\\s+/g, " ").trim();
-    const tile = [...document.querySelectorAll(".usage-tile")].find((node) => words(node.firstElementChild ?? node) === "Tokens");
+    const tiled = (label) => [...document.querySelectorAll(".usage-tile")].find((node) => words(node.firstElementChild ?? node) === label);
+    const tile = tiled("Tokens");
+    const reread = tiled("Re-read from cache");
     const panel = [...document.querySelectorAll("section.panel > .panel-head > h2")].find((title) => words(title) === "By project")?.closest("section.panel");
     const table = panel?.querySelector("table") ?? null;
     return {
       tile: tile ? [...tile.children].map(words) : null,
+      reread: reread ? [...reread.children].map(words) : null,
       head: table ? [...table.querySelectorAll("thead th")].map(words) : null,
       row: table?.querySelector("tbody tr") ? [...table.querySelector("tbody tr").children].map(words) : null,
     };
   })()`);
 }
 
-test("Settings, Usage shows the Tokens headline with the cache re-reads on their own line, and the By project table shows all four parts with the headline first (OS-7)", { timeout: 600000 }, async (t) => {
+test("Settings, Usage shows the Tokens headline with its three parts and the cache re-reads on their own tile, and the By project table shows all four parts with the headline first (OS-7)", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-cache-line-", async ({ project, runtime, me, page, site }) => {
     assert.equal(await handOff(me, page, project, runtime), "done", "the Codex sub-agent finished the task");
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/settings/usage` });
@@ -233,7 +237,8 @@ test("Settings, Usage shows the Tokens headline with the cache re-reads on their
       await page.send("Page.reload", { ignoreCache: true });
     }
     await me.capture("usage-cache-line");
-    assert.deepEqual(shown.tile, TILE, "the Tokens tile shows the headline and, on its second line, the cache re-reads counted apart");
+    assert.deepEqual(shown.tile, TILE, "the Tokens tile shows the headline and its input, cache write and output");
+    assert.deepEqual(shown.reread, REREAD, "the cache re-reads have their own tile with their share, never added into Tokens");
     assert.deepEqual(shown.head, HEAD, "the By project table shows Tokens, then Input, Cache write, Output and Cache read");
     assert.ok(shown.row !== null, "the By project table has the project's row");
     assert.deepEqual(shown.row.slice(1, 6), PARTS, `the project's row shows the headline and all four parts: ${JSON.stringify(shown.row)}`);
