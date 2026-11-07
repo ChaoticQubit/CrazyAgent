@@ -17,6 +17,14 @@ const ACTOR_BYTES_MAX: usize = 120;
 const CHANGE_SET_BYTES_MAX: usize = 128;
 /// The most events one project keeps; the oldest go first.
 const KEPT_PER_PROJECT_MAX: i64 = 10_000;
+/// Who a research run event names as its actor.
+pub const RESEARCH_ACTOR: &str = "Research";
+/// Who an event names when the owner acted.
+pub const OWNER_ACTOR: &str = "Owner";
+/// Who an event names when the engine acted on its own or for an agent.
+pub const ENGINE_ACTOR: &str = "Engine";
+/// Who an event names when a project's master acted, as the team list names it.
+pub const MASTER_ACTOR: &str = "Master";
 
 const _: () = assert!(LISTED_BYTES_MAX + 4096 <= crate::protocol::FRAME_BYTES_MAX);
 const _: () = assert!(TEXT_BYTES_MAX + GOAL_BYTES_MAX + ACTOR_BYTES_MAX + 512 < LISTED_BYTES_MAX);
@@ -227,10 +235,158 @@ pub fn record(
 /// Records one event for a writer whose own action must never fail on it: a failure is
 /// logged by its plain code. Takes what `record` takes.
 pub fn note(db: &Connection, project: &ProjectId, item: &NewActivity<'_>, now_ms: i64) {
-    if let Err(error) = record(db, project, item, now_ms) {
+    logged(item.kind, record(db, project, item, now_ms).map(drop));
+}
+
+/// Records an event of one team agent, named the way the team list names it, with the
+/// goal of its latest active work; a failure is logged by its plain code. Takes the
+/// database, the project, the agent, the kind of event, its text and the time in ms.
+pub fn note_agent(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    kind: ActivityKind,
+    text: &str,
+    now_ms: i64,
+) {
+    let recorded = agent_actor(db, agent).and_then(|actor| {
+        let item = NewActivity {
+            kind,
+            actor: &actor,
+            agent: Some(agent),
+            goal: None,
+            text,
+            change_set: None,
+        };
+        record(db, project, &item, now_ms).map(drop)
+    });
+    logged(kind, recorded);
+}
+
+/// Records that a team agent started a task, with the first line of the task's prompt;
+/// a failure is logged by its plain code. Takes the database, the project, the agent, the
+/// task id and the time in ms.
+pub fn note_task(db: &Connection, project: &ProjectId, agent: i64, task: i64, now_ms: i64) {
+    let prompt: Result<String, EngineError> = db
+        .query_row("SELECT prompt FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .map_err(state);
+    match prompt {
+        Ok(prompt) => {
+            let first = prompt.lines().find(|line| !line.trim().is_empty());
+            let text = format!("Started a task: {}", first.unwrap_or("(no prompt)"));
+            note_agent(db, project, agent, ActivityKind::TaskStarted, &text, now_ms);
+        }
+        Err(error) => logged(ActivityKind::TaskStarted, Err(error)),
+    }
+}
+
+/// Records the start or one of the three ends of a unit of work, as the coordination
+/// audit stores it, with the work's title as the goal; other actions are not shown and a
+/// failure is logged by its plain code. Takes the database, the project, the work, the
+/// party kind and agent who acted, the audit action and the time in ms.
+pub fn note_audit(
+    db: &Connection,
+    project: &ProjectId,
+    work: i64,
+    by: (&str, Option<i64>),
+    action: &str,
+    now_ms: i64,
+) {
+    let Some((kind, text)) = audit_event(action) else {
+        return;
+    };
+    logged(
+        kind,
+        record_audit(db, project, work, by, (kind, text), now_ms),
+    );
+}
+
+fn record_audit(
+    db: &Connection,
+    project: &ProjectId,
+    work: i64,
+    by: (&str, Option<i64>),
+    (kind, text): (ActivityKind, &str),
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    let title: Option<String> = db
+        .query_row("SELECT title FROM coord_work WHERE id=?1", [work], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(state)?;
+    let actor = party_actor(db, by.0, by.1)?;
+    let item = NewActivity {
+        kind,
+        actor: &actor,
+        agent: None,
+        goal: title.as_deref(),
+        text,
+        change_set: None,
+    };
+    record(db, project, &item, now_ms).map(drop)
+}
+
+/// Records a research run event of one job, read from the job's row; a failure is logged
+/// by its plain code, so the run itself never fails on it. Takes the database, the job
+/// id, the research kind of event and the time in ms.
+pub fn note_research(db: &Connection, job: i64, kind: ActivityKind, now_ms: i64) {
+    logged(kind, record_research(db, job, kind, now_ms));
+}
+
+fn record_research(
+    db: &Connection,
+    job: i64,
+    kind: ActivityKind,
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    let (project, name): (String, String) = db
+        .query_row(
+            "SELECT project,kind FROM research_jobs WHERE id=?1",
+            [job],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(state)?;
+    let project = ProjectId::new(&project).map_err(|_| failure("activity_item_invalid"))?;
+    let text = research_text(kind, &name);
+    let item = NewActivity {
+        kind,
+        actor: RESEARCH_ACTOR,
+        agent: None,
+        goal: None,
+        text: &text,
+        change_set: None,
+    };
+    record(db, &project, &item, now_ms).map(drop)
+}
+
+/// Records that a lead merged a sub-agent's work into its own branch, named by the lead
+/// and with the lead's goal; a failure is logged by its plain code. Takes the database,
+/// the project, the lead, the sub-agent, the merged branch and the time in ms.
+pub fn note_lead_merge(
+    db: &Connection,
+    project: &ProjectId,
+    lead: i64,
+    sub: i64,
+    branch: &str,
+    now_ms: i64,
+) {
+    match agent_actor(db, sub) {
+        Ok(worker) => {
+            let text = format!("Merged the work of {worker} from {branch}");
+            note_agent(db, project, lead, ActivityKind::LeadMerged, &text, now_ms);
+        }
+        Err(error) => logged(ActivityKind::LeadMerged, Err(error)),
+    }
+}
+
+fn logged(kind: ActivityKind, recorded: Result<(), EngineError>) {
+    if let Err(error) = recorded {
         eprintln!(
             "activity_record_failed kind={} cause={}",
-            item.kind.name(),
+            kind.name(),
             crate::protocol::plain_code(&error.0)
         );
     }
@@ -247,8 +403,59 @@ pub fn list(
     if limit == 0 || limit > LIST_MAX {
         return Err(failure("activity_limit_invalid"));
     }
-    let _ = (db, project);
-    Ok(Vec::new())
+    let mut statement = db
+        .prepare(
+            "SELECT id,at_ms,kind,actor,goal,text,change_set,undone FROM project_activity
+             WHERE project=?1 ORDER BY at_ms DESC, id DESC LIMIT ?2",
+        )
+        .map_err(state)?;
+    let rows = statement
+        .query_map(
+            params![project.as_str(), i64::try_from(limit).map_err(state)?],
+            |row| {
+                Ok((
+                    row.get::<_, String>(2)?,
+                    ActivityItem {
+                        id: row.get(0)?,
+                        at_ms: row.get(1)?,
+                        kind: ActivityKind::Created,
+                        actor: row.get(3)?,
+                        goal: row.get(4)?,
+                        text: row.get(5)?,
+                        change_set: row.get(6)?,
+                        undone: row.get(7)?,
+                    },
+                ))
+            },
+        )
+        .map_err(state)?;
+    let mut items = Vec::new();
+    let mut bytes = 0;
+    for row in rows {
+        let (kind, mut item) = row.map_err(state)?;
+        let Some(kind) = ActivityKind::parse(&kind) else {
+            continue;
+        };
+        item.kind = kind;
+        let size = serde_json::to_vec(&item).map_err(state)?.len() + 1;
+        if bytes + size > LISTED_BYTES_MAX {
+            break;
+        }
+        bytes += size;
+        items.push(item);
+    }
+    assert!(items.len() <= limit && bytes <= LISTED_BYTES_MAX);
+    Ok(items)
+}
+
+/// One event found in the project's older records by `backfill`.
+struct Past {
+    kind: ActivityKind,
+    at_ms: i64,
+    actor: String,
+    goal: Option<String>,
+    text: String,
+    change_set: Option<String>,
 }
 
 /// Brings in, once per project, what happened before the engine recorded events: the
@@ -256,8 +463,174 @@ pub fn list(
 /// research runs, each at its own time. An event already recorded is not added again.
 /// Takes the database and the project. Returns how many events it added.
 pub fn backfill(db: &Connection, project: &ProjectId) -> Result<usize, EngineError> {
-    let _ = (db, project);
-    Ok(0)
+    let tx = db.unchecked_transaction().map_err(state)?;
+    let marked = tx
+        .execute(
+            "INSERT OR IGNORE INTO project_activity_backfill(project) VALUES (?1)",
+            [project.as_str()],
+        )
+        .map_err(state)?;
+    if marked == 0 {
+        return Ok(0);
+    }
+    let mut found = Vec::new();
+    if has_table(&tx, "landing_change_sets")? {
+        found.extend(past_accepts(&tx, project)?);
+    }
+    if has_table(&tx, "coord_audit")? && has_table(&tx, "coord_work")? {
+        found.extend(past_work(&tx, project)?);
+    }
+    if has_table(&tx, "research_jobs")? {
+        found.extend(past_research(&tx, project)?);
+    }
+    let mut added = 0;
+    for past in &found {
+        if known(&tx, project, past)? {
+            continue;
+        }
+        let item = NewActivity {
+            kind: past.kind,
+            actor: &past.actor,
+            agent: None,
+            goal: past.goal.as_deref(),
+            text: &past.text,
+            change_set: past.change_set.as_deref(),
+        };
+        record(&tx, project, &item, past.at_ms)?;
+        added += 1;
+    }
+    tx.commit().map_err(state)?;
+    assert!(added <= found.len());
+    Ok(added)
+}
+
+fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .map_err(state)
+}
+
+fn past_accepts(db: &Connection, project: &ProjectId) -> Result<Vec<Past>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT id,label,prompt_line,updated_ms FROM landing_change_sets
+             WHERE project=?1 AND state='accepted'",
+        )
+        .map_err(state)?;
+    let rows = statement
+        .query_map([project.as_str()], |row| {
+            Ok(Past {
+                kind: ActivityKind::Accepted,
+                at_ms: row.get(3)?,
+                actor: OWNER_ACTOR.into(),
+                goal: None,
+                text: accepted_text(&row.get::<_, String>(1)?, &row.get::<_, String>(2)?),
+                change_set: Some(row.get(0)?),
+            })
+        })
+        .map_err(state)?;
+    rows.collect::<Result<_, _>>().map_err(state)
+}
+
+fn past_work(db: &Connection, project: &ProjectId) -> Result<Vec<Past>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT a.action,a.by_kind,a.by_agent,a.at,w.title FROM coord_audit a
+             JOIN coord_work w ON w.id=a.work WHERE a.project=?1",
+        )
+        .map_err(state)?;
+    let rows: Vec<(String, String, Option<i64>, i64, String)> = statement
+        .query_map([project.as_str()], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(state)?
+        .collect::<Result<_, _>>()
+        .map_err(state)?;
+    let mut found = Vec::new();
+    for (action, by_kind, by_agent, at_ms, title) in rows {
+        let Some((kind, text)) = audit_event(&action) else {
+            continue;
+        };
+        found.push(Past {
+            kind,
+            at_ms,
+            actor: party_actor(db, &by_kind, by_agent)?,
+            goal: Some(title),
+            text: text.into(),
+            change_set: None,
+        });
+    }
+    Ok(found)
+}
+
+fn past_research(db: &Connection, project: &ProjectId) -> Result<Vec<Past>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT kind,status,started_ms,finished_ms FROM research_jobs
+             WHERE project=?1 AND started_ms IS NOT NULL",
+        )
+        .map_err(state)?;
+    let rows: Vec<(String, String, i64, Option<i64>)> = statement
+        .query_map([project.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(state)?
+        .collect::<Result<_, _>>()
+        .map_err(state)?;
+    let mut found = Vec::new();
+    for (job, status, started, finished) in rows {
+        let ended = finished.map(|at_ms| {
+            let kind = if status == "done" {
+                ActivityKind::ResearchSaved
+            } else {
+                ActivityKind::ResearchStopped
+            };
+            (kind, at_ms)
+        });
+        for (kind, at_ms) in std::iter::once((ActivityKind::ResearchStarted, started)).chain(ended)
+        {
+            found.push(Past {
+                kind,
+                at_ms,
+                actor: RESEARCH_ACTOR.into(),
+                goal: None,
+                text: research_text(kind, &job),
+                change_set: None,
+            });
+        }
+    }
+    Ok(found)
+}
+
+fn known(db: &Connection, project: &ProjectId, past: &Past) -> Result<bool, EngineError> {
+    let change_set = past
+        .change_set
+        .as_deref()
+        .map(|id| one_line(id, CHANGE_SET_BYTES_MAX));
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_activity WHERE project=?1 AND kind=?2 AND
+         ((?3 IS NOT NULL AND change_set=?3)
+          OR (?3 IS NULL AND at_ms=?4 AND actor=?5 AND text=?6)))",
+        params![
+            project.as_str(),
+            past.kind.name(),
+            change_set,
+            past.at_ms,
+            one_line(&past.actor, ACTOR_BYTES_MAX),
+            one_line(&past.text, TEXT_BYTES_MAX)
+        ],
+        |row| row.get(0),
+    )
+    .map_err(state)
 }
 
 /// Clears a removed project's events and its backfill mark. Runs inside the removal's
@@ -293,6 +666,33 @@ pub fn audit_event(action: &str) -> Option<(ActivityKind, &'static str)> {
         "finish_closed" => Some((ActivityKind::WorkClosed, "The work was closed")),
         _ => None,
     }
+}
+
+/// The text one research run event carries, the same for the live writer and the
+/// backfill: the job named by its label, or as stored when the kind is unknown. Takes the
+/// research kind of event and the job's stored kind. Returns the text.
+pub fn research_text(kind: ActivityKind, job: &str) -> String {
+    let verb = match kind {
+        ActivityKind::ResearchStarted => "started",
+        ActivityKind::ResearchSaved => "saved",
+        ActivityKind::ResearchStopped => "stopped",
+        _ => unreachable!("research_text takes a research event"),
+    };
+    let shown = crate::project_setup::ResearchKind::CHOICES
+        .into_iter()
+        .find(|known| known.name() == job)
+        .map_or(job, crate::project_setup::ResearchKind::label);
+    format!("Research {verb}: {shown}")
+}
+
+/// Names who acted from a stored party, as the coordination audit keeps it. Takes the
+/// database, the party kind and its agent. Returns "Owner", the agent's label or "Engine".
+pub fn party_actor(db: &Connection, kind: &str, agent: Option<i64>) -> Result<String, EngineError> {
+    Ok(match (kind, agent) {
+        ("agent", Some(agent)) => agent_actor(db, agent)?,
+        ("owner", _) => OWNER_ACTOR.into(),
+        _ => ENGINE_ACTOR.into(),
+    })
 }
 
 /// Names a team agent for the activity the way the team list does. Takes the database
