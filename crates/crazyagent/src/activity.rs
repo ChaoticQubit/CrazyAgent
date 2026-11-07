@@ -400,6 +400,21 @@ pub fn list(
     project: &ProjectId,
     limit: usize,
 ) -> Result<Vec<ActivityItem>, EngineError> {
+    listed(db, project, limit).map(|read| read.items)
+}
+
+/// One read of a project's events: the newest that fit, and whether older ones were left
+/// out by the limit or the byte bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listed {
+    pub items: Vec<ActivityItem>,
+    pub more: bool,
+}
+
+/// Lists a project's events as `list` does and says whether older ones were left out.
+/// Takes the database, the project and the limit, 1 to `LIST_MAX`. Returns the read, or
+/// `activity_limit_invalid`.
+pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<Listed, EngineError> {
     if limit == 0 || limit > LIST_MAX {
         return Err(failure("activity_limit_invalid"));
     }
@@ -411,7 +426,7 @@ pub fn list(
         .map_err(state)?;
     let rows = statement
         .query_map(
-            params![project.as_str(), i64::try_from(limit).map_err(state)?],
+            params![project.as_str(), i64::try_from(limit + 1).map_err(state)?],
             |row| {
                 Ok((
                     row.get::<_, String>(2)?,
@@ -431,39 +446,27 @@ pub fn list(
         .map_err(state)?;
     let mut items = Vec::new();
     let mut bytes = 0;
+    let mut more = false;
     for row in rows {
         let (kind, mut item) = row.map_err(state)?;
         let Some(kind) = ActivityKind::parse(&kind) else {
             continue;
         };
+        if items.len() == limit {
+            more = true;
+            break;
+        }
         item.kind = kind;
         let size = serde_json::to_vec(&item).map_err(state)?.len() + 1;
         if bytes + size > LISTED_BYTES_MAX {
+            more = true;
             break;
         }
         bytes += size;
         items.push(item);
     }
     assert!(items.len() <= limit && bytes <= LISTED_BYTES_MAX);
-    Ok(items)
-}
-
-/// One read of a project's events: the newest that fit, and whether older ones were left
-/// out by the limit or the byte bound.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Listed {
-    pub items: Vec<ActivityItem>,
-    pub more: bool,
-}
-
-/// Lists a project's events as `list` does and says whether older ones were left out.
-/// Takes the database, the project and the limit, 1 to `LIST_MAX`. Returns the read, or
-/// `activity_limit_invalid`.
-pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<Listed, EngineError> {
-    Ok(Listed {
-        items: list(db, project, limit)?,
-        more: false,
-    })
+    Ok(Listed { items, more })
 }
 
 /// One event found in the project's older records by `backfill`.
