@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./load-source.mjs";
@@ -155,6 +156,20 @@ test("each link shows its pair's label first in its badge row, live while an act
   for (const box of layout.links.map(badgeBox)) assert.ok(graph.layoutCards(layout).every((item) => !overlaps(box, item)), "a badge row never covers a card");
   const legend = renderToStaticMarkup(createElement(view.EdgeLegend));
   for (const word of ["leads", "delegated to", "teammate of", "live action, while it happens"]) assert.ok(legend.includes(word), `the legend names ${word}: ${legend}`);
+});
+
+test("a line's label pill takes the pointer so its full words show on hover, while the rest of its badge row lets a drag through", () => {
+  const css = readFileSync(new URL("../src/screens/team/team-graph.css", import.meta.url), "utf8");
+  const rule = (selector) => {
+    const at = css.split("\n}").find((block) => block.trim().startsWith(`${selector} {`));
+    return at === undefined ? "" : at.slice(at.indexOf("{") + 1);
+  };
+  assert.match(rule(".tg-badges"), /pointer-events: none;/, "the badge row lets a drag on the canvas through");
+  assert.match(rule(".tg-badges .tg-edge-label"), /pointer-events: auto;/, "the label pill under the row takes the pointer, so the row's title shows its full words");
+  const handing = { ...team, relations: [{ from: "m", to: "team-2", relation: "leads", live: { action: "handing_off", task: "Task 7" } }] };
+  const markup = renderToStaticMarkup(createElement(view.LinkBadges, { link: graph.layoutGraph(handing).links.find((link) => link.to === "team-2") }));
+  assert.match(markup, /^<span class="tg-badges" role="img" aria-label="handing off: Task 7, [^"]+" title="handing off: Task 7, [^"]+"[^>]*><span class="tg-edge-label live">/,
+    "the full words stay in the row's aria label and title, over the pill");
 });
 
 test("unread messages ride their lead's link or arc dashed, and claim overlaps arc between the two cards", () => {

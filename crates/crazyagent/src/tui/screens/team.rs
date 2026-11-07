@@ -1923,9 +1923,7 @@ fn edge_label(edge: &RelationEdge) -> String {
         Some(LiveAction::Messaging) => "messaging".to_owned(),
         Some(LiveAction::WaitingOn { owner: true }) => "waiting on: your answer".to_owned(),
         Some(LiveAction::WaitingOn { owner: false }) => "waiting on".to_owned(),
-        Some(LiveAction::Reviewing { change_set }) => {
-            format!("reviewing: change set #{change_set}")
-        }
+        Some(LiveAction::Reviewing { .. }) => "reviewing".to_owned(),
         None => match edge.relation {
             Relation::Leads => "leads",
             Relation::DelegatedTo => "delegated to",

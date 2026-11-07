@@ -155,6 +155,17 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           "the engine marks the master's open task on its line");
         await shows("a live handoff", [[`handing off: ${HANDOFF}`, true], ["leads", false], ["teammate of", false]], 1);
         await me.capture("graph-labels-handoff");
+        const pointer = await page.evaluate(`(() => {
+          const pill = document.querySelector(".tg-canvas .tg-badges .tg-edge-label.live");
+          const box = pill.getBoundingClientRect();
+          const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+          return [getComputedStyle(pill).pointerEvents, getComputedStyle(pill.parentElement).pointerEvents, pill.contains(hit), hit?.closest("[title]")?.getAttribute("title") ?? null];
+        })()`);
+        assert.deepEqual(pointer.slice(0, 3), ["auto", "none", true], "the label pill takes the pointer and the rest of its badge row lets a drag through");
+        assert.ok(pointer[3]?.startsWith(`handing off: ${HANDOFF}`), `hovering the pill shows its full words: ${pointer[3]}`);
+        inStore(runtime, (store) => store.prepare("UPDATE team_tasks SET status='running', attempts=1, delivered=1, started_ms=? WHERE id=?")
+          .run(Date.now(), task));
+        await shows("the handoff once its agent picks the task up", RESTING, 0);
         inStore(runtime, (store) => store.prepare("UPDATE team_tasks SET status='done', result='Wrote them', attempts=1, delivered=1, started_ms=?, finished_ms=? WHERE id=?")
           .run(Date.now(), Date.now(), task));
         await shows("the handoff once its task is done", RESTING, 0);

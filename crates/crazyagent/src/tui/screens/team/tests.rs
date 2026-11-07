@@ -292,25 +292,43 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     for line in [
         "> ▸ Master  Working",
         "  │  ChatGPT Pro - main",
-        "  │  • handing off: Fix the…",
-        "  ├─ ▸ claude-1  Working",
+        "  ├─ ▸ claude-1  • handing …",
         "  │  │  Claude Max - work",
-        "  │  │  teammate of",
         "  │  └─ ◌ claude-2  Waiting…",
-        "  │  delegated to",
-        "  └─ ▸ codex-1  Starting",
+        "  └─ ▸ codex-1  Starting  d…",
         "     ChatGPT Plus",
         "",
         "  Tasks",
         "  ▸ claude-1  Fix the login…",
         "  ✓ codex-1  Write tests",
+        "",
+        "",
+        "",
     ] {
         expected.push(format!("│{line:<28}│"));
     }
     let drawn: Vec<String> = rows[3..17].iter().map(|row| chars(row, 2, 32)).collect();
     assert_eq!(
         drawn, expected,
-        "each agent's line from its lead is labelled on the lead's stem just above it"
+        "each agent's line names its relation on that same line, so 80x24 shows as many agents as with no labels: the live action right after the name, cut to the width left, and the standing word after the status word"
+    );
+    let mut bare = graph();
+    bare.relations.clear();
+    let mut plain_shell = fresh(80, 24);
+    plain_shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(bare),
+    });
+    let drawn_lines = |rows: &[String]| {
+        rows[3..22]
+            .iter()
+            .filter(|row| !chars(row, 3, 31).trim().is_empty())
+            .count()
+    };
+    assert_eq!(
+        drawn_lines(&rows),
+        drawn_lines(&render(&mut plain_shell)),
+        "the labels take no row of their own"
     );
     let label = |relation, live| {
         super::edge_label(&RelationEdge {
@@ -362,9 +380,21 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     assert_eq!(
         label(
             Relation::Leads,
-            Some(LiveAction::Reviewing { change_set: 16 })
+            Some(LiveAction::Reviewing {
+                agent: "Wren (@checkout)".into()
+            })
         ),
-        "reviewing: change set #16"
+        "reviewing: Wren (@checkout)'s change set"
+    );
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::Reviewing {
+                agent: "Wren\u{1b}[31m\nnow".into()
+            })
+        ),
+        "reviewing: Wren[31m now's change set",
+        "a reviewed name keeps no control character"
     );
 }
 

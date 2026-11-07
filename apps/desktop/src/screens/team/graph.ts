@@ -347,9 +347,7 @@ export function edgeLabel(edge: RelationEdge): string {
   if (!liveShown(live)) return RELATION_WORDS.get(edge.relation) ?? "";
   if (live.action === "messaging") return "messaging";
   if (live.action === "waiting_on") return live.owner === true ? "waiting on: your answer" : "waiting on";
-  if (live.action === "reviewing") {
-    return Number.isSafeInteger(live.change_set) && live.change_set > 0 ? `reviewing: change set #${live.change_set}` : "reviewing";
-  }
+  if (live.action === "reviewing") return "reviewing";
   const task = live.task.split("\n").map((line) => line.split(/\s+/).filter(Boolean).join(" ")).find(Boolean);
   return `handing off: ${task ?? "Untitled task"}`;
 }

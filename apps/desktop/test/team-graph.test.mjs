@@ -74,8 +74,11 @@ test("each graph line names its relation, and the live action while it happens",
   assert.equal(graph.edgeLabel(pair("leads", { action: "messaging" })), "messaging");
   assert.equal(graph.edgeLabel(pair("delegated_to", { action: "waiting_on", owner: false })), "waiting on");
   assert.equal(graph.edgeLabel(pair("delegated_to", { action: "waiting_on", owner: true })), "waiting on: your answer");
-  assert.equal(graph.edgeLabel(pair("leads", { action: "reviewing", change_set: 16 })), "reviewing: change set #16");
-  assert.equal(graph.edgeLabel(pair("leads", { action: "reviewing", change_set: 1.5 })), "reviewing", "a change set that is no whole number is not named");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "reviewing", agent: "Wren (@checkout)" })), "reviewing: Wren (@checkout)'s change set",
+    "a review names the agent whose change set it reviews, as its card names it");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "reviewing", agent: " Wren\n\t(@checkout) " })), "reviewing: Wren (@checkout)'s change set");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "reviewing", agent: " \n " })), "reviewing: change set", "a blank name is not named");
+  assert.equal(graph.edgeLabel(pair("leads", { action: "reviewing", change_set: 16 })), "reviewing: change set", "a number from an older engine is never shown");
   assert.equal(graph.edgeLabel(pair("leads", { action: "someday" })), "leads", "a live action from a newer engine falls back to the relation");
   assert.equal(graph.edgeLabel(pair("someday")), "", "a relation from a newer engine draws no label");
 });
