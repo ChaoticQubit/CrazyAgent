@@ -1376,9 +1376,9 @@ fn the_team_tools_section_tells_agents_to_merge_crazyagent_main_while_catch_up_i
     );
 }
 
-/// Every agent hears, with "Catch up with main" on or off, to start its next work from main
-/// with git reset --hard crazyagent/main once its change set is accepted, unless it has
-/// newer commits (OS-8).
+/// A sub-agent in its own clone hears, with "Catch up with main" on or off, to start its next
+/// work from main with git reset --keep crazyagent/main once its change set is accepted,
+/// unless it has newer commits (OS-8, DEC-117).
 #[test]
 fn the_team_tools_section_tells_agents_to_restart_from_main_after_an_accept() {
     for catch_up in [true, false] {
