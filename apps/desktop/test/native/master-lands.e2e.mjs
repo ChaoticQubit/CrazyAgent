@@ -10,7 +10,7 @@ import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
 import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
-import { engineMasterWorktree } from "./master-lease.mjs";
+import { SUB_LABEL, engineMasterWorktree, masterConflictFix } from "./master-lease.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
@@ -22,10 +22,6 @@ const SETTING = "When the master resolves conflicts";
 const MERGES = "Merge into main itself";
 const WAITS = "Wait for my Accept";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
-const AS_MASTER = ["-c", "user.name=Master", "-c", "user.email=master@example.invalid"];
-const SUB = "agent-1";
-const SUB_LABEL = "Agent 1";
-const SUB_PROMPT = "Add the apple seed";
 const README = "# Seed service\n\nServes seeds over HTTP.\n";
 
 /** Runs git in a folder with no system or user config. Inputs: the folder and git's
@@ -138,27 +134,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           return { id, how };
         };
         const changes = () => value(bridge, "desktop_changes", { projectId: project });
-        const masterFix = async () => {
-          const place = join(root, "agents", SUB);
-          git(repo, "worktree", "add", "-q", "--detach", place, start);
-          writeFileSync(join(place, "seeds.txt"), "apple\n");
-          const made = spawnSync(bridgeBinary, ["record-turn-end", runtime, project, SUB, SUB_LABEL, repo, place, join(repo, ".git", "worktrees", SUB), SUB_PROMPT], { encoding: "utf8", env: { ...env } });
-          assert.equal(made.status, 0, `the engine ends the sub-agent's turn: ${made.stderr}`);
-          const sub = made.stdout.trim();
-          assert.match(sub, /^[0-9a-f]{32}$/, "the sub-agent's edit makes a change set");
-          const subHead = (await changes()).find((set) => set.id === sub)?.head ?? "";
-          assert.match(subHead, /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/, "Changes lists the sub-agent's set with its head");
-          writeFileSync(join(repo, "seeds.txt"), "pear\n");
-          git(repo, "add", "seeds.txt");
-          git(repo, ...OWNER, "commit", "-q", "-m", "Plant the pear seed");
-          const tip = git(repo, "rev-parse", "HEAD");
-          git(lease.worktree, ...AS_MASTER, "merge", "-q", "--no-edit", "main");
-          git(lease.worktree, ...AS_MASTER, "merge", "-q", "--no-commit", "-s", "ours", subHead);
-          writeFileSync(join(lease.worktree, "seeds.txt"), "pear\napple\n");
-          git(lease.worktree, "add", "seeds.txt");
-          git(lease.worktree, ...AS_MASTER, "commit", "-q", "-m", "Keep both seeds");
-          return { sub, tip, ...masterTurn(null) };
-        };
+        const masterFix = () => masterConflictFix({ bridgeBinary, env, runtime, project, root, repo, start, lease, changes, masterTurn });
         const status = () => value(bridge, "desktop_team_status", { id: project });
         const activity = async () => (await value(bridge, "desktop_project_activity", { id: project, limit: 50 })).items;
         await steps({ me, page, open, masterTurn, masterFix, changes, status, activity, repo, start });

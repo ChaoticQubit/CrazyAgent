@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
@@ -9,6 +10,21 @@ const LEASE_MS = 180000;
 const ACTIVE_TURN = new Set(["queued", "prepared", "delivering", "running"]);
 const LEASE_BRANCH = /^crazyagent\/(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const PROMPT = "Say hello.";
+const GIT = "/usr/bin/git";
+const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
+const AS_MASTER = ["-c", "user.name=Master", "-c", "user.email=master@example.invalid"];
+const SUB = "agent-1";
+const SUB_PROMPT = "Add the apple seed";
+export const SUB_LABEL = "Agent 1";
+export const FIXED_SEEDS = "pear\napple\n";
+
+/** Runs git in a folder with no system or user config. Inputs: the folder and git's
+ * arguments. Output: git's trimmed stdout. */
+function git(folder, ...args) {
+  const result = spawnSync(GIT, ["-c", "commit.gpgsign=false", ...args], { cwd: folder, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: folder, GIT_CONFIG_NOSYSTEM: "1", LANG: "C" } });
+  assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
+  return result.stdout.trim();
+}
 
 /** Reads, read-only, the worktree leases the engine keeps for one project. Inputs: the
  * engine root and the project. Output: the leases as the engine stored them. */
@@ -76,4 +92,32 @@ export async function engineMasterWorktree(bridge, runtime, project, next) {
   assert.ok(link, "the master worktree is a linked worktree");
   assert.equal(readFileSync(join(link[1], "HEAD"), "utf8"), `ref: refs/heads/${kept.branch}\n`, "the master worktree is on the engine's branch");
   return { worktree: kept.path, gitDir: link[1], branch: kept.branch };
+}
+
+/** Makes the HackerBlog shape in a test project: a sub-agent set that adds seeds.txt, the
+ * owner's own seeds.txt on main so that set conflicts, then the master merges main and the
+ * set's head in its leased worktree, keeps both lines and ends its turn. Inputs: the case's
+ * handles (bridge binary, env, engine root, project, test root, repository, first commit,
+ * lease, Changes reader and master turn end). Output: the sub-agent's set, the owner's tip
+ * and the master's turn end. */
+export async function masterConflictFix({ bridgeBinary, env, runtime, project, root, repo, start, lease, changes, masterTurn }) {
+  const place = join(root, "agents", SUB);
+  git(repo, "worktree", "add", "-q", "--detach", place, start);
+  writeFileSync(join(place, "seeds.txt"), "apple\n");
+  const made = spawnSync(bridgeBinary, ["record-turn-end", runtime, project, SUB, SUB_LABEL, repo, place, join(repo, ".git", "worktrees", SUB), SUB_PROMPT], { encoding: "utf8", env: { ...env } });
+  assert.equal(made.status, 0, `the engine ends the sub-agent's turn: ${made.stderr}`);
+  const sub = made.stdout.trim();
+  assert.match(sub, /^[0-9a-f]{32}$/, "the sub-agent's edit makes a change set");
+  const subHead = (await changes()).find((set) => set.id === sub)?.head ?? "";
+  assert.match(subHead, /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/, "Changes lists the sub-agent's set with its head");
+  writeFileSync(join(repo, "seeds.txt"), "pear\n");
+  git(repo, "add", "seeds.txt");
+  git(repo, ...OWNER, "commit", "-q", "-m", "Plant the pear seed");
+  const tip = git(repo, "rev-parse", "HEAD");
+  git(lease.worktree, ...AS_MASTER, "merge", "-q", "--no-edit", "main");
+  git(lease.worktree, ...AS_MASTER, "merge", "-q", "--no-commit", "-s", "ours", subHead);
+  writeFileSync(join(lease.worktree, "seeds.txt"), FIXED_SEEDS);
+  git(lease.worktree, "add", "seeds.txt");
+  git(lease.worktree, ...AS_MASTER, "commit", "-q", "-m", "Keep both seeds");
+  return { sub, tip, ...masterTurn(null) };
 }
