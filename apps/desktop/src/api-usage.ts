@@ -99,6 +99,7 @@ export interface MetricsBucket {
 export interface MetricsRun {
   project: string;
   agent: string;
+  label: string | null;
   session: string;
   task: number | null;
   title: string | null;
@@ -113,13 +114,17 @@ export interface MetricsGroup {
   agents: number;
   runs: number;
   projects: string[];
+  more_projects: number;
 }
 
 export interface MetricsAgent {
   project: string;
   agent: string;
+  label: string | null;
   harnesses: string[];
+  more_harnesses: number;
   accounts: string[];
+  more_accounts: number;
   tokens: Tokens;
 }
 

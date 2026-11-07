@@ -215,6 +215,8 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
   const agent = (key: string) => names.agents.get(key) ?? agentLabel(key, projectName);
   const account = (key: string) => key === "" ? "Unattributed" : names.accounts.get(key) ?? key;
   const harness = (key: string) => HARNESS_NAMES[key as keyof typeof HARNESS_NAMES] ?? key;
+  const listed = (kept: string[], more: number | undefined, show: (name: string) => string) =>
+    [...kept.map(show), ...(more ? [`+${more} more`] : [])].join(", ");
   const across = filter !== undefined && projectId === null;
   const projectColumn = across && (by === "agent" || by === "run");
   if (by === "project") {
@@ -238,7 +240,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
   if (by === "account" && filter) {
     return {
       head: "Account", extra: ["Agents", "Projects"], projectColumn,
-      rows: metrics.accounts.map((row) => ({ key: row.key, name: account(row.key), tokens: row.tokens, extra: [String(row.agents), row.projects.map(projectName).join(", ")] })),
+      rows: metrics.accounts.map((row) => ({ key: row.key, name: account(row.key), tokens: row.tokens, extra: [String(row.agents), listed(row.projects, row.more_projects, projectName)] })),
     };
   }
   if (by === "account") {
@@ -254,7 +256,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
     return {
       head: "Harness", extra: filter ? ["Agents", "Projects"] : ["Agents", "Runs"], projectColumn,
       rows: metrics.harnesses.map((row) => ({
-        key: row.key, name: harness(row.key), tokens: row.tokens, extra: [String(row.agents), filter ? row.projects.map(projectName).join(", ") : String(row.runs)],
+        key: row.key, name: harness(row.key), tokens: row.tokens, extra: [String(row.agents), filter ? listed(row.projects, row.more_projects, projectName) : String(row.runs)],
       })),
     };
   }
@@ -263,7 +265,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
       head: "Agent", extra: ["Harness", "Account"], projectColumn,
       rows: metrics.agents.map((row) => ({
         key: `${row.project}/${row.agent}`, name: agent(row.agent), project: projectColumn ? projectName(row.project) : undefined, tokens: row.tokens,
-        extra: [row.harnesses.map(harness).join(", "), row.accounts.map(account).join(", ")],
+        extra: [listed(row.harnesses, row.more_harnesses, harness), listed(row.accounts, row.more_accounts, account)],
       })),
     };
   }
