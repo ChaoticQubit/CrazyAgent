@@ -15,6 +15,15 @@ mod flow;
 mod git;
 #[cfg(unix)]
 pub(crate) mod ide;
+#[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Task 8 part B calls regenerate from Task 7's conflict check"
+    )
+)]
+mod lockfiles;
 mod merges;
 #[cfg(unix)]
 mod owner;
