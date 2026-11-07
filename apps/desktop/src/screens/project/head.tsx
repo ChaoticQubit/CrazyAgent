@@ -39,6 +39,7 @@ function headSettled(head: HTMLElement, scrolled: boolean): boolean {
  * Output: whether the head is scrolled. */
 export function useProjectHead(root: RefObject<HTMLDivElement | null>, project: string): boolean {
   const [scrolled, setScrolled] = useState(false);
+  const settle = useRef<(() => void) | null>(null);
   useEffect(() => {
     const node = root.current;
     const page = node?.closest<HTMLElement>(".main");
@@ -58,12 +59,14 @@ export function useProjectHead(root: RefObject<HTMLDivElement | null>, project: 
       sync();
     };
     follow();
+    settle.current = sync;
     page.addEventListener("scroll", follow, { passive: true });
     head.addEventListener("transitionend", sync);
     head.addEventListener("transitioncancel", sync);
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync);
     observer?.observe(head);
     return () => {
+      settle.current = null;
       page.removeEventListener("scroll", follow);
       head.removeEventListener("transitionend", sync);
       head.removeEventListener("transitioncancel", sync);
@@ -72,6 +75,9 @@ export function useProjectHead(root: RefObject<HTMLDivElement | null>, project: 
       node.style.removeProperty("--pj-head-room");
     };
   }, [project]);
+  useEffect(() => {
+    settle.current?.();
+  }, [scrolled]);
   return scrolled;
 }
 
