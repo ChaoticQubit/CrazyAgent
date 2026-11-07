@@ -8294,7 +8294,7 @@ fn a_tools_on_master_s_owner_turn_carries_the_task_start_reminder_only_while_it_
         replies(f) == 1
     });
     let master = masters(&fixture.connection)[0];
-    let first = typed(&fixture, master);
+    let first = pasted(&fixture, master);
     assert!(first.contains("Plan the page"), "{first}");
     assert_eq!(
         first.matches(REMINDER).count(),
@@ -8315,7 +8315,7 @@ fn a_tools_on_master_s_owner_turn_carries_the_task_start_reminder_only_while_it_
     fixture.until(&mut team, "the master answers the second message", |f| {
         replies(f) == 2
     });
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     let second = &text[first.len()..];
@@ -8353,9 +8353,9 @@ fn a_tools_on_live_master_s_typed_owner_message_carries_the_task_start_reminder_
     let master = masters(&fixture.connection)[0];
     tell_master(&fixture, "Plan the page");
     fixture.until(&mut team, "the live master's first turn ends", |f| {
-        typed(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+        pasted(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
     });
-    let first = typed(&fixture, master);
+    let first = pasted(&fixture, master);
     assert_eq!(
         first.matches(REMINDER).count(),
         1,
@@ -8373,9 +8373,9 @@ fn a_tools_on_live_master_s_typed_owner_message_carries_the_task_start_reminder_
     .unwrap();
     tell_master(&fixture, "Plan the title");
     fixture.until(&mut team, "the live master's second turn ends", |f| {
-        typed(f, master).contains("Plan the title") && live_turns(&f.connection) == (2, false)
+        pasted(f, master).contains("Plan the title") && live_turns(&f.connection) == (2, false)
     });
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     let second = &text[first.len()..];
@@ -8416,9 +8416,9 @@ fn a_live_master_s_reminder_is_left_out_when_only_the_owner_message_and_its_edit
     let master = masters(&fixture.connection)[0];
     tell_master(&fixture, "Plan the page");
     fixture.until(&mut team, "the live master's first turn ends", |f| {
-        typed(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+        pasted(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
     });
-    let first = typed(&fixture, master);
+    let first = pasted(&fixture, master);
     assert!(first.contains("Task start reminder"), "{first}");
 
     let edited = format!(
@@ -8457,9 +8457,9 @@ fn a_live_master_s_reminder_is_left_out_when_only_the_owner_message_and_its_edit
     assert_eq!(message.len(), room);
     tell_master(&fixture, &message);
     fixture.until(&mut team, "the live master's second turn ends", |f| {
-        typed(f, master).contains(&message) && live_turns(&f.connection) == (2, false)
+        pasted(f, master).contains(&message) && live_turns(&f.connection) == (2, false)
     });
-    let text = typed(&fixture, master);
+    let text = pasted(&fixture, master);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     let second = &text[first.len()..];

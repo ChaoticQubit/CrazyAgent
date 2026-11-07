@@ -431,7 +431,7 @@ fn harness_without_reader_reports_not_reported_never_zero() {
         .unwrap();
     assert_eq!(hours, 2, "one row per hour an agent ran");
 
-    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(all.total.input, 70, "unreported runs add no tokens");
     assert_eq!(all.not_reported_by, ["Gemini CLI", "OpenCode"]);
     assert_eq!(
@@ -460,14 +460,14 @@ fn harness_without_reader_reports_not_reported_never_zero() {
     assert!(all.accounts.iter().all(|row| row.not_reported_by.is_none()));
 
     let only = crate::protocol::ProjectId::new("beta").unwrap();
-    let beta_report = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let beta_report = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(beta_report.total, Tokens::default());
     assert_eq!(beta_report.not_reported_by, ["Gemini CLI"]);
     assert_eq!(
         flagged(&beta_report.agents),
         [("master-beta", 0, Some("Gemini CLI"))]
     );
-    let earlier = report(&db, None, Some(MIDNIGHT - 4 * DAY), 0, MIDNIGHT + DAY).unwrap();
+    let earlier = report(&db, None, Some(MIDNIGHT - 4 * DAY), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert!(earlier.agents.iter().any(|row| row.key == "team-5"));
 
     let counted = who("alpha", None, "claude-1", "team-2", RunKind::Agent);
@@ -515,7 +515,7 @@ fn rcli_counted_from_host_frames_is_reported_and_never_marked_unreported() {
     let opencode = readerless("alpha", "team-4", "opencode", RunKind::Agent);
     mark_unreported(&db, &opencode, MIDNIGHT + HOUR).unwrap();
 
-    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(all.total.input, 300);
     assert_eq!(all.not_reported_by, ["OpenCode"]);
     assert_eq!(
@@ -530,7 +530,7 @@ fn a_report_from_an_engine_without_step_health_reads_as_healthy() {
     let root = tempfile::tempdir().unwrap();
     let db = crate::usage::open(root.path()).unwrap();
     crate::usage::health::record_panic(&db, crate::usage::health::UsageStep::Poll, 7).unwrap();
-    let report = report(&db, None, None, 0, MIDNIGHT).unwrap();
+    let report = report(&db, None, None, 0, MIDNIGHT, &[]).unwrap();
     assert_eq!(report.health.len(), 1);
     let mut older = serde_json::to_value(&report).unwrap();
     older.as_object_mut().unwrap().remove("health");
@@ -571,7 +571,7 @@ fn a_flagged_key_outside_the_top_rows_keeps_its_full_count() {
     let readerless_only = readerless("p-01", "team-99", "opencode", RunKind::Agent);
     mark_unreported(&db, &readerless_only, MIDNIGHT + HOUR + 5).unwrap();
 
-    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(all.agents.len(), ROWS_MAX + 2);
     assert!(
         all.agents[..ROWS_MAX]
@@ -603,7 +603,7 @@ fn a_flagged_key_outside_the_top_rows_keeps_its_full_count() {
     );
 
     let only = crate::protocol::ProjectId::new(last_project.as_str()).unwrap();
-    let alone = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let alone = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(
         flagged(&alone.agents),
         [(last.as_str(), 1000 - listed, Some("OpenCode"))]
@@ -654,7 +654,7 @@ fn trimmed_flagged_keys_are_counted_together_and_an_unattributed_agent_mark_stay
     )
     .unwrap();
 
-    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert!(
         !all.agents.iter().any(|row| row.key.is_empty()),
         "the agents list leaves the unattributed key out, marked or not"

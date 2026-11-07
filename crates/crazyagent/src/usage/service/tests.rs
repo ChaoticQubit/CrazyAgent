@@ -111,7 +111,7 @@ fn a_live_agent_on_a_harness_without_a_reader_is_marked_not_reported() {
     let mut usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
     usage.step(NOW).unwrap();
     usage.step(NOW + 1).unwrap();
-    let report = crate::usage::report::report(&db, None, None, 0, NOW + 2).unwrap();
+    let report = crate::usage::report::report(&db, None, None, 0, NOW + 2, &[]).unwrap();
     assert_eq!(report.total.input, 50);
     assert_eq!(report.not_reported_by, ["OpenCode"]);
     assert_eq!(
@@ -271,7 +271,7 @@ fn a_panicking_step_kind_is_counted_marked_working_again_and_forgotten_on_restar
         UsageStep::Runs,
         "a whole step ends in its last part"
     );
-    let report = crate::usage::report::report(&db, None, None, 0, NOW + 11_000).unwrap();
+    let report = crate::usage::report::report(&db, None, None, 0, NOW + 11_000, &[]).unwrap();
     assert_eq!(
         report.health,
         [crate::usage::health::StepHealth {
