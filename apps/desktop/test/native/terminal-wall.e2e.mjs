@@ -171,6 +171,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   } finally {
     log.closing = true;
     writeFileSync(join(evidence, "calls.json"), JSON.stringify(log.calls, null, 1));
+    writeFileSync(join(evidence, "trail.json"), JSON.stringify(log.trail.map(({ at, ms, cmd, args }) => ({ at, ms, cmd, id: args?.id ?? null })), null, 1));
     site?.server.close();
     await stop(bridgeProcess);
     await stop(engine);
