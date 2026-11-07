@@ -1528,8 +1528,17 @@ fn land_on_lead(
     head: &str,
     branch: &str,
 ) -> (String, bool) {
-    let landed = crate::projects_home::owner_home()
-        .and_then(|home| crate::landing::accept_into(db, &home, id, head, None, branch));
+    let landed = crate::projects_home::owner_home().and_then(|home| {
+        crate::landing::accept_into_as(
+            db,
+            &home,
+            id,
+            head,
+            None,
+            branch,
+            crate::activity::ENGINE_ACTOR,
+        )
+    });
     match landed {
         Ok(crate::landing::AcceptOutcome::Landed { commit, branch }) => (
             format!(

@@ -963,6 +963,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::team::initialize(connection)?;
     crate::ide::bridge::memory::initialize(connection)?;
     crate::coord::ensure(connection)?;
+    crate::activity::initialize(connection)?;
     crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
@@ -1625,12 +1626,21 @@ pub(crate) fn create_project(
     }
     enforce_snapshot_bound(tx)?;
     assert_eq!(count, 1);
+    crate::activity::note_created(tx, project_id, &spec.name, created_ms());
     plugins::remove_project(tx, project_id)?;
     if let Some(root) = tx.path().map(Path::new).and_then(Path::parent) {
         plugins::remove_skill_project_folder(root, project_id.as_str())?;
     }
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
+}
+
+fn created_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 fn snapshot(tx: &Transaction<'_>) -> Result<Outcome, EngineError> {
@@ -2542,6 +2552,15 @@ fn owner_read(
             project_id: project_id.clone(),
             jobs: crate::project_setup::list_jobs(&tx, config, project_id)?,
         },
+        OwnerRead::ProjectActivity { project_id, limit } => {
+            stored_setup(&tx, project_id)?;
+            let listed = crate::activity::listed(&tx, project_id, *limit)?;
+            OwnerData::ProjectActivity {
+                project_id: project_id.clone(),
+                items: listed.items,
+                more: listed.more,
+            }
+        }
         OwnerRead::ProjectContext { project_id } => OwnerData::ProjectContext {
             context: crate::project_setup::list_context(&stored_setup(&tx, project_id)?)?,
         },

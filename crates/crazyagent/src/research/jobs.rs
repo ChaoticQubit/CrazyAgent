@@ -1,3 +1,4 @@
+use crate::activity::ActivityKind;
 use crate::planning::AFTER_RESEARCH;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use std::fmt;
@@ -251,6 +252,8 @@ impl ResearchJobs {
             assert_eq!(job.claimer.as_deref(), Some(claimer));
             assert!(harness.is_none_or(|harness| job.harness == harness));
             assert!(job.attempts >= 1);
+            let started = ActivityKind::ResearchStarted;
+            crate::activity::note_research(&self.connection, job.id, started, now);
         }
         Ok(job)
     }
@@ -281,19 +284,24 @@ impl ResearchJobs {
     }
 
     /// Marks the job of the claim `held` done with its report path inside the
-    /// project folder.
+    /// project folder, and records the saved run in the project's activity.
     pub fn finish(&self, held: &ResearchJob, report_path: &str) -> Result<(), JobError> {
         bounded(report_path, REPORT_PATH_BYTES_MAX)?;
+        let now = now_ms();
         self.transition(
             held,
             "status = 'done', report_path = ?4, finished_ms = ?5, claimer = NULL",
-            &[&report_path, &now_ms()],
-        )
+            &[&report_path, &now],
+        )?;
+        let saved = ActivityKind::ResearchSaved;
+        crate::activity::note_research(&self.connection, held.id, saved, now);
+        Ok(())
     }
 
     /// Records a failed attempt of the claim `held`: a job whose cancel was
     /// requested ends cancelled, otherwise it requeues while attempts remain under
-    /// `attempts_max`, otherwise it is marked failed. Returns the new status.
+    /// `attempts_max`, otherwise it is marked failed; the stopped run is recorded in
+    /// the project's activity. Returns the new status.
     pub fn fail(
         &self,
         held: &ResearchJob,
@@ -305,6 +313,7 @@ impl ResearchJobs {
         }
         let error: String = error.chars().take(ERROR_BYTES_MAX / 4).collect();
         let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
+        let now = now_ms();
         let status = self
             .connection
             .query_row(
@@ -314,14 +323,7 @@ impl ResearchJobs {
                      error = ?4, finished_ms = ?6, claimer = NULL
                  WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
                  RETURNING status",
-                params![
-                    held.id,
-                    claimer,
-                    held.attempts,
-                    error,
-                    attempts_max,
-                    now_ms()
-                ],
+                params![held.id, claimer, held.attempts, error, attempts_max, now],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
@@ -331,6 +333,8 @@ impl ResearchJobs {
             status,
             ResearchStatus::Queued | ResearchStatus::Failed | ResearchStatus::Cancelled
         ));
+        let stopped = ActivityKind::ResearchStopped;
+        crate::activity::note_research(&self.connection, held.id, stopped, now);
         Ok(status)
     }
 
@@ -466,13 +470,17 @@ impl ResearchJobs {
     }
 
     /// Marks the cancel-flagged job of the claim `held` cancelled after its
-    /// process stopped.
+    /// process stopped, and records the stopped run in the project's activity.
     pub fn cancelled(&self, held: &ResearchJob) -> Result<(), JobError> {
+        let now = now_ms();
         self.transition(
             held,
             "status = 'cancelled', finished_ms = ?4, claimer = NULL",
-            &[&now_ms()],
-        )
+            &[&now],
+        )?;
+        let stopped = ActivityKind::ResearchStopped;
+        crate::activity::note_research(&self.connection, held.id, stopped, now);
+        Ok(())
     }
 
     /// Takes back running jobs whose heartbeat is older than `stale_ms`, so work held by a

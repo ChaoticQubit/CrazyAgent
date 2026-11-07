@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod accounts;
+pub mod activity;
 pub mod adapters;
 pub mod agent_git;
 pub mod agent_home;
