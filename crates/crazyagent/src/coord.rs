@@ -39,7 +39,11 @@ pub mod tool_switches;
 pub mod watch;
 mod work;
 
-pub use claims::{breadth, covers, overlapping, overlaps_of, path_scopes, release_claims};
+pub use claims::{
+    breadth, claims_full_notice, covers, held_sets, held_sets_in, hold_for_set, overlapping,
+    overlaps_of, path_scopes, release_claims, release_set, release_unheld, restore_set,
+    stopped_with_unheld,
+};
 pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread};
 pub use presence::{owner_questions, record_tool, set_waiting, snapshot, touch};
 pub use store::{ensure, forget_project, master_of, message};
@@ -58,6 +62,9 @@ pub const BODY_BYTES_MAX: usize = 4000;
 pub const PATTERN_BYTES_MAX: usize = 512;
 /// The most claims one unit of work holds.
 pub const CLAIMS_PER_WORK_MAX: usize = 32;
+/// The most live claims one agent holds, so one agent's flood of claimed work refuses only
+/// that agent's starts, never fills a whole project's overlap check.
+pub const AGENT_CLAIMS_MAX: usize = 128;
 /// The most messages one `pending` read returns.
 pub const PENDING_MAX: usize = 64;
 /// The longest work title, in bytes.

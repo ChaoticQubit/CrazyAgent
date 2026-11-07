@@ -1112,7 +1112,8 @@ fn answer_asks(
 
 /// The active claims of other agents that cover one file, at most `HELD_MAX`, for an
 /// agent's overlap question (K1a `overlapping`); a path that is not one plain repository
-/// file has none. Takes the database, the project, the asking agent and the
+/// file has none. A project holding more claims than one check reads answers one claim
+/// held by CrazyAgent, so the edit check fails closed. Takes the database, the project, the asking agent and the
 /// repository-relative path. Returns the claims, or a SQLite failure.
 fn held(
     db: &Connection,
@@ -1135,6 +1136,14 @@ fn held(
         }
         Err(problem) if problem.0.starts_with("coord_state_unavailable") => {
             return Err(problem);
+        }
+        Err(problem) if problem.0 == "coord_claims_full" => {
+            held.push(Held {
+                by: "CrazyAgent".to_owned(),
+                pattern:
+                    "too many claims in this project to check; they free up as the owner accepts or discards finished change sets, or as work no agent is on is released"
+                        .to_owned(),
+            });
         }
         Err(_) => {}
     }

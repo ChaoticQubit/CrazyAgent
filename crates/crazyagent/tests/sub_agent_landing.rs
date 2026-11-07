@@ -511,6 +511,62 @@ fn hand_merged_worker_set_closes_at_the_lead_turn_end() {
     assert_eq!(team.pending_ref(&set), "");
 }
 
+/// OS-8 L4: a lead's merge that holds a worker's change set closes that set as landed and
+/// releases the claims of the worker's review-ready work, so another agent's start on the
+/// same file no longer overlaps it.
+#[test]
+fn a_lead_merge_covering_a_worker_set_releases_the_worker_s_claims() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.db
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (9,?1,'sub','claude-code',1,'working',0,0)",
+            [PROJECT],
+        )
+        .unwrap();
+    let now = i64::try_from(now_ms()).unwrap();
+    let (work, _) = crazyagent::coord::start_work(
+        &team.db,
+        &team.id,
+        2,
+        "Fix".into(),
+        vec!["README".into()],
+        now,
+    )
+    .unwrap();
+    crazyagent::coord::finish(
+        &team.db,
+        work,
+        1,
+        crazyagent::coord::Finish::ReviewReady,
+        "Green.".into(),
+        2,
+        now,
+    )
+    .unwrap();
+    team.commit(&fix, "README", "one\nTWO\nthree\n", "Worker edit");
+    let set = team.turn_end(&fix);
+    let start = || {
+        crazyagent::coord::start_work(
+            &team.db,
+            &team.id,
+            9,
+            "Docs".into(),
+            vec!["README".into()],
+            now,
+        )
+        .unwrap()
+        .1
+        .len()
+    };
+    assert_eq!(start(), 1, "the worker's set still waits");
+    let tip = team.hand_merge(&team.lead, &fix);
+    landing::settle_sub_agents(&team.db, &team.id, 1).unwrap();
+    assert_eq!(team.state(&set), ("accepted".to_owned(), Some(tip)));
+    assert_eq!(start(), 0, "the merged worker set's claim is released");
+}
+
 /// When the owner accepts a lead's set that holds a worker's work, the worker's set closes
 /// with it as accepted, landed as the owner's squash commit (fix/hand-merged-set 8f98740a).
 #[test]

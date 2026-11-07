@@ -6332,3 +6332,427 @@ fn files_an_instruction_file_imports_or_links_to_are_marked() {
         ]
     );
 }
+
+/// Seeds the coordination tables for OS-8: the case's sub-agent becomes engine agent 1 with
+/// a claim on README for work it finished as review-ready, beside a second agent 2 and the
+/// project's master, agent 3. Input: the case. Output: the review-ready work.
+fn review_ready_claim(case: &mut Case) -> crate::coord::WorkId {
+    case.workspace.agent.id = "1".into();
+    crate::team::initialize(&case.db).unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    case.db
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (1,'project-1','sub','claude-code',1,'working',1,1),
+                    (2,'project-1','sub','claude-code',1,'working',1,1),
+                    (3,'project-1','master','claude-code',1,'working',1,1);",
+        )
+        .unwrap();
+    let now = crate::team::now_ms();
+    let (work, _) = crate::coord::start_work(
+        &case.db,
+        &case.workspace.project,
+        1,
+        "Readme".into(),
+        vec!["README".into()],
+        now,
+    )
+    .unwrap();
+    crate::coord::finish(
+        &case.db,
+        work,
+        1,
+        crate::coord::Finish::ReviewReady,
+        "Green.".into(),
+        1,
+        now,
+    )
+    .unwrap();
+    work
+}
+
+/// Starts agent 2 on README as the next agent would. Input: the case. Output: how many
+/// claims of other agents its start overlaps.
+fn second_start(case: &Case) -> usize {
+    start_on(case, 2, "README")
+}
+
+/// Starts one agent on one file. Inputs: the case, the agent and the file. Output: how many
+/// claims of other agents its start overlaps.
+fn start_on(case: &Case, agent: i64, file: &str) -> usize {
+    crate::coord::start_work(
+        &case.db,
+        &case.workspace.project,
+        agent,
+        "Docs".into(),
+        vec![file.into()],
+        crate::team::now_ms(),
+    )
+    .unwrap()
+    .1
+    .len()
+}
+
+/// Has agent 1 start one unit of work on a file and finish it as review-ready, as a
+/// sub-agent does during a turn. Inputs: the case and the file. Output: the work.
+fn finished_on(case: &Case, file: &str) -> crate::coord::WorkId {
+    let now = crate::team::now_ms();
+    let (work, _) = crate::coord::start_work(
+        &case.db,
+        &case.workspace.project,
+        1,
+        "More".into(),
+        vec![file.into()],
+        now,
+    )
+    .unwrap();
+    crate::coord::finish(
+        &case.db,
+        work,
+        1,
+        crate::coord::Finish::ReviewReady,
+        "Green.".into(),
+        1,
+        now,
+    )
+    .unwrap();
+    work
+}
+
+/// OS-8 M1: the master's review that completes, or closes, a sub-agent's review-ready work
+/// keeps its claims while the sub-agent's change set waits; only the set's Accept, or its
+/// discard, releases them.
+#[test]
+fn a_master_review_of_a_sub_s_work_keeps_its_claims_until_the_set_closes() {
+    for outcome in [crate::coord::Finish::Complete, crate::coord::Finish::Closed] {
+        let mut case = Case::new();
+        let work = review_ready_claim(&mut case);
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        crate::coord::finish(
+            &case.db,
+            work,
+            2,
+            outcome,
+            "Reviewed.".into(),
+            3,
+            crate::team::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(second_start(&case), 1, "{outcome:?}: the set still waits");
+        match outcome {
+            crate::coord::Finish::Complete => assert!(matches!(
+                case.accept(&id).unwrap(),
+                AcceptOutcome::Landed { .. }
+            )),
+            _ => {
+                discard(&case.db, &id, &case.view(&id).head, NOW_MS).unwrap();
+            }
+        }
+        assert_eq!(second_start(&case), 0, "{outcome:?}: the set closed");
+    }
+}
+
+/// OS-8 L1: closing a change set releases only the claims of the work it holds. Work the
+/// agent finished after the set's last turn end keeps its claims through that set's Accept
+/// and is released by the Accept of the next set, which holds it.
+#[test]
+fn landing_a_set_releases_only_the_claims_of_work_it_holds() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    finished_on(&case, "src/two.rs");
+    assert!(matches!(
+        case.accept(&first).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the landed set's own claim is released"
+    );
+    assert_eq!(
+        start_on(&case, 2, "src/two.rs"),
+        1,
+        "work finished after the landed set's turn end still waits"
+    );
+    case.edit("src/two.rs", "two\n");
+    let next = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_ne!(next, first);
+    assert!(matches!(
+        case.accept(&next).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        start_on(&case, 2, "src/two.rs"),
+        0,
+        "the next set landed it"
+    );
+}
+
+/// OS-8 L2: review-ready work whose agent left nothing to land has no change set to wait
+/// for, so its claims are released at the turn end that records nothing.
+#[test]
+fn review_ready_work_with_nothing_to_land_releases_its_claims_at_the_turn_end() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    assert_eq!(second_start(&case), 1, "the turn has not ended yet");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), None);
+    assert_eq!(second_start(&case), 0, "nothing waits to land");
+}
+
+/// OS-8 L2: a claim release that fails when a set closes keeps the claim, never frees it
+/// early, and is tried again at the agent's next turn end, so the claim is not held forever.
+#[test]
+fn a_failed_claim_release_is_tried_again_at_the_agent_s_next_turn_end() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER claims_stuck BEFORE UPDATE ON coord_claims
+             BEGIN SELECT RAISE(ABORT, 'claims stuck'); END;",
+        )
+        .unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    case.db.execute_batch("DROP TRIGGER claims_stuck;").unwrap();
+    assert_eq!(second_start(&case), 1, "the failed release kept the claim");
+    case.edit("src/next.rs", "next\n");
+    let next = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_ne!(next, id);
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the next turn end released the landed set's claim"
+    );
+}
+
+/// OS-8 L3: restoring a discarded sub-agent set brings its review-ready work's claims back,
+/// so a start made after the discard on the same file now shows the overlap.
+#[test]
+fn restoring_a_discarded_sub_set_holds_its_claims_again() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    discard(&case.db, &id, &case.view(&id).head, NOW_MS).unwrap();
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the discarded set released its claim"
+    );
+    restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(
+        second_start(&case),
+        1,
+        "the restored set's claim overlaps the start made after the discard"
+    );
+}
+
+/// Marks the case's sub-agent, engine agent 1, stopped, as the runtime does when it stops
+/// or the engine starts. Input: the case.
+fn stop_agent_1(case: &Case) {
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=1", [])
+        .unwrap();
+}
+
+/// Runs the engine's claims sweep for the case's project. Input: the case.
+fn sweep(case: &Case) {
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS + 2 * DAY_MS).unwrap();
+}
+
+/// OS-8 r2 L2: a sub-agent that finished its work and stopped before any turn end never
+/// runs again; with nothing to land, the engine's sweep releases its claims.
+#[test]
+fn a_stopped_sub_agent_s_finished_claims_are_released_by_the_sweep_when_nothing_waits() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    stop_agent_1(&case);
+    assert_eq!(
+        second_start(&case),
+        1,
+        "finished work still holds its claim"
+    );
+    sweep(&case);
+    assert_eq!(
+        second_start(&case),
+        0,
+        "nothing waits to land, so the sweep released it"
+    );
+}
+
+/// OS-8 r2 L2: a sub-agent that finished its work after its set's last turn end and then
+/// stopped keeps its claims for that open set: the sweep holds them for it, and the set's
+/// Accept releases them.
+#[test]
+fn a_stopped_sub_agent_s_finished_claims_are_held_for_its_open_set_by_the_sweep() {
+    let mut case = Case::new();
+    let work = review_ready_claim(&mut case);
+    crate::coord::transfer(
+        &case.db,
+        work,
+        2,
+        crate::coord::Transfer::Reopen,
+        crate::coord::Party::Agent(1),
+        crate::team::now_ms(),
+    )
+    .unwrap();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    crate::coord::finish(
+        &case.db,
+        work,
+        3,
+        crate::coord::Finish::ReviewReady,
+        "Green again.".into(),
+        1,
+        crate::team::now_ms(),
+    )
+    .unwrap();
+    stop_agent_1(&case);
+    sweep(&case);
+    assert_eq!(second_start(&case), 1, "the open set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the set's Accept released the claim it held"
+    );
+}
+
+/// OS-8 r2 L2: a claim release that failed when the set landed is retried by the engine's
+/// sweep, so an agent that never has another turn end does not keep the claim.
+#[test]
+fn a_landed_set_s_failed_release_is_retried_by_the_sweep_after_its_agent_stopped() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER claims_stuck BEFORE UPDATE ON coord_claims
+             BEGIN SELECT RAISE(ABORT, 'claims stuck'); END;",
+        )
+        .unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    case.db.execute_batch("DROP TRIGGER claims_stuck;").unwrap();
+    stop_agent_1(&case);
+    assert_eq!(second_start(&case), 1, "the failed release kept the claim");
+    sweep(&case);
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the sweep released the landed set's claim"
+    );
+}
+
+/// OS-8 r2 L2: a restore whose claims could not be taken back is repaired by the engine's
+/// sweep, so the restored set's claims overlap again.
+#[test]
+fn a_restore_whose_claims_failed_to_return_is_repaired_by_the_sweep() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    discard(&case.db, &id, &case.view(&id).head, NOW_MS).unwrap();
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER claims_stuck BEFORE UPDATE ON coord_claims
+             BEGIN SELECT RAISE(ABORT, 'claims stuck'); END;",
+        )
+        .unwrap();
+    restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+    case.db.execute_batch("DROP TRIGGER claims_stuck;").unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the failed restore left the claim released"
+    );
+    sweep(&case);
+    assert_eq!(
+        second_start(&case),
+        1,
+        "the sweep took the restored set's claim back"
+    );
+}
+
+/// OS-8 L4: a sub-agent set whose worktree was deleted outside the app closes as removed
+/// outside and releases its review-ready work's claims.
+#[test]
+fn a_sub_set_removed_outside_the_app_releases_its_claims() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    assert_eq!(second_start(&case), 1, "the set still waits");
+    std::fs::remove_dir_all(&case.workspace.worktree).unwrap();
+    case.observe();
+    case.removed_outside(&id, &head);
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the removed set's claim is released"
+    );
+}
+
+/// OS-8: a sub-agent's claim on work it finished as review-ready holds while its change set
+/// waits, so the next agent starting on the same file hears the overlap; accepting the set
+/// lands the work and releases the claim, and the same start then overlaps nothing.
+#[test]
+fn accepting_a_sub_set_releases_its_agents_review_ready_claims() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(second_start(&case), 1, "the set has not landed yet");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the landed set's claim is released");
+}
+
+/// OS-8, DEC-117 Q7: rejecting a sub-agent's change set frees the files its review-ready
+/// work claimed, so the next agent's start on them gets no overlap note.
+#[test]
+fn discarding_a_sub_set_releases_its_agents_review_ready_claims() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(second_start(&case), 1, "the set has not been rejected yet");
+    discard(&case.db, &id, &case.view(&id).head, NOW_MS).unwrap();
+    assert_eq!(
+        second_start(&case),
+        0,
+        "the rejected set's claim is released"
+    );
+}
+
+/// OS-8: the claim release runs only once a change set closed; called on a set still open,
+/// it stops at its assertion, so no claim is freed while that set's edits wait for review.
+#[test]
+#[should_panic(expected = "!record.is_open()")]
+fn releasing_claims_for_an_open_set_trips_the_assertion() {
+    let mut case = Case::new();
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &id).unwrap();
+    super::flow::release_agent_claims(&case.db, &record);
+}

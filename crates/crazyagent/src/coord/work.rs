@@ -56,8 +56,10 @@ pub fn start_work(
 /// Changes who owns a unit of work (Concord's transfer verbs), first transition wins:
 /// Assign gives Open, Declined or the owner's own work to a running agent; the owner
 /// Accepts or Declines what was assigned; Release gives it back as Open and Handoff
-/// passes it on, both dropping the owner's claims; Reopen brings ended work back. The
-/// owner, the engine, the master and the owner's lead may Assign, Release and Reopen too.
+/// passes it on, both dropping the owner's claims; Reopen brings ended work back, its
+/// claims no longer waiting on a change set, so a set landing later frees none of the
+/// reopened work's later edits. The owner, the engine, the master and the owner's lead
+/// may Assign, Release and Reopen too.
 /// Takes the database, the work, the version the caller read, the change, who acts and
 /// the time in ms. Returns the new version, `coord_work_stale`, `coord_transfer_invalid`
 /// for the state or `coord_transfer_refused` for who acts.
@@ -140,6 +142,13 @@ pub fn transfer(
     {
         super::claims::release_claims(tx, previous, work, now)?;
     }
+    if action == Transfer::Reopen {
+        tx.execute(
+            "DELETE FROM coord_held WHERE claim IN (SELECT id FROM coord_claims WHERE work=?1)",
+            [work],
+        )
+        .map_err(super::store::state)?;
+    }
     let next = advance(tx, work, &row, state, owner, now)?;
     audit(tx, &row.project, work, by, name, version, next, now)?;
     if let Party::Agent(agent) = by {
@@ -151,7 +160,9 @@ pub fn transfer(
 
 /// Ends a unit of work with evidence (Concord's finish_work): its owner marks Accepted or
 /// Active work ReviewReady, Complete or Closed, and work waiting for review is Completed
-/// or Closed by its owner or whoever supervises it. The owner's claims are released.
+/// or Closed by its owner or whoever supervises it. A master's claims are released at
+/// every end; any other agent's hold at every end until the change set carrying its edits
+/// lands or is rejected, or its turn ends with nothing to land (OS-8, DEC-117 Q7).
 /// Checks that belong to a role, such as a lead's unmerged sub-agent branches, run
 /// before this. Takes the database, the work, the version the caller read, the outcome,
 /// the evidence, who finishes and the time in ms. Returns the new version or a plain
@@ -187,7 +198,9 @@ pub fn finish(
         Finish::Complete => (WorkState::Complete, "finish_complete"),
         Finish::Closed => (WorkState::Closed, "finish_closed"),
     };
-    if let Some(owner) = row.owner {
+    if let Some(owner) = row.owner
+        && super::store::agent(tx, owner)?.is_none_or(|found| found.master())
+    {
         super::claims::release_claims(tx, owner, work, now)?;
     }
     let next = advance(tx, work, &row, ended, row.owner, now)?;

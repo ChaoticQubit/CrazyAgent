@@ -535,6 +535,41 @@ fn an_overlap_question_is_answered_with_other_agents_active_claims_only() {
     assert!(team.names().iter().all(|name| !name.ends_with(ASK)));
 }
 
+/// F3: when a project holds more claims than one overlap check reads, the edit-time
+/// question fails closed: the file is answered as held by CrazyAgent with the reason, so
+/// Block refuses the edit and Warn says why, instead of letting it through unchecked.
+#[test]
+fn an_overlap_question_past_the_claims_one_check_reads_is_answered_as_held() {
+    let team = Team::new();
+    let lead = team.agent("sub_agent", None, None);
+    let other = team.agent("sub_agent", None, None);
+    let (work, _) = crate::coord::start_work(
+        &team.db,
+        &team.project,
+        other,
+        "Backlog".to_owned(),
+        vec!["held/0.rs".to_owned()],
+        now(),
+    )
+    .unwrap();
+    team.db
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<9000)
+             INSERT INTO coord_claims(project,agent,work,pattern,created)
+             SELECT ?1,?2,?3,'held/'||i||'.rs',?4 FROM n",
+            rusqlite::params![team.project.as_str(), other, work, now()],
+        )
+        .unwrap();
+    assert_eq!(
+        held(&team.db, &team.project, lead, "src/new.rs").unwrap(),
+        vec![Held {
+            by: "CrazyAgent".to_owned(),
+            pattern: "too many claims in this project to check; they free up as the owner accepts or discards finished change sets, or as work no agent is on is released"
+                .to_owned(),
+        }]
+    );
+}
+
 #[test]
 fn a_delivered_message_becomes_read_only_once_the_session_answered_after_its_mark() {
     let team = Team::new();

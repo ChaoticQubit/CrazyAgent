@@ -1,11 +1,31 @@
-use super::store::{failure, related, state};
-use super::{AgentId, CLAIMS_PER_WORK_MAX, Claim, Overlap, PATTERN_BYTES_MAX, Presence, WorkId};
+use super::store::{Change, failure, related, state};
+use super::{
+    AGENT_CLAIMS_MAX, AgentId, CLAIMS_PER_WORK_MAX, Claim, Overlap, PATTERN_BYTES_MAX, Presence,
+    WorkId,
+};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
+use std::collections::HashMap;
 
-/// The most active claims of a project one overlap check reads.
-const CLAIMS_SCAN_MAX: usize = 512;
+/// The most active claims of a project one overlap check reads; past it the check fails
+/// closed with `coord_claims_full`, never a silent miss.
+const CLAIMS_SCAN_MAX: usize = 2048;
+/// The most change sets one agent's held claims wait on that one turn end checks.
+const HELD_SETS_MAX: usize = 16;
+/// The work states whose claims wait for a change set rather than for the agent.
+const ENDED: &str = "('review_ready','complete','closed')";
+/// The work states whose claims still hold scope: someone is on it, is about to be, or it
+/// ended while its change set has not landed.
+const HOLDING: &str = "('assigned','accepted','active','review_ready','complete','closed')";
+
+/// What one read of a project's claims does past `CLAIMS_SCAN_MAX`: a check that decides
+/// an overlap fails closed with `coord_claims_full`; a view shows the oldest claims.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    Check,
+    View,
+}
 /// Concord's soft breadth limits: more path claims, modules or domains than these in
 /// one unit of work get a "split this" note.
 const PATHS_SOFT_MAX: usize = 5;
@@ -15,6 +35,8 @@ const DOMAINS_SOFT_MAX: usize = 2;
 const ROOT: &str = "**";
 
 const _: () = assert!(CLAIMS_SCAN_MAX >= CLAIMS_PER_WORK_MAX * 2);
+const _: () = assert!(AGENT_CLAIMS_MAX >= CLAIMS_PER_WORK_MAX);
+const _: () = assert!(CLAIMS_SCAN_MAX >= AGENT_CLAIMS_MAX * 16);
 
 /// What one claim covers, read from its stored form.
 enum Scope<'a> {
@@ -173,8 +195,10 @@ pub fn covers(claim: &str, path: &str) -> bool {
     Scope::of(claim).covers(path)
 }
 
-/// Stores the claims of a unit of work. Takes the transaction, the project, the agent,
-/// the work, the stored forms and the time in ms.
+/// Stores the claims of a unit of work, refused with `coord_agent_claims_full` when they
+/// would take the agent past `AGENT_CLAIMS_MAX` live claims, so one agent's flood stops
+/// only that agent. Takes the transaction, the project, the agent, the work, the stored
+/// forms and the time in ms.
 pub(super) fn add(
     tx: &Connection,
     project: &ProjectId,
@@ -184,6 +208,26 @@ pub(super) fn add(
     now: i64,
 ) -> Result<(), EngineError> {
     assert!(claims.len() <= CLAIMS_PER_WORK_MAX);
+    if claims.is_empty() {
+        return Ok(());
+    }
+    let limit = i64::try_from(AGENT_CLAIMS_MAX + 1).map_err(state)?;
+    let live: i64 = tx
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM coord_claims c JOIN coord_work w ON w.id=c.work
+                 WHERE c.project=?1 AND c.agent=?2 AND c.released IS NULL AND w.state IN {HOLDING}
+                 LIMIT ?3)"
+            ),
+            params![project.as_str(), agent, limit],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    let live = usize::try_from(live).map_err(state)?;
+    assert!(live <= AGENT_CLAIMS_MAX + 1);
+    if live + claims.len() > AGENT_CLAIMS_MAX {
+        return Err(failure("coord_agent_claims_full"));
+    }
     for claim in claims {
         tx.execute(
             "INSERT INTO coord_claims(project,agent,work,pattern,created) VALUES (?1,?2,?3,?4,?5)",
@@ -210,6 +254,190 @@ pub fn release_claims(
     Ok(())
 }
 
+/// Holds an agent's claims on its ended work for the change set that carries its edits, so
+/// they keep overlapping until that set lands or is discarded (OS-8, DEC-117 Q7). A claim
+/// already held for a set keeps that set. Takes the database, the agent and the open
+/// change set's id. Returns how many claims it newly held.
+pub fn hold_for_set(db: &Connection, agent: AgentId, set: &str) -> Result<usize, EngineError> {
+    assert!(!set.is_empty());
+    db.execute(
+        &format!(
+            "INSERT OR IGNORE INTO coord_held(claim,project,change_set)
+             SELECT c.id,c.project,?2 FROM coord_claims c JOIN coord_work w ON w.id=c.work
+             WHERE c.agent=?1 AND c.released IS NULL AND w.state IN {ENDED}"
+        ),
+        params![agent, set],
+    )
+    .map_err(state)
+}
+
+/// Releases the claims one closed change set held on still-ended work, and marks those
+/// holds released at that time so a restore can take back exactly them. Claims of work
+/// reopened since, or held for another set, stay. Takes the database, the set's id and the
+/// time in ms. Returns how many claims it released.
+pub fn release_set(db: &Connection, set: &str, now: i64) -> Result<usize, EngineError> {
+    assert!(!set.is_empty());
+    let change = Change::begin(db)?;
+    let tx = change.db();
+    let marked = tx
+        .execute(
+            &format!(
+                "UPDATE coord_held SET released=?2 WHERE change_set=?1 AND released IS NULL
+                 AND claim IN (SELECT c.id FROM coord_claims c JOIN coord_work w ON w.id=c.work
+                               WHERE c.released IS NULL AND w.state IN {ENDED})"
+            ),
+            params![set, now],
+        )
+        .map_err(state)?;
+    let released = tx
+        .execute(
+            "UPDATE coord_claims SET released=?2 WHERE released IS NULL
+             AND id IN (SELECT claim FROM coord_held WHERE change_set=?1 AND released=?2)",
+            params![set, now],
+        )
+        .map_err(state)?;
+    assert_eq!(
+        marked, released,
+        "a set's release frees exactly the claims it marked"
+    );
+    change.commit()?;
+    Ok(released)
+}
+
+/// Takes back the claims a change set's close released, once that set is restored, so
+/// they overlap newer claims again as any held claim does; a set with no released hold to
+/// take back or unmark writes nothing. Takes the database and the set's id. Returns how many
+/// claims hold again.
+pub fn restore_set(db: &Connection, set: &str) -> Result<usize, EngineError> {
+    assert!(!set.is_empty());
+    let due: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM coord_held h JOIN coord_claims c ON c.id=h.claim
+             WHERE h.change_set=?1 AND h.released IS NOT NULL
+             AND (c.released IS NULL OR h.released=c.released))",
+            [set],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if !due {
+        return Ok(0);
+    }
+    let change = Change::begin(db)?;
+    let tx = change.db();
+    let restored = tx
+        .execute(
+            "UPDATE coord_claims SET released=NULL WHERE id IN
+             (SELECT h.claim FROM coord_held h WHERE h.change_set=?1
+              AND h.released IS NOT NULL AND h.released=coord_claims.released)",
+            [set],
+        )
+        .map_err(state)?;
+    let unmarked = tx
+        .execute(
+            "UPDATE coord_held SET released=NULL WHERE change_set=?1 AND released IS NOT NULL
+             AND claim IN (SELECT id FROM coord_claims WHERE released IS NULL)",
+            [set],
+        )
+        .map_err(state)?;
+    assert_eq!(
+        restored, unmarked,
+        "a restore takes back exactly the claims its set released"
+    );
+    change.commit()?;
+    Ok(restored)
+}
+
+/// Releases an agent's claims on ended work no change set holds, at a turn end that leaves
+/// nothing to land, so such claims never hold forever. Takes the database, the agent and
+/// the time in ms. Returns how many claims it released.
+pub fn release_unheld(db: &Connection, agent: AgentId, now: i64) -> Result<usize, EngineError> {
+    db.execute(
+        &format!(
+            "UPDATE coord_claims SET released=?2 WHERE agent=?1 AND released IS NULL
+             AND id NOT IN (SELECT claim FROM coord_held WHERE released IS NULL)
+             AND work IN (SELECT id FROM coord_work WHERE state IN {ENDED})"
+        ),
+        params![agent, now],
+    )
+    .map_err(state)
+}
+
+/// The change sets an agent's still-held claims wait on, at most `HELD_SETS_MAX`, so a
+/// turn end can release those of a set that closed while its release failed. Takes the
+/// database and the agent. Returns the set ids.
+pub fn held_sets(db: &Connection, agent: AgentId) -> Result<Vec<String>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT DISTINCT h.change_set FROM coord_held h JOIN coord_claims c ON c.id=h.claim
+             WHERE c.agent=?1 AND c.released IS NULL AND h.released IS NULL LIMIT ?2",
+        )
+        .map_err(state)?;
+    let limit = i64::try_from(HELD_SETS_MAX).map_err(state)?;
+    let sets = statement
+        .query_map(params![agent, limit], |row| row.get::<_, String>(0))
+        .map_err(state)?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(state)?;
+    assert!(sets.len() <= HELD_SETS_MAX);
+    Ok(sets)
+}
+
+/// The change sets any agent's still-held claims in a project wait on, at most `most`, so
+/// the engine's sweep can release those of a set that closed while its release failed and
+/// whose agent never has another turn end. Takes the database, the project and the most
+/// sets to read. Returns the set ids.
+pub fn held_sets_in(
+    db: &Connection,
+    project: &ProjectId,
+    most: usize,
+) -> Result<Vec<String>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT DISTINCT h.change_set FROM coord_claims c JOIN coord_held h ON h.claim=c.id
+             WHERE c.project=?1 AND c.released IS NULL AND h.released IS NULL LIMIT ?2",
+        )
+        .map_err(state)?;
+    let limit = i64::try_from(most).map_err(state)?;
+    let sets = statement
+        .query_map(params![project.as_str(), limit], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(state)?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(state)?;
+    assert!(sets.len() <= most);
+    Ok(sets)
+}
+
+/// The stopped or failed agents of a project whose claims on ended work no change set
+/// holds, at most `HELD_SETS_MAX`, so the engine's sweep holds or releases them although
+/// no turn end of theirs will. Takes the database and the project. Returns the agents.
+pub fn stopped_with_unheld(
+    db: &Connection,
+    project: &ProjectId,
+) -> Result<Vec<AgentId>, EngineError> {
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT DISTINCT c.agent FROM coord_claims c JOIN coord_work w ON w.id=c.work
+             JOIN team_agents a ON a.id=c.agent
+             WHERE c.project=?1 AND c.released IS NULL AND w.state IN {ENDED}
+             AND a.status IN ('stopped','failed')
+             AND NOT EXISTS (SELECT 1 FROM coord_held h WHERE h.claim=c.id AND h.released IS NULL)
+             LIMIT ?2"
+        ))
+        .map_err(state)?;
+    let limit = i64::try_from(HELD_SETS_MAX).map_err(state)?;
+    let agents = statement
+        .query_map(params![project.as_str(), limit], |row| {
+            row.get::<_, AgentId>(0)
+        })
+        .map_err(state)?
+        .collect::<Result<Vec<AgentId>, _>>()
+        .map_err(state)?;
+    assert!(agents.len() <= HELD_SETS_MAX);
+    Ok(agents)
+}
+
 /// The other agents' active claims that cover one file, for the edit-time check that
 /// warns or blocks under the "Overlapping edits" setting. A lead's and its sub-agent's
 /// claims never count against each other. Takes the database, the project, the editing
@@ -227,11 +455,12 @@ pub fn overlapping(
         return Err(failure("coord_claim_invalid"));
     }
     let now = crate::team::now_ms();
+    let mut kin = Kin::new(db);
     let mut found = Vec::new();
-    for claim in active(db, project, now)? {
+    for claim in active(db, project, now, Scan::Check)? {
         if claim.agent != agent
-            && !related(db, agent, claim.agent)?
             && Scope::of(&claim.pattern).covers(&file)
+            && !kin.related(agent, claim.agent)?
         {
             found.push(claim);
         }
@@ -249,13 +478,14 @@ pub(super) fn overlaps_for(
     work: WorkId,
     now: i64,
 ) -> Result<Vec<Overlap>, EngineError> {
-    let claims = active(tx, project, now)?;
+    let claims = active(tx, project, now, Scan::Check)?;
     let (mine, others): (Vec<Claim>, Vec<Claim>) = claims
         .into_iter()
         .partition(|claim| claim.agent == agent && claim.work == work);
+    let mut kin = Kin::new(tx);
     let mut found = Vec::new();
     for theirs in others.iter().filter(|claim| claim.agent != agent) {
-        if related(tx, agent, theirs.agent)? {
+        if kin.related(agent, theirs.agent)? {
             continue;
         }
         for claim in &mine {
@@ -272,18 +502,20 @@ pub(super) fn overlaps_for(
 }
 
 /// Every overlap between active claims of different, unrelated agents of a project, each
-/// pair once, for the graph's red lines. Takes the database, the project and the time in
-/// ms. Returns the overlaps.
+/// pair once, for the graph's red lines and an agent's inbox, read from the oldest
+/// `CLAIMS_SCAN_MAX` active claims. Takes the database, the project and the time in ms.
+/// Returns the overlaps.
 pub(super) fn all_overlaps(
     db: &Connection,
     project: &ProjectId,
     now: i64,
 ) -> Result<Vec<Overlap>, EngineError> {
-    let claims = active(db, project, now)?;
+    let claims = active(db, project, now, Scan::View)?;
+    let mut kin = Kin::new(db);
     let mut found = Vec::new();
     for (index, mine) in claims.iter().enumerate() {
         for theirs in &claims[index + 1..] {
-            if mine.agent == theirs.agent || related(db, mine.agent, theirs.agent)? {
+            if mine.agent == theirs.agent || kin.related(mine.agent, theirs.agent)? {
                 continue;
             }
             if let Some(reason) = reason(&mine.pattern, &theirs.pattern) {
@@ -325,20 +557,66 @@ pub fn overlaps_of(
         .collect())
 }
 
-/// Reads a project's claims that still hold scope: not released, on work someone is on
-/// or about to be, at most `CLAIMS_SCAN_MAX`, oldest first, each marked stale while its
-/// agent is Away or Stopped.
-fn active(db: &Connection, project: &ProjectId, now: i64) -> Result<Vec<Claim>, EngineError> {
+/// The lead and sub-agent answers one overlap check already read, so a check over many
+/// claims asks the store once per pair of agents.
+struct Kin<'a> {
+    db: &'a Connection,
+    known: HashMap<(AgentId, AgentId), bool>,
+}
+
+impl<'a> Kin<'a> {
+    fn new(db: &'a Connection) -> Self {
+        Self {
+            db,
+            known: HashMap::new(),
+        }
+    }
+
+    /// Says whether two agents are lead and sub-agent of each other, as `related` does.
+    fn related(&mut self, a: AgentId, b: AgentId) -> Result<bool, EngineError> {
+        let pair = (a.min(b), a.max(b));
+        if let Some(known) = self.known.get(&pair) {
+            return Ok(*known);
+        }
+        let answer = related(self.db, a, b)?;
+        self.known.insert(pair, answer);
+        Ok(answer)
+    }
+}
+
+/// The query over a project's claims one overlap check reads, selecting `columns`, oldest
+/// first up to a limit: not released, on work in a `HOLDING` state, and, unless the work
+/// ended, of an agent that is not stopped, failed or gone, so claims built up by agents
+/// that never run again stop no one. They are kept, not released: a resumed agent keeps
+/// its id and its claims count again. Input: the columns. Output: the SQL, taking the
+/// project and the limit.
+fn scanned(columns: &str) -> String {
+    format!(
+        "SELECT {columns} FROM coord_claims c JOIN coord_work w ON w.id=c.work
+         LEFT JOIN team_agents a ON a.id=c.agent
+         WHERE c.project=?1 AND c.released IS NULL AND w.state IN {HOLDING}
+         AND (w.state IN {ENDED} OR (a.status IS NOT NULL AND a.status NOT IN ('stopped','failed')))
+         ORDER BY c.id LIMIT ?2"
+    )
+}
+
+/// Reads a project's claims that still hold scope, as [`scanned`] selects them, each
+/// marked stale while its agent is Away or Stopped. A claim on ended work is never stale:
+/// it holds until the agent's change set lands or is rejected (DEC-117 Q7). Past
+/// `CLAIMS_SCAN_MAX` a check fails closed with `coord_claims_full`, so no overlap it
+/// decides on is silently missed, and a view stops at the oldest `CLAIMS_SCAN_MAX`.
+fn active(
+    db: &Connection,
+    project: &ProjectId,
+    now: i64,
+    scan: Scan,
+) -> Result<Vec<Claim>, EngineError> {
     let mut statement = db
-        .prepare(
-            "SELECT c.id,c.agent,c.work,c.pattern FROM coord_claims c
-             JOIN coord_work w ON w.id=c.work
-             WHERE c.project=?1 AND c.released IS NULL
-             AND w.state IN ('assigned','accepted','active')
-             ORDER BY c.id LIMIT ?2",
-        )
+        .prepare(&scanned(&format!(
+            "c.id,c.agent,c.work,c.pattern,w.state IN {ENDED}"
+        )))
         .map_err(state)?;
-    let limit = i64::try_from(CLAIMS_SCAN_MAX).map_err(state)?;
+    let limit = i64::try_from(CLAIMS_SCAN_MAX + 1).map_err(state)?;
     let rows = statement
         .query_map(params![project.as_str(), limit], |row| {
             Ok((
@@ -346,19 +624,38 @@ fn active(db: &Connection, project: &ProjectId, now: i64) -> Result<Vec<Claim>, 
                 row.get(1)?,
                 row.get(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
             ))
         })
         .map_err(state)?;
+    let mut away: HashMap<AgentId, bool> = HashMap::new();
     let mut claims = Vec::new();
     for row in rows {
-        let (id, agent, work, pattern) = row.map_err(state)?;
-        let presence = super::presence::current(db, agent, now)?;
+        let (id, agent, work, pattern, ended) = row.map_err(state)?;
+        if claims.len() == CLAIMS_SCAN_MAX {
+            if scan == Scan::Check {
+                return Err(failure("coord_claims_full"));
+            }
+            break;
+        }
+        let stale = !ended
+            && match away.get(&agent).copied() {
+                Some(known) => known,
+                None => {
+                    let gone = matches!(
+                        super::presence::current(db, agent, now)?,
+                        Presence::Away | Presence::Stopped
+                    );
+                    away.insert(agent, gone);
+                    gone
+                }
+            };
         claims.push(Claim {
             id,
             agent,
             work,
             pattern,
-            stale: matches!(presence, Presence::Away | Presence::Stopped),
+            stale,
         });
     }
     assert!(claims.len() <= CLAIMS_SCAN_MAX);
@@ -507,4 +804,41 @@ fn glob_match(glob: &[u8], path: &[u8]) -> bool {
         row = next;
     }
     row[path.len()]
+}
+
+/// Tells whether the owner should now hear that a project's live claims pass what one
+/// overlap check reads: once per time it fills, recorded in `coord_claims_full` and cleared
+/// once it is no longer full, so a project that fills again is told again. Inputs: the
+/// store, the project and the time in ms. Output: true the first time a full project is
+/// seen, false otherwise.
+pub fn claims_full_notice(
+    db: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<bool, EngineError> {
+    let limit = i64::try_from(CLAIMS_SCAN_MAX + 1).map_err(state)?;
+    let read: i64 = db
+        .query_row(
+            &format!("SELECT COUNT(*) FROM ({})", scanned("1")),
+            params![project.as_str(), limit],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    let read = usize::try_from(read).map_err(state)?;
+    assert!(read <= CLAIMS_SCAN_MAX + 1);
+    if read > CLAIMS_SCAN_MAX {
+        let told = db
+            .execute(
+                "INSERT OR IGNORE INTO coord_claims_full(project,told) VALUES (?1,?2)",
+                params![project.as_str(), now],
+            )
+            .map_err(state)?;
+        return Ok(told == 1);
+    }
+    db.execute(
+        "DELETE FROM coord_claims_full WHERE project=?1",
+        [project.as_str()],
+    )
+    .map_err(state)?;
+    Ok(false)
 }

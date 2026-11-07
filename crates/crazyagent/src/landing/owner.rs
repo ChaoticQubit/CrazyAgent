@@ -675,6 +675,7 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
     record.intent = None;
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
+    flow::release_agent_claims(db, record);
     if let Err(error) = super::subagent::close_with_lead(db, record) {
         eprintln!(
             "landing_settle_failed cause={}",
@@ -1349,6 +1350,7 @@ fn close_removed(db: &Connection, record: &mut Record) -> Result<(), EngineError
     record.conflicts.clear();
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
+    flow::release_agent_claims(db, record);
     if std::fs::symlink_metadata(record.repository.join(".git")).is_ok_and(|found| found.is_dir()) {
         flow::set_engine_ref(
             &shared(&record.repository)?,
