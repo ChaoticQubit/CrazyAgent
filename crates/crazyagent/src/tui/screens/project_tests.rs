@@ -2574,8 +2574,9 @@ fn a_stale_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
     );
 }
 
-/// Once the research jobs are read, `p` on the Settings tab plans a roadmap and `k` opens
-/// the hidden folders box, so neither action takes the other's key.
+/// Once the research jobs and a context with no roadmap document are read, `p` on the
+/// Settings tab plans a roadmap at once and `k` opens the hidden folders box, so neither
+/// action takes the other's key.
 #[test]
 fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
     let look = Look::plain();
@@ -2584,6 +2585,11 @@ fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
     screen.open(Tab::Settings);
     screen.jobs = Some(Vec::new());
     screen.hidden_paths = Some(vec!["/Users/owner/secret".into()]);
+    screen.context = Some(crate::project_setup::ProjectContext {
+        project_id: project.clone(),
+        folder: "/Users/owner/hidden".into(),
+        items: vec![],
+    });
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
         shown.contains("Roadmap   Not planned   p Plan roadmap now"),
