@@ -181,7 +181,15 @@ pub(super) fn merge(
         ));
     }
     let landed = crate::projects_home::owner_home().and_then(|home| {
-        crate::landing::accept_into(&db, &home, &set.id, &set.head, None, &target)
+        crate::landing::accept_into_as(
+            &db,
+            &home,
+            &set.id,
+            &set.head,
+            None,
+            &target,
+            crate::activity::MASTER_ACTOR,
+        )
     });
     Ok(match landed {
         Ok(AcceptOutcome::Landed { commit, branch }) => {

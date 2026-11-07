@@ -3,6 +3,7 @@ use super::{
     AgentRole, AgentStatus, MessageAuthor, MessageState, append_message, bound_text, error,
     make_room,
 };
+use crate::activity::ActivityKind;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::storage::versioned;
@@ -757,6 +758,17 @@ fn record_in(
     .map_err(error)?;
     let id = tx.last_insert_rowid();
     assert!(id > 0);
+    match kind {
+        EventKind::Finished | EventKind::Failed => {
+            let failed = kind == EventKind::Failed;
+            crate::activity::note_task_end(tx, project, agent, task, failed, now);
+        }
+        EventKind::ChangeSetReady => {
+            let shown = ActivityKind::ChangesReady;
+            crate::activity::note_agent(tx, project, agent, shown, &text, now);
+        }
+        EventKind::Question | EventKind::Progress => {}
+    }
     Ok(Some(id))
 }
 

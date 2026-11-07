@@ -16,6 +16,7 @@ fn main() {
         "desktop_setup_project",
         "desktop_project_setup",
         "desktop_research_jobs",
+        "desktop_project_activity",
         "desktop_project_context",
         "desktop_project_context_item",
         "desktop_save_research_to_memory",

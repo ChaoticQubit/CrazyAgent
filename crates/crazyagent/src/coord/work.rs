@@ -380,5 +380,6 @@ fn audit(
         params![project.as_str(), work, kind, agent, action, from, to, now],
     )
     .map_err(state)?;
+    crate::activity::note_audit(tx, project, work, (kind, agent), action, now);
     Ok(())
 }

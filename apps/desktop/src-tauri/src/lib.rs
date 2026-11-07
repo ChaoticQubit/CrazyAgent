@@ -441,6 +441,17 @@ async fn desktop_research_jobs(
 }
 
 #[tauri::command]
+async fn desktop_project_activity(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    limit: usize,
+) -> Result<bridge::project_setup::ProjectActivity, BridgeError> {
+    main_window(&window)?;
+    read(&state).await?.project_activity(&id, limit).await
+}
+
+#[tauri::command]
 async fn desktop_project_context(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3828,6 +3839,7 @@ pub fn run() {
             desktop_setup_project,
             desktop_project_setup,
             desktop_research_jobs,
+            desktop_project_activity,
             desktop_project_context,
             desktop_project_context_item,
             desktop_save_research_to_memory,

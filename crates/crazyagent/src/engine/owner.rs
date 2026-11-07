@@ -674,6 +674,10 @@ pub enum OwnerRead {
     ResearchJobs {
         project_id: ProjectId,
     },
+    ProjectActivity {
+        project_id: ProjectId,
+        limit: usize,
+    },
     TeamStatus {
         project_id: ProjectId,
     },
@@ -856,6 +860,12 @@ impl OwnerRead {
             Self::ResearchLog { job, .. } => {
                 if *job <= 0 {
                     return Err(failure("research_job_missing"));
+                }
+                return Ok(None);
+            }
+            Self::ProjectActivity { limit, .. } => {
+                if *limit == 0 || *limit > crate::activity::LIST_MAX {
+                    return Err(failure("activity_limit_invalid"));
                 }
                 return Ok(None);
             }
@@ -1181,6 +1191,12 @@ pub enum OwnerData {
     ResearchJobs {
         project_id: ProjectId,
         jobs: Vec<crate::project_setup::ResearchJob>,
+    },
+    ProjectActivity {
+        project_id: ProjectId,
+        items: Vec<crate::activity::ActivityItem>,
+        #[serde(default)]
+        more: bool,
     },
     TeamStatus {
         status: Box<crate::team::TeamStatus>,

@@ -5014,6 +5014,7 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             names::assign_task_role(&self.connection, project, agent, task)?;
+            crate::activity::note_task(&self.connection, project, agent, task, now_ms());
             self.mark_agent(agent, AgentStatus::Working, Some(task))?;
         }
         Ok(())
@@ -6299,7 +6300,15 @@ impl TeamRuntime {
                 continue;
             }
             let outcome = crate::projects_home::owner_home().and_then(|home| {
-                crate::landing::accept_into(&db, &home, &set.id, &set.head, None, &branch)
+                crate::landing::accept_into_as(
+                    &db,
+                    &home,
+                    &set.id,
+                    &set.head,
+                    None,
+                    &branch,
+                    crate::activity::ENGINE_ACTOR,
+                )
             });
             match outcome {
                 Ok(crate::landing::AcceptOutcome::Landed { .. }) => {

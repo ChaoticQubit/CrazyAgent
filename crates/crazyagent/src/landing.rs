@@ -40,6 +40,75 @@ pub const LIST_MAX: usize = 32;
 /// The most bytes an owner-edited Accept message may hold.
 pub const MESSAGE_BYTES_MAX: usize = 4096;
 
+/// The folders a path an agent wrote is cut at when it is shown: any absolute local path
+/// starting with one of them shows only its last component.
+const LOCAL_ROOTS: [&str; 10] = [
+    "~/",
+    "/Users/",
+    "/home/",
+    "/root/",
+    "/private/",
+    "/tmp/",
+    "/var/",
+    "/Volumes/",
+    "/mnt/",
+    "/opt/",
+];
+
+/// Replaces every control character but newline and tab, and every bidirectional
+/// override or isolate, with U+FFFD, then shows every other character a reviewer cannot
+/// see, such as zero-width, tag and line separator characters, as its `memory::visible_text`
+/// escape, so text shown to the owner cannot move a terminal cursor, reorder what it shows
+/// or hide text from it. Input: the text. Output: the plain text.
+pub(crate) fn plain(text: &str) -> String {
+    let replaced: String = text
+        .chars()
+        .map(|c| {
+            let bidi = matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}');
+            if (c.is_control() && c != '\n' && c != '\t') || bidi {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect();
+    crate::memory::visible_text(&replaced)
+}
+
+/// Free text as the owner is shown it on one line: plain through `plain`, paths under
+/// `roots` made relative to them and any other absolute local path cut to its last
+/// component, the words joined by single spaces. Inputs: the text and the folders,
+/// innermost first. Output: the line, maybe empty.
+pub(crate) fn scrubbed(text: &str, roots: &[&Path]) -> String {
+    let mut line = plain(text);
+    for root in roots.iter().filter_map(|root| root.to_str()) {
+        if root.len() > 1 {
+            line = line.replace(&format!("{}/", root.trim_end_matches('/')), "");
+        }
+    }
+    let words: Vec<String> = line
+        .split(|c: char| c.is_whitespace() || c == '\u{FFFD}')
+        .map(local_path)
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.join(" ")
+}
+
+/// One word with an absolute local path in it cut to the path's last component, the
+/// punctuation around it kept. Input: the word. Output: the word, maybe empty.
+fn local_path(word: &str) -> String {
+    let core = word.trim_start_matches(['(', '"', '\'', '<', '[', '`']);
+    let path = core.trim_end_matches([')', '"', '\'', '>', ']', '`', ',', '.', ';', ':', '!', '?']);
+    if !LOCAL_ROOTS.iter().any(|root| path.starts_with(root)) {
+        return word.to_owned();
+    }
+    let (lead, tail) = (&word[..word.len() - core.len()], &core[path.len()..]);
+    match path.rsplit('/').find(|part| !part.is_empty()) {
+        Some(last) => format!("{lead}{last}{tail}"),
+        None => String::new(),
+    }
+}
+
 /// Who made a change set: the master of a project conversation or one team sub-agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -303,6 +372,66 @@ fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
 
+/// Records one action on a change set in its project's activity at the time the set last
+/// changed, with its sub-agent for the goal; a failure is logged by its plain code, so the
+/// action itself never fails on it. A Discarded set closed outside the app says so, and
+/// ChangesReady is a discarded set brought back. Inputs: the store, the change set, the
+/// kind of event (Accepted, Conflict, Discarded, SentBack or ChangesReady) and who acted.
+#[cfg(unix)]
+fn note_change(
+    db: &Connection,
+    record: &store::Record,
+    kind: crate::activity::ActivityKind,
+    by: &str,
+) {
+    use crate::activity::ActivityKind;
+    let label = &record.agent.label;
+    let line = &record.prompt_line;
+    let text = match kind {
+        ActivityKind::Accepted => crate::activity::accepted_text(label, line),
+        ActivityKind::Conflict => {
+            format!("The changes of {label} conflict with the branch they land on: {line}")
+        }
+        ActivityKind::Discarded if record.outside => {
+            format!("The changes of {label} were closed outside the app: {line}")
+        }
+        ActivityKind::Discarded => format!("Discarded the changes of {label}: {line}"),
+        ActivityKind::ChangesReady => format!("Brought back the changes of {label}: {line}"),
+        ActivityKind::SentBack => {
+            format!("Sent the changes of {label} back to take in the newer work: {line}")
+        }
+        _ => unreachable!("note_change takes a change set action"),
+    };
+    let agent = match record.agent.kind {
+        AgentKind::Sub => record.agent.id.parse().ok(),
+        AgentKind::Master => None,
+    };
+    let item = crate::activity::NewActivity {
+        kind,
+        actor: by,
+        agent,
+        goal: None,
+        text: &text,
+        change_set: Some(record.id.as_str()),
+    };
+    let at = i64::try_from(record.updated_ms).unwrap_or(i64::MAX);
+    crate::activity::note(db, &record.project, &item, at);
+}
+
+/// Records an owner action on a stored change set, as [`note_change`] does, once the
+/// action is done. Inputs: the store, the change set and the kind of event.
+#[cfg(unix)]
+fn noted(db: &Connection, id: &ChangeSetId, kind: crate::activity::ActivityKind) {
+    match store::load(db, id) {
+        Ok(record) => note_change(db, &record, kind, crate::activity::OWNER_ACTOR),
+        Err(error) => eprintln!(
+            "activity_record_failed kind={} cause={}",
+            kind.name(),
+            crate::protocol::plain_code(&error.0)
+        ),
+    }
+}
+
 /// Opens the change set store in the engine database, adding its table when missing.
 /// Input: the engine root holding `engine.db`. Output: the connection.
 pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
@@ -514,7 +643,12 @@ pub fn merge_sub_agent(
     git: &LeadGit<'_>,
 ) -> Result<MergeOutcome, EngineError> {
     #[cfg(unix)]
-    return subagent::merge(db, project, lead, sub, git);
+    return subagent::merge(db, project, lead, sub, git).inspect(|outcome| {
+        if let MergeOutcome::Merged { branch, .. } = outcome {
+            let now = crate::team::now_ms();
+            crate::activity::note_lead_merge(db, project, lead, sub, branch, now);
+        }
+    });
     #[cfg(not(unix))]
     {
         let _ = (db, project, lead, sub, git);
@@ -1007,6 +1141,30 @@ pub fn accept_into(
     message: Option<&str>,
     target_branch: &str,
 ) -> Result<AcceptOutcome, EngineError> {
+    accept_into_as(
+        db,
+        owner_home,
+        id,
+        expected_head,
+        message,
+        target_branch,
+        crate::activity::OWNER_ACTOR,
+    )
+}
+
+/// Lands a change set on a chosen local branch as [`accept_into`] does, for an Accept the
+/// owner did not make: the project's activity names who accepted it, the master or the
+/// engine. Inputs: as [`accept_into`], plus who accepts. Output: the landed commit and
+/// branch, or the conflicting files.
+pub fn accept_into_as(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+    expected_head: &str,
+    message: Option<&str>,
+    target_branch: &str,
+    by: &str,
+) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
     return owner::accept_to(
         db,
@@ -1015,11 +1173,20 @@ pub fn accept_into(
         expected_head,
         message,
         Some(target_branch),
+        by,
         &|_| false,
     );
     #[cfg(not(unix))]
     {
-        let _ = (db, owner_home, id, expected_head, message, target_branch);
+        let _ = (
+            db,
+            owner_home,
+            id,
+            expected_head,
+            message,
+            target_branch,
+            by,
+        );
         Err(unavailable())
     }
 }
@@ -1064,7 +1231,8 @@ pub fn discard(
     now_ms: u64,
 ) -> Result<u64, EngineError> {
     #[cfg(unix)]
-    return flow::discard(db, id, expected_head, now_ms);
+    return flow::discard(db, id, expected_head, now_ms)
+        .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded));
     #[cfg(not(unix))]
     {
         let _ = (db, id, expected_head, now_ms);
@@ -1077,7 +1245,8 @@ pub fn discard(
 /// pending.
 pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return flow::restore(db, id, now_ms);
+    return flow::restore(db, id, now_ms)
+        .inspect(|()| noted(db, id, crate::activity::ActivityKind::ChangesReady));
     #[cfg(not(unix))]
     {
         let _ = (db, id, now_ms);
@@ -1089,7 +1258,8 @@ pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), Eng
 /// for the resolve task. Inputs: the store and the change set. Output: Ok once merged.
 pub fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return owner::update(db, id);
+    return owner::update(db, id)
+        .inspect(|()| noted(db, id, crate::activity::ActivityKind::SentBack));
     #[cfg(not(unix))]
     {
         let _ = (db, id);

@@ -102,6 +102,9 @@ impl Team {
         let db = landing::open(&engine).unwrap();
         crazyagent::team::initialize(&db).unwrap();
         crazyagent::coord::ensure(&db).unwrap();
+        db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            .unwrap();
+        crazyagent::activity::initialize(&db).unwrap();
         let worktree = project.join(".crazyagent/worktrees/agent-1");
         let branch = landing::claim_task_branch(&db, &project, &worktree, "lead").unwrap();
         assert_eq!(branch, "crazyagent/lead");
@@ -421,6 +424,23 @@ fn merge_into_the_lead_clone_under_its_profile() {
     assert_eq!(
         team.git(lead, &["rev-parse", "refs/heads/crazyagent/lead--fix"]),
         second
+    );
+    let merged: Vec<(String, String)> =
+        crazyagent::activity::list(&team.db, &team.id, crazyagent::activity::LIST_MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.kind == crazyagent::activity::ActivityKind::LeadMerged)
+            .map(|item| (item.actor, item.text))
+            .collect();
+    let label = |agent: i64| crazyagent::team::events::label(&team.db, agent).unwrap();
+    let once = (
+        label(1),
+        format!("Merged the work of {} from crazyagent/lead--fix", label(2)),
+    );
+    assert_eq!(
+        merged,
+        vec![once.clone(), once],
+        "two merges, not the no-op"
     );
 }
 
