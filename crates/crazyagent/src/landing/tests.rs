@@ -3701,11 +3701,20 @@ fn every_agent_clone_holds_the_landed_main_after_an_accept() {
     let main = git_in(
         &case.home,
         &second,
-        &["for-each-ref", "--format=%(objectname)", "refs/crazyagent/main"],
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/crazyagent/main",
+        ],
     );
     assert_eq!(main.trim(), commit, "the second clone holds no landed main");
     let agent = |args: &[&str]| {
-        let named = ["-c", "user.name=Agent", "-c", "user.email=agent@example.invalid"];
+        let named = [
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+        ];
         git_in(&case.home, &second, &[&named[..], args].concat())
     };
     write(&second.join("two.txt"), "second agent\n");
@@ -3750,8 +3759,12 @@ fn giving_main_to_a_clone_refuses_a_link_on_the_way_and_writes_nothing_outside()
     std::fs::remove_file(&planted).unwrap();
     clone::give_main(&case.repo, &case.workspace.worktree, &tip).unwrap();
     assert_eq!(
-        case.agent(&["for-each-ref", "--format=%(objectname)", "refs/crazyagent/main"])
-            .trim(),
+        case.agent(&[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/crazyagent/main"
+        ])
+        .trim(),
         tip
     );
 }
@@ -3778,7 +3791,11 @@ fn a_clone_holding_the_engine_s_main_ref_still_retires() {
         )
         .unwrap()
     };
-    assert_eq!(blocker(), None, "the clone cannot retire even without the main ref");
+    assert_eq!(
+        blocker(),
+        None,
+        "the clone cannot retire even without the main ref"
+    );
     case.agent(&["update-ref", "refs/crazyagent/main", &commit]);
     assert_eq!(blocker(), None, "the loose main ref kept the clone");
     case.agent(&["pack-refs", "--all"]);

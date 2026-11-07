@@ -1426,7 +1426,9 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         );
         assert!(server.secrets.is_empty());
         assert!(
-            context.instructions().ends_with(&team_tools_section(&off, true)),
+            context
+                .instructions()
+                .ends_with(&team_tools_section(&off, true)),
             "{}",
             context.instructions()
         );

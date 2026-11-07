@@ -329,9 +329,10 @@ pub(super) fn give_main(repository: &Path, worktree: &Path, tip: &str) -> Result
         }
         folder = openat(&folder, part, flags, Mode::empty()).map_err(|_| invalid())?;
     }
-    let created = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let lock = openat(&folder, MAIN_LOCK, created, Mode::from_raw_mode(0o644))
-        .map_err(|_| invalid())?;
+    let created =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let lock =
+        openat(&folder, MAIN_LOCK, created, Mode::from_raw_mode(0o644)).map_err(|_| invalid())?;
     let mut file = std::fs::File::from(lock);
     let written = file
         .write_all(format!("{tip}\n").as_bytes())

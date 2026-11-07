@@ -19,9 +19,10 @@ use crate::protocol::ProjectId;
 use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, ResultsShown};
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
-    AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordinationView,
-    DelegationPath, MASTER_BRANCH_BYTES_MAX, SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX,
-    TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
+    AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
+    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, SwitchApply, SwitchMode,
+    TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus,
+    TeamTask,
 };
 use crate::tui::keys::Key;
 use crate::tui::seam::AccountRow;

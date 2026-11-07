@@ -208,7 +208,10 @@ fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
         assert!(!done.status.success(), "{args:?}");
         let stderr = String::from_utf8_lossy(&done.stderr);
         assert!(stderr.contains(refused), "{args:?} {stderr}");
-        assert!(stderr.contains("git merge crazyagent/main"), "{args:?} {stderr}");
+        assert!(
+            stderr.contains("git merge crazyagent/main"),
+            "{args:?} {stderr}"
+        );
     }
 }
 

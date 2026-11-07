@@ -477,9 +477,11 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     }
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     assert!(private_folder(&path));
-    if let Some(script) =
-        git_script(crate::research::runner::sandboxed_git(), GitCopy::Worker, true)
-        && let Err(error) = write_git(&path, &script)
+    if let Some(script) = git_script(
+        crate::research::runner::sandboxed_git(),
+        GitCopy::Worker,
+        true,
+    ) && let Err(error) = write_git(&path, &script)
     {
         eprintln!("agent_git_not_written kind={:?}", error.kind());
     }
@@ -530,7 +532,11 @@ fn git_script(git: &Path, copy: GitCopy, main: bool) -> Option<String> {
 /// and no copy is written, or the write failure.
 #[cfg(unix)]
 pub fn lead_git(tmp: &Path, catch_up: bool) -> io::Result<()> {
-    match git_script(crate::research::runner::sandboxed_git(), GitCopy::Lead, catch_up) {
+    match git_script(
+        crate::research::runner::sandboxed_git(),
+        GitCopy::Lead,
+        catch_up,
+    ) {
         Some(script) => write_git(tmp, &script),
         None => Ok(()),
     }
@@ -542,7 +548,11 @@ pub fn lead_git(tmp: &Path, catch_up: bool) -> io::Result<()> {
 /// git is the shim and no copy is written, or the write failure.
 #[cfg(unix)]
 pub fn free_git(tmp: &Path) -> io::Result<()> {
-    match git_script(crate::research::runner::sandboxed_git(), GitCopy::Free, true) {
+    match git_script(
+        crate::research::runner::sandboxed_git(),
+        GitCopy::Free,
+        true,
+    ) {
         Some(script) => write_git(tmp, &script),
         None => Ok(()),
     }
@@ -554,7 +564,11 @@ pub fn free_git(tmp: &Path) -> io::Result<()> {
 /// Output: Ok, also when git is the shim and no copy is written, or the write failure.
 #[cfg(unix)]
 pub fn strict_git(tmp: &Path) -> io::Result<()> {
-    match git_script(crate::research::runner::sandboxed_git(), GitCopy::Worker, false) {
+    match git_script(
+        crate::research::runner::sandboxed_git(),
+        GitCopy::Worker,
+        false,
+    ) {
         Some(script) => write_git(tmp, &script),
         None => Ok(()),
     }
