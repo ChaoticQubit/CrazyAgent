@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Icon, Segmented, type IconName } from "../../ui";
+import { ConfirmDialog, Icon, Segmented, type IconName } from "../../ui";
 import { listMcpServers, listSkills, loadAllProjectMemories, nextGeneration, poolSummaries } from "../../api";
 import { failureCopy, loadActivity, loadAgentPolicy, retryResearch } from "../../api-projects";
 import type { ActivityItem, ActivityKind, ResearchJob } from "../../api-projects";
@@ -63,11 +63,8 @@ const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "
   test: { icon: "shield-check", tone: "ok" },
 };
 
-/** One activity row: when, the kind's icon, what happened, Undone when it was, and who, with
- * the goal when the row stands outside its group. Inputs: the event, the time it is read
- * against and the goal to tag it with. Output: the row. */
-/** What a row's Undo does: the change set being undone, if any, and the undo itself. */
-type Undo = { undoing: string | null; onUndo: (changeSet: string) => void };
+/** What a row's Undo does: the change set being undone, if any, and the ask before it. */
+type Undo = { undoing: string | null; onUndo: (item: ActivityItem) => void };
 
 /** The change set a row's Undo reverts: a master's merge into main not undone yet. Input: the
  * event. Output: the change set id, or null when the row has no Undo. */
@@ -75,6 +72,15 @@ function undoable(item: ActivityItem): string | null {
   return item.kind === "merged_into_main" && !item.undone ? item.change_set : null;
 }
 
+/** The branch a master's merge row names, as the engine wrote it. Input: the row's words.
+ * Output: the branch, or "its branch" when the words name none. */
+function mergedBranch(text: string): string {
+  return /^The master merged its changes into (\S+): /.exec(text)?.[1] ?? "its branch";
+}
+
+/** One activity row: when, the kind's icon, what happened, Undone when it was, and who, with
+ * the goal when the row stands outside its group. Inputs: the event, the time it is read
+ * against and the goal to tag it with. Output: the row. */
 function ActivityRow({ item, now, goal, undo }: { item: ActivityItem; now: number; goal?: string; undo?: Undo }) {
   const changeSet = undoable(item);
   return <li className="pj-activity-row">
@@ -83,7 +89,7 @@ function ActivityRow({ item, now, goal, undo }: { item: ActivityItem; now: numbe
     <span className="pj-activity-text">{displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
       <span className="pj-small pj-muted pj-activity-by">{displayText(item.actor)}{goal !== undefined && <> · <span className="pj-activity-tag">{displayText(goal)}</span></>}</span></span>
     {undo && changeSet !== null && <button type="button" className="pj-link pj-activity-undo" disabled={undo.undoing !== null}
-      aria-busy={undo.undoing === changeSet} onClick={() => undo.onUndo(changeSet)}>Undo</button>}
+      aria-busy={undo.undoing === changeSet} onClick={() => undo.onUndo(item)}>Undo</button>}
   </li>;
 }
 
@@ -163,14 +169,15 @@ const UNDO_FILES_SHOWN = 5;
 function undoNote(result: Result<AcceptOutcome>): { note: string; moved: boolean } {
   if (result.kind === "not_ready") return { note: "Undo isn't in this build.", moved: false };
   if (result.kind === "error") return { note: changesRefusal({ code: result.code, cause: result.cause }), moved: false };
-  if (result.value.kind === "landed") return { note: `Undid the merge. ${result.value.branch} is back to how it was before it.`, moved: true };
+  if (result.value.kind === "landed") return { note: `Undid the merge with one new commit on ${result.value.branch}. Later commits stay.`, moved: true };
   const files = result.value.files;
   const more = files.length > UNDO_FILES_SHOWN ? ` and ${files.length - UNDO_FILES_SHOWN} more` : "";
   return { note: `Couldn't undo the merge: ${files.slice(0, UNDO_FILES_SHOWN).join(", ")}${more} changed on its branch since, so nothing changed.`, moved: false };
 }
 
 /** Recent activity on Overview: the project's events by goal, read again while the window is
- * visible, with loading, failure and stale states, and Undo on a master's merge into main.
+ * visible, with loading, failure and stale states, and Undo on a master's merge into main
+ * after a confirm naming the branch.
  * Inputs: the project id, and for tests the interval, the read and the undo. Output: the
  * section. */
 export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load = loadActivity, undo: runUndo = undoChange }: {
@@ -179,6 +186,7 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
   const [round, setRound] = useState(0);
   const [undoing, setUndoing] = useState<string | null>(null);
   const [undoLine, setUndoLine] = useState<string | null>(null);
+  const [asking, setAsking] = useState<{ changeSet: string; branch: string } | null>(null);
   const read = useActivity(projectId, every, load, round);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [closed, setClosed] = useState<string[]>([RESEARCH_KEY]);
@@ -188,20 +196,28 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
     setExpanded([]);
     setClosed([RESEARCH_KEY]);
     setUndoLine(null);
+    setAsking(null);
   }, [projectId]);
   const undo: Undo = {
     undoing,
-    onUndo: (changeSet) => {
-      if (undoing !== null) return;
-      setUndoing(changeSet);
-      setUndoLine(null);
-      void runUndo(changeSet).then((result) => {
-        const { note, moved } = undoNote(result);
-        setUndoing(null);
-        setUndoLine(note);
-        if (moved) setRound((value) => value + 1);
-      });
+    onUndo: (item) => {
+      const changeSet = undoable(item);
+      if (undoing !== null || changeSet === null) return;
+      setAsking({ changeSet, branch: mergedBranch(item.text) });
     },
+  };
+  const confirmUndo = () => {
+    if (asking === null || undoing !== null) return;
+    const { changeSet } = asking;
+    setUndoing(changeSet);
+    setUndoLine(null);
+    void runUndo(changeSet).then((result) => {
+      const { note, moved } = undoNote(result);
+      setUndoing(null);
+      setAsking(null);
+      setUndoLine(note);
+      if (moved) setRound((value) => value + 1);
+    });
   };
   const shown = read.shown;
   const items = shown?.kind === "ok" ? shown.value : [];
@@ -227,6 +243,10 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
         onToggle={(key) => setClosed((keys) => keys.includes(key) ? keys.filter((other) => other !== key) : [...keys, key])} undo={undo} />
       : <ActivityTimeline items={visible} now={read.at} undo={undo} />)}
     {shown?.kind === "ok" && read.more && <p className="pj-small pj-muted">Older activity isn't shown here.</p>}
+    <ConfirmDialog open={asking !== null} pending={undoing !== null} title={`Undo this merge on ${asking?.branch ?? "its branch"}?`}
+      confirmLabel="Undo merge" cancelLabel="Keep it" onCancel={() => setAsking(null)} onConfirm={confirmUndo}>
+      CrazyAgent adds one new commit on {asking?.branch ?? "its branch"} that reverts this merge. Later commits stay.
+    </ConfirmDialog>
   </section>;
 }
 
