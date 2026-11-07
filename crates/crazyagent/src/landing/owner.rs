@@ -460,7 +460,7 @@ pub(super) fn refresh_main(db: &Connection, project: &ProjectId) -> Result<(), E
             continue;
         };
         let given = shared(repository).and_then(|repo| {
-            flow::set_engine_ref(&repo, repository, clone::MAIN_REF, Some(tip))
+            flow::set_engine_ref(&repo, repository, clone::MAIN_REF, Some(tip.as_str()))
         });
         if let Err(error) = given {
             eprintln!(
