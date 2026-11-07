@@ -4933,6 +4933,7 @@ impl TeamRuntime {
                     params![task, agent, now_ms()],
                 )
                 .map_err(error)?;
+            crate::activity::note_task(&self.connection, project, agent, task, now_ms());
             self.connection
                 .execute(
                     "UPDATE team_agents SET session=(SELECT session FROM team_tasks WHERE id=?1) WHERE id=?2 AND session IS NULL",
@@ -6225,7 +6226,15 @@ impl TeamRuntime {
                 continue;
             }
             let outcome = crate::projects_home::owner_home().and_then(|home| {
-                crate::landing::accept_into(&db, &home, &set.id, &set.head, None, &branch)
+                crate::landing::accept_into_as(
+                    &db,
+                    &home,
+                    &set.id,
+                    &set.head,
+                    None,
+                    &branch,
+                    crate::activity::ENGINE_ACTOR,
+                )
             });
             match outcome {
                 Ok(crate::landing::AcceptOutcome::Landed { .. }) => {

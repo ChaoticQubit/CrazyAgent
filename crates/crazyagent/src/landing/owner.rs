@@ -7,6 +7,7 @@ use super::{
     AcceptOutcome, AgentKind, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeSetId, ChangeState,
     MESSAGE_BYTES_MAX, TargetBranches,
 };
+use crate::activity::{ActivityKind, ENGINE_ACTOR, OWNER_ACTOR};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::Connection;
@@ -665,16 +666,18 @@ pub(super) fn commit_deletions(
 
 /// Marks a change set landed as `landed`, closes its agent's workers' open sets with it
 /// (F3, DEC-107), drops its pending ref, forgets the owner edits settled on it and points the
-/// agent's worktree at the landed commit when the worktree holds nothing newer than the set.
-/// A worker set that cannot be closed now is logged by its plain code and left open, so the
-/// Accept itself never fails on it.
-fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
+/// agent's worktree at the landed commit when the worktree holds nothing newer than the set,
+/// and records the Accept in the project's activity by who accepted it. A worker set that
+/// cannot be closed now is logged by its plain code and left open, so the Accept itself
+/// never fails on it.
+fn finish(db: &Connection, record: &mut Record, landed: &str, by: &str) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
     record.landed = Some(landed.to_owned());
     record.conflicts.clear();
     record.intent = None;
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
+    super::note_change(db, record, ActivityKind::Accepted, by);
     if let Err(error) = super::subagent::close_with_lead(db, record) {
         eprintln!(
             "landing_settle_failed cause={}",
@@ -724,14 +727,25 @@ pub(super) fn accept(
     message: Option<&str>,
     stopped: &dyn Fn(Step) -> bool,
 ) -> Result<AcceptOutcome, EngineError> {
-    accept_to(db, home, id, expected_head, message, None, stopped)
+    accept_to(
+        db,
+        home,
+        id,
+        expected_head,
+        message,
+        None,
+        OWNER_ACTOR,
+        stopped,
+    )
 }
 
 /// Lands a change set as one squash commit on a target branch, the project's Land on
 /// branch when none is named (DEC-111 Q1): as [`accept`] through the owner's checkout, by
 /// moving the ref alone for a branch checked out nowhere, or through an agent's worktree
-/// for that agent's own branch. Inputs: as [`accept`], plus the target branch. Output: the landed
-/// commit and branch, or the conflicts.
+/// for that agent's own branch. Inputs: as [`accept`], plus the target branch and who
+/// accepts, as the project's activity names them. Output: the landed commit and branch, or
+/// the conflicts.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn accept_to(
     db: &Connection,
     home: &Path,
@@ -739,6 +753,7 @@ pub(super) fn accept_to(
     expected_head: &str,
     message: Option<&str>,
     target: Option<&str>,
+    by: &str,
     stopped: &dyn Fn(Step) -> bool,
 ) -> Result<AcceptOutcome, EngineError> {
     let edited = message.map(edited).transpose()?;
@@ -773,6 +788,7 @@ pub(super) fn accept_to(
         record.conflicts = conflicts.clone();
         record.updated_ms = flow::now_ms()?;
         store::save(db, &record)?;
+        super::note_change(db, &record, ActivityKind::Conflict, by);
         return Ok(AcceptOutcome::Conflict { files: conflicts });
     }
     if uses_configured_commands(&owner, &paths, &[&tree])? {
@@ -792,7 +808,7 @@ pub(super) fn accept_to(
         }
     }
     if tree == owner.tree_of(&tip)? {
-        finish(db, &mut record, &tip)?;
+        finish(db, &mut record, &tip, by)?;
         return Ok(AcceptOutcome::Landed {
             commit: tip,
             branch,
@@ -869,7 +885,7 @@ pub(super) fn accept_to(
     if stopped(Step::BranchMoved) {
         return Err(failure("changes_git_failed"));
     }
-    finish(db, &mut record, &commit)?;
+    finish(db, &mut record, &commit, by)?;
     Ok(AcceptOutcome::Landed { commit, branch })
 }
 
@@ -1097,7 +1113,7 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                     .code
                     == 0;
             if moved || tip.as_deref() == Some(new.as_str()) {
-                finish(db, record, &new)?;
+                finish(db, record, &new, ENGINE_ACTOR)?;
             } else {
                 record.intent = None;
                 store::save(db, record)?;
@@ -1405,7 +1421,11 @@ fn observe_one(
         }
         Judged::Landed => {
             record.outside = true;
-            finish(db, &mut record, tip)?;
+            let by = match against {
+                Against::Owner => OWNER_ACTOR,
+                Against::Lead(_) => ENGINE_ACTOR,
+            };
+            finish(db, &mut record, tip, by)?;
             assert!(!record.is_open());
             Ok(None)
         }

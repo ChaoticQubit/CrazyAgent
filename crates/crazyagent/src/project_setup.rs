@@ -1,3 +1,4 @@
+use crate::activity::ActivityKind;
 use crate::config::{EffectiveConfig, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
@@ -1628,6 +1629,7 @@ pub fn claim_research_job(
     let job = load_jobs(&tx, "id", &id)?
         .pop()
         .ok_or_else(|| failure("research_job_corrupt"))?;
+    crate::activity::note_research(&tx, id, ActivityKind::ResearchStarted, now);
     tx.commit().map_err(error)?;
     assert_eq!(job.status, ResearchStatus::Running);
     assert_eq!(job.claimer.as_deref(), Some(claimer));
@@ -1665,6 +1667,11 @@ pub fn finish_research_job(
     if changed != 1 {
         return Err(failure("research_job_not_claimed"));
     }
+    let ended = match status {
+        ResearchStatus::Done => ActivityKind::ResearchSaved,
+        _ => ActivityKind::ResearchStopped,
+    };
+    crate::activity::note_research(&tx, id, ended, now);
     tx.commit().map_err(error)
 }
 

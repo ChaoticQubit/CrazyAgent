@@ -303,6 +303,61 @@ fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
 
+/// Records one action on a change set in its project's activity at the time the set last
+/// changed, with its sub-agent for the goal; a failure is logged by its plain code, so the
+/// action itself never fails on it. Inputs: the store, the change set, the kind of event
+/// (Accepted, Conflict, Discarded or SentBack) and who acted.
+#[cfg(unix)]
+fn note_change(
+    db: &Connection,
+    record: &store::Record,
+    kind: crate::activity::ActivityKind,
+    by: &str,
+) {
+    use crate::activity::ActivityKind;
+    let label = &record.agent.label;
+    let line = &record.prompt_line;
+    let text = match kind {
+        ActivityKind::Accepted => crate::activity::accepted_text(label, line),
+        ActivityKind::Conflict => {
+            format!("The changes of {label} conflict with the branch they land on: {line}")
+        }
+        ActivityKind::Discarded => format!("Discarded the changes of {label}: {line}"),
+        ActivityKind::SentBack => {
+            format!("Sent the changes of {label} back to take in the newer work: {line}")
+        }
+        _ => unreachable!("note_change takes a change set action"),
+    };
+    let agent = match record.agent.kind {
+        AgentKind::Sub => record.agent.id.parse().ok(),
+        AgentKind::Master => None,
+    };
+    let item = crate::activity::NewActivity {
+        kind,
+        actor: by,
+        agent,
+        goal: None,
+        text: &text,
+        change_set: Some(record.id.as_str()),
+    };
+    let at = i64::try_from(record.updated_ms).unwrap_or(i64::MAX);
+    crate::activity::note(db, &record.project, &item, at);
+}
+
+/// Records an owner action on a stored change set, as [`note_change`] does, once the
+/// action is done. Inputs: the store, the change set and the kind of event.
+#[cfg(unix)]
+fn noted(db: &Connection, id: &ChangeSetId, kind: crate::activity::ActivityKind) {
+    match store::load(db, id) {
+        Ok(record) => note_change(db, &record, kind, crate::activity::OWNER_ACTOR),
+        Err(error) => eprintln!(
+            "activity_record_failed kind={} cause={}",
+            kind.name(),
+            crate::protocol::plain_code(&error.0)
+        ),
+    }
+}
+
 /// Opens the change set store in the engine database, adding its table when missing.
 /// Input: the engine root holding `engine.db`. Output: the connection.
 pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
@@ -514,7 +569,12 @@ pub fn merge_sub_agent(
     git: &LeadGit<'_>,
 ) -> Result<MergeOutcome, EngineError> {
     #[cfg(unix)]
-    return subagent::merge(db, project, lead, sub, git);
+    return subagent::merge(db, project, lead, sub, git).inspect(|outcome| {
+        if let MergeOutcome::Merged { branch, .. } = outcome {
+            let now = crate::team::now_ms();
+            crate::activity::note_lead_merge(db, project, lead, sub, branch, now);
+        }
+    });
     #[cfg(not(unix))]
     {
         let _ = (db, project, lead, sub, git);
@@ -993,6 +1053,30 @@ pub fn accept_into(
     message: Option<&str>,
     target_branch: &str,
 ) -> Result<AcceptOutcome, EngineError> {
+    accept_into_as(
+        db,
+        owner_home,
+        id,
+        expected_head,
+        message,
+        target_branch,
+        crate::activity::OWNER_ACTOR,
+    )
+}
+
+/// Lands a change set on a chosen local branch as [`accept_into`] does, for an Accept the
+/// owner did not make: the project's activity names who accepted it, the master or the
+/// engine. Inputs: as [`accept_into`], plus who accepts. Output: the landed commit and
+/// branch, or the conflicting files.
+pub fn accept_into_as(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+    expected_head: &str,
+    message: Option<&str>,
+    target_branch: &str,
+    by: &str,
+) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
     return owner::accept_to(
         db,
@@ -1001,11 +1085,20 @@ pub fn accept_into(
         expected_head,
         message,
         Some(target_branch),
+        by,
         &|_| false,
     );
     #[cfg(not(unix))]
     {
-        let _ = (db, owner_home, id, expected_head, message, target_branch);
+        let _ = (
+            db,
+            owner_home,
+            id,
+            expected_head,
+            message,
+            target_branch,
+            by,
+        );
         Err(unavailable())
     }
 }
@@ -1050,7 +1143,8 @@ pub fn discard(
     now_ms: u64,
 ) -> Result<u64, EngineError> {
     #[cfg(unix)]
-    return flow::discard(db, id, expected_head, now_ms);
+    return flow::discard(db, id, expected_head, now_ms)
+        .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded));
     #[cfg(not(unix))]
     {
         let _ = (db, id, expected_head, now_ms);
@@ -1075,7 +1169,8 @@ pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), Eng
 /// for the resolve task. Inputs: the store and the change set. Output: Ok once merged.
 pub fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return owner::update(db, id);
+    return owner::update(db, id)
+        .inspect(|()| noted(db, id, crate::activity::ActivityKind::SentBack));
     #[cfg(not(unix))]
     {
         let _ = (db, id);
