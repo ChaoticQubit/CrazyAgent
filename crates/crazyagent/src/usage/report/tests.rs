@@ -393,7 +393,7 @@ fn rows_count_and_rank_by_the_headline_and_never_by_cache_reads() {
         at,
     )
     .unwrap();
-    let report = report(&db, None, None, 0, at + HOUR).unwrap();
+    let report = report(&db, None, None, 0, at + HOUR, &[]).unwrap();
     let keys: Vec<&str> = report.agents.iter().map(|row| row.key.as_str()).collect();
     assert_eq!(keys, ["team-ada", "team-ken"]);
     let ken = &report.agents[1].tokens;

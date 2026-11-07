@@ -5287,7 +5287,8 @@ fn a_captured_run_spends_the_budget_by_the_headline_its_usage_row_shows() {
         now,
     )
     .unwrap();
-    let report = crate::usage::report::report(&connection, Some(&project), None, 0, now).unwrap();
+    let report =
+        crate::usage::report::report(&connection, Some(&project), None, 0, now, &[]).unwrap();
     let row = report
         .agents
         .iter()
