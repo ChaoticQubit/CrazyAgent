@@ -4194,9 +4194,9 @@ fn left_live_master(fixture: &Fixture, host: &Arc<dyn Host>) -> i64 {
 }
 
 /// Waits for the live master to start idle with nothing typed, since the engine types
-/// nothing before the owner's first line, then types the owner's first line into its pane
-/// and waits for that turn to end, as the owner opens a live master. Takes the fixture, the
-/// running runtime and its host. Returns the master's id.
+/// nothing before the owner's first line, then types that line into its pane as the owner,
+/// whose key the owner typing signal records, and waits for the turn to end, as the owner
+/// opens a live master. Takes the fixture, the running runtime and its host. Returns the id.
 #[cfg(target_os = "macos")]
 fn owner_first_turn(fixture: &Fixture, team: &mut TeamRuntime, host: &Arc<dyn Host>) -> i64 {
     fixture.until(team, "the live master starts idle", |f| {
@@ -4206,6 +4206,13 @@ fn owner_first_turn(fixture: &Fixture, team: &mut TeamRuntime, host: &Arc<dyn Ho
     assert_eq!(live_turns(&fixture.connection), (0, false), "nothing typed");
     let master = masters(&fixture.connection)[0];
     assert_eq!(live_agent(&fixture.connection), Some(master));
+    let typed = now_ms();
+    super::super::master::owner_typed(&fixture.connection, master, b"hello\r", typed).unwrap();
+    assert_eq!(
+        super::super::master::owner_key_ms(&fixture.connection, None, master).unwrap(),
+        Some(typed),
+        "the owner's first line is an owner key"
+    );
     host.input(&AgentId::team(master).unwrap(), b"hello\r")
         .unwrap();
     fixture.until(team, "the owner's first turn ends", |f| {
