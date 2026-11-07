@@ -214,8 +214,13 @@ pub fn release_claims(
 /// change set lands or is discarded, so later agents stop overlapping it (OS-8). Takes the
 /// database, the agent and the time in ms. Returns how many claims it released.
 pub fn release_landed(db: &Connection, agent: AgentId, now: i64) -> Result<usize, EngineError> {
-    let _ = (db, agent, now);
-    Ok(0)
+    db.execute(
+        "UPDATE coord_claims SET released=?2 WHERE agent=?1 AND released IS NULL
+         AND work IN (SELECT id FROM coord_work WHERE owner_agent=?1
+                      AND state IN ('review_ready','complete'))",
+        params![agent, now],
+    )
+    .map_err(state)
 }
 
 /// The other agents' active claims that cover one file, for the edit-time check that
@@ -333,16 +338,17 @@ pub fn overlaps_of(
         .collect())
 }
 
-/// Reads a project's claims that still hold scope: not released, on work someone is on
-/// or about to be, at most `CLAIMS_SCAN_MAX`, oldest first, each marked stale while its
-/// agent is Away or Stopped.
+/// Reads a project's claims that still hold scope: not released, on work someone is on,
+/// is about to be or finished for review, at most `CLAIMS_SCAN_MAX`, oldest first, each
+/// marked stale while its agent is Away or Stopped. A claim on work waiting for review is
+/// never stale: it holds until the agent's change set lands or is rejected (DEC-117 Q7).
 fn active(db: &Connection, project: &ProjectId, now: i64) -> Result<Vec<Claim>, EngineError> {
     let mut statement = db
         .prepare(
-            "SELECT c.id,c.agent,c.work,c.pattern FROM coord_claims c
+            "SELECT c.id,c.agent,c.work,c.pattern,w.state='review_ready' FROM coord_claims c
              JOIN coord_work w ON w.id=c.work
              WHERE c.project=?1 AND c.released IS NULL
-             AND w.state IN ('assigned','accepted','active')
+             AND w.state IN ('assigned','accepted','active','review_ready')
              ORDER BY c.id LIMIT ?2",
         )
         .map_err(state)?;
@@ -354,19 +360,24 @@ fn active(db: &Connection, project: &ProjectId, now: i64) -> Result<Vec<Claim>, 
                 row.get(1)?,
                 row.get(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
             ))
         })
         .map_err(state)?;
     let mut claims = Vec::new();
     for row in rows {
-        let (id, agent, work, pattern) = row.map_err(state)?;
-        let presence = super::presence::current(db, agent, now)?;
+        let (id, agent, work, pattern, reviewing) = row.map_err(state)?;
+        let stale = !reviewing
+            && matches!(
+                super::presence::current(db, agent, now)?,
+                Presence::Away | Presence::Stopped
+            );
         claims.push(Claim {
             id,
             agent,
             work,
             pattern,
-            stale: matches!(presence, Presence::Away | Presence::Stopped),
+            stale,
         });
     }
     assert!(claims.len() <= CLAIMS_SCAN_MAX);
