@@ -35,8 +35,8 @@ pub struct RunRow {
     pub tokens: Tokens,
 }
 
-/// The tokens one account or harness used in the range, with how many agents and runs used
-/// it.
+/// The tokens one project, account or harness used in the range, with how many agents and
+/// runs used it and the projects they ran in, once each in name order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupRow {
@@ -44,11 +44,24 @@ pub struct GroupRow {
     pub tokens: Tokens,
     pub agents: u64,
     pub runs: u64,
+    pub projects: Vec<String>,
+}
+
+/// The tokens one agent used in the range, with the harnesses and accounts it used, once
+/// each in name order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRow {
+    pub project: String,
+    pub agent: String,
+    pub harnesses: Vec<String>,
+    pub accounts: Vec<String>,
+    pub tokens: Tokens,
 }
 
 /// What the Metrics page counts besides the usage report: team tasks running now, waiting
 /// now, and done or failed in the range; the tokens chart in bars of `bucket_ms`; and the
-/// breakdown by run, account and harness.
+/// breakdown by run, project, agent, account and harness.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metrics {
@@ -59,6 +72,8 @@ pub struct Metrics {
     pub bucket_ms: i64,
     pub series: Vec<Bucket>,
     pub runs: Vec<RunRow>,
+    pub projects: Vec<GroupRow>,
+    pub agents: Vec<AgentRow>,
     pub accounts: Vec<GroupRow>,
     pub harnesses: Vec<GroupRow>,
 }
@@ -220,6 +235,7 @@ fn groups(
                 tokens: tokens(row, 1)?,
                 agents: count(row.get(5)?),
                 runs: count(row.get(6)?),
+                projects: Vec::new(),
             })
         })
         .map_err(storage)?
@@ -253,6 +269,8 @@ pub fn read(
         bucket_ms,
         series: series(db, project, since_ms, bucket_ms)?,
         runs: runs(db, project, since_ms)?,
+        projects: Vec::new(),
+        agents: Vec::new(),
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,
     };

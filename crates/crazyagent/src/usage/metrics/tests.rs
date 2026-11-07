@@ -496,3 +496,315 @@ fn a_range_that_starts_after_now_is_refused() {
         "usage_request_invalid"
     );
 }
+
+/// The read for every project is the sum of the reads for each project: the same task
+/// counts, chart bars, runs, accounts and harnesses. It also ranks projects and agents by the
+/// headline, and names each account's and harness's projects and each agent's harnesses and
+/// accounts, once each in name order.
+#[test]
+fn the_read_for_every_project_is_the_sum_of_each_project_and_names_who_used_what() {
+    let (_directory, db) = database();
+    let beta = ProjectId::new("beta").unwrap();
+    task(
+        &db,
+        "alpha",
+        7,
+        "running",
+        "Alpha work",
+        Some("s1"),
+        MIDNIGHT,
+        None,
+    );
+    task(
+        &db,
+        "alpha",
+        8,
+        "done",
+        "Alpha done",
+        Some("s2"),
+        MIDNIGHT,
+        Some(MIDNIGHT + HOUR),
+    );
+    task(&db, "beta", 9, "queued", "Beta waits", None, MIDNIGHT, None);
+    task(
+        &db,
+        "beta",
+        10,
+        "failed",
+        "Beta failed",
+        Some("s4"),
+        MIDNIGHT,
+        Some(MIDNIGHT + 3 * HOUR),
+    );
+    for (
+        hour_ms,
+        project,
+        account,
+        agent,
+        harness,
+        session,
+        input,
+        output,
+        cache_read,
+        cache_write,
+    ) in [
+        (
+            MIDNIGHT + HOUR,
+            "alpha",
+            "acct-a",
+            "team-7",
+            "claude-code",
+            "s1",
+            1000,
+            100,
+            50,
+            10,
+        ),
+        (
+            MIDNIGHT + HOUR,
+            "alpha",
+            "acct-b",
+            "team-7",
+            "claude-code",
+            "s1",
+            200,
+            20,
+            0,
+            0,
+        ),
+        (
+            MIDNIGHT + 3 * HOUR,
+            "alpha",
+            "acct-a",
+            "team-8",
+            "codex",
+            "s2",
+            300,
+            30,
+            0,
+            0,
+        ),
+        (
+            MIDNIGHT + HOUR,
+            "beta",
+            "acct-a",
+            "team-9",
+            "codex",
+            "s3",
+            400,
+            40,
+            4000,
+            0,
+        ),
+        (
+            MIDNIGHT + 5 * HOUR,
+            "beta",
+            "acct-c",
+            "master-beta",
+            "claude-code",
+            "m1",
+            600,
+            60,
+            0,
+            6,
+        ),
+    ] {
+        used(
+            &db,
+            hour_ms,
+            project,
+            account,
+            agent,
+            harness,
+            session,
+            input,
+            output,
+            cache_read,
+            cache_write,
+        );
+    }
+    let one = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap();
+    let two = read(&db, Some(&beta), MIDNIGHT, NOW).unwrap();
+    let all = read(&db, None, MIDNIGHT, NOW).unwrap();
+    let counts = |m: &Metrics| [m.running, m.tasks_waiting, m.tasks_done, m.tasks_failed];
+    let summed: Vec<u64> = counts(&one)
+        .iter()
+        .zip(counts(&two))
+        .map(|(a, b)| a + b)
+        .collect();
+    assert_eq!(counts(&all).to_vec(), summed);
+    let add =
+        |into: &mut std::collections::BTreeMap<String, [u64; 6]>, key: String, row: [u64; 6]| {
+            let total = into.entry(key).or_default();
+            for (sum, value) in total.iter_mut().zip(row) {
+                *sum += value;
+            }
+        };
+    let parts = |tokens: &Tokens, agents: u64, runs: u64| {
+        [
+            tokens.input,
+            tokens.output,
+            tokens.cache_read,
+            tokens.cache_write,
+            agents,
+            runs,
+        ]
+    };
+    let mut bars = std::collections::BTreeMap::new();
+    let mut runs = std::collections::BTreeMap::new();
+    let mut accounts = std::collections::BTreeMap::new();
+    let mut harnesses = std::collections::BTreeMap::new();
+    for m in [&one, &two] {
+        for bar in &m.series {
+            add(
+                &mut bars,
+                bar.start_ms.to_string(),
+                parts(&bar.tokens, 0, 0),
+            );
+        }
+        for run in &m.runs {
+            let key = format!("{}/{}/{}", run.project, run.agent, run.session);
+            add(&mut runs, key, parts(&run.tokens, 0, 0));
+        }
+        for row in &m.accounts {
+            add(
+                &mut accounts,
+                row.key.clone(),
+                parts(&row.tokens, row.agents, row.runs),
+            );
+        }
+        for row in &m.harnesses {
+            add(
+                &mut harnesses,
+                row.key.clone(),
+                parts(&row.tokens, row.agents, row.runs),
+            );
+        }
+    }
+    let keyed = |rows: Vec<(String, [u64; 6])>| {
+        rows.into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        keyed(
+            all.series
+                .iter()
+                .map(|bar| (bar.start_ms.to_string(), parts(&bar.tokens, 0, 0)))
+                .collect()
+        ),
+        bars
+    );
+    assert_eq!(
+        keyed(
+            all.runs
+                .iter()
+                .map(|run| (
+                    format!("{}/{}/{}", run.project, run.agent, run.session),
+                    parts(&run.tokens, 0, 0)
+                ))
+                .collect()
+        ),
+        runs
+    );
+    assert_eq!(
+        keyed(
+            all.accounts
+                .iter()
+                .map(|row| (row.key.clone(), parts(&row.tokens, row.agents, row.runs)))
+                .collect()
+        ),
+        accounts
+    );
+    assert_eq!(
+        keyed(
+            all.harnesses
+                .iter()
+                .map(|row| (row.key.clone(), parts(&row.tokens, row.agents, row.runs)))
+                .collect()
+        ),
+        harnesses
+    );
+    let groups = |rows: &[GroupRow]| {
+        rows.iter()
+            .map(|row| {
+                (
+                    row.key.clone(),
+                    row.tokens.headline(),
+                    row.agents,
+                    row.runs,
+                    row.projects.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        groups(&all.projects),
+        [
+            ("alpha".into(), 1660, 2, 2, names(&["alpha"])),
+            ("beta".into(), 1106, 2, 2, names(&["beta"])),
+        ]
+    );
+    assert_eq!(
+        groups(&one.projects),
+        [("alpha".into(), 1660, 2, 2, names(&["alpha"]))]
+    );
+    assert_eq!(
+        groups(&all.accounts),
+        [
+            ("acct-a".into(), 1880, 3, 3, names(&["alpha", "beta"])),
+            ("acct-c".into(), 666, 1, 1, names(&["beta"])),
+            ("acct-b".into(), 220, 1, 1, names(&["alpha"])),
+        ]
+    );
+    assert_eq!(all.harnesses[0].projects, names(&["alpha", "beta"]));
+    let agents = all
+        .agents
+        .iter()
+        .map(|row| {
+            (
+                row.project.clone(),
+                row.agent.clone(),
+                row.tokens.headline(),
+                row.harnesses.clone(),
+                row.accounts.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        agents,
+        [
+            (
+                "alpha".into(),
+                "team-7".into(),
+                1330,
+                names(&["claude-code"]),
+                names(&["acct-a", "acct-b"])
+            ),
+            (
+                "beta".into(),
+                "master-beta".into(),
+                666,
+                names(&["claude-code"]),
+                names(&["acct-c"])
+            ),
+            (
+                "beta".into(),
+                "team-9".into(),
+                440,
+                names(&["codex"]),
+                names(&["acct-a"])
+            ),
+            (
+                "alpha".into(),
+                "team-8".into(),
+                330,
+                names(&["codex"]),
+                names(&["acct-a"])
+            ),
+        ]
+    );
+    assert_eq!(all.agents[2].tokens.cache_read, 4000);
+    assert!(one.agents.iter().all(|row| row.project == "alpha"));
+    assert_eq!(one.agents.len(), 2);
+}
