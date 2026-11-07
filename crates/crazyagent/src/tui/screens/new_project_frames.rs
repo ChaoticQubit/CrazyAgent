@@ -1,7 +1,7 @@
 use super::new_project::*;
 use super::new_project_input::cells;
 use super::new_project_tests::{key, load_catalog, type_text, wizard};
-use super::new_project_view::{Look, Row, Screen, research_glyph, wizard_screen};
+use super::new_project_view::{Look, Row, Screen, research_glyph, spread, wizard_screen};
 use crate::project_setup::ResearchKind;
 use crate::tui::frame::{footer, header, hint};
 use crate::tui::glyphs::{ASCII, UNICODE};
