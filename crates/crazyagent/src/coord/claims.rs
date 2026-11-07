@@ -458,6 +458,13 @@ pub fn overlaps_of(
         .collect())
 }
 
+/// Prompts each agent waiting for a file that is free now. Takes the database and the time
+/// in ms. Returns how many it prompted.
+pub fn wake_waiters(db: &Connection, now: i64) -> Result<usize, EngineError> {
+    let _ = (db, now);
+    Ok(0)
+}
+
 /// The lead and sub-agent answers one overlap check already read, so a check over many
 /// claims asks the store once per pair of agents.
 struct Kin<'a> {

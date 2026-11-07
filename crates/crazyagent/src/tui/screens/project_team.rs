@@ -3447,6 +3447,7 @@ fn overlaps_words(overlaps: Overlaps) -> &'static str {
         Overlaps::Warn => "Warn",
         Overlaps::Block => "Block",
         Overlaps::Off => "Off",
+        Overlaps::Wait => "Wait",
     }
 }
 

@@ -98,6 +98,7 @@ pub enum Overlaps {
     Warn,
     Block,
     Off,
+    Wait,
 }
 
 /// How every Claude Code terminal of the project draws (N-D9): Classic on the normal

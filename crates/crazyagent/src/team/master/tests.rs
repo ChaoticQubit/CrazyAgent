@@ -1823,6 +1823,56 @@ fn the_masters_overlapping_start_work_notes_the_sub_agent_unless_overlaps_are_of
     );
 }
 
+/// OS-8 Wait: under the Wait option the master's start_work on a file a running
+/// sub-agent's work claims is refused with the plan's sentence naming that agent, its work
+/// and the file, and starts nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn under_wait_the_master_s_start_on_a_held_file_is_told_to_wait() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    known_project(&fixture);
+    let charts = named_sub(&fixture, "charts", "working");
+    let (said, refused) = as_sub(
+        &mut fixture,
+        charts,
+        tool::START_WORK_TOOL,
+        json!({"title": "Draw the chart", "claims": ["src/ui/chart.ts"]}),
+    );
+    assert!(!refused, "{said}");
+    let work = work_id(&fixture, "Draw the chart");
+    crate::coord::settings::write(
+        &fixture.connection,
+        &ProjectId::new(PROJECT).unwrap(),
+        &crate::coord::settings::CoordSettings {
+            overlaps: crate::coord::settings::Overlaps::Wait,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "Restyle the chart", "claims": ["src/ui/chart.ts"]}),
+    );
+    assert!(refused, "{said}");
+    assert_eq!(
+        said,
+        format!(
+            "Wait: charts's work #{work} holds src/ui/chart.ts until it lands. You will get a message when it is free."
+        )
+    );
+    let started: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_work WHERE title='Restyle the chart'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(started, 0);
+}
+
 /// A lead's inspect_work shows its work, its workers' work and not another agent's, what
 /// waits for it (then marked read), its workers' questions for the owner, what it sent
 /// and its workers; a plain sub-agent sees only its own sections.

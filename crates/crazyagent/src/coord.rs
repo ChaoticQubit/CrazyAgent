@@ -41,7 +41,7 @@ mod work;
 
 pub use claims::{
     breadth, covers, held_sets, hold_for_set, overlapping, overlaps_of, path_scopes,
-    release_claims, release_set, release_unheld, restore_set,
+    release_claims, release_set, release_unheld, restore_set, wake_waiters,
 };
 pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread};
 pub use presence::{owner_questions, record_tool, set_waiting, snapshot, touch};
