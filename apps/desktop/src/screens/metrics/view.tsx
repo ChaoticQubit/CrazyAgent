@@ -388,6 +388,12 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   </div>;
 }
 
+/** The projects whose team status names agents on the page. Inputs: the project id or null,
+ * and the app page's filter. Output: the project ids. */
+export function namedProjects(projectId: string | null, filter: MetricsFilter | undefined): string[] {
+  return filter ? filter.projects.map((project) => project.id) : projectId === null ? [] : [projectId];
+}
+
 /** Each listed project's team status paired with its id; a project whose read fails is left
  * out, so its agents keep their usage labels. Input: the project ids. Output: the pairs read,
  * in order. */
@@ -414,7 +420,7 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
     return loadUsage(rangeStart(range, now), offsetMinutes(now), projectId);
   }, [range, reload, projectId]);
   const [metrics, retryMetrics] = useLoad(() => loadMetrics(rangeStart(range, new Date()) ?? 0, projectId), [range, reload, projectId]);
-  const named = filter ? filter.projects.map((project) => project.id) : projectId === null ? [] : [projectId];
+  const named = namedProjects(projectId, filter);
   const [adoption] = useLoad<Adoption | null>(() => projectId === null || filter ? Promise.resolve({ kind: "ok" as const, value: null }) : loadAdoption(projectId), [projectId, reload, Boolean(filter)]);
   const [statuses] = useLoad(() => teamStatuses(named), [named.join("\n"), reload]);
   const [accounts] = useLoad(listAccounts, [], "accounts");

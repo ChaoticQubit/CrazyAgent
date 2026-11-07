@@ -116,3 +116,45 @@ test("the Metrics route shows the app Metrics page with the engine's projects", 
   assert.equal(screen.type, appPage.AppMetrics);
   assert.deepEqual(screen.props.projects, PROJECTS);
 });
+
+test("a Projects, Harness or Account cell lists the names the read kept, then how many more there were", () => {
+  const eight = Array.from({ length: 8 }, (_, at) => `p-${at}`);
+  const capped = {
+    ...metrics,
+    accounts: [{ ...metrics.accounts[0], projects: eight, more_projects: 3 }],
+    harnesses: [{ ...metrics.harnesses[0], more_projects: 0 }],
+    agents: [{ ...metrics.agents[0], more_harnesses: 0, more_accounts: 2 }],
+  };
+  const shown = (by) => tableText(render({ by, metrics: { kind: "ok", value: capped } }));
+  assert.match(shown("account"), /p-0, p-1, p-2, p-3, p-4, p-5, p-6, p-7, \+3 more/);
+  assert.match(shown("agent"), /Codex Pool A, Claude 1, acct-b, \+2 more/);
+  assert.doesNotMatch(shown("harness"), /more/);
+});
+
+test("the app page names agents from the metrics read and reads no team status per project", () => {
+  const filter = { projects: PROJECTS, onProject: forbidden };
+  assert.deepEqual(view.namedProjects(null, filter), []);
+  assert.deepEqual(view.namedProjects("alpha", filter), []);
+  assert.deepEqual(view.namedProjects("alpha", undefined), ["alpha"]);
+  assert.deepEqual(view.namedProjects(null, undefined), []);
+  const label = (agent) => agent === "team-8" ? "Ada (@calendar)" : "Master";
+  const labelled = {
+    ...metrics,
+    runs: metrics.runs.map((run) => ({ ...run, label: label(run.agent) })),
+    agents: metrics.agents.map((row) => ({ ...row, label: label(row.agent) })),
+  };
+  const shown = (by) => tableText(render({ by, names: { agents: new Map(), accounts: names.accounts }, metrics: { kind: "ok", value: labelled } }));
+  assert.match(shown("agent"), /Ada \(@calendar\) Alpha 1\.4K/);
+  assert.match(shown("agent"), /Master Beta 900/);
+  assert.match(shown("run"), /#142 Calendar API endpoints Alpha 1\.4K 700 500 200 3K Ada \(@calendar\) /);
+});
+
+test("across all projects By project and By agent total the Tokens tile, an Other row holding what the listed rows leave", () => {
+  const listed = { ...metrics, projects: [metrics.projects[0]], agents: [metrics.agents[0]] };
+  const shown = (by) => tableText(render({ by, metrics: { kind: "ok", value: listed } }));
+  for (const by of ["project", "agent"]) {
+    assert.match(shown(by), /Other, not listed 900 500 300 100 1K 39%/, by);
+    assert.match(shown(by), /Total 2\.3K 1\.2K 800 300 4K/, by);
+  }
+  assert.doesNotMatch(tableText(render()), /Other, not listed/);
+});
