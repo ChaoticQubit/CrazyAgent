@@ -217,8 +217,10 @@ function Totals({ report }: { report: UsageReport }) {
     <div className="usage-tiles">
       {onlyUnreported
         ? <Tile label="Tokens" value="Not reported" detail={`Usage not reported by ${unreported}`} />
-        : <Tile label="Tokens" value={compactCount(headlineTokens(report.total))} detail={`Re-read from cache: ${compactCount(report.total.cache_read)}, counted apart.`} />}
-      <Tile label="Cache" value={share === null ? "None" : `${share}%`} detail={`${compactCount(report.total.cache_read)} read, ${compactCount(report.total.cache_write)} written`} />
+        : <Tile label="Tokens" value={compactCount(headlineTokens(report.total))}
+          detail={`${compactCount(report.total.input)} input, ${compactCount(report.total.cache_write)} cache write, ${compactCount(report.total.output)} output`} />}
+      <Tile label="Re-read from cache" value={compactCount(report.total.cache_read)}
+        detail={share === null ? "Billed far lower, not in Tokens" : `${share}% of everything read; billed far lower, not in Tokens`} />
       <Tile label="Runs" value={String(report.runs)} />
       <Tile label="Lines changed" value={`+${compactCount(added)} -${compactCount(removed)}`} />
     </div>
