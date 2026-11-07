@@ -1072,6 +1072,53 @@ async fn team_plans_take_a_master_only_harness_as_the_master_but_never_as_a_team
     engine.stop().await;
 }
 
+/// The owner reads a project's activity through the engine: a research run the runner
+/// claimed is listed, and a limit outside 1 to `LIST_MAX` is refused.
+#[tokio::test]
+async fn owner_reads_the_project_activity_through_the_engine() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![ResearchKind::MarketResearch]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let store =
+        crate::research::jobs::ResearchJobs::open(&engine.root.path().join("engine.db")).unwrap();
+    store
+        .claim("setup-pooled", "runner-test", 4)
+        .unwrap()
+        .unwrap();
+
+    let items = owner.project_activity(project.clone(), 50).await.unwrap();
+
+    let seen: Vec<(crate::activity::ActivityKind, &str, &str)> = items
+        .iter()
+        .map(|item| (item.kind, item.actor.as_str(), item.text.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![(
+            crate::activity::ActivityKind::ResearchStarted,
+            "Research",
+            "Research started: Market research"
+        )]
+    );
+    for limit in [0, crate::activity::LIST_MAX + 1] {
+        let refused = owner
+            .project_activity(project.clone(), limit)
+            .await
+            .unwrap_err();
+        assert!(refused.0.contains("activity_limit_invalid"), "{refused:?}");
+    }
+}
+
 #[tokio::test]
 async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
     let engine = Engine::start().await;

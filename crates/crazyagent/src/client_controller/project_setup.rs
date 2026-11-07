@@ -161,6 +161,24 @@ impl OwnerController {
         }
     }
 
+    /// Lists what happened in a project, newest first, as the Overview shows it.
+    /// Takes the project id and the most events to return, 1 to `activity::LIST_MAX`.
+    /// Returns the events, at most one engine frame of them.
+    pub async fn project_activity(
+        &mut self,
+        project_id: ProjectId,
+        limit: usize,
+    ) -> Result<Vec<crate::activity::ActivityItem>, EngineError> {
+        match self
+            .read(OwnerRead::ProjectActivity { project_id, limit })
+            .await?
+            .data
+        {
+            OwnerData::ProjectActivity { items, .. } => Ok(items),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Lists the brief, documents and research reports of a project folder.
     /// Takes the project id.
     /// Returns the folder path and its context items.
