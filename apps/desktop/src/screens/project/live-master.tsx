@@ -11,7 +11,7 @@ import { TerminalPanel } from "../team";
 import { changeNote } from "../team/controls";
 import "../team/team-graph.css";
 import { readMasterInput } from "../../state";
-import { ConversationTab } from "./conversation";
+import { ConversationTab, MasterSettingsButton } from "./conversation";
 import { SessionsBar, SwitchDivider } from "./sessions";
 import { savedStale } from "./settings";
 import { NotReady, valueOf } from "./shared";
@@ -379,6 +379,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
       <span className={`pj-console-state ${state.tone}`}>{state.word}</span>
       {account && <span className="pj-console-detail">{displayText(account)}</span>}
       {head.waits && <span className="pj-console-detail" data-testid="master-switch-waits">{displayText(head.waits)}</span>}
+      <span className="pj-console-actions"><MasterSettingsButton data={data} /></span>
     </div>
     {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} mark={live.kind === "running" ? live.node?.status ?? null : null} onSwitched={async () => {
       await sessions.reread();

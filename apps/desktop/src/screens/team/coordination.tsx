@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, type SkillView } from "../../api";
-import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
+import { OVERLAP_CHOICES } from "../../engine-client";
+import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
-import { changeNote } from "./controls";
+import { SettingRow, changeNote } from "./controls";
 
 export const COUNTED_TOOLS_MAX = 32;
 const COUNTED_TOOL = /^[A-Za-z0-9_*-]{1,64}$/;
@@ -123,20 +124,25 @@ export function countedToolsInput(text: string): { kind: "ok"; tools: string[] }
   return { kind: "ok", tools };
 }
 
-/** Coordination settings on the Agents tab: each harness kind's sub-agent mode and delivery,
- * where sub-agent questions go, what overlapping claims do, workflow nudges, the Task-start
- * reminder, the counted tools and the skills each team role gets. Every option is selectable; the plan defaults show for
- * an older engine. Inputs: the project id, the latest team status and a reload. Output: the
- * controls. */
-export function CoordinationControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
-  const view = coordination(status);
-  const [skills] = useLoad(() => listSkills(projectId), [projectId], "skills");
+const OVERLAP_LABELS: Record<Overlaps, string> = { warn: "Warn", block: "Block", off: "Off" };
+
+function knownOverlap(value: string): value is Overlaps {
+  return (OVERLAP_CHOICES as readonly string[]).includes(value);
+}
+
+/** The Overlapping edits choices: the engine's known ones in their order, then the engine's
+ * value as it is when this app does not know it, so it is never dropped or remapped. Input:
+ * the engine's value. Output: the options. */
+export function overlapOptions(current: string): { value: string; label: string }[] {
+  const known = OVERLAP_CHOICES.map((value) => ({ value: value as string, label: OVERLAP_LABELS[value] }));
+  return knownOverlap(current) ? known : [...known, { value: current, label: displayText(current) }];
+}
+
+/** A coordination change's busy flag and note, and the call that saves one change, shows its
+ * note and reads the team again. Input: the reload. Output: the state and the call. */
+function useChange(reload: () => void) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
-  const [counted, setCounted] = useState<string | null>(null);
-  const countedText = counted ?? view.settings.counted_tools.join("\n");
-  const countedCheck = countedToolsInput(countedText);
-
   async function run(change: () => Promise<Parameters<typeof changeNote>[0]>, what: string) {
     if (busy) return;
     setBusy(true);
@@ -145,6 +151,51 @@ export function CoordinationControls({ projectId, status, reload }: { projectId:
     setNote(message);
     reload();
   }
+  return { busy, note, run };
+}
+
+function ChangeNote({ note }: { note: string }) {
+  return note ? <p className="pj-note warn" role="alert">{displayText(note)}</p> : null;
+}
+
+/** Where sub-agent questions go, as one row, on Agent settings and in the master's settings.
+ * Inputs: the project id, the team status and a reload. Output: the row. */
+export function QuestionsSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const view = coordination(status);
+  const { note, run } = useChange(reload);
+  return <SettingRow label="Sub-agent questions go to">
+    <span className="set-label" aria-hidden="true">Sub-agent questions go to</span>
+    <Segmented label="Sub-agent questions go to" value={view.settings.questions_to} onValue={(value: QuestionsTo) => void run(() => setCoordSettings(projectId, { ...view.settings, questions_to: value }), "where questions go")}
+      options={[{ value: "lead", label: "Their lead" }, { value: "me", label: "Me directly" }]} />
+    <span className="tg-terminal-note">A question an agent marks For: Me always reaches you; no lead or master can answer it.</span>
+    <ChangeNote note={note} />
+  </SettingRow>;
+}
+
+/** How messages reach one harness kind's agents, as one row, on Agent settings and in the
+ * master's settings. Inputs: the project id, the harness kind's row and a reload. Output: the
+ * row. */
+export function DeliverySetting({ projectId, row, reload }: { projectId: string; row: HarnessCoordination; reload: () => void }) {
+  const { note, run } = useChange(reload);
+  const label = `Messages to ${HARNESS_NAMES[row.harness]} agents`;
+  return <SettingRow label={label}>
+    <Select id={`tg-delivery-${row.harness}-${projectId}`} label={label} value={row.delivery} options={DELIVERY_OPTIONS}
+      onValue={(value) => { if (value === "auto" || value === "native_only" || value === "typing_only") void run(() => setHarnessDelivery(projectId, row.harness, value as Delivery), "message delivery"); }} />
+    <ChangeNote note={note} />
+  </SettingRow>;
+}
+
+/** The Skills and tools rows of Agent settings: the skills each team role gets, workflow
+ * nudges, the Task-start reminder and the counted tools. Every option is selectable; the plan
+ * defaults show for an older engine. Inputs: the project id, the latest team status and a
+ * reload. Output: the rows. */
+export function ToolsControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const view = coordination(status);
+  const [skills] = useLoad(() => listSkills(projectId), [projectId], "skills");
+  const { busy, note, run } = useChange(reload);
+  const [counted, setCounted] = useState<string | null>(null);
+  const countedText = counted ?? view.settings.counted_tools.join("\n");
+  const countedCheck = countedToolsInput(countedText);
 
   const save = (patch: Partial<CoordSettings>, what: string) =>
     run(() => setCoordSettings(projectId, { ...view.settings, ...patch }), what);
@@ -155,54 +206,74 @@ export function CoordinationControls({ projectId, status, reload }: { projectId:
     setCounted(null);
   }
 
-  return <section className="tg-controls" aria-label="Coordination">
-    <h4>Coordination</h4>
-    {view.harnesses.map((row) => <div className="tg-limits" role="group" aria-label={HARNESS_NAMES[row.harness]} key={row.harness}>
-      <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={row.mode} options={modeOptions(row.native)}
-        onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void run(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode"); }}
-        helper={row.native ? "Native teammates run inside the lead's own session. App-spawned sub-agents get their own terminal, worktree and branch."
-          : `${HARNESS_NAMES[row.harness]} has no native teammates, so its sub-agents are app-spawned.`} />
-      <Select id={`tg-delivery-${row.harness}-${projectId}`} label={`Messages to ${HARNESS_NAMES[row.harness]} agents`} value={row.delivery} options={DELIVERY_OPTIONS}
-        onValue={(value) => { if (value === "auto" || value === "native_only" || value === "typing_only") void run(() => setHarnessDelivery(projectId, row.harness, value as Delivery), "message delivery"); }} />
-      {row.harness === "claude-code" && <Select id={`tg-display-claude-code-${projectId}`} label="Claude Code terminal display" value={view.settings.claude_display} options={DISPLAY_OPTIONS}
-        onValue={(value) => { if (value === "classic" || value === "fullscreen") void save({ claude_display: value }, "the Claude Code terminal display"); }}
-        helper={DISPLAY_HELPER[view.settings.claude_display]} />}
-    </div>)}
-    <div className="pj-row">
-      <span aria-hidden="true">Sub-agent questions go to</span>
-      <Segmented label="Sub-agent questions go to" value={view.settings.questions_to} onValue={(value: QuestionsTo) => void save({ questions_to: value }, "where questions go")}
-        options={[{ value: "lead", label: "Their lead" }, { value: "me", label: "Me directly" }]} />
-      <span className="tg-terminal-note">A question an agent marks For: Me always reaches you; no lead or master can answer it.</span>
-    </div>
-    <div className="pj-row">
-      <span aria-hidden="true">Overlapping edits</span>
-      <Segmented label="Overlapping edits" value={view.settings.overlaps} onValue={(value: Overlaps) => void save({ overlaps: value }, "overlapping edits")}
-        options={[{ value: "warn", label: "Warn" }, { value: "block", label: "Block" }, { value: "off", label: "Off" }]} />
-      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit.</span>
-    </div>
-    <div className="pj-row">
-      <span aria-hidden="true">Workflow nudges</span>
+  return <>
+    <SettingRow label="Skills per role" wide>
+      <span className="set-label" aria-hidden="true">Skills per role</span>
+      <RoleSkillsControls settings={view.settings} skills={skills} busy={busy}
+        onChoose={(role, chosen) => void save({ role_skills: { ...view.settings.role_skills, [role]: chosen } }, `the ${role} skills`)} />
+    </SettingRow>
+    <SettingRow label="Workflow nudges">
+      <span className="set-label" aria-hidden="true">Workflow nudges</span>
       <Segmented label="Workflow nudges" value={view.settings.nudges} onValue={(value: Nudges) => void save({ nudges: value }, "workflow nudges")}
         options={[{ value: "off", label: "Off" }, { value: "ten_minutes", label: "Every 10 minutes" }, { value: "first_edit", label: "First edit" }]} />
       <span className="tg-terminal-note">Every 10 minutes sends an agent one reminder when it edits without start_work, or works 10 minutes without graphify or ctx tools. First edit reminds an agent once when it edits a file before any graphify query; the edit still runs.</span>
-    </div>
-    <div className="pj-row">
-      <span aria-hidden="true">Task-start reminder</span>
+    </SettingRow>
+    <SettingRow label="Task-start reminder">
+      <span className="set-label" aria-hidden="true">Task-start reminder</span>
       <Segmented label="Task-start reminder" value={view.settings.task_start} onValue={(value: TaskStart) => void save({ task_start: value }, "the task-start reminder")}
         options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
       <span className="tg-terminal-note">On adds a short reminder to the first turn of each task of every sub-agent and teammate with tools on: load the context-mode tools (Claude Code runs ToolSearch with their select string) and use the approved skills that fit. Off adds nothing. It is advice; nothing is blocked.</span>
-    </div>
-    <form className="pj-row" aria-label="Counted tools" onSubmit={(event) => { event.preventDefault(); void saveCounted(); }}>
-      <label htmlFor={`tg-counted-${projectId}`}>Counted tools</label>
-      <textarea id={`tg-counted-${projectId}`} className="pj-input" rows={3} value={countedText} onChange={(event) => setCounted(event.target.value)}
-        aria-describedby={`tg-counted-help-${projectId}`} />
-      <Button type="submit" size="small" disabled={busy || counted === null || countedCheck.kind !== "ok"} pending={busy && counted !== null} pendingLabel="Saving...">Save</Button>
-      <Button type="button" size="small" disabled={busy} onClick={() => { setCounted(null); void save({ counted_tools: COORD_DEFAULTS.counted_tools }, "the counted tools"); }}>Use defaults</Button>
-      <span className="tg-terminal-note" id={`tg-counted-help-${projectId}`}>{counted !== null && countedCheck.kind === "invalid" ? countedCheck.reason
-        : "The Process page and the graph count these tool calls per agent. One name per line; * matches any ending, such as ctx_*."}</span>
-    </form>
-    <RoleSkillsControls settings={view.settings} skills={skills} busy={busy}
-      onChoose={(role, chosen) => void save({ role_skills: { ...view.settings.role_skills, [role]: chosen } }, `the ${role} skills`)} />
-    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
-  </section>;
+    </SettingRow>
+    <SettingRow label="Counted tools" wide>
+      <form className="pj-row" aria-label="Counted tools" onSubmit={(event) => { event.preventDefault(); void saveCounted(); }}>
+        <label htmlFor={`tg-counted-${projectId}`}>Counted tools</label>
+        <textarea id={`tg-counted-${projectId}`} className="pj-input" rows={3} value={countedText} onChange={(event) => setCounted(event.target.value)}
+          aria-describedby={`tg-counted-help-${projectId}`} />
+        <Button type="submit" size="small" disabled={busy || counted === null || countedCheck.kind !== "ok"} pending={busy && counted !== null} pendingLabel="Saving...">Save</Button>
+        <Button type="button" size="small" disabled={busy} onClick={() => { setCounted(null); void save({ counted_tools: COORD_DEFAULTS.counted_tools }, "the counted tools"); }}>Use defaults</Button>
+        <span className="tg-terminal-note" id={`tg-counted-help-${projectId}`}>{counted !== null && countedCheck.kind === "invalid" ? countedCheck.reason
+          : "The Process page and the graph count these tool calls per agent. One name per line; * matches any ending, such as ctx_*."}</span>
+      </form>
+    </SettingRow>
+    <ChangeNote note={note} />
+  </>;
+}
+
+/** The Coordination rows of Agent settings: each harness kind's sub-agent mode and message
+ * delivery, the Claude Code terminal display, then the rows handed in, where sub-agent
+ * questions go and what overlapping claims do, with the engine's choices and any value it holds
+ * that this app does not know. Every option is selectable; the plan defaults show for an older
+ * engine. Inputs: the project id, the latest team status, a reload and rows to show after the
+ * harness rows. Output: the rows. */
+export function CoordinationControls({ projectId, status, reload, children }: { projectId: string; status: TeamStatus; reload: () => void; children?: ReactNode }) {
+  const view = coordination(status);
+  const { note, run } = useChange(reload);
+  const save = (patch: Partial<CoordSettings>, what: string) =>
+    run(() => setCoordSettings(projectId, { ...view.settings, ...patch }), what);
+
+  return <>
+    {view.harnesses.map((row) => <div className="set-harness" role="group" aria-label={HARNESS_NAMES[row.harness]} key={row.harness}>
+      <SettingRow label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
+        <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={row.mode} options={modeOptions(row.native)}
+          onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void run(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode"); }}
+          helper={row.native ? "Native teammates run inside the lead's own session. App-spawned sub-agents get their own terminal, worktree and branch."
+            : `${HARNESS_NAMES[row.harness]} has no native teammates, so its sub-agents are app-spawned.`} />
+      </SettingRow>
+      <DeliverySetting projectId={projectId} row={row} reload={reload} />
+      {row.harness === "claude-code" && <SettingRow label="Claude Code terminal display">
+        <Select id={`tg-display-claude-code-${projectId}`} label="Claude Code terminal display" value={view.settings.claude_display} options={DISPLAY_OPTIONS}
+          onValue={(value) => { if (value === "classic" || value === "fullscreen") void save({ claude_display: value }, "the Claude Code terminal display"); }}
+          helper={DISPLAY_HELPER[view.settings.claude_display]} />
+      </SettingRow>}
+    </div>)}
+    {children}
+    <QuestionsSetting projectId={projectId} status={status} reload={reload} />
+    <SettingRow label="Overlapping edits">
+      <span className="set-label" aria-hidden="true">Overlapping edits</span>
+      <Segmented label="Overlapping edits" value={view.settings.overlaps as string} options={overlapOptions(view.settings.overlaps)}
+        onValue={(value) => { if (knownOverlap(value)) void save({ overlaps: value }, "overlapping edits"); }} />
+      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit.</span>
+    </SettingRow>
+    <ChangeNote note={note} />
+  </>;
 }

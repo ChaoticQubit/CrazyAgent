@@ -108,7 +108,7 @@ test("the Task-start reminder row follows Workflow nudges with On as the default
   assert.equal(coord.COORD_DEFAULTS.task_start, "on");
   for (const [option, checked] of [["on", "On"], ["off", "Off"]]) {
     const status = { project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, task_start: option }, harnesses: [] } };
-    const markup = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden }));
+    const markup = renderToStaticMarkup(createElement(coord.ToolsControls, { projectId: "p", status, reload: forbidden }));
     const nudges = markup.indexOf('aria-label="Workflow nudges"');
     const reminder = markup.indexOf('aria-label="Task-start reminder"');
     const counted = markup.indexOf('aria-label="Counted tools"');

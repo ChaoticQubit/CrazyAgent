@@ -48,19 +48,22 @@ test("a team change says nothing when applied and plain words otherwise", () => 
 });
 
 test("the controls show the keep-ready switch and the hand-off form for a team with sub-agents", () => {
-  const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ keep_warm: true }), reload() {} }));
+  const html = renderToStaticMarkup(createElement(controls.TeamActions, { projectId: "chores", status: status({ keep_warm: true }), reload() {} }));
+  const settings = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ keep_warm: true }), reload() {} }));
   assert.match(html, /aria-label="Team controls"/);
-  assert.match(html, /role="switch" class="switch" aria-checked="true"/);
-  assert.match(html, /Keep 1 sub-agent ready/);
+  assert.match(settings, /role="switch" class="switch" aria-checked="true"/);
+  assert.match(settings, /Keep 1 sub-agent ready/);
   assert.match(html, /<h4>Hand a task to a sub-agent<\/h4>/);
   assert.match(html, /<option value="" selected="">Any sub-agent<\/option><option value="codex">codex<\/option><option value="claude">claude<\/option>/);
   assert.match(html, /<button type="submit" class="btn primary small" disabled=""/);
   assert.match(html, /Skips the master\. The master sees the task and its result\./);
-  const lone = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "solo", status: status({ min_agents: 0, harnesses: [harness("codex", "master")] }), reload() {} }));
+  const solo = status({ min_agents: 0, harnesses: [harness("codex", "master")] });
+  const lone = renderToStaticMarkup(createElement(controls.TeamActions, { projectId: "solo", status: solo, reload() {} }));
+  const loneSettings = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "solo", status: solo, reload() {} }));
   assert.doesNotMatch(lone, /Hand a task/);
   assert.match(lone, /This team has no sub-agents/);
-  assert.match(lone, /Keep 0 sub-agents ready/);
-  assert.match(lone, /aria-disabled="true"/);
+  assert.match(loneSettings, /Keep 0 sub-agents ready/);
+  assert.match(loneSettings, /aria-disabled="true"/);
 });
 
 test("each time limit offers Off and 30 min to 8 h, with Off the default", () => {
@@ -145,9 +148,9 @@ test("Background commands at task end offers Wait first, a grace time and Stop, 
 });
 
 test("a team view the engine shortened to fit says older history is hidden", () => {
-  const whole = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
+  const whole = renderToStaticMarkup(createElement(controls.TeamActions, { projectId: "chores", status: status(), reload() {} }));
   assert.doesNotMatch(whole, /Older team history is hidden/);
-  const partial = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ partial: true }), reload() {} }));
+  const partial = renderToStaticMarkup(createElement(controls.TeamActions, { projectId: "chores", status: status({ partial: true }), reload() {} }));
   assert.match(partial, /<p class="pj-note" role="status">Older team history is hidden so the team fits in one view\. Queued and running work stays listed\.<\/p>/);
 });
 
@@ -214,7 +217,7 @@ const coordination = await import("../src/screens/team/coordination.tsx");
 
 test("workflow nudges offer Off first, Every 10 minutes and First edit, and show Off for a project with no saved coordination settings", () => {
   assert.equal(coordination.COORD_DEFAULTS.nudges, "off");
-  const html = renderToStaticMarkup(createElement(coordination.CoordinationControls, { projectId: "chores", status: status(), reload: () => {} }));
+  const html = renderToStaticMarkup(createElement(coordination.ToolsControls, { projectId: "chores", status: status(), reload: () => {} }));
   const group = html.match(/<div class="segmented" role="radiogroup" aria-label="Workflow nudges">(.*?)<\/div>/)[1];
   const choices = [...group.matchAll(/aria-checked="(true|false)"[^>]*>([^<]+)<\/button>/g)].map(([, checked, label]) => [label, checked === "true"]);
   assert.deepEqual(choices, [["Off", true], ["Every 10 minutes", false], ["First edit", false]], "the default comes first, as in the panel's other settings");

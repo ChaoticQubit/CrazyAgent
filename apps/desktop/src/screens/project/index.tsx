@@ -256,7 +256,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
-      {active === "agents" && <AgentsTab data={data} />}
+      {active === "agents" && <AgentsTab data={data} section={settingsSection} />}
       {active === "changes" && <ChangesTab data={data} />}
       {active === "questions" && <QuestionsTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
