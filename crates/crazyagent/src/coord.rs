@@ -42,7 +42,7 @@ mod work;
 pub use claims::{
     breadth, claims_full_notice, covers, held_sets, held_sets_in, hold_for_set, latest_wait,
     overlapping, overlaps_of, path_scopes, release_claims, release_set, release_unheld,
-    restore_set, stopped_with_unheld, wake_waiters,
+    restore_set, stopped_with_unheld, wait_cycle_notices, wake_waiters,
 };
 pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread};
 pub use presence::{owner_questions, record_tool, set_waiting, snapshot, touch};
@@ -314,6 +314,7 @@ pub struct AgentState {
     pub agent: AgentId,
     pub presence: Presence,
     pub waiting: Option<Waiting>,
+    pub waits_for: Option<String>,
     pub has_worktree: bool,
     pub unread: u32,
     pub tool_counts: Vec<(String, u32)>,

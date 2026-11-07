@@ -107,3 +107,12 @@ test("an agent name holding a direction override is shown without it in the acti
   assert.doesNotMatch(html, /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u);
   assert.match(html, /Ada\\u202etxt\.exe/);
 });
+
+test("an Overview row of an agent waiting for a file under Wait leads its task line with the file", () => {
+  const waiting = { ...graph, nodes: graph.nodes.map((item) => item.id === "team-1" ? { ...item, waits_for: "src/a.rs" } : item) };
+  const row = activity.activityRows(waiting, status).find((item) => item.node.id === "team-1");
+  assert.equal(row.task, `Waiting for src/a.rs. ${longTask}`);
+  assert.ok(row.line.startsWith("Waiting for src/a.rs."), row.line);
+  const html = renderToStaticMarkup(createElement(activity.TeamActivityList, { rows: [row], now: 600_000, open: null, onOpen: () => {} }));
+  assert.match(html, /aria-label="Ada \(@onboarding-fix\), codex, Working\. Waiting for src\/a\.rs\. /);
+});

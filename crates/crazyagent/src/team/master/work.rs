@@ -981,26 +981,36 @@ fn message_line(
     ))
 }
 
-/// The plan's answer to a start that waits under the Wait option (OS-8): who holds which
-/// file on which work, and that a message follows once it is free. Without a readable
-/// wait it is the plain refusal. Takes the database, the project, the agent and the
-/// refusal. Returns the refusal.
+/// The plan's answer to a start that waits under the Wait option (OS-8), as
+/// [`wait_sentence`] words it. Without a readable wait it is the plain refusal. Takes the
+/// database, the project, the agent and the refusal. Returns the refusal.
 fn waiting(
     connection: &Connection,
     project: &ProjectId,
     agent: i64,
     problem: EngineError,
 ) -> Result<(String, bool), EngineError> {
+    match wait_sentence(connection, project, agent)? {
+        Some(sentence) => Ok((sentence, true)),
+        None => refused("Not started", problem),
+    }
+}
+
+/// The sentence an agent whose start waits under the Wait option reads (OS-8): who holds
+/// which file on which work, and that a message follows once it is free. Takes the
+/// database, the project and the agent. Returns the sentence, None without a wait.
+pub fn wait_sentence(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Option<String>, EngineError> {
     let Some((holder, work, file)) = coord::latest_wait(connection, agent)? else {
-        return refused("Not started", problem);
+        return Ok(None);
     };
     let name = who(connection, project, Party::Agent(holder))?;
-    Ok((
-        format!(
-            "Wait: {name}'s work #{work} holds {file} until it lands. You will get a message when it is free."
-        ),
-        true,
-    ))
+    Ok(Some(format!(
+        "Wait: {name}'s work #{work} holds {file} until it lands. You will get a message when it is free."
+    )))
 }
 
 /// Turns a coordination refusal into the sentence the agent reads, while a store failure

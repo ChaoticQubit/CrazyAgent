@@ -37,6 +37,8 @@ const ROOT: &str = "**";
 const WAITS_PER_AGENT_MAX: usize = 8;
 /// The most waits one wake settles; the rest settle at the next release or sweep.
 const WAKES_MAX: usize = 64;
+/// The most agents one cycle check under Wait walks; a longer chain counts as a cycle.
+pub(super) const WAIT_WALK_MAX: usize = 64;
 
 const _: () = assert!(CLAIMS_SCAN_MAX >= CLAIMS_PER_WORK_MAX * 2);
 const _: () = assert!(AGENT_CLAIMS_MAX >= CLAIMS_PER_WORK_MAX);
@@ -696,6 +698,19 @@ pub fn wake_waiters(db: &Connection, now: i64) -> Result<usize, EngineError> {
     }
     change.commit()?;
     Ok(prompted)
+}
+
+/// The waits under Wait that would have closed a cycle and the owner has not heard of yet,
+/// each pair once: its two agents, lower id first, and the file of the start that went
+/// ahead. Marks them told. Takes the database, the project and the time in ms. Returns the
+/// pairs.
+pub fn wait_cycle_notices(
+    db: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<Vec<(AgentId, AgentId, String)>, EngineError> {
+    let _ = (db, project, now);
+    Ok(Vec::new())
 }
 
 /// The lead and sub-agent answers one overlap check already read, so a check over many

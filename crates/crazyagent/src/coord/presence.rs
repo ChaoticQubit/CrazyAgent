@@ -205,6 +205,7 @@ fn agent_state(
         agent: id,
         presence,
         waiting,
+        waits_for: None,
         has_worktree,
         unread: u32::try_from(unread.max(0)).unwrap_or(u32::MAX),
         tool_counts,

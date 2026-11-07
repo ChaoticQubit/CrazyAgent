@@ -150,6 +150,7 @@ mod tests {
             pane: None,
             presence: None,
             waiting: None,
+            waits_for: None,
             owner_questions: 0,
             no_worktree: false,
             hookless: false,

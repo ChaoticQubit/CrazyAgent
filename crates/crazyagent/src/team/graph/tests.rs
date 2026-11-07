@@ -704,11 +704,38 @@ fn branches_come_from_each_agent_worktree_record_with_no_git_run() {
     );
 }
 
+/// OS-8 Wait is visible on the graph: an agent's node names the file it waits for, and an
+/// agent waiting for none names none.
+#[test]
+fn a_node_names_the_file_its_agent_waits_for() {
+    let facts = GraphFacts {
+        branches: BTreeMap::new(),
+        coord: Some(Snapshot {
+            agents: vec![
+                AgentState {
+                    waits_for: Some("src/lexer.rs".into()),
+                    ..state(3, Presence::Live, None)
+                },
+                state(7, Presence::Live, None),
+            ],
+            overlaps: Vec::new(),
+            questions_for_owner: Vec::new(),
+            unread_edges: Vec::new(),
+        }),
+        ..none()
+    };
+    let graph = graph(&tree(), &facts);
+    let node = |id: &str| graph.nodes.iter().find(|node| node.id == id).unwrap();
+    assert_eq!(node("team-3").waits_for.as_deref(), Some("src/lexer.rs"));
+    assert_eq!(node("team-7").waits_for, None);
+}
+
 fn state(agent: i64, presence: Presence, waiting: Option<Waiting>) -> AgentState {
     AgentState {
         agent,
         presence,
         waiting,
+        waits_for: None,
         has_worktree: true,
         unread: 0,
         tool_counts: Vec::new(),

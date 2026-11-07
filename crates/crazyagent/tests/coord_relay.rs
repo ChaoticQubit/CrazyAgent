@@ -413,8 +413,9 @@ fn a_teammate_edit_outside_its_own_worktree_is_denied_whatever_the_path_says() {
     );
 }
 
-/// A project `alpha` set to Overlaps Block in the team's real engine database, with a lead
-/// agent working in `repo` and another agent holding a claim on `src/a.rs`.
+/// A project `alpha` set to Overlaps Block, or the option `overlaps` names, in the team's
+/// real engine database, with a lead agent working in `repo` and another agent holding a
+/// claim on `src/a.rs`.
 struct Claimed {
     db: Connection,
     project: ProjectId,
@@ -422,12 +423,19 @@ struct Claimed {
     other: i64,
     repo: PathBuf,
     home: PathBuf,
+    overlaps: Overlaps,
 }
 
 impl Claimed {
-    /// Opens the team's engine database with the claim and serves the lead's relay once.
-    /// Input: the team. Output: the claim.
+    /// Opens the team's engine database with the claim under Block and serves the lead's
+    /// relay once. Input: the team. Output: the claim.
     fn new(team: &Team) -> Self {
+        Self::with(team, Overlaps::Block)
+    }
+
+    /// Opens the team's engine database with the claim under one Overlapping edits option
+    /// and serves the lead's relay once. Inputs: the team and the option. Output: the claim.
+    fn with(team: &Team, overlaps: Overlaps) -> Self {
         let repo = team.root.join("repo");
         std::fs::create_dir_all(repo.join("src")).unwrap();
         let db = Connection::open(team.root.join("engine.db")).unwrap();
@@ -462,7 +470,7 @@ impl Claimed {
             &db,
             &project,
             &CoordSettings {
-                overlaps: Overlaps::Block,
+                overlaps,
                 ..CoordSettings::default()
             },
         )
@@ -485,6 +493,7 @@ impl Claimed {
             other,
             repo,
             home,
+            overlaps,
         };
         claimed.serve(team);
         claimed
@@ -524,10 +533,18 @@ impl Claimed {
     fn denies_only_the_claimed_file(&self, team: &Team, start: impl Fn(&Path) -> PaneRun) {
         let reason = denial(&self.answered(team, start(&self.repo.join("src").join("a.rs"))));
         let holder = crazyagent::team::events::label(&self.db, self.other).unwrap();
+        let advice = match self.overlaps {
+            Overlaps::Wait => {
+                "set to Wait in this project: start_work on it to get a message when it is free, or start_work on other files."
+            }
+            _ => {
+                "set to Block in this project: message the holder with update_work, or start_work on other files."
+            }
+        };
         assert_eq!(
             reason,
             format!(
-                "CrazyAgent: src/a.rs is claimed by {holder} (src/a.rs). Overlapping edits are set to Block in this project: message the holder with update_work, or start_work on other files."
+                "CrazyAgent: src/a.rs is claimed by {holder} (src/a.rs). Overlapping edits are {advice}"
             )
         );
         assert_eq!(
@@ -548,6 +565,18 @@ impl Claimed {
 fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engine_answers() {
     let team = Team::new();
     let claimed = Claimed::new(&team);
+    claimed.denies_only_the_claimed_file(&team, |path| {
+        team.start_hook("edit", None, edit(LEAD_SESSION, path))
+    });
+}
+
+/// OS-8: Wait is at least as strong as Block, so under Wait an edit of a file another
+/// agent's work claims is denied once the engine answers, and the reason tells the agent to
+/// wait for it with start_work.
+#[test]
+fn under_overlaps_wait_an_edit_on_another_agents_claim_is_denied_like_block() {
+    let team = Team::new();
+    let claimed = Claimed::with(&team, Overlaps::Wait);
     claimed.denies_only_the_claimed_file(&team, |path| {
         team.start_hook("edit", None, edit(LEAD_SESSION, path))
     });

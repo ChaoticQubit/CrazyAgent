@@ -297,3 +297,14 @@ test("the Agents tab shows the team graph above the team panel", async () => {
   const html = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tab }));
   assert.match(html, /<section class="tg" aria-busy="true" aria-label="Team graph">/);
 });
+
+test("an agent waiting for a file under Wait leads its card's task line and its hover with the file", () => {
+  const waiting = node("team-5", "sub", { parent: "m", label: "Ada", status: "idle", terminal: "team-5", agent: 5, waits_for: "src/ui/chart.ts" });
+  const edges = [edge(11, "m", "team-5", "running", { text: "Draw the chart" })];
+  assert.equal(graph.cardTask(waiting, edges), "Waiting for src/ui/chart.ts. Draw the chart");
+  assert.equal(graph.cardTask(waiting, []), "Waiting for src/ui/chart.ts. No task yet.");
+  assert.equal(graph.cardTask({ ...waiting, waits_for: null }, edges), "Draw the chart", "an agent waiting for nothing shows its task alone");
+  assert.equal(graph.cardTask({ ...waiting, waits_for: undefined }, edges), "Draw the chart", "an older engine leaves the field out");
+  assert.ok(graph.cardTip(waiting, { ...team, nodes: [...team.nodes, waiting], edges }).includes("Waiting for src/ui/chart.ts. Draw the chart"));
+  assert.ok(graph.cardText(waiting, edges).task[0].startsWith("Waiting for src/ui/chart.ts."), "the card shows it on its first task line");
+});

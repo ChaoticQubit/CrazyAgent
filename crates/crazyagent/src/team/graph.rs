@@ -92,6 +92,8 @@ pub struct GraphNode {
     #[serde(default)]
     pub waiting: Option<Waiting>,
     #[serde(default)]
+    pub waits_for: Option<String>,
+    #[serde(default)]
     pub owner_questions: u16,
     #[serde(default)]
     pub no_worktree: bool,
@@ -459,6 +461,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         pane: None,
         presence: master_state.map(|state| state.presence),
         waiting: master_state.and_then(|state| state.waiting),
+        waits_for: None,
         owner_questions: master.map_or(0, |agent| asked.get(&agent.id).copied().unwrap_or(0)),
         no_worktree: false,
         hookless: master.is_some_and(|agent| agent.hookless),
@@ -519,6 +522,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
             pane: agent.pane.clone(),
             presence: state.map(|state| state.presence),
             waiting: state.and_then(|state| state.waiting),
+            waits_for: None,
             owner_questions: asked.get(&agent.id).copied().unwrap_or(0),
             no_worktree: agent.role == AgentRole::Teammate
                 && state.is_some_and(|state| !state.has_worktree),
@@ -554,6 +558,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
                 pane: Some(mate.pane.clone()),
                 presence: None,
                 waiting: None,
+                waits_for: None,
                 owner_questions: 0,
                 no_worktree: false,
                 hookless: agent.hookless,
