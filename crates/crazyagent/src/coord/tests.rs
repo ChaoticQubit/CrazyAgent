@@ -899,7 +899,11 @@ fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {
         "coord_transfer_refused"
     );
     assert_eq!(end(2, Finish::Complete, "Reviewed.", lead).unwrap(), 3);
-    assert_eq!(held(&connection, sub, work_id), 0);
+    assert_eq!(
+        held(&connection, sub, work_id),
+        1,
+        "a reviewed sub-agent's claims hold until its change set closes (OS-8)"
+    );
     let evidence: String = connection
         .query_row(
             "SELECT evidence FROM coord_work WHERE id=?1",
@@ -1147,6 +1151,197 @@ fn a_quiet_agent_s_review_ready_claim_never_goes_stale_and_an_active_one_does() 
         .collect();
     by.sort();
     assert_eq!(by, vec![(grace, false), (linus, true)]);
+}
+
+/// OS-8 M1: the master's review that completes or closes a sub-agent's review-ready work
+/// keeps that work's claims, so the next agent starting on the same file still hears the
+/// overlap while the sub-agent's change set waits for the owner.
+#[cfg(unix)]
+#[test]
+fn the_master_completing_or_closing_review_ready_work_keeps_the_sub_agent_s_claims() {
+    let connection = db();
+    let master = agent(&connection, "master", None);
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    for (outcome, file) in [
+        (Finish::Complete, "pyproject.toml"),
+        (Finish::Closed, "uv.lock"),
+    ] {
+        let start = |who, title: &str| {
+            start_work(
+                &connection,
+                &project(),
+                who,
+                title.into(),
+                vec![file.into()],
+                NOW,
+            )
+            .unwrap()
+        };
+        let (work, _) = start(grace, "Dependencies");
+        finish(
+            &connection,
+            work,
+            1,
+            Finish::ReviewReady,
+            "Green.".into(),
+            grace,
+            NOW,
+        )
+        .unwrap();
+        finish(
+            &connection,
+            work,
+            2,
+            outcome,
+            "Reviewed.".into(),
+            master,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(held(&connection, grace, work), 1, "{outcome:?}");
+        let (_, overlaps) = start(ada, "CLI");
+        assert_eq!(
+            overlaps.len(),
+            1,
+            "{outcome:?}: Grace's change set has not closed: {overlaps:?}"
+        );
+        assert_eq!(overlaps[0].theirs.work, work);
+    }
+}
+
+/// OS-8: the master's own work has no sub-agent change set to wait for, so finishing it
+/// releases its claims at every end, review-ready included, and nothing holds them forever.
+#[cfg(unix)]
+#[test]
+fn a_master_s_own_finished_work_releases_its_claims_at_every_end() {
+    let connection = db();
+    let master = agent(&connection, "master", None);
+    for (index, outcome) in [Finish::ReviewReady, Finish::Complete, Finish::Closed]
+        .into_iter()
+        .enumerate()
+    {
+        let (work, _) = start_work(
+            &connection,
+            &project(),
+            master,
+            "Plan".into(),
+            vec![format!("docs/plan-{index}.md")],
+            NOW,
+        )
+        .unwrap();
+        finish(&connection, work, 1, outcome, "Done.".into(), master, NOW).unwrap();
+        assert_eq!(held(&connection, master, work), 0, "{outcome:?}");
+    }
+}
+
+/// Seeds `count` claims on one unit of work an agent finished as review-ready, as many
+/// waiting change sets would hold them, each on its own file under `held/`. Takes the
+/// database, the agent and the count. Returns the work.
+#[cfg(unix)]
+fn held_claims(connection: &Connection, who: AgentId, count: usize) -> WorkId {
+    let (work, _) = start_work(
+        connection,
+        &project(),
+        who,
+        "Backlog".into(),
+        vec!["held/0.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    finish(
+        connection,
+        work,
+        1,
+        Finish::ReviewReady,
+        "Green.".into(),
+        who,
+        NOW,
+    )
+    .unwrap();
+    connection
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?4)
+             INSERT INTO coord_claims(project,agent,work,pattern,created)
+             SELECT ?1,?2,?3,'held/'||i||'.rs',?5 FROM n",
+            params![PROJECT, who, work, count as i64 - 1, NOW],
+        )
+        .unwrap();
+    assert_eq!(held(connection, who, work), count);
+    work
+}
+
+/// F3: claims held for waiting change sets never crowd a newer claim out of the overlap
+/// check, so a start on a file another agent claimed after 600 held claims still hears it,
+/// and the edit-time check still names it.
+#[cfg(unix)]
+#[test]
+fn a_newer_claim_still_overlaps_behind_more_than_512_held_ones() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let linus = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    held_claims(&connection, grace, 600);
+    let (linus_work, _) = start_work(
+        &connection,
+        &project(),
+        linus,
+        "Lexer".into(),
+        vec!["src/lexer.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    let (_, overlaps) = start_work(
+        &connection,
+        &project(),
+        ada,
+        "Parser".into(),
+        vec!["src/lexer.rs".into()],
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(overlaps.len(), 1, "{overlaps:?}");
+    assert_eq!(overlaps[0].theirs.work, linus_work);
+    let holders: Vec<AgentId> = overlapping(&connection, &project(), ada, "src/lexer.rs")
+        .unwrap()
+        .iter()
+        .map(|claim| claim.agent)
+        .collect();
+    assert_eq!(holders, vec![linus]);
+}
+
+/// F3: past the claims one overlap check reads, the check fails closed: a new start is
+/// refused with a plain code and the file check says so, never a silent miss.
+#[cfg(unix)]
+#[test]
+fn a_project_past_the_claims_one_check_reads_refuses_new_work_and_the_file_check() {
+    let connection = db();
+    let grace = agent(&connection, "sub", None);
+    let ada = agent(&connection, "sub", None);
+    held_claims(&connection, grace, 9_000);
+    assert_eq!(
+        code(start_work(
+            &connection,
+            &project(),
+            ada,
+            "Parser".into(),
+            vec!["src/parser.rs".into()],
+            NOW,
+        )),
+        "coord_claims_full"
+    );
+    assert_eq!(
+        code(overlapping(&connection, &project(), ada, "src/parser.rs")),
+        "coord_claims_full"
+    );
+    let works: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_work WHERE owner_agent=?1",
+            [ada],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(works, 0, "the refused start stored nothing");
 }
 
 #[cfg(unix)]
