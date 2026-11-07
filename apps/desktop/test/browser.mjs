@@ -7,7 +7,7 @@ import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const CHROME = process.env.CRAZYAGENT_CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const STARTUP_MS = 15000;
 const CALL_MS = 15000;
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -86,7 +86,7 @@ async function connect(url) {
  * file has nothing left to run, or is killed if the process ends another way. Output: the
  * DevTools origin and browser endpoint. */
 async function launch() {
-  assert.ok(existsSync(CHROME), `these tests need Google Chrome at ${CHROME}`);
+  assert.ok(existsSync(CHROME), `these tests need Google Chrome at ${CHROME}; set CRAZYAGENT_CHROME to its executable`);
   const profile = mkdtempSync(join(tmpdir(), "ca-chrome-"));
   const chrome = spawn(CHROME, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`,
     "--no-first-run", "--no-default-browser-check", "--disable-extensions", "about:blank"], { stdio: "ignore" });
