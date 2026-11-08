@@ -1729,7 +1729,9 @@ fn removing_a_project_moves_its_turn_rows_to_the_removed_rows_with_their_counts(
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    let row = |project: &str, agent: &str, turns| (project.to_owned(), agent.to_owned(), turns);
+    fn row<T>(project: &str, agent: &str, turns: T) -> (String, String, T) {
+        (project.to_owned(), agent.to_owned(), turns)
+    }
     let removed = crate::usage::REMOVED_PROJECTS;
     assert_eq!(
         kept,
