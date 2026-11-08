@@ -18,11 +18,14 @@ const TABS = [
 
 /** Renders the project head the way the project page draws it. Inputs: whether the page has
  * scrolled and the description. Output: the static markup. */
-function markup(scrolled, about = ABOUT) {
+function markup(scrolled, about = ABOUT, extra = {}) {
   return renderToStaticMarkup(createElement(head.ProjectHead, {
-    title: "Larkspur Booking", about, actions: null, tabs: TABS, current: "overview", scrolled,
+    title: "Larkspur Booking", about, actions: null, tabs: TABS, current: "overview", scrolled, ...extra,
   }));
 }
+
+const META = { folder: "~/CrazyAgent/larkspur-booking", branch: "main", access: "Full access", pool: "Pool A, 4 accounts" };
+const words = (drawn) => drawn.replace(/<[^>]*>/gu, " ").replace(/\s+/gu, " ").trim();
 
 test("the head shrinks once the page scrolls past 8 px and not before", () => {
   assert.ok(ABOUT.length >= 600, "the description is a long one");
@@ -99,4 +102,39 @@ test("the scroll container keeps a focused control clear of the head by the head
   assert.match(css, /\.main \{[^}]*scroll-padding-top: var\(--pj-head-h, 0px\);/u);
   assert.match(source, /setProperty\("--pj-head-h", `\$\{height\}px`\)/u);
   assert.match(source, /removeProperty\("--pj-head-h"\)/u);
+});
+
+test("the head names the project folder, its branch, the agents' access and the pool in one meta line under the description (OS-1)", () => {
+  const drawn = markup(false, ABOUT, { meta: META, working: 5, questions: 1 });
+  const line = drawn.match(/<p class="pj-meta"[^>]*>(.*?)<\/p>/u);
+  assert.ok(line, `a meta line: ${drawn.slice(0, 600)}`);
+  assert.equal(words(line[1]), "~/CrazyAgent/larkspur-booking main Full access Pool A, 4 accounts");
+  assert.ok(drawn.indexOf("pj-meta") > drawn.indexOf("pj-desc") && drawn.indexOf("pj-meta") < drawn.indexOf("role=\"tablist\""), "under the description, above the tabs");
+  const partial = markup(false, ABOUT, { meta: { ...META, branch: null, pool: null } });
+  assert.equal(words(partial.match(/<p class="pj-meta"[^>]*>(.*?)<\/p>/u)[1]), "~/CrazyAgent/larkspur-booking Full access", "an unknown part is left out");
+  assert.ok(!markup(false).includes("pj-meta"), "no meta line before the project's facts are read");
+});
+
+test("next to the title the head shows how many agents work and how many questions wait, each only when there are any", () => {
+  assert.deepEqual(head.headChips(5, 1), [{ word: "5 agents working", tone: "ok" }, { word: "1 question", tone: "warn" }]);
+  assert.deepEqual(head.headChips(1, 2), [{ word: "1 agent working", tone: "ok" }, { word: "2 questions", tone: "warn" }]);
+  assert.deepEqual(head.headChips(0, 0), []);
+  assert.throws(() => head.headChips(-1, 0), /head counts are whole numbers/u);
+  assert.throws(() => head.headChips(1.5, 0), /head counts are whole numbers/u);
+  const drawn = markup(false, ABOUT, { meta: META, working: 5, questions: 1 });
+  const title = drawn.indexOf("Larkspur Booking");
+  assert.ok(drawn.indexOf("5 agents working") > title && drawn.indexOf("1 question") > drawn.indexOf("5 agents working"), "the chips follow the title");
+  assert.ok(drawn.indexOf("1 question") < drawn.indexOf("pj-desc"), "the chips sit on the title's line, above the description");
+  assert.match(drawn, /<h1>Larkspur Booking<\/h1>/u, "the chips are not part of the heading");
+  assert.ok(!markup(false, ABOUT, { meta: META, working: 0, questions: 0 }).includes("working"), "no chip when nothing works or waits");
+});
+
+test("the meta line hides once the page scrolls, as the description drops to one line", () => {
+  assert.match(css, /\.pj-head\.scrolled \.page-header p\.pj-meta \{[^}]*display: none;/u);
+});
+
+test("the project page gives its head the meta line and the working and question counts", () => {
+  assert.match(index, /<ProjectHead [\s\S]*?\bmeta=\{meta\}/u);
+  assert.match(index, /working=\{/u);
+  assert.match(index, /questions=\{/u);
 });

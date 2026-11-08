@@ -1,6 +1,8 @@
 import { harnessCatalog, nextGeneration, type Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
-import { cancelTeamTask, failureCopy, loadContext, loadPools, loadResearch, loadSetup, receiptState, revealProjectFolder } from "../../api-projects";
+import { cancelTeamTask, failureCopy, loadAgentPolicy, loadContext, loadPools, loadResearch, loadSetup, receiptState, revealProjectFolder } from "../../api-projects";
+import { loadUncommittedImport } from "../../api-process";
+import { loadQuestionCounts, pendingByProject } from "../../api-questions";
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { ConfirmDialog, Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
@@ -15,9 +17,11 @@ import { IdeExtensionConfirm } from "./ide-extensions";
 import { IDE_POLL_MS, IdeTab, IdeUnavailable } from "./ide";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
-import { ProjectHead, useProjectHead } from "./head";
+import { ProjectHead, useProjectHead, type HeadMeta } from "./head";
+import { accessSummary } from "./access";
+import { poolName, poolSummary } from "../new-project/wizard";
 import { IdeConfirm } from "./ide-confirm";
-import { OverviewTab } from "./overview";
+import { OverviewTab, folderLabel, projectFolder } from "./overview";
 import { ImportMoveBanner, InstructionImportPrompt, ProcessEditor } from "../process";
 import { QuestionsTab } from "./questions";
 import { pauseSummary, shouldPoll } from "./research";
@@ -27,6 +31,7 @@ import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
 import { TeamActivity } from "./team-activity";
 import { useTeam } from "./team";
+import { useStopAll } from "../team/controls";
 import "./projects.css";
 
 export const TABS = [
@@ -134,6 +139,9 @@ function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly
   const team = data.team.result;
   const summary = pauseSummary(team?.kind === "ok" ? team.value.tasks : []);
   const researching = (valueOf(data.research)?.jobs ?? []).some((job) => job.status === "running");
+  const stopped = team?.kind === "ok" && team.value.paused;
+  const stopAll = useStopAll(data.id, data.reloadTeam, (note, stopping) => data.notify(note
+    || (stopping ? "Stopped. Every agent of this project stays stopped until you start them again." : "Started again. The agents of this project run again.")));
 
   async function reveal() {
     const result = await revealProjectFolder(data.id);
@@ -162,6 +170,7 @@ function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly
       ...replaced.map((item) => ({ label: `Open ${item.label}`, icon: item.icon, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/${item.id}`) })),
       { label: "Show folder in Finder", icon: "folder-open", onSelect: () => void reveal() },
       { label: "Pause all agents", icon: "circle-pause", onSelect: askPause },
+      stopped ? { label: "Start all again", icon: "refresh-cw", onSelect: stopAll.start } : { label: "Stop all", icon: "circle-stop", danger: true, onSelect: stopAll.ask },
       { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove&ask=remove`) },
     ]} />
     <ConfirmDialog open={pausing} title="Pause all agents?" confirmLabel="Pause all agents" cancelLabel="Keep working" pending={busy}
@@ -169,7 +178,35 @@ function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly
       {summary.line} Work so far stays in each agent's copy of the project. Stopped tasks don't start again on their own; ask the master when you want to continue.
       {researching ? " Research agents keep running." : ""}
     </ConfirmDialog>
+    {stopAll.dialog}
   </>;
+}
+
+/** The head's meta line for a project: its folder, the checked-out branch, the agents' access
+ * and the pool with its size, each null until read. Inputs: the project data, the access
+ * policy read and the checkout read. Output: the meta. */
+function headMeta(data: ProjectData, access: string | null, branch: string | null): HeadMeta {
+  const setup = valueOf(data.setup);
+  return {
+    folder: setup ? folderLabel(projectFolder(setup.folder)) : null,
+    branch,
+    access,
+    pool: data.assigned ? `${poolName(data.assigned.pool)}, ${poolSummary(data.assigned.members)}` : null,
+  };
+}
+
+/** How many questions of one project wait for the owner, read again with each team read.
+ * Inputs: the project id and the time of the latest team read. Output: the count, 0 until read. */
+function usePendingQuestions(projectId: string, at: number): number {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    let live = true;
+    void loadQuestionCounts().then((result) => {
+      if (live && result.kind === "ok") setCount(pendingByProject(result.value).get(projectId) ?? 0);
+    });
+    return () => { live = false; };
+  }, [projectId, at]);
+  return count;
 }
 
 function hashSection(): string | undefined {
@@ -247,10 +284,16 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
 
   const root = useRef<HTMLDivElement>(null);
   const scrolled = useProjectHead(root, projectId);
+  const [policy] = useLoad(() => loadAgentPolicy(projectId), [projectId], "agent-policy");
+  const [checkout] = useLoad(() => loadUncommittedImport(projectId), [projectId, data.team.at]);
+  const questions = usePendingQuestions(projectId, data.team.at);
+  const team = data.team.result?.kind === "ok" ? data.team.result.value : null;
+  const working = team ? team.agents.filter((agent) => agent.status === "working").length : 0;
+  const meta = headMeta(data, policy.kind === "ok" ? accessSummary(policy.value) : null, checkout.kind === "ok" ? checkout.value.checked_out : null);
 
   return <div className="pj pj-project" ref={root}>
     <ProjectHead title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
-      about={setup?.about ?? ""} actions={<ProjectMenu data={data} replaced={replacedTabs(view)} />} current={active} scrolled={scrolled}
+      about={setup?.about ?? ""} meta={meta} working={working} questions={questions} actions={<ProjectMenu data={data} replaced={replacedTabs(view)} />} current={active} scrolled={scrolled}
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <RecoveryBanner key={projectId} project={projectId} />
     <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />

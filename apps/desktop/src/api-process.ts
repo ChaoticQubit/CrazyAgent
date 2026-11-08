@@ -150,7 +150,8 @@ export function confirmInstructionImport(projectId: string): Promise<Result<Impo
 
 /** Lists the moved instruction files whose move the project's checkout has not committed,
  * with its checked-out branch. Input: the project id. Output: the paths, empty when no move
- * waits for a commit, and the branch, null for a detached HEAD. */
+ * waits for a commit, the branch, null for a detached HEAD or when no move waits, and the
+ * checked-out branch whether or not a move waits. */
 export function loadUncommittedImport(projectId: string): Promise<Result<UncommittedImport>> {
   return call<UncommittedImport>("desktop_uncommitted_instruction_import", { projectId });
 }

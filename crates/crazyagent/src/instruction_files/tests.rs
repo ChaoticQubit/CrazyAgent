@@ -933,14 +933,16 @@ mod import {
             uncommitted_import(&checkout.folder).unwrap(),
             UncommittedImport {
                 files: Vec::new(),
-                branch: None
+                branch: None,
+                checked_out: Some("main".to_owned())
             },
-            "no move waits, so no branch is read"
+            "no move waits, so no branch is named for a refusal, and the head still reads it"
         );
         import(&checkout.folder).unwrap();
         let waiting = |branch: Option<&str>| UncommittedImport {
             files: vec!["CLAUDE.md".to_owned(), ".claude/CLAUDE.md".to_owned()],
             branch: branch.map(str::to_owned),
+            checked_out: branch.map(str::to_owned),
         };
         assert_eq!(
             uncommitted_import(&checkout.folder).unwrap(),
@@ -968,6 +970,117 @@ mod import {
     }
 
     #[test]
+    fn the_head_branch_is_read_again_only_when_the_checkout_head_changes() {
+        let checkout = Checkout::new();
+        let root = std::fs::canonicalize(&checkout.folder).unwrap();
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            crate::landing::checked_out_branch(&root)
+        };
+        let main = Some("main".to_owned());
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(reads.get(), 1, "an unchanged HEAD is not read again");
+        checkout.git(&["checkout", "-q", "-b", "release/2.0"]);
+        let release = Some("release/2.0".to_owned());
+        assert_eq!(branch_of(&root, read), release);
+        assert_eq!(branch_of(&root, read), release);
+        assert_eq!(reads.get(), 2, "a branch switch is read once");
+        checkout.git(&["checkout", "-q", "--detach"]);
+        assert_eq!(branch_of(&root, read), None);
+        assert_eq!(branch_of(&root, read), None);
+        assert_eq!(reads.get(), 3, "a detached HEAD is read once");
+        checkout.git(&["checkout", "-q", "main"]);
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(reads.get(), 4, "back on main is read again");
+        let other = Checkout::new();
+        let other_root = std::fs::canonicalize(&other.folder).unwrap();
+        let failing = || {
+            reads.set(reads.get() + 1);
+            Err(failure("process_commit_failed"))
+        };
+        assert_eq!(branch_of(&other_root, failing), None);
+        assert_eq!(
+            branch_of(&other_root, || crate::landing::checked_out_branch(
+                &other_root
+            )),
+            main,
+            "a failed read is not kept"
+        );
+        assert_eq!(reads.get(), 5);
+    }
+
+    #[test]
+    fn a_reftable_checkout_names_the_branch_it_switched_to() {
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-reftable-")
+            .tempdir_in(fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let (home, folder) = (root.join("home"), root.join("repo"));
+        for made in [&home, &folder] {
+            fs::create_dir(made).unwrap();
+        }
+        let engine_git = crate::research::runner::setup_git();
+        let run = |args: &[&str]| {
+            crate::spawn_gate::output(
+                Command::new(engine_git)
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("HOME", &home)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("LC_ALL", "C")
+                    .arg("-C")
+                    .arg(&folder)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap()
+        };
+        let made = run(&[
+            "init",
+            "-q",
+            "--template=",
+            "--ref-format=reftable",
+            "-b",
+            "main",
+        ]);
+        if !made.status.success() {
+            panic!(
+                "UNAVAILABLE: {} cannot make a reftable checkout: {}",
+                engine_git.display(),
+                String::from_utf8_lossy(&made.stderr)
+            );
+        }
+        assert!(folder.join(".git").join("reftable").is_dir());
+        for args in [
+            &["config", "user.name", "Repo Owner"][..],
+            &["config", "user.email", "repo@example.invalid"],
+            &["config", "commit.gpgSign", "false"],
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+        ] {
+            assert!(run(args).status.success(), "git {args:?}");
+        }
+        let checked_out = || uncommitted_import(&folder).unwrap().checked_out;
+        assert_eq!(checked_out(), Some("main".to_owned()));
+        assert!(
+            run(&["checkout", "-q", "-b", "release/2.0"])
+                .status
+                .success()
+        );
+        assert_eq!(
+            checked_out(),
+            Some("release/2.0".to_owned()),
+            "a reftable checkout's .git/HEAD stub stays the same across a switch, so the branch is read again"
+        );
+        assert!(run(&["checkout", "-q", "--detach"]).status.success());
+        assert_eq!(checked_out(), None);
+    }
+
+    #[test]
     fn a_branch_name_the_engine_cannot_read_keeps_the_waiting_move_with_no_branch() {
         let checkout = Checkout::new();
         import(&checkout.folder).unwrap();
@@ -980,7 +1093,8 @@ mod import {
             uncommitted_import(&checkout.folder).unwrap(),
             UncommittedImport {
                 files: vec!["CLAUDE.md".to_owned(), ".claude/CLAUDE.md".to_owned()],
-                branch: None
+                branch: None,
+                checked_out: None
             },
             "a branch that is not UTF-8 is not named, and the move still waits"
         );

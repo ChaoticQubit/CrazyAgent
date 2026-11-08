@@ -90,8 +90,8 @@ function ActivityRow({ item, now, goal, fresh = false, undo }: { item: ActivityI
     <span className={`pj-activity-kind ${KINDS[item.kind].tone}`}><Icon name={KINDS[item.kind].icon} size={14} /></span>
     <span className="pj-activity-text">{KINDS[item.kind].own ? `${displayText(item.actor)} noted: ${displayText(item.text)}` : displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
       <span className="pj-small pj-muted pj-activity-by">{displayText(item.actor)}{goal !== undefined && <> · <span className="pj-activity-tag">{displayText(goal)}</span></>}</span></span>
-    {undo && changeSet !== null && <button type="button" className="pj-link pj-activity-undo" disabled={undo.undoing !== null}
-      aria-busy={undo.undoing === changeSet} onClick={() => undo.onUndo(item)}>Undo</button>}
+    {undo && changeSet !== null && <button type="button" className="btn small pj-activity-undo" disabled={undo.undoing !== null}
+      aria-busy={undo.undoing === changeSet} onClick={() => undo.onUndo(item)}>Undo merge</button>}
   </li>;
 }
 
@@ -129,7 +129,7 @@ export function ActivityGroups({ items, whole = items, more, now, expanded, clos
     return <section className="pj-panel pj-activity-goal" aria-label={group.goal} key={group.key}>
       <button type="button" className="pj-activity-head" aria-expanded={open} onClick={() => onToggle(group.key)}>
         <span className="pj-activity-name"><Icon name={open ? "chevron-down" : "chevron-right"} size={16} /><strong className="ellipsis">{displayText(group.goal)}</strong></span>
-        <span className="pj-activity-sub pj-small pj-muted"><PhasePath items={paths.get(group.key) ?? group.items} /><span>{count} {count === "1" ? "item" : "items"} · latest {ago(group.items[0].at_ms, now).toLowerCase()}</span></span>
+        <span className="pj-activity-sub pj-small pj-muted"><PhasePath items={paths.get(group.key) ?? group.items} /><span>{count} {count === "1" ? "item" : "items"} · last {ago(group.items[0].at_ms, now).toLowerCase()}</span></span>
       </button>
       {open && <ul className="pj-activity-list" aria-label={`${group.goal} activity`}>{(all ? group.items : group.items.slice(0, ACTIVITY_ROWS)).map((item) => <ActivityRow key={item.id} item={item} now={now} fresh={fresh.includes(item.id)} undo={undo} />)}</ul>}
       {open && !all && group.items.length > ACTIVITY_ROWS && <button type="button" className="pj-link pj-activity-more" onClick={() => onShowAll(group.key)}>Show all ({count})</button>}
@@ -327,6 +327,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {suggested > 0 && <div className="pj-need"><span>{suggestedLine(suggested)}</span>
           <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=%40memory`)}>Review</button></div>}
       </section>}
+      <RecentActivity projectId={data.id} />
       <section className="pj-stack-s" aria-labelledby="pj-research"><h2 id="pj-research">Research</h2>
         {data.research === undefined && <p className="pj-muted" role="status">Loading research...</p>}
         {data.research?.kind === "not_ready" && <NotReady what="research progress isn't in this build." />}
@@ -343,7 +344,6 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {allDone && <p>Research finished. <button type="button" className="pj-link" onClick={() => data.navigate(`${base}/conversation`)}>Ask the master what to build first.</button></p>}
       </section>
       <PlanningLine data={data} />
-      <RecentActivity projectId={data.id} />
     </div>
     <aside className="pj-panel pj-facts" aria-label="Project facts">
       {data.setup?.kind === "not_ready" && <NotReady what="project details aren't in this build." />}

@@ -7,7 +7,7 @@ import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyL
 import type { IconName, SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { savedStale } from "../project/settings";
-import { CoordinationControls, ToolsControls } from "./coordination";
+import { CoordinationControls, PerHarnessControls, ToolsControls } from "./coordination";
 import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, type TeamProject } from "./setup-rows";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
@@ -228,6 +228,7 @@ export type SettingGroupId = "model" | "access" | "tools" | "coord" | "limits";
 
 const MERGE_INTO_MAIN = "Under Full access, merging into main";
 const RESTARTS_FROM_MAIN = "After you accept, the agent's branch restarts from main";
+const PER_HARNESS_ROWS = ["Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents"];
 
 /** The Agent settings groups in the order the approved mockup lists them, each with its purpose
  * line and the labels of its rows in the order they show. */
@@ -239,7 +240,7 @@ export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; 
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
     rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"] },
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
-    rows: ["Claude Code sub-agents", "Messages to Claude Code agents", "Claude Code terminal display", "Codex sub-agents", "Messages to Codex agents", "rcli sub-agents", "Messages to rcli agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents"] },
+    rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", ...PER_HARNESS_ROWS] },
   { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
     rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"] },
 ];
@@ -276,9 +277,9 @@ export function SettingGroup({ group, prefix, level = 2, children }: { group: Se
   </section>;
 }
 
-/** One setting row: its label on the left and its control on the right, with any help below,
- * or all stacked for a wide row; hidden while Find a setting does not match its label. Inputs:
- * the label, whether it is wide and the row's parts. Output: the row. */
+/** One setting row: its label with any help under it on the left and its control on the
+ * right, or all stacked for a wide row; hidden while Find a setting does not match its label.
+ * Inputs: the label, whether it is wide and the row's parts. Output: the row. */
 export function SettingRow({ label, wide = false, children }: { label: string; wide?: boolean; children: ReactNode }) {
   const words = useContext(SettingFind);
   return <div className={wide ? "set-row wide" : "set-row"} data-setting={label} hidden={!matches(label, words)}>{children}</div>;
@@ -346,39 +347,50 @@ export function ReaskSetting({ projectId, status, reload }: { projectId: string;
   </SettingRow>;
 }
 
-/** Stop all, or Start all again while the team is stopped, with its line and its confirm:
- * every agent of the project stops and stays stopped across restarts until the owner starts
- * them again. Exported for the project menu. Inputs: the project id, the latest team status
- * and a reload. Output: the row. */
-export function StopAll({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
-  const [stopAsked, setStopAsked] = useState(false);
+/** Stop all and Start all again for one project, shared by the Team view's row and the project
+ * menu: `ask` opens the one confirm, whose Stop all stops every agent; `start` starts them again
+ * at once. Inputs: the project id, a reload and where a change's note goes ("" once applied)
+ * with whether it stopped. Output: whether a change runs, ask, start and the confirm. */
+export function useStopAll(projectId: string, reload: () => void, onNote: (note: string, stopped: boolean) => void) {
+  const [asked, setAsked] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
 
-  async function stopAll(stopped: boolean) {
-    setStopAsked(false);
+  async function change(stopped: boolean) {
+    setAsked(false);
     setBusy(true);
     const message = changeNote(await setTeamStopped(projectId, stopped), stopped ? "stopping the team" : "starting the team again");
     setBusy(false);
-    setNote(message);
+    onNote(message, stopped);
     reload();
   }
+
+  const dialog = <ConfirmDialog open={asked} title="Stop every agent of this project?" confirmLabel="Stop all" cancelLabel="Keep running"
+    pending={busy} onCancel={() => setAsked(false)} onConfirm={() => void change(true)}>
+    The master, every harness and every teammate stop now, and stay stopped across app and engine restarts until you start them again. Their work waits for them.
+  </ConfirmDialog>;
+  return { busy, ask: () => setAsked(true), start: () => void change(false), dialog };
+}
+
+/** Stop all, or Start all again while the team is stopped, with its line and its confirm:
+ * every agent of the project stops and stays stopped across restarts until the owner starts
+ * them again. The project menu shares its action and confirm through `useStopAll`. Inputs:
+ * the project id, the latest team status and a reload. Output: the row. */
+export function StopAll({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const [note, setNote] = useState("");
+  const stop = useStopAll(projectId, reload, setNote);
 
   return <>
     <div className="pj-row">
       {status.paused
-        ? <Button variant="primary" size="small" pending={busy} onClick={() => void stopAll(false)}>Start all again</Button>
-        : <Button variant="danger" size="small" icon="circle-stop" disabled={busy} onClick={() => setStopAsked(true)}>Stop all</Button>}
+        ? <Button variant="primary" size="small" pending={stop.busy} onClick={stop.start}>Start all again</Button>
+        : <Button variant="danger" size="small" icon="circle-stop" disabled={stop.busy} onClick={stop.ask}>Stop all</Button>}
       <span className="tg-terminal-note" role="status">{status.paused
         ? status.budget_reached === true
           ? "Every agent of this project is stopped: its agents used the token budget. Start them again, or raise the budget first."
           : "Every agent of this project is stopped until you start them again."
         : "Stops the master, every harness and every teammate of this project. They stay stopped across restarts."}</span>
     </div>
-    <ConfirmDialog open={stopAsked} title="Stop every agent of this project?" confirmLabel="Stop all" cancelLabel="Keep running"
-      pending={busy} onCancel={() => setStopAsked(false)} onConfirm={() => void stopAll(true)}>
-      The master, every harness and every teammate stop now, and stay stopped across app and engine restarts until you start them again. Their work waits for them.
-    </ConfirmDialog>
+    {stop.dialog}
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </>;
 }
@@ -700,19 +712,18 @@ export function TeamControls({ projectId, status, reload, data, group }: {
         <SettingGroup group={access} prefix={prefix}>
           <AgentAccessSetting projectId={projectId} notify={data?.notify} reload={reload} />
           <SettingRow label={MERGE_INTO_MAIN} wide>
-            <span className="set-label" aria-hidden={status.master_lands ? true : undefined}>{MERGE_INTO_MAIN}</span>
-            {status.master_lands
-              ? <div className="radio-cards" role="radiogroup" aria-label={MERGE_INTO_MAIN}>
-                <RadioCard name={`${prefix}-merge`} value="merges" checked={(masterLandsHeld ?? status.master_lands) === "merges"}
-                  onChecked={() => { if (!busy) void chooseMasterLands("merges"); }}
-                  title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
-                  details={["Finished work lands on main as soon as the master has resolved it and its checks pass."]} />
-                <RadioCard name={`${prefix}-merge`} value="waits" checked={(masterLandsHeld ?? status.master_lands) === "waits"}
-                  onChecked={() => { if (!busy) void chooseMasterLands("waits"); }}
-                  title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
-              </div>
-              : <span className="tg-terminal-note">Only at Full access.</span>}
+            <span className="set-label" aria-hidden="true">{MERGE_INTO_MAIN}</span>
             <span className="tg-terminal-note">Each merge shows in Activity and can be undone. Sandboxed keeps today's limits.</span>
+            <div className="radio-cards" role="radiogroup" aria-label={MERGE_INTO_MAIN}>
+              <RadioCard name={`${prefix}-merge`} value="merges" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "merges"} disabled={!status.master_lands}
+                onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("merges"); }}
+                title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
+                details={["Finished work lands on main as soon as the master has resolved it and its checks pass."]} />
+              <RadioCard name={`${prefix}-merge`} value="waits" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "waits"} disabled={!status.master_lands}
+                onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("waits"); }}
+                title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
+            </div>
+            {!status.master_lands && <span className="tg-terminal-note">Only at Full access.</span>}
           </SettingRow>
           <SettingRow label="Ask me before merging into the master's branch">
             <span className="set-label" aria-hidden="true">Ask me before merging into the master's branch</span>
@@ -785,6 +796,8 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
             <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
           </SettingRow>
+          <h3 className="set-sub" hidden={!PER_HARNESS_ROWS.some((row) => matches(row, words))}>Per harness</h3>
+          <PerHarnessControls projectId={projectId} status={status} reload={reload} />
         </SettingGroup>
         <SettingGroup group={limitsGroup} prefix={prefix}>
           <SettingRow label="Each task may run">

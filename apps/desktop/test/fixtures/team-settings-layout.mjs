@@ -155,9 +155,24 @@ export function shown() {
   };
 }
 
+/** Measures where each shown row's help line sits against its label and control. Output: the
+ * rows measured and the rows whose help runs under the control or away from the label. */
+function helpBeside() {
+  const rows = [...document.querySelectorAll(".set-row:not(.wide)")].filter((row) => row.offsetParent !== null);
+  const measured = rows.flatMap((row) => {
+    const label = row.querySelector(":scope > .set-label, :scope > .field > label, :scope > .switch-label");
+    const control = row.querySelector(":scope > .segmented, :scope > .set-ctl, :scope > .field > .select");
+    const help = row.querySelector(":scope > .tg-terminal-note:not(.set-ctl), :scope > .field > .helper");
+    if (!label || !control || !help) return [];
+    const [l, c, h] = [label, control, help].map((part) => part.getBoundingClientRect());
+    return [{ row: row.dataset.setting, apart: h.right > c.left + 0.5 || Math.abs(h.left - l.left) > 0.5 || h.top < l.bottom - 0.5 }];
+  });
+  return { rows: measured.length, apart: measured.filter((row) => row.apart).map((row) => row.row) };
+}
+
 /** Measures the mounted settings where they are drawn. Output: each group's heading and row
  * labels, the rows and parts that run past their group's panel, how far the scrolling area
- * scrolls sideways and the width the groups take. */
+ * scrolls sideways, the width the groups take and where each row's help line sits. */
 export function measure() {
   const groups = [...document.querySelectorAll(".set-group")];
   const past = groups.flatMap((group) => {
@@ -173,6 +188,7 @@ export function measure() {
     past: [...new Set(past)],
     sideways: scroller.scrollWidth - scroller.clientWidth,
     width: Math.round(document.querySelector(".set-groups")?.getBoundingClientRect().width ?? 0),
+    help: helpBeside(),
   };
 }
 

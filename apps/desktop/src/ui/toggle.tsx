@@ -58,18 +58,19 @@ export function Segmented<T extends string>({ label, value, options, onValue }: 
   </div>;
 }
 
-/** A radio choice drawn as a card with a title and up to two detail lines.
- * Inputs: group name, value, checked, change handler, title, details. */
-export function RadioCard({ name, value, checked, onChecked, title, details = [] }: {
+/** A radio choice drawn as a card with a title and up to two detail lines, locked when disabled.
+ * Inputs: group name, value, checked, change handler, title, details, disabled. */
+export function RadioCard({ name, value, checked, onChecked, title, details = [], disabled = false }: {
   name: string;
   value: string;
   checked: boolean;
   onChecked: (value: string) => void;
   title: ReactNode;
   details?: ReactNode[];
+  disabled?: boolean;
 }) {
   return <label className="radio-card">
-    <input type="radio" name={name} value={value} checked={checked} onChange={() => onChecked(value)} />
+    <input type="radio" name={name} value={value} checked={checked} disabled={disabled} onChange={() => onChecked(value)} />
     <span className="title">{title}</span>
     {details.map((detail, index) => <span key={index} className="detail">{detail}</span>)}
   </label>;

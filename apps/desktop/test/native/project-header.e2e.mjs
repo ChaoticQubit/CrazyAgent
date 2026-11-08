@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -34,6 +35,7 @@ function measure(page) {
       tabs: box(document.querySelector(".pj-head [role=tablist]")),
       desc: desc ? { text: desc.textContent, scrollWidth: desc.scrollWidth, clientWidth: desc.clientWidth, clientHeight: desc.clientHeight, line: parseFloat(getComputedStyle(desc).lineHeight) } : null,
       more: more ? { hidden: more.hidden, text: more.textContent, expanded: more.getAttribute("aria-expanded") } : null,
+      meta: (() => { const line = document.querySelector(".pj-head .pj-meta"); return line ? { text: line.innerText.replace(/\\s+/g, " ").trim(), shown: line.offsetParent !== null } : null; })(),
     };
   })()`);
 }
@@ -119,6 +121,14 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     });
     assert.equal(receipt.outcome, "applied", `the project is made: ${JSON.stringify(receipt)}`);
     const project = receipt.project_id;
+    const pools = await value(bridge, "desktop_model_access_page", { collection: "pools", next: false });
+    assert.equal(pools.writable, true, "the test engine's settings are writable");
+    const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 4 });
+    assert.equal(assigned.outcome, "applied", `the project gets its pool: ${JSON.stringify(assigned)}`);
+    const folder = join(projects, "larkspur-booking");
+    assert.ok(existsSync(folder), "the project folder is made under the projects home");
+    const branch = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: folder, env, encoding: "utf8" }).trim();
+    assert.match(branch, /^\S+$/u, "the project folder is a git checkout on a branch");
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
@@ -135,14 +145,23 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.waitFor("the project's Settings tab", (text) => text.includes(NAME) && text.includes("Settings"), STEP_MS);
         assert.equal(await page.evaluate("document.visibilityState"), "visible", "the window is drawn: a locked screen hides it (ENV-LOCKED)");
 
-        const before = await measure(page);
+        let before = await measure(page);
+        for (const until = Date.now() + STEP_MS; !(before.meta?.text.includes("local-pool") && before.meta.text.includes("larkspur-booking") && before.meta.text.includes(` ${branch} `)) && Date.now() < until; before = await measure(page)) await pause(POLL_MS);
         assert.equal(before.head, "pj-head", "the head starts in its full form");
+        assert.ok(before.meta?.shown, `the meta line shows under the description (OS-1): ${JSON.stringify(before.meta)}`);
+        assert.ok(before.meta.text.includes(`larkspur-booking ${branch} `) && before.meta.text.endsWith("local-pool, 1 local model"), `the meta line names the project folder first, then its checked-out branch ${branch}, and the pool with its size last: ${before.meta.text}`);
         assert.ok(before.desc, "the description is shown");
         assert.ok(before.desc.text.includes("V2 adds recurring classes"), "the description keeps every line");
         assert.ok(before.desc.scrollWidth <= before.desc.clientWidth, `the description wraps inside its box: ${JSON.stringify(before.desc)}`);
         assert.ok(before.desc.clientHeight <= before.desc.line * 2 + 1, `the description takes at most two lines: ${JSON.stringify(before.desc)}`);
         assert.deepEqual([before.more?.hidden, before.more?.text, before.more?.expanded], [false, "more", "false"], "a cut description offers more");
         await me.capture("head-top");
+
+        execFileSync("git", ["checkout", "-q", "-b", "head-switch"], { cwd: folder, env });
+        let switched = await measure(page);
+        for (const until = Date.now() + STEP_MS; !switched.meta?.text.includes(" head-switch ") && Date.now() < until; switched = await measure(page)) await pause(POLL_MS);
+        assert.ok(switched.meta?.text.includes("larkspur-booking head-switch "), `the meta line follows a branch switch in the project folder without a page reload: ${switched.meta?.text}`);
+        await me.capture("head-branch-switched");
 
         await page.evaluate("document.querySelector('.main').scrollBy(0, 2000)");
         const deadline = Date.now() + STEP_MS;
@@ -158,6 +177,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         }
         assert.ok(after.desc.scrollWidth <= after.desc.clientWidth, `the description still wraps: ${JSON.stringify(after.desc)}`);
         assert.ok(after.desc.clientHeight <= after.desc.line + 1, `the description shrinks to one line: ${JSON.stringify(after.desc)}`);
+        assert.equal(after.meta?.shown, false, `the meta line hides once the page scrolls: ${JSON.stringify(after.meta)}`);
         await me.capture("head-scrolled");
 
         const hidden = await page.evaluate(`(() => {
@@ -215,6 +235,25 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.deepEqual([open.more?.text, open.more?.expanded], ["less", "true"], "more opens the whole description");
         assert.ok(open.desc.clientHeight > open.desc.line + 1, `the open description shows more than one line: ${JSON.stringify(open.desc)}`);
         await me.capture("head-open");
+
+        const paused = async (want) => {
+          let team = await value(bridge, "desktop_team_status", { id: project });
+          for (const until = Date.now() + STEP_MS; team.paused !== want && Date.now() < until; team = await value(bridge, "desktop_team_status", { id: project })) await pause(POLL_MS);
+          return team.paused;
+        };
+        assert.equal(await paused(false), false, "the team starts running");
+        await me.click("Project actions", "button[aria-label='Project actions']");
+        await me.click("Stop all", "[role=menuitem]");
+        await me.waitFor("the Stop all confirm", (text) => text.includes("Stop every agent of this project?"), STEP_MS);
+        const risen = () => page.evaluate("(() => { const box = document.querySelector('dialog[open]'); return Boolean(box) && getComputedStyle(box).opacity === '1' && box.getAnimations().every((animation) => animation.playState === 'finished'); })()");
+        for (const until = Date.now() + STEP_MS; !(await risen()) && Date.now() < until;) await pause(POLL_MS);
+        assert.equal(await risen(), true, "the Stop all confirm has finished rising before its shot");
+        await me.capture("menu-stop-all");
+        await me.click("Stop all", "dialog[open] button");
+        assert.equal(await paused(true), true, "Stop all in the project menu stops every agent of the project in the engine");
+        await me.click("Project actions", "button[aria-label='Project actions']");
+        await me.click("Start all again", "[role=menuitem]");
+        assert.equal(await paused(false), false, "Start all again in the project menu starts them again");
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});

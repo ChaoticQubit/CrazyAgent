@@ -281,6 +281,15 @@ test("a failed research row shows its plain reason and Try again", async () => {
   assert.equal(markup.match(/>Try again</g)?.length, 1);
 });
 
+test("the Overview shows Recent activity first, then Research and the Roadmap line under it, as the mockup does", async () => {
+  const overview = await import("../src/screens/project/overview.tsx");
+  const markup = renderToStaticMarkup(createElement(overview.OverviewTab, { data: tabData([job("done")]) }));
+  const at = (pattern) => markup.search(pattern);
+  assert.ok(at(/>Recent activity</) > 0, "Recent activity shows");
+  assert.ok(at(/<h2 id="pj-research">Research<\/h2>/) > at(/>Recent activity</), "Research comes after Recent activity");
+  assert.ok(at(/<h2 id="pj-roadmap">Roadmap<\/h2>/) > at(/<h2 id="pj-research">Research<\/h2>/), "the Roadmap line comes after Research");
+});
+
 test("a stopped or failed master turn offers its own message to send again", () => {
   const turn = (ordinal, phase) => ({ id: `t${ordinal}`, ordinal, phase, reason: null, reply: phase === "succeeded" ? { text: "hi" } : null });
   assert.equal(research.resendText([turn(1, "succeeded"), turn(2, "failed")], { t1: "first", t2: "second" }), "second");
@@ -404,6 +413,13 @@ test("the master's reply mark is the small mark with the reduced drawing for low
   assert.match(markup, /<svg class="brand-glyph reduced" width="24" height="24" viewBox="0 0 16 16"/);
   const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
   assert.match(css, /\.pj-mark \.brand-name \{ display: none; \}/);
+});
+
+test("the IDE-unavailable notice keeps the same gap below it as the waiting-changes notice", () => {
+  const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
+  const gap = (selector) => new RegExp(`(?:^|\\n)${selector.replace(".", "\\.")} \\{[^}]*margin-bottom: ([^;]+);`).exec(css)?.[1] ?? null;
+  assert.equal(gap(".pj-waiting"), "var(--space-4)");
+  assert.equal(gap(".pj-ide-unavailable"), gap(".pj-waiting"), "the IDE notice does not touch the block under it");
 });
 
 test("Needs you names the project's pool accounts that aren't signed in", () => {

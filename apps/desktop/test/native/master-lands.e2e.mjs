@@ -184,7 +184,8 @@ test("below Full access the master merge setting is off, the master's edit waits
     await open("agents?section=access", SETTING);
     const row = await page.evaluate(`document.querySelector(${JSON.stringify(`.set-row[data-setting="${SETTING}"]`)})?.innerText ?? ""`);
     assert.match(row, /Only at Full access\./, "the row says the setting needs Full access");
-    assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"]`)})`), null, "no choice is offered below Full access");
+    const locked = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"] input[type=radio]`)})].map((input) => [input.value, input.checked, input.disabled])`);
+    assert.deepEqual(locked, [["merges", false, true], ["waits", true, true]], "below Full access the two choices show locked, the master waiting for your accept");
     assert.equal((await status()).master_lands, null, "the engine offers no choice below Full access");
     await me.capture("sandboxed-agents");
 
