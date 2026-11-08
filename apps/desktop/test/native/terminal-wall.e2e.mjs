@@ -64,10 +64,11 @@ function tiles(graph) {
     .map((node) => ({ label: node.label, master: node.kind === "master" }));
 }
 
-/** Reads the wall window the page shows: its heading, its tiles in order and its free slots.
- * Input: the page. Output: what it shows. */
+/** Reads the wall window the page shows: its tools row, its heading, its tiles in order and
+ * its free slots. Input: the page. Output: what it shows. */
 function wallShown(page) {
   return page.evaluate(`(() => ({
+    tools: [...document.querySelectorAll(".tw-tools button")].map((button) => button.textContent.trim()),
     heading: document.querySelector(".tw-head h1")?.textContent.trim() ?? null,
     tiles: [...document.querySelectorAll(".tw-tile section.tg-terminal")].map((panel) => panel.getAttribute("aria-label").replace(/ terminal$/, "")),
     free: document.querySelectorAll(".tw-free").length,
@@ -202,9 +203,11 @@ async function kept(status, perWindow) {
 }
 
 /** Opens the Team view, clicks Open all terminals and checks the one request it sends, then
- * opens each window's page as the native window would and checks its heading, its tiles in
- * order, their Message and Stop buttons and the free slots of the last window. Inputs: the
- * steps' context, the choice and the hint the button shows. Output: none. */
+ * opens each window's page as the native window would, at its named address, and checks its
+ * tools row, its named heading, its tiles in order, their Message and Stop buttons and the free
+ * slots of the last window, and that the first window's Window switch and Back to Agents ask
+ * the bridge to bring forward only its own project's windows. Inputs: the steps' context, the
+ * choice and the hint the button shows. Output: the project name the windows show. */
 async function openAll({ project, me, page, tiles: all, site, log }, perWindow, hint) {
   const windows = Math.ceil(all.length / perWindow);
   await me.click("Team", AGENTS_VIEW);
@@ -221,17 +224,19 @@ async function openAll({ project, me, page, tiles: all, site, log }, perWindow, 
   assert.equal(opened[0].args.count, windows, `${all.length} terminals at ${perWindow} a window take ${windows} windows`);
   assert.equal(opened[0].args.focus, true);
   assert.ok(typeof opened[0].args.name === "string" && opened[0].args.name.length > 0, "the request names the project for the window titles");
+  const name = opened[0].args.name;
   for (let number = 1; number <= windows; number += 1) {
     const slice = all.slice((number - 1) * perWindow, number * perWindow);
     const mark = log.trail.length;
-    await openWall(page, site, project, number);
+    await openWall(page, site, project, number, name);
     for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
       const wall = await wallShown(page).catch(() => null);
       if (wall?.tiles.length === slice.length) break;
       assert.ok(Date.now() < deadline, `window ${number} never drew its ${slice.length} tiles: ${JSON.stringify(wall)}`);
     }
     const wall = await wallShown(page);
-    assert.equal(wall.heading, `Terminals ${number} of ${windows}`);
+    assert.equal(wall.heading, `${name} · Terminals ${number} of ${windows}`);
+    assert.deepEqual(wall.tools, ["Back to Agents", ...Array.from({ length: windows }, (_, index) => `Window ${index + 1} of ${windows}`)], "the mockup's tools row");
     assert.deepEqual(wall.tiles, slice.map((tile) => tile.label), `window ${number} shows its terminals in order, the master first`);
     assert.equal(wall.free, perWindow - slice.length, "only the last window has free slots, up to the setting");
     assert.equal(wall.messages, slice.length, "each tile has Message");
@@ -244,22 +249,43 @@ async function openAll({ project, me, page, tiles: all, site, log }, perWindow, 
     }
     assert.ok(attaches().every((call) => call.args.id === project), `window ${number} attaches naming its own project: ${JSON.stringify(attaches().map((call) => call.args))}`);
     await me.capture(`wall-${perWindow}-${number}-of-${windows}`);
+    if (number === 1) await moves(page, log, project, windows);
   }
   const attached = log.trail.slice(before).filter((call) => call.cmd === "desktop_terminal_attach").length;
   assert.equal(attached, all.length, "each window asks to attach each of its terminals once");
   assert.ok(log.trail.slice(before).some((call) => call.cmd === "desktop_terminals_per_window"), "each window reads the setting");
+  return name;
+}
+
+/** Clicks the first wall window's other Window entries, its own entry and Back to Agents, and
+ * checks each other entry and Back to Agents asks the bridge once to bring forward a window of
+ * its own project, while its own entry asks nothing. Inputs: the page, the call log, the
+ * project and the window count. Output: none. */
+async function moves(page, log, project, windows) {
+  const mark = log.trail.length;
+  const labels = [...Array.from({ length: windows }, (_, index) => `Window ${index + 1} of ${windows}`), "Back to Agents"];
+  for (const label of labels) {
+    assert.equal(await page.evaluate(`(() => { const button = [...document.querySelectorAll(".tw-tools button")].find((item) => item.textContent.trim() === ${JSON.stringify(label)}); button?.click(); return Boolean(button); })()`), true, label);
+  }
+  const wanted = [...Array.from({ length: windows - 1 }, (_, index) => String(index + 2)), "main"];
+  const calls = () => log.trail.slice(mark).filter((call) => call.cmd === "desktop_focus_terminal_window");
+  for (const deadline = Date.now() + STEP_MS; calls().length < wanted.length; await pause(POLL_MS)) {
+    assert.ok(Date.now() < deadline, `the tools row asked ${calls().length} of ${wanted.length} times: ${JSON.stringify(calls().map((call) => call.args))}`);
+  }
+  await pause(POLL_MS * 2);
+  assert.deepEqual(calls().map((call) => call.args), wanted.map((target) => ({ id: project, target })), "each move names its own project, never the window it is");
 }
 
 let wallLoads = 0;
 
-/** Opens one wall window's page as a new document, the way its native window starts, and
- * waits until the page before it is gone, so the page boots on the wall and never reloads the
- * route it showed before. Inputs: the page, the site, the project and the window number.
- * Output: none. */
-async function openWall(page, site, project, number) {
+/** Opens one wall window's page as a new document at the named address its native window
+ * starts at, and waits until the page before it is gone, so the page boots on the wall and
+ * never reloads the route it showed before. Inputs: the page, the site, the project, the
+ * window number and the project name. Output: none. */
+async function openWall(page, site, project, number, name) {
   wallLoads += 1;
   await page.evaluate("window.__e2eLeaving = true");
-  await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/?load=${wallLoads}#/terminals/${encodeURIComponent(project)}/${number}` });
+  await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/?load=${wallLoads}#/terminals/${encodeURIComponent(project)}/${number}/${encodeURIComponent(name)}` });
   for (const deadline = Date.now() + STEP_MS; await page.evaluate("window.__e2eLeaving === true").catch(() => true); await pause(POLL_MS)) {
     assert.ok(Date.now() < deadline, `window ${number}'s page never replaced the page before it`);
   }
@@ -280,11 +306,11 @@ async function asked(log, mark, count) {
  * one agent more in the team than the open windows hold and checks the wall itself asks the
  * bridge for one more window of its own project, while nothing asks to open windows from the
  * main window. Inputs: the steps' context and the choice. Output: none. */
-async function grows({ project, page, graph, runtime, site, log }, perWindow) {
+async function grows({ project, page, graph, runtime, site, log }, perWindow, name) {
   const before = tiles(await graph()).length;
   const windows = Math.ceil(before / perWindow);
   const mark = log.trail.length;
-  await openWall(page, site, project, 1);
+  await openWall(page, site, project, 1, name);
   await asked(log, mark, windows);
   restingAgents(runtime, project, windows * perWindow - before + 1);
   const after = tiles(await graph()).length;
@@ -300,8 +326,8 @@ test("Terminals per window 4: the owner's pick is kept, and Open all terminals a
     await kept(context.status, 4);
     await context.reload();
     assert.equal(await shown(context.page), "4", "4 is shown again after a reload");
-    await openAll(context, 4, "Opens 2 windows, 4 terminals each.");
-    await grows(context, 4);
+    const name = await openAll(context, 4, "Opens 2 windows, 4 terminals each.");
+    await grows(context, 4, name);
   });
 });
 
@@ -315,8 +341,8 @@ test("Terminals per window 6 (default): six is the pick until the owner changes 
     await kept(context.status, 6);
     await context.reload();
     assert.equal(await shown(context.page), "6 (default)", "6 is shown again after a reload");
-    await openAll(context, 6, "Opens 2 windows, 6 terminals each.");
-    await grows(context, 6);
+    const name = await openAll(context, 6, "Opens 2 windows, 6 terminals each.");
+    await grows(context, 6, name);
   });
 });
 
@@ -326,7 +352,7 @@ test("Terminals per window 9: the owner's pick is kept, and Open all terminals a
     await kept(context.status, 9);
     await context.reload();
     assert.equal(await shown(context.page), "9", "9 is shown again after a reload");
-    await openAll(context, 9, "Opens 1 window of up to 9 terminals.");
-    await grows(context, 9);
+    const name = await openAll(context, 9, "Opens 1 window of up to 9 terminals.");
+    await grows(context, 9, name);
   });
 });

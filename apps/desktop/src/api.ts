@@ -1317,6 +1317,14 @@ export function extendTerminalWindows(id: string, count: number): Promise<Result
   return call<void>("desktop_extend_terminal_windows", { id, count });
 }
 
+/** Brings forward, from a terminal wall window, the main window on its project's Agents tab
+ * or another wall window of its own project, as the wall's Back to Agents and Window switch
+ * do. Inputs: the project id and the target, "main" or a page. Output: nothing, not ready,
+ * or a plain error. */
+export function focusTerminalWindow(id: string, target: "main" | number): Promise<Result<void>> {
+  return call<void>("desktop_focus_terminal_window", { id, target: String(target) });
+}
+
 /** Closes a removed project's terminal wall windows. Input: the project id. Output:
  * nothing, not ready, or a plain error. */
 export function closeProjectWalls(id: string): Promise<Result<void>> {

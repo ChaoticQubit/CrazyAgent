@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { extendTerminalWindows, loadTerminalsPerWindow, nextGeneration, type Result } from "../../api";
+import { extendTerminalWindows, focusTerminalWindow, loadTerminalsPerWindow, nextGeneration, type Result } from "../../api";
 import { stopTeamAgent, stopTeammate } from "../../api-projects";
 import type { GraphNode } from "../../engine-client";
-import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, Skeleton } from "../../ui";
+import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, Segmented, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
 import { actionNote, panelKey, useTeamGraph, wallNote } from "../team";
@@ -45,12 +45,42 @@ export function WallGrid({ projectId, tiles, nodes, perWindow, onStop }: { proje
   </div>;
 }
 
+/** A wall window's title, as the mockup's window bar says it. Inputs: the project name, the
+ * window's page and the window count. Output: "Larkspur Booking · Terminals 1 of 2". */
+export function wallTitle(name: string, page: number, pages: number): string {
+  if (!(Number.isSafeInteger(page) && Number.isSafeInteger(pages) && page >= 1 && page <= pages)) {
+    throw new Error(`a wall window is page ${page} of ${pages}`);
+  }
+  if (name.length === 0) throw new Error("a wall window names its project");
+  return `${name} · Terminals ${page} of ${pages}`;
+}
+
+/** A wall window's tools row, as the mockup draws it: Back to Agents, which brings the main
+ * window forward on the project's Agents tab, a Window N of M switch at this window's page,
+ * which brings another of the project's wall windows forward, and the hint. Inputs: this
+ * window's page, the window count and the focus action. Output: the row. */
+export function WallTools({ page, pages, onFocus }: { page: number; pages: number; onFocus: (target: "main" | number) => void }) {
+  if (!(Number.isSafeInteger(page) && Number.isSafeInteger(pages) && page >= 1 && page <= pages)) {
+    throw new Error(`a wall window is page ${page} of ${pages}`);
+  }
+  const windows = Array.from({ length: pages }, (_, index) => ({ value: String(index + 1), label: `Window ${index + 1} of ${pages}` }));
+  return <div className="tw-tools">
+    <div className="tw-tools-row">
+      <Button size="small" icon="bot" onClick={() => onFocus("main")}>Back to Agents</Button>
+      <Segmented label="Terminal windows" value={String(page)} options={windows}
+        onValue={(value) => { if (Number(value) !== page) onFocus(Number(value)); }} />
+    </div>
+    <span className="tw-tools-hint">One click opens every window needed; new agents fill the last window or open a new one.</span>
+  </div>;
+}
+
 /** A terminal wall window of one project: its page of the team's terminals, the master
  * first, side by side, read again with the team graph. It reaches only the terminal, graph,
  * Stop, Terminals per window and window growth commands, and asks for the windows a growing
- * team needs itself, whatever the main window shows. Inputs: the project id and the window's
- * page. Output: the window's page. */
-export function TerminalWall({ projectId, page }: { projectId: string; page: number }) {
+ * team needs itself, whatever the main window shows. Its tools row brings the main window
+ * forward on Agents or another of its wall windows forward. Inputs: the project id, the
+ * window's page and the project name its address carries. Output: the window's page. */
+export function TerminalWall({ projectId, page, name }: { projectId: string; page: number; name: string }) {
   const [read, reload] = useTeamGraph(projectId);
   const graph = read.shown;
   const [setting, setSetting] = useState<Result<PerWindow> | undefined>(undefined);
@@ -63,6 +93,12 @@ export function TerminalWall({ projectId, page }: { projectId: string; page: num
     void loadTerminalsPerWindow(projectId).then((result) => { if (current) setSetting(result); });
     return () => { current = false; };
   }, [projectId, graph]);
+
+  async function focus(target: "main" | number) {
+    const result = await focusTerminalWindow(projectId, target);
+    if (result.kind === "ok") return;
+    setNote(result.kind === "not_ready" ? "Not ready yet: moving between windows isn't in this build." : `Couldn't bring that window forward. ${result.message}`);
+  }
 
   async function halt() {
     if (stopping === null || busy) return;
@@ -104,8 +140,9 @@ export function TerminalWall({ projectId, page }: { projectId: string; page: num
     }} />;
 
   return <main className="tw" aria-label="Terminals">
+    {tiles !== undefined && <WallTools page={page} pages={pages.length} onFocus={(target) => void focus(target)} />}
     <div className="tw-head">
-      <h1>{tiles === undefined ? "Terminals" : `Terminals ${page} of ${pages.length}`}</h1>
+      <h1>{tiles === undefined ? `${name} · Terminals` : wallTitle(name, page, pages.length)}</h1>
       {read.stale && <span className="tw-stale" role="status">{displayText(`Couldn't refresh the team. ${read.stale} Showing the last read.`)}</span>}
     </div>
     {note && <Notice tone="warn" alert>

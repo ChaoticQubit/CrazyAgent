@@ -36,20 +36,39 @@ function assert(condition: boolean, message: string): asserts condition {
 /** The most terminal wall windows one project opens, as the desktop bridge allows. */
 export const WALL_WINDOWS_MAX = 8;
 
-/** Reads a terminal wall window's project and page from its address, `#/terminals/<project>/<page>`.
- * Input: the location hash. Output: the project id and the page, 1 to WALL_WINDOWS_MAX, or
- * null for any other address. */
-export function wallRoute(hash: string): { project: string; page: number } | null {
-  const match = /^#\/terminals\/([^/]+)\/([1-9])$/u.exec(hash);
+/** The name a wall window shows when its address names none, or none it can show. */
+export const WALL_NAME_FALLBACK = "Project";
+
+/** Reads a terminal wall window's project, page and project name from its address,
+ * `#/terminals/<project>/<page>/<name>`, the name a URI component the bridge wrote. Input: the
+ * location hash. Output: the project id, the page, 1 to WALL_WINDOWS_MAX, and the name, or
+ * WALL_NAME_FALLBACK when it is missing, blank, undecodable or has control characters; null
+ * for any other address. */
+export function wallRoute(hash: string): { project: string; page: number; name: string } | null {
+  const match = /^#\/terminals\/([^/]+)\/([1-9])(?:\/([^/]*))?$/u.exec(hash);
   if (match === null) return null;
   const page = Number(match[2]);
   if (page > WALL_WINDOWS_MAX) return null;
+  let project: string;
   try {
-    const project = decodeURIComponent(match[1]);
-    return project.length > 0 ? { project, page } : null;
+    project = decodeURIComponent(match[1]);
   } catch {
     return null;
   }
+  if (project.length === 0) return null;
+  const name = wallName(match[3] ?? "");
+  assert(name.length > 0, "a wall window always has a name to show");
+  return { project, page, name };
+}
+
+function wallName(encoded: string): string {
+  let name: string;
+  try {
+    name = decodeURIComponent(encoded).trim();
+  } catch {
+    return WALL_NAME_FALLBACK;
+  }
+  return name.length === 0 || /\p{Cc}/u.test(name) ? WALL_NAME_FALLBACK : name;
 }
 
 /** The hint on Open all terminals. Inputs: how many windows the team takes and the terminals
