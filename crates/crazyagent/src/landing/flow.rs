@@ -840,19 +840,33 @@ pub(super) fn holds_only_except(
     Ok(untracked.stdout.is_empty())
 }
 
+/// An edit a test plants for [`reset_agent`] to make, the way an agent writes.
 #[cfg(test)]
-thread_local! {
-    /// Test seam (RESET-KEEP): an edit this thread's next [`reset_agent`] makes first, after
-    /// its caller checked the worktree, the way an agent can write in that window.
-    pub(super) static BEFORE_RESET: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
+pub(super) type PlantedEdit = std::sync::Arc<dyn Fn() + Send + Sync>;
 
-/// Runs and clears the edit a test planted in [`BEFORE_RESET`], if any. Takes nothing.
-/// Returns nothing.
+/// Test seam (RESET-KEEP): edits [`reset_agent`] makes first for an agent git folder, on
+/// whichever thread runs it, after its caller checked the worktree, the way an agent can
+/// write in that window.
 #[cfg(test)]
-fn before_reset() {
-    if let Some(edit) = BEFORE_RESET.with(|hook| hook.borrow_mut().take()) {
+pub(super) static BEFORE_RESET: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Runs the edit a test planted for this agent's git folder, if any. Input: the agent.
+/// Output: none.
+#[cfg(test)]
+fn before_reset(agent: &Agent) {
+    let same = |planted: &Path| {
+        std::fs::canonicalize(planted)
+            .ok()
+            .is_some_and(|planted| std::fs::canonicalize(&agent.git_dir).ok() == Some(planted))
+    };
+    let edit = BEFORE_RESET
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(git_dir, _)| same(git_dir))
+        .map(|(_, edit)| std::sync::Arc::clone(edit));
+    if let Some(edit) = edit {
         edit();
     }
 }
@@ -866,7 +880,7 @@ fn before_reset() {
 pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
     assert!(is_object_id(from) && is_object_id(target));
     #[cfg(test)]
-    before_reset();
+    before_reset(agent);
     if agent.head()? != from {
         return Ok(false);
     }
