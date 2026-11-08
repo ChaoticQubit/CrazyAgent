@@ -260,6 +260,25 @@ export function cards() {
   };
 }
 
+/** Opens Agent settings from the view switch, waits for its settings, and reads the Agents
+ * toolbar row there as the owner reads it: every button and the team line in the row, how
+ * many rows they take, and the drawer's title once the row's "N ask you" is clicked. */
+export async function settingsBar() {
+  [...document.querySelectorAll("#panel button")].find((item) => item.textContent.trim() === "Agent settings")?.click();
+  await until(() => document.querySelector("#panel .tg-split") === null && document.querySelector("#panel .tg-head") !== null);
+  const items = [...document.querySelectorAll("#panel .tg-head button, #panel .tg-head .tg-summary")]
+    .filter((item) => item.offsetParent !== null && !item.parentElement.closest(".tg-summary"));
+  const middles = items.map((item) => item.getBoundingClientRect()).map((box) => box.top + box.height / 2).sort((a, b) => a - b);
+  document.querySelector("#panel .tg-head .tg-asks")?.click();
+  await until(() => document.querySelector("dialog[open]") !== null);
+  return {
+    names: items.map((item) => item.textContent.replace(/\s+/gu, " ").trim() || item.getAttribute("aria-label")),
+    rows: middles.filter((middle, index) => index === 0 || middle - middles[index - 1] > 8).length,
+    settings: document.querySelector("#panel .tg-split") === null,
+    drawer: document.querySelector("dialog[open] h2")?.textContent ?? null,
+  };
+}
+
 /** The Agents toolbar as the owner reads it, left to right: every button and the team line
  * above the graph, outside dialogs, with how many rows they take, the space between the
  * lowest of them and the graph, and whether a Questions for you section shows on the page. */

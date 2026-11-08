@@ -176,6 +176,14 @@ test("the Agents toolbar is the mockup's one row: Team and Agent settings, the t
   assert.equal(bar.questions, false, "no Questions for you section on the page");
 });
 
+test("Agent settings keeps the same toolbar row above its settings, and its N ask you opens the questions drawer", async () => {
+  const { bar } = await agentsPage([["bar", "Fixture.settingsBar()"]]);
+  assert.equal(bar.settings, true, `Agent settings shows, not the graph: ${JSON.stringify(bar)}`);
+  assert.deepEqual(bar.names, ["Team", "Agent settings", "Master and 3 agents · 2 ask you · Pool A", "Running", "All", "Pause all", "Open all terminals"], JSON.stringify(bar));
+  assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
+  assert.equal(bar.drawer, "Questions for you", JSON.stringify(bar));
+});
+
 test("under the graph the Team view keeps the team's agents, tasks, Hand a task, Stop all, wake rules and usage in a closed Agents and tasks fold", async () => {
   const { parts } = await agentsPage([["parts", "Fixture.folds()"]]);
   assert.deepEqual(parts.folds.find((fold) => fold.label === "Agents and tasks"), { label: "Agents and tasks", open: false }, JSON.stringify(parts));
