@@ -136,9 +136,9 @@ test("the panel's Message puts the cursor in its Type to box, its Stop asks firs
  * step saw. Input: the steps as page expressions, by name. Output: what each returned. */
 const TOOLBAR_NAMES = ["Team", "Agent settings", "Master and 3 agents · 3 of 3 agents working. 0 tasks live. · 2 ask you · Pool A: 0 accounts", "Running (0)", "All (0)", "Pause all", "Open all terminals"];
 
-async function agentsPage(steps, patch = {}, view = "{}") {
+async function agentsPage(steps, patch = {}, view = "{}", width = 1200) {
   return withPage(async ({ evaluate, send }) => {
-    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await send("Emulation.setDeviceMetricsOverride", { width, height: 800, deviceScaleFactor: 1, mobile: false });
     await evaluate(fixture);
     const status = { harnesses: [{ harness: "codex", role: "sub", agents_max: 2, tools: true, live: 1 }], ...patch };
     await evaluate(`Fixture.mount(0, 'ok', [Fixture.runningTask(7)], ${JSON.stringify(status)}, ${view})`);
@@ -177,6 +177,12 @@ test("the Agents toolbar is one row: Team and Agent settings, the team line with
   assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
   assert.ok(bar.gap !== null && bar.gap <= 24, `the graph starts right under the row: ${bar.gap} px`);
   assert.equal(bar.questions, false, "no Questions for you section on the page");
+});
+
+test("in the content width of the app's default window the Agents toolbar stays one row and its team line wraps inside it", async () => {
+  const { bar } = await agentsPage([["bar", "Fixture.toolbar()"]], {}, "{}", 912);
+  assert.deepEqual(bar.names, TOOLBAR_NAMES, JSON.stringify(bar));
+  assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
 });
 
 test("at the app's smallest window the Agents toolbar may wrap but never scrolls the page sideways", async () => {
