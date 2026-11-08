@@ -145,14 +145,14 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.enable");
         await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
-        await me.waitFor("Open all terminals on the Agents tab's Team view", (text) => text.includes("Open all terminals"));
+        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents?section=coord` });
+        await me.waitFor("the Terminals per window setting in Agent settings", (text) => text.includes(SETTING));
         const reload = async () => {
           await page.evaluate("window.__e2eBeforeReload = true");
           await page.send("Page.reload", { ignoreCache: true });
-          const fresh = `window.__e2eBeforeReload !== true && document.body.innerText.includes("Open all terminals")`;
+          const fresh = `window.__e2eBeforeReload !== true && document.body.innerText.includes(${JSON.stringify(SETTING)})`;
           for (const deadline = Date.now() + STEP_MS; !(await page.evaluate(fresh).catch(() => false)); await pause(POLL_MS)) {
-            assert.ok(Date.now() < deadline, "the reloaded page never showed the Agents tab's Team view");
+            assert.ok(Date.now() < deadline, "the reloaded page never showed the Terminals per window setting");
           }
         };
         const graph = () => value(bridge, "desktop_team_graph", { id: project });
@@ -179,32 +179,15 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   if (!process.env.E2E_EVIDENCE) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 
-/** Opens Agent settings with the Agents tab's view switch, as the owner does, and waits for
- * the setting in its Coordination group, where the approved mockup puts it. Input: the owner
- * on the page. Output: none. */
-async function inSettings(me) {
-  await me.click("Agent settings", AGENTS_VIEW);
-  await me.waitFor("the Terminals per window setting in Agent settings, Coordination", (text) => text.includes("Coordination") && text.includes(SETTING));
+/** Clicks one choice of the Terminals per window setting, as the owner does. Inputs: the
+ * owner on the page and the choice's label. Output: none. */
+function pick(me, label) {
+  return me.click(label, `[role=radiogroup][aria-label="${SETTING}"] [role=radio]`);
 }
 
-/** Goes back to the Agents tab's Team view, where Open all terminals is, as the owner does.
- * Input: the owner on the page. Output: none. */
-async function inTeam(me) {
-  await me.click("Team", AGENTS_VIEW);
-  await me.waitFor("Open all terminals on the Agents tab's Team view", (text) => text.includes("Open all terminals") && !text.includes(SETTING));
-}
-
-/** Clicks one choice of the Terminals per window setting in Agent settings, as the owner
- * does. Inputs: the owner on the page and the choice's label. Output: none. */
-async function pick(me, label) {
-  await inSettings(me);
-  await me.click(label, `[role=radiogroup][aria-label="${SETTING}"] [role=radio]`);
-}
-
-/** Reads which choice of the setting Agent settings shows as picked. Inputs: the owner on
- * the page and the page. Output: the picked choice's label, or null. */
-async function shown(me, page) {
-  await inSettings(me);
+/** Reads which choice of the setting Agent settings shows as picked. Input: the page.
+ * Output: the picked choice's label, or null. */
+function shown(page) {
   return page.evaluate(`document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"] [role=radio][aria-checked=true]`)})?.innerText.trim() ?? null`);
 }
 
@@ -218,13 +201,14 @@ async function kept(status, perWindow) {
   }
 }
 
-/** Clicks Open all terminals and checks the one request it sends, then opens each window's
- * page as the native window would and checks its heading, its tiles in order, their Message
- * and Stop buttons and the free slots of the last window. Inputs: the steps' context, the
- * choice and the hint the button shows. Output: none. */
+/** Opens the Team view, clicks Open all terminals and checks the one request it sends, then
+ * opens each window's page as the native window would and checks its heading, its tiles in
+ * order, their Message and Stop buttons and the free slots of the last window. Inputs: the
+ * steps' context, the choice and the hint the button shows. Output: none. */
 async function openAll({ project, me, page, tiles: all, site, log }, perWindow, hint) {
   const windows = Math.ceil(all.length / perWindow);
-  await inTeam(me);
+  await me.click("Team", AGENTS_VIEW);
+  await me.waitFor("Open all terminals on the Team view", (text) => text.includes("Open all terminals"));
   assert.equal(await page.evaluate(`[...document.querySelectorAll("button")].find((button) => button.innerText.includes("Open all terminals"))?.title ?? null`), hint);
   const before = log.trail.length;
   await me.click("Open all terminals", "button");
@@ -315,7 +299,7 @@ test("Terminals per window 4: the owner's pick is kept, and Open all terminals a
     await pick(context.me, "4");
     await kept(context.status, 4);
     await context.reload();
-    assert.equal(await shown(context.me, context.page), "4", "4 is shown again after a reload");
+    assert.equal(await shown(context.page), "4", "4 is shown again after a reload");
     await openAll(context, 4, "Opens 2 windows, 4 terminals each.");
     await grows(context, 4);
   });
@@ -324,13 +308,13 @@ test("Terminals per window 4: the owner's pick is kept, and Open all terminals a
 test("Terminals per window 6 (default): six is the pick until the owner changes it, and Open all terminals asks for two windows of six, and the wall grows on its own", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-tw6-", async (context) => {
     assert.equal((await context.status()).terminals_per_window, 6, "6 is the default");
-    assert.equal(await shown(context.me, context.page), "6 (default)", "the tab shows the default");
+    assert.equal(await shown(context.page), "6 (default)", "the tab shows the default");
     await pick(context.me, "9");
     await kept(context.status, 9);
     await pick(context.me, "6 (default)");
     await kept(context.status, 6);
     await context.reload();
-    assert.equal(await shown(context.me, context.page), "6 (default)", "6 is shown again after a reload");
+    assert.equal(await shown(context.page), "6 (default)", "6 is shown again after a reload");
     await openAll(context, 6, "Opens 2 windows, 6 terminals each.");
     await grows(context, 6);
   });
@@ -341,7 +325,7 @@ test("Terminals per window 9: the owner's pick is kept, and Open all terminals a
     await pick(context.me, "9");
     await kept(context.status, 9);
     await context.reload();
-    assert.equal(await shown(context.me, context.page), "9", "9 is shown again after a reload");
+    assert.equal(await shown(context.page), "9", "9 is shown again after a reload");
     await openAll(context, 9, "Opens 1 window of up to 9 terminals.");
     await grows(context, 9);
   });

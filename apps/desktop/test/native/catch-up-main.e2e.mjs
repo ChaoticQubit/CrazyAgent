@@ -231,13 +231,16 @@ async function kept(status, mode) {
   }
 }
 
-/** Opens Agent settings with the Agents tab's view switch, as the owner does, and brings the
- * Catch up with main setting into the window, so a capture shows the pick. Inputs: the owner
- * on the page and the page. Output: none. */
+/** Brings the Catch up with main setting into the window, so a capture shows the pick: it
+ * opens the Agents tab's Agent settings view first, since a hand-off leaves the Team view
+ * open. Inputs: the owner on the page and the page. Output: none. */
 async function showSetting(me, page) {
   await me.click("Agent settings", AGENTS_VIEW);
-  await me.waitFor("the Catch up with main setting in Agent settings", (text) => text.includes(SETTING));
-  return page.evaluate(`document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"]`)}).scrollIntoView({ block: "center" })`);
+  const group = `document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"]`)})`;
+  for (const deadline = Date.now() + STEP_MS; !(await page.evaluate(`${group} !== null`)); await pause(POLL_MS)) {
+    assert.ok(Date.now() < deadline, "the Agent settings view never showed the Catch up with main setting");
+  }
+  return page.evaluate(`${group}.scrollIntoView({ block: "center" })`);
 }
 
 /** Hands a task to a Codex sub-agent from the Agents tab's Team view, as the owner does, and
