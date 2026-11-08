@@ -190,8 +190,9 @@ export const INTERNALS = `(() => {
   };
 })();`;
 
-/** Page helpers over DevTools: what the owner sees, waiting for it, and real clicks and typing.
- * Input: the page's evaluate and send. Output: the helpers. */
+/** Page helpers over DevTools: what the owner sees, waiting for it, real clicks and typing,
+ * opening a fold by its label, and opening the Agents toolbar's questions drawer. Input: the
+ * page's evaluate and send. Output: the helpers. */
 export function owner({ evaluate, send }, evidence) {
   const seen = () => evaluate("document.body.innerText");
   let shots = 0;
@@ -263,5 +264,23 @@ export function owner({ evaluate, send }, evidence) {
   const enter = async () => {
     for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   };
-  return { seen, waitFor, click, follow, type, enter, capture };
+  const unfold = async (label) => {
+    const fold = `details[aria-label=${JSON.stringify(label)}]`;
+    const deadline = Date.now() + STEP_MS;
+    for (;;) {
+      const open = await evaluate(`document.querySelector(${JSON.stringify(fold)})?.open ?? null`);
+      if (open === true) return;
+      if (Date.now() > deadline) {
+        await capture(`no-fold-${label.replace(/[^a-z0-9]+/gi, "-").slice(0, 40)}`);
+        assert.fail(`the "${label}" fold never opened: ${open === null ? "not on the page" : "still closed"}`);
+      }
+      if (open === false) await follow(`${fold} > summary`);
+      await pause(POLL_MS);
+    }
+  };
+  const asks = async () => {
+    await follow(".tg-asks");
+    await waitFor("the Questions for you drawer", (text) => text.includes("Questions for you"));
+  };
+  return { seen, waitFor, click, follow, type, enter, capture, unfold, asks };
 }

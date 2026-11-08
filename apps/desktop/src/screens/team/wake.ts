@@ -113,10 +113,12 @@ export function freshAlerts(last: number | null, events: Pick<AppTeamEvents, "no
   return { last: newest, fresh };
 }
 
-/** Where the toast for one notification leads: an urgent question or an agent waiting in its
- * terminal opens the project's Agents tab, where the Questions inbox lists it (Q14, Q14b).
- * Input: the notification. Output: the route, or undefined for one that only informs. */
+/** Where the toast for one notification leads: an urgent question opens the project's Agents
+ * tab with Questions for you open on the question, and an agent waiting in its terminal opens
+ * it on Waiting on you (Q14, Q14b). Input: the notification. Output: the route, or undefined
+ * for one that only informs. */
 export function alertRoute(item: Pick<TeamNotification, "kind" | "project_id">): Route | undefined {
-  if (item.kind !== "urgent_question" && item.kind !== "waiting_on_you") return undefined;
-  return { name: "project", id: item.project_id, tab: "agents" };
+  if (item.kind === "urgent_question") return { name: "project", id: item.project_id, tab: "agents", section: "questions" };
+  if (item.kind === "waiting_on_you") return { name: "project", id: item.project_id, tab: "agents", section: "waiting" };
+  return undefined;
 }

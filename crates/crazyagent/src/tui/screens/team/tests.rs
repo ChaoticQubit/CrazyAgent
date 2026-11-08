@@ -46,6 +46,7 @@ fn node(id: &str, kind: NodeKind, parent: Option<&str>, label: &str) -> GraphNod
         no_worktree: false,
         hookless: false,
         message_note: None,
+        started_ms: None,
     }
 }
 

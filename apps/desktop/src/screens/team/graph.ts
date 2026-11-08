@@ -1,5 +1,6 @@
 import { HOOKLESS_WORDS, type GraphEdge, type GraphEdgeState, type GraphNode, type MessageEdge, type OverlapEdge, type Presence, type LiveAction, type Receipt, type RelationEdge, type TeamAgentStatus, type TeamGraph } from "../../engine-client";
 import type { Tone } from "../../ui";
+import { elapsed } from "../project/research";
 
 export const CARD_WIDTH = 216;
 export const CARD_HEIGHT = 132;
@@ -612,6 +613,17 @@ export function nodeRole(node: Pick<GraphNode, "kind">): string {
   return Object.hasOwn(ROLE_WORDS, node.kind) ? ROLE_WORDS[node.kind] : "Agent";
 }
 
+/** How long the node's running task has run, as a terminal head says it, such as
+ * "running 14 min". Inputs: the node and now, in ms. Output: the words, or null while it
+ * runs no task or the engine does not say when its task started. */
+export function nodeRunning(node: Pick<GraphNode, "started_ms">, now: number): string | null {
+  const started = node.started_ms;
+  if (started === undefined || started === null) return null;
+  if (!Number.isSafeInteger(started)) throw new Error(`a task starts at a whole ms: ${started}`);
+  if (!Number.isFinite(now)) throw new Error(`now is a time in ms: ${now}`);
+  return `running ${elapsed(now - started)}`;
+}
+
 /** The second line of a node box: its place in the tree, its harness and its account, such
  * as "Lead, Claude Code, Work". Inputs: the node and a harness display name lookup. Output:
  * one short line; a node with no account leaves that part out. */
@@ -631,6 +643,17 @@ export function namedAccounts(graph: TeamGraph, account: (id: string) => string)
 export function graphLive(graph: TeamGraph): boolean {
   return graph.nodes.some((node) => node.status === "starting" || node.status === "working")
     || graph.edges.some(live);
+}
+
+/** The team part of the Agents toolbar line, as the mockup words it: "Master and 5 agents",
+ * then how many of them the drawing leaves out. Inputs: the graph and the layout's hidden
+ * count. Output: the words. */
+export function teamLine(graph: TeamGraph, hidden = 0): string {
+  const agents = graph.nodes.filter((node) => node.kind !== "master").length;
+  if (!Number.isSafeInteger(hidden) || hidden < 0) throw new Error(`a hidden count is a whole number: ${hidden}`);
+  if (hidden > agents) throw new Error(`the drawing hides ${hidden} of ${agents} agents`);
+  const team = agents === 0 ? "Master, no agents yet" : `Master and ${plural(agents, "agent")}`;
+  return hidden > 0 ? `${team} · ${hidden} not shown` : team;
 }
 
 /** The one line under the graph title: how many agents work, how many tasks are live and how

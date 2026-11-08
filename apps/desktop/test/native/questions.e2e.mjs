@@ -164,8 +164,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(questionRows(runtime, project, question, agent).waiting, "question", "the engine paused the asker until the owner answers");
         await me.capture("questions-toast");
         await me.click("Open", "div.toast[role=status] button");
-        await me.waitFor("the Agents tab with the question", (text) => text.includes("Questions for you (1)") && text.includes(QUESTION));
-        assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/agents`), "Open goes to the project's Agents tab");
+        await me.waitFor("the question in the Questions for you drawer Open opened", (text) => text.includes("Questions for you (1)") && text.includes(QUESTION));
+        const focus = await page.evaluate(`document.activeElement?.closest("dialog.drawer[open] li.tg-question")?.innerText ?? null`);
+        assert.ok(focus?.includes(QUESTION), `Open puts the keyboard on the urgent question: ${focus}`);
+        assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/agents`), "Open goes to the project's Agents tab and the drawer opens once");
         const row = await page.evaluate("document.querySelector('li.tg-question')?.innerText ?? null");
         for (const part of ["Urgent", label, "The agent is paused until you answer.", QUESTION, "Open terminal", "Answer"]) {
           assert.ok(row?.includes(part), `the question row shows "${part}": ${row}`);
@@ -185,15 +187,16 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.deepEqual(await page.evaluate(`[...document.querySelectorAll("section.tg-terminal")].map((panel) => panel.getAttribute("aria-label"))`), [`${label} terminal`], "the asker's terminal opens in the Agents tab's one terminal panel");
         await me.capture("questions-terminal");
 
+        await me.asks();
         await me.click("Answer", "li.tg-question button");
         await me.type(".tg-answer textarea", ANSWER);
         await me.click("Send answer", ".tg-answer button");
         await me.waitFor("the emptied inbox", (text) => text.includes("No agent is waiting on you."));
         const inbox = await page.evaluate(`(() => {
-          const section = [...document.querySelectorAll("section.tg-events")].find((item) => item.querySelector("h3")?.textContent.startsWith("Questions for you"));
+          const section = document.querySelector('dialog.drawer[open] section[aria-label="Questions for you"]');
           return section ? { text: section.innerText, rows: section.querySelectorAll("li.tg-question").length } : null;
         })()`);
-        assert.ok(inbox !== null, "the Agents tab shows the Questions for you section");
+        assert.ok(inbox !== null, "the drawer shows the Questions for you section");
         assert.equal(inbox.rows, 0, `the answered question left the inbox:\n${inbox.text}`);
         assert.ok(!inbox.text.includes(QUESTION), `the inbox no longer shows the answered question:\n${inbox.text}`);
         await me.capture("questions-answered");

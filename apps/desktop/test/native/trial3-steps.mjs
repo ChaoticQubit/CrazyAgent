@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { mask } from "./trial3-mask.mjs";
-import { click, says, shown, text, texts, type } from "./settings-steps.mjs";
+import { click, says, shown, text, texts, type, unfold } from "./settings-steps.mjs";
 import { MODE, NAME, PROJECT, TEAM_MS, UI_MS, choose, go, graph, hash, inView, lit, paste, pick, project, reopen, run, screen, segment, tab, team, until, waitFor } from "./trial-kit.mjs";
 
 const ANSWER = process.env.TRIAL_ANSWER ?? "Hello";
@@ -402,6 +402,7 @@ export const TRIAL3_STEPS = [
     why: "The owner ends the trial with Stop all; every agent stops (trial 2 check 10)",
     action: async () => {
       await tab("agents");
+      await unfold("Agents and tasks");
       await click("button=Stop all");
       await until(() => says("dialog[open] h2", "Stop every agent of this project?"), UI_MS, "the Stop all question did not open");
       await click("//dialog[@open]//button[normalize-space(.)=\"Stop all\"]");

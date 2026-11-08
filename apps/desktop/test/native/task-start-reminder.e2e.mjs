@@ -234,6 +234,7 @@ async function shows(me, page, wanted) {
  * project and the engine root. Output: the engine's rows then. */
 async function handOff(me, page, project, runtime) {
   await me.click("Team", AGENTS_VIEW);
+  await me.unfold("Agents and tasks");
   const picked = await page.evaluate(`(() => {
     const select = document.getElementById(${JSON.stringify(`tg-hand-to-${project}`)});
     if (!select || select.disabled || ![...select.options].some((option) => option.value === "codex")) return false;

@@ -14,7 +14,7 @@ const STATUS_WORDS = { starting: "Starting", idle: "Idle", working: "Working", s
 const NO_TASK = "No task yet.";
 const ROLE_NAME = /^[^()@]+ \(@[^()\s]+\)$/;
 const HARNESS_NAME = /^(claude code|claude|codex|gemini|opencode|cursor)\b/i;
-const NOT_SHOWN = /(\d+) agents? not shown\./;
+const NOT_SHOWN = /· (\d+) not shown\b/u;
 const EDGE_PX = 1;
 const COPY_CHARS = 3;
 const CONNECTING = "Connecting to the terminal";
@@ -81,8 +81,8 @@ export function roleName(label) {
   return ROLE_NAME.test(name) && !HARNESS_NAME.test(name);
 }
 
-/** How many agents the graph line says the drawing leaves out. Input: the graph line's
- * text. Output: the count, 0 when the line names none. */
+/** How many agents the Agents toolbar's team line says the drawing leaves out. Input: the
+ * line's text. Output: the count, 0 when the line names none. */
 export function notShown(summary) {
   const found = NOT_SHOWN.exec(summary);
   return found ? Number(found[1]) : 0;
@@ -191,8 +191,8 @@ export function readCards() {
   }));
 }
 
-/** Reads the graph line under the Team graph title. Output: its text, empty when the graph
- * is not shown. */
+/** Reads the team line in the Agents toolbar. Output: its text, empty when the graph is not
+ * shown. */
 export function summary() {
   return browser.execute(() => document.querySelector(".tg-summary")?.textContent ?? "");
 }

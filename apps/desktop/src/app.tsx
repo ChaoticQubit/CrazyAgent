@@ -204,12 +204,13 @@ function useShortcuts() {
 export const ALERT_READ_MS = 10_000;
 
 /** Watches the owner's team notifications and pending questions while the engine runs: every
- * 10 s it reads them, shows a new notification as a toast, with Open to the Questions inbox
- * for an urgent question or an agent waiting in its terminal, keeps the app icon badge at the
- * unseen notifications plus the pending questions, and asks for attention when a notification
- * is new; a Normal question only counts toward the badge. The same counts read drives the
- * question notification watch, so the counts are read once per look. Inputs: whether the
- * engine runs and the toast action. Output: what each project's sidebar flag counts. */
+ * 10 s it reads them, shows a new notification as a toast, with Open to the Agents tab's
+ * Questions for you drawer on an urgent question or an agent waiting in its terminal, keeps
+ * the app icon badge at the unseen notifications plus the pending questions, and asks for
+ * attention when a notification is new; a Normal question only counts toward the badge. The
+ * same counts read drives the question notification watch, so the counts are read once per
+ * look. Inputs: whether the engine runs and the toast action. Output: what each project's
+ * sidebar flag counts. */
 function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): Map<string, number> {
   const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
   const toast = useRef(showToast);

@@ -1378,7 +1378,7 @@ fn an_agent_head_pointed_at_the_owners_branch_is_never_read_through_or_moved() {
             Ok(agent) => {
                 assert!(!linked);
                 assert_eq!(refused(agent.head()), "changes_workspace_invalid");
-                assert!(flow::reset_agent(&agent, &head).is_err());
+                assert!(flow::reset_agent(&agent, &head, &head).is_err());
             }
             Err(refused) => {
                 assert!(linked);
@@ -8473,6 +8473,193 @@ fn a_set_message_leaves_out_main_commits_its_agent_merged_in() {
     assert_eq!(case.view(&id).message, "Agent work");
 }
 
+/// Plants `edit` to run inside every engine reset of the case's agent worktree, on any
+/// thread, after its caller checked the worktree held nothing new (RESET-KEEP). Inputs: the
+/// case and the edit. Output: how many resets ran it so far.
+fn plant_inside_resets(
+    case: &Case,
+    edit: impl Fn() + Send + Sync + 'static,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    plant(&flow::BEFORE_RESET, &case.workspace.git_dir, edit)
+}
+
+/// Plants `edit` in `planted` for an agent git folder, counting its runs. Inputs: the
+/// seam, the git folder and the edit. Output: how many resets ran it so far.
+fn plant(
+    planted: &std::sync::Mutex<Vec<(PathBuf, flow::PlantedEdit)>>,
+    git_dir: &Path,
+    edit: impl Fn() + Send + Sync + 'static,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&runs);
+    planted.lock().unwrap().push((
+        git_dir.to_path_buf(),
+        std::sync::Arc::new(move || {
+            edit();
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    ));
+    runs
+}
+
+/// Plants a write of "agent edit" to the case's README inside every engine reset of its
+/// agent worktree. Input: the case. Output: how many resets ran it so far.
+fn edit_inside_resets(case: &Case) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let file = case.workspace.worktree.join("README");
+    plant_inside_resets(case, move || write(&file, "agent edit\n"))
+}
+
+/// Removes what [`plant_inside_resets`] planted for the case and returns how many resets
+/// ran it. Inputs: the case and the count. Output: the runs.
+fn unplant(case: &Case, runs: &std::sync::atomic::AtomicUsize) -> usize {
+    unplant_from(&case.workspace.git_dir, runs)
+}
+
+/// Removes every edit planted for an agent git folder, in both seams, and returns how many
+/// resets ran the one counted by `runs`. Inputs: the git folder and the count. Output: the
+/// runs.
+fn unplant_from(git_dir: &Path, runs: &std::sync::atomic::AtomicUsize) -> usize {
+    for planted in [&flow::BEFORE_RESET, &flow::AFTER_READ_TREE] {
+        planted
+            .lock()
+            .unwrap()
+            .retain(|(planted, _)| planted != git_dir);
+    }
+    runs.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Asserts an engine reset ran the planted README edit, the edit is still in the agent's
+/// worktree, its HEAD is still `head` and the set holds no half-done step. Inputs: the
+/// case, the set, the head kept and the run count.
+fn assert_edit_kept(
+    case: &Case,
+    id: &ChangeSetId,
+    head: &str,
+    runs: &std::sync::atomic::AtomicUsize,
+) {
+    assert!(unplant(case, runs) >= 1, "no engine reset ran");
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        "agent edit\n",
+        "the engine's reset overwrote the agent's edit"
+    );
+    assert_eq!(case.agent_head(), head);
+    assert!(store::load(&case.db, id).unwrap().intent.is_none());
+}
+
+/// The start the store records for the case's agent worktree. Input: the case. Output: it.
+fn recorded_start(case: &Case) -> Option<String> {
+    store::base_of(&case.db, case.workspace.worktree.to_str().unwrap()).unwrap()
+}
+
+/// An agent edit written inside a discard's reset, after its clean check, is never
+/// overwritten: the worktree keeps the set's head and its next set opens above it.
+#[test]
+fn an_agent_edit_inside_a_discard_reset_survives_and_the_worktree_keeps_its_head() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let runs = edit_inside_resets(&case);
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_edit_kept(&case, &id, &head, &runs);
+    assert_eq!(recorded_start(&case), Some(head));
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+}
+
+/// An agent edit written inside the reset after its set landed is never overwritten: the
+/// set lands, the worktree keeps the set's head and its next set opens above it.
+#[test]
+fn an_agent_edit_inside_the_reset_after_accept_survives_and_the_worktree_keeps_its_head() {
+    let case = Case::new();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.owner_commit("README", "one\ntwo\nthree\nowner\n", "Owner edit");
+    let runs = edit_inside_resets(&case);
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_edit_kept(&case, &id, &head, &runs);
+    assert_eq!(recorded_start(&case), Some(head));
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+}
+
+/// An agent edit written inside a restore's reset is never overwritten: the restore is
+/// refused and the set, its refs and the worktree stay as the discard left them.
+#[test]
+fn an_agent_edit_inside_a_restore_reset_survives_and_the_set_stays_discarded() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    let tip = case.tip();
+    let before = store::load(&case.db, &id).unwrap();
+    let runs = edit_inside_resets(&case);
+    assert_eq!(
+        refused(restore(&case.db, &id, NOW_MS + DAY_MS)),
+        "changes_agent_busy"
+    );
+    assert_edit_kept(&case, &id, &tip, &runs);
+    assert_eq!(recorded_start(&case), Some(tip));
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+    assert_eq!(
+        case.owner(&["rev-parse", &flow::discarded_ref(&id)]).trim(),
+        head
+    );
+    assert_eq!(
+        case.owner(&["for-each-ref", "refs/crazyagent/pending/"]),
+        ""
+    );
+}
+
+/// An agent edit written inside an update's reset is never overwritten: the update is
+/// refused and the set and its pending ref stay as they were.
+#[test]
+fn an_agent_edit_inside_an_update_reset_survives_and_the_update_is_refused() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    let before = store::load(&case.db, &id).unwrap();
+    let runs = edit_inside_resets(&case);
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_edit_kept(&case, &id, &before.head, &runs);
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+    assert_eq!(
+        case.owner(&["rev-parse", &flow::pending_ref(&id)]).trim(),
+        before.head
+    );
+}
+
+/// An agent edit written inside the reset an engine start finishes for a discard an
+/// engine stop cut short is never overwritten: the worktree keeps the set's head.
+#[test]
+fn an_agent_edit_inside_the_reset_an_engine_start_finishes_survives() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let mut stopped = store::load(&case.db, &id).unwrap();
+    stopped.state = ChangeState::Discarded;
+    stopped.restorable_until_ms = Some(NOW_MS + 7 * DAY_MS);
+    stopped.intent = Some(store::Intent::Reset {
+        from: Some(head.clone()),
+        target: case.tip(),
+    });
+    store::save(&case.db, &stopped).unwrap();
+    let runs = edit_inside_resets(&case);
+    owner::settled(&case.db, &id).unwrap();
+    assert_edit_kept(&case, &id, &head, &runs);
+    assert_eq!(recorded_start(&case), Some(head));
+}
+
 const APP_MANIFEST: &str = "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n\n[features]\ndefault = []\n\n[dev-dependencies]\n";
 
 /// The Cargo.lock Cargo writes for the case's workspace of `app`, `a` and `b`, with `app`
@@ -9279,5 +9466,275 @@ fn an_agent_that_ignores_the_note_keeps_the_regenerated_lockfile_at_its_next_tur
     assert!(
         is_ancestor(&case, &set.head, &next.head),
         "the agent's next turn end dropped the engine's regenerated lockfile"
+    );
+}
+
+/// An untracked agent file written inside the reset after its set landed, at a path the
+/// landed commit adds, is never overwritten: the worktree keeps the set's head (RESET-KEEP).
+#[test]
+fn an_untracked_agent_file_where_the_reset_adds_one_survives() {
+    let case = Case::new();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.owner_commit("owner.txt", "owner\n", "Owner file");
+    let file = case.workspace.worktree.join("owner.txt");
+    let runs = plant_inside_resets(&case, move || write(&file, "agent file\n"));
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("owner.txt")).unwrap(),
+        "agent file\n"
+    );
+    assert_eq!(case.agent_head(), head);
+    assert_eq!(recorded_start(&case), Some(head));
+}
+
+/// An agent commit made inside a discard's reset is never dropped from its branch: the
+/// reset finds HEAD moved and changes nothing, and the next set opens above the set's head,
+/// so it holds the commit (RESET-KEEP).
+#[test]
+fn an_agent_commit_inside_a_discard_reset_stays_on_its_branch() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant_inside_resets(&case, move || {
+        write(&worktree.join("later.txt"), "later\n");
+        git_in(&home, &worktree, &["add", "later.txt"]);
+        git_in(
+            &home,
+            &worktree,
+            &[
+                "-c",
+                "user.name=Agent",
+                "-c",
+                "user.email=agent@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Later work",
+            ],
+        );
+    });
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(
+        case.agent(&["log", "-1", "--format=%s"]).trim(),
+        "Later work"
+    );
+    assert_eq!(case.agent(&["rev-parse", "HEAD^"]).trim(), head);
+    assert_eq!(recorded_start(&case), Some(head));
+    assert!(store::load(&case.db, &id).unwrap().intent.is_none());
+}
+
+/// An agent edit written inside the reset a lockfile regeneration applies, after its clean
+/// check, is never overwritten: the regeneration lands nothing, Task 7's update then finds
+/// the edit at its own clean check and refuses before any reset, and the set waits for the
+/// owner on the agent's own head (RESET-KEEP).
+#[test]
+fn an_agent_edit_inside_a_regeneration_reset_survives_and_the_set_keeps_its_head() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(&case, "", "", Duration::from_secs(60));
+    let file = case.workspace.worktree.join("Cargo.lock");
+    let runs = plant_inside_resets(&case, move || write(&file, "agent edit\n"));
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let head = case.agent_head();
+    let pending = flow::pending_ref(&id);
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while Instant::now() < deadline
+        && !(runs.load(std::sync::atomic::Ordering::SeqCst) >= 1
+            && store::load(&case.db, &id).unwrap().intent.is_none()
+            && case.owner(&["rev-parse", &pending]).trim() == head)
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        unplant(&case, &runs),
+        1,
+        "only the regeneration reached a reset; Task 7's update refused at its clean check"
+    );
+    let set = case.view(&id);
+    assert_eq!(
+        (set.state, set.head.as_str()),
+        (ChangeState::Pending, head.as_str())
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("Cargo.lock")).unwrap(),
+        "agent edit\n",
+        "the engine's reset overwrote the agent's edit"
+    );
+    assert_eq!(case.agent_head(), head);
+    assert!(store::load(&case.db, &id).unwrap().intent.is_none());
+    assert!(
+        engine_notes(&case)
+            .iter()
+            .all(|note| !note.contains("regenerated")),
+        "no regeneration note goes out"
+    );
+}
+
+/// An index lock that stops an update's reset at its index refresh (a tracked file's stat
+/// changed, so git must write the index) leaves no half-done reset behind: the agent's
+/// commit made afterwards stays on its branch through the owner's next action, and the set
+/// is as it was (RESET-KEEP r2 M1).
+#[test]
+fn an_agent_commit_after_a_reset_an_index_lock_stopped_stays_through_the_next_owner_action() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    let before = store::load(&case.db, &id).unwrap();
+    let lock = case.workspace.git_dir.join("index.lock");
+    let held = lock.clone();
+    let readme = case.workspace.worktree.join("README");
+    let runs = plant_inside_resets(&case, move || {
+        write(&held, "");
+        std::fs::File::options()
+            .write(true)
+            .open(&readme)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(946_684_800))
+            .unwrap();
+    });
+    assert!(update(&case.db, &id).is_err());
+    assert_eq!(unplant(&case, &runs), 1);
+    std::fs::remove_file(&lock).unwrap();
+    case.edit("later.txt", "later\n");
+    let later = case.agent_commit("Later work");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(
+        case.agent_head(),
+        later,
+        "the agent's commit left its branch"
+    );
+    assert_eq!(case.agent(&["rev-parse", "HEAD^"]).trim(), before.head);
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+}
+
+/// A reset intent stored before resets recorded where they start never moves the agent's
+/// HEAD off a commit the agent made later: the engine drops it, the commit stays and the
+/// next set opens above the set's head (RESET-KEEP r2 M1).
+#[test]
+fn a_reset_intent_stored_without_its_start_never_moves_a_later_agent_commit() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let mut stopped = store::load(&case.db, &id).unwrap();
+    stopped.state = ChangeState::Discarded;
+    stopped.restorable_until_ms = Some(NOW_MS + 7 * DAY_MS);
+    stopped.intent = Some(
+        serde_json::from_value(serde_json::json!({"step": "reset", "target": case.tip()})).unwrap(),
+    );
+    store::save(&case.db, &stopped).unwrap();
+    case.edit("later.txt", "later\n");
+    let later = case.agent_commit("Later work");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(
+        case.agent_head(),
+        later,
+        "the agent's commit left its branch"
+    );
+    assert!(store::load(&case.db, &id).unwrap().intent.is_none());
+    assert_eq!(recorded_start(&case), Some(head));
+}
+
+/// An agent that commits and edits a path inside an update's reset, after the files moved
+/// and before HEAD moves, keeps both: the HEAD move fails, putting the files back refuses
+/// on the edit, and the update is refused with the set as it was (RESET-KEEP r2).
+#[test]
+fn an_agent_commit_and_edit_after_a_reset_moved_the_files_are_kept() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    let before = store::load(&case.db, &id).unwrap();
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(&flow::AFTER_READ_TREE, &case.workspace.git_dir, move || {
+        git_in(
+            &home,
+            &worktree,
+            &[
+                "-c",
+                "user.name=Agent",
+                "-c",
+                "user.email=agent@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Later work",
+            ],
+        );
+        write(&worktree.join("README"), "agent edit\n");
+    });
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(
+        case.agent(&["log", "-1", "--format=%s"]).trim(),
+        "Later work"
+    );
+    assert_eq!(case.agent(&["rev-parse", "HEAD^"]).trim(), before.head);
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        "agent edit\n"
+    );
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+}
+
+/// An agent that switches its branch inside a reset, after the files moved and before HEAD
+/// moves, is never reported as reset: the engine reads HEAD again through the branch it
+/// opened, refuses, and puts that branch and the files back (RESET-KEEP r2).
+#[test]
+fn a_branch_switch_inside_a_reset_is_never_reported_as_reset() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Master,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let from = agent.head().unwrap();
+    let lease = git_in(&case.home, &master.worktree, &["symbolic-ref", "HEAD"])
+        .trim()
+        .to_owned();
+    let target = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    let (home, worktree) = (case.home.clone(), master.worktree.clone());
+    let runs = plant(&flow::AFTER_READ_TREE, &master.git_dir, move || {
+        git_in(&home, &worktree, &["switch", "-q", "-c", "side"]);
+    });
+    let reset = flow::reset_agent(&agent, &from, &target).unwrap();
+    assert_eq!(unplant_from(&master.git_dir, &runs), 1);
+    assert!(
+        !reset,
+        "a reset whose agent switched branches was reported as done"
+    );
+    assert_eq!(
+        git_in(&case.home, &master.worktree, &["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/side"
+    );
+    assert_eq!(
+        git_in(&case.home, &master.worktree, &["rev-parse", &lease]).trim(),
+        from
+    );
+    assert_eq!(
+        git_in(&case.home, &master.worktree, &["status", "--porcelain"]),
+        ""
     );
 }

@@ -50,10 +50,10 @@ test("an agent name is a persona with its @role name, never a harness name with 
   assert.equal(roleName("Ada (@)"), false);
 });
 
-test("the graph line's left-out count is read, and none means zero", () => {
-  assert.equal(notShown("3 of 7 agents working. 2 tasks live. 4 agents not shown."), 4);
-  assert.equal(notShown("1 of 2 agents working. 1 task live. 1 agent not shown."), 1);
-  assert.equal(notShown("1 of 2 agents working. 1 task live."), 0);
+test("the team line's left-out count is read, and none means zero", () => {
+  assert.equal(notShown("Master and 7 agents · 4 not shown · 1 asks you · Pool A"), 4);
+  assert.equal(notShown("Master and 2 agents · 1 not shown · no one asks you · Pool A"), 1);
+  assert.equal(notShown("Master and 2 agents · no one asks you · Pool A"), 0);
 });
 
 /** A terminal view of an agent that does not read the mouse, as terminalView reads it.

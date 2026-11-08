@@ -217,3 +217,16 @@ test("each question row says whom its asker meant it for (OP-50)", () => {
   assert.match(lead, /For: Ada \(@lead-graph\)</);
   assert.doesNotMatch(lead, /For: Me</);
 });
+
+test("the Agents toolbar says how many ask the owner, and the drawer counts the open questions in its title", async () => {
+  const inbox = await import("../src/screens/team/questions.tsx");
+  const read = (questions, more, waiting) => ({ project_id: "p", questions: Array.from({ length: questions }, (_, index) => question({ id: index + 1 })), more, waiting: Array.from({ length: waiting }, (_, index) => ({ agent: index + 1, label: `A${index}`, waiting: "question", since_ms: 0, terminal: null })) });
+  assert.equal(inbox.askCount(read(1, 2, 1)), 4);
+  assert.equal(inbox.asksWords(inbox.askCount(read(0, 0, 1))), "1 asks you");
+  assert.equal(inbox.asksWords(3), "3 ask you");
+  assert.equal(inbox.asksWords(0), "no one asks you");
+  assert.throws(() => inbox.asksWords(1.5), /whole number/);
+  assert.equal(inbox.questionsTitle({ shown: { kind: "ok", value: read(0, 0, 2) }, stale: null }), "Questions for you");
+  assert.equal(inbox.questionsTitle({ shown: { kind: "ok", value: read(1, 1, 0) }, stale: null }), "Questions for you (2)");
+  assert.equal(inbox.questionsTitle({ shown: undefined, stale: null }), "Questions for you");
+});

@@ -686,7 +686,7 @@ test("a long task prompt shows its first line, cut to fit a row", () => {
   assert.equal(research.firstLine(""), "");
 });
 
-test("the Agents tab counts working team agents and running research like the project card", async () => {
+test("the Agents toolbar's team line names the pool as the mockup does, and the working count stays in the Agents and tasks fold", async () => {
   const agents = await import("../src/screens/project/agents.tsx");
   const team = { project_id: "p-1", keep_warm: false, paused: false, min_agents: 0, max_agents: 5, harnesses: [], messages: [], plan: [],
     agents: [teamAgent(2, "working", { task: 10 }), teamAgent(3, "working", { task: 11 }), teamAgent(4, "stopped")],
@@ -696,8 +696,13 @@ test("the Agents tab counts working team agents and running research like the pr
   const data = { ...tabData([job("running", { started_ms: 1_000 })]), setup: { kind: "ok", value: { team: { max_agents: 5 } } },
     assigned: { pool: { id: "pool-1", name: "Work", members: ["a", "b"] } }, team: { result: { kind: "ok", value: team }, at: 1_000 } };
   const markup = renderToStaticMarkup(createElement(agents.AgentsTab, { data }));
-  assert.match(markup, /3 agents working\. Work: 2 accounts\./);
-  assert.doesNotMatch(markup, /1 of 5 agents running/);
+  const line = markup.slice(markup.indexOf('class="tg-summary"'), markup.indexOf("Open all terminals"));
+  assert.match(line, /<button type="button" class="tg-asks" aria-haspopup="dialog">Questions<\/button><\/span><span aria-hidden="true"> · <\/span><span>Work<\/span>/);
+  assert.doesNotMatch(line, /working/, "the toolbar line names no working count");
+  const fold = markup.slice(markup.indexOf('<details class="pj-stack-s" aria-label="Agents and tasks">'));
+  assert.match(fold, /2 of 5 agents working\./, "the team table in the fold counts them");
+  const none = renderToStaticMarkup(createElement(agents.AgentsTab, { data: { ...data, assigned: null } }));
+  assert.match(none, /<span>No pool\. Pick a pool to start\.<\/span>/);
 });
 
 test("the Agents tab labels research and asks the engine for the live team", async () => {

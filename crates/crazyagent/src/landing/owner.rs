@@ -1503,6 +1503,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let (tree, conflicts) = merge(&owner, &from, &tip, &record.head)?;
     let merged = owner.commit_tree(&tree, &[&record.head, &tip], &message, ENGINE)?;
     verify_objects(&repository, &[&merged], &[&record.head, &tip, &record.base])?;
+    let before = record.clone();
     record.state = ChangeState::Updating;
     record.waiting = true;
     record.base = tip;
@@ -1516,10 +1517,15 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
         return store::save(db, &record);
     };
     record.intent = Some(Intent::Reset {
+        from: Some(before.head.clone()),
         target: merged.clone(),
     });
     store::save(db, &record)?;
-    flow::reset_agent(&agent, &merged)?;
+    if !flow::reset_agent(&agent, &before.head, &merged)? {
+        store::save(db, &before)?;
+        flow::set_engine_ref(&owner, &repository, &pending_ref(id), Some(&before.head))?;
+        return Err(failure("changes_agent_busy"));
+    }
     record.intent = None;
     store::save(db, &record)
 }
@@ -1691,9 +1697,12 @@ pub(super) fn settled(db: &Connection, id: &ChangeSetId) -> Result<Record, Engin
 /// an Accept whose branch moved is finished, one whose files were written but whose
 /// branch did not move is moved by compare and swap, either listed as the master's merge
 /// with its covered sets closed when the master landed its own set, one that wrote nothing is dropped,
-/// an undo is finished or dropped the same way, and an agent worktree reset is run again
-/// while the worktree still holds the old or new commit. The caller holds [`hold`] on its repository. Inputs: the store and the loaded
-/// record. Output: Ok once the stored record holds no intent.
+/// an undo is finished or dropped the same way, and an agent worktree reset counts as done
+/// when HEAD already holds its target, is run again only while HEAD still holds the
+/// commit it started from and the worktree holds nothing else, and is dropped otherwise,
+/// so a commit the agent made after it stopped is never moved. The caller holds [`hold`]
+/// on its repository. Inputs: the store and the loaded record. Output: Ok once the stored
+/// record holds no intent.
 fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     match record.intent.clone() {
         Some(Intent::Land {
@@ -1730,7 +1739,7 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                 store::save(db, record)?;
             }
         }
-        Some(Intent::Reset { target }) => {
+        Some(Intent::Reset { from, target }) => {
             let agent = match flow::agent(db, record) {
                 Err(refused) if refused.0 == "changes_workspace_invalid" => None,
                 opened => Some(opened?),
@@ -1738,11 +1747,15 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             let mut reset = false;
             if let Some(agent) = &agent
                 && let Ok(current) = agent.head()
-                && (flow::holds_only(&agent.repo, &target)?
-                    || flow::holds_only(&agent.repo, &current)?)
             {
-                flow::reset_agent(agent, &target)?;
-                reset = true;
+                if current == target {
+                    reset = true;
+                } else if from.as_deref() == Some(current.as_str())
+                    && (flow::holds_only(&agent.repo, &target)?
+                        || flow::holds_only(&agent.repo, &current)?)
+                {
+                    reset = flow::reset_agent(agent, &current, &target)?;
+                }
             }
             if !record.is_open() {
                 let start = if reset { &target } else { &record.head };
