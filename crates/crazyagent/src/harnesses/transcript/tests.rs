@@ -230,8 +230,9 @@ fn claude_background_commands_are_followed_by_task_id() {
 
 /// A background command that ends while its agent is still in the turn is recorded by
 /// Claude Code 2.1.309 as a queued command attachment inside that turn, not as a user
-/// message, in the shape its package code builds: its task id ends there and no turn starts. Only a task notification attachment
-/// ends a task; a queued prompt naming a task id does not (HackerBlog task 177, DEC-119).
+/// message, with the fields of the line in the HackerBlog transcript (task 177): its task
+/// id ends there and no turn starts. Only a task notification attachment ends a task; a
+/// queued prompt naming a task id does not (DEC-119).
 #[test]
 fn claude_a_background_command_that_ends_during_the_turn_ends_by_its_queued_notification() {
     let case = Case::new();
@@ -243,9 +244,9 @@ fn claude_a_background_command_that_ends_during_the_turn_ends_by_its_queued_noti
             "\n",
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: bub9bmz4a."}]},"toolUseResult":{"backgroundTaskId":"bub9bmz4a"}}"#,
             "\n",
-            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<tool-use-id>t1</tool-use-id>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>","commandMode":"task-notification","origin":{"kind":"task-notification"}}}"#,
+            r#"{"parentUuid":"00000000-0000-4000-8000-0000000000e1","isSidechain":false,"attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<tool-use-id>t1</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bub9bmz4a.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>","source_uuid":"00000000-0000-4000-8000-0000000000b1","delivery_id":"00000000-0000-4000-8000-0000000000c1","commandMode":"task-notification","origin":{"kind":"task-notification","producer":"session-task"},"runId":"00000000-0000-4000-8000-0000000000d1","timestamp":"2026-11-07T18:52:01.000Z"},"type":"attachment","uuid":"00000000-0000-4000-8000-0000000000f1","timestamp":"2026-11-07T18:52:01.000Z","rendered":[{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<tool-use-id>t1</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bub9bmz4a.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>"}}],"renderedInHumanTurn":[{"content":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<tool-use-id>t1</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bub9bmz4a.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>"}],"renderedRole":"user","session_id":"00000000-0000-4000-8000-0000000000a1","userType":"external","entrypoint":"cli","cwd":"/work/agent","sessionId":"00000000-0000-4000-8000-0000000000a1","version":"2.1.309","gitBranch":"agent/check"}"#,
             "\n",
-            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>other1</task-id>\n</task-notification>","commandMode":"prompt"}}"#,
+            r#"{"parentUuid":"00000000-0000-4000-8000-0000000000e2","isSidechain":false,"attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>other1</task-id>\n</task-notification>","source_uuid":"00000000-0000-4000-8000-0000000000b2","delivery_id":"00000000-0000-4000-8000-0000000000c2","commandMode":"prompt","origin":{"kind":"user"},"runId":"00000000-0000-4000-8000-0000000000d2","timestamp":"2026-11-07T18:52:02.000Z"},"type":"attachment","uuid":"00000000-0000-4000-8000-0000000000f2","timestamp":"2026-11-07T18:52:02.000Z","rendered":[{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>other1</task-id>\n</task-notification>"}}],"renderedInHumanTurn":[{"content":"<task-notification>\n<task-id>other1</task-id>\n</task-notification>"}],"renderedRole":"user","session_id":"00000000-0000-4000-8000-0000000000a1","userType":"external","entrypoint":"cli","cwd":"/work/agent","sessionId":"00000000-0000-4000-8000-0000000000a1","version":"2.1.309","gitBranch":"agent/check"}"#,
             "\n",
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Check passed"}],"stop_reason":"end_turn"}}"#,
             "\n",

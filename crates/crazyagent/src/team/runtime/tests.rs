@@ -7940,13 +7940,13 @@ fn a_message_to_an_agent_in_a_running_turn_is_not_typed_into_it() {
 }
 
 /// The queued command attachment Claude Code 2.1.309 writes when a background command ends
-/// while its agent is still in the turn, for task `bgcheck1`, in the shape its package code
-/// builds; the freeze live pass checks it against a real session.
+/// while its agent is still in the turn, for task `bgcheck1`, with the fields of the line in
+/// the HackerBlog transcript (task 177); the freeze live pass checks it end to end.
 #[cfg(target_os = "macos")]
-const MID_TURN_NOTICE: &str = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>bgcheck1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>","commandMode":"task-notification","origin":{"kind":"task-notification"}}}"#;
+const MID_TURN_NOTICE: &str = r#"{"parentUuid":"00000000-0000-4000-8000-0000000000e3","isSidechain":false,"attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>bgcheck1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bgcheck1.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>","source_uuid":"00000000-0000-4000-8000-0000000000b3","delivery_id":"00000000-0000-4000-8000-0000000000c3","commandMode":"task-notification","origin":{"kind":"task-notification","producer":"session-task"},"runId":"00000000-0000-4000-8000-0000000000d3","timestamp":"2026-11-07T18:52:03.000Z"},"type":"attachment","uuid":"00000000-0000-4000-8000-0000000000f3","timestamp":"2026-11-07T18:52:03.000Z","rendered":[{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>bgcheck1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bgcheck1.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>"}}],"renderedInHumanTurn":[{"content":"<task-notification>\n<task-id>bgcheck1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bgcheck1.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>"}],"renderedRole":"user","session_id":"00000000-0000-4000-8000-0000000000a1","userType":"external","entrypoint":"cli","cwd":"/work/agent","sessionId":"00000000-0000-4000-8000-0000000000a1","version":"2.1.309","gitBranch":"agent/check"}"#;
 
 /// The Claude Code stand-in of HackerBlog task 177: each turn starts a command in the
-/// background that writes and commits `background.txt` in the agent's folder and marks
+/// background that writes `background.txt` in the agent's folder and marks
 /// `background-done`; the agent goes on working until that command ended, gets its end as
 /// a queued notification inside the same turn, and ends the turn. Returns the script.
 #[cfg(target_os = "macos")]
@@ -7956,7 +7956,7 @@ fn mid_turn_background() -> String {
     let (head, _) = BACKGROUND_CLAUDE.split_once(start).unwrap();
     let notice = MID_TURN_NOTICE.replace('\'', "'\\''");
     format!(
-        "{head}{start}  (\n    /bin/sleep 1\n    printf mine > background.txt\n    g='{AGENT_GIT} -c user.name=W -c user.email=w@crazyagent.invalid -c core.hooksPath=/dev/null -c commit.gpgsign=false'\n    $g add background.txt > /dev/null 2>&1 && $g commit -q -m 'background commit' > /dev/null 2>&1\n    printf done > \"$CLAUDE_CONFIG_DIR/background-done\"\n  ) &\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu_bg\",\"name\":\"Bash\",\"input\":{{\"command\":\"check\",\"run_in_background\":true}}}}],\"stop_reason\":\"tool_use\"}}}}' '{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_bg\",\"content\":\"Command running in background with ID: bgcheck1.\"}}]}},\"toolUseResult\":{{\"backgroundTaskId\":\"bgcheck1\"}}}}' >> \"$f\"\n  while [ ! -e \"$CLAUDE_CONFIG_DIR/background-done\" ]; do /bin/sleep 0.1; done\n  printf '%s\\n' '{notice}' >> \"$f\"\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Check passed.\"}}],\"stop_reason\":\"end_turn\"}}}}' '{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":300}}' >> \"$f\"\ndone\n"
+        "{head}{start}  (\n    /bin/sleep 1\n    printf mine > background.txt\n    printf done > \"$CLAUDE_CONFIG_DIR/background-done\"\n  ) &\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu_bg\",\"name\":\"Bash\",\"input\":{{\"command\":\"check\",\"run_in_background\":true}}}}],\"stop_reason\":\"tool_use\"}}}}' '{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_bg\",\"content\":\"Command running in background with ID: bgcheck1.\"}}]}},\"toolUseResult\":{{\"backgroundTaskId\":\"bgcheck1\"}}}}' >> \"$f\"\n  while [ ! -e \"$CLAUDE_CONFIG_DIR/background-done\" ]; do /bin/sleep 0.1; done\n  printf '%s\\n' '{notice}' >> \"$f\"\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Check passed.\"}}],\"stop_reason\":\"end_turn\"}}}}' '{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":300}}' >> \"$f\"\ndone\n"
     )
 }
 
@@ -7977,12 +7977,11 @@ fn a_task_whose_background_command_ends_during_its_turn_ends_with_that_turn() {
     );
 }
 
-/// S3 (DEC-119): a task whose turn waited on its background command, which wrote and
-/// committed a file, posts its change set when it ends, with that commit and no stop of
-/// the agent.
+/// S3 (DEC-119): a task whose turn waited on its background command, which wrote a file,
+/// posts its change set when it ends, holding that file, with no stop of the agent.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_held_task_that_ends_posts_its_change_set_with_its_background_commit_and_no_stop() {
+fn a_held_task_that_ends_posts_its_change_set_with_its_background_work_and_no_stop() {
     let fixture = Fixture::new(1);
     choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
     let host = fixture.host();
@@ -8003,14 +8002,15 @@ fn a_held_task_that_ends_posts_its_change_set_with_its_background_commit_and_no_
             |row| row.get(0),
         )
         .unwrap();
-    let log = level_git(
+    let changed = level_git(
         &fixture.base.join("project").join(&worktree),
         &fixture.base,
-        &["log", "--format=%s"],
+        &["diff", "--name-only", &sets[0].base, &sets[0].head],
     );
-    assert!(
-        String::from_utf8_lossy(&log.stdout).contains("background commit"),
-        "{log:?}"
+    assert_eq!(
+        String::from_utf8_lossy(&changed.stdout),
+        "background.txt\n",
+        "{changed:?}"
     );
     assert_ne!(fixture.agent_status(agent).0, AgentStatus::Stopped);
     team.shutdown().unwrap();
@@ -8708,7 +8708,7 @@ fn send_own_rules_bounds_a_kept_lead_s_own_turn_by_the_session_time_left() {
     let Ok(Order::Rules(rules)) = orders.try_recv() else {
         panic!("no rules for the own turn");
     };
-    assert_eq!(rules.background, crate::team::BackgroundAtEnd::Wait);
+    assert_eq!(rules.background, crate::team::BackgroundAtEnd::default());
     let limit = rules.limit.expect("a bound for the own turn");
     assert!(
         limit > Duration::from_secs(2) && limit <= Duration::from_secs(3),
