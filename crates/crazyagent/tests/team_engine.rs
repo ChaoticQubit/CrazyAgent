@@ -239,7 +239,10 @@ impl Owner {
         .settings
         .model_access
         .unwrap();
-        let tx = self.database.transaction().unwrap();
+        let tx = self
+            .database
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
         let outcome = crazyagent::team::execute(&tx, &access, &action).unwrap();
         tx.commit().unwrap();
         outcome

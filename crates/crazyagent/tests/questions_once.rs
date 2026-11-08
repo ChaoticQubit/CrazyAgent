@@ -256,8 +256,9 @@ fn project(database: &Connection, root: &Path) -> StoredSetup {
     setup
 }
 
-/// Applies one owner team action in its own transaction, as the owner socket does.
-/// Inputs: the database, the engine root and the action. Output: none; the action applied.
+/// Applies one owner team action in its own immediate transaction, as the owner socket
+/// does, so a write racing the running engine waits for it instead of failing. Inputs: the
+/// database, the engine root and the action. Output: none; the action applied.
 fn act(database: &mut Connection, root: &Path, action: TeamAction) {
     let access =
         crazyagent::config::resolve_config(&root.join("global.toml"), &root.join("project.toml"))
@@ -265,7 +266,9 @@ fn act(database: &mut Connection, root: &Path, action: TeamAction) {
             .settings
             .model_access
             .unwrap();
-    let tx = database.transaction().unwrap();
+    let tx = database
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
     assert_eq!(
         crazyagent::team::execute(&tx, &access, &action).unwrap(),
         Outcome::Applied,
@@ -285,6 +288,20 @@ fn live_turns(database: &Connection) -> Option<(i64, bool)> {
         )
         .optional()
         .unwrap()
+}
+
+/// Reads the team agent the live master switch runs. Input: the database. Output: the
+/// agent, or none before the runtime started one.
+fn live_agent(database: &Connection) -> Option<i64> {
+    database
+        .query_row(
+            "SELECT agent FROM team_live_masters WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+        .flatten()
 }
 
 fn state(database: &Connection, message: i64) -> String {
@@ -315,7 +332,8 @@ fn until(what: &str, done: impl Fn() -> bool) {
 
 /// An owner answer the engine settled while the live master was busy waits as one owner
 /// message; the engine is killed before it types it, and the restarted engine types it
-/// into the master exactly once and never queues it again.
+/// into the master exactly once and never queues it again. The master starts quiet, its
+/// instructions read as system context with nothing typed, so its first turn is the owner's.
 #[test]
 fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_the_restart() {
     let (_folder, codex) = runtime();
@@ -340,8 +358,12 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
             version,
         },
     );
-    until("the live master's briefing turn ends", || {
-        live_turns(&database) == Some((1, false))
+    let host = Tmux::open(Some(tmux.clone()), &root.join(FOLDER));
+    until("the live master's pane runs", || {
+        live_agent(&database).is_some_and(|agent| {
+            host.alive()
+                .is_ok_and(|alive| alive.contains(&AgentId::team(agent).unwrap()))
+        })
     });
     let master: i64 = database
         .query_row(
@@ -350,9 +372,19 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
             |row| row.get(0),
         )
         .unwrap();
+    assert_eq!(live_agent(&database), Some(master));
     let home = crazyagent::team::runtime::agent_home(&root.join("team"), master);
     let log = home.join("heard.log");
-    assert!(log.is_file(), "the master read its briefing");
+    std::thread::sleep(WATCHED);
+    assert_eq!(
+        live_turns(&database),
+        Some((0, false)),
+        "the master starts quiet"
+    );
+    assert!(
+        !log.exists(),
+        "nothing is typed into the master at its start"
+    );
 
     let question = crazyagent::questions::ask(
         &database,
@@ -366,7 +398,6 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
         },
     )
     .unwrap();
-    let host = Tmux::open(Some(tmux.clone()), &root.join(FOLDER));
     host.input(&AgentId::team(master).unwrap(), b"hold the turn\r")
         .unwrap();
     until("the owner's own turn keeps the master busy", || {
