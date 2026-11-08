@@ -289,11 +289,11 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
     </SettingRow>)}
     {children}
     <QuestionsSetting projectId={projectId} status={status} reload={reload} />
-    <SettingRow label="Overlapping edits">
+    <SettingRow label="Overlapping edits" wide>
       <span className="set-label" aria-hidden="true">Overlapping edits</span>
+      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit. Wait holds back an agent starting on a file another agent is on, and tells it when the file is free.</span>
       <Segmented label="Overlapping edits" value={view.settings.overlaps as string} options={overlapOptions(view.settings.overlaps)}
         onValue={(value) => { if (knownOverlap(value)) void save({ overlaps: value }, "overlapping edits"); }} />
-      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit. Wait holds back an agent starting on a file another agent is on, and tells it when the file is free.</span>
     </SettingRow>
     <SettingRow label="Terminals per window">
       <span className="set-label" aria-hidden="true">Terminals per window</span>

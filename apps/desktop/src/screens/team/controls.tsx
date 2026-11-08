@@ -687,6 +687,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           <AgentAccessSetting projectId={projectId} notify={data?.notify} reload={reload} />
           <SettingRow label={MERGE_INTO_MAIN} wide>
             <span className="set-label" aria-hidden="true">{MERGE_INTO_MAIN}</span>
+            <span className="tg-terminal-note">Each merge shows in Activity and can be undone. Sandboxed keeps today's limits.</span>
             <div className="radio-cards" role="radiogroup" aria-label={MERGE_INTO_MAIN}>
               <RadioCard name={`${prefix}-merge`} value="merges" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "merges"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("merges"); }}
@@ -697,7 +698,6 @@ export function TeamControls({ projectId, status, reload, data, group }: {
                 title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
             </div>
             {!status.master_lands && <span className="tg-terminal-note">Only at Full access.</span>}
-            <span className="tg-terminal-note">Each merge shows in Activity and can be undone. Sandboxed keeps today's limits.</span>
           </SettingRow>
           <SettingRow label="Ask me before merging into the master's branch">
             <span className="set-label" aria-hidden="true">Ask me before merging into the master's branch</span>
