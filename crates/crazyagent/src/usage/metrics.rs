@@ -72,8 +72,9 @@ pub struct AgentRow {
 }
 
 /// What the Metrics page counts besides the usage report: team tasks running now, waiting
-/// now, and done or failed in the range; the tokens chart in bars of `bucket_ms`; and the
-/// breakdown by run, project, agent, account and harness.
+/// now, and done or failed in the range; the merges in the range, those into main and those
+/// undone; the tokens chart in bars of `bucket_ms`; and the breakdown by run, project, agent,
+/// account and harness.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metrics {
@@ -81,6 +82,12 @@ pub struct Metrics {
     pub tasks_waiting: u64,
     pub tasks_done: u64,
     pub tasks_failed: u64,
+    #[serde(default)]
+    pub merges: u64,
+    #[serde(default)]
+    pub merges_into_main: u64,
+    #[serde(default)]
+    pub merges_undone: u64,
     pub bucket_ms: i64,
     pub series: Vec<Bucket>,
     pub runs: Vec<RunRow>,
@@ -481,6 +488,9 @@ pub fn read(
         tasks_waiting,
         tasks_done,
         tasks_failed,
+        merges: 0,
+        merges_into_main: 0,
+        merges_undone: 0,
         bucket_ms,
         series: series(db, project, since_ms, bucket_ms)?,
         runs: runs(db, project, since_ms)?,

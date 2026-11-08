@@ -25,7 +25,7 @@ const usage = {
   agent_lines: [], limits: [], partial_homes: 0,
 };
 const metrics = {
-  running: 2, tasks_waiting: 1, tasks_done: 6, tasks_failed: 0, bucket_ms: 2 * HOUR,
+  running: 2, tasks_waiting: 1, tasks_done: 6, tasks_failed: 0, merges: 19, merges_into_main: 5, merges_undone: 1, bucket_ms: 2 * HOUR,
   series: [{ start_ms: SINCE, tokens: tokens(100, 50, 20, 999) }],
   runs: [
     { project: "alpha", agent: "team-8", session: "rollout-abc", task: 142, title: "Calendar API endpoints", status: "running", last_ms: NOW - 5 * MINUTE, tokens: ALPHA },
@@ -67,6 +67,7 @@ test("all projects shows the same tiles, and By project lists each project with 
   const markup = render();
   assert.match(text(markup), /Tokens 2\.3K 1\.2K input, 800 cache write, 300 output/);
   assert.match(text(markup), /2 projects · Updated 10 s ago · provider-reported usage per turn/);
+  assert.match(text(markup), /Tasks 6 done 1 waiting, 0 failed Merges 19 5 into main, 1 undone Lines /, "the same six tiles as the project tab");
   assert.match(text(markup), /By project By agent By run By account By harness/);
   const table = tableText(markup);
   assert.match(table, /^ Project Tokens Input Cache write Output Cache read Agents Runs Share of tokens /);

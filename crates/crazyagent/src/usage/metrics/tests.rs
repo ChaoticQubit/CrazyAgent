@@ -104,6 +104,60 @@ fn tasks_count_running_and_waiting_now_and_done_or_failed_in_the_range() {
     );
 }
 
+/// Merges count the merges the Overview's Merges filter shows in the range, a lead's merge
+/// and the master's merge into main; into main counts the master's, and undone those an Undo
+/// merge reverted. An owner's Accept is a change, not a merge. One project counts only its
+/// own merges, None counts all.
+#[test]
+fn merges_count_lead_and_main_merges_in_the_range_with_those_undone() {
+    use crate::activity::{ActivityKind, MASTER_ACTOR, NewActivity};
+    let (_directory, db) = database();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+        .unwrap();
+    crate::activity::initialize(&db).unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    for (project, kind, change_set, at_ms) in [
+        (alpha(), ActivityKind::MergedIntoMain, "set-1", MIDNIGHT + HOUR),
+        (alpha(), ActivityKind::MergedIntoMain, "set-2", MIDNIGHT + 2 * HOUR),
+        (alpha(), ActivityKind::LeadMerged, "set-3", MIDNIGHT + 3 * HOUR),
+        (alpha(), ActivityKind::Accepted, "set-4", MIDNIGHT + 4 * HOUR),
+        (alpha(), ActivityKind::MergedIntoMain, "set-5", MIDNIGHT - HOUR),
+        (beta.clone(), ActivityKind::MergedIntoMain, "set-6", MIDNIGHT + HOUR),
+    ] {
+        let item = NewActivity {
+            kind,
+            actor: MASTER_ACTOR,
+            agent: None,
+            goal: None,
+            text: "Merged",
+            change_set: Some(change_set),
+        };
+        crate::activity::record(&db, &project, &item, at_ms).unwrap();
+    }
+    crate::activity::mark_undone(&db, &alpha(), "set-2");
+    let one = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap();
+    assert_eq!(
+        (one.merges, one.merges_into_main, one.merges_undone),
+        (3, 2, 1)
+    );
+    let all = read(&db, None, MIDNIGHT, NOW).unwrap();
+    assert_eq!(
+        (all.merges, all.merges_into_main, all.merges_undone),
+        (4, 3, 1)
+    );
+}
+
+/// A store without the activity table counts no merges.
+#[test]
+fn merges_are_zero_without_the_activity_table() {
+    let (_directory, db) = database();
+    let metrics = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap();
+    assert_eq!(
+        (metrics.merges, metrics.merges_into_main, metrics.merges_undone),
+        (0, 0, 0)
+    );
+}
+
 const MINUTE: i64 = 60 * 1000;
 
 /// A project whose team runs Codex and Claude Code sub-agents, as onboarding stores one.
