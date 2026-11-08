@@ -215,6 +215,44 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
   return [state, () => setRound((value) => value + 1)];
 }
 
+/** The Agents toolbar, one row as the mockup draws it above both Agents views: `lead`, then
+ * the team line (`line`, what `asks` the owner and the `pool`), then `tools` and Open all
+ * terminals, which opens the terminal wall windows, perWindow terminals each, and says why
+ * under the row when they could not open. Inputs: the project id and name, the terminals per
+ * window, the drawn team or null while it is not read, the team line and the row's parts.
+ * Output: the row and its note. */
+export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, asks, pool, tools }: {
+  projectId: string; name: string; perWindow: PerWindow; team: TeamGraph | null; line: string | null;
+  lead?: ReactNode; asks?: ReactNode; pool?: string; tools?: ReactNode;
+}) {
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => { setNote(null); }, [projectId]);
+  if (line !== null && team === null) throw new Error("a team line comes from a read team");
+  const walls = team === null ? null : wallPages(team.nodes, perWindow).length;
+  if (walls !== null && !(Number.isSafeInteger(walls) && walls >= 0)) throw new Error(`a team needs a whole number of windows: ${walls}`);
+
+  async function openAll(windows: number) {
+    if (windows === 0) return;
+    setNote(wallNote(await openTerminalWindows(projectId, name, windows, true)));
+  }
+
+  const parts = [line && <span key="team" role="status">{line}</span>, asks && <span key="asks">{asks}</span>, pool && <span key="pool">{displayText(pool)}</span>]
+    .filter((part) => Boolean(part));
+  return <>
+    <div className="tg-head">
+      {lead}
+      <span className="tg-summary">{parts.flatMap((part, index) => index === 0 ? [part] : [<span key={`dot-${index}`} aria-hidden="true"> · </span>, part])}</span>
+      {tools}
+      <Button size="small" icon="square-terminal" className="tg-open-all" title={openAllHint(walls ?? 0, perWindow)} disabled={!walls}
+        onClick={() => void openAll(walls ?? 0)}>Open all terminals</Button>
+    </div>
+    {note && <Notice tone="warn" alert>
+      <span className="grow">{displayText(note)}</span>
+      <Button size="small" variant="quiet" onClick={() => setNote(null)}>Dismiss</Button>
+    </Notice>}
+  </>;
+}
+
 /** The live team graph of one project as a tree of who leads whom (DEC-104 Q16): the master
  * on top, each lead under it and each lead's agents under that lead, joined by solid
  * assignment lines whose badges count live tasks, waiting questions and unread messages with
@@ -260,11 +298,6 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
     setSendNote(null);
     setNote(null);
   }, [projectId]);
-
-  async function openAll(windows: number) {
-    if (windows === 0) return;
-    setNote(wallNote(await openTerminalWindows(projectId, name, windows, true)));
-  }
 
   async function send() {
     if (acting?.kind !== "message" || busy) return;
@@ -361,19 +394,10 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
       <NodeMessages projectId={projectId} node={node} refresh={graph} />
     </AgentSide>;
   };
-  const walls = team === null ? null : wallPages(team.nodes, perWindow).length;
-  const head = (line: string | null) => {
-    const parts = [line && <span key="team" role="status">{line}</span>, asks && <span key="asks">{asks}</span>, pool && <span key="pool">{displayText(pool)}</span>]
-      .filter((part) => Boolean(part));
-    return <div className="tg-head">
-      <h3 id={`${ids}-title`} className="pj-sr">Team graph</h3>
-      {lead}
-      <span className="tg-summary">{parts.flatMap((part, index) => index === 0 ? [part] : [<span key={`dot-${index}`} aria-hidden="true"> · </span>, part])}</span>
-      {tools}
-      <Button size="small" icon="square-terminal" className="tg-open-all" title={openAllHint(walls ?? 0, perWindow)} disabled={!walls}
-        onClick={() => void openAll(walls ?? 0)}>Open all terminals</Button>
-    </div>;
-  };
+  const head = (line: string | null) => <>
+    <h3 id={`${ids}-title`} className="pj-sr">Team graph</h3>
+    <AgentsToolbar projectId={projectId} name={name} perWindow={perWindow} team={team} line={line} lead={lead} asks={asks} pool={pool} tools={tools} />
+  </>;
   const status: ReactNode = graph === undefined ? <Skeleton shape="card" />
     : graph.kind === "not_ready" ? <NotReady what="The team graph" compact />
     : graph.kind === "error" ? <LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />
