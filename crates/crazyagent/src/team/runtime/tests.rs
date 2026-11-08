@@ -6227,13 +6227,28 @@ fn wake_call(
     agent: &str,
     text: &str,
 ) -> (String, bool) {
+    master_call(
+        fixture,
+        mailbox,
+        call,
+        serde_json::json!({"tool": "update_work", "kind": "message", "to": agent, "text": text}),
+    )
+}
+
+/// Plants one live master tool call in a mailbox and answers it the way the runtime's tick
+/// does, as the project's first master. Takes the fixture, the mailbox, a call number and
+/// the call. Returns the reply text and whether it is an error.
+#[cfg(target_os = "macos")]
+fn master_call(
+    fixture: &Fixture,
+    mailbox: &Path,
+    call: u32,
+    body: serde_json::Value,
+) -> (String, bool) {
     let id = format!("{call:032x}");
     std::fs::write(
         mailbox.join(format!("{id}.call")),
-        serde_json::to_vec(
-            &serde_json::json!({"tool": "update_work", "kind": "message", "to": agent, "text": text}),
-        )
-        .unwrap(),
+        serde_json::to_vec(&body).unwrap(),
     )
     .unwrap();
     let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
@@ -7862,8 +7877,9 @@ fn receipt(fixture: &Fixture, message: i64) -> String {
 }
 
 /// S2 (DEC-119, HackerBlog messages 440, 445, 461 and 475): a sub-agent whose turn ended but
-/// is held open for a command it started in the background waits at its prompt, so it shows
-/// idle and a message sent to it is typed into its pane, while its task stays open.
+/// is held open for a command it started in the background waits at its prompt, so a
+/// message sent to it is typed into its pane, while it shows working on its task and its
+/// task stays open.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_message_to_an_agent_held_for_its_background_command_is_typed_into_its_pane() {
@@ -7878,15 +7894,90 @@ fn a_message_to_an_agent_held_for_its_background_command_is_typed_into_its_pane(
             .is_some_and(|agent| stand_in_file(f, *agent, "held").exists())
     });
     let agent = subs(&fixture)[0];
-    fixture.until(&mut team, "the held agent shows idle", |f| {
-        f.agent_status(agent).0 == AgentStatus::Idle
-    });
     let message = typed_prompt(&fixture, agent, "End your turn now.");
     fixture.until(&mut team, "the message is typed into the held agent", |f| {
         receipt(f, message) == "typed"
     });
     let typed = std::fs::read_to_string(stand_in_file(&fixture, agent, "typed")).unwrap();
     assert!(typed.contains("End your turn now."), "{typed}");
+    assert_eq!(fixture.agent_status(agent).0, AgentStatus::Working);
+    assert_eq!(check_end(&fixture), None, "the held task stays open");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// How long a held row ticks the runtime after its stand-in marked the turn held, so the
+/// runtime has read the held turn before the row looks at the agent.
+#[cfg(target_os = "macos")]
+const HELD_SETTLE: Duration = Duration::from_secs(3);
+
+/// Waits until the sub-agent of [`long_background`] ended its turn held for its background
+/// command, then ticks the runtime for `HELD_SETTLE`. Takes the fixture and the runtime.
+/// Returns the agent.
+#[cfg(target_os = "macos")]
+fn held_agent(fixture: &Fixture, team: &mut TeamRuntime) -> i64 {
+    fixture.until(team, "the agent's turn is held", |f| {
+        subs(f)
+            .first()
+            .is_some_and(|agent| stand_in_file(f, *agent, "held").exists())
+    });
+    let settle = Instant::now() + HELD_SETTLE;
+    while Instant::now() < settle {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    subs(fixture)[0]
+}
+
+/// DEC-119 r2: a sub-agent held for its background command still works on its task, so it
+/// shows working and its worktree stays read-only in the owner's IDE workspace.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_held_agent_shows_working_and_its_worktree_stays_locked_in_the_ide() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    let host = fixture.host();
+    let mut team = check_runtime(&fixture, &host, &long_background(120), None, None);
+    let agent = held_agent(&fixture, &mut team);
+    assert_eq!(fixture.agent_status(agent).0, AgentStatus::Working);
+    let worktree: String = fixture
+        .connection
+        .query_row(
+            "SELECT worktree FROM team_worktrees WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let locked =
+        crate::ide::readonly::settings(&fixture.connection, &ProjectId::new(PROJECT).unwrap())
+            .unwrap()
+            .readonly_include;
+    assert!(locked.contains(&format!("{worktree}/**")), "{locked:?}");
+    assert_eq!(check_end(&fixture), None, "the held task stays open");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// DEC-119 r2: the master's merge refuses a sub-agent held for its background command, as
+/// it refuses any agent still working on its task.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_cannot_merge_an_agent_held_for_its_background_command() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    let host = fixture.host();
+    let mut team = check_runtime(&fixture, &host, &long_background(120), None, None);
+    let agent = held_agent(&fixture, &mut team);
+    fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
+    let mailbox = fixture.base.join("mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let (text, refused) = master_call(
+        &fixture,
+        &mailbox,
+        1,
+        serde_json::json!({"tool": crate::team::tool::MERGE_TOOL, "agent": format!("team-{agent}")}),
+    );
+    assert!(refused && text.contains("is still working"), "{text}");
     assert_eq!(check_end(&fixture), None, "the held task stays open");
     team.shutdown().unwrap();
     host.close(&[]).unwrap();

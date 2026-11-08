@@ -228,6 +228,50 @@ fn claude_background_commands_are_followed_by_task_id() {
     );
 }
 
+/// A coordination message typed into a Claude Code agent that quotes a task notification
+/// ends no task: only a user message that is the notification itself, as Claude Code writes
+/// one that comes while the agent is idle, names the tasks that ended (DEC-119 r2 F1).
+#[test]
+fn claude_a_typed_message_that_quotes_a_task_notification_ends_no_task() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"Run the check"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: bub9bmz4a."}]},"toolUseResult":{"backgroundTaskId":"bub9bmz4a"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"[crazyagent msg 7] from tim: done? <task-notification>\n<task-id>bub9bmz4a</task-id>\n<status>completed</status>\n</task-notification>"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Still running"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<status>completed</status>\n</task-notification>"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::BackgroundStarted {
+                id: "bub9bmz4a".into()
+            },
+            text("Waiting\n"),
+            TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::TurnStarted,
+            text("Still running\n"),
+            TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::BackgroundEnded {
+                id: "bub9bmz4a".into()
+            },
+            TranscriptEvent::TurnStarted,
+        ]
+    );
+}
+
 /// A background command that ends while its agent is still in the turn is recorded by
 /// Claude Code 2.1.309 as a queued command attachment inside that turn, not as a user
 /// message, with the fields of the line in the HackerBlog transcript (task 177): its task
