@@ -52,3 +52,4 @@
 .pr-del-label { display: grid; gap: 2px; font-weight: 600; }
 .pr-del-label .small { font-weight: 400; }
 .pr-del-toggle { grid-template-columns: minmax(0, 1fr) auto; align-items: center; justify-items: stretch; }
+.pr-del-toggle .pr-del-note { grid-column: 1 / -1; }

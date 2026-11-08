@@ -243,20 +243,24 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
     </div>}
     <div className="pr-del-row">
       <span className="pr-del-label">Instructions agents get</span>
-      <Segmented label="Instructions agents get" value={choice.value}
-        options={INSTRUCTION_MODES.map(({ value, label, note }) => ({ value, label, title: note }))}
+      <Segmented label="Instructions agents get" value={choice.value} describedBy="agent-instructions-note"
+        options={INSTRUCTION_MODES.map(({ value, label }) => ({ value, label }))}
         onValue={(mode) => save({ ...current, mode })} />
+      <span className="small muted pr-del-note" id="agent-instructions-note">{choice.note}</span>
     </div>
     <div className="pr-del-row">
       <span className="pr-del-label">When you edit instructions</span>
-      <Segmented label="When you edit instructions" value={delivery.value}
-        options={EDIT_DELIVERIES.map(({ value, label, note }) => ({ value, label, title: note }))}
+      <Segmented label="When you edit instructions" value={delivery.value} describedBy="agent-edits-note"
+        options={EDIT_DELIVERIES.map(({ value, label }) => ({ value, label }))}
         onValue={(edits) => save({ ...current, edits })} />
+      <span className="small muted pr-del-note" id="agent-edits-note">{delivery.note}</span>
     </div>
     <div className="pr-del-row pr-del-toggle">
       <span className="pr-del-label"><strong>Keep transcripts</strong><span className="small muted">For headless Claude runs</span></span>
       <Switch id="agent-transcripts" label="Keep transcripts for headless Claude runs" hideLabel checked={current.transcripts}
-        disabledReason={busy ? "Saving..." : undefined} onChecked={(transcripts) => save({ ...current, transcripts })} />
+        describedBy="agent-transcripts-note" disabledReason={busy ? "Saving..." : undefined}
+        onChecked={(transcripts) => save({ ...current, transcripts })} />
+      <span className="small muted pr-del-note" id="agent-transcripts-note">{current.transcripts ? "Kept in the agent's own home" : "No transcript kept"}</span>
     </div>
   </Panel>;
 }
