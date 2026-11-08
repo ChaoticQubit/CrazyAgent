@@ -131,11 +131,12 @@ test("the panel's Message puts the cursor in its Type to box, its Stop asks firs
   assert.deepEqual(steps.paused.notes, ["Paused. Running tasks are stopping and waiting tasks are cancelled."], JSON.stringify(steps.paused));
 });
 
-/** Mounts the Agents tab at 1200x800 with a running task and a codex sub-agent harness, waits
- * until the graph drew and the questions inbox read, runs the steps and returns what each
- * step saw. Input: the steps as page expressions, by name. Output: what each returned. */
 const TOOLBAR_NAMES = ["Team", "Agent settings", "Master and 3 agents · 3 of 3 agents working. 0 tasks live. · 2 ask you · Pool A: 0 accounts", "Running (0)", "All (0)", "Pause all", "Open all terminals"];
 
+/** Mounts the Agents tab 800 px high at the given width, 1200 by default, with a running task
+ * and a codex sub-agent harness, waits until the graph drew and the questions inbox read, runs
+ * the steps and returns what each step saw. Inputs: the steps as page expressions, by name,
+ * the team status changes, the view and the width. Output: what each returned. */
 async function agentsPage(steps, patch = {}, view = "{}", width = 1200) {
   return withPage(async ({ evaluate, send }) => {
     await send("Emulation.setDeviceMetricsOverride", { width, height: 800, deviceScaleFactor: 1, mobile: false });
@@ -185,16 +186,23 @@ test("in the content width of the app's default window the Agents toolbar stays 
   assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
 });
 
-test("at the app's smallest window the Agents toolbar may wrap but never scrolls the page sideways", async () => {
+test("when the team line wraps in the default window's content width, the view switch and Running and All stay centred with Pause all and Open all terminals", async () => {
+  const pool = "Shared design and engineering pool for the booking studio team accounts";
+  const { bar } = await agentsPage([["bar", "Fixture.toolbar()"]], {}, JSON.stringify({ pool }), 912);
+  assert.ok(bar.spread <= 1, `one centre: ${JSON.stringify(bar)}`);
+  assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
+});
+
+test("at the app's smallest content width, 492 px, a 64-character unbroken pool name wraps in the Agents toolbar and .main never scrolls sideways", async () => {
   const seen = await withPage(async ({ evaluate, send }) => {
-    await send("Emulation.setDeviceMetricsOverride", { width: 760, height: 560, deviceScaleFactor: 1, mobile: false });
+    await send("Emulation.setDeviceMetricsOverride", { width: 492, height: 560, deviceScaleFactor: 1, mobile: false });
     await evaluate(fixture);
     const status = { harnesses: [{ harness: "codex", role: "sub", agents_max: 2, tools: true, live: 1 }] };
-    await evaluate(`Fixture.mount(0, 'ok', [Fixture.runningTask(7)], ${JSON.stringify(status)}, {})`);
+    await evaluate(`Fixture.mount(0, 'ok', [Fixture.runningTask(7)], ${JSON.stringify(status)}, ${JSON.stringify({ pool: "P".repeat(64) })})`);
     assert.equal(await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent.includes('ask you'))"), true, "the toolbar drew");
     return evaluate("Fixture.toolbarFit()");
   });
-  assert.equal(seen.sideways, 0, `the page does not scroll sideways: ${JSON.stringify(seen)}`);
+  assert.equal(seen.sideways, 0, `.main does not scroll sideways: ${JSON.stringify(seen)}`);
   assert.deepEqual(seen.past, [], `nothing in the row reaches past its edge: ${JSON.stringify(seen)}`);
 });
 
