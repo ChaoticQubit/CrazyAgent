@@ -242,3 +242,15 @@ test("an agents?section= route opens Agent settings at the group it names", () =
   assert.equal(shared.routeSection("#/projects/alpha/agents"), undefined);
   assert.deepEqual(agents.agentsView(shared.routeSection("#/projects/alpha/agents?section=tools")), { view: "settings", group: "tools" });
 });
+
+test("Overlapping edits and the merge choice take the row's full width with the help above the choices, as the mockup draws them", () => {
+  const html = settingsHtml({ master_lands: "merges" });
+  for (const [label, help] of [["Overlapping edits", "Warn tells both agents"], [MERGE, "Each merge shows in Activity"]]) {
+    const start = html.indexOf(`data-setting="${attr(label)}"`);
+    assert.match(html.slice(html.lastIndexOf("<div", start), start), /class="set-row wide"/, `${label} takes the row's full width`);
+    const part = row(html, label);
+    const [words, choices] = [part.indexOf(help), part.indexOf(`aria-label="${attr(label)}"`)];
+    assert.ok(words >= 0 && choices >= 0, `${label} has its help and its choices`);
+    assert.ok(words < choices, `${label}: the help sits above the choices`);
+  }
+});
