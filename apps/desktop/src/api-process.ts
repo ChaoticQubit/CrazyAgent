@@ -277,9 +277,9 @@ export const EDIT_DELIVERIES: readonly { value: EditDelivery; label: string; not
 
 /** Every instructions option in the order the page lists them, with what it hands agents. */
 export const INSTRUCTION_MODES: readonly { value: InstructionMode; label: string; note: string }[] = [
+  { value: "both", label: "App and project", note: "Agents get the app instructions, then this project's appended. An empty project text gives the app text as it is." },
   { value: "project_only", label: "Project only", note: "Agents get only this project's instructions, from its .crazyagent/instructions.md." },
   { value: "app_only", label: "App only", note: "Agents get only the app instructions from Settings > Process." },
-  { value: "both", label: "Both (app, then project appended)", note: "Agents get the app instructions, then this project's appended. An empty project text gives the app text as it is." },
 ];
 
 /** Reads one project's agent settings. Input: the project id. Output: the settings, the

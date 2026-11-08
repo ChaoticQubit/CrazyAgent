@@ -172,7 +172,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
                 disabled={Boolean(invalid) || !changed || busy !== null || Boolean(conflict)}>Save</Button>
               {changed && !conflict && <Button disabled={busy !== null} onClick={() => onDraft(saved.value)}>Discard edits</Button>}
               {mode === "project_only"
-                ? <span className="small muted">Project only gives agents this file alone. To use the app default, pick Both or App only under Delivery.</span>
+                ? <span className="small muted">Project only gives agents this file alone. To use the app default, pick App and project or App only under Delivery.</span>
                 : mode !== null && <Button disabled={busy !== null || draft === ""} onClick={() => onUseDefault?.()}>Use app default</Button>}
               <span className="small muted">{note}</span>
             </span>
@@ -233,7 +233,7 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
   if (settings.kind === "loading") return <Skeleton shape="card" count={1} />;
   if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
   const current = settings.kind === "ok" ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS;
-  const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[2];
+  const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[0];
   const delivery = EDIT_DELIVERIES.find((option) => option.value === current.edits) ?? EDIT_DELIVERIES[0];
   const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
   return <Panel title="Delivery">
