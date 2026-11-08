@@ -2,8 +2,8 @@ use super::{BridgeError, NativeBridge, bounded, caused, failure};
 use crazyagent::config::ModelConnection;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
-    NativeAuthAction, NativeAuthCancel, NativeAuthLogout, NativeAuthMethod, NativeAuthPhase,
-    NativeAuthQuery, NativeAuthReply, NativeAuthScope, NativeAuthStart,
+    ModelAccessRecord, NativeAuthAction, NativeAuthCancel, NativeAuthLogout, NativeAuthMethod,
+    NativeAuthPhase, NativeAuthQuery, NativeAuthReply, NativeAuthScope, NativeAuthStart, OwnerData,
 };
 use crazyagent::protocol::RequestId;
 use serde::Serialize;
@@ -218,16 +218,26 @@ impl NativeBridge {
             .map(|value| &value.connection)
     }
 
-    /// Tells whether the engine database or settings moved on since a sign-in started, so its
-    /// sign-in page can no longer reach it. Input: the sign-in. Output: false while the bridge
-    /// has nothing to compare.
+    /// Tells whether the engine database, or the sign-in's own account entry in the latest
+    /// owner read, moved on since it started, so its sign-in page can no longer reach it.
+    /// Edits to other accounts do not move it: the engine goes on with a sign-in while its own
+    /// entry is unchanged. Input: the sign-in. Output: false while the bridge has nothing to
+    /// compare.
     fn auth_moved(&self, operation: &Operation) -> bool {
         let scope = operation.original.scope();
+        let changed = |record: &ModelAccessRecord| {
+            matches!(record, ModelAccessRecord::Connection { connection }
+                if connection.id == operation.connection.id && connection != &operation.connection)
+        };
         self.controller.as_ref().is_some_and(|controller| {
             controller.identity().database_instance() != scope.expected_database_instance
         }) || self
             .current_view()
-            .is_some_and(|view| view.state.config_id != scope.expected_config_id)
+            .is_some_and(|view| match &view.state.data {
+                OwnerData::ModelAccessRecord { record, .. } => changed(record),
+                OwnerData::ModelAccessPage { items, .. } => items.iter().any(changed),
+                _ => false,
+            })
     }
 
     /// Re-reads, with the scope it started with, a held sign-in the engine last answered as
