@@ -89,12 +89,24 @@ test("approved skills are the ones on here and readable, and a tick keeps the na
   assert.deepEqual(coord.tickedSkills(["style-guide", "gone"], approved, "style-guide", false), ["gone"]);
 });
 
+test("Coordination leads with the mockup's rows, each harness's sub-agents together, and keeps the per-harness rows in their own harness groups", () => {
+  assert.equal(typeof coord.PerHarnessControls, "function", "the per-harness rows have their own part");
+  const status = { project_id: "p", coordination: { settings: coord.COORD_DEFAULTS, harnesses: [] } };
+  const rows = (markup) => [...markup.matchAll(/data-setting="([^"]*)"/g)].map((match) => match[1]);
+  const lead = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden }));
+  assert.deepEqual(rows(lead), ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent questions go to", "Overlapping edits", "Terminals per window"]);
+  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden }));
+  assert.deepEqual(rows(per), ["Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents"]);
+  assert.deepEqual([...per.matchAll(/role="group" aria-label="([^"]*)"/g)].map((match) => match[1]), ["Claude Code", "Codex", "rcli"]);
+});
+
 test("Claude Code's row offers both terminal displays with Classic as the default (N-D9)", () => {
   assert.equal(coord.COORD_DEFAULTS.claude_display, "classic");
   assert.deepEqual(coord.DISPLAY_OPTIONS, [{ value: "classic", label: "Classic" }, { value: "fullscreen", label: "Fullscreen" }]);
   const status = (claude_display) => ({ project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, claude_display }, harnesses: [] } });
   for (const [display, helper] of [["classic", /the mouse wheel scrolls the terminal at once and a plain drag selects text/], ["fullscreen", /takes the mouse; the wheel scrolls 3 rows a notch and Option-drag selects text/]]) {
-    const markup = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status: status(display), reload: forbidden }));
+    assert.equal(typeof coord.PerHarnessControls, "function", "the display row sits in the per-harness part");
+    const markup = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status: status(display), reload: forbidden }));
     const claude = markup.slice(markup.indexOf('aria-label="Claude Code"'), markup.indexOf('aria-label="Codex"'));
     assert.match(claude, /<label for="tg-display-claude-code-p">Claude Code terminal display<\/label>/, display);
     assert.match(claude, new RegExp(`<option value="${display}" selected="">`), display);
