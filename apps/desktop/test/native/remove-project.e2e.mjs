@@ -176,6 +176,7 @@ test("Delete everything lists the loss, waits for the typed name, then moves the
   await value(run.bridge, "desktop_usage_metrics", { projectId: null, sinceMs: 0 });
   execFileSync(SQLITE, [run.database, `INSERT INTO usage_tokens VALUES ((strftime('%s','now')/3600)*3600000,'agent','${id}','local-pool','local-account','1','rcli','s1',1200,300,8000,0)`]);
   await onPage("delete", async (page, me) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 760, height: 560, deviceScaleFactor: 1, mobile: false });
     await openRemove(page, me, id, name);
     await me.click(DELETE, "dialog[open] input[type=radio]");
     await me.waitFor("the loss list and the name box", (text) => text.includes(folder) && text.includes("Type"));
@@ -189,6 +190,14 @@ test("Delete everything lists the loss, waits for the typed name, then moves the
     for (const deadline = Date.now() + STEP_MS; !(shown = await dialog(page)).deleteEnabled; await pause(POLL_MS)) {
       assert.ok(Date.now() < deadline, `Delete never enabled after the exact name: ${JSON.stringify(shown)}`);
     }
+    const fit = await page.evaluate(`(() => {
+      const box = document.querySelector("dialog[open]");
+      const frame = box.getBoundingClientRect();
+      const card = box.querySelector(".pj-radio-card").getBoundingClientRect();
+      return { window: innerHeight, client: box.clientHeight, scroll: box.scrollHeight, cardTop: card.top - frame.top, cardBottom: frame.bottom - card.bottom };
+    })()`);
+    assert.ok(fit.window === 560 && fit.scroll <= fit.client && fit.cardTop >= 0 && fit.cardBottom >= 0,
+      `at the app's smallest window the dialog fits its frame and the top choice is in view: ${JSON.stringify(fit)}`);
     await me.capture("delete-ready");
     await me.click(DELETE, "dialog[open] button");
     await me.waitFor("Home after the delete", (text) => text.includes(`${name} was deleted`), 90000);

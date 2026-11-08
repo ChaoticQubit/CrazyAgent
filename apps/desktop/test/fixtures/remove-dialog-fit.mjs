@@ -35,16 +35,17 @@ export function focusName() {
 }
 
 /** Measures the open dialog, its body and its top choice, rounded to whole pixels. Output: the
- * window height, each box's visible and full heights and scroll offset, and the top choice's
- * edges against the dialog's visible edges. */
+ * window height, the dialog's, its body's and its folder and loss lists' visible and full
+ * heights and scroll offsets, and the top choice's edges against the dialog's visible edges. */
 export function fit() {
   const dialog = document.querySelector("dialog[open]");
   const body = dialog.querySelector(".dialog-body");
   const frame = dialog.getBoundingClientRect();
   const card = dialog.querySelector(".pj-radio-card").getBoundingClientRect();
   const box = (node) => ({ client: node.clientHeight, scroll: node.scrollHeight, top: Math.round(node.scrollTop) });
+  const details = dialog.querySelector(".pj-remove-details");
   return {
-    window: innerHeight, dialog: box(dialog), body: box(body),
+    window: innerHeight, dialog: box(dialog), body: box(body), details: details ? box(details) : null,
     cardTop: Math.round(card.top - frame.top), cardBottom: Math.round(card.bottom - frame.top), frame: Math.round(frame.height),
   };
 }

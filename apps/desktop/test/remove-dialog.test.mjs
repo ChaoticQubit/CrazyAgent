@@ -107,6 +107,7 @@ test("at the app's smallest and default windows the Delete everything dialog fit
       assert.ok(fit.dialog.scroll <= fit.dialog.client && fit.dialog.top === 0, `the frame does not scroll: ${seen}`);
       assert.ok(fit.body.scroll <= fit.body.client && fit.body.top === 0, `the body fits the frame: ${seen}`);
       assert.ok(fit.cardTop >= 0 && fit.cardBottom <= fit.frame, `the top choice is in view: ${seen}`);
+      if (label === "no loss") assert.ok(fit.details.scroll <= fit.details.client, `one folder and no loss need no scroll at all: ${seen}`);
     }
   }
 });
