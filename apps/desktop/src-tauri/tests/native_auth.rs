@@ -909,6 +909,55 @@ async fn desktop_native_auth_running_sign_in_is_not_reported_stuck() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_native_auth_another_accounts_save_leaves_a_running_sign_in_not_stuck() {
+    run_case(|fixture| async move {
+        let running = sleeping_login(&fixture).await;
+        let mut bridge = fixture.bridge().await;
+        let detail = inspect(&mut bridge, "connection-z").await;
+        let started = serde_json::to_value(
+            bridge
+                .start_native_auth(&detail.ticket, NativeAuthMethod::ClaudeOfficial)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        login_pid(&running).await;
+        bridge
+            .add_account(claude_draft("Added while signing in"), None)
+            .await
+            .unwrap();
+        let current = inspect(&mut bridge, "connection-z").await;
+        assert_ne!(current.source_hash, detail.source_hash);
+        assert_eq!(
+            bridge.status().stuck_sign_in,
+            None,
+            "a save to another account leaves the running sign-in healthy, with no stuck banner"
+        );
+        assert_eq!(
+            bridge
+                .start_native_auth(&current.ticket, NativeAuthMethod::ClaudeOfficial)
+                .await
+                .err()
+                .map(|error| serde_json::to_value(error).unwrap()),
+            Some(serde_json::json!({ "code": "native_auth_sign_in_running", "account": "connection-z" })),
+            "a second sign-in after another account's save waits for the running one, not for recovery"
+        );
+        assert_eq!(
+            bridge.clear_native_auth().await.err().map(|error| error.code),
+            Some("native_auth_in_progress")
+        );
+        let read = serde_json::to_value(bridge.read_native_auth(&current.ticket).await.unwrap())
+            .unwrap();
+        assert_eq!(read["operation_id"], started["operation_id"]);
+        bridge.cancel_native_auth(&current.ticket).await.unwrap();
+        let cancelled = settle(&mut bridge, "cancelled").await;
+        assert_eq!(cancelled["operation_id"], started["operation_id"]);
+        assert_eq!(bridge.status().stuck_sign_in, None);
+    })
+    .await;
+}
+
 /// Reads a drawer's sign-in with the drawer's own ticket until it reaches the phase, with the
 /// app-wide team alert read before each read, as the open window polls both. Inputs: the
 /// bridge, the drawer's ticket and the phase. Output: the last view.
