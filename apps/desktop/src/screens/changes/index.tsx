@@ -71,7 +71,11 @@ function refusalOf(failure: Failure): string {
   return failure.kind === "error" ? changesRefusal({ code: failure.code, cause: failure.cause }) : "";
 }
 
-function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved }: {
+/** One change set's details, its diff a page at a time and the owner's actions on it.
+ * Inputs: the change set, now, whether an action runs, the action handlers, what a page
+ * refused as moved on does, and how a diff page is read, the engine's by default.
+ * Output: the section. */
+export function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved, load = loadChangeDiff }: {
   set: ChangeSet;
   now: number;
   busy: boolean;
@@ -79,6 +83,7 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved }: {
   onUpdate: (set: ChangeSet) => void;
   onRestore: (set: ChangeSet) => void;
   onMoved: () => void;
+  load?: typeof loadChangeDiff;
 }) {
   const [pages, setPages] = useState<number[]>([0]);
   const page = pages[pages.length - 1];
@@ -96,14 +101,14 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved }: {
   useEffect(() => {
     let current = true;
     setDiff(undefined);
-    void loadChangeDiff(set.id, head, page).then((result) => {
+    void load(set.id, head, page).then((result) => {
       if (!current) return;
       setDiff(result);
       if (result.kind === "ok" && result.value.next === null) setReview((shown) => lastPageSeen(shown, head));
       if (result.kind === "error" && result.code === "changes_stale") onMoved();
     });
     return () => { current = false; };
-  }, [set.id, head, page]);
+  }, [set.id, head, page, load]);
   const value = diff?.kind === "ok" ? diff.value : null;
   const asked = { ...set, head };
   return <section className="pj-stack-s ch-detail" aria-label={`Changes from ${agentName(set)}`}>
