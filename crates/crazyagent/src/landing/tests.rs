@@ -6918,3 +6918,21 @@ fn a_master_worktree_start_is_recorded_once_and_never_moves_past_its_commits() {
         "the start never moved past the master's commit"
     );
 }
+
+/// A set's proposed message names only the agent's own commits: owner commits the agent
+/// brought in by merging main are already on main, so they never become its subject or
+/// its list (T4 r2: an undo named the owner's commit).
+#[test]
+fn a_set_message_leaves_out_main_commits_its_agent_merged_in() {
+    let case = Case::new();
+    case.start();
+    let tip = case.owner_commit("owner.txt", "owner\n", "Owner work");
+    case.agent(&["merge", "-q", "--ff-only", &tip]);
+    assert_eq!(case.agent_head(), tip);
+    case.edit("own.txt", "own\n");
+    case.agent_commit("Agent work");
+    let id = case
+        .turn(TurnOutcome::Succeeded)
+        .expect("the agent's own commit makes its change set");
+    assert_eq!(case.view(&id).message, "Agent work");
+}
