@@ -32,7 +32,7 @@ function processShown(page) {
     const side = layout?.querySelector("aside.pr-side");
     const table = document.querySelector(".pr-table");
     return {
-      main: main ? [...main.querySelectorAll(":scope > section.panel .panel-head h2")].map(words) : null,
+      main: main ? [...main.querySelectorAll(":scope > section.panel, :scope > .stack > section.panel")].map((panel) => words(panel.querySelector(":scope > .panel-head h2"))) : null,
       side: side ? [...side.querySelectorAll("h2, h3")].map(words) : null,
       picked: words(document.querySelector('[aria-label="How the instructions show"] [aria-checked="true"]')),
       editor: document.getElementById("process-project") !== null,

@@ -47,6 +47,33 @@ while IFS= read -r line; do
 done
 `;
 
+/** One stand-in turn as the engine keeps it, in the order the Metrics page lists the parts:
+ * tokens, new input, cache write, output and cache re-reads. */
+export const TURN = [1500, 1200, 0, 300, 8000];
+
+/** Reads a count the Metrics page shows, such as 300, 4.8K or 12K. Input: the text. Output:
+ * the number, or NaN for any other text. */
+function count(text) {
+  const match = /^(\d+(?:\.\d+)?)([KM]?)$/.exec(text ?? "");
+  return match ? Number(match[1]) * { "": 1, K: 1e3, M: 1e6 }[match[2]] : Number.NaN;
+}
+
+/** Says whether five shown parts, in TURN's order, are one stand-in turn per run, within the
+ * page's rounding. Every run the stand-in serves, onboarding's included, takes one turn.
+ * Inputs: the shown texts and the run count. Output: true when they are. */
+export function turnsOf(parts, runs) {
+  return Number.isInteger(runs) && runs > 0 && parts.length === TURN.length
+    && TURN.every((one, index) => Math.abs(count(parts[index]) - one * runs) <= one * runs * 0.05);
+}
+
+/** Reads the Tokens, Re-read from cache and Runs tiles as five parts in TURN's order and the
+ * run count. Input: the tiles as shown. Output: { parts, runs }, empty while a tile is missing. */
+export function tileParts(tiles) {
+  const split = /^(\S+) input, (\S+) cache write, (\S+) output$/.exec(tiles?.[0]?.[2] ?? "");
+  if (!split || tiles[1]?.[0] !== "Re-read from cache" || tiles[2]?.[0] !== "Runs") return { parts: [], runs: 0 };
+  return { parts: [tiles[0][1], split[1], split[2], split[3], tiles[1][1]], runs: Number(tiles[2][1]) };
+}
+
 /** Makes the owner's project folder: a git repository on main with one commit. Input: the
  * folder. Output: none. */
 function ownerRepo(folder) {
@@ -79,8 +106,9 @@ export function taskStatus(runtime, project) {
 }
 
 /** Makes one of the owner's repositories a project the way the app does: onboarding, the
- * pool its sub-agents run on, and team tools for its Codex sub-agent. Inputs: the bridge, the
- * repository and the first of the three write generations it uses. Output: the project id. */
+ * pool its sub-agents run on, and a Codex sub-agent with team tools saved through the team
+ * settings, since onboarding's team names no sub-agent. Inputs: the bridge, the repository and
+ * the first of the three write generations it uses. Output: the project id. */
 async function addProject(bridge, repo, generation) {
   const receipt = await value(bridge, "desktop_start_onboarding", { path: repo, pool: "local-pool", generation });
   assert.equal(receipt.outcome, "applied", `the folder becomes a project: ${JSON.stringify(receipt)}`);
@@ -96,11 +124,12 @@ async function addProject(bridge, repo, generation) {
   const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: generation + 1 });
   assert.equal(assigned.outcome, "applied", `the project gets the pool its sub-agents run on: ${JSON.stringify(assigned)}`);
   const stored = await value(bridge, "desktop_project_setup", { id: project });
-  const subs = (stored.team.sub_harnesses ?? []).map((slot) => slot.harness === "codex" ? { ...slot, tools: true } : slot);
-  assert.ok(subs.some((slot) => slot.harness === "codex"), `the project has a Codex sub-agent: ${JSON.stringify(stored.team)}`);
-  const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team: { ...stored.team, sub_harnesses: subs }, documents: [] };
+  const team = { ...stored.team, sub_harnesses: [{ harness: "codex", agents: 1, tools: true }] };
+  const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team, documents: [] };
   const saved = await value(bridge, "desktop_update_project_setup", { id: project, setup, name: null, revision: stored.revision, generation: generation + 2 });
-  assert.equal(saved.outcome, "applied", `the Codex sub-agent gets its team tools: ${JSON.stringify(saved)}`);
+  assert.equal(saved.outcome, "applied", `the project gets a Codex sub-agent with team tools: ${JSON.stringify(saved)}`);
+  const kept = await value(bridge, "desktop_project_setup", { id: project });
+  assert.ok(kept.team.sub_harnesses.some((slot) => slot.harness === "codex" && slot.tools), `the saved team has a Codex sub-agent with team tools: ${JSON.stringify(kept.team)}`);
   return project;
 }
 
