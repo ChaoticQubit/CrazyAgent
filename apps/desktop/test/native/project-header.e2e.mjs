@@ -245,6 +245,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.click("Project actions", "button[aria-label='Project actions']");
         await me.click("Stop all", "[role=menuitem]");
         await me.waitFor("the Stop all confirm", (text) => text.includes("Stop every agent of this project?"), STEP_MS);
+        const risen = () => page.evaluate("(() => { const box = document.querySelector('dialog[open]'); return Boolean(box) && getComputedStyle(box).opacity === '1' && box.getAnimations().every((animation) => animation.playState === 'finished'); })()");
+        for (const until = Date.now() + STEP_MS; !(await risen()) && Date.now() < until;) await pause(POLL_MS);
+        assert.equal(await risen(), true, "the Stop all confirm has finished rising before its shot");
         await me.capture("menu-stop-all");
         await me.click("Stop all", "dialog[open] button");
         assert.equal(await paused(true), true, "Stop all in the project menu stops every agent of the project in the engine");
