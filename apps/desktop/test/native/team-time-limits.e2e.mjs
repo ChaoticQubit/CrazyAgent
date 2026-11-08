@@ -120,8 +120,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await page.send("Page.enable");
       for (const source of scripts) await page.send("Page.addScriptToEvaluateOnNewDocument", { source });
       await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-      await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
-      await me.waitFor(`the Time limits on the Agents tab of the ${name} window`, (text) => text.includes(SETTING));
+      await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents?section=limits` });
+      await me.waitFor(`the Limits group in Agent settings of the ${name} window`, (text) => text.includes("Limits") && text.includes(SETTING));
       return { me, page };
     };
     await withPage(async (firstPage) => withPage(async (secondPage) => {

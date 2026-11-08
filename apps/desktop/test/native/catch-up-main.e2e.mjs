@@ -231,9 +231,12 @@ async function kept(status, mode) {
   }
 }
 
-/** Brings the Catch up with main setting into the window, so a capture shows the pick.
- * Input: the page. Output: none. */
-function showSetting(page) {
+/** Opens Agent settings with the Agents tab's view switch, as the owner does, and brings the
+ * Catch up with main setting into the window, so a capture shows the pick. Inputs: the owner
+ * on the page and the page. Output: none. */
+async function showSetting(me, page) {
+  await me.click("Agent settings", AGENTS_VIEW);
+  await me.waitFor("the Catch up with main setting in Agent settings", (text) => text.includes(SETTING));
   return page.evaluate(`document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"]`)}).scrollIntoView({ block: "center" })`);
 }
 
@@ -300,7 +303,7 @@ test("Catch up with main On: the owner's pick is kept, and after a set lands the
     await kept(status, "on");
     await reload();
     assert.equal(await shown(page), "On", "On is shown again after a reload");
-    await showSetting(page);
+    await showSetting(me, page);
     await me.capture("catch-up-on");
 
     const landed = await landOne(run);
@@ -311,7 +314,7 @@ test("Catch up with main On: the owner's pick is kept, and after a set lands the
     assert.equal(row.main?.trim(), landed, `the agent's own git sees the landed set as crazyagent/main: ${row.main}`);
     assert.ok(row.merged?.trimEnd().endsWith("exit 0"), `the agent's own git merged crazyagent/main: ${row.merged}`);
     assert.ok(!row.merged.includes("is refused"), `the merge was not refused: ${row.merged}`);
-    await showSetting(page);
+    await showSetting(me, page);
     await me.capture("catch-up-on-merged");
   });
 });
@@ -323,7 +326,7 @@ test("Catch up with main Off: the owner's pick is kept, and after a set lands th
     await kept(status, "off");
     await reload();
     assert.equal(await shown(page), "Off", "Off is shown again after a reload");
-    await showSetting(page);
+    await showSetting(me, page);
     await me.capture("catch-up-off");
 
     const landed = await landOne(run);
@@ -335,7 +338,7 @@ test("Catch up with main Off: the owner's pick is kept, and after a set lands th
     assert.ok(row.merged?.trimEnd().endsWith("exit 1"), `the agent's own git refused crazyagent/main: ${row.merged}`);
     assert.ok(row.merged.includes("crazyagent: git merge is refused."), `the refusal names the merge: ${row.merged}`);
     assert.ok(!row.merged.includes("git merge crazyagent/main"), `the refusal does not offer main: ${row.merged}`);
-    await showSetting(page);
+    await showSetting(me, page);
     await me.capture("catch-up-off-refused");
   });
 });
