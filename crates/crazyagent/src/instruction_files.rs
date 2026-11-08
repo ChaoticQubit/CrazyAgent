@@ -981,24 +981,19 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
 }
 
 /// Lists the moved instruction files whose move the owner's checkout has not committed, as
-/// `uncommitted` does, with the branch the checkout has checked out while any wait; a
-/// branch that cannot be read is left unnamed, so the move still shows. Input: the project
-/// folder. Output: the files and branch, or a plain code as `uncommitted`.
+/// `uncommitted` does, with the branch the checkout has checked out, named as the refusal's
+/// branch only while any wait; a branch that cannot be read is left unnamed, so the move
+/// still shows. Input: the project folder. Output: the files and branches, or a plain code
+/// as `uncommitted`.
 pub fn uncommitted_import(folder: &Path) -> Result<UncommittedImport, EngineError> {
     let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
     let files = uncommitted(&root)?;
-    if files.is_empty() {
-        return Ok(UncommittedImport {
-            files,
-            branch: None,
-            checked_out: None,
-        });
-    }
-    let branch = crate::landing::checked_out_branch(&root).unwrap_or(None);
+    let checked_out = crate::landing::checked_out_branch(&root).unwrap_or(None);
+    let branch = (!files.is_empty()).then(|| checked_out.clone()).flatten();
     Ok(UncommittedImport {
         files,
         branch,
-        checked_out: None,
+        checked_out,
     })
 }
 
