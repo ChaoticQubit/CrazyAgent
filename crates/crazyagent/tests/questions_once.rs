@@ -256,8 +256,9 @@ fn project(database: &Connection, root: &Path) -> StoredSetup {
     setup
 }
 
-/// Applies one owner team action in its own transaction, as the owner socket does.
-/// Inputs: the database, the engine root and the action. Output: none; the action applied.
+/// Applies one owner team action in its own immediate transaction, as the owner socket
+/// does, so a write racing the running engine waits for it instead of failing. Inputs: the
+/// database, the engine root and the action. Output: none; the action applied.
 fn act(database: &mut Connection, root: &Path, action: TeamAction) {
     let access =
         crazyagent::config::resolve_config(&root.join("global.toml"), &root.join("project.toml"))
@@ -265,7 +266,9 @@ fn act(database: &mut Connection, root: &Path, action: TeamAction) {
             .settings
             .model_access
             .unwrap();
-    let tx = database.transaction().unwrap();
+    let tx = database
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
     assert_eq!(
         crazyagent::team::execute(&tx, &access, &action).unwrap(),
         Outcome::Applied,
