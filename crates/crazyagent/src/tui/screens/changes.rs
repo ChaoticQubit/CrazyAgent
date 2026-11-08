@@ -879,7 +879,7 @@ impl ProjectChanges {
         ];
         for (index, set) in self.sets.iter().enumerate().skip(first).take(shown) {
             let cells = vec![
-                Row::of(agent_name(set), look.fg),
+                Row::of(listed_name(set), look.fg),
                 state_row(set, look),
                 Row::of(size_line(set), look.muted),
             ];
@@ -916,7 +916,7 @@ impl ProjectChanges {
         if let Some(set) = self.chosen() {
             lines.push(spread(
                 content,
-                Row::of(agent_name(set), look.heading),
+                Row::of(crate::landing::change_set_name(set), look.heading),
                 state_row(set, look),
             ));
             lines.extend(details(set, content, now_ms, look).into_iter().skip(1));
@@ -1227,7 +1227,7 @@ fn details(set: &ChangeSetView, content: usize, now_ms: i64, look: &Look) -> Vec
         ChangeState::Discarded => notes.push((restore_note(set, now_ms), look.fg)),
         _ => {}
     }
-    let mut rows = vec![Row::of(agent_name(set), look.heading)];
+    let mut rows = vec![Row::of(crate::landing::change_set_name(set), look.heading)];
     for (note, style) in notes {
         rows.extend(
             wrap_words(&note, content)
@@ -1248,6 +1248,15 @@ fn restore_note(set: &ChangeSetView, now_ms: i64) -> String {
             duration(until - now_ms)
         ),
         _ => "These changes can no longer be restored.".to_owned(),
+    }
+}
+
+/// A change set in the Changes list: its number before its agent once the engine
+/// numbered it. Input: the change set. Output: the cell text.
+fn listed_name(set: &ChangeSetView) -> String {
+    match set.number {
+        Some(number) => format!("#{number} {}", agent_name(set)),
+        None => agent_name(set),
     }
 }
 

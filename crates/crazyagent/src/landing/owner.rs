@@ -981,10 +981,7 @@ pub(super) fn land_master(
 /// as and the branch it landed on. Output: none.
 fn master_merged(db: &Connection, master: &Record, landed: &str, branch: &str) {
     let closed = close_covered(db, master, landed);
-    let mut text = format!(
-        "The master merged its changes into {branch}: {}",
-        master.prompt_line
-    );
+    let mut text = format!("Master merged {} into {branch}", super::named(db, master));
     if !closed.is_empty() {
         text.push_str(&format!(". It closed the changes of {}", closed.join(", ")));
     }

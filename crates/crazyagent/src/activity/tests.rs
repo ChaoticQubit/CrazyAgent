@@ -214,7 +214,10 @@ fn backfill_brings_in_accepts_audits_and_research_once() {
         )
         .unwrap();
     }
-    let live = accepted_text(&format!("Sub-agent {worker}"), "Change cs-b");
+    let live = accepted_text(
+        OWNER_ACTOR,
+        &crate::landing::change_set_words(None, &format!("Sub-agent {worker}"), "Change cs-b", 1),
+    );
     record(
         &db,
         &project(),
@@ -255,7 +258,13 @@ fn backfill_brings_in_accepts_audits_and_research_once() {
         ]
     );
     assert_eq!(listed[1].change_set.as_deref(), Some("cs-a"));
-    assert_eq!(listed[1].text, accepted_text(&worker_label, "Change cs-a"));
+    assert_eq!(
+        listed[1].text,
+        accepted_text(
+            OWNER_ACTOR,
+            &crate::landing::change_set_words(None, &worker_label, "Change cs-a", 1)
+        )
+    );
     assert_eq!(listed[3].goal.as_deref(), Some("Ship the login page"));
     assert_eq!(listed[6].text, "Research saved: brief");
     assert_eq!(

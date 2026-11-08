@@ -398,6 +398,8 @@ pub const BRANCH_BYTES_MAX: usize = 255;
 /// before it fails.
 pub(crate) const BUSY_WAIT: Duration = Duration::from_secs(5);
 
+const SUBJECT_CHARS_MAX: usize = 48;
+
 fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
@@ -418,7 +420,7 @@ fn note_change(
     let label = &record.agent.label;
     let line = &record.prompt_line;
     let text = match kind {
-        ActivityKind::Accepted => crate::activity::accepted_text(label, line),
+        ActivityKind::Accepted => crate::activity::accepted_text(by, &named(db, record)),
         ActivityKind::Conflict => {
             format!("The changes of {label} conflict with the branch they land on: {line}")
         }
@@ -433,6 +435,26 @@ fn note_change(
         _ => unreachable!("note_change takes a change set action"),
     };
     note_text(db, record, kind, by, &text);
+}
+
+/// The words an activity row names a change set by, with its number once it has one; a
+/// number that cannot be read is logged by its plain code and the set named without it.
+/// Inputs: the store and the change set. Output: the words.
+#[cfg(unix)]
+fn named(db: &Connection, record: &store::Record) -> String {
+    let number = store::number_of(db, &record.id).unwrap_or_else(|error| {
+        eprintln!(
+            "landing_number_unread cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+        None
+    });
+    change_set_words(
+        number,
+        &agent_title(record.agent.kind, &record.agent.label),
+        &record.message(),
+        record.files,
+    )
 }
 
 /// Records the Undone row of a finished undo, naming the sets its merge closed whose work
@@ -1469,10 +1491,58 @@ pub fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(), Engi
 /// UI, 7 files)", or its agent alone for a set the engine has not numbered yet. Input: the
 /// change set. Output: the name.
 pub fn change_set_name(set: &ChangeSetView) -> String {
-    match set.agent.kind {
-        AgentKind::Master => "Master".to_owned(),
-        AgentKind::Sub => set.agent.label.clone(),
+    let agent = agent_title(set.agent.kind, &set.agent.label);
+    match set.number {
+        Some(_) => change_set_words(set.number, &agent, &set.message, set.files).replacen(
+            "change set",
+            "Change set",
+            1,
+        ),
+        None => agent,
     }
+}
+
+/// The words a sentence names a change set by: "change set #16 (Wren: checkout UI, 7
+/// files)", or "the changes of Wren: checkout UI" while the engine has not numbered it.
+/// Inputs: its number, its agent's name, its commit message and its file count. Output:
+/// the words.
+pub fn change_set_words(number: Option<u64>, agent: &str, message: &str, files: u32) -> String {
+    let subject = subject(message);
+    let about = if subject.is_empty() {
+        agent.to_owned()
+    } else {
+        format!("{agent}: {subject}")
+    };
+    let Some(number) = number else {
+        return format!("the changes of {about}");
+    };
+    assert!(number >= 1, "a change set number starts at 1");
+    let files = if files == 1 {
+        "1 file".to_owned()
+    } else {
+        format!("{files} files")
+    };
+    format!("change set #{number} ({about}, {files})")
+}
+
+/// The name a change set's agent goes by: Master for the master, else the label the owner
+/// knows it by. Inputs: the agent's kind and label. Output: the name.
+pub fn agent_title(kind: AgentKind, label: &str) -> String {
+    match kind {
+        AgentKind::Master => "Master".to_owned(),
+        AgentKind::Sub => label.to_owned(),
+    }
+}
+
+/// The first line of a commit message, cut to `SUBJECT_CHARS_MAX` characters ending in
+/// "..." when longer. Input: the message. Output: the subject, empty for an empty message.
+fn subject(message: &str) -> String {
+    let line = message.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= SUBJECT_CHARS_MAX {
+        return line.to_owned();
+    }
+    let kept: String = line.chars().take(SUBJECT_CHARS_MAX - 3).collect();
+    format!("{kept}...")
 }
 
 /// Numbers the change sets of the projects the engine has that carry no number yet, such

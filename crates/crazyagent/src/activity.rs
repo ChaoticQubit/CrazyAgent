@@ -840,20 +840,39 @@ fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
 }
 
 fn past_accepts(db: &Connection, project: &ProjectId) -> Result<Vec<Past>, EngineError> {
+    let number = if has_table(db, "landing_change_set_numbers")? {
+        "(SELECT number FROM landing_change_set_numbers WHERE change_set=landing_change_sets.id)"
+    } else {
+        "NULL"
+    };
     let mut statement = db
-        .prepare(
-            "SELECT id,label,prompt_line,updated_ms FROM landing_change_sets
-             WHERE project=?1 AND state='accepted'",
-        )
+        .prepare(&format!(
+            "SELECT id,label,prompt_line,updated_ms,agent_kind,files,{number} FROM landing_change_sets
+             WHERE project=?1 AND state='accepted'"
+        ))
         .map_err(state)?;
     let rows = statement
         .query_map([project.as_str()], |row| {
+            let kind = match row.get::<_, String>(4)?.as_str() {
+                "master" => crate::landing::AgentKind::Master,
+                _ => crate::landing::AgentKind::Sub,
+            };
+            let agent = crate::landing::agent_title(kind, &row.get::<_, String>(1)?);
+            let number = row
+                .get::<_, Option<i64>>(6)?
+                .and_then(|number| u64::try_from(number).ok());
+            let named = crate::landing::change_set_words(
+                number,
+                &agent,
+                &row.get::<_, String>(2)?,
+                row.get(5)?,
+            );
             Ok(Past {
                 kind: ActivityKind::Accepted,
                 at_ms: row.get(3)?,
                 actor: OWNER_ACTOR.into(),
                 goal: None,
-                text: accepted_text(&row.get::<_, String>(1)?, &row.get::<_, String>(2)?),
+                text: accepted_text(OWNER_ACTOR, &named),
                 change_set: Some(row.get(0)?),
             })
         })
@@ -984,10 +1003,15 @@ pub fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), Engine
 }
 
 /// The text one event of an accepted change set carries, the same for the live writer
-/// and the backfill. Takes the agent's label and the set's one-line prompt. Returns the
-/// text.
-pub fn accepted_text(label: &str, prompt_line: &str) -> String {
-    format!("Accepted the changes of {label}: {prompt_line}")
+/// and the backfill: "You accepted change set #14 (Wren: checkout UI, 9 files)" when the
+/// owner accepted it, "Accepted ..." when the engine finished an Accept. Takes who
+/// accepted and the words naming the set. Returns the text.
+pub fn accepted_text(by: &str, named: &str) -> String {
+    if by == OWNER_ACTOR {
+        format!("You accepted {named}")
+    } else {
+        format!("Accepted {named}")
+    }
 }
 
 /// The kind and text of a coordination audit action the activity shows: the start and
