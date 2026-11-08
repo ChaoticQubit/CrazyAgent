@@ -161,6 +161,10 @@ pub struct ActivityItem {
     pub text: String,
     pub change_set: Option<String>,
     pub undone: bool,
+    /// The branch a master's merge row's change set landed on, the one its Undo reverts on,
+    /// read from the stored set rather than the row's words; None for any other row.
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// One event a writer records. `agent` is the team agent whose work the event is about:
@@ -657,11 +661,17 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
     if limit == 0 || limit > LIST_MAX {
         return Err(failure("activity_limit_invalid"));
     }
+    let landed_on = if has_table(db, "landing_change_sets")? {
+        "CASE WHEN kind='merged_into_main' THEN \
+         (SELECT landed_on FROM landing_change_sets WHERE id=project_activity.change_set) END"
+    } else {
+        "NULL"
+    };
     let mut statement = db
-        .prepare(
-            "SELECT id,at_ms,kind,actor,goal,text,change_set,undone FROM project_activity
-             WHERE project=?1 ORDER BY at_ms DESC, id DESC LIMIT ?2",
-        )
+        .prepare(&format!(
+            "SELECT id,at_ms,kind,actor,goal,text,change_set,undone,{landed_on} \
+             FROM project_activity WHERE project=?1 ORDER BY at_ms DESC, id DESC LIMIT ?2"
+        ))
         .map_err(state)?;
     let rows = statement
         .query_map(
@@ -678,6 +688,9 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
                         text: row.get(5)?,
                         change_set: row.get(6)?,
                         undone: row.get(7)?,
+                        branch: row.get::<_, Option<String>>(8)?.and_then(|reference| {
+                            reference.strip_prefix("refs/heads/").map(str::to_owned)
+                        }),
                     },
                 ))
             },

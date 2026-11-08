@@ -72,13 +72,13 @@ function undoable(item: ActivityItem): string | null {
   return item.kind === "merged_into_main" && !item.undone ? item.change_set : null;
 }
 
-/** The branch a master's merge row names, as the engine writes it now or wrote it before
- * change sets had numbers. Input: the row's words. Output: the branch, or "its branch" when
- * the words name none. */
-function mergedBranch(text: string): string {
-  const named = /^Master merged .*? into (\S+?)(?:\. It closed the changes of .*)?$/su.exec(text)
-    ?? /^The master merged its changes into (\S+): /u.exec(text);
-  return named?.[1] ?? "its branch";
+/** The branch a master's merge row's Undo reverts on: the one the engine gives the row, or,
+ * for a row stored before it gave one, the branch the old words name first. Never read from
+ * the newer words, whose commit subject comes first. Input: the event. Output: the branch,
+ * or "its branch" when neither names one. */
+function mergedBranch(item: ActivityItem): string {
+  if (item.branch) return item.branch;
+  return /^The master merged its changes into (\S+): /u.exec(item.text)?.[1] ?? "its branch";
 }
 
 /** Who an activity row says acted: You for the owner, the master's own merge into main as
@@ -247,7 +247,7 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
     onUndo: (item) => {
       const changeSet = undoable(item);
       if (undoing !== null || changeSet === null) return;
-      setAsking({ changeSet, branch: mergedBranch(item.text) });
+      setAsking({ changeSet, branch: mergedBranch(item) });
     },
   };
   const confirmUndo = () => {
