@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::webview::{NewWindowResponse, WebviewBuilder};
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Rect, Runtime, Url, WebviewUrl,
-    WebviewWindow,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Rect, Runtime, Url, WebviewUrl, WebviewWindow,
 };
 
 /// The script every IDE webview runs before the workbench loads: it drops the control
