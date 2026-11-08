@@ -718,7 +718,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               <RadioCard name={`${prefix}-merge`} value="merges" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "merges"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("merges"); }}
                 title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
-                details={["Finished work lands on main as soon as the master has resolved it and its checks pass."]} />
+                details={["Of the master's own change sets, only one that merges in another open change set lands on main by itself, with everything in that set. The others wait for your Accept."]} />
               <RadioCard name={`${prefix}-merge`} value="waits" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "waits"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("waits"); }}
                 title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
@@ -729,7 +729,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
             <span className="set-label" aria-hidden="true">Ask me before merging into the master's branch</span>
             <Segmented label="Ask me before merging into the master's branch" value={askMerge ?? (status.ask_before_merge === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
               options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
-            <span className="tg-terminal-note">On keeps each finished harness's work in Changes for your Accept instead of the master merging it.</span>
+            <span className="tg-terminal-note">On stops the master's merge tool: each finished harness's work waits in Changes for your Accept. At Full access, a master change set that merges it in can still land by itself.</span>
           </SettingRow>
           <h3 className="set-sub" hidden={!access.rows.slice(3).some((row) => matches(row, words))}>Branches</h3>
           <SettingRow label="Agent branches">

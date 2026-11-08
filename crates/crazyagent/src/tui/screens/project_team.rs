@@ -2014,7 +2014,7 @@ impl TeamView {
         let on = !status.ask_before_merge;
         self.changing = Some(
             if on {
-                "The master now asks you before merging a harness."
+                "The master's merge tool now waits for your Accept. At Full access, a master change set that merges a harness in can still land by itself."
             } else {
                 "The master now merges a finished harness without asking."
             }
@@ -2039,7 +2039,7 @@ impl TeamView {
         };
         let Some(current) = status.master_lands else {
             self.notice = Some(Notice::plain(
-                "The master merges into main itself only at Full access.",
+                "The master's own change sets land by themselves only at Full access.",
             ));
             return TeamReply::Handled;
         };

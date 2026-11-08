@@ -58,10 +58,26 @@ fn master_landed_note(
         .and_then(|home| crate::landing::land_master_set(db, &home, id));
     match landed {
         Ok(None) => None,
-        Ok(Some(crate::landing::AcceptOutcome::Landed { branch, .. })) => Some(format!(
-            "The master merged the edits from this turn into {branch} itself, as this project's setting lets it at Full access. Activity lists the merge."
-        )),
-        Ok(Some(crate::landing::AcceptOutcome::Conflict { files })) => {
+        Ok(Some(outcome)) => Some(master_land_words(&outcome)),
+        Err(error) => {
+            eprintln!(
+                "master_land_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+            None
+        }
+    }
+}
+
+/// What the note under a master turn says after trying to land the turn's change set. The
+/// set lands or conflicts whole, with edits from earlier turns in it, so the note names the
+/// set. Input: the outcome. Output: the note.
+fn master_land_words(outcome: &crate::landing::AcceptOutcome) -> String {
+    match outcome {
+        crate::landing::AcceptOutcome::Landed { branch, .. } => format!(
+            "The master merged its change set into {branch} itself, with everything in that set, as this project's setting lets it at Full access. Activity lists the merge."
+        ),
+        crate::landing::AcceptOutcome::Conflict { files } => {
             let named: Vec<&str> = files
                 .iter()
                 .take(NOTE_FILES_MAX)
@@ -73,17 +89,10 @@ fn master_landed_note(
             } else {
                 format!(" and {more} more")
             };
-            Some(format!(
-                "The edits from this turn conflict with the branch they land on in {}{more}, so the master did not merge them. They are waiting for you in Changes.",
+            format!(
+                "The master's change set conflicts with the branch it lands on in {}{more}, so the master did not merge it. It is waiting for you in Changes.",
                 named.join(", ")
-            ))
-        }
-        Err(error) => {
-            eprintln!(
-                "master_land_failed cause={}",
-                crate::protocol::plain_code(&error.0)
-            );
-            None
+            )
         }
     }
 }
@@ -1419,6 +1428,26 @@ mod tests {
     use crate::master_session::MasterReason;
     use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_note_after_a_master_land_names_the_whole_change_set() {
+        use crate::landing::AcceptOutcome;
+        let landed = master_land_words(&AcceptOutcome::Landed {
+            commit: "c0".into(),
+            branch: "main".into(),
+        });
+        assert_eq!(
+            landed,
+            "The master merged its change set into main itself, with everything in that set, as this project's setting lets it at Full access. Activity lists the merge."
+        );
+        let conflict = master_land_words(&AcceptOutcome::Conflict {
+            files: vec!["README".into(), "NOTES".into()],
+        });
+        assert_eq!(
+            conflict,
+            "The master's change set conflicts with the branch it lands on in README, NOTES, so the master did not merge it. It is waiting for you in Changes."
+        );
+    }
 
     #[test]
     fn a_tools_on_master_reply_is_its_last_message_and_a_tools_off_reply_is_unchanged() {

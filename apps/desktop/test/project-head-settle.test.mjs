@@ -36,3 +36,29 @@ test("the meta line is drawn under the description and hidden once the head take
   assert.deepEqual([rest.head, rest.meta], ["pj-head", true], `the full head draws the meta line: ${JSON.stringify(rest)}`);
   assert.deepEqual([after.head, after.meta], ["pj-head scrolled", false], `the scrolled head hides the meta line: ${JSON.stringify(after)}`);
 });
+
+/** Reads the tab strip of a project page in a window of a given width at the app's default
+ * height. Input: the window's width. Output: the strip's values. */
+function tabRow(width) {
+  return withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate("Fixture.mountAllTabs()");
+    await evaluate("Fixture.frames(3)");
+    return evaluate("Fixture.tabRow()");
+  });
+}
+
+test("in the default 1180x800 window every project tab stands on one row, each with its icon and word", async () => {
+  const row = await tabRow(1180);
+  assert.deepEqual(row.words, ["Overview", "Conversation", "Agents", "Changes", "Questions", "Context", "Process", "Metrics", "Settings"]);
+  assert.equal(row.icons, row.words.length, `every tab keeps its icon: ${JSON.stringify(row)}`);
+  assert.equal(new Set(row.tops).size, 1, `every tab has the same top: ${JSON.stringify(row)}`);
+  assert.equal(row.sideways, false, `nothing scrolls sideways: ${JSON.stringify(row)}`);
+});
+
+test("a window at the 760 minimum may wrap the project tabs but never scrolls sideways", async () => {
+  const row = await tabRow(760);
+  assert.equal(row.words.length, 9);
+  assert.equal(row.sideways, false, `nothing scrolls sideways: ${JSON.stringify(row)}`);
+});

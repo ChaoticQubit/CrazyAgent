@@ -8070,6 +8070,81 @@ fn an_ordinary_master_set_waits_for_the_owner_under_merges() {
     );
 }
 
+/// What the merge choice's words promise: a master set lands whole. An ordinary edit from
+/// an earlier turn waits, then lands with the later turn that merged in another open set,
+/// and that merge needs no conflict.
+#[test]
+fn a_later_turn_merging_in_another_set_lands_the_earlier_turns_edit_with_the_master_set() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    let sub = case.turn(TurnOutcome::Succeeded).unwrap();
+    let sub_head = case.view(&sub).head;
+    let master = master_at_work(&case);
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
+    write(&master.worktree.join("NOTES"), "from the earlier turn\n");
+    let earlier = turn_of(&case, &master, "Write notes");
+    let tip = case.tip();
+
+    assert_eq!(
+        land_master_set(&case.db, &case.home, &earlier).unwrap(),
+        None,
+        "the ordinary edit waits for the owner's Accept"
+    );
+    assert_eq!(case.tip(), tip, "main does not move for the ordinary edit");
+
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    git_in(
+        &case.home,
+        &master.worktree,
+        &[
+            "-c",
+            "user.name=Master",
+            "-c",
+            "user.email=master@example.invalid",
+            "merge",
+            "-q",
+            "--no-edit",
+            &sub_head,
+        ],
+    );
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-master-later".into(),
+        prompt_line: "Merge the agent's work".into(),
+    };
+    let later = record_turn_end(&case.db, &master, &turn).unwrap().unwrap();
+    assert_eq!(later, earlier, "the later turn joins the master's open set");
+
+    let outcome = land_master_set(&case.db, &case.home, &later).unwrap();
+    let Some(AcceptOutcome::Landed { commit, branch }) = outcome else {
+        panic!("the set that merged in another lands: {outcome:?}");
+    };
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit));
+    assert_eq!(
+        case.owner(&["show", "main:NOTES"]),
+        "from the earlier turn\n",
+        "the earlier turn's edit landed with the set, unaccepted"
+    );
+    assert_eq!(
+        case.owner(&["show", "main:README"]),
+        "one\ntwo\nthree\nfour from the agent\n",
+        "the merged-in set's work landed too"
+    );
+    assert_eq!(
+        case.view(&sub).state,
+        ChangeState::Accepted,
+        "the merged-in set closes"
+    );
+}
+
 #[test]
 fn a_master_fix_that_conflicts_with_main_lands_nothing() {
     let case = Case::new();
