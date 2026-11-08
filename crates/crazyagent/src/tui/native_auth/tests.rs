@@ -1724,6 +1724,57 @@ async fn real_sign_in_whose_own_account_was_removed_elsewhere_shows_stuck_and_c_
     .await;
 }
 
+/// Changes a connection's model from another owner client, so the entry a sign-in was bound
+/// to is replaced. Inputs: the case and the connection id. Output: none; panics unless the
+/// change applied.
+async fn replace_elsewhere(case: &Case, id: &str) {
+    let mut other =
+        OwnerController::attach(case.root.path(), OwnerClientKind::Desktop, ENGINE_WAIT)
+            .await
+            .unwrap();
+    let read = other.read(record_query(id)).await.unwrap();
+    let OwnerData::ModelAccessRecord {
+        source_hash,
+        record: ModelAccessRecord::Connection { mut connection },
+        ..
+    } = read.data
+    else {
+        panic!("actual connection record required");
+    };
+    connection.model.id = "model-replaced".into();
+    other
+        .begin_mutation(
+            crate::engine::owner::OwnerMutation::ModelAccess {
+                expected_config_id: read.config_id,
+                expected_source_hash: source_hash,
+                edit: crate::config::ModelAccessEdit::ReplaceConnection { connection },
+            },
+            1,
+        )
+        .unwrap();
+    let replaced = other.send_pending().await.unwrap();
+    assert!(matches!(
+        replaced,
+        crate::engine::owner::OwnerResponse::Applied { operation }
+            if operation.result == crate::engine::owner::OwnerResult::Applied
+    ));
+}
+
+#[tokio::test]
+async fn real_sign_in_whose_own_account_was_replaced_elsewhere_shows_stuck_with_its_panel_closed() {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        running_sign_in(&mut ui, &running).await;
+        replace_elsewhere(&case, "b-claude").await;
+        ui.connections(1).await;
+        let stuck = ui.render(160, 50);
+        std::fs::write(&stop, "").unwrap();
+        assert!(stuck.contains("c clears a stuck sign-in"), "{stuck}");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn real_running_sign_in_stays_healthy_after_another_account_was_removed_elsewhere() {
     run(|case| async move {
@@ -1756,11 +1807,7 @@ async fn real_panel_refuses_a_running_sign_in_whose_own_account_was_replaced_and
         login_started(&running).await;
         assert!(state.has_pending());
         assert!(state.stuck(Some(&basis)).is_none());
-        std::fs::write(
-            &case.global,
-            CATALOG.replace("model-claude", "model-claude-2"),
-        )
-        .unwrap();
+        replace_elsewhere(&case, "b-claude").await;
         let (edited, current) = case.selected("b-claude").await;
         assert_ne!(current, connection);
         state.open(edited.clone(), current).unwrap();

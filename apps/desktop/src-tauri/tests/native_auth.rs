@@ -7,7 +7,7 @@ use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
     ModelAccessCollection, ModelAccessRecord, NativeAuthAction, NativeAuthMethod, NativeAuthPhase,
     NativeAuthQuery, NativeAuthReply, NativeAuthScope, OwnerClient, OwnerClientKind, OwnerControl,
-    OwnerDecision,
+    OwnerData, OwnerDecision, OwnerMutation, OwnerRead, OwnerResponse, OwnerResult,
 };
 use crazyagent::model_gateway::{Health, Quota};
 use crazyagent::protocol::{ConfigId, CredentialRef, RequestId};
@@ -986,6 +986,48 @@ async fn clear_once_ended(bridge: &mut NativeBridge) {
     panic!("Clear never ended the stuck sign-in");
 }
 
+/// Changes connection-z's model from another owner client, so the entry its sign-in was bound
+/// to is replaced. Input: the fixture. Output: none; panics unless the change applied.
+async fn replace_elsewhere(fixture: &Fixture) {
+    let mut other = OwnerController::attach(
+        &fixture.root.path().join("s"),
+        OwnerClientKind::Tui,
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    let read = other
+        .read(OwnerRead::ModelAccessRecord {
+            collection: ModelAccessCollection::Connections,
+            id: reference("connection-z"),
+        })
+        .await
+        .unwrap();
+    let OwnerData::ModelAccessRecord {
+        source_hash,
+        record: ModelAccessRecord::Connection { mut connection },
+        ..
+    } = read.data
+    else {
+        panic!("actual connection record required");
+    };
+    connection.model.id = "model-replaced".into();
+    other
+        .begin_mutation(
+            OwnerMutation::ModelAccess {
+                expected_config_id: read.config_id,
+                expected_source_hash: source_hash,
+                edit: ModelAccessEdit::ReplaceConnection { connection },
+            },
+            1,
+        )
+        .unwrap();
+    let replaced = other.send_pending().await.unwrap();
+    assert!(
+        matches!(replaced, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_native_auth_own_account_removed_elsewhere_is_named_stuck_and_clear_ends_it() {
     run_case(|fixture| async move {
@@ -1070,12 +1112,7 @@ async fn desktop_native_auth_own_account_replaced_elsewhere_is_named_stuck_and_r
             .await
             .unwrap();
         login_pid(&running).await;
-        assert_eq!(CATALOG.matches(r#"id = "model-z""#).count(), 1);
-        std::fs::write(
-            fixture.root.path().join("global.toml"),
-            CATALOG.replace(r#"id = "model-z""#, r#"id = "model-z2""#),
-        )
-        .unwrap();
+        replace_elsewhere(&fixture).await;
         let moved = inspect(&mut bridge, "connection-z").await;
         assert_ne!(moved.source_hash, detail.source_hash);
         assert_eq!(
