@@ -78,3 +78,22 @@ test("a page refused as moved on is read again from page 0 when the list shows t
   assert.deepEqual(seen.paged.asked.at(-1), { id: "cs-1", head: "b".repeat(40), page: 1 });
   assert.equal(seen.read.accept, true, "its last page read to the end, Accept comes back");
 });
+
+test("a list read that moves the head never lets the old diff's end marker unlock the new head, without act as the app runs (RVA-1 r1 M1)", { timeout: 60_000 }, async () => {
+  const seen = await steps(`
+    await Fixture.mountPlain(${JSON.stringify(set())}, ${NOW});
+    const opened = await Fixture.answer(${JSON.stringify(page("+one\n"))});
+    const markers = await Fixture.showInFrame(${JSON.stringify(set({ head: "c".repeat(40) }))});
+    await Fixture.frames();
+    const arrived = await Fixture.answer(${JSON.stringify(page(LONG))});
+    return { opened, markers, arrived };
+  `);
+  assert.equal(seen.opened.accept, true, "the head the owner opened can be accepted");
+  assert.match(seen.opened.diff ?? "", /\+one/);
+  assert.deepEqual(seen.arrived.asked.at(-1), { id: "cs-1", head: "c".repeat(40), page: 0 }, "a move reads the new head from the top");
+  assert.equal(seen.arrived.scrollable, true, "400 lines need the diff box's own scroll");
+  assert.equal(seen.arrived.scrolled, 0, "the new diff is at its top");
+  assert.equal(seen.arrived.accept, false, "the old head's end marker, read before the move, unlocked the new head");
+  assert.equal(seen.arrived.discard, false);
+  assert.equal(seen.markers, 0, "the render that moves to the new head shows no diff read at the old head");
+});

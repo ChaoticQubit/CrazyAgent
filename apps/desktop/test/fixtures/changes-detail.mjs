@@ -1,4 +1,5 @@
 import { act, createElement } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import styles from "../../src/style.css?inline";
 import changesStyles from "../../src/screens/changes/changes.css?inline";
@@ -45,14 +46,14 @@ export function state() {
     paging: Boolean(button("Next page") || button("Previous page")),
     diff: box?.textContent ?? null,
     scrollable: box ? box.scrollHeight > box.clientHeight : null,
+    scrolled: box ? box.scrollTop : null,
     alert: document.querySelector("[role=alert]")?.textContent ?? null,
     notes: [...document.querySelectorAll(".pj-note")].map((note) => note.textContent),
   };
 }
 
-/** Mounts one change set's details with the app's styles and a page reader that waits for
- * the test. Inputs: the change set and now. Output: the state. */
-export async function mount(set, now) {
+function fresh(set, now, acting) {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = acting;
   root?.unmount();
   asked = [];
   waiting = [];
@@ -66,8 +67,51 @@ export async function mount(set, now) {
   document.body.innerHTML = '<div id="root" style="width: 900px"></div>';
   root = createRoot(document.getElementById("root"));
   props = { set, now, busy: false, onAsk: () => {}, onUpdate: () => {}, onRestore: () => {}, onMoved: () => { moved += 1; }, load };
+}
+
+/** Mounts one change set's details with the app's styles and a page reader that waits for
+ * the test. Inputs: the change set and now. Output: the state. */
+export async function mount(set, now) {
+  fresh(set, now, true);
   await acted(render);
   return state();
+}
+
+/** Mounts one change set's details as the app runs them, without act: React schedules its
+ * own renders and effects. Inputs: the change set and now. Output: the state after two
+ * rendered frames. */
+export async function mountPlain(set, now) {
+  fresh(set, now, false);
+  render();
+  return frames();
+}
+
+/** Waits two rendered frames and a short pause so React and the browser settle. Output:
+ * the state. */
+export async function frames() {
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done, 50))));
+  return state();
+}
+
+/** Shows the change set as the next list read gives it, rendered at once inside an
+ * animation frame without act, the order in which the browser can notice an end marker
+ * before React's next render. Input: the change set. Output: how many end markers that
+ * render left in the page. */
+export function showInFrame(set) {
+  props = { ...props, set };
+  return new Promise((done) => requestAnimationFrame(() => {
+    flushSync(render);
+    done(document.querySelectorAll(".ch-end").length);
+  }));
+}
+
+/** Answers the oldest page read waiting without act, then waits two rendered frames.
+ * Input: the reply. Output: the state. */
+export async function answer(result) {
+  const done = waiting.shift();
+  if (!done) throw new Error("no page read is waiting for a reply");
+  done(result);
+  return frames();
 }
 
 /** Shows the change set as the next list read gives it. Input: the change set. Output: the
