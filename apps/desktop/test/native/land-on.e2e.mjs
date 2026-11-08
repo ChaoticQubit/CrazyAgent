@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { AGENTS_VIEW, INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const REPO = "land-shop";
@@ -321,8 +321,8 @@ test("Land on: a deleted Land on branch is named in the Accept dialog, which lan
 
 test("Land on: under Wait a start on a file another agent's work holds waits, the waiting agent's card and row say for which file, and accepting that work lets the start go through", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-lo-w-", async ({ runtime, project, repo, worktree, tips, me, open, status, graph, stand, recordTurn, addAgent }) => {
-    await open("agents");
-    await me.waitFor("the Overlapping edits setting on the Agents tab", (text) => text.includes("Overlapping edits") && text.includes("Land on"));
+    await open("agents?section=settings");
+    await me.waitFor("the Overlapping edits and Land on settings in Agent settings", (text) => text.includes("Overlapping edits") && text.includes("Land on"));
     await me.click("Wait", '[role=radiogroup][aria-label="Overlapping edits"] [role=radio]');
     for (const deadline = Date.now() + STEP_MS; (await status()).coordination?.settings.overlaps !== "wait"; await pause(POLL_MS)) {
       assert.ok(Date.now() < deadline, "the engine never kept Overlapping edits at Wait");
@@ -339,6 +339,7 @@ test("Land on: under Wait a start on a file another agent's work holds waits, th
     assert.equal(stand("start-work", project, waiter, "Fix plots", "README.md"),
       `Wait: ${holder}'s work #${work} holds README.md until it lands. You will get a message when it is free.`, "the waiting start reads who holds the file");
     assert.equal((await graph()).nodes.find((node) => node.id === `team-${waiter}`)?.waits_for, "README.md", "the engine's graph names the file the agent waits for");
+    await me.click("Team", AGENTS_VIEW);
     await me.waitFor("the waiting agent's card naming the file", (text) => text.includes(waiting) && text.includes("Waiting for README.md."));
     await me.capture("wait-card");
     await open("conversation");
@@ -361,7 +362,7 @@ test("Land on: under Wait a start on a file another agent's work holds waits, th
     assert.match(stand("start-work", project, waiter, "Fix plots", "README.md"), /^started \d+$/, "the start goes through once the file is free");
     assert.equal((await graph()).nodes.find((node) => node.id === `team-${waiter}`)?.waits_for ?? null, null, "the agent waits for nothing now");
     await open("agents");
-    await me.waitFor("the agent's card no longer waiting", (text) => text.includes(waiting) && text.includes("Overlapping edits") && !text.includes("Waiting for README.md."));
+    await me.waitFor("the agent's card no longer waiting", (text) => text.includes(waiting) && text.includes("Team graph") && !text.includes("Waiting for README.md."));
     await me.capture("wait-over");
   });
 });
