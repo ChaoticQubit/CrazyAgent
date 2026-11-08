@@ -9,7 +9,7 @@ use crate::engine::owner::{
     NativeAuthLogout, NativeAuthMethod, NativeAuthPhase, NativeAuthQuery, NativeAuthReply,
     NativeAuthScope, NativeAuthStart, OwnerData, OwnerReadReply,
 };
-use crate::protocol::RequestId;
+use crate::protocol::{ConfigId, RequestId};
 use crate::tui::text::plain_code;
 use std::borrow::Cow;
 
@@ -58,6 +58,7 @@ struct Retained {
     original: Job,
     fact: Option<NativeAuthFact>,
     uncertain: bool,
+    checked: Option<ConfigId>,
 }
 
 pub(super) struct State {
@@ -79,6 +80,7 @@ pub(super) struct State {
     notice: Cow<'static, str>,
     polled: Option<std::time::Instant>,
     clearing: bool,
+    rechecking: Option<ConfigId>,
 }
 
 impl Default for State {
@@ -102,6 +104,7 @@ impl Default for State {
             notice: Cow::Borrowed("Select a managed native connection"),
             polled: None,
             clearing: false,
+            rechecking: None,
         }
     }
 }
@@ -165,6 +168,7 @@ impl State {
         self.flight = None;
         self.job = None;
         self.clearing = false;
+        self.rechecking = None;
         self.inspected = false;
         self.context = None;
         if !basis.writable || !supported(&connection) {
@@ -191,6 +195,7 @@ impl State {
         self.flight = None;
         self.job = None;
         self.clearing = false;
+        self.rechecking = None;
         self.inspected = false;
         self.connected = connected && identity.is_some();
         if self.hide().is_err() {
@@ -384,6 +389,38 @@ impl State {
         self.enqueue_query(false).is_ok()
     }
 
+    /// Asks the engine, once per settings change, about a held sign-in whose panel is closed,
+    /// with the scope it started with. An unchanged own account entry answers it as running; a
+    /// removed or replaced one answers a conflict that marks it unconfirmed, so it shows as
+    /// stuck and c can clear it. Input: the current basis. Output: whether a read was queued;
+    /// never while the panel is open, which polls it, or another request is in flight.
+    pub(super) fn recheck(&mut self, basis: Option<&Basis>) -> bool {
+        let Some(basis) = basis.filter(|_| !self.open && self.connected && !self.loading()) else {
+            return false;
+        };
+        let Some(retained) = self.retained.as_ref().filter(|retained| {
+            !retained.uncertain
+                && retained.original.context.basis.config_id != basis.config_id
+                && retained.checked.as_ref() != Some(&basis.config_id)
+        }) else {
+            return false;
+        };
+        if !self.has_pending() || self.moved(Some(basis)) {
+            return false;
+        }
+        let mut context = retained.original.context.clone();
+        context.basis.identity = basis.identity.clone();
+        context.generation = self.generation;
+        let Ok(command) = self.query(false) else {
+            return false;
+        };
+        if self.queue(Job { context, command }).is_err() {
+            return false;
+        }
+        self.rechecking = Some(basis.config_id.clone());
+        true
+    }
+
     pub(super) fn loading(&self) -> bool {
         self.flight.is_some() || self.job.is_some() || self.claude_code.loading()
     }
@@ -555,6 +592,7 @@ impl State {
             original: job,
             fact: None,
             uncertain: true,
+            checked: None,
         });
         self.presentation = None;
         self.notice =
@@ -675,6 +713,24 @@ impl State {
                     "Settings changed after this sign-in started; the engine ends it within 10 minutes of its start, then press c again",
                 );
             }
+            Err(problem)
+                if self.rechecking.is_some() && crate::engine::owner::ends_operation(&problem) =>
+            {
+                self.retained = None;
+                self.presentation = None;
+                self.claude_code.clear();
+                self.notice = Cow::Borrowed("The sign-in ended; the engine no longer runs it");
+            }
+            Err(problem)
+                if self.rechecking.is_some() && problem == "native_profile_source_conflict" =>
+            {
+                if let Some(retained) = &mut self.retained {
+                    retained.uncertain = true;
+                }
+                self.notice = Cow::Borrowed(
+                    "This account changed or was removed after its sign-in started; c clears the stuck sign-in",
+                );
+            }
             Ok(Output::Inspected(reply)) if matches!(event.job.command, Command::Inspect) => {
                 self.inspected = self.matches_inspection(&event.job, &reply);
                 self.notice = Cow::Borrowed(if self.inspected {
@@ -727,6 +783,11 @@ impl State {
         self.flight = None;
         self.job = None;
         self.clearing = false;
+        if let Some(config) = self.rechecking.take()
+            && let Some(retained) = &mut self.retained
+        {
+            retained.checked = Some(config);
+        }
         if list_using {
             self.queue(Job {
                 context: event.job.context,
