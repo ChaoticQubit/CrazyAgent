@@ -1338,11 +1338,13 @@ export interface ImportCommit {
   files: string[];
 }
 
-/** The moved instruction files whose move the checkout has not committed, and the branch it
- * has checked out, null for a detached HEAD or when no move waits (DEC-106 addendum). */
+/** The moved instruction files whose move the checkout has not committed, the branch it has
+ * checked out, null for a detached HEAD or when no move waits (DEC-106 addendum), and that
+ * branch whether or not a move waits, for the project head, null for a detached HEAD. */
 export interface UncommittedImport {
   files: string[];
   branch: string | null;
+  checked_out: string | null;
 }
 
 /** The try a running mapping step is on: its number of `tries`, when it started in ms since the
