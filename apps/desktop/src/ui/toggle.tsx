@@ -35,11 +35,11 @@ export function Checkbox({ label, checked, onChecked, disabled }: {
 }
 
 /** A radio group drawn as segments (role "radiogroup"); arrow keys move the choice.
- * Inputs: accessible label, value, options with optional icons, change handler. */
+ * Inputs: accessible label, value, options with optional icons and hover text, change handler. */
 export function Segmented<T extends string>({ label, value, options, onValue }: {
   label: string;
   value: T;
-  options: { value: T; label: string; icon?: IconName }[];
+  options: { value: T; label: string; icon?: IconName; title?: string }[];
   onValue: (value: T) => void;
 }) {
   const move = (step: number) => {
@@ -52,7 +52,7 @@ export function Segmented<T extends string>({ label, value, options, onValue }: 
       if (event.key === "ArrowLeft" || event.key === "ArrowUp") { event.preventDefault(); move(-1); }
     }}>
     {options.map((option) => <button key={option.value} type="button" role="radio" aria-checked={option.value === value}
-      tabIndex={option.value === value ? 0 : -1} onClick={() => onValue(option.value)}>
+      tabIndex={option.value === value ? 0 : -1} title={option.title} onClick={() => onValue(option.value)}>
       {option.icon && <Icon name={option.icon} size={14} />}{option.label}
     </button>)}
   </div>;

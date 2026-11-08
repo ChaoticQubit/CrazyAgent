@@ -236,25 +236,27 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
   const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[0];
   const delivery = EDIT_DELIVERIES.find((option) => option.value === current.edits) ?? EDIT_DELIVERIES[0];
   const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
-  return <Panel title="Delivery">
-    <div className="stack-small">
+  return <Panel title="Delivery" padded={false}>
+    {(settings.kind === "error" || failure) && <div className="pr-del-notes">
       {settings.kind === "error" && <Notice tone="danger" alert>{processMessage(settings)}</Notice>}
       {failure && <Notice tone="danger" alert>{failure}</Notice>}
-      <span>Instructions agents get</span>
+    </div>}
+    <div className="pr-del-row">
+      <span className="pr-del-label">Instructions agents get</span>
       <Segmented label="Instructions agents get" value={choice.value}
-        options={INSTRUCTION_MODES.map(({ value, label }) => ({ value, label }))}
+        options={INSTRUCTION_MODES.map(({ value, label, note }) => ({ value, label, title: note }))}
         onValue={(mode) => save({ ...current, mode })} />
-      <p className="secondary">{choice.note}</p>
-      <Switch id="agent-transcripts" label="Keep transcripts for headless Claude runs" checked={current.transcripts}
-        disabledReason={busy ? "Saving..." : undefined} onChecked={(transcripts) => save({ ...current, transcripts })} />
-      <p className="secondary">{current.transcripts
-        ? "Headless Claude runs keep their transcript in the agent's own home."
-        : "Headless Claude runs keep no transcript."}</p>
-      <span>When you edit instructions</span>
+    </div>
+    <div className="pr-del-row">
+      <span className="pr-del-label">When you edit instructions</span>
       <Segmented label="When you edit instructions" value={delivery.value}
-        options={EDIT_DELIVERIES.map(({ value, label }) => ({ value, label }))}
+        options={EDIT_DELIVERIES.map(({ value, label, note }) => ({ value, label, title: note }))}
         onValue={(edits) => save({ ...current, edits })} />
-      <p className="secondary">{delivery.note}</p>
+    </div>
+    <div className="pr-del-row pr-del-toggle">
+      <span className="pr-del-label"><strong>Keep transcripts</strong><span className="small muted">For headless Claude runs</span></span>
+      <Switch id="agent-transcripts" label="Keep transcripts for headless Claude runs" hideLabel checked={current.transcripts}
+        disabledReason={busy ? "Saving..." : undefined} onChecked={(transcripts) => save({ ...current, transcripts })} />
     </div>
   </Panel>;
 }
