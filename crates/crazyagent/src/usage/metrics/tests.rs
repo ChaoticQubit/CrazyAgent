@@ -265,6 +265,71 @@ fn each_project_row_counts_its_merges_in_the_range() {
     assert_eq!(merges(&one.projects), [("beta".to_owned(), 1)]);
 }
 
+/// A project with merges in the range and no tokens there still has its row, with zero
+/// tokens after the rows that used tokens, so the project rows add up to the Merges tile.
+#[test]
+fn a_project_with_merges_and_no_tokens_in_the_range_has_its_row() {
+    use crate::activity::{ActivityKind, MASTER_ACTOR, NewActivity};
+    let (_directory, db) = database();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+        .unwrap();
+    crate::activity::initialize(&db).unwrap();
+    used(
+        &db,
+        MIDNIGHT + HOUR,
+        "alpha",
+        "acct-a",
+        "team-1",
+        "codex",
+        "s1",
+        10,
+        0,
+        0,
+        0,
+    );
+    let gamma = ProjectId::new("gamma").unwrap();
+    for (project, kind, change_set) in [
+        (alpha(), ActivityKind::MergedIntoMain, "set-1"),
+        (gamma.clone(), ActivityKind::MergedIntoMain, "set-2"),
+        (gamma.clone(), ActivityKind::LeadMerged, "set-3"),
+    ] {
+        let item = NewActivity {
+            kind,
+            actor: MASTER_ACTOR,
+            agent: None,
+            goal: None,
+            text: "Merged",
+            change_set: Some(change_set),
+        };
+        crate::activity::record(&db, &project, &item, MIDNIGHT + HOUR).unwrap();
+    }
+    let merges_only = GroupRow {
+        key: "gamma".to_owned(),
+        tokens: Tokens::default(),
+        agents: 0,
+        runs: 0,
+        projects: vec!["gamma".to_owned()],
+        more_projects: 0,
+        merges: 2,
+    };
+    let all = read(&db, None, MIDNIGHT, NOW).unwrap();
+    assert_eq!(
+        all.projects
+            .iter()
+            .map(|row| (row.key.as_str(), row.merges))
+            .collect::<Vec<_>>(),
+        [("alpha", 1), ("gamma", 2)]
+    );
+    assert_eq!(all.projects[1], merges_only);
+    assert_eq!(
+        all.projects.iter().map(|row| row.merges).sum::<u64>(),
+        all.merges
+    );
+    let one = read(&db, Some(&gamma), MIDNIGHT, NOW).unwrap();
+    assert_eq!(one.projects, [merges_only]);
+    assert_eq!(one.merges, 2);
+}
+
 /// A store without the activity table counts no merges.
 #[test]
 fn merges_are_zero_without_the_activity_table() {
