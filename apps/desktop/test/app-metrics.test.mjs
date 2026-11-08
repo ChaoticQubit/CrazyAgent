@@ -32,8 +32,8 @@ const metrics = {
     { project: "beta", agent: "master-beta", session: "m-2", task: null, title: null, status: null, last_ms: NOW - 11 * MINUTE, tokens: BETA },
   ],
   projects: [
-    { key: "alpha", tokens: ALPHA, agents: 2, runs: 3, projects: ["alpha"] },
-    { key: "beta", tokens: BETA, agents: 1, runs: 1, projects: ["beta"] },
+    { key: "alpha", tokens: ALPHA, agents: 2, runs: 3, projects: ["alpha"], merges: 4 },
+    { key: "beta", tokens: BETA, agents: 1, runs: 1, projects: ["beta"], merges: 0 },
   ],
   agents: [
     { project: "alpha", agent: "team-8", harnesses: ["codex"], accounts: ["acct-a", "acct-b"], tokens: ALPHA },
@@ -70,9 +70,9 @@ test("all projects shows the same tiles, and By project lists each project with 
   assert.match(text(markup), /Tasks 6 done 1 waiting, 0 failed Merges 19 5 into main, 1 undone Lines /, "the same six tiles as the project tab");
   assert.match(text(markup), /By project By agent By run By account By harness/);
   const table = tableText(markup);
-  assert.match(table, /^ Project Tokens Input Cache write Output Cache read Agents Runs Share of tokens /);
-  assert.match(table, /Alpha 1\.4K 700 500 200 3K 2 3 61%/);
-  assert.match(table, /Beta 900 500 300 100 1K 1 1 39%/);
+  assert.match(table, /^ Project Tokens Input Cache write Output Cache read Agents Runs Merges Share of tokens /, "By project counts each project's merges, as the mockup does");
+  assert.match(table, /Alpha 1\.4K 700 500 200 3K 2 3 4 61%/);
+  assert.match(table, /Beta 900 500 300 100 1K 1 1 0 39%/);
 });
 
 test("across all projects, By agent and By run add a Project column, and an agent names its harness and accounts", () => {

@@ -42,8 +42,9 @@ pub struct RunRow {
 }
 
 /// The tokens one project, account or harness used in the range, with how many agents and
-/// runs used it and the first `NAMES_MAX` projects they ran in, once each in name order,
-/// with how many more there were.
+/// runs used it, the first `NAMES_MAX` projects they ran in, once each in name order, with
+/// how many more there were, and for a project row the merges of the range as the Merges
+/// tile counts them (zero for an account or harness row).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupRow {
@@ -53,6 +54,8 @@ pub struct GroupRow {
     pub runs: u64,
     pub projects: Vec<String>,
     pub more_projects: u64,
+    #[serde(default)]
+    pub merges: u64,
 }
 
 /// The tokens one agent used in the range, with the name clients show for it when the store
@@ -360,6 +363,7 @@ fn groups(
                 runs: count(row.get(6)?),
                 projects: Vec::new(),
                 more_projects: 0,
+                merges: 0,
             })
         })
         .map_err(storage)?

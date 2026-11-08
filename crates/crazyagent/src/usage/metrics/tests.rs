@@ -177,6 +177,94 @@ fn merges_count_lead_and_main_merges_in_the_range_with_those_undone() {
     );
 }
 
+/// Each project row of the breakdown counts that project's merges in the range as the
+/// Merges tile does, a lead's merge and the master's merge into main; account and harness
+/// rows count none.
+#[test]
+fn each_project_row_counts_its_merges_in_the_range() {
+    use crate::activity::{ActivityKind, MASTER_ACTOR, NewActivity};
+    let (_directory, db) = database();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+        .unwrap();
+    crate::activity::initialize(&db).unwrap();
+    for project in ["alpha", "beta"] {
+        used(
+            &db,
+            MIDNIGHT + HOUR,
+            project,
+            "acct-a",
+            "team-1",
+            "codex",
+            "s1",
+            10,
+            0,
+            0,
+            0,
+        );
+    }
+    let beta = ProjectId::new("beta").unwrap();
+    for (project, kind, change_set, at_ms) in [
+        (
+            alpha(),
+            ActivityKind::MergedIntoMain,
+            "set-1",
+            MIDNIGHT + HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::LeadMerged,
+            "set-2",
+            MIDNIGHT + 2 * HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::Accepted,
+            "set-3",
+            MIDNIGHT + 2 * HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::MergedIntoMain,
+            "set-4",
+            MIDNIGHT - HOUR,
+        ),
+        (
+            beta.clone(),
+            ActivityKind::LeadMerged,
+            "set-5",
+            MIDNIGHT + HOUR,
+        ),
+    ] {
+        let item = NewActivity {
+            kind,
+            actor: MASTER_ACTOR,
+            agent: None,
+            goal: None,
+            text: "Merged",
+            change_set: Some(change_set),
+        };
+        crate::activity::record(&db, &project, &item, at_ms).unwrap();
+    }
+    let merges = |rows: &[GroupRow]| -> Vec<(String, u64)> {
+        rows.iter()
+            .map(|row| (row.key.clone(), row.merges))
+            .collect()
+    };
+    let all = read(&db, None, MIDNIGHT, NOW).unwrap();
+    assert_eq!(
+        merges(&all.projects),
+        [("alpha".to_owned(), 2), ("beta".to_owned(), 1)]
+    );
+    assert!(
+        all.accounts
+            .iter()
+            .chain(&all.harnesses)
+            .all(|row| row.merges == 0)
+    );
+    let one = read(&db, Some(&beta), MIDNIGHT, NOW).unwrap();
+    assert_eq!(merges(&one.projects), [("beta".to_owned(), 1)]);
+}
+
 /// A store without the activity table counts no merges.
 #[test]
 fn merges_are_zero_without_the_activity_table() {
