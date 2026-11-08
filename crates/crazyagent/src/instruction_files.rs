@@ -245,15 +245,18 @@ pub struct ImportCommit {
     pub files: Vec<String>,
 }
 
-/// The moved instruction files whose move the owner's checkout has not committed, and the
-/// branch that checkout has checked out, so a notice can name where merges are refused:
-/// none for a detached HEAD, a name over `BRANCH_BYTES_MAX`, a branch git cannot read for
-/// the engine (a name that is not UTF-8) or when no move waits.
+/// The moved instruction files whose move the owner's checkout has not committed, the
+/// branch that checkout has checked out while a move waits, so a notice can name where
+/// merges are refused, and in `checked_out` that branch whether or not a move waits, for the
+/// project head. A branch is none for a detached HEAD, a name over `BRANCH_BYTES_MAX` or a
+/// branch git cannot read for the engine (a name that is not UTF-8).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UncommittedImport {
     pub files: Vec<String>,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub checked_out: Option<String>,
 }
 
 /// Tells whether a name is one an instruction files record may hold, so a record read back
@@ -978,20 +981,20 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
 }
 
 /// Lists the moved instruction files whose move the owner's checkout has not committed, as
-/// `uncommitted` does, with the branch the checkout has checked out while any wait; a
-/// branch that cannot be read is left unnamed, so the move still shows. Input: the project
-/// folder. Output: the files and branch, or a plain code as `uncommitted`.
+/// `uncommitted` does, with the branch the checkout has checked out, named as the refusal's
+/// branch only while any wait; a branch that cannot be read is left unnamed, so the move
+/// still shows. Input: the project folder. Output: the files and branches, or a plain code
+/// as `uncommitted`.
 pub fn uncommitted_import(folder: &Path) -> Result<UncommittedImport, EngineError> {
     let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
     let files = uncommitted(&root)?;
-    if files.is_empty() {
-        return Ok(UncommittedImport {
-            files,
-            branch: None,
-        });
-    }
-    let branch = crate::landing::checked_out_branch(&root).unwrap_or(None);
-    Ok(UncommittedImport { files, branch })
+    let checked_out = crate::landing::checked_out_branch(&root).unwrap_or(None);
+    let branch = (!files.is_empty()).then(|| checked_out.clone()).flatten();
+    Ok(UncommittedImport {
+        files,
+        branch,
+        checked_out,
+    })
 }
 
 /// Commits the instruction import's move in the owner's checkout, as the owner chose: one

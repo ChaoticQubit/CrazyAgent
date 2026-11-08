@@ -283,7 +283,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const questions = usePendingQuestions(projectId, data.team.at);
   const team = data.team.result?.kind === "ok" ? data.team.result.value : null;
   const working = team ? team.agents.filter((agent) => agent.status === "working").length : 0;
-  const meta = headMeta(data, policy.kind === "ok" ? accessSummary(policy.value) : null, checkout.kind === "ok" ? checkout.value.branch : null);
+  const meta = headMeta(data, policy.kind === "ok" ? accessSummary(policy.value) : null, checkout.kind === "ok" ? checkout.value.checked_out : null);
 
   return <div className="pj pj-project" ref={root}>
     <ProjectHead title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
