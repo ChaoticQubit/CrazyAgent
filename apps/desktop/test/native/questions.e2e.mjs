@@ -164,10 +164,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(questionRows(runtime, project, question, agent).waiting, "question", "the engine paused the asker until the owner answers");
         await me.capture("questions-toast");
         await me.click("Open", "div.toast[role=status] button");
-        await me.waitFor("the Agents toolbar counting the question", (text) => /[1-9][0-9]* asks? you/u.test(text));
-        await me.asks();
-        await me.waitFor("the question in the Questions for you drawer", (text) => text.includes("Questions for you (1)") && text.includes(QUESTION));
-        assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/agents`), "Open goes to the project's Agents tab");
+        await me.waitFor("the question in the Questions for you drawer Open opened", (text) => text.includes("Questions for you (1)") && text.includes(QUESTION));
+        const focus = await page.evaluate(`document.activeElement?.closest("dialog.drawer[open] li.tg-question")?.innerText ?? null`);
+        assert.ok(focus?.includes(QUESTION), `Open puts the keyboard on the urgent question: ${focus}`);
+        assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/agents`), "Open goes to the project's Agents tab and the drawer opens once");
         const row = await page.evaluate("document.querySelector('li.tg-question')?.innerText ?? null");
         for (const part of ["Urgent", label, "The agent is paused until you answer.", QUESTION, "Open terminal", "Answer"]) {
           assert.ok(row?.includes(part), `the question row shows "${part}": ${row}`);
