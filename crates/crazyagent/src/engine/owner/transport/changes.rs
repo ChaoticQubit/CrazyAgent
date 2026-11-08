@@ -47,6 +47,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_target_invalid",
     "changes_too_large",
     "changes_unavailable",
+    "changes_undo_unavailable",
     "changes_workspace_invalid",
     "owner_authentication_failed",
     "owner_authority_unavailable",
@@ -93,6 +94,9 @@ enum Action {
         expected_head: String,
     },
     Restore {
+        id: ChangeSetId,
+    },
+    Undo {
         id: ChangeSetId,
     },
     Update {
@@ -239,6 +243,16 @@ impl OwnerClient {
             target,
         };
         match self.changes_exchange(action).await? {
+            Reply::Accepted { outcome } => Ok(outcome),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Undoes a change set its own Accept merged, with one revert commit on the branch it
+    /// landed on. Input: the change set. Output: the undo commit and branch, or the files
+    /// the branch changed since, when nothing changed.
+    pub async fn undo_changes(&self, id: ChangeSetId) -> Result<AcceptOutcome, EngineError> {
+        match self.changes_exchange(Action::Undo { id }).await? {
             Reply::Accepted { outcome } => Ok(outcome),
             _ => Err(unknown()),
         }
@@ -548,6 +562,17 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
         Action::Restore { id } => {
             landing::restore(&db, &id, now_ms()?)?;
             (Reply::Done, false)
+        }
+        Action::Undo { id } => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or_else(|| failure("changes_owner_identity_missing"))?;
+            (
+                Reply::Accepted {
+                    outcome: landing::undo_landing(&db, &home, &id)?,
+                },
+                false,
+            )
         }
         Action::Update { id } => (Reply::Done, crate::landing_turns::update(&db, &id)?),
     })

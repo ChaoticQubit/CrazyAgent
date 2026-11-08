@@ -126,6 +126,16 @@ impl NativeBridge {
         }))
     }
 
+    /// Undoes a change set its own Accept merged, run without the bridge lock. Input: the
+    /// change set id. Output: the undo commit and branch, or the conflicting files.
+    pub fn undo_change(&self, id: String) -> Result<Unlocked<AcceptOutcome>, BridgeError> {
+        let id = change_set(id)?;
+        let client = self.changes_client()?;
+        Ok(Box::pin(async move {
+            client.undo_changes(id).await.map_err(changes_error)
+        }))
+    }
+
     /// Asks the agent to update a conflicting change set onto the owner's branch, run
     /// without the bridge lock. Input: the change set id.
     pub fn update_change(&self, id: String) -> Result<Unlocked<()>, BridgeError> {

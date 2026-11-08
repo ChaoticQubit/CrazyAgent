@@ -221,6 +221,7 @@
     "allow-desktop-change-branches",
     "allow-desktop-discard-change",
     "allow-desktop-restore-change",
+    "allow-desktop-undo-change",
     "allow-desktop-update-change",
     "allow-desktop-questions",
     "allow-desktop-answer-question",

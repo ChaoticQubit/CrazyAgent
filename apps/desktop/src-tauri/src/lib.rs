@@ -3188,6 +3188,17 @@ async fn desktop_restore_change(
 }
 
 #[tauri::command]
+async fn desktop_undo_change(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<crazyagent::landing::AcceptOutcome, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.undo_change(id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_update_change(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -4045,6 +4056,7 @@ pub fn run() {
             desktop_change_branches,
             desktop_discard_change,
             desktop_restore_change,
+            desktop_undo_change,
             desktop_update_change,
             desktop_questions,
             desktop_answer_question,

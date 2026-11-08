@@ -2584,6 +2584,19 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.restore_change(id)?; call.await }.await;
             routed(result)
         }
+        "desktop_undo_change" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.undo_change(id)?; call.await }.await;
+            routed(result)
+        }
         "desktop_update_change" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

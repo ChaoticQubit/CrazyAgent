@@ -33,7 +33,8 @@ const BUSY_STATE: [&str; 11] = [
 ];
 const BUILT_IN_MERGES: [&str; 6] = ["unspecified", "unset", "set", "text", "binary", "union"];
 
-/// A point inside an Accept after which a test can stop it, as an engine stop would.
+/// A point inside an Accept or an undo after which a test can stop it, as an engine stop
+/// would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Step {
     Recorded,
@@ -678,6 +679,11 @@ fn finish(
     by: By<'_>,
 ) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
+    record.landed_on = match &record.intent {
+        Some(Intent::Land { reference, new, .. }) if new == landed => Some(reference.clone()),
+        _ => None,
+    };
+    record.made = record.landed_on.is_some();
     record.landed = Some(landed.to_owned());
     record.conflicts.clear();
     record.intent = None;
@@ -1045,6 +1051,182 @@ pub(super) fn accept_to(
     Ok(AcceptOutcome::Landed { commit, branch })
 }
 
+/// Reverts the commit a change set's own Accept made, on the branch that Accept moved,
+/// through the owner's checkout or as its ref alone: merge-tree from the landed commit onto
+/// the branch tip with the landed commit's parent as the other side, the same checkout and
+/// configured-command checks as an Accept, one commit `Undo: <landed subject>` with the
+/// owner's identity, the intent recorded before the checkout is written, and a
+/// compare-and-swap move of the branch. Then [`undone`] records it. A conflict changes
+/// nothing. Inputs: the store, the owner's home, the change set and where a test stops it.
+/// Output: the undo commit and branch, the conflicts, or `changes_undo_unavailable` for a
+/// set whose Accept made no commit, that is undone already, whose commit is not on that
+/// branch or that lands in an agent's branch.
+pub(super) fn undo(
+    db: &Connection,
+    home: &Path,
+    id: &ChangeSetId,
+    stopped: &dyn Fn(Step) -> bool,
+) -> Result<AcceptOutcome, EngineError> {
+    store::initialize(db)?;
+    let repository = store::load(db, id)?.repository;
+    let _held = hold(&repository);
+    let mut record = settled(db, id)?;
+    let unavailable = || failure("changes_undo_unavailable");
+    let (landed, named) = match (&record.landed, &record.landed_on) {
+        (Some(landed), Some(reference))
+            if record.state == ChangeState::Accepted && record.made && record.undone.is_none() =>
+        {
+            let named = reference
+                .strip_prefix("refs/heads/")
+                .ok_or_else(unavailable)?;
+            (landed.clone(), named.to_owned())
+        }
+        _ => return Err(unavailable()),
+    };
+    let git_dir = repository.join(".git");
+    let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
+    let (reference, tip, target) = landing_target(db, &owner, &repository, Some(named.as_str()))?;
+    assert_eq!(record.landed_on.as_deref(), Some(reference.as_str()));
+    if matches!(target, Target::Agent(_))
+        || !owner.test(&["merge-base", "--is-ancestor", &landed, &tip])?
+    {
+        return Err(unavailable());
+    }
+    let parent = owner
+        .commit_of(&format!("{landed}^1"))?
+        .ok_or_else(unavailable)?;
+    let paths = diff::changed_paths(&owner, &parent, &landed)?;
+    if uses_configured_commands(&owner, &paths, &[&parent, &tip, &landed])? {
+        return Err(failure("changes_git_unsupported"));
+    }
+    let (tree, conflicts) = merge(&owner, &landed, &tip, &parent)?;
+    let branch = reference.trim_start_matches("refs/heads/").to_owned();
+    if !conflicts.is_empty() {
+        return Ok(AcceptOutcome::Conflict { files: conflicts });
+    }
+    if uses_configured_commands(&owner, &paths, &[&tree])? {
+        return Err(failure("changes_git_unsupported"));
+    }
+    flow::check_merged(&owner, &repository, &landed, &parent, &tree)?;
+    if matches!(target, Target::Checkout) {
+        check_clean(&owner, &repository, &tip, &tree)?;
+    }
+    if tree == owner.tree_of(&tip)? {
+        return Err(unavailable());
+    }
+    let subject = owner.run(&["show", "-s", "--format=%s", &landed])?;
+    let subject = String::from_utf8_lossy(&subject).trim().to_owned();
+    let identity = owner_identity(&repository, home)?;
+    let identity = (identity.0.as_str(), identity.1.as_str());
+    let commit = owner.commit_tree(&tree, &[&tip], &format!("Undo: {subject}\n"), identity)?;
+    verify_objects(&repository, &[&commit], &[&tip, &landed])?;
+    record.intent = Some(Intent::Undo {
+        reference: reference.clone(),
+        old: tip.clone(),
+        new: commit.clone(),
+    });
+    store::save(db, &record)?;
+    if stopped(Step::Recorded) {
+        return Err(failure("changes_git_failed"));
+    }
+    if matches!(target, Target::Checkout)
+        && owner
+            .exec(&["read-tree", "-u", "-m", &tip, &commit], None, &[], 4096)?
+            .code
+            != 0
+    {
+        record.intent = None;
+        store::save(db, &record)?;
+        return Err(failure("changes_owner_dirty"));
+    }
+    if stopped(Step::FilesWritten) {
+        return Err(failure("changes_git_failed"));
+    }
+    let env = [
+        ("GIT_COMMITTER_NAME", identity.0),
+        ("GIT_COMMITTER_EMAIL", identity.1),
+    ];
+    let message = format!("CrazyAgent: undo {}", id.as_str());
+    let moved = owner.exec(
+        &["update-ref", "-m", &message, &reference, &commit, &tip],
+        None,
+        &env,
+        256,
+    )?;
+    if moved.code != 0 {
+        if matches!(target, Target::Checkout)
+            && owner.test(&["diff-index", "--cached", "--quiet", &commit, "--"])?
+        {
+            let _ = owner.exec(&["read-tree", "-u", "-m", &commit, &tip], None, &[], 4096);
+        }
+        record.intent = None;
+        store::save(db, &record)?;
+        return Err(failure("changes_branch_moved"));
+    }
+    if stopped(Step::BranchMoved) {
+        return Err(failure("changes_git_failed"));
+    }
+    undone(db, &mut record, &commit, OWNER_ACTOR)?;
+    Ok(AcceptOutcome::Landed { commit, branch })
+}
+
+/// Records a finished undo: every set the undone merge closed (a master's merge closes the
+/// sets its head holds) is marked undone with it, then the set keeps the reverting commit
+/// and drops its intent, its merge rows show Undone and one Undone row names the closed
+/// sets whose work it reverted too. Inputs: the store, the undone set, the reverting commit
+/// and who undid it. Output: Ok once saved.
+fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Result<(), EngineError> {
+    let landed = record
+        .landed
+        .clone()
+        .ok_or_else(|| failure("changes_undo_unavailable"))?;
+    let mut closed = Vec::new();
+    for mut other in store::closed_in(db, &record.project, &landed, &record.id)? {
+        other.undone = Some(commit.to_owned());
+        store::save(db, &other)?;
+        closed.push(other.agent.label);
+    }
+    record.undone = Some(commit.to_owned());
+    record.intent = None;
+    record.updated_ms = flow::now_ms()?;
+    store::save(db, record)?;
+    crate::activity::mark_undone(db, &record.project, record.id.as_str());
+    super::note_undo(db, record, &closed, by);
+    Ok(())
+}
+
+/// Moves an owner ref an Accept or an undo left in flight: by compare and swap when the
+/// ref still holds `old` and the owner's index already holds `new`. Inputs: the set, the
+/// intent's ref, old and new commits and the reflog message. Output: whether the ref now
+/// holds `new`.
+fn moved_on(
+    record: &Record,
+    reference: &str,
+    old: &str,
+    new: &str,
+    message: &str,
+) -> Result<bool, EngineError> {
+    let owner = Repo::open(
+        &record.repository,
+        &record.repository.join(".git"),
+        Some(&record.repository),
+    )?;
+    let tip = owner.commit_of(reference)?;
+    let written = tip.as_deref() == Some(old)
+        && owner.test(&["diff-index", "--cached", "--quiet", new, "--"])?;
+    let moved = written
+        && owner
+            .exec(
+                &["update-ref", "-m", message, reference, new, old],
+                None,
+                &[],
+                256,
+            )?
+            .code
+            == 0;
+    Ok(moved || tip.as_deref() == Some(new))
+}
+
 /// Merges the tip the set lands on into a change set's agent worktree with conflict
 /// markers as an engine merge commit named after that branch, from the merge base of the
 /// tip and its head, so the agent can resolve them in its next turn: its lead's branch for
@@ -1234,8 +1416,8 @@ pub(super) fn settled(db: &Connection, id: &ChangeSetId) -> Result<Record, Engin
 /// an Accept whose branch moved is finished, one whose files were written but whose
 /// branch did not move is moved by compare and swap, either listed as the master's merge
 /// with its covered sets closed when the master landed its own set, one that wrote nothing is dropped,
-/// and an agent worktree reset is run again while the worktree still holds the old or new
-/// commit. The caller holds [`hold`] on its repository. Inputs: the store and the loaded
+/// an undo is finished or dropped the same way, and an agent worktree reset is run again
+/// while the worktree still holds the old or new commit. The caller holds [`hold`] on its repository. Inputs: the store and the loaded
 /// record. Output: Ok once the stored record holds no intent.
 fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     match record.intent.clone() {
@@ -1245,32 +1427,7 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             new,
             master,
         }) => {
-            let owner = Repo::open(
-                &record.repository,
-                &record.repository.join(".git"),
-                Some(&record.repository),
-            )?;
-            let tip = owner.commit_of(&reference)?;
-            let written = tip.as_deref() == Some(old.as_str())
-                && owner.test(&["diff-index", "--cached", "--quiet", &new, "--"])?;
-            let moved = written
-                && owner
-                    .exec(
-                        &[
-                            "update-ref",
-                            "-m",
-                            "CrazyAgent: accept",
-                            &reference,
-                            &new,
-                            &old,
-                        ],
-                        None,
-                        &[],
-                        256,
-                    )?
-                    .code
-                    == 0;
-            let landed = moved || tip.as_deref() == Some(new.as_str());
+            let landed = moved_on(record, &reference, &old, &new, "CrazyAgent: accept")?;
             if landed && master {
                 finish(db, record, &new, By::Master)?;
                 master_merged(
@@ -1281,6 +1438,18 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                 );
             } else if landed {
                 finish(db, record, &new, By::Named(ENGINE_ACTOR))?;
+            } else {
+                record.intent = None;
+                store::save(db, record)?;
+            }
+        }
+        Some(Intent::Undo {
+            reference,
+            old,
+            new,
+        }) => {
+            if moved_on(record, &reference, &old, &new, "CrazyAgent: undo")? {
+                undone(db, record, &new, ENGINE_ACTOR)?;
             } else {
                 record.intent = None;
                 store::save(db, record)?;

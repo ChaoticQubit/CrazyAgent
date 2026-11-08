@@ -65,6 +65,7 @@ const REFUSALS: Record<string, string> = {
   changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
   changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
   changes_restore_expired: "These changes can no longer be restored. Discarded changes are kept for 7 days.",
+  changes_undo_unavailable: "This merge can't be undone. CrazyAgent undoes only a merge it committed itself, and only once.",
   changes_agent_has_pending: "This agent has newer changes waiting. Accept or discard those first.",
   changes_agent_busy: "The agent is working right now. Try again when it finishes.",
   changes_unavailable: "Landing changes isn't ready in this engine yet.",
@@ -157,6 +158,13 @@ export function discardChange(id: string, expectedHead: string): Promise<Result<
 /** Restores a discarded change set to its agent. Input: the id. */
 export function restoreChange(id: string): Promise<Result<void>> {
   return call<void>("desktop_restore_change", { id });
+}
+
+/** Undoes a merge a change set's own Accept made, with one revert commit on the branch it
+ * landed on. Input: the change set id. Output: the undo commit and branch, or the files the
+ * branch changed since, when nothing changed. */
+export function undoChange(id: string): Promise<Result<AcceptOutcome>> {
+  return call<AcceptOutcome>("desktop_undo_change", { id });
 }
 
 /** Asks the agent to update its changes onto the owner's branch and resolve the

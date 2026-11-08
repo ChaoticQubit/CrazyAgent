@@ -6,6 +6,9 @@ export const EVERY = 300;
 let root = null;
 let asked = [];
 let replies = [];
+let undos = [];
+let undoReplies = [];
+let every = EVERY;
 let hidden = false;
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (hidden ? "hidden" : "visible") });
@@ -15,6 +18,13 @@ Object.defineProperty(document, "visibilityState", { configurable: true, get: ()
 function read(projectId) {
   asked.push(projectId);
   return new Promise((done) => replies.push(done));
+}
+
+/** Undoes a merge the way the engine does, answering only when the test replies. Input: the
+ * change set id. Output: the outcome, once replied. */
+function undo(id) {
+  undos.push(id);
+  return new Promise((done) => undoReplies.push(done));
 }
 
 async function settle(ms) {
@@ -48,25 +58,41 @@ function state() {
     live: section?.querySelector(".pj-live") !== null && section !== null,
     rows: section?.querySelectorAll(".pj-activity-row").length ?? 0,
     alert: section?.querySelector("[role=alert]")?.textContent ?? null,
+    undos: [...undos],
+    buttons: all(".pj-activity-row button").map((button) => ({ text: button.textContent, row: rowText(button.closest(".pj-activity-row")), disabled: button.disabled })),
+    note: section?.querySelector(".pj-note[role=status]")?.textContent ?? null,
+    dialog: document.querySelector("dialog[open]")?.innerText ?? null,
   };
 }
 
-/** Mounts Recent activity for a project with the test's read and a short interval.
- * Input: the project id. Output: what it shows and what it read. */
-export async function mount(id) {
+/** Mounts Recent activity for a project with the test's read and undo and an interval.
+ * Inputs: the project id and the interval, short unless given. Output: what it shows and
+ * what it read. */
+export async function mount(id, interval = EVERY) {
   root?.unmount();
   asked = [];
   replies = [];
+  undos = [];
+  undoReplies = [];
+  every = interval;
   hidden = false;
   document.body.innerHTML = '<div id="root"></div>';
   root = createRoot(document.getElementById("root"));
-  await acted(() => root.render(createElement(RecentActivity, { projectId: id, every: EVERY, read })));
+  await acted(() => root.render(createElement(RecentActivity, { projectId: id, every, read, undo })));
   return state();
 }
 
 /** Shows another project in the same section. Input: its id. Output: the state. */
 export async function move(id) {
-  await acted(() => root.render(createElement(RecentActivity, { projectId: id, every: EVERY, read })));
+  await acted(() => root.render(createElement(RecentActivity, { projectId: id, every, read, undo })));
+  return state();
+}
+
+/** Answers the oldest undo still waiting. Input: the undo's result. Output: the state. */
+export async function answerUndo(result) {
+  const answer = undoReplies.shift();
+  if (!answer) throw new Error("no undo is waiting for a reply");
+  await acted(() => answer(result));
   return state();
 }
 

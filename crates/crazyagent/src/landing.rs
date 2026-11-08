@@ -426,6 +426,38 @@ fn note_change(
         }
         _ => unreachable!("note_change takes a change set action"),
     };
+    note_text(db, record, kind, by, &text);
+}
+
+/// Records the Undone row of a finished undo, naming the sets its merge closed whose work
+/// it reverted too; a failure is logged by its plain code. Inputs: the store, the undone
+/// set, the labels of those sets and who undid it.
+#[cfg(unix)]
+fn note_undo(db: &Connection, record: &store::Record, closed: &[String], by: &str) {
+    let mut text = format!(
+        "Undid the changes of {}: {}",
+        record.agent.label, record.prompt_line
+    );
+    if !closed.is_empty() {
+        text.push_str(&format!(
+            ". This also reverted the changes of {}",
+            closed.join(", ")
+        ));
+    }
+    note_text(db, record, crate::activity::ActivityKind::Undone, by, &text);
+}
+
+/// Records one row about a change set with its words, at the time the set last changed and
+/// with its sub-agent for the goal; a failure is logged by its plain code. Inputs: the
+/// store, the change set, the kind of event, who acted and the words.
+#[cfg(unix)]
+fn note_text(
+    db: &Connection,
+    record: &store::Record,
+    kind: crate::activity::ActivityKind,
+    by: &str,
+    text: &str,
+) {
     let agent = match record.agent.kind {
         AgentKind::Sub => record.agent.id.parse().ok(),
         AgentKind::Master => None,
@@ -435,7 +467,7 @@ fn note_change(
         actor: by,
         agent,
         goal: None,
-        text: &text,
+        text,
         change_set: Some(record.id.as_str()),
     };
     let at = i64::try_from(record.updated_ms).unwrap_or(i64::MAX);
@@ -1253,6 +1285,27 @@ pub fn land_master_set(
     {
         let _ = (db, owner_home, id);
         Ok(None)
+    }
+}
+
+/// Undoes a change set its own Accept merged into main: one commit on the branch it landed
+/// on that reverts the landed commit by a three-way merge, made with the owner's identity
+/// and named `Undo: <landed subject>`, and one Undone activity row; the merge's own rows
+/// then show Undone. A conflict with what that branch changed since returns the files and
+/// changes nothing. Inputs: the store, the owner's home and the change set. Output: the
+/// undo commit and branch, the conflicts, or `changes_undo_unavailable` for a set whose
+/// Accept made no commit of its own or that is already undone.
+pub fn undo_landing(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+) -> Result<AcceptOutcome, EngineError> {
+    #[cfg(unix)]
+    return owner::undo(db, owner_home, id, &|_| false);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, owner_home, id);
+        Err(unavailable())
     }
 }
 
