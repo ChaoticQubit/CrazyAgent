@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::webview::{NewWindowResponse, WebviewBuilder};
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Rect, Url, WebviewUrl, WebviewWindow,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Rect, Runtime, Url, WebviewUrl,
+    WebviewWindow,
 };
 
 /// The script every IDE webview runs before the workbench loads: it drops the control
@@ -349,7 +350,7 @@ fn ide_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )
 }
 
-fn restore_menu(app: &AppHandle) -> Result<(), BridgeError> {
+fn restore_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(), BridgeError> {
     app.set_menu(Menu::default(app).map_err(failed)?)
         .map_err(failed)?;
     Ok(())
@@ -449,8 +450,8 @@ pub fn show(
 
 /// Moves the shown IDE webview over its panel after the panel moved or resized. Inputs: the
 /// app, the views, the project and the panel. Output: Ok, also when that IDE is not shown.
-pub fn place(
-    app: &AppHandle,
+pub fn place<R: Runtime>(
+    app: &AppHandle<R>,
     views: &IdeViews,
     project: &ProjectId,
     bounds: Bounds,
@@ -472,7 +473,11 @@ pub fn place(
 /// Hides a project's IDE webview when its tab is left or an overlay covers it, keeping it
 /// loaded, stops an open of it still waiting for the engine, and gives the app its own menu
 /// back. Inputs: the app, the views and the project. Output: Ok.
-pub fn hide(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<(), BridgeError> {
+pub fn hide<R: Runtime>(
+    app: &AppHandle<R>,
+    views: &IdeViews,
+    project: &ProjectId,
+) -> Result<(), BridgeError> {
     let mut held = views.lock();
     held.cancel(project);
     if held.shown.as_deref() != Some(project.as_str()) {
@@ -492,7 +497,11 @@ pub fn hide(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<()
 /// Closes a project's IDE webview when the project page closes, stops an open of it still
 /// waiting for the engine, and gives the app its own menu back if that IDE was shown.
 /// Inputs: the app, the views and the project. Output: Ok.
-pub fn close(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<(), BridgeError> {
+pub fn close<R: Runtime>(
+    app: &AppHandle<R>,
+    views: &IdeViews,
+    project: &ProjectId,
+) -> Result<(), BridgeError> {
     let mut held = views.lock();
     held.cancel(project);
     let shown = held.shown.as_deref() == Some(project.as_str());

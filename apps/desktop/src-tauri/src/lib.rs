@@ -53,8 +53,8 @@ use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
-use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
+use tauri::{AppHandle, Manager, Runtime, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 use updates::{AvailableUpdate, InstallOutcome, UpdateProgress, UpdateSettings, UpdateState};
@@ -63,7 +63,7 @@ pub struct NativeState(BridgeQueue);
 
 pub struct TerminalState(Arc<Terminals>);
 
-fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
+fn main_window<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), BridgeError> {
     if window.label() != "main" {
         return Err(BridgeError {
             code: "window_denied",
@@ -3430,9 +3430,9 @@ async fn desktop_ide_open(
 }
 
 #[tauri::command]
-async fn desktop_ide_place(
-    window: WebviewWindow,
-    app: AppHandle,
+async fn desktop_ide_place<R: Runtime>(
+    window: WebviewWindow<R>,
+    app: AppHandle<R>,
     views: State<'_, ide::IdeViews>,
     project_id: String,
     bounds: ide::Bounds,
@@ -3443,9 +3443,9 @@ async fn desktop_ide_place(
 }
 
 #[tauri::command]
-async fn desktop_ide_hide(
-    window: WebviewWindow,
-    app: AppHandle,
+async fn desktop_ide_hide<R: Runtime>(
+    window: WebviewWindow<R>,
+    app: AppHandle<R>,
     views: State<'_, ide::IdeViews>,
     project_id: String,
 ) -> Result<(), BridgeError> {
@@ -3454,9 +3454,9 @@ async fn desktop_ide_hide(
 }
 
 #[tauri::command]
-async fn desktop_ide_close(
-    window: WebviewWindow,
-    app: AppHandle,
+async fn desktop_ide_close<R: Runtime>(
+    window: WebviewWindow<R>,
+    app: AppHandle<R>,
     state: State<'_, NativeState>,
     views: State<'_, ide::IdeViews>,
     project_id: String,
@@ -3900,6 +3900,295 @@ async fn desktop_link_cli(window: WebviewWindow) -> Result<String, BridgeError> 
     updates::link_cli().await
 }
 
+/// Puts one check in front of every native command. Input: the generated handler. Output:
+/// the handler to register.
+fn admit_pages<R: Runtime>(
+    handler: impl Fn(Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
+    handler
+}
+
+/// Declares the native commands once: their names for whoever must walk them and their
+/// handler behind the page check. Input: the command functions. Output: `NATIVE_COMMANDS`
+/// and `native_handler`.
+macro_rules! native_commands {
+    ($($command:ident,)+) => {
+        #[cfg(test)]
+        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+];
+
+        fn native_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
+            admit_pages::<tauri::Wry>(tauri::generate_handler![$($command,)+])
+        }
+    };
+}
+
+native_commands! {
+    desktop_connect,
+    desktop_status,
+    desktop_harness_catalog,
+    desktop_baselines,
+    desktop_inspect_baseline,
+    desktop_approve_baseline,
+    desktop_revoke_baseline,
+    desktop_reconcile,
+    desktop_retry,
+    desktop_projects,
+    desktop_project_list,
+    desktop_create_project,
+    desktop_project_catalog,
+    desktop_setup_project,
+    desktop_project_setup,
+    desktop_research_jobs,
+    desktop_project_activity,
+    desktop_project_context,
+    desktop_project_context_item,
+    desktop_save_research_to_memory,
+    desktop_add_project_documents,
+    desktop_delete_project_context,
+    desktop_project_read_paths,
+    desktop_project_hidden_paths,
+    desktop_project_files,
+    desktop_set_project_read_paths,
+    desktop_set_project_hidden_paths,
+    desktop_project_agent_policy,
+    desktop_set_project_agent_policy,
+    desktop_team_status,
+    desktop_team_agent_messages,
+    desktop_team_message_settings,
+    desktop_team_message,
+    desktop_team_delegate,
+    desktop_team_cancel,
+    desktop_team_keep_warm,
+    desktop_team_time_limits,
+    desktop_team_on_harness_switch,
+    desktop_team_apply_harness_switch,
+    desktop_team_sub_agent_depth,
+    desktop_team_child_landing,
+    desktop_team_finished_agents,
+    desktop_team_agent_branches,
+    desktop_team_master_branch,
+    desktop_team_land_on,
+    desktop_team_background,
+    desktop_team_ask_before_merge,
+    desktop_team_master_lands,
+    desktop_team_reask_empty_reply,
+    desktop_team_catch_up_main,
+    desktop_team_new_folder_limit,
+    desktop_team_coordination,
+    desktop_team_harness_mode,
+    desktop_team_harness_delivery,
+    desktop_team_live_master,
+    desktop_team_pause,
+    desktop_team_hand_off,
+    desktop_team_rename,
+    desktop_team_wake_agent,
+    desktop_team_stop_agent,
+    desktop_coord_send,
+    desktop_team_stop_teammate,
+    desktop_team_max_harnesses,
+    desktop_team_max_teammates,
+    desktop_team_token_budget,
+    desktop_team_spread_accounts,
+    desktop_team_graph,
+    desktop_team_events,
+    desktop_team_wake_rule,
+    desktop_team_seen,
+    desktop_coord_questions,
+    desktop_coord_answer,
+    desktop_team_attention,
+    desktop_terminal_attach,
+    desktop_terminal_input,
+    desktop_terminal_prompt,
+    desktop_terminal_resize,
+    desktop_terminal_detach,
+    desktop_team_terminals_per_window,
+    desktop_terminals_per_window,
+    desktop_open_terminal_windows,
+    desktop_extend_terminal_windows,
+    desktop_focus_terminal_window,
+    desktop_close_project_walls,
+    desktop_update_project_setup,
+    desktop_remove_project,
+    desktop_cancel_research,
+    desktop_retry_research,
+    desktop_plan_roadmap,
+    desktop_research_log,
+    desktop_projects_home,
+    desktop_set_projects_home,
+    desktop_move_projects_home,
+    desktop_found_projects,
+    desktop_folder_size,
+    desktop_add_existing_folder,
+    desktop_start_onboarding,
+    desktop_onboarding,
+    desktop_github_status,
+    desktop_github_sign_in,
+    desktop_github_token,
+    desktop_github_use_cli,
+    desktop_github_sign_out,
+    desktop_github_repos,
+    desktop_clone_repo,
+    desktop_setup_status,
+    desktop_run_setup,
+    desktop_set_pack_entry,
+    desktop_remove_pack_entry,
+    desktop_project_memories,
+    desktop_ide_asks,
+    desktop_review_memory,
+    desktop_memories,
+    desktop_memory,
+    desktop_approved_memories,
+    desktop_add_memory,
+    desktop_import_memory,
+    desktop_promote_memory,
+    desktop_delete_memory,
+    desktop_approve_memory,
+    desktop_set_agent_memory_writes,
+    desktop_forget_memory,
+    desktop_remember_research,
+    desktop_save_selection_to_memory,
+    desktop_open_project,
+    desktop_history,
+    desktop_send_message,
+    desktop_replace_brief,
+    desktop_master_state,
+    desktop_master_turns,
+    desktop_open_master,
+    desktop_submit_master,
+    desktop_close_master,
+    desktop_master_sessions,
+    desktop_master_session_turns,
+    desktop_master_inputs,
+    desktop_new_master_session,
+    desktop_resume_master_session,
+    desktop_delete_master_session,
+    desktop_cancel_master_turn,
+    desktop_pending_intent,
+    desktop_reconcile_intent,
+    desktop_retry_intent,
+    desktop_drop_intent,
+    desktop_prepare_managed_account,
+    desktop_prepare_configured_account,
+    desktop_account_auth_capabilities,
+    desktop_configure_account_profile,
+    desktop_read_account_profile,
+    desktop_model_access_page,
+    desktop_inspect_model_access,
+    desktop_edit_model_access,
+    desktop_start_native_auth,
+    desktop_read_native_auth,
+    desktop_cancel_native_auth,
+    desktop_clear_native_auth,
+    desktop_logout_native_auth,
+    desktop_submit_claude_auth_code,
+    desktop_owner_profile,
+    desktop_save_owner_profile,
+    desktop_sandbox_settings,
+    desktop_set_sandbox_settings,
+    desktop_pool_summaries,
+    desktop_account_schedule,
+    desktop_account_ranking,
+    desktop_set_account_schedule,
+    desktop_account_catalog,
+    desktop_list_accounts,
+    desktop_add_account,
+    desktop_rename_account,
+    desktop_remove_account,
+    desktop_check_account,
+    desktop_local_models,
+    desktop_plugin_skills,
+    desktop_plugin_servers,
+    desktop_plugin_hooks,
+    desktop_add_hooks,
+    desktop_set_hook_enabled,
+    desktop_add_skill,
+    desktop_set_skill_enabled,
+    desktop_remove_skill,
+    desktop_skill_detail,
+    desktop_skill_import_scan,
+    desktop_import_skill,
+    desktop_add_mcp_server,
+    desktop_update_mcp_server,
+    desktop_approve_mcp_server,
+    desktop_set_mcp_server_enabled,
+    desktop_remove_mcp_server,
+    desktop_switch_plugin,
+    desktop_set_mcp_secret,
+    desktop_remove_mcp_secret,
+    desktop_check_mcp_server,
+    desktop_project_plugins,
+    desktop_tool_switches,
+    desktop_set_tool_switch,
+    desktop_restore_tool_switches,
+    desktop_agents,
+    desktop_stop_agent,
+    desktop_account_use,
+    desktop_release_account,
+    desktop_interrupt_agent,
+    desktop_restart_agent,
+    desktop_changes,
+    desktop_change_diff,
+    desktop_accept_change,
+    desktop_change_branches,
+    desktop_discard_change,
+    desktop_restore_change,
+    desktop_undo_change,
+    desktop_update_change,
+    desktop_questions,
+    desktop_answer_question,
+    desktop_dismiss_question,
+    desktop_question_counts,
+    desktop_notify_question,
+    desktop_notification_target,
+    desktop_system_notifications,
+    desktop_process_text,
+    desktop_save_process_text,
+    desktop_import_instructions_file,
+    desktop_instruction_import,
+    desktop_confirm_instruction_import,
+    desktop_uncommitted_instruction_import,
+    desktop_commit_instruction_import,
+    desktop_default_process,
+    desktop_process_given,
+    desktop_agent_instructions,
+    desktop_recovery_banner,
+    desktop_retry_recovery,
+    desktop_dismiss_recovery,
+    desktop_ide_state,
+    desktop_ide_open,
+    desktop_ide_place,
+    desktop_ide_hide,
+    desktop_ide_close,
+    desktop_ide_touch,
+    desktop_instruction_settings,
+    desktop_save_instruction_settings,
+    desktop_adoption,
+    desktop_usage_report,
+    desktop_usage_metrics,
+    desktop_usage_refresh,
+    desktop_usage_set_reset,
+    desktop_ide_extension_asks,
+    desktop_ide_extension_approve,
+    desktop_ide_extension_decline,
+    desktop_finished_agents,
+    desktop_remove_finished_agents,
+    desktop_project_removal,
+    desktop_pick_folder,
+    desktop_pick_documents,
+    desktop_open_link,
+    desktop_reveal_project_folder,
+    desktop_open_context_item,
+    desktop_engine_versions,
+    desktop_restart_engine,
+    desktop_ide_focus,
+    desktop_update_settings,
+    desktop_set_update_channel,
+    desktop_check_update,
+    desktop_install_update,
+    desktop_restart_app,
+    desktop_link_cli,
+}
+
 pub fn run() {
     let socket = desktop_socket(
         std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET"),
@@ -3913,272 +4202,7 @@ pub fn run() {
         .manage(Notices::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![
-            desktop_connect,
-            desktop_status,
-            desktop_harness_catalog,
-            desktop_baselines,
-            desktop_inspect_baseline,
-            desktop_approve_baseline,
-            desktop_revoke_baseline,
-            desktop_reconcile,
-            desktop_retry,
-            desktop_projects,
-            desktop_project_list,
-            desktop_create_project,
-            desktop_project_catalog,
-            desktop_setup_project,
-            desktop_project_setup,
-            desktop_research_jobs,
-            desktop_project_activity,
-            desktop_project_context,
-            desktop_project_context_item,
-            desktop_save_research_to_memory,
-            desktop_add_project_documents,
-            desktop_delete_project_context,
-            desktop_project_read_paths,
-            desktop_project_hidden_paths,
-            desktop_project_files,
-            desktop_set_project_read_paths,
-            desktop_set_project_hidden_paths,
-            desktop_project_agent_policy,
-            desktop_set_project_agent_policy,
-            desktop_team_status,
-            desktop_team_agent_messages,
-            desktop_team_message_settings,
-            desktop_team_message,
-            desktop_team_delegate,
-            desktop_team_cancel,
-            desktop_team_keep_warm,
-            desktop_team_time_limits,
-            desktop_team_on_harness_switch,
-            desktop_team_apply_harness_switch,
-            desktop_team_sub_agent_depth,
-            desktop_team_child_landing,
-            desktop_team_finished_agents,
-            desktop_team_agent_branches,
-            desktop_team_master_branch,
-            desktop_team_land_on,
-            desktop_team_background,
-            desktop_team_ask_before_merge,
-            desktop_team_master_lands,
-            desktop_team_reask_empty_reply,
-            desktop_team_catch_up_main,
-            desktop_team_new_folder_limit,
-            desktop_team_coordination,
-            desktop_team_harness_mode,
-            desktop_team_harness_delivery,
-            desktop_team_live_master,
-            desktop_team_pause,
-            desktop_team_hand_off,
-            desktop_team_rename,
-            desktop_team_wake_agent,
-            desktop_team_stop_agent,
-            desktop_coord_send,
-            desktop_team_stop_teammate,
-            desktop_team_max_harnesses,
-            desktop_team_max_teammates,
-            desktop_team_token_budget,
-            desktop_team_spread_accounts,
-            desktop_team_graph,
-            desktop_team_events,
-            desktop_team_wake_rule,
-            desktop_team_seen,
-            desktop_coord_questions,
-            desktop_coord_answer,
-            desktop_team_attention,
-            desktop_terminal_attach,
-            desktop_terminal_input,
-            desktop_terminal_prompt,
-            desktop_terminal_resize,
-            desktop_terminal_detach,
-            desktop_team_terminals_per_window,
-            desktop_terminals_per_window,
-            desktop_open_terminal_windows,
-            desktop_extend_terminal_windows,
-            desktop_focus_terminal_window,
-            desktop_close_project_walls,
-            desktop_update_project_setup,
-            desktop_remove_project,
-            desktop_cancel_research,
-            desktop_retry_research,
-            desktop_plan_roadmap,
-            desktop_research_log,
-            desktop_projects_home,
-            desktop_set_projects_home,
-            desktop_move_projects_home,
-            desktop_found_projects,
-            desktop_folder_size,
-            desktop_add_existing_folder,
-            desktop_start_onboarding,
-            desktop_onboarding,
-            desktop_github_status,
-            desktop_github_sign_in,
-            desktop_github_token,
-            desktop_github_use_cli,
-            desktop_github_sign_out,
-            desktop_github_repos,
-            desktop_clone_repo,
-            desktop_setup_status,
-            desktop_run_setup,
-            desktop_set_pack_entry,
-            desktop_remove_pack_entry,
-            desktop_project_memories,
-            desktop_ide_asks,
-            desktop_review_memory,
-            desktop_memories,
-            desktop_memory,
-            desktop_approved_memories,
-            desktop_add_memory,
-            desktop_import_memory,
-            desktop_promote_memory,
-            desktop_delete_memory,
-            desktop_approve_memory,
-            desktop_set_agent_memory_writes,
-            desktop_forget_memory,
-            desktop_remember_research,
-            desktop_save_selection_to_memory,
-            desktop_open_project,
-            desktop_history,
-            desktop_send_message,
-            desktop_replace_brief,
-            desktop_master_state,
-            desktop_master_turns,
-            desktop_open_master,
-            desktop_submit_master,
-            desktop_close_master,
-            desktop_master_sessions,
-            desktop_master_session_turns,
-            desktop_master_inputs,
-            desktop_new_master_session,
-            desktop_resume_master_session,
-            desktop_delete_master_session,
-            desktop_cancel_master_turn,
-            desktop_pending_intent,
-            desktop_reconcile_intent,
-            desktop_retry_intent,
-            desktop_drop_intent,
-            desktop_prepare_managed_account,
-            desktop_prepare_configured_account,
-            desktop_account_auth_capabilities,
-            desktop_configure_account_profile,
-            desktop_read_account_profile,
-            desktop_model_access_page,
-            desktop_inspect_model_access,
-            desktop_edit_model_access,
-            desktop_start_native_auth,
-            desktop_read_native_auth,
-            desktop_cancel_native_auth,
-            desktop_clear_native_auth,
-            desktop_logout_native_auth,
-            desktop_submit_claude_auth_code,
-            desktop_owner_profile,
-            desktop_save_owner_profile,
-            desktop_sandbox_settings,
-            desktop_set_sandbox_settings,
-            desktop_pool_summaries,
-            desktop_account_schedule,
-            desktop_account_ranking,
-            desktop_set_account_schedule,
-            desktop_account_catalog,
-            desktop_list_accounts,
-            desktop_add_account,
-            desktop_rename_account,
-            desktop_remove_account,
-            desktop_check_account,
-            desktop_local_models,
-            desktop_plugin_skills,
-            desktop_plugin_servers,
-            desktop_plugin_hooks,
-            desktop_add_hooks,
-            desktop_set_hook_enabled,
-            desktop_add_skill,
-            desktop_set_skill_enabled,
-            desktop_remove_skill,
-            desktop_skill_detail,
-            desktop_skill_import_scan,
-            desktop_import_skill,
-            desktop_add_mcp_server,
-            desktop_update_mcp_server,
-            desktop_approve_mcp_server,
-            desktop_set_mcp_server_enabled,
-            desktop_remove_mcp_server,
-            desktop_switch_plugin,
-            desktop_set_mcp_secret,
-            desktop_remove_mcp_secret,
-            desktop_check_mcp_server,
-            desktop_project_plugins,
-            desktop_tool_switches,
-            desktop_set_tool_switch,
-            desktop_restore_tool_switches,
-            desktop_agents,
-            desktop_stop_agent,
-            desktop_account_use,
-            desktop_release_account,
-            desktop_interrupt_agent,
-            desktop_restart_agent,
-            desktop_changes,
-            desktop_change_diff,
-            desktop_accept_change,
-            desktop_change_branches,
-            desktop_discard_change,
-            desktop_restore_change,
-            desktop_undo_change,
-            desktop_update_change,
-            desktop_questions,
-            desktop_answer_question,
-            desktop_dismiss_question,
-            desktop_question_counts,
-            desktop_notify_question,
-            desktop_notification_target,
-            desktop_system_notifications,
-            desktop_process_text,
-            desktop_save_process_text,
-            desktop_import_instructions_file,
-            desktop_instruction_import,
-            desktop_confirm_instruction_import,
-            desktop_uncommitted_instruction_import,
-            desktop_commit_instruction_import,
-            desktop_default_process,
-            desktop_process_given,
-            desktop_agent_instructions,
-            desktop_recovery_banner,
-            desktop_retry_recovery,
-            desktop_dismiss_recovery,
-            desktop_ide_state,
-            desktop_ide_open,
-            desktop_ide_place,
-            desktop_ide_hide,
-            desktop_ide_close,
-            desktop_ide_touch,
-            desktop_instruction_settings,
-            desktop_save_instruction_settings,
-            desktop_adoption,
-            desktop_usage_report,
-            desktop_usage_metrics,
-            desktop_usage_refresh,
-            desktop_usage_set_reset,
-            desktop_ide_extension_asks,
-            desktop_ide_extension_approve,
-            desktop_ide_extension_decline,
-            desktop_finished_agents,
-            desktop_remove_finished_agents,
-            desktop_project_removal,
-            desktop_pick_folder,
-            desktop_pick_documents,
-            desktop_open_link,
-            desktop_reveal_project_folder,
-            desktop_open_context_item,
-            desktop_engine_versions,
-            desktop_restart_engine,
-            desktop_ide_focus,
-            desktop_update_settings,
-            desktop_set_update_channel,
-            desktop_check_update,
-            desktop_install_update,
-            desktop_restart_app,
-            desktop_link_cli,
-        ])
+        .invoke_handler(native_handler())
         .setup(|app| {
             let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("CrazyAgent")
@@ -4227,4 +4251,145 @@ pub fn run() {
     builder
         .run(tauri::generate_context!())
         .expect("native desktop exited with an error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use tauri::ipc::{CallbackFn, InvokeBody};
+    use tauri::test::{
+        INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder, mock_context, noop_assets,
+    };
+    use tauri::webview::{InvokeRequest, WebviewBuilder};
+    use tauri::{LogicalPosition, LogicalSize, Webview};
+
+    fn ask(page: &Webview<MockRuntime>, command: &str, args: Value) -> Result<(), Value> {
+        get_ipc_response(
+            page,
+            InvokeRequest {
+                cmd: command.into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "http://tauri.localhost".parse().unwrap(),
+                body: InvokeBody::Json(args),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|_| ())
+    }
+
+    #[test]
+    fn the_app_page_keeps_its_commands_and_the_ide_page_gets_none_once_the_ide_is_in_the_window() {
+        let app = mock_builder()
+            .manage(NativeState(BridgeQueue::new(NativeBridge::new(None))))
+            .manage(ide::IdeViews::default())
+            .invoke_handler(admit_pages(tauri::generate_handler![
+                desktop_ide_place,
+                desktop_ide_hide,
+                desktop_ide_close,
+            ]))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let main = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .unwrap();
+        let ide_page = main
+            .as_ref()
+            .window()
+            .add_child(
+                WebviewBuilder::new("ide-70-1", WebviewUrl::default()),
+                LogicalPosition::new(0, 0),
+                LogicalSize::new(400, 300),
+            )
+            .unwrap();
+        let project = json!({ "projectId": "project-one" });
+        let placed = json!({
+            "projectId": "project-one",
+            "bounds": { "x": 0.0, "y": 80.0, "width": 900.0, "height": 600.0 },
+        });
+        let calls = [
+            ("desktop_ide_place", &placed),
+            ("desktop_ide_hide", &project),
+            ("desktop_ide_close", &project),
+        ];
+        for (command, args) in calls {
+            assert_eq!(
+                ask(main.as_ref(), command, args.clone()),
+                Ok(()),
+                "{command} from the app page",
+            );
+            let refused = ask(&ide_page, command, args.clone()).unwrap_err();
+            assert_eq!(
+                refused["code"], "window_denied",
+                "{command} from the IDE page",
+            );
+        }
+    }
+
+    #[test]
+    fn every_native_command_refuses_any_page_the_app_did_not_make() {
+        let reached = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let spy = {
+            let reached = Arc::clone(&reached);
+            move |invoke: Invoke<MockRuntime>| {
+                reached
+                    .lock()
+                    .unwrap()
+                    .push(invoke.message.command().to_owned());
+                invoke.resolver.resolve(());
+                true
+            }
+        };
+        let app = mock_builder()
+            .invoke_handler(admit_pages(spy))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let page = |label: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
+                .build()
+                .unwrap()
+        };
+        let main = page("main");
+        let wall = page("terminals-0123456789abcdef-1");
+        let ide_page = main
+            .as_ref()
+            .window()
+            .add_child(
+                WebviewBuilder::new("ide-70-1", WebviewUrl::default()),
+                LogicalPosition::new(0, 0),
+                LogicalSize::new(400, 300),
+            )
+            .unwrap();
+        let strangers: Vec<Webview<MockRuntime>> = ["stranger", "Main", "terminals-zz-1"]
+            .map(|label| page(label).as_ref().clone())
+            .into_iter()
+            .chain([ide_page])
+            .collect();
+        assert!(NATIVE_COMMANDS.contains(&"desktop_connect"));
+        assert!(NATIVE_COMMANDS.contains(&"desktop_ide_hide"));
+        let added_later = ["desktop_a_command_added_later"];
+        for command in NATIVE_COMMANDS.iter().chain(&added_later) {
+            for stranger in &strangers {
+                let refused = ask(stranger, command, json!({})).unwrap_err();
+                assert_eq!(
+                    refused["code"],
+                    "window_denied",
+                    "{command} from {}",
+                    stranger.label(),
+                );
+            }
+        }
+        assert_eq!(
+            *reached.lock().unwrap(),
+            Vec::<String>::new(),
+            "no command ran for a page the app did not make",
+        );
+        for command in NATIVE_COMMANDS {
+            assert_eq!(ask(main.as_ref(), command, json!({})), Ok(()), "{command}");
+            assert_eq!(ask(wall.as_ref(), command, json!({})), Ok(()), "{command}");
+        }
+        assert_eq!(reached.lock().unwrap().len(), NATIVE_COMMANDS.len() * 2);
+    }
 }

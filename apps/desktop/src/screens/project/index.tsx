@@ -6,7 +6,7 @@ import { loadQuestionCounts, pendingByProject } from "../../api-questions";
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { ConfirmDialog, Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
-import { HEARTBEAT_MS, closeIde, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
+import { HEARTBEAT_MS, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
 import { MetricsView } from "../metrics/view";
@@ -14,7 +14,7 @@ import { WaitingChanges } from "../changes/waiting";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
 import { IdeExtensionConfirm } from "./ide-extensions";
-import { IDE_POLL_MS, IdeTab, IdeUnavailable } from "./ide";
+import { IDE_POLL_MS, IdeTab, IdeUnavailable, useCloseIde } from "./ide";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { ProjectHead, useProjectHead, type HeadMeta } from "./head";
@@ -239,7 +239,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const [importMoves, setImportMoves] = useState(0);
   const select = (next: TabId) => navigate(`/projects/${encodeURIComponent(projectId)}/${next}`);
 
-  useEffect(() => () => void closeIde(projectId), [projectId]);
+  useCloseIde(projectId, data.notify);
 
   useEffect(() => {
     let live = true;

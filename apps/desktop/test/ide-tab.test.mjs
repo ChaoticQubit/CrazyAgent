@@ -114,9 +114,41 @@ test("the IDE tab follows its panel, hides with the tab, closes with the project
   assert.match(source, /hideIde\(/);
   assert.match(source, /touchIde\(/);
   const index = read("src/screens/project/index.tsx");
-  assert.match(index, /closeIde\(projectId\)/, "leaving the project closes its IDE webview");
+  assert.match(index, /useCloseIde\(projectId, data\.notify\)/, "leaving the project closes its IDE webview");
   assert.deepEqual(client.bounds({ left: 10.4, top: 80.6, width: 900.2, height: 600.7 }), { x: 10, y: 81, width: 900, height: 601 });
   assert.equal(client.bounds({ left: 0, top: 0, width: 0, height: 300 }), null, "a hidden panel has no bounds");
+});
+
+test("no native command or main-window lookup goes through the WebviewWindow type that Tauri refuses while the IDE webview is in the window", () => {
+  const native = read("src-tauri/src/lib.rs");
+  const app = native.slice(0, native.indexOf("mod tests {"));
+  assert.equal(app.match(/\.invoke_handler\(/g).length, 1, "a second handler would replace the gated one");
+  assert.match(app, /\.invoke_handler\(native_handler\(\)\)/, "the app registers the gated handler");
+  assert.equal(app.match(/generate_handler!/g).length, 1, "the one command list is the gated one");
+  assert.match(app, /admit_pages::<tauri::Wry>\(tauri::generate_handler!/, "the page check wraps the generated handler");
+  assert.doesNotMatch(native, /\bWebviewWindow\b/, "each command takes the calling Webview, which Tauri never refuses");
+  for (const path of ["src-tauri/src/lib.rs", "src-tauri/src/bridge/notify.rs"]) {
+    assert.doesNotMatch(read(path), /get_webview_window\("main"\)/, `${path} finds the main window while the IDE is loaded`);
+  }
+});
+
+test("a refused place, hide or close reaches the owner instead of vanishing", async () => {
+  const { bundle, withPage } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/ide-tab-failures.mjs", import.meta.url).pathname);
+  const opened = (refused, then) => withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(${JSON.stringify(refused)})`);
+    assert.equal(await evaluate(`Fixture.called("desktop_ide_place")`), true, "the opened IDE is placed");
+    await evaluate("Fixture.frames()");
+    return then(evaluate);
+  });
+  const left = (evaluate) => evaluate(`Fixture.leave()`).then(() => evaluate("Fixture.frames()")).then(() => evaluate("Fixture.seen()"));
+  assert.match(await opened(["desktop_ide_place"], (evaluate) => evaluate("Fixture.seen()")).then((seen) => seen.alert), /couldn't move to fit/, "a failed place shows on the tab");
+  assert.ok((await opened(["desktop_ide_hide"], left)).reported.some((line) => /^hide: .*couldn't be hidden/.test(line)), "a failed hide reaches the page");
+  assert.ok((await opened(["desktop_ide_close"], left)).reported.some((line) => /^close: .*didn't close/.test(line)), "a failed close reaches the owner");
+  const clean = await opened([], left);
+  assert.deepEqual(clean.reported, ["hide: null"], "calls that work tell the owner nothing");
+  assert.equal(clean.alert, null);
 });
 
 test("an open dialog, drawer or menu hides the IDE webview until the last one closes", async () => {

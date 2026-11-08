@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Failure } from "../../api";
-import { HEARTBEAT_MS, bounds, desktopPlatform, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, openFailure, openIde, placeIde, sameBounds, touchIde } from "../../api-ide";
+import { HEARTBEAT_MS, bounds, closeIde, desktopPlatform, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, openFailure, openIde, placeIde, sameBounds, touchIde } from "../../api-ide";
 import type { IdeBounds, IdeTabState, IdeView } from "../../api-ide";
 import { Button, useOverlayShown } from "../../ui";
 import "./ide.css";
@@ -35,6 +35,12 @@ export function IdeUnavailable({ view, failure, busy = false, onAction }: { view
     <span className="secondary">{unavailable.line}</span>
     {unavailable.action && <Button size="small" pending={busy} disabled={busy} onClick={onAction}>{unavailable.action === "retry" ? "Retry" : "Download"}</Button>}
   </div>;
+}
+
+/** Closes the project's IDE when its page closes. Inputs: the project and the toast the page
+ * tells the owner through. Output: none. */
+export function useCloseIde(projectId: string, _notify: (line: string) => void) {
+  useEffect(() => () => void closeIde(projectId), [projectId]);
 }
 
 /** The project's IDE tab: the build state until the IDE is ready, then the IDE itself in a
