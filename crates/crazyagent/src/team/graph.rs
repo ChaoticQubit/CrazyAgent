@@ -445,6 +445,14 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         .iter()
         .find(|harness| harness.role == AgentRole::Master);
     let master_state = master.and_then(|agent| states.get(&agent.id));
+    let running_since = |agent: i64| {
+        status
+            .tasks
+            .iter()
+            .filter(|task| task.agent == Some(agent) && task.status == TaskStatus::Running)
+            .filter_map(|task| task.started_ms)
+            .min()
+    };
     let mut nodes = vec![GraphNode {
         id: MASTER_NODE.into(),
         kind: NodeKind::Master,
@@ -470,7 +478,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         no_worktree: false,
         hookless: master.is_some_and(|agent| agent.hookless),
         message_note: master.and_then(|agent| agent.message_note.clone()),
-        started_ms: None,
+        started_ms: master.and_then(|agent| running_since(agent.id)),
     }];
     let listed: Vec<&TeamAgent> = status.agents.iter().filter(|agent| shown(agent)).collect();
     let adopted: BTreeSet<(i64, &str)> = status
@@ -533,7 +541,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
                 && state.is_some_and(|state| !state.has_worktree),
             hookless: agent.hookless,
             message_note: agent.message_note.clone(),
-            started_ms: None,
+            started_ms: running_since(agent.id),
         });
         for mate in agent.teammates.iter().filter(|mate| {
             (status.show_finished || !mate.ended)
