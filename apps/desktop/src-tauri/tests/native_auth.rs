@@ -1330,6 +1330,69 @@ async fn desktop_native_auth_open_drawer_sends_the_claude_code_after_another_own
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_native_auth_settings_recheck_keeps_the_held_claude_prompt() {
+    run_case(|fixture| async move {
+        let received = fixture.root.path().join("code-received");
+        fixture
+            .register_claude(&format!(
+                "printf '%s\\n' \"If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&state=fixture\"\nprintf '%s' 'Paste code here if prompted > '\nread code\nprintf '%s\\n' \"$code\" > '{}'\nexec /bin/sleep 30",
+                received.display()
+            ))
+            .await;
+        let mut bridge = fixture.bridge().await;
+        let drawer = inspect(&mut bridge, "connection-z").await;
+        bridge
+            .start_native_auth(&drawer.ticket, NativeAuthMethod::ClaudeOfficial)
+            .await
+            .unwrap();
+        let mut seen = Value::Null;
+        for _ in 0..120 {
+            seen = serde_json::to_value(bridge.read_native_auth(&drawer.ticket).await.unwrap())
+                .unwrap();
+            if seen["challenge"]["prompt_id"] == "1" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(seen["challenge"]["accepts_code"], true, "{seen}");
+        OwnerController::attach(
+            &fixture.root.path().join("s"),
+            OwnerClientKind::Tui,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .add_account(claude_draft("Added while the code is pasted"), None)
+        .await
+        .unwrap();
+        let current = inspect(&mut bridge, "connection-z").await;
+        assert_ne!(current.source_hash, drawer.source_hash);
+        let secret = NativeBridge::claude_auth_secret("fixture-code#fixture-state".into()).unwrap();
+        let sent = bridge
+            .submit_claude_auth_code(&current.ticket, secret)
+            .await
+            .map_err(|error| error.code);
+        assert_eq!(
+            sent.err(),
+            None,
+            "a read that only checks the sign-in leaves its Claude code prompt open"
+        );
+        let mut delivered = String::new();
+        for _ in 0..100 {
+            delivered = std::fs::read_to_string(&received).unwrap_or_default();
+            if delivered.ends_with('\n') {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(delivered.trim(), "fixture-code#fixture-state");
+        bridge.cancel_native_auth(&current.ticket).await.unwrap();
+        settle_open(&mut bridge, &current.ticket, "cancelled").await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desktop() {
     run_case(|fixture| async move {
         let running = sleeping_login(&fixture).await;
