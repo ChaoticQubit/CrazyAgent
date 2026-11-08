@@ -14,6 +14,7 @@ const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const AS_MASTER = ["-c", "user.name=Master", "-c", "user.email=master@example.invalid"];
 const SUB = "agent-1";
+const CONNECTION = "local-connection";
 const SUB_PROMPT = "Add the apple seed";
 export const SUB_LABEL = "Agent 1";
 export const FIXED_SEEDS = "pear\napple\n";
@@ -55,13 +56,24 @@ async function poolForMaster(bridge, project, next) {
   assert.equal(saved.outcome, "applied", `the pool serves the project's master: ${JSON.stringify(saved)}`);
 }
 
+/** Sets the test's key-less connection up for agents, as the app does once an account is in
+ * a pool, so the engine registers the configured RCLI master before it leases its worktree.
+ * Inputs: the bridge and the next generation. Output: none. */
+async function readyForAgents(bridge, next) {
+  const { ticket } = await value(bridge, "desktop_inspect_model_access", { collection: "connections", id: CONNECTION });
+  const configured = await value(bridge, "desktop_configure_account_profile", { ticket, secret: null, generation: next() });
+  assert.ok(!configured.pending && configured.reply.outcome !== "not_recorded", `the connection is set up for agents: ${JSON.stringify(configured)}`);
+}
+
 /** Has the engine lease and check out the project's master worktree the way it does for
- * every master turn: opens the master, sends one prompt, waits with a deadline for the
- * engine's Ready lease and for the turn to end (it fails at the test's closed model port),
+ * every master turn: sets the connection up for agents, opens the master, sends one prompt,
+ * waits with a deadline for the engine's Ready lease and for the turn to end (no model
+ * answers in the test),
  * then checks the lease is still the engine's. Inputs: the bridge, the engine root, the
  * project and the next generation. Output: the worktree, its git folder and its branch. */
 export async function engineMasterWorktree(bridge, runtime, project, next) {
   await poolForMaster(bridge, project, next);
+  await readyForAgents(bridge, next);
   const { ticket } = await value(bridge, "desktop_open_project", { id: project });
   let master = await value(bridge, "desktop_master_state", { ticket });
   if (!master.session || master.session.phase !== "configured") {
