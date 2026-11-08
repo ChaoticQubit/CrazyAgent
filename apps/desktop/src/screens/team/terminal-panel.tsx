@@ -500,7 +500,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   }, [name, pane, projectId, round]);
 
   const boxed = mode.box && Boolean(name) && view.kind !== "not_ready";
-  return <section className={embedded ? "tg-terminal embedded" : tile ? "tg-terminal tile" : "tg-terminal"} aria-label={`${node.label} terminal`}>
+  return <section className={embedded ? "tg-terminal embedded" : tile ? "tg-terminal wall-tile" : "tg-terminal"} aria-label={`${node.label} terminal`}>
     {!embedded && <TerminalHead node={node} harness={harness} tile={tile} boxed={boxed} onMessage={() => box.current?.focus()}
       onStop={onStop} onClose={onClose} reported={reported} swaps={swaps} />}
     {!name && <p className="tg-terminal-state" role="status">This agent has no terminal yet. It opens once the agent starts.</p>}
