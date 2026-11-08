@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, closedPort, owner, required, serveApp, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, closedPort, endTerminals, owner, required, serveApp, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
@@ -214,6 +214,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     site?.server.close();
     await stop(bridgeProcess);
     await stop(engine);
+    await endTerminals(runtime);
   }
   assert.deepEqual(terminalServers(runtime), [], "no tmux server outlives the test's engine");
   if (!process.env.E2E_EVIDENCE) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });

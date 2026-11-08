@@ -12,6 +12,7 @@ export const POLL_MS = 100;
  * a view as the owner does. */
 export const AGENTS_VIEW = '[role=radiogroup][aria-label="Agents view"] [role=radio]';
 const BODY_BYTES_MAX = 4 * 1024 * 1024;
+const TMUX_FOLDERS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2" };
 
 /** Reads an absolute path from the environment or stops the run with what to set.
@@ -68,6 +69,19 @@ export async function stop(child) {
   const timer = setTimeout(() => child.kill("SIGKILL"), 20000);
   await exited;
   clearTimeout(timer);
+}
+
+/** Ends the tmux server an engine ran its agent terminals on, which an engine stop keeps
+ * while a team agent lives, through the socket's name inside its folder, so a folder too long
+ * for a socket address works too; then waits up to `STEP_MS` until no tmux process serves the
+ * folder. Input: the stopped engine's root. Output: none. */
+export async function endTerminals(runtime) {
+  const folder = join(runtime, "terminal");
+  if (!existsSync(join(folder, "tmux.sock"))) return;
+  const tmux = [join(runtime, "setup", "bin"), ...TMUX_FOLDERS].map((place) => join(place, "tmux")).find((program) => existsSync(program));
+  assert.ok(tmux, "the tmux program that served the engine's terminals is installed");
+  spawnSync(tmux, ["-S", "tmux.sock", "kill-server"], { cwd: folder, env: { PATH: "/usr/bin:/bin" }, stdio: "ignore" });
+  for (const deadline = Date.now() + STEP_MS; terminalServers(runtime).length > 0 && Date.now() < deadline; ) await pause(POLL_MS);
 }
 
 /** Lists the tmux processes still serving an engine's agent terminals: each tmux process's
