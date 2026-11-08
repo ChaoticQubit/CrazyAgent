@@ -10,7 +10,7 @@ import { displayText } from "../conversation";
 import { AgentSkillsDialog } from "../process";
 import {
   BADGE_HEIGHT, BADGE_WIDTH, DRAG_SLOP, LIVE_LABEL_WIDTH_MAX, ZOOM_STEP, badgeLabel, cardTask, cardText, cardTip, dotTone, fitView, fromOwner,
-  graphLive, layoutCards, layoutGraph, namedAccounts, nodeActions, nodeDetail, nodeStatus, panView,
+  graphLive, graphSummary, layoutCards, layoutGraph, namedAccounts, nodeActions, nodeDetail, nodeStatus, panView,
   receiptTicks, teamLine, tipPlace, viewKey, waitingOnOwner, wheelZoom, zoomView, type Link, type PlacedCard, type Size, type View,
 } from "./graph";
 import { openAllHint, wallPages, type PerWindow } from "../terminals/pages";
@@ -216,11 +216,12 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
 }
 
 /** The Agents toolbar, one row as the mockup draws it above both Agents views: `lead`, then
- * the team line (`line`, what `asks` the owner and the `pool`), then `tools` and Open all
- * terminals, which opens the terminal wall windows, perWindow terminals each, and says why
- * under the row when they could not open. Inputs: the project id and name, the terminals per
- * window, the drawn team or null while it is not read, the team line and the row's parts.
- * Output: the row and its note. */
+ * the team line (`line`, how many of the team's agents work and tasks are live once the team
+ * is read, what `asks` the owner and the `pool`), then `tools` and Open all terminals, which
+ * opens the terminal wall windows, perWindow terminals each, and says why under the row when
+ * they could not open. Inputs: the project id and name, the terminals per window, the drawn
+ * team or null while it is not read, the team line and the row's parts. Output: the row and
+ * its note. */
 export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, asks, pool, tools }: {
   projectId: string; name: string; perWindow: PerWindow; team: TeamGraph | null; line: string | null;
   lead?: ReactNode; asks?: ReactNode; pool?: string; tools?: ReactNode;
@@ -236,7 +237,9 @@ export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, as
     setNote(wallNote(await openTerminalWindows(projectId, name, windows, true)));
   }
 
-  const parts = [line && <span key="team" role="status">{line}</span>, asks && <span key="asks">{asks}</span>, pool && <span key="pool">{displayText(pool)}</span>]
+  const working = line !== null && team !== null ? graphSummary(team) : null;
+  const parts = [line && <span key="team" role="status">{line}</span>, working && <span key="working">{working}</span>, asks && <span key="asks">{asks}</span>,
+    pool && <span key="pool">{displayText(pool)}</span>]
     .filter((part) => Boolean(part));
   return <>
     <div className="tg-head">
