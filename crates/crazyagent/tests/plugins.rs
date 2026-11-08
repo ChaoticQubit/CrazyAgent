@@ -884,10 +884,19 @@ async fn a_server_check_folder_swapped_for_a_link_is_refused() {
     let first = check(&controller, server.id.clone()).await.unwrap();
     assert_eq!(first.tools, vec!["echo", "authorized"]);
     let home = root.join("mcp-checks").join(&server.id).join("home");
+    #[cfg(target_os = "macos")]
     assert!(
-        fs::symlink_metadata(&home).unwrap().is_symlink(),
-        "the server swapped its home for a link"
+        fs::symlink_metadata(&home).unwrap().is_dir(),
+        "the check sandbox keeps the server from swapping its home for a link"
     );
+    assert!(
+        !target.join("planted").exists(),
+        "the first check never writes outside its own folders"
+    );
+    if !fs::symlink_metadata(&home).unwrap().is_symlink() {
+        fs::remove_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&target, &home).unwrap();
+    }
     let second = check(&controller, server.id.clone()).await.unwrap();
     assert!(
         !target.join("planted").exists(),
