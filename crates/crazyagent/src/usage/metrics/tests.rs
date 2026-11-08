@@ -1608,3 +1608,102 @@ fn runs_and_agents_carry_the_name_every_client_shows_for_their_agent() {
         .collect();
     assert_eq!(agents, expected);
 }
+
+/// Each agent row's Turns is the turns that agent ended in the range, from the usage turn
+/// rows: a turn before the range is left out, each project counts only its own agents (the
+/// master as `master-<project>`, a sub-agent as `team-<id>`), and a row no team agent owns,
+/// such as onboarding, has none (AL4).
+#[test]
+fn each_agent_row_counts_the_turns_it_ended_in_the_range_in_its_own_project() {
+    let (_directory, db) = database();
+    let beta = ProjectId::new("beta").unwrap();
+    for (project, agent) in [
+        ("alpha", "master-alpha"),
+        ("alpha", "team-7"),
+        ("alpha", "onboarding"),
+        ("beta", "team-9"),
+    ] {
+        let session = format!("s-{agent}");
+        used(
+            &db,
+            MIDNIGHT + HOUR,
+            project,
+            "acct-a",
+            agent,
+            "codex",
+            &session,
+            100,
+            10,
+            0,
+            0,
+        );
+    }
+    for (project, agent, at) in [
+        (alpha(), "master-alpha", MIDNIGHT + HOUR + 5),
+        (alpha(), "master-alpha", MIDNIGHT + 3 * HOUR),
+        (alpha(), "master-alpha", MIDNIGHT - HOUR),
+        (alpha(), "team-7", MIDNIGHT + 2 * HOUR),
+        (beta.clone(), "team-9", MIDNIGHT + 2 * HOUR),
+        (beta.clone(), "team-9", MIDNIGHT + 2 * HOUR + 1),
+    ] {
+        crate::usage::turns::count(&db, &project, agent, at).unwrap();
+    }
+    let turns = |metrics: Metrics| {
+        let mut rows: Vec<(String, String, Option<u64>)> = metrics
+            .agents
+            .into_iter()
+            .map(|row| (row.project, row.agent, row.turns))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let row = |project: &str, agent: &str, turns: Option<u64>| {
+        (project.to_owned(), agent.to_owned(), turns)
+    };
+    let alpha_rows = vec![
+        row("alpha", "master-alpha", Some(2)),
+        row("alpha", "onboarding", None),
+        row("alpha", "team-7", Some(1)),
+    ];
+    let beta_rows = vec![row("beta", "team-9", Some(2))];
+    assert_eq!(
+        turns(read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap()),
+        alpha_rows
+    );
+    assert_eq!(
+        turns(read(&db, Some(&beta), MIDNIGHT, NOW).unwrap()),
+        beta_rows
+    );
+    assert_eq!(
+        turns(read(&db, None, MIDNIGHT, NOW).unwrap()),
+        [alpha_rows, beta_rows].concat()
+    );
+    let earlier = turns(read(&db, Some(&alpha()), MIDNIGHT - HOUR, NOW).unwrap());
+    assert_eq!(earlier[0], row("alpha", "master-alpha", Some(3)));
+}
+
+/// Removing a project deletes its usage turn rows and keeps every other project's (AL4).
+#[test]
+fn removing_a_project_deletes_its_turn_rows_and_keeps_the_others() {
+    let (_directory, db) = database();
+    for (project, agent) in [
+        ("alpha", "master-alpha"),
+        ("alpha", "team-7"),
+        ("beta", "team-9"),
+    ] {
+        db.execute(
+            "INSERT INTO usage_turns(hour_ms,project,agent,turns) VALUES (?1,?2,?3,2)",
+            params![MIDNIGHT + HOUR, project, agent],
+        )
+        .unwrap();
+    }
+    crate::usage::forget_project(&db, "alpha").unwrap();
+    let kept: Vec<(String, String, i64)> = db
+        .prepare("SELECT project,agent,turns FROM usage_turns ORDER BY project,agent")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(kept, [("beta".to_owned(), "team-9".to_owned(), 2)]);
+}

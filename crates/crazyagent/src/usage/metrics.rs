@@ -72,6 +72,8 @@ pub struct AgentRow {
     pub accounts: Vec<String>,
     pub more_accounts: u64,
     pub tokens: Tokens,
+    #[serde(default)]
+    pub turns: Option<u64>,
 }
 
 /// What the Metrics page counts besides the usage report: team tasks running now, waiting
@@ -480,6 +482,7 @@ fn agents(
                 accounts: Vec::new(),
                 more_accounts: 0,
                 tokens: tokens(row, 2)?,
+                turns: None,
             })
         })
         .map_err(storage)?

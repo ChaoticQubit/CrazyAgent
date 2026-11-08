@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod poll;
 pub mod report;
 pub mod service;
+pub mod turns;
 
 pub const PLAN_BYTES_MAX: usize = 64;
 pub const FAILURE_BYTES_MAX: usize = 64;
@@ -297,7 +298,8 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     add_columns(db, "weekly_left_out", ADD_LEFT_OUT)?;
     db.execute_batch(capture::SCHEMA).map_err(storage)?;
     db.execute_batch(health::SCHEMA).map_err(storage)?;
-    db.execute_batch(report::SCHEMA).map_err(storage)
+    db.execute_batch(report::SCHEMA).map_err(storage)?;
+    db.execute_batch(turns::SCHEMA).map_err(storage)
 }
 
 fn add_columns(db: &Connection, last: &str, batch: &str) -> Result<(), EngineError> {
