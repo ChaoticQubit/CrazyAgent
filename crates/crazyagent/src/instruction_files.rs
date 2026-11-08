@@ -983,9 +983,9 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
         .collect())
 }
 
-/// The stat of a checkout's `.git/HEAD`. Git rewrites that file through a new lock file on
-/// every branch switch, detach or rename of the current branch, so an equal stamp means the
-/// checked-out branch is the one read before.
+/// The stat of a checkout's `.git/HEAD`. With the files ref format git rewrites that file
+/// through a new lock file on every branch switch, detach or rename of the current branch, so
+/// an equal stamp means the checked-out branch is the one read before.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct HeadStamp {
     file: u64,
@@ -994,9 +994,16 @@ struct HeadStamp {
 }
 
 /// Stats a checkout's `.git/HEAD`. Inputs: the checkout root. Output: the stamp, or None when
-/// that file cannot be read as a plain file, as in a linked worktree whose `.git` is a file.
+/// that file cannot be read as a plain file, as in a linked worktree whose `.git` is a file,
+/// or when `.git/reftable` exists or cannot be checked: a reftable checkout's HEAD is a stub
+/// that no switch changes.
 fn head_stamp(root: &Path) -> Option<HeadStamp> {
-    let meta = fs::symlink_metadata(root.join(".git").join("HEAD")).ok()?;
+    let git = root.join(".git");
+    match fs::symlink_metadata(git.join("reftable")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return None,
+    }
+    let meta = fs::symlink_metadata(git.join("HEAD")).ok()?;
     if !meta.is_file() {
         return None;
     }
