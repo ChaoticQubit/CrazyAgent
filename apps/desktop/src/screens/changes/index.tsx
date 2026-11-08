@@ -138,6 +138,17 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved }: {
   </section>;
 }
 
+/** One change set in the Changes list: its agent, its state badge and its size. Inputs: the
+ * change set, whether it is the one shown and what selecting it does. Output: the row button. */
+export function ChangeRow({ set, active, onSelect }: { set: ChangeSet; active: boolean; onSelect: (id: string) => void }) {
+  const badge = stateBadge(set);
+  return <button type="button" className={`ch-row${active ? " active" : ""}`} aria-current={active} onClick={() => onSelect(set.id)}>
+    <strong>{agentName(set)}</strong>
+    <Badge word={badge.word} tone={badge.tone} />
+    <span className="pj-small pj-secondary">{sizeLine(set)}</span>
+  </button>;
+}
+
 /** Changes tab: every change set the project's agents made, newest first, with its diff and
  * the owner's Accept, Discard, Restore and Ask agent to update. A refused action is shown only
  * while the set it was about is the one shown, never under another set. Input: the project
@@ -192,11 +203,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     </ProjectEmpty>}
     {sets.length > 0 && <div className="ch-layout">
       <ul className="pj-rows ch-list" aria-label="Change sets">{sets.map((set) => <li key={set.id}>
-        <button type="button" className={`ch-row${shown?.id === set.id ? " active" : ""}`} aria-current={shown?.id === set.id} onClick={() => setSelected(set.id)}>
-          <strong>{agentName(set)}</strong>
-          <Badge word={stateBadge(set).word} tone={stateBadge(set).tone} />
-          <span className="pj-small pj-secondary">{sizeLine(set)}</span>
-        </button>
+        <ChangeRow set={set} active={shown?.id === set.id} onSelect={setSelected} />
       </li>)}</ul>
       {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} onMoved={reread} />}
     </div>}
