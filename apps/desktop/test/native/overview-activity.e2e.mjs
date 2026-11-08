@@ -158,7 +158,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         }
         t.diagnostic(`the Accept showed under its goal after ${Date.now() - accepted} ms`);
         await me.capture("overview-accepted");
-        assert.match(shown, /Owner/, "the row names who accepted");
+        assert.match(shown, /\bYou\b/, "the row names you as who accepted");
+        assert.doesNotMatch(shown, /\bOwner\b/, "the owner is You, never Owner");
         assert.match(shown, /\d+ items? · last just now/, "the goal says how many events it has and when the last was");
         const first = await page.evaluate("document.querySelector('.pj-activity-goal')?.getAttribute('aria-label') ?? null");
         assert.equal(first, GOAL, "the goal with the newest event comes first");

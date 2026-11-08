@@ -78,6 +78,14 @@ function mergedBranch(text: string): string {
   return /^The master merged its changes into (\S+): /.exec(text)?.[1] ?? "its branch";
 }
 
+/** Who an activity row says acted: You for the owner, the master's own merge into main as
+ * merged by itself at Full access, anyone else by name. Input: the event. Output: the line. */
+function actorLine(item: ActivityItem): string {
+  if (item.actor === "Owner") return "You";
+  if (item.kind === "merged_into_main" && item.actor === "Master") return "Master · Full access, merged by itself";
+  return displayText(item.actor);
+}
+
 /** One activity row: when, the kind's icon, what happened, Undone when it was, and who, with
  * the goal when the row stands outside its group, highlighted while fresh. A phase or test run
  * an agent logged reads as its own words, "<actor> noted: ...", with no tone, never as an engine
@@ -89,7 +97,7 @@ function ActivityRow({ item, now, goal, fresh = false, undo }: { item: ActivityI
     <span className="pj-small pj-muted">{ago(item.at_ms, now)}</span>
     <span className={`pj-activity-kind ${KINDS[item.kind].tone}`}><Icon name={KINDS[item.kind].icon} size={14} /></span>
     <span className="pj-activity-text">{KINDS[item.kind].own ? `${displayText(item.actor)} noted: ${displayText(item.text)}` : displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
-      <span className="pj-small pj-muted pj-activity-by">{displayText(item.actor)}{goal !== undefined && <> · <span className="pj-activity-tag">{displayText(goal)}</span></>}</span></span>
+      <span className="pj-small pj-muted pj-activity-by">{actorLine(item)}{goal !== undefined && <> · <span className="pj-activity-tag">{displayText(goal)}</span></>}</span></span>
     {undo && changeSet !== null && <button type="button" className="pj-link pj-activity-undo" disabled={undo.undoing !== null}
       aria-busy={undo.undoing === changeSet} onClick={() => undo.onUndo(item)}>Undo</button>}
   </li>;
@@ -129,7 +137,7 @@ export function ActivityGroups({ items, whole = items, more, now, expanded, clos
     return <section className="pj-panel pj-activity-goal" aria-label={group.goal} key={group.key}>
       <button type="button" className="pj-activity-head" aria-expanded={open} onClick={() => onToggle(group.key)}>
         <span className="pj-activity-name"><Icon name={open ? "chevron-down" : "chevron-right"} size={16} /><strong className="ellipsis">{displayText(group.goal)}</strong></span>
-        <span className="pj-activity-sub pj-small pj-muted"><PhasePath items={paths.get(group.key) ?? group.items} /><span>{count} {count === "1" ? "item" : "items"} · latest {ago(group.items[0].at_ms, now).toLowerCase()}</span></span>
+        <span className="pj-activity-sub pj-small pj-muted"><PhasePath items={paths.get(group.key) ?? group.items} /><span>{count} {count === "1" ? "item" : "items"} · last {ago(group.items[0].at_ms, now).toLowerCase()}</span></span>
       </button>
       {open && <ul className="pj-activity-list" aria-label={`${group.goal} activity`}>{(all ? group.items : group.items.slice(0, ACTIVITY_ROWS)).map((item) => <ActivityRow key={item.id} item={item} now={now} fresh={fresh.includes(item.id)} undo={undo} />)}</ul>}
       {open && !all && group.items.length > ACTIVITY_ROWS && <button type="button" className="pj-link pj-activity-more" onClick={() => onShowAll(group.key)}>Show all ({count})</button>}
