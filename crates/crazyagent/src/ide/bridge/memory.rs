@@ -212,6 +212,7 @@ pub(crate) async fn decide(
 /// and adds the decision column to a table an earlier build made without it; every ask of
 /// that shape was an approval, so its rows read as approvals. Takes the engine connection.
 /// Returns Ok, or `ide_asks_unavailable`.
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     let unavailable = |_| failure("ide_asks_unavailable");
     connection

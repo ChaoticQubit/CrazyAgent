@@ -30,6 +30,7 @@ const HOLD_POLL: Duration = Duration::from_secs(2);
 const UNCHECKED_HOLD_MAX: Duration = Duration::from_secs(10 * 60);
 /// The most processes one report names; the rest are counted.
 const NAMED_MAX: usize = 8;
+#[cfg(unix)]
 const PROGRAM_CHARS_MAX: usize = 32;
 #[cfg(unix)]
 const TABLE_ROWS_MAX: usize = 65_536;
@@ -153,15 +154,19 @@ struct Process {
 /// `sandboxed` tells the agent ran in a sandbox no warden empties, not at Full access.
 #[derive(Debug)]
 pub(crate) struct Lineage {
+    #[cfg(unix)]
     leader: i32,
     known: Vec<Process>,
+    #[cfg(unix)]
     table: &'static [&'static str],
     unchecked: bool,
+    #[cfg(unix)]
     pending: Option<Listing>,
     sandboxed: bool,
 }
 
 /// Where a listing thread reports its output, or none when it failed or ran out of bounds.
+#[cfg(unix)]
 type Listing = std::sync::mpsc::Receiver<Option<Vec<u8>>>;
 
 /// The processes an agent no warden empties left running after its stop, at Full access

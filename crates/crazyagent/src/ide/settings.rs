@@ -18,6 +18,7 @@ pub const THEME_KEYS: [&str; 3] = [
 
 const USER_DATA: &str = "data";
 const MACHINE: &str = "Machine";
+#[cfg(unix)]
 const SETTINGS: &str = "settings.json";
 #[cfg(unix)]
 const UNREADABLE: &str = "settings.json.unreadable";

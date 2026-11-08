@@ -15,6 +15,7 @@ mod flow;
 mod git;
 #[cfg(unix)]
 pub(crate) mod ide;
+#[cfg(unix)]
 mod merges;
 #[cfg(unix)]
 mod owner;
