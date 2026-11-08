@@ -84,7 +84,8 @@ function refusalOf(failure: Failure): string {
 /** One change set's details, its diff a page at a time and the owner's actions on it.
  * Inputs: the change set, now, whether an action runs, the action handlers, what a page
  * refused as moved on does, and how a diff page is read, the engine's by default.
- * Output: the section. */
+ * Output: the section; a diff page shows only under the change set, head and page it was
+ * read at, so an old head's end marker never counts for a new one. */
 export function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved, load = loadChangeDiff }: {
   set: ChangeSet;
   now: number;
@@ -97,7 +98,7 @@ export function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved, lo
 }) {
   const [pages, setPages] = useState<number[]>([0]);
   const page = pages[pages.length - 1];
-  const [diff, setDiff] = useState<Result<ChangeDiff>>();
+  const [read, setRead] = useState<{ id: string; head: string; page: number; result: Result<ChangeDiff> }>();
   const [review, setReview] = useState<Review>(() => reviewOf(null, set));
   const [staleAt, setStaleAt] = useState<ChangeSet | null>(null);
   const carried = reviewOf(review, set);
@@ -113,17 +114,18 @@ export function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved, lo
   const settled = reviewed(carried);
   const notes = [movedNote(carried), conflictNote(set), checkedNote(set), outcomeNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
   const head = carried.head;
+  const diff = read?.id === set.id && read.head === head && read.page === page ? read.result : undefined;
   useEffect(() => {
     if (staleAt !== null) return;
     let current = true;
-    setDiff(undefined);
+    setRead(undefined);
     void load(set.id, head, page).then((result) => {
       if (!current) return;
       if (result.kind === "error" && result.code === "changes_stale") {
         setStaleAt(set);
         setReview(movedOn);
         onMoved();
-      } else setDiff(result);
+      } else setRead({ id: set.id, head, page, result });
     });
     return () => { current = false; };
   }, [set.id, head, page, load, staleAt]);
