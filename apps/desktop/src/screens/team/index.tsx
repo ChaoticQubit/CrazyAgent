@@ -268,8 +268,9 @@ export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, as
  * terminal wall windows, perWindow terminals each; once clicked, a team that needs more or
  * fewer windows opens or closes them while any stays open. The open panel's Stop asks as the
  * card menu's does. The head is the Agents toolbar, one row as the mockup draws it: `lead`,
- * then the team line ("Master and 5 agents", what `asks` the owner and the `pool`), then
- * `tools` and Open all terminals; it shows while the graph loads, fails or is empty too.
+ * then the team line ("Master and 5 agents", how many of them work and tasks are live, what
+ * `asks` the owner and the `pool`), then `tools` and Open all terminals; it shows while the
+ * graph loads, fails or is empty too.
  * Inputs: the project id and name, the terminals per window, the agent whose terminal is open
  * and the open action, optional harness and account name lookups, and the head's parts.
  * Output: the graph section. */
