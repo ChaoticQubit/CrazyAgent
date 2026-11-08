@@ -857,29 +857,42 @@ fn before_reset() {
     }
 }
 
-/// Points an agent worktree at a commit: its index and tracked files first, then its
-/// HEAD, so a stop between the two leaves a state an engine start can finish. A detached
-/// HEAD the agent moved again meanwhile is `changes_agent_busy`, never a crash.
-/// Inputs: the worktree and the commit. Output: Ok once it holds the commit.
-pub(super) fn reset_agent(agent: &Agent, target: &str) -> Result<(), EngineError> {
+/// Moves an agent worktree from the commit it holds to another, never over the agent's
+/// work: git's two-tree read-tree moves its index and tracked files first and refuses,
+/// changing nothing, when a path it would change was edited, staged or is in its way
+/// untracked; then HEAD moves only while it still holds `from`, else the files go back. A
+/// stop between the two leaves a state an engine start can finish. Inputs: the worktree
+/// and both commits. Output: true once it holds `target`, false when nothing moved.
+pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
+    assert!(is_object_id(from) && is_object_id(target));
     #[cfg(test)]
     before_reset();
-    agent.repo.run(&["read-tree", "-u", "--reset", target])?;
-    agent.move_head(None, target, "CrazyAgent: reset")?;
-    match &agent.pointer {
-        Pointer::Branch(_) => assert_eq!(agent.head()?, target),
-        Pointer::Detached if agent.head().ok().as_deref() != Some(target) => {
-            return Err(failure("changes_agent_busy"));
-        }
-        Pointer::Detached => {}
+    if agent.head()? != from {
+        return Ok(false);
     }
-    Ok(())
+    agent.repo.run(&["update-index", "-q", "--refresh"])?;
+    let moved = agent
+        .repo
+        .exec(&["read-tree", "-u", "-m", from, target], None, &[], 4096)?;
+    if moved.code != 0 {
+        return Ok(false);
+    }
+    if agent
+        .move_head(Some(from), target, "CrazyAgent: reset")
+        .is_err()
+    {
+        let _ = agent
+            .repo
+            .exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096);
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Records a reset of the agent's worktree to `target` after its change set closed, runs
-/// it and clears the record, or skips it when the worktree holds more than `expected`, so
-/// the agent's newer work stays; the worktree's next change set opens above whichever
-/// commit it now starts from. Inputs: the store, the closed change set and both commits.
+/// it and clears the record, or skips it when the worktree holds more than `expected` or
+/// the agent writes while it runs, so the agent's newer work stays; the worktree's next
+/// change set opens above whichever commit it now starts from. Inputs: the store, the closed change set and both commits.
 /// Output: Ok once saved.
 pub(super) fn reset_if_quiet(
     db: &Connection,
@@ -917,13 +930,17 @@ pub(super) fn reset_if_quiet(
         target: target.to_owned(),
     });
     store::save(db, record)?;
-    reset_agent(&agent, target)?;
+    let start = if reset_agent(&agent, expected, target)? {
+        target
+    } else {
+        expected
+    };
     set_base(
         db,
         &record.repository,
         &record.worktree,
         &record.git_dir,
-        target,
+        start,
     )?;
     record.intent = None;
     store::save(db, record)
@@ -2330,6 +2347,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     {
         return Err(failure("changes_agent_busy"));
     }
+    let before = record.clone();
     let shared = shared(&record.repository)?;
     set_engine_ref(
         &shared,
@@ -2344,7 +2362,11 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
         target: record.head.clone(),
     });
     store::save(db, &record)?;
-    reset_agent(&agent, &record.head)?;
+    if !reset_agent(&agent, &current, &record.head)? {
+        store::save(db, &before)?;
+        set_engine_ref(&shared, &record.repository, &pending_ref(id), None)?;
+        return Err(failure("changes_agent_busy"));
+    }
     record.intent = None;
     store::save(db, &record)?;
     logged_claims(crate::coord::restore_set(db, id.as_str()).map(drop));

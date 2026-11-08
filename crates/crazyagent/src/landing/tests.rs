@@ -1377,7 +1377,7 @@ fn an_agent_head_pointed_at_the_owners_branch_is_never_read_through_or_moved() {
             Ok(agent) => {
                 assert!(!linked);
                 assert_eq!(refused(agent.head()), "changes_workspace_invalid");
-                assert!(flow::reset_agent(&agent, &head).is_err());
+                assert!(flow::reset_agent(&agent, &head, &head).is_err());
             }
             Err(refused) => {
                 assert!(linked);

@@ -1498,6 +1498,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let (tree, conflicts) = merge(&owner, &from, &tip, &record.head)?;
     let merged = owner.commit_tree(&tree, &[&record.head, &tip], &message, ENGINE)?;
     verify_objects(&repository, &[&merged], &[&record.head, &tip, &record.base])?;
+    let before = record.clone();
     record.state = ChangeState::Updating;
     record.waiting = true;
     record.base = tip;
@@ -1514,7 +1515,11 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
         target: merged.clone(),
     });
     store::save(db, &record)?;
-    flow::reset_agent(&agent, &merged)?;
+    if !flow::reset_agent(&agent, &before.head, &merged)? {
+        store::save(db, &before)?;
+        flow::set_engine_ref(&owner, &repository, &pending_ref(id), Some(&before.head))?;
+        return Err(failure("changes_agent_busy"));
+    }
     record.intent = None;
     store::save(db, &record)
 }
@@ -1721,8 +1726,7 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                 && (flow::holds_only(&agent.repo, &target)?
                     || flow::holds_only(&agent.repo, &current)?)
             {
-                flow::reset_agent(agent, &target)?;
-                reset = true;
+                reset = flow::reset_agent(agent, &current, &target)?;
             }
             if !record.is_open() {
                 let start = if reset { &target } else { &record.head };
