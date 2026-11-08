@@ -851,16 +851,23 @@ pub(super) type PlantedEdit = std::sync::Arc<dyn Fn() + Send + Sync>;
 pub(super) static BEFORE_RESET: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Runs the edit a test planted for this agent's git folder, if any. Input: the agent.
-/// Output: none.
+/// Test seam (RESET-KEEP r2): edits [`reset_agent`] makes right after its two-tree
+/// read-tree moved the files and before HEAD moves, the way an agent can write in that
+/// window.
 #[cfg(test)]
-fn before_reset(agent: &Agent) {
+pub(super) static AFTER_READ_TREE: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Runs the edit a test planted in `planted` for this agent's git folder, if any. Inputs:
+/// the planted edits and the agent. Output: none.
+#[cfg(test)]
+fn run_planted(planted: &std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>>, agent: &Agent) {
     let same = |planted: &Path| {
         std::fs::canonicalize(planted)
             .ok()
             .is_some_and(|planted| std::fs::canonicalize(&agent.git_dir).ok() == Some(planted))
     };
-    let edit = BEFORE_RESET
+    let edit = planted
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
@@ -880,7 +887,7 @@ fn before_reset(agent: &Agent) {
 pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
     assert!(is_object_id(from) && is_object_id(target));
     #[cfg(test)]
-    before_reset(agent);
+    run_planted(&BEFORE_RESET, agent);
     if agent.head()? != from {
         return Ok(false);
     }
@@ -891,6 +898,8 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
     if moved.code != 0 {
         return Ok(false);
     }
+    #[cfg(test)]
+    run_planted(&AFTER_READ_TREE, agent);
     if agent
         .move_head(Some(from), target, "CrazyAgent: reset")
         .is_err()

@@ -8480,10 +8480,20 @@ fn plant_inside_resets(
     case: &Case,
     edit: impl Fn() + Send + Sync + 'static,
 ) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    plant(&flow::BEFORE_RESET, &case.workspace.git_dir, edit)
+}
+
+/// Plants `edit` in `planted` for an agent git folder, counting its runs. Inputs: the
+/// seam, the git folder and the edit. Output: how many resets ran it so far.
+fn plant(
+    planted: &std::sync::Mutex<Vec<(PathBuf, flow::PlantedEdit)>>,
+    git_dir: &Path,
+    edit: impl Fn() + Send + Sync + 'static,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
     let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = std::sync::Arc::clone(&runs);
-    flow::BEFORE_RESET.lock().unwrap().push((
-        case.workspace.git_dir.clone(),
+    planted.lock().unwrap().push((
+        git_dir.to_path_buf(),
         std::sync::Arc::new(move || {
             edit();
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -8502,10 +8512,19 @@ fn edit_inside_resets(case: &Case) -> std::sync::Arc<std::sync::atomic::AtomicUs
 /// Removes what [`plant_inside_resets`] planted for the case and returns how many resets
 /// ran it. Inputs: the case and the count. Output: the runs.
 fn unplant(case: &Case, runs: &std::sync::atomic::AtomicUsize) -> usize {
-    flow::BEFORE_RESET
-        .lock()
-        .unwrap()
-        .retain(|(git_dir, _)| git_dir != &case.workspace.git_dir);
+    unplant_from(&case.workspace.git_dir, runs)
+}
+
+/// Removes every edit planted for an agent git folder, in both seams, and returns how many
+/// resets ran the one counted by `runs`. Inputs: the git folder and the count. Output: the
+/// runs.
+fn unplant_from(git_dir: &Path, runs: &std::sync::atomic::AtomicUsize) -> usize {
+    for planted in [&flow::BEFORE_RESET, &flow::AFTER_READ_TREE] {
+        planted
+            .lock()
+            .unwrap()
+            .retain(|(planted, _)| planted != git_dir);
+    }
     runs.load(std::sync::atomic::Ordering::SeqCst)
 }
 
@@ -9554,5 +9573,144 @@ fn an_agent_edit_inside_a_regeneration_reset_survives_and_the_set_keeps_its_head
             .iter()
             .all(|note| !note.contains("regenerated")),
         "no regeneration note goes out"
+    );
+}
+
+/// An index lock that stops an update's reset leaves no half-done reset behind: the agent's
+/// commit made afterwards stays on its branch through the owner's next action, and the set
+/// is as it was (RESET-KEEP r2 M1).
+#[test]
+fn an_agent_commit_after_a_reset_an_index_lock_stopped_stays_through_the_next_owner_action() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    let before = store::load(&case.db, &id).unwrap();
+    let lock = case.workspace.git_dir.join("index.lock");
+    let held = lock.clone();
+    let runs = plant_inside_resets(&case, move || write(&held, ""));
+    assert!(update(&case.db, &id).is_err());
+    assert_eq!(unplant(&case, &runs), 1);
+    std::fs::remove_file(&lock).unwrap();
+    case.edit("later.txt", "later\n");
+    let later = case.agent_commit("Later work");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(
+        case.agent_head(),
+        later,
+        "the agent's commit left its branch"
+    );
+    assert_eq!(case.agent(&["rev-parse", "HEAD^"]).trim(), before.head);
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+}
+
+/// A reset intent stored before resets recorded where they start never moves the agent's
+/// HEAD off a commit the agent made later: the engine drops it, the commit stays and the
+/// next set opens above the set's head (RESET-KEEP r2 M1).
+#[test]
+fn a_reset_intent_stored_without_its_start_never_moves_a_later_agent_commit() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let mut stopped = store::load(&case.db, &id).unwrap();
+    stopped.state = ChangeState::Discarded;
+    stopped.restorable_until_ms = Some(NOW_MS + 7 * DAY_MS);
+    stopped.intent = Some(
+        serde_json::from_value(serde_json::json!({"step": "reset", "target": case.tip()})).unwrap(),
+    );
+    store::save(&case.db, &stopped).unwrap();
+    case.edit("later.txt", "later\n");
+    let later = case.agent_commit("Later work");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(
+        case.agent_head(),
+        later,
+        "the agent's commit left its branch"
+    );
+    assert!(store::load(&case.db, &id).unwrap().intent.is_none());
+    assert_eq!(recorded_start(&case), Some(head));
+}
+
+/// An agent that commits and edits a path inside an update's reset, after the files moved
+/// and before HEAD moves, keeps both: the HEAD move fails, putting the files back refuses
+/// on the edit, and the update is refused with the set as it was (RESET-KEEP r2).
+#[test]
+fn an_agent_commit_and_edit_after_a_reset_moved_the_files_are_kept() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    let before = store::load(&case.db, &id).unwrap();
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(&flow::AFTER_READ_TREE, &case.workspace.git_dir, move || {
+        git_in(
+            &home,
+            &worktree,
+            &[
+                "-c",
+                "user.name=Agent",
+                "-c",
+                "user.email=agent@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Later work",
+            ],
+        );
+        write(&worktree.join("README"), "agent edit\n");
+    });
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(
+        case.agent(&["log", "-1", "--format=%s"]).trim(),
+        "Later work"
+    );
+    assert_eq!(case.agent(&["rev-parse", "HEAD^"]).trim(), before.head);
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        "agent edit\n"
+    );
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+}
+
+/// An agent that switches its branch inside a reset, after the files moved and before HEAD
+/// moves, is never reported as reset: the engine reads HEAD again through the branch it
+/// opened and refuses (RESET-KEEP r2).
+#[test]
+fn a_branch_switch_inside_a_reset_is_never_reported_as_reset() {
+    let case = Case::new();
+    let master = master_agent(&case);
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Master,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let from = agent.head().unwrap();
+    let target = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    let (home, worktree) = (case.home.clone(), master.worktree.clone());
+    let runs = plant(&flow::AFTER_READ_TREE, &master.git_dir, move || {
+        git_in(&home, &worktree, &["switch", "-q", "-c", "side"]);
+    });
+    let reset = flow::reset_agent(&agent, &from, &target).unwrap();
+    assert_eq!(unplant_from(&master.git_dir, &runs), 1);
+    assert!(
+        !reset,
+        "a reset whose agent switched branches was reported as done"
+    );
+    assert_eq!(
+        git_in(&case.home, &master.worktree, &["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/side"
     );
 }
