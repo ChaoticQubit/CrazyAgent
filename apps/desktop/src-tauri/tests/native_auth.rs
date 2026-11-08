@@ -1148,11 +1148,14 @@ async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desk
         let running = sleeping_login(&fixture).await;
         let mut bridge = fixture.bridge().await;
         let detail = inspect(&mut bridge, "connection-z").await;
-        bridge
-            .start_native_auth(&detail.ticket, NativeAuthMethod::ClaudeOfficial)
-            .await
-            .unwrap();
-        login_pid(&running).await;
+        let started = serde_json::to_value(
+            bridge
+                .start_native_auth(&detail.ticket, NativeAuthMethod::ClaudeOfficial)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let pid = login_pid(&running).await;
         for refused in [
             bridge
                 .rename_account("connection-z", "Renamed while signing in".into())
@@ -1184,8 +1187,21 @@ async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desk
             .unwrap();
         let moved = inspect(&mut bridge, "connection-z").await;
         assert_ne!(moved.source_hash, detail.source_hash);
-        bridge.cancel_native_auth(&moved.ticket).await.unwrap();
-        settle(&mut bridge, "cancelled").await;
+        let cancelling =
+            serde_json::to_value(bridge.cancel_native_auth(&moved.ticket).await.unwrap()).unwrap();
+        assert_eq!(cancelling["operation_id"], started["operation_id"]);
+        let cancelled = settle(&mut bridge, "cancelled").await;
+        assert_eq!(cancelled["operation_id"], started["operation_id"]);
+        let alive = crazyagent::spawn_gate::status(
+            std::process::Command::new("/bin/kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        assert!(
+            !alive.success(),
+            "a cancel after another account changed stops the real login child"
+        );
         add_account_ref(&mut bridge, "account-after-source-change", 1).await;
         bridge
             .add_account(claude_draft("Added after the source moved"), None)
