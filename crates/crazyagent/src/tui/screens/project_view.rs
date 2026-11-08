@@ -383,8 +383,9 @@ pub(in crate::tui) fn project_screen(
         };
     }
     if let Some(access) = &screen.access {
-        let body = access.body(look);
-        rows = modal(&rows, width, 62, "Agent access", body, 4, look);
+        let top = 4;
+        let body = access.rows(look, body_height.saturating_sub(top + 2));
+        rows = modal(&rows, width, 62, "Agent access", body, top, look);
         help = if access.busy {
             vec![("Esc", "Close")]
         } else if access.confirm_full {
