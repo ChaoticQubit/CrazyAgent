@@ -1049,12 +1049,11 @@ mod import {
             "main",
         ]);
         if !made.status.success() {
-            eprintln!(
-                "SKIPPED: {} cannot make a reftable checkout: {}",
+            panic!(
+                "UNAVAILABLE: {} cannot make a reftable checkout: {}",
                 engine_git.display(),
                 String::from_utf8_lossy(&made.stderr)
             );
-            return;
         }
         assert!(folder.join(".git").join("reftable").is_dir());
         for args in [
