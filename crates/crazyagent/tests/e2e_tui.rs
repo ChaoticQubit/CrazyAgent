@@ -22,7 +22,6 @@ const STEPS_MAX: usize = 12;
 const SHIFT_RIGHT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "43"];
 const SHIFT_LEFT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "44"];
 const SETTLE_TIME: Duration = Duration::from_secs(180);
-const PICK_TIME: Duration = Duration::from_secs(5);
 const TURN_TIME: Duration = Duration::from_secs(60);
 const REPO: &str = "plant-shop";
 const ABOUT: &str = "A small shop that sells house plants online.";
@@ -177,9 +176,53 @@ fn picked_card(screen: &str, project: &str) -> bool {
     })
 }
 
+/// The name on the first line Home's selection bar marks, up to the gap before its state.
+/// Input: the screen. Output: that name, or none when no line carries the bar.
+fn picked_name(screen: &str) -> Option<&str> {
+    screen.lines().find_map(|line| {
+        let rest = ["\u{258c} ", "| "]
+            .iter()
+            .find_map(|bar| line.trim_start().strip_prefix(bar))?;
+        rest.split("  ").next()
+    })
+}
+
+/// The action Enter takes on Home's footer: the hint after `Enter `, up to the gap before
+/// the next hint. Input: the screen. Output: that action, or none when no hint names Enter.
+fn enter_hint(screen: &str) -> Option<&str> {
+    let footer = screen.lines().rfind(|line| !line.trim().is_empty())?;
+    footer
+        .split("   ")
+        .find_map(|hint| hint.trim().strip_prefix("Enter "))
+}
+
+/// Presses Tab until Home's footer offers Enter `action`, waiting for each press to redraw
+/// the footer, so no press lands while the last one is still undrawn.
+/// Inputs: the TUI on Home and the action. Output: none; panics when no panel offers it.
+fn tab_until_enter(pty: &Pty, action: &str) {
+    for step in 0..=STEPS_MAX {
+        let screen = pty.until("Home's footer names what Enter does", |now| {
+            enter_hint(now).is_some()
+        });
+        let shown = enter_hint(&screen).map(str::to_owned);
+        if shown.as_deref() == Some(action) {
+            return;
+        }
+        assert!(
+            step < STEPS_MAX,
+            "no Home panel offers Enter {action}:\n{screen}"
+        );
+        pty.keys(&["Tab"]);
+        pty.until("Tab moves Home to its other panel", |now| {
+            enter_hint(now) != shown.as_deref()
+        });
+    }
+}
+
 /// Moves Home's selection to the card named exactly `project`: filters Home by the name,
 /// then steps down until the bar marks that card, so a newer card whose name starts with it
-/// is passed over. Inputs: the TUI on Home with its project list focused and the name.
+/// is passed over. Each step waits for the bar to leave the card it marked.
+/// Inputs: the TUI on Home with its project list focused and the name.
 /// Output: none; panics when no card has exactly that name.
 fn pick_card(pty: &Pty, project: &str) {
     pty.keys(&["/"]);
@@ -193,6 +236,11 @@ fn pick_card(pty: &Pty, project: &str) {
         let screen = pty.until("Home keeps the filter", |screen| {
             !screen.contains("Keep filter")
         });
+        assert_eq!(
+            enter_hint(&screen),
+            Some("Open"),
+            "Home's project list lost the focus:\n{screen}"
+        );
         if picked_card(&screen, project) {
             return;
         }
@@ -200,11 +248,12 @@ fn pick_card(pty: &Pty, project: &str) {
             step < STEPS_MAX && !screen.contains("No project matches"),
             "no Home card is named exactly {project}:\n{screen}"
         );
+        let picked = picked_name(&screen).map(str::to_owned);
+        assert!(picked.is_some(), "Home's bar marks no card:\n{screen}");
         pty.keys(&["Down"]);
-        pty.until_within(
+        pty.until(
             &format!("no Home card below the picked one is named exactly {project}"),
-            PICK_TIME,
-            |now| now != screen,
+            |now| picked_name(now) != picked.as_deref(),
         );
     }
 }
@@ -235,16 +284,7 @@ fn reach_home(pty: &Pty, home: impl Fn(&str) -> bool) {
 
 fn open_team(pty: &Pty, project: &str) {
     reach_home(pty, |screen| at_home(screen, project));
-    for _ in 0..STEPS_MAX {
-        if pty.screen().contains("Open") {
-            break;
-        }
-        pty.keys(&["Tab"]);
-        std::thread::sleep(POLL_TIME);
-    }
-    pty.until("Home offers to open the project", |screen| {
-        screen.contains("Open")
-    });
+    tab_until_enter(pty, "Open");
     pick_card(pty, project);
     pty.keys(&["Enter"]);
     let screen = pty.until("the project screen opens with its tabs", |screen| {
@@ -254,15 +294,12 @@ fn open_team(pty: &Pty, project: &str) {
         in_project(&screen, project),
         "Home opened another project than {project}:\n{screen}"
     );
-    for step in 0..=STEPS_MAX {
-        let screen = pty.screen();
-        if on_agents(&screen, project) {
-            break;
-        }
-        assert!(step < STEPS_MAX, "no project tab is Agents:\n{screen}");
-        pty.bytes(&SHIFT_RIGHT);
-        pty.until("the next project tab shows", |now| now != screen);
-    }
+    to_tab(pty, project, "Agents", &SHIFT_RIGHT);
+    let agents = pty.screen();
+    assert!(
+        on_agents(&agents, project),
+        "the Agents tab shows:\n{agents}"
+    );
     pty.keys(&["t"]);
     pty.until("t on the Agents tab opens the team tree", |screen| {
         on_team(screen, project)
@@ -742,16 +779,7 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
         "the chosen pool went to the project:\n{ready}"
     );
 
-    for _ in 0..STEPS_MAX {
-        if pty.screen().contains("Enter Open") {
-            break;
-        }
-        pty.keys(&["Tab"]);
-        std::thread::sleep(POLL_TIME);
-    }
-    pty.until("Home offers to open the project", |screen| {
-        screen.contains("Enter Open")
-    });
+    tab_until_enter(&pty, "Open");
     pty.keys(&["Enter"]);
     pty.until("the project opens on Overview", |screen| {
         tab_shown(screen, REPO).as_deref() == Some("Overview")
