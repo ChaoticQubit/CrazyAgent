@@ -958,6 +958,146 @@ async fn desktop_native_auth_another_accounts_save_leaves_a_running_sign_in_not_
     .await;
 }
 
+/// Registers a Claude login that runs until the row creates its stop file, so a row ends a
+/// running sign-in without signalling anything. Input: the fixture. Output: the file the login
+/// writes its pid to and the stop file it waits for.
+async fn stoppable_login(fixture: &Fixture) -> (std::path::PathBuf, std::path::PathBuf) {
+    let running = fixture.root.path().join("login-running");
+    let stop = fixture.root.path().join("login-stop");
+    fixture
+        .register_claude(&format!(
+            "echo $$ > '{}'\ni=0\nwhile [ ! -e '{}' ] && [ \"$i\" -lt 300 ]; do /bin/sleep 0.1; i=$((i+1)); done\nexit 1",
+            running.display(),
+            stop.display()
+        ))
+        .await;
+    (running, stop)
+}
+
+/// Asks Clear until the engine has ended the stuck sign-in. Input: the bridge. Output: none;
+/// panics past the bound.
+async fn clear_once_ended(bridge: &mut NativeBridge) {
+    for _ in 0..150 {
+        if matches!(bridge.clear_native_auth().await, Ok(true)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("Clear never ended the stuck sign-in");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_native_auth_own_account_removed_elsewhere_is_named_stuck_and_clear_ends_it() {
+    run_case(|fixture| async move {
+        let (running, stop) = stoppable_login(&fixture).await;
+        let mut bridge = fixture.bridge().await;
+        let detail = inspect(&mut bridge, "connection-z").await;
+        bridge
+            .start_native_auth(&detail.ticket, NativeAuthMethod::ClaudeOfficial)
+            .await
+            .unwrap();
+        login_pid(&running).await;
+        assert_eq!(bridge.status().stuck_sign_in, None);
+        let elsewhere = OwnerController::attach(
+            &fixture.root.path().join("s"),
+            OwnerClientKind::Tui,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        elsewhere
+            .remove_account(reference("connection-z"))
+            .await
+            .unwrap();
+        let other = inspect(&mut bridge, "connection-a").await;
+        assert_eq!(
+            bridge
+                .start_native_auth(&other.ticket, NativeAuthMethod::CodexBrowser)
+                .await
+                .err()
+                .map(|error| error.code),
+            Some("native_auth_recovery_required"),
+            "a new sign-in asks the engine about the held one and is sent to recovery once its own account is gone"
+        );
+        assert_eq!(
+            bridge.status().stuck_sign_in.as_deref(),
+            Some("connection-z")
+        );
+        assert_eq!(
+            bridge
+                .clear_native_auth()
+                .await
+                .err()
+                .map(|error| error.code),
+            Some("native_profile_source_conflict"),
+            "Clear waits while the engine still runs a sign-in it can no longer reach"
+        );
+        assert_eq!(
+            bridge.status().stuck_sign_in.as_deref(),
+            Some("connection-z")
+        );
+        std::fs::write(&stop, "").unwrap();
+        clear_once_ended(&mut bridge).await;
+        assert_eq!(bridge.status().stuck_sign_in, None);
+        let next = inspect(&mut bridge, "connection-a").await;
+        bridge
+            .start_native_auth(&next.ticket, NativeAuthMethod::CodexBrowser)
+            .await
+            .unwrap();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_native_auth_own_account_replaced_elsewhere_is_named_stuck_and_refuses_its_tickets()
+{
+    run_case(|fixture| async move {
+        let (running, stop) = stoppable_login(&fixture).await;
+        let mut bridge = fixture.bridge().await;
+        let detail = inspect(&mut bridge, "connection-z").await;
+        bridge
+            .start_native_auth(&detail.ticket, NativeAuthMethod::ClaudeOfficial)
+            .await
+            .unwrap();
+        login_pid(&running).await;
+        assert_eq!(CATALOG.matches(r#"id = "model-z""#).count(), 1);
+        std::fs::write(
+            fixture.root.path().join("global.toml"),
+            CATALOG.replace(r#"id = "model-z""#, r#"id = "model-z2""#),
+        )
+        .unwrap();
+        let moved = inspect(&mut bridge, "connection-z").await;
+        assert_ne!(moved.source_hash, detail.source_hash);
+        assert_eq!(
+            bridge.status().stuck_sign_in.as_deref(),
+            Some("connection-z"),
+            "the latest read shows the sign-in's own entry changed, so it is named stuck"
+        );
+        assert_eq!(
+            bridge
+                .read_native_auth(&detail.ticket)
+                .await
+                .err()
+                .map(|error| error.code),
+            Some("stale_model_access"),
+            "the ticket from before the change no longer selects anything"
+        );
+        assert_eq!(
+            bridge
+                .read_native_auth(&moved.ticket)
+                .await
+                .err()
+                .map(|error| error.code),
+            Some("native_profile_source_conflict"),
+            "a ticket for the replaced entry never reaches the sign-in bound to the old one"
+        );
+        std::fs::write(&stop, "").unwrap();
+        clear_once_ended(&mut bridge).await;
+        assert_eq!(bridge.status().stuck_sign_in, None);
+    })
+    .await;
+}
+
 /// Reads a drawer's sign-in with the drawer's own ticket until it reaches the phase, with the
 /// app-wide team alert read before each read, as the open window polls both. Inputs: the
 /// bridge, the drawer's ticket and the phase. Output: the last view.
