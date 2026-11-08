@@ -134,7 +134,7 @@ test("As agents read it shows the text the engine gives agents, title and headin
 test("under Project only, Use app default is not offered and an empty file cannot be saved, so agents are never left with no instructions", () => {
   const only = projectPage({ view: "edit", mode: "project_only", subtitle: "This project's file only" });
   assert.doesNotMatch(only, />Use app default<\/button>/);
-  assert.match(plain(only), /Project only gives agents this file alone\. To use the app default, pick Both or App only under Delivery\./);
+  assert.match(plain(only), /Project only gives agents this file alone\. To use the app default, pick App and project or App only under Delivery\./);
   const empty = projectPage({ view: "edit", mode: "project_only", draft: "" });
   assert.match(saveButton(empty), /disabled=""/);
   assert.match(plain(empty), /Under Project only an empty file leaves agents with no instructions\./);
@@ -277,14 +277,14 @@ const html = (text) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").rep
 test("a project's agent settings offer every instructions mode and the transcript switch, the defaults first", () => {
   assert.deepEqual(client.DEFAULT_INSTRUCTION_SETTINGS, { mode: "both", transcripts: true, edits: "next_message" });
   assert.deepEqual(client.INSTRUCTION_MODES.map((choice) => [choice.value, choice.label]),
-    [["project_only", "Project only"], ["app_only", "App only"], ["both", "Both (app, then project appended)"]]);
+    [["both", "App and project"], ["project_only", "Project only"], ["app_only", "App only"]]);
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
   for (const choice of client.INSTRUCTION_MODES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
   const markup = agentSettings();
   assert.match(markup, /Instructions agents get/);
   for (const choice of client.INSTRUCTION_MODES) assert.match(markup, new RegExp(`role="radio"[^>]*>${escaped(choice.label)}</button>`));
-  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Both \(app, then project appended\)</);
-  assert.ok(markup.includes(html(client.INSTRUCTION_MODES[2].note)));
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>App and project</);
+  assert.ok(markup.includes(html(client.INSTRUCTION_MODES[0].note)));
   assert.match(markup, /role="switch"[^>]*aria-checked="true"/);
   assert.match(markup, /Keep transcripts for headless Claude runs/);
   assert.match(markup, /keep their transcript in the agent&#x27;s own home/);
@@ -323,7 +323,7 @@ test("unreadable agent settings say why and show the defaults so a change replac
   const markup = agentSettings({ settings: { kind: "error", code: "instruction_settings_invalid", message: "" } });
   assert.match(markup, /value CrazyAgent doesn&#x27;t know/);
   assert.doesNotMatch(markup, /instruction_settings_/);
-  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Both \(app, then project appended\)</);
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>App and project</);
   assert.match(agentSettings({ failure: "This project's agent settings couldn't be read. Try again." }), /couldn&#x27;t be read/);
   assert.match(agentSettings({ busy: true }), /Saving\.\.\./);
   assert.match(agentSettings({ settings: { kind: "not_ready" } }), /ready/);
