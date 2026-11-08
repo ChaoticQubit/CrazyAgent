@@ -62,6 +62,8 @@ for (const width of [1024, 1440]) {
     assert.ok(seen.measured.width > 500, `the groups have room, ${seen.measured.width} px`);
     assert.deepEqual(seen.measured.past, [], "nothing runs past a group's panel");
     assert.ok(seen.measured.sideways <= 0, `the page does not scroll sideways, ${seen.measured.sideways} px`);
+    assert.ok(seen.measured.help.rows >= 25, `rows with a label, a help line and a control are measured, ${seen.measured.help.rows}`);
+    assert.deepEqual(seen.measured.help.apart, [], "each row's help line sits under its label, left of the control");
     assert.deepEqual(GROUPS.flatMap(([, rows]) => rows).filter((row) => !READ_ONLY.includes(row) && !seen.reached.includes(row)), [], "Tab reaches every setting with a control");
   });
 }
@@ -80,6 +82,8 @@ test("the master's settings drawer holds its four groups with nothing past the d
   assert.deepEqual(seen.measured.groups, MASTER.map(([title, rows]) => ({ title, rows })));
   assert.deepEqual(seen.measured.past, [], "nothing runs past a group's panel");
   assert.ok(seen.measured.sideways <= 0, `the drawer does not scroll sideways, ${seen.measured.sideways} px`);
+  assert.ok(seen.measured.help.rows >= 3, `drawer rows with a label, a help line and a control are measured, ${seen.measured.help.rows}`);
+  assert.deepEqual(seen.measured.help.apart, [], "each drawer row's help line sits under its label, left of the control");
   assert.deepEqual(seen.controls.filter((row) => !seen.reached.includes(row)), [], "Tab reaches every control in the drawer");
 });
 
