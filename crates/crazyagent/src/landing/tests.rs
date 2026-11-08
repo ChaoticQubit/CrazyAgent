@@ -7743,6 +7743,7 @@ fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
 fn the_engine_start_sweeps_the_regenerations_a_stopped_engine_left() {
     let mut case = Case::new();
     cargo_workspace(&mut case);
+    crate::storage::initialize_authority_schemas(&case.db).unwrap();
     let set = "0123456789abcdef0123456789abcdef";
     let worktree = crate::projects_home::state_folder(&case.repo)
         .join("worktrees")
