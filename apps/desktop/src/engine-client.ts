@@ -833,6 +833,8 @@ export type BranchMode = "named" | "detached";
 /** What a Full-access master does with its own conflict fixes: merge them into main itself,
  * or leave them waiting for the owner's Accept. */
 export type MasterLands = "merges" | "waits";
+/** Whether a project's agents may merge the landed main, `crazyagent/main`, into their own branch. */
+export type CatchUpMain = "on" | "off";
 
 /** A harness kind the coordination settings are kept for, by its catalog id. */
 export type CoordHarness = "claude-code" | "codex" | "rcli";
@@ -919,6 +921,7 @@ export interface TeamStatus {
   ask_before_merge?: boolean;
   master_lands?: MasterLands | null;
   reask_empty_reply?: boolean;
+  catch_up_main?: CatchUpMain;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
   message_settings?: MessageSettings;

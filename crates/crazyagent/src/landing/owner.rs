@@ -8,6 +8,7 @@ use super::{
     MESSAGE_BYTES_MAX, TargetBranches,
 };
 use crate::activity::{ActivityKind, ENGINE_ACTOR, OWNER_ACTOR};
+use crate::agent_git::Layout;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::Connection;
@@ -17,6 +18,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 
 const IDENTITY_BYTES_MAX: usize = 256;
+const MAIN_PLACES_MAX: usize = 512;
 const JUDGED_MAX: usize = 256;
 const BUSY_STATE: [&str; 11] = [
     "MERGE_HEAD",
@@ -410,6 +412,128 @@ pub(super) fn land_on(
     branch_of(owner, chosen.as_deref())
 }
 
+/// Points `refs/crazyagent/main` at the tip of the project's Land on branch for every agent
+/// worktree the team records: in each own clone through [`clone::give_main`], with no git
+/// run there, and once in the owner repository for linked worktrees, which share its refs.
+/// Each repository's tip is read and given under its hold, so a start never writes a tip
+/// read before an Accept after that Accept gave the newer one: taken here when `held` is
+/// None, else the caller's, and a repository other than the held one is logged and skipped.
+/// A worktree or repository it cannot reach is logged by its plain code and skipped, so
+/// one never stops the rest. Inputs: the store, the project and the repository the caller
+/// holds. Output: Ok once each was given or skipped, else `changes_unavailable` when the
+/// team records cannot be read.
+pub(super) fn refresh_main(
+    db: &Connection,
+    project: &ProjectId,
+    held: Option<&Path>,
+) -> Result<(), EngineError> {
+    let places = main_places(db, project)?;
+    let mut by_repository: BTreeMap<&Path, Vec<&[PathBuf; 3]>> = BTreeMap::new();
+    for place in &places {
+        by_repository
+            .entry(place[0].as_path())
+            .or_default()
+            .push(place);
+    }
+    for (repository, places) in by_repository {
+        let _hold = match held {
+            None => Some(hold(repository)),
+            Some(own) if own == repository => None,
+            Some(_) => {
+                eprintln!("landing_main_not_given code=changes_repository_not_held");
+                continue;
+            }
+        };
+        give_main_in(db, project, repository, &places);
+    }
+    Ok(())
+}
+
+/// Gives one owner repository's agent worktrees the project's Land on tip as
+/// [`refresh_main`] says, logging by plain code each one it cannot reach. The caller holds
+/// the repository's hold. Inputs: the store, the project, the repository and its places.
+fn give_main_in(db: &Connection, project: &ProjectId, repository: &Path, places: &[&[PathBuf; 3]]) {
+    let tip = match land_on_branch(db, repository, project) {
+        Ok(found) => found.map(|(_, tip)| tip),
+        Err(error) => {
+            eprintln!(
+                "landing_main_unresolved code={}",
+                crate::protocol::plain_code(&error.0)
+            );
+            None
+        }
+    };
+    let Some(tip) = tip else {
+        return;
+    };
+    let mut linked = false;
+    for [_, worktree, git_dir] in places.iter().copied() {
+        let given = match flow::check_places(repository, worktree, git_dir) {
+            Ok(Layout::Clone) => clone::give_main(repository, worktree, &tip),
+            Ok(Layout::Linked) => {
+                linked = true;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = given {
+            eprintln!(
+                "landing_main_not_given code={}",
+                crate::protocol::plain_code(&error.0)
+            );
+        }
+    }
+    if !linked {
+        return;
+    }
+    let given = shared(repository).and_then(|repo| {
+        flow::set_engine_ref(&repo, repository, clone::MAIN_REF, Some(tip.as_str()))
+    });
+    if let Err(error) = given {
+        eprintln!(
+            "landing_main_not_given code={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
+}
+
+/// The repository, worktree and git folder of each agent worktree the team records for a
+/// project, at most `MAIN_PLACES_MAX`; none for a store that keeps no team tables. Inputs:
+/// the store and the project. Output: the places, else `changes_unavailable`.
+fn main_places(db: &Connection, project: &ProjectId) -> Result<Vec<[PathBuf; 3]>, EngineError> {
+    let unavailable = |_| failure("changes_unavailable");
+    let kept: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_worktrees')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !kept {
+        return Ok(Vec::new());
+    }
+    let mut statement = db
+        .prepare(
+            "SELECT repository,worktree,git_dir FROM team_worktrees WHERE project=?1
+             ORDER BY agent LIMIT ?2",
+        )
+        .map_err(unavailable)?;
+    let limit = i64::try_from(MAIN_PLACES_MAX).map_err(|_| failure("changes_unavailable"))?;
+    let places = statement
+        .query_map(rusqlite::params![project.as_str(), limit], |row| {
+            Ok([
+                PathBuf::from(row.get::<_, String>(0)?),
+                PathBuf::from(row.get::<_, String>(1)?),
+                PathBuf::from(row.get::<_, String>(2)?),
+            ])
+        })
+        .map_err(unavailable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(unavailable)?;
+    assert!(places.len() <= MAIN_PLACES_MAX);
+    Ok(places)
+}
+
 /// The tip of the branch a project's work lands on, None while it cannot be read: an
 /// unfinished git operation in the owner's checkout, no such branch, or a failed read,
 /// logged by its plain code. Inputs: the store, the owner repository opened for object
@@ -668,10 +792,11 @@ pub(super) fn commit_deletions(
 /// Marks a change set landed as `landed`, closes its agent's workers' open sets with it
 /// (F3, DEC-107), drops its pending ref, forgets the owner edits settled on it and points the
 /// agent's worktree at the landed commit when the worktree holds nothing newer than the set,
-/// and records the Accept in the project's activity by who accepted it. A worker set that
-/// cannot be closed now is logged by its plain code and left open, so the Accept itself
-/// never fails on it; so is a failure after the save for the master's own land, which its
-/// caller still lists as landed.
+/// gives every agent worktree the new main ([`refresh_main`]) and records the Accept in the
+/// project's activity by who accepted it. A worker set that cannot be closed now, or a main
+/// that cannot be given, is logged by its plain code and left, so the Accept itself never
+/// fails on it; so is a failure after the save for the master's own land, which its caller
+/// still lists as landed.
 fn finish(
     db: &Connection,
     record: &mut Record,
@@ -724,7 +849,14 @@ fn tidy(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engine
     )?;
     super::owner_edit::logged("forget", super::owner_edit::forget(db, &record.id));
     let head = record.head.clone();
-    reset_if_quiet(db, record, &head, landed)
+    reset_if_quiet(db, record, &head, landed)?;
+    if let Err(error) = refresh_main(db, &record.project, Some(record.repository.as_path())) {
+        eprintln!(
+            "landing_main_not_refreshed code={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
+    Ok(())
 }
 
 /// Who lands a change set, as the project's activity names them: someone whose Accept or

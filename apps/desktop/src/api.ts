@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, MasterLands, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterLands, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -1320,6 +1320,13 @@ export function extendTerminalWindows(id: string, count: number): Promise<Result
  * nothing, not ready, or a plain error. */
 export function closeProjectWalls(id: string): Promise<Result<void>> {
   return call<void>("desktop_close_project_walls", { id });
+}
+
+/** Sets the project's "Catch up with main" setting for agents started from now on: on lets each
+ * agent merge the landed main, `crazyagent/main`, into its own branch and tells it to; off refuses that merge.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setCatchUpMain(id: string, mode: CatchUpMain): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_catch_up_main", { id, mode, generation: nextGeneration() });
 }
 
 /** Sets the most files one new top-level folder, a folder the owner's branch does not have,

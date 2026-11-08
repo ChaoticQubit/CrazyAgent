@@ -211,6 +211,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let installed = context.install("codex", &home, false).unwrap();
     let mut child = crate::spawn_gate::spawn(
@@ -319,6 +320,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
@@ -372,6 +374,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
@@ -418,6 +421,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let context = fresh()
         .with_team_tool(engine, &record, &mailbox, &[])
@@ -543,6 +547,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     }
     .with_index(&plugins, &RoleSkills::default());
     let home = root.join("codex");
@@ -582,6 +587,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let first = context.install("codex", &home, true).unwrap();
     let planted = home.join("skills").join(".system").join("planted");
@@ -748,6 +754,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
 
     agents.shell(&plant);
@@ -904,6 +911,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let start = "# Project context from CrazyAgent\n";
     assert!(!fresh(start.into()).instructions().contains(rule));
@@ -929,7 +937,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         format!(
             "{start}{}{}",
             ask_rule(AskReach::Live, true),
-            team_tools_section(&[])
+            team_tools_section(&[], true)
         )
     );
     assert_eq!(told.matches(joint).count(), 1, "{told}");
@@ -963,7 +971,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         format!(
             "{start}{}{}",
             ask_rule(AskReach::SubAgent, true),
-            team_tools_section(&unrecorded)
+            team_tools_section(&unrecorded, true)
         )
     );
     assert!(heard.contains("types the owner's answer or dismissal into your terminal once"));
@@ -1014,7 +1022,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         format!(
             "{start}{}{}",
             ask_rule(AskReach::SubAgent, false),
-            team_tools_section(&unreported)
+            team_tools_section(&unreported, true)
         )
     );
     assert_eq!(reports_off.instructions().matches(rule).count(), 1);
@@ -1040,7 +1048,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     assert!(full.instructions().ends_with(&format!(
         "{}{}",
         ask_rule(AskReach::Live, true),
-        team_tools_section(&[])
+        team_tools_section(&[], true)
     )));
 
     setup.team.sub_harnesses = (0..200)
@@ -1089,6 +1097,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -1184,6 +1193,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             relay: None,
             model_proxy: None,
             claude_display: ClaudeDisplay::Classic,
+            catch_up_main: true,
         };
         let claude = home(&format!("claude-{layout:?}"));
         let installed = context.install("claude-code", &claude, false).unwrap();
@@ -1266,6 +1276,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let request = || crate::harnesses::launch::LaunchRequest {
         harness: "codex".into(),
@@ -1382,6 +1393,7 @@ impl LeftPane {
             relay: None,
             model_proxy: None,
             claude_display: ClaudeDisplay::Classic,
+            catch_up_main: true,
         };
         let request = crate::harnesses::launch::LaunchRequest {
             harness: "codex".into(),
@@ -1491,7 +1503,7 @@ fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
 
 #[test]
 fn the_team_tools_section_lists_each_tool_left_on_with_the_tags_and_the_branch_rule() {
-    let all = team_tools_section(&[]);
+    let all = team_tools_section(&[], true);
     for (name, line) in crate::coord::tool_switches::BUILTIN_TOOLS {
         assert_eq!(
             all.matches(&format!("\n- {name}: {line}\n")).count(),
@@ -1507,13 +1519,36 @@ fn the_team_tools_section_lists_each_tool_left_on_with_the_tags_and_the_branch_r
         crate::team::tool::STOP_TOOL.to_owned(),
         crate::team::tool::MERGE_TOOL.to_owned(),
     ];
-    let some = team_tools_section(&off);
+    let some = team_tools_section(&off, true);
     for name in &off {
         assert!(!some.contains(&format!("\n- {name}: ")), "{name}:\n{some}");
     }
     assert!(some.contains(&format!("\n- {}: ", crate::team::tool::UPDATE_WORK_TOOL)));
     assert!(some.contains("severity (high, normal or low)"));
     assert!(some.len() < all.len());
+}
+
+/// While "Catch up with main" is on, the default, the team tools section tells each agent
+/// to bring a moved main into its own branch with `git merge crazyagent/main` (OS-8).
+#[test]
+fn the_team_tools_section_tells_agents_to_merge_crazyagent_main_while_catch_up_is_on() {
+    let section = team_tools_section(&[], true);
+    assert!(
+        section.contains(
+            "When main has moved on, bring it into your branch with git merge crazyagent/main before you finish."
+        ),
+        "{section}"
+    );
+    assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
+    let off = team_tools_section(&[], false);
+    assert!(!off.contains("crazyagent/main"), "{off}");
+    assert_eq!(
+        section.replace(
+            "When main has moved on, bring it into your branch with git merge crazyagent/main before you finish.\n",
+            ""
+        ),
+        off
+    );
 }
 
 #[test]
@@ -1531,6 +1566,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let off = vec![crate::team::tool::STOP_TOOL.to_owned()];
     for (context, subcommand) in [
@@ -1565,7 +1601,9 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         );
         assert!(server.secrets.is_empty());
         assert!(
-            context.instructions().ends_with(&team_tools_section(&off)),
+            context
+                .instructions()
+                .ends_with(&team_tools_section(&off, true)),
             "{}",
             context.instructions()
         );
@@ -1618,6 +1656,7 @@ fn context_with(
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     }
 }
 
@@ -2325,6 +2364,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -2484,6 +2524,7 @@ fn context_mode_context(plugins: LaunchPlugins) -> AgentContext {
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     }
 }
 

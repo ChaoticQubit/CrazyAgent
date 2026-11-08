@@ -161,6 +161,7 @@ fn team() -> TeamStatus {
         ask_before_merge: false,
         master_lands: None,
         reask_empty_reply: true,
+        catch_up_main: crate::team::CatchUpMain::On,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -2665,6 +2666,69 @@ fn capital_r_turns_reask_empty_reply_off_and_on() {
     );
 }
 
+/// OS-8: Catch up with main shows On in the coordination editor of a project that made no
+/// choice, on the row under Overlapping edits, and Space flips it Off and back: each press
+/// sends the setting's own change, the engine's answer says what agents may now do and the
+/// row shows the stored choice.
+#[test]
+fn catch_up_with_main_shows_on_under_overlapping_edits_and_space_flips_it() {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut stored = team();
+    stored.coordination = Some(crate::team::coordination(&connection, &project()).unwrap());
+    stored.catch_up_main = crate::team::catch_up_main(&connection, &project()).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    let shown = frame(&view, 120, 40);
+    let at_overlaps = shown
+        .iter()
+        .position(|row| row.contains("Overlapping edits"))
+        .unwrap();
+    assert!(
+        shown[at_overlaps + 1].contains("Catch up with main")
+            && shown[at_overlaps + 1].contains("On"),
+        "the row under Overlapping edits shows Catch up with main On:\n{}",
+        shown.join("\n")
+    );
+    let row = |view: &TeamView| find(&frame(view, 120, 40), "Catch up with main").to_owned();
+    for _ in 0..9 {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 9);
+    let mut at = NOW;
+    for (mode, words, done) in [
+        (
+            CatchUpMain::Off,
+            "Off",
+            "Catch up with main is off for agents started from now on: their git merge of main is refused.",
+        ),
+        (
+            CatchUpMain::On,
+            "On",
+            "Catch up with main is on for agents started from now on: they may git merge crazyagent/main.",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::CatchUpMain {
+                project_id: project(),
+                mode,
+            })
+        );
+        stored.catch_up_main = mode;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(row(&view).contains(words), "{}", row(&view));
+    }
+}
+
 async fn coord_send(
     view: &mut TeamView,
     controller: &mut OwnerController,
@@ -2835,10 +2899,10 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         assert_eq!(coordination_of(&view).settings.overlaps, overlaps);
     }
 
-    for _ in 0..3 {
+    for _ in 0..4 {
         view.key(press(KeyCode::Down));
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 11);
+    assert_eq!(view.coord.as_ref().unwrap().row, 12);
     assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
     assert!(view.typing());
     clear_counted(&mut view);
@@ -2919,10 +2983,10 @@ async fn skills_per_role_are_set_in_the_coordination_editor_through_a_real_engin
     for role in ["Master skills", "Lead skills", "Worker skills"] {
         assert!(find(&shown, role).contains("All approved skills"), "{role}");
     }
-    for _ in 0..14 {
+    for _ in 0..15 {
         assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 14);
+    assert_eq!(view.coord.as_ref().unwrap().row, 15);
     let (_, help) = view.rows(116, 40, &accounts(), &Look::plain());
     assert!(
         help.contains(&("Space", "All or chosen")) && help.contains(&("Enter", "Edit skills")),
@@ -3009,7 +3073,7 @@ fn workflow_nudges_show_off_by_default_and_space_steps_through_every_option() {
     assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
     let nudges = |view: &TeamView| find(&frame(view, 120, 40), "Workflow nudges").to_owned();
     assert!(nudges(&view).contains("Off"), "{}", nudges(&view));
-    for _ in 0..9 {
+    for _ in 0..10 {
         assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
     }
     let mut at = NOW;
@@ -3068,10 +3132,10 @@ fn the_task_start_reminder_shows_on_by_default_and_space_flips_it() {
         shown.join("\n")
     );
     let reminder = |view: &TeamView| find(&frame(view, 120, 40), "Task-start reminder").to_owned();
-    for _ in 0..10 {
+    for _ in 0..11 {
         assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 10);
+    assert_eq!(view.coord.as_ref().unwrap().row, 11);
     let mut at = NOW;
     for (next, words) in [(TaskStart::Off, "Off"), (TaskStart::On, "On")] {
         let mut settings = coordination.settings.clone();

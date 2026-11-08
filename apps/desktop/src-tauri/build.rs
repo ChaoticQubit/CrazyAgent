@@ -49,6 +49,7 @@ fn main() {
         "desktop_team_ask_before_merge",
         "desktop_team_master_lands",
         "desktop_team_reask_empty_reply",
+        "desktop_team_catch_up_main",
         "desktop_team_new_folder_limit",
         "desktop_team_coordination",
         "desktop_team_harness_mode",

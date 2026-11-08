@@ -156,8 +156,9 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 /// and the owner-approved memories, whether a headless Claude run keeps its transcript,
 /// whether a Claude Code lead runs its own agent team, the engine executable and mailbox
 /// of a team agent's message relay, the loopback port of the model proxy a team agent
-/// under the None network reaches its model through (S4b), and the display its Claude Code
-/// terminal draws with (N-D9).
+/// under the None network reaches its model through (S4b), the display its Claude Code
+/// terminal draws with (N-D9) and whether its team tools section tells it to merge
+/// `crazyagent/main` ("Catch up with main", OS-8).
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
@@ -169,6 +170,7 @@ pub struct AgentContext {
     relay: Option<(PathBuf, PathBuf)>,
     model_proxy: Option<u16>,
     claude_display: ClaudeDisplay,
+    catch_up_main: bool,
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
@@ -245,6 +247,9 @@ pub fn for_project(
     let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project)
         .map_err(|problem| LaunchError(problem.0, None))?;
     let off_tools = off_tools(&tx, project, &plugins)?;
+    let catch_up_main = crate::team::catch_up_main(&tx, project)
+        .map_err(|problem| LaunchError(problem.0, None))?
+        == crate::team::CatchUpMain::On;
     drop(tx);
     crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0, None))?;
     Ok(AgentContext {
@@ -261,6 +266,7 @@ pub fn for_project(
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main,
     })
 }
 
@@ -467,10 +473,11 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
 }
 
 /// The section that names a live master's or sub-agent's team tools (DEC-104), each on
-/// one line, with the two question tags and the branch rule for the agents it leads
-/// (Q-W-LAND-26). Input: the team tools left out. Output: at most
+/// one line, with the two question tags, the branch rule for the agents it leads
+/// (Q-W-LAND-26) and, while "Catch up with main" is on, how to bring a moved main into its
+/// own branch (OS-8). Inputs: the team tools left out and the setting. Output: at most
 /// `TOOLS_SECTION_BYTES_MAX` bytes of markdown.
-pub fn team_tools_section(off: &[String]) -> String {
+pub fn team_tools_section(off: &[String], catch_up_main: bool) -> String {
     let mut section = format!(
         "\n## Team tools\n\nYour team tools are in the `{}` MCP server. The engine answers each by your place in the team:\n",
         crate::team::tool::SERVER_NAME
@@ -486,6 +493,9 @@ pub fn team_tools_section(off: &[String]) -> String {
         .any(|tool| tool == crate::team::tool::ACTIVITY_TOOL)
     {
         section.push_str("When you start a new phase of the work (for example architecture, building, testing) or finish a test run, call log_activity with the goal it serves and one line saying what happened.\n");
+    }
+    if catch_up_main {
+        section.push_str("When main has moved on, bring it into your branch with git merge crazyagent/main before you finish.\n");
     }
     assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
     section
@@ -637,6 +647,13 @@ impl AgentContext {
             assert!(self.plugins.skills.len() <= before.min(names.len()));
         }
         self
+    }
+
+    /// Whether this launch's project has "Catch up with main" on, as read once with the rest
+    /// of the context, so the agent's own `git` copy and its team tools section agree.
+    /// Output: the choice.
+    pub fn catch_up_main(&self) -> bool {
+        self.catch_up_main
     }
 
     /// Lists what a project sandbox must let an agent with tools on read beyond its home, as
@@ -800,7 +817,8 @@ impl AgentContext {
     }
 
     fn with_tools_section(mut self, off: &[String]) -> Self {
-        self.instructions.push_str(&team_tools_section(off));
+        self.instructions
+            .push_str(&team_tools_section(off, self.catch_up_main));
         assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         self
     }

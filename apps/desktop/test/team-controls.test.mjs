@@ -144,6 +144,12 @@ test("Background commands at task end offers Wait first, a grace time and Stop, 
   assert.deepEqual(controls.backgroundChoice(status()), { mode: "wait" });
 });
 
+test("Catch up with main says it applies to agents started from now on and what each choice does", () => {
+  const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
+  assert.ok(html.includes("For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off refuses that merge. Merging another agent&#x27;s branch stays refused either way."), "the note names when the choice applies");
+  assert.doesNotMatch(html, /Off refuses every merge/);
+});
+
 test("a team view the engine shortened to fit says older history is hidden", () => {
   const whole = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
   assert.doesNotMatch(whole, /Older team history is hidden/);

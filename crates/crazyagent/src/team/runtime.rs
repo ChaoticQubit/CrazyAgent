@@ -5676,6 +5676,14 @@ impl TeamRuntime {
                 return Ok(Err(problem));
             }
         }
+        if let Err(problem) = crate::landing::open(&self.root)
+            .and_then(|db| crate::landing::refresh_main(&db, &stored.project_id))
+        {
+            eprintln!(
+                "team_main_not_refreshed code={}",
+                crate::protocol::plain_code(&problem.0)
+            );
+        }
         let hosted = match spawn_ledger::begin_spawn(&self.root, id, plan.pane.is_some())
             .and_then(|()| self.host(stored, id, role, &plan.harness, &account.connection, again))
         {
@@ -6747,7 +6755,11 @@ impl TeamRuntime {
                 super::nesting(&self.connection, &stored.project_id)
                     .is_ok_and(|nested| depth < nested.depth)
             });
-        if leads && let Err(error) = toolchains::lead_git(&scratch) {
+        let catch_up = context.catch_up_main();
+        if catch_up && let Err(error) = toolchains::catch_up_git(&scratch) {
+            eprintln!("agent_catch_up_git_not_written kind={:?}", error.kind());
+        }
+        if leads && let Err(error) = toolchains::lead_git(&scratch, catch_up) {
             eprintln!("agent_lead_git_not_written kind={:?}", error.kind());
         }
         if role == AgentRole::Master

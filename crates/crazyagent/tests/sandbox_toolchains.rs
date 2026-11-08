@@ -740,7 +740,7 @@ impl AgentGit {
         let case = case();
         let tmp = toolchains::make_tmp(&case.home).unwrap();
         if lead {
-            toolchains::lead_git(&tmp).unwrap();
+            toolchains::lead_git(&tmp, true).unwrap();
         }
         let git = tmp.join("bin/git");
         let metadata = fs::symlink_metadata(&git).unwrap();
@@ -933,7 +933,7 @@ fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_
     assert_eq!(agent_git_script(&tmp), script);
     assert_ne!(fs::symlink_metadata(&git).unwrap().ino(), first.ino());
 
-    toolchains::lead_git(&tmp).unwrap();
+    toolchains::lead_git(&tmp, true).unwrap();
     assert!(agent_git_script(&tmp).contains("\nlead=1\n"));
     toolchains::make_tmp(&case.home).unwrap();
     assert_eq!(agent_git_script(&tmp), script);
@@ -951,7 +951,7 @@ fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_
             .file_type()
             .is_symlink()
     );
-    assert!(toolchains::lead_git(&tmp).is_err());
+    assert!(toolchains::lead_git(&tmp, true).is_err());
     assert!(names(&elsewhere).is_empty());
     assert_eq!(
         toolchains::with_agent_git(&case.home, "/usr/bin:/bin".to_owned()),

@@ -724,6 +724,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    CatchUpMain {
+        project_id: ProjectId,
+        mode: CatchUpMain,
+    },
     NewFolderLimit {
         project_id: ProjectId,
         files: u32,
@@ -983,6 +987,7 @@ impl TeamAction {
             | Self::MasterLands { .. }
             | Self::ReaskEmptyReply { .. }
             | Self::TerminalsPerWindow { .. }
+            | Self::CatchUpMain { .. }
             | Self::LiveMaster { .. }
             | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
@@ -1012,6 +1017,7 @@ impl TeamAction {
             | Self::AskBeforeMerge { project_id, .. }
             | Self::MasterLands { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
+            | Self::CatchUpMain { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
             | Self::TerminalsPerWindow { project_id, .. }
             | Self::MessageSettings { project_id, .. }
@@ -1483,6 +1489,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_wall (
                 project TEXT PRIMARY KEY,
                 per_window INTEGER NOT NULL CHECK(per_window IN (4,6,9))
+            );
+            CREATE TABLE IF NOT EXISTS team_catch_up_main (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('on','off'))
             );
             CREATE TABLE IF NOT EXISTS team_session_switches (
                 session TEXT PRIMARY KEY,
@@ -2461,6 +2471,10 @@ fn perform(
             wall::store(tx, project, *per_window)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::CatchUpMain { mode, .. } => {
+            set_catch_up_main(tx, project, *mode)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::NewFolderLimit { files, .. } => {
             tx.execute(
                 "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,?2)
@@ -3071,6 +3085,8 @@ pub struct TeamStatus {
     pub master_lands: Option<MasterLands>,
     #[serde(default = "reask_default")]
     pub reask_empty_reply: bool,
+    #[serde(default)]
+    pub catch_up_main: CatchUpMain,
     #[serde(default = "new_folder_default")]
     pub new_folder_files_max: u32,
     #[serde(default)]
@@ -3725,6 +3741,84 @@ pub fn reask_empty_reply(
         .optional()
         .map_err(error)?;
     Ok(reask.unwrap_or_else(reask_default))
+}
+
+/// The owner's "Catch up with main" setting (OS-8): `On`, the default, lets every agent's
+/// own `git` merge `crazyagent/main`, the project's landed main, into its own branch and
+/// tells it to; `Off` keeps the DEC-107 refusal of every merge and says nothing of main.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatchUpMain {
+    #[default]
+    On,
+    Off,
+}
+
+impl CatchUpMain {
+    /// The stored name of the setting. Output: `on` or `off`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    /// Reads a stored setting name. Input: the name. Output: the setting, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::On, Self::Off]
+            .into_iter()
+            .find(|value| value.name() == name)
+    }
+}
+
+/// Reads a project's "Catch up with main" setting: `On` when no choice is saved and for a
+/// store that keeps no team tables. Takes a connection and the project. Returns the
+/// setting, or `team_catch_up_main_invalid` for a stored name it does not know.
+pub fn catch_up_main(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<CatchUpMain, EngineError> {
+    let kept: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_catch_up_main')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !kept {
+        return Ok(CatchUpMain::default());
+    }
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_catch_up_main WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode {
+        None => Ok(CatchUpMain::default()),
+        Some(mode) => {
+            CatchUpMain::named(&mode).ok_or_else(|| failure("team_catch_up_main_invalid"))
+        }
+    }
+}
+
+/// Saves a project's "Catch up with main" setting, replacing an earlier choice. Takes a
+/// connection and the project. Returns done.
+pub fn set_catch_up_main(
+    connection: &Connection,
+    project: &ProjectId,
+    value: CatchUpMain,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_catch_up_main(project,mode) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+            params![project.as_str(), value.name()],
+        )
+        .map_err(error)?;
+    Ok(())
 }
 
 /// The most files one new top-level folder, a folder the owner's branch does not have,
@@ -4460,6 +4554,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         ask_before_merge: ask_before_merge(connection, project)?,
         master_lands: offered_master_lands(connection, project)?,
         reask_empty_reply: reask_empty_reply(connection, project)?,
+        catch_up_main: catch_up_main(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
         message_settings: agent_messages::settings(connection, project)?,

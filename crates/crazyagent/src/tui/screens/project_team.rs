@@ -19,8 +19,9 @@ use crate::protocol::ProjectId;
 use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, ResultsShown};
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
-    AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, ChildLanding, CoordinationView,
-    DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, SwitchApply, SwitchMode,
+    AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
+    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, SwitchApply,
+    SwitchMode,
     TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus,
     TeamTask,
 };
@@ -166,8 +167,8 @@ pub(in crate::tui) struct CoordEdit {
 
 /// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
 /// the Claude Code terminal display (N-D9), where sub-agent questions go, overlapping edits,
-/// workflow nudges, the Task-start reminder (T3-15), the counted tools or the skills one team
-/// role gets (DEC-111 R3).
+/// whether agents may catch up with main (OS-8), workflow nudges, the Task-start reminder
+/// (T3-15), the counted tools or the skills one team role gets (DEC-111 R3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CoordRow {
     Mode(HarnessKind),
@@ -175,13 +176,14 @@ pub(in crate::tui) enum CoordRow {
     ClaudeDisplay,
     Questions,
     Overlaps,
+    CatchUpMain,
     Nudges,
     TaskStart,
     Counted,
     Skills(SkillRole),
 }
 
-const COORD_ROWS: [CoordRow; 15] = [
+const COORD_ROWS: [CoordRow; 16] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::ClaudeDisplay,
@@ -191,6 +193,7 @@ const COORD_ROWS: [CoordRow; 15] = [
     CoordRow::Delivery(HarnessKind::Rcli),
     CoordRow::Questions,
     CoordRow::Overlaps,
+    CoordRow::CatchUpMain,
     CoordRow::Nudges,
     CoordRow::TaskStart,
     CoordRow::Counted,
@@ -2410,6 +2413,24 @@ impl TeamView {
                     done,
                 )
             }
+            CoordRow::CatchUpMain => {
+                let mode = match self.status.as_ref().map(|status| status.catch_up_main) {
+                    Some(CatchUpMain::Off) => CatchUpMain::On,
+                    Some(CatchUpMain::On) | None => CatchUpMain::Off,
+                };
+                let done = match mode {
+                    CatchUpMain::On => {
+                        "Catch up with main is on for agents started from now on: they may git merge crazyagent/main."
+                    }
+                    CatchUpMain::Off => {
+                        "Catch up with main is off for agents started from now on: their git merge of main is refused."
+                    }
+                };
+                (
+                    TeamAction::CatchUpMain { project_id, mode },
+                    done.to_owned(),
+                )
+            }
             CoordRow::Nudges => {
                 settings.nudges = cycle(&Nudges::ALL, settings.nudges, forward);
                 let done = format!(
@@ -2629,6 +2650,15 @@ impl TeamView {
                 CoordRow::Overlaps => (
                     "Overlapping edits".to_owned(),
                     overlaps_words(view.settings.overlaps).to_owned(),
+                    "",
+                ),
+                CoordRow::CatchUpMain => (
+                    "Catch up with main".to_owned(),
+                    match self.status.as_ref().map(|status| status.catch_up_main) {
+                        Some(CatchUpMain::Off) => "Off",
+                        Some(CatchUpMain::On) | None => "On",
+                    }
+                    .to_owned(),
                     "",
                 ),
                 CoordRow::Nudges => (
