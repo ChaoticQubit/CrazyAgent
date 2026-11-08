@@ -1,9 +1,9 @@
 use crazyagent::plugins::check::{CHECK_TIME, check_stdio};
 use crazyagent::team::Delegation;
 use crazyagent::team::tool::{
-    AGENT_SERVER_COMMAND, CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND, MAILBOX_FOLDER,
-    RECALL_TOOL, REMEMBER_TOOL, SERVER_COMMAND, TEAM_TOOLS, TOOL_NAME, answer_call, take,
-    take_calls,
+    AGENT_SERVER_COMMAND, ASK_TOOL, CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND,
+    MAILBOX_FOLDER, QUESTION_TOOLS, RECALL_TOOL, RECORD_TOOL, REMEMBER_TOOL, SERVER_COMMAND,
+    TEAM_TOOLS, TOOL_NAME, answer_call, take, take_calls,
 };
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -17,8 +17,8 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
     let arguments = [SERVER_COMMAND.to_owned(), record.display().to_string()];
     assert_eq!(
         check_stdio(engine, &arguments, &[], CHECK_TIME).unwrap(),
-        [TOOL_NAME],
-        "the engine's own MCP check sees exactly the delegate tool"
+        [TOOL_NAME, ASK_TOOL, RECORD_TOOL],
+        "the engine's own MCP check sees exactly the delegate tool and the master's question tools"
     );
     let mailbox = record.with_file_name(MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
@@ -29,7 +29,7 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
     ];
     assert_eq!(
         check_stdio(engine, &remembering, &[], CHECK_TIME).unwrap(),
-        [TOOL_NAME, REMEMBER_TOOL, RECALL_TOOL],
+        [TOOL_NAME, ASK_TOOL, RECORD_TOOL, REMEMBER_TOOL, RECALL_TOOL],
         "a master without its live terminal also gets its memory tools"
     );
     let unknown = crazyagent::spawn_gate::output(
@@ -120,7 +120,11 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
     ];
     assert_eq!(
         check_stdio(engine, &arguments, &[], CHECK_TIME).unwrap(),
-        TEAM_TOOLS,
+        TEAM_TOOLS
+            .iter()
+            .chain(&QUESTION_TOOLS)
+            .copied()
+            .collect::<Vec<_>>(),
     );
 
     let mut server = crazyagent::spawn_gate::spawn(
@@ -503,10 +507,15 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
     let arguments = [
         AGENT_SERVER_COMMAND.to_owned(),
         mailbox.display().to_string(),
+        RECORD_TOOL.to_owned(),
     ];
     assert_eq!(
         check_stdio(engine, &arguments, &[], CHECK_TIME).unwrap(),
-        TEAM_TOOLS,
+        TEAM_TOOLS
+            .iter()
+            .chain(&[ASK_TOOL])
+            .copied()
+            .collect::<Vec<_>>(),
     );
 
     let call = |id: u64, name: &str, arguments: Value| {
