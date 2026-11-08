@@ -4134,15 +4134,19 @@ fn e_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access()
     );
     let mut full = team();
     full.master_lands = Some(MasterLands::Merges);
-    reread(&mut view, full, NOW + MINUTE);
+    reread(&mut view, full.clone(), NOW + MINUTE);
     assert!(shows(&view, &format!("{row}  Merge into main itself")));
+    let terminals = view.key(press(KeyCode::Char('W')));
     assert!(
-        !matches!(
-            view.key(press(KeyCode::Char('W'))),
-            TeamReply::Change(TeamAction::MasterLands { .. })
+        matches!(
+            terminals,
+            TeamReply::Change(TeamAction::TerminalsPerWindow { .. })
         ),
-        "W does not switch the master merge setting"
+        "W switches Terminals per window, never the master merge setting"
     );
+    applied(&mut view, terminals);
+    reread(&mut view, full, NOW + MINUTE + 5);
+    assert!(shows(&view, &format!("{row}  Merge into main itself")));
     let reply = view.key(press(KeyCode::Char('E')));
     assert_eq!(
         reply,
