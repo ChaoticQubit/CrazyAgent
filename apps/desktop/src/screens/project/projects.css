@@ -275,16 +275,21 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .set-head p { margin: 2px 0 0; color: var(--text-2); font-size: 12px; line-height: 16px; }
 .set-icon { display: inline-grid; flex: none; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-control); background: var(--accent-soft); color: var(--accent-text); }
 .set-sub { margin: 0; padding: 12px 16px 4px; border-top: 1px solid var(--border); color: var(--text-3); font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
-.set-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, max-content); gap: 6px 16px; align-items: center; min-width: 0; padding: 12px 16px; border-top: 1px solid var(--border); }
-.set-row > * { grid-column: 1 / -1; min-width: 0; }
+.set-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, max-content); gap: 2px 16px; align-items: center; min-width: 0; padding: 12px 16px; border-top: 1px solid var(--border); }
+.set-row > * { grid-column: 1; min-width: 0; }
 .set-row > .field { display: contents; }
-.set-row > .field > * { grid-column: 1 / -1; min-width: 0; }
+.set-row > .field > * { grid-column: 1; min-width: 0; }
+.set-row > .tg-terminal-note:not(.set-ctl), .set-row > .field > .helper { padding: 0; line-height: 16px; }
+.set-row > .pj-row { grid-column: 1 / -1; }
 .set-row > .set-label, .set-row > .field > label, .set-row > .switch-label { grid-column: 1; font-weight: 500; }
 .set-row > .segmented, .set-row > .set-ctl, .set-row > .field > .select { grid-column: 2; grid-row: 1; justify-self: end; align-self: center; }
+.set-row:not(.wide):has(> .tg-terminal-note:not(.set-ctl), > .field > .helper) > :is(.segmented, .set-ctl), .set-row:not(.wide):has(> .field > .helper) > .field > .select { grid-row: 1 / span 2; }
 .set-row > .field > .select { width: auto; max-width: 100%; }
+.set-row.wide { row-gap: 6px; }
 .set-row.wide > *, .set-row.wide > .field > * { grid-column: 1 / -1; grid-row: auto; justify-self: stretch; }
 .set-row.wide > .segmented { justify-self: start; }
 .set-row > .pj-note { margin: 0; }
+.set-row:not(.wide) > .pj-note, .set-row:not(.wide) > .pj-row { margin-top: 4px; }
 .set-row form.pj-row > label { flex: 1 0 100%; font-weight: 500; }
 .set-row form.pj-row > .tg-terminal-note { flex: 1 0 100%; }
 .set-note { position: sticky; bottom: 16px; z-index: 1; box-shadow: var(--elev-1); }
