@@ -6874,3 +6874,47 @@ fn a_master_merge_an_engine_stop_cut_short_settles_as_the_masters_merge() {
         );
     }
 }
+
+/// A master's worktree start is recorded once: the call each master turn makes keeps the
+/// stored start after the master committed, so its next turn end still holds that commit
+/// in its change set (T3 r2).
+#[test]
+fn a_master_worktree_start_is_recorded_once_and_never_moves_past_its_commits() {
+    let case = Case::new();
+    case.start();
+    let master = master_agent(&case);
+    let start_of = || {
+        record_master_start(
+            &case.db,
+            &master.repository,
+            &master.worktree,
+            &master.git_dir,
+        )
+        .unwrap()
+    };
+    start_of();
+    let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
+    let start = in_master(&["rev-parse", "HEAD"]).trim().to_owned();
+    write(&master.worktree.join("NOTES"), "master notes\n");
+    in_master(&["add", "NOTES"]);
+    in_master(&[
+        "-c",
+        "user.name=Master",
+        "-c",
+        "user.email=master@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Add notes",
+    ]);
+    start_of();
+    let id = record_turn_end(&case.db, &master, &merge_turn())
+        .unwrap()
+        .expect("the master's own commit makes its change set");
+    let set = case.view(&id);
+    assert_eq!(
+        (set.base.as_str(), set.files),
+        (start.as_str(), 1),
+        "the start never moved past the master's commit"
+    );
+}

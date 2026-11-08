@@ -637,6 +637,20 @@ pub fn record_worktree_start(
     }
 }
 
+/// Records the commit a master's leased worktree starts from, as [`record_worktree_start`]
+/// does for a team agent's new worktree, unless a start is stored for it already, so a
+/// lease made Ready again never moves the start past commits the master made. The master
+/// runtime calls it before each master turn runs. Inputs: the store, the owner's checkout
+/// root, the worktree and its git metadata folder. Output: Ok once a start is stored.
+pub fn record_master_start(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<(), EngineError> {
+    record_worktree_start(db, repository, worktree, git_dir)
+}
+
 #[cfg(unix)]
 const TRACKED_LISTING_BYTES_MAX: usize = 4096;
 
