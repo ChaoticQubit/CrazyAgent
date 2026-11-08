@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
+import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
@@ -236,6 +236,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [masterBranch, setMasterBranchText] = useState<string | null>(null);
   const [landOn, setLandOnText] = useState<string | null>(null);
   const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
+  const [masterLandsHeld, setMasterLandsHeld] = useState<MasterLands | null>(null);
   const [reask, setReask] = useState<"off" | "on" | null>(null);
   const [newFolder, setNewFolder] = useState<number | null>(null);
   const [background, setBackground] = useState<BackgroundAtEnd | null>(null);
@@ -398,6 +399,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function chooseMasterLands(choice: MasterLands) {
+    setMasterLandsHeld(choice);
+    setBusy(true);
+    const message = changeNote(await setMasterLands(projectId, choice), "what the master does with its conflict fixes");
+    setBusy(false);
+    setMasterLandsHeld(null);
+    setNote(message);
+    reload();
+  }
+
   async function chooseAskMerge(choice: "off" | "on") {
     setAskMerge(choice);
     setBusy(true);
@@ -555,6 +566,14 @@ export function TeamControls({ projectId, status, harness, reload }: {
       <Segmented label="Ask me before merging into the master's branch" value={askMerge ?? (status.ask_before_merge === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
         options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
       <span className="tg-terminal-note">On keeps each finished harness's work in Changes for your Accept instead of the master merging it.</span>
+    </div>
+    <div className="pj-row">
+      <span aria-hidden={status.master_lands ? true : undefined}>When the master resolves conflicts</span>
+      {status.master_lands
+        ? <Segmented label="When the master resolves conflicts" value={masterLandsHeld ?? status.master_lands} onValue={(choice) => { if (!busy) void chooseMasterLands(choice); }}
+          options={[{ value: "merges", label: "Merge into main itself" }, { value: "waits", label: "Wait for my Accept" }]} />
+        : <span className="tg-terminal-note">Only at Full access.</span>}
+      <span className="tg-terminal-note">Merge lands the master's own fix of a conflict on main with no Accept from you, and closes the change sets it fixed. Activity lists each merge.</span>
     </div>
     <div className="pj-row">
       <span aria-hidden="true">Re-ask a sub-agent's empty reply</span>

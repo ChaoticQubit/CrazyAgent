@@ -58,14 +58,16 @@ const GIT_SHIM: &str = "/usr/bin/git";
 /// The most bytes of an agent's `git` script read to tell whether it is current.
 #[cfg(unix)]
 const GIT_SCRIPT_BYTES_MAX: u64 = 8192;
-/// The script an agent's own `git` holds, with `@GIT@` for the real git and `@LEAD@` for 1
-/// in a lead's copy and 0 in any other agent's. It refuses merge, pull, rebase and
-/// cherry-pick, and aliases for them, with a plain reason (DEC-107 rule 2); a lead may
-/// still merge its own workers' `BRANCH--NAME` branches. Every other command runs as is.
+/// The script an agent's own `git` holds, with `@GIT@` for the real git, `@LEAD@` for 1 in
+/// a lead's copy and `@FREE@` for 1 in the free copy, else 0. It refuses merge, pull,
+/// rebase and cherry-pick, and aliases for them, with a plain reason (DEC-107 rule 2); a
+/// lead may still merge its own workers' `BRANCH--NAME` branches, and the free copy runs
+/// every command as is.
 #[cfg(unix)]
 const GIT_SCRIPT: &str = r##"#!/bin/sh
 git='@GIT@'
 lead=@LEAD@
+free=@FREE@
 worker_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another branch into it (DEC-107). If you need work from another branch, stop and tell your lead what you need; the master tells the owner.'
 lead_reason='A lead merges only the branches of its own workers, named BRANCH--NAME after its own branch, and never pulls, rebases or cherry-picks other branches (DEC-107). The engine merge tool merges app-spawned workers. If you need other work, stop and tell the master what you need.'
 refuse() {
@@ -80,6 +82,7 @@ reason() {
   fi
 }
 aliased() {
+  [ "$free" = 1 ] && return 0
   case "$1" in
     [Aa][Ll][Ii][Aa][Ss].*) refuse "$2" "Aliases set on the command line are refused. $(reason)" ;;
   esac
@@ -151,6 +154,7 @@ gate() {
       --abort|--quit|--continue|--skip) return 0 ;;
     esac
   fi
+  [ "$free" = 1 ] && return 0
   [ "$lead" = 1 ] && [ "$sub" = merge ] && own_workers "$@"
 }
 case "$sub" in
@@ -160,10 +164,12 @@ case "$sub" in
     ;;
   add|am|apply|archive|bisect|blame|branch|bundle|cat-file|checkout|cherry|clean|clone|commit|config|describe|diff|diff-files|diff-index|diff-tree|difftool|fetch|for-each-ref|format-patch|fsck|gc|grep|hash-object|help|init|log|ls-files|ls-remote|ls-tree|merge-base|merge-file|merge-tree|mergetool|mv|name-rev|notes|push|range-diff|reflog|remote|reset|restore|rev-list|rev-parse|revert|rm|shortlog|show|show-ref|sparse-checkout|stash|status|submodule|switch|symbolic-ref|tag|update-index|update-ref|version|worktree) ;;
   *)
-    expanded=$("$git" config --get "alias.$sub" 2>/dev/null)
-    case "$expanded" in
-      merge|'merge '*|pull|'pull '*|rebase|'rebase '*|cherry-pick|'cherry-pick '*) refuse "$sub" "Aliases for merge, pull, rebase or cherry-pick are refused as those commands are. $(reason)" ;;
-    esac
+    if [ "$free" != 1 ]; then
+      expanded=$("$git" config --get "alias.$sub" 2>/dev/null)
+      case "$expanded" in
+        merge|'merge '*|pull|'pull '*|rebase|'rebase '*|cherry-pick|'cherry-pick '*) refuse "$sub" "Aliases for merge, pull, rebase or cherry-pick are refused as those commands are. $(reason)" ;;
+      esac
+    fi
     ;;
 esac
 exec "$git" "$@"
@@ -512,7 +518,7 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     }
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     assert!(private_folder(&path));
-    if let Some(script) = git_script(crate::research::runner::sandboxed_git(), false)
+    if let Some(script) = git_script(crate::research::runner::sandboxed_git(), GitCopy::Worker)
         && let Err(error) = write_git(&path, &script)
     {
         eprintln!("agent_git_not_written kind={:?}", error.kind());
@@ -520,19 +526,30 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Which copy of the agent's own `git` a script is: the worker's, a lead's that may
+/// merge its own workers' branches, or the free copy that runs every command as is.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GitCopy {
+    Worker,
+    Lead,
+    Free,
+}
+
 /// The script an agent's own `git` holds: it runs the real git the engine itself resolved,
 /// so the agent's git calls never reach the `/usr/bin/git` xcrun shim, whose `xcrun_db`
 /// cache write Seatbelt denies, and git still finds its helpers beside its real path, which
 /// a link to it would lose; it refuses merges as [`GIT_SCRIPT`] says. Inputs: the real git
-/// and whether the agent leads workers. Output: the script, or none when git is the shim or
-/// its path is not plain.
+/// and the copy. Output: the script, or none when git is the shim or its path is not
+/// plain.
 #[cfg(unix)]
-fn git_script(git: &Path, lead: bool) -> Option<String> {
+fn git_script(git: &Path, copy: GitCopy) -> Option<String> {
     let text = plain_path(git).filter(|_| git != Path::new(GIT_SHIM))?;
     let script = GIT_SCRIPT
         .replace("@GIT@", text)
-        .replace("@LEAD@", if lead { "1" } else { "0" });
-    assert!(!script.contains("@GIT@") && !script.contains("@LEAD@"));
+        .replace("@LEAD@", if copy == GitCopy::Lead { "1" } else { "0" })
+        .replace("@FREE@", if copy == GitCopy::Free { "1" } else { "0" });
+    assert!(!script.contains("@GIT@") && !script.contains("@LEAD@") && !script.contains("@FREE@"));
     assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
     Some(script)
 }
@@ -655,7 +672,19 @@ fn getconf_folder(home: &Path) -> PathBuf {
 /// is the shim and no copy is written, or the write failure.
 #[cfg(unix)]
 pub fn lead_git(tmp: &Path) -> io::Result<()> {
-    match git_script(crate::research::runner::sandboxed_git(), true) {
+    match git_script(crate::research::runner::sandboxed_git(), GitCopy::Lead) {
+        Some(script) => write_git(tmp, &script),
+        None => Ok(()),
+    }
+}
+
+/// Rewrites the agent's own `git` in its short temp folder as the free copy, which runs
+/// every git command as is: the master's at Full access (DEC-117 Q2), after [`make_tmp`]
+/// wrote the worker copy. Input: the folder `make_tmp` returned. Output: Ok, also when
+/// git is the shim and no copy is written, or the write failure.
+#[cfg(unix)]
+pub fn free_git(tmp: &Path) -> io::Result<()> {
+    match git_script(crate::research::runner::sandboxed_git(), GitCopy::Free) {
         Some(script) => write_git(tmp, &script),
         None => Ok(()),
     }
@@ -987,6 +1016,12 @@ pub fn fresh_native_lead_tmp(_scratch: &Path) -> io::Result<PathBuf> {
 /// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
 #[cfg(not(unix))]
 pub fn lead_git(_tmp: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn free_git(_tmp: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 

@@ -294,13 +294,19 @@ pub(super) fn subject(text: &str, roots: &[&Path]) -> String {
 }
 
 /// The message an Accept proposes from the commits the agent made itself above the
-/// base: the latest subject, then the earlier ones newest first as a list. Commits the
-/// engine made and merges are left out. Inputs: the agent repository, the record and
+/// point the set is measured from: the latest subject, then the earlier ones newest first
+/// as a list. Commits the engine made, merges and commits already on the landing branch
+/// are left out. Inputs: the agent repository, the record, the measured-from commit and
 /// the folders paths are shown relative to. Output: the message, empty when the agent
 /// made no commit, at most `PROPOSED_BYTES_MAX` bytes.
-fn proposed(repo: &Repo, record: &Record, roots: &[&Path]) -> Result<String, EngineError> {
+fn proposed(
+    repo: &Repo,
+    record: &Record,
+    from: &str,
+    roots: &[&Path],
+) -> Result<String, EngineError> {
     let count = format!("--max-count={AGENT_COMMITS_READ_MAX}");
-    let range = format!("{}..{}", record.base, record.head);
+    let range = format!("{from}..{}", record.head);
     let printed = repo.run(&[
         "log",
         "-z",
@@ -1712,6 +1718,31 @@ pub(super) fn start(
     set_base(db, repository, worktree, git_dir, &head)
 }
 
+/// Records the commit a master's leased worktree holds as the base its change sets open
+/// above, as [`start`] does for a team agent's new worktree, unless a base is stored for it
+/// already, which then never moves past commits the master made. Inputs: the store, the
+/// owner checkout, the worktree on its lease branch and its git folder. Output: Ok once a
+/// base is stored.
+pub(super) fn start_master(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<(), EngineError> {
+    store::initialize(db)?;
+    let _held = hold(repository);
+    if store::base_of(db, super::subagent::path_text(worktree)?)?.is_some() {
+        return Ok(());
+    }
+    let head = open_agent(db, AgentKind::Master, repository, worktree, git_dir)?.head()?;
+    set_base(db, repository, worktree, git_dir, &head)?;
+    assert_eq!(
+        store::base_of(db, super::subagent::path_text(worktree)?)?.as_deref(),
+        Some(head.as_str())
+    );
+    Ok(())
+}
+
 /// The commit an agent worktree holds now, for a worker cut from its lead (N1): a linked
 /// worktree's HEAD, or the tip of a clone's branch as fetched into the owner repository,
 /// so the worker's own copy reads it through the owner's objects. Inputs: the store, the
@@ -1919,7 +1950,7 @@ pub(super) fn record(
     )?;
     let stats = diff::stats(repo, &from, &record.head)?;
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
-    record.message = proposed(repo, &record, &roots)?;
+    record.message = proposed(repo, &record, &from, &roots)?;
     record.updated_ms = now;
     store::save(db, &record)?;
     set_engine_ref(

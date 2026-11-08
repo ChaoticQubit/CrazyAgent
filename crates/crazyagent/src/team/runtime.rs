@@ -6750,6 +6750,12 @@ impl TeamRuntime {
         if leads && let Err(error) = toolchains::lead_git(&scratch) {
             eprintln!("agent_lead_git_not_written kind={:?}", error.kind());
         }
+        if role == AgentRole::Master
+            && policy.access == AgentAccess::Full
+            && let Err(error) = toolchains::free_git(&scratch)
+        {
+            eprintln!("agent_free_git_not_written kind={:?}", error.kind());
+        }
         toolchains::prepare_cargo_home(&home, &homes)
             .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
         let kept = if tools {

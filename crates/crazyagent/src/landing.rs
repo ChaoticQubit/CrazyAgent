@@ -735,6 +735,26 @@ pub fn record_worktree_start(
     }
 }
 
+/// Records the commit a master's leased worktree starts from, as [`record_worktree_start`]
+/// does for a team agent's new worktree, unless a start is stored for it already, so a
+/// lease made Ready again never moves the start past commits the master made. The master
+/// runtime calls it before each master turn runs. Inputs: the store, the owner's checkout
+/// root, the worktree and its git metadata folder. Output: Ok once a start is stored.
+pub fn record_master_start(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return flow::start_master(db, repository, worktree, git_dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, git_dir);
+        Err(unavailable())
+    }
+}
+
 #[cfg(unix)]
 const TRACKED_LISTING_BYTES_MAX: usize = 4096;
 
@@ -1197,7 +1217,7 @@ pub fn accept_into_as(
         expected_head,
         message,
         Some(target_branch),
-        by,
+        owner::By::Named(by),
         &|_| false,
     );
     #[cfg(not(unix))]
@@ -1212,6 +1232,27 @@ pub fn accept_into_as(
             by,
         );
         Err(unavailable())
+    }
+}
+
+/// Lands the change set the project's master made, such as its fix of a conflicted set, the
+/// way an Accept does, when `team::master_lands` says Merges at that moment: one squash
+/// commit on the Land on branch, every open set of the project the master's head holds
+/// closed with it, and one MergedIntoMain activity row naming them. Any other set, a set
+/// that is not pending, or Waits leaves everything as it was. Inputs: the store, the
+/// owner's home and the change set. Output: the outcome of the land, or None when nothing
+/// was tried.
+pub fn land_master_set(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+) -> Result<Option<AcceptOutcome>, EngineError> {
+    #[cfg(unix)]
+    return owner::land_master(db, owner_home, id);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, owner_home, id);
+        Ok(None)
     }
 }
 

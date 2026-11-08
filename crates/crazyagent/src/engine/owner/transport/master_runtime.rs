@@ -43,6 +43,50 @@ pub(super) const CHANGES_WAITING: &str = "The edits from this turn are waiting f
 /// review; the refusal code follows in brackets.
 pub(super) const CHANGES_NOT_KEPT: &str =
     "The edits from this turn could not be kept for review and stay only in the master's worktree.";
+/// The most conflicting files a note under a master turn names.
+const NOTE_FILES_MAX: usize = 10;
+
+/// Lands the change set a master turn made when the project lets the master merge into main
+/// itself (DEC-117 Q2), and says what happened in the note under the turn; None when the set
+/// waits for the owner as before. A failure is logged by its plain code and the set waits.
+/// Inputs: the store and the change set. Output: the note.
+fn master_landed_note(
+    db: &rusqlite::Connection,
+    id: &crate::landing::ChangeSetId,
+) -> Option<String> {
+    let landed = crate::projects_home::owner_home()
+        .and_then(|home| crate::landing::land_master_set(db, &home, id));
+    match landed {
+        Ok(None) => None,
+        Ok(Some(crate::landing::AcceptOutcome::Landed { branch, .. })) => Some(format!(
+            "The master merged the edits from this turn into {branch} itself, as this project's setting lets it at Full access. Activity lists the merge."
+        )),
+        Ok(Some(crate::landing::AcceptOutcome::Conflict { files })) => {
+            let named: Vec<&str> = files
+                .iter()
+                .take(NOTE_FILES_MAX)
+                .map(String::as_str)
+                .collect();
+            let more = files.len().saturating_sub(named.len());
+            let more = if more == 0 {
+                String::new()
+            } else {
+                format!(" and {more} more")
+            };
+            Some(format!(
+                "The edits from this turn conflict with the branch they land on in {}{more}, so the master did not merge them. They are waiting for you in Changes.",
+                named.join(", ")
+            ))
+        }
+        Err(error) => {
+            eprintln!(
+                "master_land_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+            None
+        }
+    }
+}
 
 pub(super) struct MasterHostLaunch {
     pub(super) command: Command,
@@ -531,17 +575,25 @@ impl OwnerRuntimeHandle {
                 worktree,
                 git_dir: crate::worktrees::lease_git_dir(&db, &lease)?,
             };
-            crate::landing_turns::record(&db, &workspace, &end)
+            let landed = crate::landing_turns::record(&db, &workspace, &end)?;
+            let merged = match &landed {
+                crate::landing_turns::Landed::Added(id) => master_landed_note(&db, id),
+                _ => None,
+            };
+            Ok((landed, merged))
         })
         .await
         .unwrap_or_else(|_| Err(failure("changes_unavailable")));
         let note = match landed {
-            Ok(
+            Ok((
                 crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
-            ) => {
+                _,
+            )) => {
                 return turn;
             }
-            Ok(crate::landing_turns::Landed::Added(_)) => CHANGES_WAITING.to_owned(),
+            Ok((crate::landing_turns::Landed::Added(_), merged)) => {
+                merged.unwrap_or_else(|| CHANGES_WAITING.to_owned())
+            }
             Err(error) => format!(
                 "{CHANGES_NOT_KEPT} ({})",
                 crate::landing::refusal_code(&error)
@@ -616,6 +668,31 @@ impl OwnerRuntimeHandle {
         result
     }
 
+    /// Records where the master's leased worktree starts before its turn runs, unless the
+    /// engine already did, on a blocking thread with the landing store, so a master whose
+    /// turn ends with only its own commits keeps them as its change set. Input: the
+    /// prepared turn. Output: Ok once a start is stored, or the plain refusal.
+    async fn record_master_start(&self, prepared: &PreparedMasterTurn) -> Result<(), EngineError> {
+        let root = self.authority.root.verify().ok().and_then(|()| {
+            self.authority
+                .root
+                .path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        });
+        let repository = prepared.repository.clone();
+        let worktree = prepared.cwd.clone();
+        let lease = prepared.lease.clone();
+        tokio::task::spawn_blocking(move || {
+            let root = root.ok_or_else(|| failure("changes_unavailable"))?;
+            let db = crate::landing::open(&root)?;
+            let git_dir = crate::worktrees::lease_git_dir(&db, &lease)?;
+            crate::landing::record_master_start(&db, &repository, &worktree, &git_dir)
+        })
+        .await
+        .unwrap_or_else(|_| Err(failure("changes_unavailable")))
+    }
+
     async fn drive_turn(
         &self,
         project_id: &ProjectId,
@@ -660,10 +737,13 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
-        if prepared.session.selection.backend == MasterBackend::Rcli {
-            return self.launch_rcli_master_turn(&prepared, turn_id).await;
-        }
-        let result = self.launch_master_turn(&prepared, turn_id).await;
+        let result = match self.record_master_start(&prepared).await {
+            Ok(()) if prepared.session.selection.backend == MasterBackend::Rcli => {
+                return self.launch_rcli_master_turn(&prepared, turn_id).await;
+            }
+            Ok(()) => self.launch_master_turn(&prepared, turn_id).await,
+            Err(error) => Err(error),
+        };
         match result {
             Ok(turn) => Ok(turn),
             Err(error) if error.0 == "master_runtime_profile_not_acquired" => {

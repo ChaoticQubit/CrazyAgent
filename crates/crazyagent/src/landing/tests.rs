@@ -285,6 +285,7 @@ impl Case {
     }
 }
 
+#[track_caller]
 fn refused<T: std::fmt::Debug>(result: Result<T, EngineError>) -> String {
     result.unwrap_err().0
 }
@@ -5687,6 +5688,270 @@ fn a_lead_may_merge_its_own_workers_tip_and_is_refused_for_any_other_branch() {
     assert_eq!(case.view(&id).state, ChangeState::Pending);
 }
 
+/// The master's worktree as the engine leases it, in the case's store: the project and
+/// its repository admitted, and a master bootstrap lease checked out on its own
+/// `crazyagent/` branch, the only HEAD a master change set is recorded from. Input: the
+/// case. Output: the master's workspace.
+fn master_agent(case: &Case) -> Workspace {
+    use crate::protocol::{Outcome, ProjectSpec, SessionId, TaskId};
+    let engine = case.repo.parent().unwrap().join("engine");
+    let project = &case.workspace.project;
+    crate::storage::initialize_authority_schemas(&case.db).unwrap();
+    let repository = case.repo.to_str().unwrap();
+    let spec = ProjectSpec {
+        name: "Project one".into(),
+        repositories: vec![repository.into()],
+    };
+    let task = TaskId::new("master-bootstrap-1").unwrap();
+    let session = SessionId::new("session-1").unwrap();
+    let tx = case.db.unchecked_transaction().unwrap();
+    assert_eq!(
+        crate::storage::create_project(&tx, project, &spec).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        crate::worktrees::admit(&tx, project, repository).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        crate::worktrees::reserve_master_bootstrap(
+            &tx, &engine, project, &task, &session, repository
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    crate::worktrees::provision(&case.db, &task, repository).unwrap();
+    let Outcome::Worktrees { leases } = crate::worktrees::leases(&case.db, &task).unwrap() else {
+        panic!("the bootstrap task holds its lease");
+    };
+    assert_eq!(leases.len(), 1);
+    let git_dir = crate::worktrees::lease_git_dir(&case.db, &leases[0]).unwrap();
+    Workspace {
+        agent: ChangeAgent {
+            kind: AgentKind::Master,
+            id: "master-1".into(),
+            label: "Master".into(),
+        },
+        worktree: PathBuf::from(&leases[0].path),
+        git_dir,
+        ..case.workspace.clone()
+    }
+}
+
+/// The owner asks the master to resolve the conflicts and merge (DEC-117 Q2). At Full
+/// access the master's merge of an open change set into its own work passes its turn,
+/// and accepting the master's set lands the merged work; below Full access the same merge
+/// is refused as outside work (DEC-107).
+#[test]
+fn a_master_turn_merging_an_open_change_set_passes_only_at_full_access() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let sub_set = case.turn(TurnOutcome::Succeeded).unwrap();
+    let sub_head = case.view(&sub_set).head;
+    let master = master_agent(&case);
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
+    in_master(&[
+        "-c",
+        "user.name=Master",
+        "-c",
+        "user.email=master@example.invalid",
+        "merge",
+        "-q",
+        "--no-ff",
+        "--no-edit",
+        &sub_head,
+    ]);
+    assert_eq!(in_master(&["rev-parse", "HEAD^2"]).trim(), sub_head);
+    let save = |access| {
+        crate::sandbox::policy::save(
+            &case.db,
+            "project-1",
+            &AgentPolicy {
+                access,
+                ..AgentPolicy::default()
+            },
+        )
+        .unwrap()
+    };
+    save(AgentAccess::OwnBranch);
+    assert_eq!(
+        refused(record_turn_end(&case.db, &master, &merge_turn())),
+        "changes_outside_merge"
+    );
+    save(AgentAccess::Full);
+    let master_set = record_turn_end(&case.db, &master, &merge_turn())
+        .unwrap()
+        .expect("the master's merge makes its change set");
+    case.accept(&master_set).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n",
+        "accepting the master's set lands the merged change set's work"
+    );
+}
+
+/// Saves the project's agent access in the case's store. Inputs: the case and the access.
+fn save_access(case: &Case, access: crate::sandbox::policy::AgentAccess) {
+    crate::sandbox::policy::save(
+        &case.db,
+        "project-1",
+        &crate::sandbox::policy::AgentPolicy {
+            access,
+            ..crate::sandbox::policy::AgentPolicy::default()
+        },
+    )
+    .unwrap();
+}
+
+/// Records a merge commit of `commit` in an agent's worktree, as the agent's own merge
+/// would. Inputs: the case, the agent's workspace and the commit.
+fn merge_in(case: &Case, agent: &Workspace, commit: &str) {
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "merge",
+            "-q",
+            "--no-ff",
+            "--no-edit",
+            commit,
+        ],
+    );
+    assert_eq!(
+        git_in(&case.home, &agent.worktree, &["rev-parse", "HEAD^2"]).trim(),
+        commit
+    );
+}
+
+/// Full access widens the master's merges to open change sets only (DEC-117 Q2): its merge
+/// of a commit no change set holds, or of a discarded set's head, is still refused as
+/// outside work (DEC-107), while its merge of an open set passes.
+#[test]
+fn at_full_access_the_master_s_merge_of_a_foreign_commit_or_a_closed_set_is_refused() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    case.start();
+    case.edit("closed.txt", "closed\n");
+    let closed = case.turn(TurnOutcome::Succeeded).unwrap();
+    let closed_head = case.view(&closed).head;
+    discard(&case.db, &closed, &closed_head, NOW_MS).unwrap();
+    assert_eq!(case.view(&closed).state, ChangeState::Discarded);
+    case.edit("open.txt", "open\n");
+    let open = case.turn(TurnOutcome::Succeeded).unwrap();
+    let open_head = case.view(&open).head;
+    let foreign = case.side_branch();
+    let master = master_agent(&case);
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    save_access(&case, AgentAccess::Full);
+    let start = git_in(&case.home, &master.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    for (commit, what) in [
+        (&foreign, "a commit no change set holds"),
+        (&closed_head, "a discarded set's head"),
+    ] {
+        merge_in(&case, &master, commit);
+        assert_eq!(
+            refused(record_turn_end(&case.db, &master, &merge_turn())),
+            "changes_outside_merge",
+            "the master's merge of {what} at Full access"
+        );
+        git_in(
+            &case.home,
+            &master.worktree,
+            &["reset", "-q", "--hard", &start],
+        );
+    }
+    merge_in(&case, &master, &open_head);
+    assert!(
+        record_turn_end(&case.db, &master, &merge_turn())
+            .unwrap()
+            .is_some(),
+        "the master's merge of an open set passes at Full access"
+    );
+}
+
+/// Full access widens no sub-agent's merges (DEC-117 Q2): a sub-agent's and a lead's merge
+/// of another agent's open change set are still refused as outside work (DEC-107), while
+/// the master's same merge passes.
+#[test]
+fn at_full_access_a_sub_agent_s_or_a_lead_s_merge_of_an_open_set_is_refused() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    case.start();
+    case.edit("open.txt", "open\n");
+    let open = case.turn(TurnOutcome::Succeeded).unwrap();
+    let open_head = case.view(&open).head;
+    let master = master_agent(&case);
+    save_access(&case, AgentAccess::Full);
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,mode)
+             VALUES (3,'project-1','sub','claude',1,'running',1,1,NULL,'app_spawned'),
+                    (4,'project-1','sub','claude',1,'running',1,1,3,'app_spawned');",
+        )
+        .unwrap();
+    let sub = second_agent(&case);
+    let mut lead = numbered_agent(&case, 3);
+    lead.agent.id = "3".into();
+    let worker = numbered_agent(&case, 4);
+    case.db
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (4,'project-1',?1,?2,?3)",
+            rusqlite::params![
+                worker.repository.to_str().unwrap(),
+                worker.worktree.to_str().unwrap(),
+                worker.git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    for (agent, what) in [(&sub, "a sub-agent"), (&lead, "a lead")] {
+        record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir)
+            .unwrap();
+        merge_in(&case, agent, &open_head);
+        assert_eq!(
+            refused(record_turn_end(&case.db, agent, &merge_turn())),
+            "changes_outside_merge",
+            "{what}'s merge of an open set at Full access"
+        );
+    }
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    merge_in(&case, &master, &open_head);
+    assert!(
+        record_turn_end(&case.db, &master, &merge_turn())
+            .unwrap()
+            .is_some(),
+        "the master's same merge passes at Full access"
+    );
+}
+
 impl Case {
     fn observe(&self) {
         observe(&self.db, Some(&self.workspace.project)).unwrap();
@@ -6851,4 +7116,356 @@ fn releasing_claims_for_an_open_set_trips_the_assertion() {
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     let record = store::load(&case.db, &id).unwrap();
     super::flow::release_agent_claims(&case.db, &record);
+}
+
+/// Gives the project the access level and master landing choice named, in a case whose
+/// master is at work, so the engine's tables are there. Inputs: the case, the access and
+/// the choice.
+fn master_may_land(
+    case: &Case,
+    access: crate::sandbox::policy::AgentAccess,
+    lands: crate::team::MasterLands,
+) {
+    let policy = crate::sandbox::policy::AgentPolicy {
+        access,
+        ..crate::sandbox::policy::AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&case.db, case.workspace.project.as_str(), &policy).unwrap();
+    crate::team::set_master_lands(&case.db, &case.workspace.project, lands).unwrap();
+}
+
+/// Adds the project's master on the worktree the engine leases it, its turn start
+/// recorded. Input: the case. Output: the master's workspace.
+fn master_at_work(case: &Case) -> Workspace {
+    let master = master_agent(case);
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    master
+}
+
+/// Ends a turn of an agent other than the case's own. Inputs: the case, the agent and the
+/// prompt line. Output: its change set.
+fn turn_of(case: &Case, workspace: &Workspace, prompt: &str) -> ChangeSetId {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: format!("turn-{}", workspace.agent.id),
+        prompt_line: prompt.into(),
+    };
+    record_turn_end(&case.db, workspace, &turn)
+        .unwrap()
+        .unwrap()
+}
+
+/// The project's activity rows about a change set. Inputs: the case and the set. Output:
+/// the rows, newest first.
+fn activity_of(case: &Case, id: &ChangeSetId) -> Vec<crate::activity::ActivityItem> {
+    crate::activity::list(&case.db, &case.workspace.project, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.change_set.as_deref() == Some(id.as_str()))
+        .collect()
+}
+
+/// Makes the HackerBlog shape: the case's agent's set conflicts with the owner's fourth
+/// line on main, then the master, at Full access with Merge into main itself, merges that
+/// set's head and keeps both lines in its own turn. Input: the case. Output: the conflicted
+/// set, the master's fix and the README the fix holds.
+fn master_fixing_a_conflict(case: &Case) -> (ChangeSetId, ChangeSetId, &'static str) {
+    use crate::sandbox::policy::AgentAccess;
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    let sub = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit(
+        "README",
+        "one\ntwo\nthree\nfour from the owner\n",
+        "Owner adds four",
+    );
+    assert!(matches!(
+        case.accept(&sub).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    let master = master_at_work(case);
+    master_may_land(case, AgentAccess::Full, crate::team::MasterLands::Merges);
+    let sub_head = case.view(&sub).head;
+    let resolved = "one\ntwo\nthree\nfour from the owner\nfour from the agent\n";
+    let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
+    in_master(&["merge", "--no-commit", "-s", "ours", &sub_head]);
+    write(&master.worktree.join("README"), resolved);
+    in_master(&["add", "README"]);
+    in_master(&[
+        "-c",
+        "user.name=Master",
+        "-c",
+        "user.email=master@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Take both fourth lines",
+    ]);
+    let fix = turn_of(case, &master, "Resolve the README conflict");
+    (sub, fix, resolved)
+}
+
+#[test]
+fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_master_lands_is_merges()
+{
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(&other.worktree.join("NOTES"), "unrelated\n");
+    let unrelated = turn_of(&case, &other, "Write notes");
+
+    assert_eq!(
+        land_master_set(&case.db, &case.home, &unrelated).unwrap(),
+        None,
+        "only the master's own set lands itself"
+    );
+    assert_eq!(case.view(&unrelated).state, ChangeState::Pending);
+    let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
+    let Some(AcceptOutcome::Landed { commit, branch }) = outcome else {
+        panic!("the master's fix lands: {outcome:?}");
+    };
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
+    assert_eq!(case.owner(&["show", "main:README"]), resolved);
+    assert_eq!(case.view(&fix).state, ChangeState::Accepted);
+    assert_eq!(
+        case.view(&sub).state,
+        ChangeState::Accepted,
+        "the fixed set closes"
+    );
+    assert_eq!(
+        store::load(&case.db, &sub).unwrap().landed.as_deref(),
+        Some(commit.as_str()),
+        "the fixed set landed with the master's commit"
+    );
+    assert_eq!(
+        case.view(&unrelated).state,
+        ChangeState::Pending,
+        "a set the master's head does not hold stays open"
+    );
+    let rows = activity_of(&case, &fix);
+    assert_eq!(rows.len(), 1, "one activity row for the land: {rows:?}");
+    assert_eq!(rows[0].kind, ActivityKind::MergedIntoMain);
+    assert_eq!(rows[0].actor, "Master");
+    assert!(
+        rows[0].text.contains("Agent 1") && rows[0].text.contains("main"),
+        "the row names the set it closed and where it landed: {}",
+        rows[0].text
+    );
+}
+
+#[test]
+fn an_ordinary_master_set_waits_for_the_owner_under_merges() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    let master = master_at_work(&case);
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let edit = turn_of(&case, &master, "Add four");
+    let tip = case.tip();
+
+    assert_eq!(
+        land_master_set(&case.db, &case.home, &edit).unwrap(),
+        None,
+        "a master set that closes no other set waits for the owner's Accept"
+    );
+    assert_eq!(case.view(&edit).state, ChangeState::Pending);
+    assert_eq!(case.tip(), tip, "main does not move");
+    assert!(
+        activity_of(&case, &edit).is_empty(),
+        "nothing merged, so no activity row"
+    );
+}
+
+#[test]
+fn a_master_fix_that_conflicts_with_main_lands_nothing() {
+    let case = Case::new();
+    let (sub, fix, _) = master_fixing_a_conflict(&case);
+    let tip = case.owner_commit(
+        "README",
+        "one\ntwo\nthree\nfour from the owner\nowner five\n",
+        "Owner adds five",
+    );
+    let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
+    assert_eq!(
+        outcome,
+        Some(AcceptOutcome::Conflict {
+            files: vec!["README".to_owned()]
+        })
+    );
+    assert_eq!(case.tip(), tip, "main does not move");
+    assert_eq!(case.view(&fix).state, ChangeState::Pending);
+    assert_eq!(case.view(&sub).state, ChangeState::Conflict);
+    assert!(
+        activity_of(&case, &fix)
+            .iter()
+            .all(|row| row.kind != crate::activity::ActivityKind::MergedIntoMain),
+        "nothing merged, so no merge row"
+    );
+}
+
+#[test]
+fn a_master_set_waits_for_the_owner_under_waits_or_below_full_access() {
+    use crate::sandbox::policy::AgentAccess;
+    use crate::team::MasterLands;
+    let case = Case::new();
+    let (sub, fix, _) = master_fixing_a_conflict(&case);
+    let tip = case.tip();
+    for (access, lands) in [
+        (AgentAccess::Full, MasterLands::Waits),
+        (AgentAccess::OwnBranch, MasterLands::Merges),
+        (AgentAccess::Sandboxed, MasterLands::Merges),
+    ] {
+        master_may_land(&case, access, lands);
+        assert_eq!(
+            land_master_set(&case.db, &case.home, &fix).unwrap(),
+            None,
+            "{access:?} with {lands:?} leaves the set to the owner"
+        );
+        assert_eq!(case.view(&fix).state, ChangeState::Pending);
+        assert_eq!(case.view(&sub).state, ChangeState::Conflict);
+        assert_eq!(case.tip(), tip, "main does not move");
+    }
+}
+
+#[test]
+fn a_master_merge_whose_covered_set_cannot_close_is_still_listed_as_landed() {
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+    let tip = case.tip();
+    let log = case.repo.join(".git/logs").join(flow::pending_ref(&sub));
+    std::fs::create_dir_all(&log).unwrap();
+
+    let outcome = land_master_set(&case.db, &case.home, &fix);
+
+    assert!(
+        matches!(outcome, Ok(Some(AcceptOutcome::Landed { .. }))),
+        "main moved, so the master's note says it merged: {outcome:?}"
+    );
+    assert_ne!(case.tip(), tip, "main moved");
+    assert_eq!(case.owner(&["show", "main:README"]), resolved);
+    assert_eq!(case.view(&fix).state, ChangeState::Accepted);
+    let rows = activity_of(&case, &fix);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.kind == ActivityKind::MergedIntoMain)
+            .count(),
+        1,
+        "the landed merge is listed once: {rows:?}"
+    );
+}
+
+#[test]
+fn a_master_merge_an_engine_stop_cut_short_settles_as_the_masters_merge() {
+    use crate::activity::ActivityKind;
+    for step in [owner::Step::FilesWritten, owner::Step::BranchMoved] {
+        let case = Case::new();
+        let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+        let head = case.view(&fix).head;
+        let stopped = owner::accept_to(
+            &case.db,
+            &case.home,
+            &fix,
+            &head,
+            None,
+            None,
+            owner::By::Master,
+            &|at| at == step,
+        );
+        assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
+
+        assert_eq!(
+            refused(case.accept(&fix)),
+            "changes_stale",
+            "the next owner action finishes the merge: {step:?}"
+        );
+
+        assert!(store::in_flight(&case.db).unwrap().is_empty(), "{step:?}");
+        assert_eq!(case.owner(&["show", "main:README"]), resolved, "{step:?}");
+        assert_eq!(case.view(&fix).state, ChangeState::Accepted, "{step:?}");
+        assert_eq!(
+            case.view(&sub).state,
+            ChangeState::Accepted,
+            "the covered set closes: {step:?}"
+        );
+        let rows: Vec<_> = activity_of(&case, &fix)
+            .into_iter()
+            .map(|row| (row.kind, row.actor))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![(ActivityKind::MergedIntoMain, "Master".to_owned())],
+            "listed as the master's merge, not an Accept: {step:?}"
+        );
+    }
+}
+
+/// A master's worktree start is recorded once: the call each master turn makes keeps the
+/// stored start after the master committed, so its next turn end still holds that commit
+/// in its change set (T3 r2).
+#[test]
+fn a_master_worktree_start_is_recorded_once_and_never_moves_past_its_commits() {
+    let case = Case::new();
+    case.start();
+    let master = master_agent(&case);
+    let start_of = || {
+        record_master_start(
+            &case.db,
+            &master.repository,
+            &master.worktree,
+            &master.git_dir,
+        )
+        .unwrap()
+    };
+    start_of();
+    let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
+    let start = in_master(&["rev-parse", "HEAD"]).trim().to_owned();
+    write(&master.worktree.join("NOTES"), "master notes\n");
+    in_master(&["add", "NOTES"]);
+    in_master(&[
+        "-c",
+        "user.name=Master",
+        "-c",
+        "user.email=master@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Add notes",
+    ]);
+    start_of();
+    let id = record_turn_end(&case.db, &master, &merge_turn())
+        .unwrap()
+        .expect("the master's own commit makes its change set");
+    let set = case.view(&id);
+    assert_eq!(
+        (set.base.as_str(), set.files),
+        (start.as_str(), 1),
+        "the start never moved past the master's commit"
+    );
+}
+
+/// A set's proposed message names only the agent's own commits: owner commits the agent
+/// brought in by merging main are already on main, so they never become its subject or
+/// its list (T4 r2: an undo named the owner's commit).
+#[test]
+fn a_set_message_leaves_out_main_commits_its_agent_merged_in() {
+    let case = Case::new();
+    case.start();
+    let tip = case.owner_commit("owner.txt", "owner\n", "Owner work");
+    case.agent(&["merge", "-q", "--ff-only", &tip]);
+    assert_eq!(case.agent_head(), tip);
+    case.edit("own.txt", "own\n");
+    case.agent_commit("Agent work");
+    let id = case
+        .turn(TurnOutcome::Succeeded)
+        .expect("the agent's own commit makes its change set");
+    assert_eq!(case.view(&id).message, "Agent work");
 }

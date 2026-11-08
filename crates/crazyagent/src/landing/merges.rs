@@ -23,8 +23,9 @@ const UNCOVERED_BYTES_MAX: usize = ID_FIELD_BYTES_MAX;
 /// owner's current branch, as the engine's own update merges are, or in the commit the
 /// agent's worktree starts from, or in the head of the agent's open change set, which the
 /// engine recorded at an earlier turn end or made itself as the update merge it hands the
-/// agent, or, for a lead, in the tip of one of its own workers. The caller holds the
-/// repository hold, so nothing here takes it. Inputs: the store, the workspace, the owner
+/// agent, or, for a lead, in the tip of one of its own workers, or, for the master at Full
+/// access, in the head of any open change set of the project (DEC-117 Q2). The caller
+/// holds the repository hold, so nothing here takes it. Inputs: the store, the workspace, the owner
 /// repository and the agent's head. Output: Ok, else `changes_outside_merge`,
 /// `changes_too_large` or a plain git or store code.
 pub(super) fn refuse_outside_merges(
@@ -54,6 +55,18 @@ pub(super) fn refuse_outside_merges(
         return Ok(());
     }
     known.extend(worker_tips(db, workspace, shared)?);
+    if workspace.agent.kind == AgentKind::Master
+        && crate::sandbox::policy::load(db, workspace.project.as_str())
+            .map_err(|_| failure("changes_unavailable"))?
+            .access
+            == crate::sandbox::policy::AgentAccess::Full
+    {
+        for head in store::open_heads(db, &workspace.project)? {
+            if shared.commit_of(&head)?.as_deref() == Some(head.as_str()) {
+                known.push(head);
+            }
+        }
+    }
     if covered(shared, &parents, &known)? {
         return Ok(());
     }

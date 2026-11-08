@@ -3846,3 +3846,86 @@ async fn a_conversation_master_s_questions_are_logged_and_recorded_when_its_turn
     drop(db);
     case.finish().await;
 }
+
+/// Reads the commit a worktree's HEAD names. Inputs: the worktree and the git home. Output:
+/// the commit id.
+fn head_of(worktree: &Path, home: &Path) -> String {
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("-C")
+            .arg(worktree)
+            .args(["rev-parse", "HEAD"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// A master whose first turn on its new worktree ends with only its own commits keeps them
+/// as its change set: the engine records the commit the leased worktree starts from before
+/// the turn runs, as it does for a team agent's new worktree (T3 r2).
+#[tokio::test]
+async fn a_master_turn_records_where_its_leased_worktree_starts_before_it_runs() {
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    let proof = case.register().await;
+    let held = exclusive_profile_hold(case.root.path(), &proof.profile_ref)
+        .expect("no agent holds the configured profile yet");
+    assert_eq!(
+        case.drive()
+            .await
+            .expect_err("the held profile stops the prepared turn before it runs")
+            .0,
+        "native_profile_in_use"
+    );
+    drop(held);
+    let db = crate::landing::open(case.root.path()).unwrap();
+    let crate::protocol::Outcome::Worktrees { leases } =
+        crate::worktrees::leases(&db, &case.session.bootstrap_task_id).unwrap()
+    else {
+        panic!("the master holds its worktree lease");
+    };
+    let worktree = PathBuf::from(&leases[0].path);
+    let start = head_of(&worktree, case.root.path());
+    fs::write(worktree.join("NOTES"), "master notes\n").unwrap();
+    git(&worktree, case.root.path(), &["add", "NOTES"]);
+    git(
+        &worktree,
+        case.root.path(),
+        &["commit", "-q", "-m", "Add notes"],
+    );
+    let workspace = crate::landing::Workspace {
+        project: case.session.project_id.clone(),
+        agent: crate::landing::ChangeAgent {
+            kind: crate::landing::AgentKind::Master,
+            id: case.session.session_id.as_str().to_owned(),
+            label: "Master".into(),
+        },
+        repository: case.repository.clone(),
+        worktree,
+        git_dir: crate::worktrees::lease_git_dir(&db, &leases[0]).unwrap(),
+    };
+    let end = crate::landing::TurnEnd {
+        outcome: crate::landing::TurnOutcome::Succeeded,
+        turn: case.turn.id.as_str().to_owned(),
+        prompt_line: "Add notes".into(),
+    };
+    let id = crate::landing::record_turn_end(&db, &workspace, &end)
+        .unwrap()
+        .expect("the master's own commit makes its change set");
+    let set = crate::landing::list(&db, &case.session.project_id)
+        .unwrap()
+        .into_iter()
+        .find(|set| set.id == id)
+        .unwrap();
+    assert_eq!((set.base.as_str(), set.files), (start.as_str(), 1));
+    drop(db);
+    case.finish().await;
+}

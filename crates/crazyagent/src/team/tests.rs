@@ -5981,3 +5981,117 @@ fn terminals_per_window_is_six_until_the_owner_picks_four_or_nine_and_reads_each
         );
     }
 }
+
+#[test]
+fn master_lands_defaults_to_merges_at_full_access_and_is_always_waits_otherwise() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let connection = Connection::open_in_memory().unwrap();
+    initialize(&connection).unwrap();
+    let project = ProjectId::new("lands").unwrap();
+    let access = |level: AgentAccess| {
+        let policy = AgentPolicy {
+            access: level,
+            ..AgentPolicy::default()
+        };
+        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+    };
+    access(AgentAccess::Full);
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Merges,
+        "Full access with no choice saved merges"
+    );
+    set_master_lands(&connection, &project, MasterLands::Waits).unwrap();
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Waits
+    );
+    set_master_lands(&connection, &project, MasterLands::Merges).unwrap();
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Merges
+    );
+    for level in [AgentAccess::OwnBranch, AgentAccess::Sandboxed] {
+        access(level);
+        assert_eq!(
+            master_lands(&connection, &project).unwrap(),
+            MasterLands::Waits,
+            "{level:?} never lets the master merge into main"
+        );
+    }
+    let unset = ProjectId::new("unset").unwrap();
+    set_master_lands(&connection, &unset, MasterLands::Merges).unwrap();
+    assert_eq!(
+        master_lands(&connection, &unset).unwrap(),
+        MasterLands::Waits,
+        "a project with no saved access is Sandboxed"
+    );
+    assert_eq!(MasterLands::named("merges"), Some(MasterLands::Merges));
+    assert_eq!(MasterLands::named("waits"), Some(MasterLands::Waits));
+    assert_eq!(MasterLands::named("Merges"), None);
+}
+
+/// The owner's choice of what a Full-access master does with its own conflict fixes is saved
+/// per project, and the team status shows it only while the project is at Full access
+/// (DEC-117 Q2).
+#[test]
+fn a_master_lands_change_is_saved_and_shown_only_at_full_access() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let (_directory, mut connection) = database();
+    let setup = stored("team-lands", Vec::new());
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-lands", &["local-a"]);
+    let project = setup.project_id.clone();
+    let level = |connection: &Connection, access: AgentAccess| {
+        let policy = AgentPolicy {
+            access,
+            ..AgentPolicy::default()
+        };
+        crate::sandbox::policy::save(connection, project.as_str(), &policy).unwrap();
+    };
+    level(&connection, AgentAccess::Full);
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_lands,
+        Some(MasterLands::Merges),
+        "Merges is the default at Full access"
+    );
+    for mode in [MasterLands::Waits, MasterLands::Merges, MasterLands::Waits] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::MasterLands {
+                    project_id: project.clone(),
+                    mode,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            status(&connection, &setup).unwrap().master_lands,
+            Some(mode)
+        );
+        assert_eq!(master_lands(&connection, &project).unwrap(), mode);
+    }
+    level(&connection, AgentAccess::OwnBranch);
+    assert_eq!(
+        status(&connection, &setup).unwrap().master_lands,
+        None,
+        "below Full access the choice is not offered"
+    );
+    assert_eq!(
+        master_lands(&connection, &project).unwrap(),
+        MasterLands::Waits
+    );
+}

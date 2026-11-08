@@ -669,8 +669,14 @@ pub(super) fn commit_deletions(
 /// agent's worktree at the landed commit when the worktree holds nothing newer than the set,
 /// and records the Accept in the project's activity by who accepted it. A worker set that
 /// cannot be closed now is logged by its plain code and left open, so the Accept itself
-/// never fails on it.
-fn finish(db: &Connection, record: &mut Record, landed: &str, by: &str) -> Result<(), EngineError> {
+/// never fails on it; so is a failure after the save for the master's own land, which its
+/// caller still lists as landed.
+fn finish(
+    db: &Connection,
+    record: &mut Record,
+    landed: &str,
+    by: By<'_>,
+) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
     record.landed = Some(landed.to_owned());
     record.conflicts.clear();
@@ -678,13 +684,32 @@ fn finish(db: &Connection, record: &mut Record, landed: &str, by: &str) -> Resul
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
     flow::release_agent_claims(db, record);
-    super::note_change(db, record, ActivityKind::Accepted, by);
+    if let By::Named(by) = by {
+        super::note_change(db, record, ActivityKind::Accepted, by);
+    }
     if let Err(error) = super::subagent::close_with_lead(db, record) {
         eprintln!(
             "landing_settle_failed cause={}",
             crate::protocol::plain_code(&error.0)
         );
     }
+    match (tidy(db, record, landed), by) {
+        (Err(error), By::Master) => {
+            eprintln!(
+                "master_land_tidy_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+            Ok(())
+        }
+        (tidied, _) => tidied,
+    }
+}
+
+/// Drops a landed change set's pending ref, forgets the owner edits settled on it and
+/// points its agent's worktree at the landed commit when the worktree holds nothing newer
+/// than the set. Inputs: the store, the landed set and its landed commit. Output: Ok once
+/// done.
+fn tidy(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
     flow::set_engine_ref(
         &shared(&record.repository)?,
         &record.repository,
@@ -694,6 +719,133 @@ fn finish(db: &Connection, record: &mut Record, landed: &str, by: &str) -> Resul
     super::owner_edit::logged("forget", super::owner_edit::forget(db, &record.id));
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)
+}
+
+/// Who lands a change set, as the project's activity names them: someone whose Accept or
+/// conflict is recorded as it happens, or the master landing its own set, whose land its
+/// caller records once with the sets it closed and whose conflict leaves the set as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum By<'a> {
+    Named(&'a str),
+    Master,
+}
+
+/// Lands the master's own pending change set when `team::master_lands` says Merges, read
+/// now, and only when it fixes a conflict: its head holds at least one other open set of
+/// the project (DEC-117 addendum, 2026-11-07). Lands it as an Accept onto the Land on
+/// branch, then [`master_merged`] closes those sets and lists the merge. Any other set, or
+/// Waits, is left for the owner's Accept, and a conflict changes nothing. Inputs: the
+/// store, the owner's home and the change set. Output: the outcome, or None when nothing
+/// was tried.
+pub(super) fn land_master(
+    db: &Connection,
+    home: &Path,
+    id: &ChangeSetId,
+) -> Result<Option<AcceptOutcome>, EngineError> {
+    store::initialize(db)?;
+    let record = store::load(db, id)?;
+    if record.agent.kind != AgentKind::Master
+        || record.state != ChangeState::Pending
+        || record.intent.is_some()
+        || crate::team::master_lands(db, &record.project)? != crate::team::MasterLands::Merges
+    {
+        return Ok(None);
+    }
+    {
+        let _held = hold(&record.repository);
+        if covered(db, &record)?.is_empty() {
+            return Ok(None);
+        }
+    }
+    let outcome = accept_to(db, home, id, &record.head, None, None, By::Master, &|_| {
+        false
+    })?;
+    if let AcceptOutcome::Landed { commit, branch } = &outcome {
+        let _held = hold(&record.repository);
+        master_merged(db, &record, commit, branch);
+    }
+    Ok(Some(outcome))
+}
+
+/// Records a landed master set the way the project lists it: closes every other open set
+/// of the project its head holds, then writes one MergedIntoMain row by the master naming
+/// them. A failure is logged by its plain code and never hides the land. The caller holds
+/// [`hold`] on the repository. Inputs: the store, the master's set, the commit it landed
+/// as and the branch it landed on. Output: none.
+fn master_merged(db: &Connection, master: &Record, landed: &str, branch: &str) {
+    let closed = close_covered(db, master, landed);
+    let mut text = format!(
+        "The master merged its changes into {branch}: {}",
+        master.prompt_line
+    );
+    if !closed.is_empty() {
+        text.push_str(&format!(". It closed the changes of {}", closed.join(", ")));
+    }
+    let item = crate::activity::NewActivity {
+        kind: ActivityKind::MergedIntoMain,
+        actor: crate::activity::MASTER_ACTOR,
+        agent: None,
+        goal: None,
+        text: &text,
+        change_set: Some(master.id.as_str()),
+    };
+    let at = flow::now_ms().map_or(i64::MAX, |ms| i64::try_from(ms).unwrap_or(i64::MAX));
+    crate::activity::note(db, &master.project, &item, at);
+}
+
+/// The other open change sets of the master's project whose head the master's set holds.
+/// A set with an owner action in flight is left out. Inputs: the store and the master's
+/// set. Output: the sets.
+fn covered(db: &Connection, master: &Record) -> Result<Vec<Record>, EngineError> {
+    let mut covered = Vec::new();
+    for record in store::open_of(db, Some(&master.project))? {
+        assert_eq!(record.project, master.project);
+        if record.id != master.id
+            && record.intent.is_none()
+            && super::subagent::covers(&record, &master.head)?
+        {
+            covered.push(record);
+        }
+    }
+    Ok(covered)
+}
+
+/// Closes, as landed in `landed`, every set [`covered`] finds for the master's landed set,
+/// the way a lead's merge closes its workers' sets. A set that fails to close is logged by
+/// its plain code and named only when the store holds it closed. The caller holds [`hold`]
+/// on the repository. Inputs: the store, the master's landed set and the commit it landed
+/// as. Output: the labels of the agents whose sets closed.
+fn close_covered(db: &Connection, master: &Record, landed: &str) -> Vec<String> {
+    assert_eq!(master.agent.kind, AgentKind::Master);
+    let logged = |error: &EngineError| {
+        eprintln!(
+            "master_close_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    };
+    let sets = match covered(db, master) {
+        Ok(sets) => sets,
+        Err(error) => {
+            logged(&error);
+            return Vec::new();
+        }
+    };
+    let found = sets.len();
+    let mut closed = Vec::new();
+    for mut record in sets {
+        let shut = match super::subagent::land_covered(db, &mut record, landed) {
+            Ok(()) => true,
+            Err(error) => {
+                logged(&error);
+                store::load(db, &record.id).is_ok_and(|stored| !stored.is_open())
+            }
+        };
+        if shut {
+            closed.push(record.agent.label.clone());
+        }
+    }
+    assert!(closed.len() <= found);
+    closed
 }
 
 /// The owner's edited Accept message: line ends made `\n`, trimmed, not empty, at most
@@ -735,7 +887,7 @@ pub(super) fn accept(
         expected_head,
         message,
         None,
-        OWNER_ACTOR,
+        By::Named(OWNER_ACTOR),
         stopped,
     )
 }
@@ -754,7 +906,7 @@ pub(super) fn accept_to(
     expected_head: &str,
     message: Option<&str>,
     target: Option<&str>,
-    by: &str,
+    by: By<'_>,
     stopped: &dyn Fn(Step) -> bool,
 ) -> Result<AcceptOutcome, EngineError> {
     let edited = message.map(edited).transpose()?;
@@ -785,11 +937,13 @@ pub(super) fn accept_to(
     let (tree, conflicts) = merge(&owner, &from, &tip, &record.head)?;
     let branch = reference.trim_start_matches("refs/heads/").to_owned();
     if !conflicts.is_empty() {
-        record.state = ChangeState::Conflict;
-        record.conflicts = conflicts.clone();
-        record.updated_ms = flow::now_ms()?;
-        store::save(db, &record)?;
-        super::note_change(db, &record, ActivityKind::Conflict, by);
+        if let By::Named(by) = by {
+            record.state = ChangeState::Conflict;
+            record.conflicts = conflicts.clone();
+            record.updated_ms = flow::now_ms()?;
+            store::save(db, &record)?;
+            super::note_change(db, &record, ActivityKind::Conflict, by);
+        }
         return Ok(AcceptOutcome::Conflict { files: conflicts });
     }
     if uses_configured_commands(&owner, &paths, &[&tree])? {
@@ -824,6 +978,7 @@ pub(super) fn accept_to(
         reference: reference.clone(),
         old: tip.clone(),
         new: commit.clone(),
+        master: by == By::Master,
     });
     store::save(db, &record)?;
     if stopped(Step::Recorded) {
@@ -1077,7 +1232,8 @@ pub(super) fn settled(db: &Connection, id: &ChangeSetId) -> Result<Record, Engin
 
 /// Finishes or undoes the one Accept or worktree reset a change set holds as its intent:
 /// an Accept whose branch moved is finished, one whose files were written but whose
-/// branch did not move is moved by compare and swap, one that wrote nothing is dropped,
+/// branch did not move is moved by compare and swap, either listed as the master's merge
+/// with its covered sets closed when the master landed its own set, one that wrote nothing is dropped,
 /// and an agent worktree reset is run again while the worktree still holds the old or new
 /// commit. The caller holds [`hold`] on its repository. Inputs: the store and the loaded
 /// record. Output: Ok once the stored record holds no intent.
@@ -1087,6 +1243,7 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             reference,
             old,
             new,
+            master,
         }) => {
             let owner = Repo::open(
                 &record.repository,
@@ -1113,8 +1270,17 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                     )?
                     .code
                     == 0;
-            if moved || tip.as_deref() == Some(new.as_str()) {
-                finish(db, record, &new, ENGINE_ACTOR)?;
+            let landed = moved || tip.as_deref() == Some(new.as_str());
+            if landed && master {
+                finish(db, record, &new, By::Master)?;
+                master_merged(
+                    db,
+                    record,
+                    &new,
+                    reference.trim_start_matches("refs/heads/"),
+                );
+            } else if landed {
+                finish(db, record, &new, By::Named(ENGINE_ACTOR))?;
             } else {
                 record.intent = None;
                 store::save(db, record)?;
@@ -1426,8 +1592,8 @@ fn observe_one(
         Judged::Landed => {
             record.outside = true;
             let by = match against {
-                Against::Owner => OWNER_ACTOR,
-                Against::Lead(_) => ENGINE_ACTOR,
+                Against::Owner => By::Named(OWNER_ACTOR),
+                Against::Lead(_) => By::Named(ENGINE_ACTOR),
             };
             finish(db, &mut record, tip, by)?;
             assert!(!record.is_open());

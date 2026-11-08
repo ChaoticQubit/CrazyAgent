@@ -68,7 +68,8 @@ const ADDED_COLUMNS: [(&str, &str); 3] = [
 
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
 /// an engine start can finish or undo it. `Land` moves the owner's `reference` from
-/// `old` to the squash commit `new`; `Reset` points the agent's worktree at `target`.
+/// `old` to the squash commit `new`, `master` when it is the master landing its own set;
+/// `Reset` points the agent's worktree at `target`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Intent {
@@ -76,6 +77,8 @@ pub(super) enum Intent {
         reference: String,
         old: String,
         new: String,
+        #[serde(default)]
+        master: bool,
     },
     Reset {
         target: String,
@@ -521,6 +524,29 @@ pub(super) fn open_for(db: &Connection, worktree: &str) -> Result<Option<Record>
     )
     .optional()
     .map_err(storage)
+}
+
+/// The most open change-set heads one project's read returns.
+const OPEN_HEADS_MAX: usize = 256;
+
+/// The heads of the project's open change sets, the ones still Pending, Conflict or
+/// Updating. Inputs: the store and the project. Output: the heads, at most
+/// `OPEN_HEADS_MAX`, or `changes_unavailable` on a SQLite failure.
+pub(super) fn open_heads(db: &Connection, project: &ProjectId) -> Result<Vec<String>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT head FROM landing_change_sets WHERE project=?1 \
+             AND state IN ('pending','conflict','updating') ORDER BY id LIMIT ?2",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![project.as_str(), OPEN_HEADS_MAX as i64], |row| {
+            row.get(0)
+        })
+        .map_err(storage)?;
+    let heads: Vec<String> = rows.collect::<Result<_, _>>().map_err(storage)?;
+    assert!(heads.len() <= OPEN_HEADS_MAX);
+    Ok(heads)
 }
 
 /// Reads the worktrees of the change sets open directly inside one folder, such as a

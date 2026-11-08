@@ -159,6 +159,7 @@ fn team() -> TeamStatus {
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
+        master_lands: None,
         reask_empty_reply: true,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
@@ -4047,4 +4048,61 @@ fn w_moves_terminals_per_window_through_four_six_and_nine() {
             )))
         );
     }
+}
+
+#[test]
+fn e_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access() {
+    use crate::team::MasterLands;
+    let row = "When the master resolves conflicts";
+    let mut view = loaded();
+    assert!(view.help().contains(&("E", "Master merges")));
+    assert!(
+        !view.help().contains(&("W", "Master merges")),
+        "W stays free for Terminals per window"
+    );
+    assert!(!shows(&view, row), "the row shows only at Full access");
+    assert_eq!(view.key(press(KeyCode::Char('E'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "The master merges into main itself only at Full access."
+        ))
+    );
+    let mut full = team();
+    full.master_lands = Some(MasterLands::Merges);
+    reread(&mut view, full, NOW + MINUTE);
+    assert!(shows(&view, &format!("{row}  Merge into main itself")));
+    assert!(
+        !matches!(
+            view.key(press(KeyCode::Char('W'))),
+            TeamReply::Change(TeamAction::MasterLands { .. })
+        ),
+        "W does not switch the master merge setting"
+    );
+    let reply = view.key(press(KeyCode::Char('E')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::MasterLands {
+            project_id: project(),
+            mode: MasterLands::Waits,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "The master now waits for your Accept on its conflict fixes."
+        ))
+    );
+    let mut waits = team();
+    waits.master_lands = Some(MasterLands::Waits);
+    reread(&mut view, waits, NOW + MINUTE + 10);
+    assert!(shows(&view, &format!("{row}  Wait for my Accept")));
+    assert_eq!(
+        view.key(press(KeyCode::Char('E'))),
+        TeamReply::Change(TeamAction::MasterLands {
+            project_id: project(),
+            mode: MasterLands::Merges,
+        })
+    );
 }
