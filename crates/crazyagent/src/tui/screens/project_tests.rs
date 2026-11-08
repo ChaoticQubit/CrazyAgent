@@ -3949,3 +3949,68 @@ fn a_live_switch_that_opened_no_session_shows_on_and_names_why() {
         "{named}"
     );
 }
+
+/// The Agent access box keeps its save line, or the Full access warning with its y and n, on
+/// screen when the window is shorter than the box, and the settings above follow the cursor
+/// down to the IDE hooks switch with the lines left out counted (FB-TUI row 3).
+#[test]
+fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
+    use crate::sandbox::policy::ToolchainView;
+    use crate::sandbox::toolchains::Toolchain;
+    let project = ProjectId::new("access-short").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_access_read(&mut screen, 20);
+    let mut view = access_view(AgentAccess::Sandboxed, 1);
+    view.toolchains = [(Toolchain::Rust, "Rust"), (Toolchain::Python, "Python")]
+        .into_iter()
+        .map(|(toolchain, label)| ToolchainView {
+            toolchain,
+            label: label.into(),
+            installed: true,
+            used: false,
+            allowed: false,
+        })
+        .collect();
+    screen.apply(&read, Ok(SetupView::AgentPolicy(view)));
+    screen.key(key(KeyCode::Char('c')));
+    let look = Look::plain();
+    for (width, height) in [(120, 40), (80, 24)] {
+        let drawn = project_screen(&mut screen, width, height, &look);
+        assert_eq!(drawn.rows.len(), usize::from(height) - 4);
+        let shown = text(&drawn.rows);
+        assert!(
+            shown.contains("> Access      < Sandboxed >")
+                && shown.contains("[> Save ]")
+                && shown.contains("more lines below"),
+            "{width}x{height}:\n{shown}"
+        );
+    }
+    let shown = text(&project_screen(&mut screen, 120, 40, &look).rows);
+    assert!(
+        shown.contains("Toolchains agents may use") && shown.contains("[ ] Rust"),
+        "{shown}"
+    );
+    for _ in 0..4 {
+        screen.key(key(KeyCode::Down));
+    }
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("> [ ] IDE git runs the project's hooks")
+            && shown.contains("more lines above")
+            && shown.contains("[> Save ]"),
+        "{shown}"
+    );
+    for _ in 0..4 {
+        screen.key(key(KeyCode::Up));
+    }
+    screen.key(key(KeyCode::Right));
+    screen.key(key(KeyCode::Right));
+    screen.key(key(KeyCode::Enter));
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Full access: Agents run with your user's permissions")
+            && shown.contains("[> y Allow Full access ]"),
+        "{shown}"
+    );
+}
