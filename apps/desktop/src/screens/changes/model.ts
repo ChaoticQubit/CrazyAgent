@@ -38,6 +38,7 @@ const MARKS: Record<string, string> = {
 };
 
 const MESSAGE_BYTES_MAX = 4096;
+const SUBJECT_CHARS_MAX = 48;
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
 /** Names the agent whose work a change set holds, a sub-agent by the engine's label such as
@@ -46,10 +47,21 @@ export function agentName(set: ChangeSet): string {
   return set.agent.kind === "master" ? "Master" : displayText(set.agent.label);
 }
 
-/** Names a change set as the owner reads it everywhere. Input: the change set. Output: the
- * name. */
+/** The first line of a change set's commit message, cut to a short subject, hidden
+ * characters shown as escapes. Input: the change set. Output: the subject, empty for an
+ * empty message. */
+export function subject(set: ChangeSet): string {
+  const chars = [...displayText(set.message.split("\n", 1)[0].trim())];
+  return chars.length > SUBJECT_CHARS_MAX ? `${chars.slice(0, SUBJECT_CHARS_MAX - 3).join("")}...` : chars.join("");
+}
+
+/** Names a change set as the owner reads it everywhere: "Change set #16 (Wren: checkout UI,
+ * 7 files)", or its agent alone for a set the engine has not numbered yet. Input: the
+ * change set. Output: the name. */
 export function changeSetName(set: ChangeSet): string {
-  return agentName(set);
+  if (set.number === undefined || set.number === null) return agentName(set);
+  const about = subject(set);
+  return `Change set #${set.number} (${agentName(set)}${about === "" ? "" : `: ${about}`}, ${plural(set.files, "file", "files")})`;
 }
 
 /** The size of a change set in files and lines. Input: the change set. Output: the line. */
