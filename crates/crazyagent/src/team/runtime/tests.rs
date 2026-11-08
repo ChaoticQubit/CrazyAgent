@@ -12860,6 +12860,7 @@ fn between_turns(
         live: false,
         briefed: true,
         input_ready: true,
+        background_held: false,
         kept_session,
         own_turn: None,
         own_rules: None,
@@ -20227,6 +20228,7 @@ fn a_kept_lead_with_working_teammates_gets_no_reask_and_takes_its_messages() {
             host.as_ref(),
             Some(&owner),
             lead,
+            false,
             "[crazyagent msg 1] from the owner: check the page",
             now_ms(),
         )

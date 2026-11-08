@@ -440,10 +440,12 @@ fn conversation_id(value: &Value) -> Option<String> {
 }
 
 /// Reads the task ids a Claude Code task notification says ended: each `<task-id>` of a
-/// message that holds `<task-notification>`, kept as `conversation_id` keeps an id, at most
-/// `NOTIFIED_TASKS_MAX`. Takes the message text. Returns the ids, none for other text.
+/// message that starts with `<task-notification>`, as Claude Code writes one, kept as
+/// `conversation_id` keeps an id, at most `NOTIFIED_TASKS_MAX`. A message that only quotes
+/// a notification, such as a typed coordination message, names none (DEC-119). Takes the
+/// message text. Returns the ids, none for other text.
 fn notified_tasks(text: &str) -> Vec<String> {
-    if !text.contains(CLAUDE_NOTIFICATION) {
+    if !text.starts_with(CLAUDE_NOTIFICATION) {
         return Vec::new();
     }
     let ids: Vec<String> = text

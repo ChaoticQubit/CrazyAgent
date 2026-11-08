@@ -174,6 +174,8 @@ fn now_ms() -> i64 {
     .unwrap()
 }
 
+static NONE_HELD: BTreeSet<AgentId> = BTreeSet::new();
+
 fn reach<'a>(
     host: Option<&'a dyn Host>,
     owner: Option<&'a OwnerTyping>,
@@ -185,6 +187,7 @@ fn reach<'a>(
         owner,
         state,
         asleep,
+        held: &NONE_HELD,
     }
 }
 
@@ -678,7 +681,7 @@ fn typing_waits_for_an_idle_quiet_pane_the_owner_left_alone() {
     let text = "[crazyagent msg 1] from the owner: work for you\nsecond line";
     let now = now_ms();
     let try_type = |agent: i64, owner: Option<&OwnerTyping>, now: i64| {
-        typing::type_into(&fixture.db, &host, owner, agent, text, now).unwrap()
+        typing::type_into(&fixture.db, &host, owner, agent, false, text, now).unwrap()
     };
 
     assert_eq!(

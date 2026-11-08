@@ -22,17 +22,19 @@ pub enum Typing {
 }
 
 /// Types text into a team agent's terminal as one submission, only while that agent
-/// waits for input (DEC-104 Q13): its status is idle, its app drew nothing for
+/// waits for input (DEC-104 Q13): its status is idle, or working on a task whose turn is
+/// held for the commands it started in the background (DEC-119), its app drew nothing for
 /// `APP_QUIET`, no question or permission prompt is on its screen or recorded for it, and
 /// the owner's keys do not hold it back by the live master's rule. Control keys are
 /// dropped, so the text cannot press keys. Takes the database, the terminal host, the owner
-/// typing signal (none holds every agent back), the agent, the text and the time in ms.
-/// Returns what happened, or a database failure.
+/// typing signal (none holds every agent back), the agent, whether its turn is held, the
+/// text and the time in ms. Returns what happened, or a database failure.
 pub fn type_into(
     db: &Connection,
     host: &dyn Host,
     owner: Option<&OwnerTyping>,
     agent: AgentId,
+    held: bool,
     text: &str,
     now: i64,
 ) -> Result<Typing, EngineError> {
@@ -56,7 +58,7 @@ pub fn type_into(
     if !status.live() {
         return Ok(Typing::Gone);
     }
-    if status != AgentStatus::Idle {
+    if status != AgentStatus::Idle && !(held && status == AgentStatus::Working) {
         return Ok(Typing::Held("coord_agent_busy"));
     }
     let Some(owner) = owner else {

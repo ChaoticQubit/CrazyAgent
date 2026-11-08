@@ -524,6 +524,7 @@ struct Worker {
     live: bool,
     briefed: bool,
     input_ready: bool,
+    background_held: bool,
     kept_session: bool,
     own_turn: Option<i64>,
     own_rules: Option<(Duration, TurnRules)>,
@@ -2342,11 +2343,13 @@ impl TeamRuntime {
         self.deliver_to_leads(project)?;
         super::events::forward_to_parents(&self.connection, project, now_ms())?;
         let asleep = self.asleep(project);
+        let held = self.held_for_background(project);
         let reach = crate::coord::delivery::Reach {
             host: self.terminal.as_deref(),
             owner: self.agents.as_deref().map(Agents::typing),
             state: &self.state,
             asleep: &asleep,
+            held: &held,
         };
         self.deliveries
             .tick_logged(&self.connection, project, now_ms(), &reach);
@@ -2378,6 +2381,19 @@ impl TeamRuntime {
                     && !worker.live
                     && worker.busy.is_none()
                     && !worker.stopping
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Lists a project's agents whose task turn is held for the commands they started in the
+    /// background (DEC-119): they show working on their task but wait at their prompt, so a
+    /// message may be typed into them. Takes the project. Returns their ids.
+    fn held_for_background(&self, project: &ProjectId) -> BTreeSet<i64> {
+        self.workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project && worker.background_held && worker.busy.is_some()
             })
             .map(|(id, _)| *id)
             .collect()
@@ -5802,6 +5818,7 @@ impl TeamRuntime {
                 live,
                 briefed,
                 input_ready: false,
+                background_held: false,
                 kept_session,
                 own_turn: None,
                 own_rules: None,
@@ -7407,20 +7424,8 @@ impl TeamRuntime {
                 Ok(false)
             }
             Report::Held { held } => {
-                if self.workers[&id].busy.is_some() {
-                    let status = if held {
-                        AgentStatus::Idle
-                    } else {
-                        AgentStatus::Working
-                    };
-                    self.connection
-                        .execute(
-                            "UPDATE team_agents SET status=?2, heartbeat_ms=?3 WHERE id=?1
-                             AND status IN ('idle','working')",
-                            params![id, status.name(), now_ms()],
-                        )
-                        .map_err(error)?;
-                }
+                let worker = self.workers.get_mut(&id).expect("held worker exists");
+                worker.background_held = held && worker.busy.is_some();
                 Ok(false)
             }
             Report::TakeoverUnconfirmed => {
@@ -7444,6 +7449,7 @@ impl TeamRuntime {
             Report::Finished { text, end, cause } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let busy = worker.busy.take();
+                worker.background_held = false;
                 let cut =
                     (end == TurnEnd::TimedOut).then(|| limit_note(cause.as_deref(), worker.bound));
                 let cause = cut.or(cause);
@@ -9909,8 +9915,8 @@ fn launch_end(problem: LaunchError) -> (TurnEnd, Option<String>) {
 /// for commands it started in the background, the owner's Background commands at task end
 /// choice: at once under Stop, after the grace time under Grace (DEC-111 Q13). A turn ended
 /// for its background commands is still held, so its caller stops the agent and them with
-/// it. Each change between held and running is reported, so a held agent shows idle and a
-/// message can be typed into it (DEC-119). Takes the session, the prompt, the reports
+/// it. Each change between held and running is reported, so a message can be typed into a
+/// held agent while it shows working on its task (DEC-119). Takes the session, the prompt, the reports
 /// channel, the cancel and interrupt flags and the turn's rules. Returns the turn's text,
 /// its end and the end's cause.
 fn turn(
