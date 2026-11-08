@@ -1,4 +1,5 @@
 use super::new_project_view::{Look, Row, wrap_words};
+use super::project_team::window;
 use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy, PolicyView, ToolchainChoice};
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -133,11 +134,51 @@ impl AccessEdit {
         policy
     }
 
-    /// The box's lines: what the setting does, the level row, what lowering the level does
-    /// to running agents, the toolchain rows, the network row with its help, the IDE hooks
-    /// row with its line, the warning or the refusal, and the save line. Input: the look.
-    /// Output: the rows.
-    pub fn body(&self, look: &Look) -> Vec<Row> {
+    /// The box's lines fitted to the rows the window leaves it: what the setting does, the
+    /// level row, what lowering the level does to running agents, the toolchain rows, the
+    /// network row with its help, the IDE hooks row with its line, the warning or the refusal,
+    /// and the save line, all of them when they fit. Else the warning or refusal and the save
+    /// line stay whole at the bottom, and the settings above them show a window that keeps the
+    /// cursor's row, with how many lines sit above and below it. Input: the look and the rows
+    /// for the body. Output: at most that many rows, or the action lines, the cursor's row and
+    /// the counts when even those do not fit.
+    pub fn rows(&self, look: &Look, room: usize) -> Vec<Row> {
+        let (form, at) = self.form(look);
+        let actions = self.actions(look);
+        let actions_len = actions.len();
+        if form.len() + actions_len <= room {
+            let mut rows = form;
+            rows.extend(actions);
+            return rows;
+        }
+        let keep = room.saturating_sub(actions_len).max(1);
+        let mut size = keep;
+        let first = loop {
+            let first = window(at, form.len(), size);
+            let counts = usize::from(first > 0) + usize::from(first + size < form.len());
+            if size + counts <= keep || size == 1 {
+                break first;
+            }
+            size -= 1;
+        };
+        assert!(first <= at && at < first + size, "the cursor's row shows");
+        let below = form.len() - first - size;
+        let mut rows = Vec::with_capacity(room.max(size + actions_len + 2));
+        if first > 0 {
+            rows.push(Row::of(format!("{first} more lines above"), look.muted));
+        }
+        rows.extend(form.into_iter().skip(first).take(size));
+        if below > 0 {
+            rows.push(Row::of(format!("{below} more lines below"), look.muted));
+        }
+        rows.extend(actions);
+        assert!(rows.len() <= room || room < actions_len + 3);
+        rows
+    }
+
+    /// The box's settings lines, through the blank line after the IDE hooks switch, and the
+    /// line the cursor's row is on. Input: the look. Output: the rows and that line.
+    fn form(&self, look: &Look) -> (Vec<Row>, usize) {
         let mut body: Vec<Row> = wrap_words(
             "Who decides what this project's agents may touch. Applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.",
             TEXT_WIDTH,
@@ -152,6 +193,7 @@ impl AccessEdit {
             .levels
             .iter()
             .find(|level| level.access == self.access);
+        let mut at = body.len();
         body.push(
             Row::of(mark(0), look.accent)
                 .push("Access      ", look.muted)
@@ -197,6 +239,9 @@ impl AccessEdit {
                 (false, true) => "installed, not used by this project",
                 (false, false) => "",
             };
+            if self.cursor == index + 1 {
+                at = body.len();
+            }
             body.push(
                 Row::of(mark(index + 1), look.accent)
                     .push(
@@ -218,6 +263,9 @@ impl AccessEdit {
         body.push(Row::default());
         body.push(Row::of("Network for agents with tools on", look.accent));
         let network_row = self.allowed.len() + 1;
+        if self.cursor == network_row {
+            at = body.len();
+        }
         body.push(
             Row::of(mark(network_row), look.accent)
                 .push("Network     ", look.muted)
@@ -245,6 +293,9 @@ impl AccessEdit {
         body.push(Row::default());
         body.push(Row::of("IDE git", look.accent));
         let hooks = self.hooks_row();
+        if self.cursor == hooks {
+            at = body.len();
+        }
         body.push(Row::of(mark(hooks), look.accent).push(
             format!(
                 "{} {IDE_GIT_HOOKS}",
@@ -262,29 +313,36 @@ impl AccessEdit {
                 .map(|line| Row::of(format!("  {line}"), look.muted)),
         );
         body.push(Row::default());
+        assert!(at < body.len(), "the cursor's row is a settings line");
+        (body, at)
+    }
+
+    /// The box's closing lines: the Full access warning with its y and n, or the refusal and
+    /// the save line. Input: the look. Output: the rows.
+    fn actions(&self, look: &Look) -> Vec<Row> {
         if self.confirm_full {
-            body.extend(
+            let mut rows: Vec<Row> =
                 wrap_words(&format!("Full access: {FULL_ACCESS_WARNING}"), TEXT_WIDTH)
                     .into_iter()
-                    .map(|line| Row::of(line, look.warning)),
-            );
-            body.push(
+                    .map(|line| Row::of(line, look.warning))
+                    .collect();
+            rows.push(
                 Row::of("[> y Allow Full access ]", look.selection).push("   [ n Keep ]", look.fg),
             );
-            return body;
+            return rows;
         }
-        body.extend(
-            self.error
-                .iter()
-                .flat_map(|error| wrap_words(error, TEXT_WIDTH))
-                .map(|line| Row::of(line, look.error)),
-        );
-        body.push(if self.busy {
+        let mut rows: Vec<Row> = self
+            .error
+            .iter()
+            .flat_map(|error| wrap_words(error, TEXT_WIDTH))
+            .map(|line| Row::of(line, look.error))
+            .collect();
+        rows.push(if self.busy {
             Row::of("Saving...", look.running)
         } else {
             Row::of("[> Save ]", look.selection).push("   [ Cancel ]", look.fg)
         });
-        body
+        rows
     }
 
     fn hooks_row(&self) -> usize {
