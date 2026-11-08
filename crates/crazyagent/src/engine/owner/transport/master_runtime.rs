@@ -668,6 +668,31 @@ impl OwnerRuntimeHandle {
         result
     }
 
+    /// Records where the master's leased worktree starts before its turn runs, unless the
+    /// engine already did, on a blocking thread with the landing store, so a master whose
+    /// turn ends with only its own commits keeps them as its change set. Input: the
+    /// prepared turn. Output: Ok once a start is stored, or the plain refusal.
+    async fn record_master_start(&self, prepared: &PreparedMasterTurn) -> Result<(), EngineError> {
+        let root = self.authority.root.verify().ok().and_then(|()| {
+            self.authority
+                .root
+                .path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        });
+        let repository = prepared.repository.clone();
+        let worktree = prepared.cwd.clone();
+        let lease = prepared.lease.clone();
+        tokio::task::spawn_blocking(move || {
+            let root = root.ok_or_else(|| failure("changes_unavailable"))?;
+            let db = crate::landing::open(&root)?;
+            let git_dir = crate::worktrees::lease_git_dir(&db, &lease)?;
+            crate::landing::record_master_start(&db, &repository, &worktree, &git_dir)
+        })
+        .await
+        .unwrap_or_else(|_| Err(failure("changes_unavailable")))
+    }
+
     async fn drive_turn(
         &self,
         project_id: &ProjectId,
@@ -712,10 +737,13 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
-        if prepared.session.selection.backend == MasterBackend::Rcli {
-            return self.launch_rcli_master_turn(&prepared, turn_id).await;
-        }
-        let result = self.launch_master_turn(&prepared, turn_id).await;
+        let result = match self.record_master_start(&prepared).await {
+            Ok(()) if prepared.session.selection.backend == MasterBackend::Rcli => {
+                return self.launch_rcli_master_turn(&prepared, turn_id).await;
+            }
+            Ok(()) => self.launch_master_turn(&prepared, turn_id).await,
+            Err(error) => Err(error),
+        };
         match result {
             Ok(turn) => Ok(turn),
             Err(error) if error.0 == "master_runtime_profile_not_acquired" => {

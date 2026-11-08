@@ -648,7 +648,13 @@ pub fn record_master_start(
     worktree: &Path,
     git_dir: &Path,
 ) -> Result<(), EngineError> {
-    record_worktree_start(db, repository, worktree, git_dir)
+    #[cfg(unix)]
+    return flow::start_master(db, repository, worktree, git_dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, git_dir);
+        Err(unavailable())
+    }
 }
 
 #[cfg(unix)]
