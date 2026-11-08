@@ -562,7 +562,7 @@ test("finished agents wait behind Show finished, and a clicked row shows the age
 test("the project Process page puts Delivery and How a task runs beside the instructions and who follows them", () => {
   assert.match(agentSettings(), /<h2>Delivery<\/h2>/);
   const steps = words(renderToStaticMarkup(createElement(view.TaskSteps)));
-  assert.match(steps, /How a task runs 1 Master writes the task and picks an agent\. 2 Agent reads instructions, asks the graph, works on its branch\. 3 Reviewer checks the change set\. 4 It waits for your accept\. At Full access the master's conflict fixes can land on main by themselves\./);
+  assert.match(steps, /How a task runs 1 Master writes the task and picks an agent\. 2 Agent reads instructions, asks the graph, works on its branch\. 3 Reviewer checks the change set\. 4 The master merges it, or it waits for your accept when Ask me before merging is on\. At Full access a master change set that merges in another can also land by itself\./);
   const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
   assert.match(source, /<div className="pr">[\s\S]*<ProjectFollowing projectId=\{scope\.id\}[\s\S]*<aside className="pr-side">\s*<AgentSettings projectId=\{scope\.id\} onSaved=\{reloadSettings\} \/>\s*<TaskSteps \/>/);
   assert.doesNotMatch(source, /<ProjectAdoption|function AdoptionView/);

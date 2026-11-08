@@ -198,7 +198,7 @@ test("Access and merging words the merge choice as the mockup does, with its two
   const cards = (html) => [...row(html, MERGE).matchAll(/<label class="radio-card">([\s\S]*?)<\/label>/g)].map((card) => ({ checked: /checked=""/.test(card[1]), text: plain(card[1]) }));
   const merges = settingsHtml({ master_lands: "merges" });
   assert.deepEqual(cards(merges), [
-    { checked: true, text: "Master resolves conflicts and merges into main itself Default Only the master's conflict fixes land on main by themselves. Everything else it changes waits for your Accept." },
+    { checked: true, text: "Master resolves conflicts and merges into main itself Default Of the master's own change sets, only one that merges in another open change set lands on main by itself, with everything in that set. The others wait for your Accept." },
     { checked: false, text: "Master resolves conflicts, then waits for my accept The resolved change set waits in Changes until you accept it." },
   ]);
   assert.deepEqual(cards(settingsHtml({ master_lands: "waits" })).map((card) => card.checked), [false, true]);
