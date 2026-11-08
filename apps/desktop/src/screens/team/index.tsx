@@ -216,12 +216,12 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
 }
 
 /** The Agents toolbar, one row as the mockup draws it above both Agents views: `lead`, then
- * the team line (`line`, how many of the team's agents work and tasks are live once the team
- * is read, what `asks` the owner and the `pool`), then `tools` and Open all terminals, which
- * opens the terminal wall windows, perWindow terminals each, and says why under the row when
- * they could not open. Inputs: the project id and name, the terminals per window, the drawn
- * team or null while it is not read, the team line and the row's parts. Output: the row and
- * its note. */
+ * the team line (`line`, how many of the team's agents work and tasks are live once it is
+ * read and has agents, what `asks` the owner and the `pool`), then `tools` and Open all
+ * terminals, which opens the terminal wall windows, perWindow terminals each, and says why
+ * under the row when they could not open. Inputs: the project id and name, the terminals per
+ * window, the drawn team or null while it is not read, the team line and the row's parts.
+ * Output: the row and its note. */
 export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, asks, pool, tools }: {
   projectId: string; name: string; perWindow: PerWindow; team: TeamGraph | null; line: string | null;
   lead?: ReactNode; asks?: ReactNode; pool?: string; tools?: ReactNode;
@@ -237,7 +237,7 @@ export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, as
     setNote(wallNote(await openTerminalWindows(projectId, name, windows, true)));
   }
 
-  const working = line !== null && team !== null ? graphSummary(team) : null;
+  const working = line !== null && team !== null && team.nodes.some((node) => node.kind !== "master") ? graphSummary(team) : null;
   const parts = [line && <span key="team" role="status">{line}</span>, working && <span key="working">{working}</span>, asks && <span key="asks">{asks}</span>,
     pool && <span key="pool">{displayText(pool)}</span>]
     .filter((part) => Boolean(part));
