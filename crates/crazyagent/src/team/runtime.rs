@@ -721,7 +721,8 @@ fn prepare_mates_home(
 }
 
 impl TeamRuntime {
-    /// Opens the team runtime over the engine database.
+    /// Opens the team runtime over the engine database, with the usage tables its turn ends
+    /// write; usage tables that cannot be made are logged by code and leave usage uncounted.
     /// Takes the database, an engine-owned state directory outside every project, the
     /// launch executables by harness, a source of live model access and the limits.
     /// Returns the runtime after returning work interrupted by an earlier engine to the queue.
@@ -763,7 +764,12 @@ impl TeamRuntime {
             .map_err(error)?;
         super::initialize(&connection)?;
         crate::project_setup::initialize(&connection)?;
-        crate::usage::initialize(&connection)?;
+        if let Err(problem) = crate::usage::initialize(&connection) {
+            eprintln!(
+                "team usage is not counted: {}",
+                crate::usage::service::failure_code(&problem)
+            );
+        }
         crate::recovery::capture(&connection, None)?;
         let now = now_ms();
         connection
