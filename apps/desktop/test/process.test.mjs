@@ -298,15 +298,15 @@ test("a project's agent settings offer every instructions mode and the transcrip
   }
 });
 
-test("every way an instruction edit reaches running agents is offered with what it does, Next task first", () => {
+test("every way an instruction edit reaches running agents is offered with what it does, At next task first", () => {
   assert.deepEqual(client.EDIT_DELIVERIES.map((choice) => [choice.value, choice.label]),
-    [["next_message", "Next task"], ["restart", "Restart when idle"], ["badge", "Badge only"]]);
+    [["next_message", "At next task"], ["restart", "Restart when idle"], ["badge", "Badge only"]]);
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
   for (const choice of client.EDIT_DELIVERIES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
   const markup = agentSettings();
   assert.match(markup, /When you edit instructions/);
   for (const choice of client.EDIT_DELIVERIES) assert.match(markup, new RegExp(`role="radio"[^>]*>${escaped(choice.label)}</button>`));
-  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Next task</);
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>At next task</);
   assert.match(markup, /next task starts with the sections you changed/);
   for (const choice of client.EDIT_DELIVERIES) {
     const shown = agentSettings({ settings: { kind: "ok", value: { settings: { mode: "both", transcripts: true, edits: choice.value }, version: 0 } } });
@@ -314,7 +314,7 @@ test("every way an instruction edit reaches running agents is offered with what 
     assert.ok(shown.includes(html(choice.note)), choice.value);
   }
   assert.match(agentSettings({ settings: { kind: "ok", value: { settings: { mode: "both", transcripts: true }, version: 0 } } }),
-    /role="radio" aria-checked="true"[^>]*>Next task</, "an engine reply without the choice shows the default");
+    /role="radio" aria-checked="true"[^>]*>At next task</, "an engine reply without the choice shows the default");
   assert.match(client.EDIT_DELIVERIES[1].note, /restarts when it is next idle/);
   assert.match(client.EDIT_DELIVERIES[2].note, /shows Instructions changed/);
 });
@@ -391,7 +391,7 @@ test("picking an instructions mode, the transcript switch or an edit choice save
     }
     const first = await evaluate("Fixture.saves()");
     await evaluate(`Fixture.mount(${JSON.stringify({ ...client.DEFAULT_INSTRUCTION_SETTINGS, edits: "badge" })})`);
-    clicks.push(await evaluate(`Fixture.click("Next task")`));
+    clicks.push(await evaluate(`Fixture.click("At next task")`));
     return { clicks, saves: [...first, ...await evaluate("Fixture.saves()")] };
   });
   assert.deepEqual(seen.clicks, [true, true, true, true, true, true]);
