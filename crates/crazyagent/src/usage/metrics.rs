@@ -176,7 +176,9 @@ fn merge_counts(
 
 /// Gives each project row its merges in the range as `merge_counts` counts them, and adds a row
 /// with no tokens, after the rows that used tokens and in name order, for a project with merges
-/// and no tokens in the range, up to `ROWS_MAX` rows, so the rows add up to the Merges tile.
+/// and no tokens in the range, up to `ROWS_MAX` (25) rows. The rows add up to the Merges tile
+/// only while every project with merges has a row: past `ROWS_MAX` such projects, or when `fit`
+/// trims the rows to fit one reply, the tile counts merges that no row shows.
 /// Inputs: the store, the project or None, the range start and the rows. Output: none.
 fn project_merges(
     db: &Connection,

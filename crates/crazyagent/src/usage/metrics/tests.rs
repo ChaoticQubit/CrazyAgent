@@ -266,7 +266,8 @@ fn each_project_row_counts_its_merges_in_the_range() {
 }
 
 /// A project with merges in the range and no tokens there still has its row, with zero
-/// tokens after the rows that used tokens, so the project rows add up to the Merges tile.
+/// tokens after the rows that used tokens, so below `ROWS_MAX` projects the project rows add up
+/// to the Merges tile.
 #[test]
 fn a_project_with_merges_and_no_tokens_in_the_range_has_its_row() {
     use crate::activity::{ActivityKind, MASTER_ACTOR, NewActivity};
