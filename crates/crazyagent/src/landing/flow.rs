@@ -330,13 +330,19 @@ fn local_path(word: &str) -> String {
 }
 
 /// The message an Accept proposes from the commits the agent made itself above the
-/// base: the latest subject, then the earlier ones newest first as a list. Commits the
-/// engine made and merges are left out. Inputs: the agent repository, the record and
+/// point the set is measured from: the latest subject, then the earlier ones newest first
+/// as a list. Commits the engine made, merges and commits already on the landing branch
+/// are left out. Inputs: the agent repository, the record, the measured-from commit and
 /// the folders paths are shown relative to. Output: the message, empty when the agent
 /// made no commit, at most `PROPOSED_BYTES_MAX` bytes.
-fn proposed(repo: &Repo, record: &Record, roots: &[&Path]) -> Result<String, EngineError> {
+fn proposed(
+    repo: &Repo,
+    record: &Record,
+    from: &str,
+    roots: &[&Path],
+) -> Result<String, EngineError> {
     let count = format!("--max-count={AGENT_COMMITS_READ_MAX}");
-    let range = format!("{}..{}", record.base, record.head);
+    let range = format!("{from}..{}", record.head);
     let printed = repo.run(&[
         "log",
         "-z",
@@ -1980,7 +1986,7 @@ pub(super) fn record(
     )?;
     let stats = diff::stats(repo, &from, &record.head)?;
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
-    record.message = proposed(repo, &record, &roots)?;
+    record.message = proposed(repo, &record, &from, &roots)?;
     record.updated_ms = now;
     store::save(db, &record)?;
     set_engine_ref(
