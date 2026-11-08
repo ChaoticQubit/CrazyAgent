@@ -289,8 +289,10 @@ impl State {
             .and_then(|_| self.open_account())
     }
 
-    /// Tells whether the owner connection or settings moved on since the retained sign-in
-    /// started, so its panel can no longer reach it. Input: the current basis, if known.
+    /// Tells whether the owner connection moved on since the retained sign-in started, so its
+    /// panel can no longer reach it. Settings edits do not move it: the engine goes on with a
+    /// sign-in while its own account entry is unchanged, and a changed entry marks it
+    /// unconfirmed once the panel or the engine sees it. Input: the current basis, if known.
     /// Output: false while it is unknown.
     fn moved(&self, basis: Option<&Basis>) -> bool {
         let Some(retained) = &self.retained else {
@@ -300,8 +302,6 @@ impl State {
         basis.is_some_and(|basis| {
             basis.identity.database_instance() != original.identity.database_instance()
                 || basis.identity.engine_epoch() != original.identity.engine_epoch()
-                || basis.config_id != original.config_id
-                || basis.source_hash != original.source_hash
         })
     }
 
@@ -603,10 +603,24 @@ impl State {
             .retained
             .as_ref()
             .ok_or("No original authentication operation")?;
-        if context.connection != retained.original.context.connection
-            || context.scope() != retained.original.context.scope()
+        let original = &retained.original.context;
+        if context.connection.id != original.connection.id
+            || context.basis.identity.database_instance()
+                != original.basis.identity.database_instance()
         {
-            return Err("Select the original connection and source to read or cancel".into());
+            return Err("Select the original connection to read or cancel".into());
+        }
+        if context.connection != original.connection {
+            let pending = self.has_pending();
+            if pending && let Some(retained) = &mut self.retained {
+                retained.uncertain = true;
+            }
+            return Err(if pending {
+                "This account changed after its sign-in started; close this panel, then c clears the stuck sign-in"
+            } else {
+                "This account changed after its sign-in started"
+            }
+            .into());
         }
         let command = self.query(cancel)?;
         self.queue(Job { context, command })?;
