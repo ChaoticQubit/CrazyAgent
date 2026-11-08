@@ -1011,6 +1011,11 @@ async fn desktop_native_auth_own_account_removed_elsewhere_is_named_stuck_and_cl
             .unwrap();
         let other = inspect(&mut bridge, "connection-a").await;
         assert_eq!(
+            bridge.status().stuck_sign_in.as_deref(),
+            Some("connection-z"),
+            "the first owner read that shows new settings asks the engine, with no drawer open"
+        );
+        assert_eq!(
             bridge
                 .start_native_auth(&other.ticket, NativeAuthMethod::CodexBrowser)
                 .await
@@ -1040,10 +1045,15 @@ async fn desktop_native_auth_own_account_removed_elsewhere_is_named_stuck_and_cl
         clear_once_ended(&mut bridge).await;
         assert_eq!(bridge.status().stuck_sign_in, None);
         let next = inspect(&mut bridge, "connection-a").await;
-        bridge
-            .start_native_auth(&next.ticket, NativeAuthMethod::CodexBrowser)
-            .await
-            .unwrap();
+        assert_eq!(
+            bridge
+                .start_native_auth(&next.ticket, NativeAuthMethod::ClaudeOfficial)
+                .await
+                .err()
+                .map(|error| error.code),
+            Some("native_auth_method_mismatch"),
+            "once cleared nothing holds a new sign-in back, so the next check is the method's"
+        );
     })
     .await;
 }
