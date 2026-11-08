@@ -290,6 +290,7 @@ impl NativeBridge {
         })?;
         assert!(self.generation > 0);
         assert!(self.controller()?.view().is_some());
+        self.recheck_auth(&state.config_id).await;
         Ok(state)
     }
 
