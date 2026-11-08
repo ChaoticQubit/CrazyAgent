@@ -27,6 +27,7 @@ const MASTER_GROUPS = [
 ];
 const MERGE = "Under Full access, merging into main";
 const RESTART = "After you accept, the agent's branch restarts from main";
+const ASK = "Ask me before merging into the master's branch";
 
 const attr = (text) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#x27;");
 const harness = (name, role, extra = {}) => ({ harness: name, role, agents_max: 2, tools: true, live: 0, delegation: null, delegation_label: null, runnable: true, ...extra });
@@ -206,6 +207,7 @@ test("Access and merging words the merge choice as the mockup does, with its two
   assert.match(plain(row(settingsHtml(), MERGE)), /Only at Full access\./, "below Full access the engine sends no merge choice");
   assert.deepEqual(cards(settingsHtml()).map((card) => card.text), cards(merges).map((card) => card.text), "below Full access the row shows the same two choices");
   assert.equal([...row(settingsHtml(), MERGE).matchAll(/<input type="radio"[^>]*disabled=""/g)].length, 2, "below Full access both choices are locked");
+  assert.match(plain(row(merges, ASK)), /On stops the master's merge tool: each finished harness's work waits in Changes for your Accept\. At Full access, a master change set that merges it in can still land by itself\./);
   const restart = row(merges, RESTART);
   assert.match(plain(restart), /Always/);
   assert.doesNotMatch(restart, /<(button|select|input|textarea)/, "the restart line has no control while it has no setting");

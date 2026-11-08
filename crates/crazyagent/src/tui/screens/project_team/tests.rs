@@ -2618,7 +2618,7 @@ fn g_turns_ask_before_merge_on_and_off() {
     assert_eq!(
         view.notice,
         Some(Notice::plain(
-            "The master now asks you before merging a harness."
+            "The master's merge tool now waits for your Accept. At Full access, a master change set that merges a harness in can still land by itself."
         ))
     );
     let mut asking = team();
@@ -4154,7 +4154,7 @@ fn e_switches_what_the_master_does_with_its_conflict_fixes_only_at_full_access()
     assert_eq!(
         view.notice,
         Some(Notice::plain(
-            "The master merges into main itself only at Full access."
+            "The master's own change sets land by themselves only at Full access."
         ))
     );
     let mut full = team();
