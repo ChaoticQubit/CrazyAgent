@@ -40,7 +40,7 @@ const TASK_STEPS = [
   "Master writes the task and picks an agent.",
   "Agent reads instructions, asks the graph, works on its branch.",
   "Reviewer checks the change set.",
-  "Master merges into main (Full access) or it waits for your accept.",
+  "It waits for your accept. At Full access the master's conflict fixes can land on main by themselves.",
 ];
 
 /** How many lines a text shows, a final line break adding none. Input: the text. Output: the

@@ -718,7 +718,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               <RadioCard name={`${prefix}-merge`} value="merges" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "merges"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("merges"); }}
                 title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
-                details={["Finished work lands on main as soon as the master has resolved it and its checks pass."]} />
+                details={["Only the master's conflict fixes land on main by themselves. Everything else it changes waits for your Accept."]} />
               <RadioCard name={`${prefix}-merge`} value="waits" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "waits"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("waits"); }}
                 title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
