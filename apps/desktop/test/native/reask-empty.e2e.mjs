@@ -215,8 +215,8 @@ async function kept(status, on) {
  * until the engine finishes it. Inputs: the owner on the page, the page, the project and the
  * engine root. Output: what `taskRow` reads once the task is done. */
 async function handOff(me, page, project, runtime) {
-  await me.unfold("Agents and tasks");
   await me.click("Team", AGENTS_VIEW);
+  await me.unfold("Agents and tasks");
   const picked = await page.evaluate(`(() => {
     const select = document.getElementById(${JSON.stringify(`tg-hand-to-${project}`)});
     if (!select || select.disabled || ![...select.options].some((option) => option.value === "codex")) return false;

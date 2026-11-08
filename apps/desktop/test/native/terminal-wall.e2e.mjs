@@ -212,7 +212,12 @@ async function openAll({ project, me, page, tiles: all, site, log }, perWindow, 
   const windows = Math.ceil(all.length / perWindow);
   await me.click("Team", AGENTS_VIEW);
   await me.waitFor("Open all terminals on the Team view", (text) => text.includes("Open all terminals"));
-  assert.equal(await page.evaluate(`[...document.querySelectorAll("button")].find((button) => button.innerText.includes("Open all terminals"))?.title ?? null`), hint);
+  const title = `[...document.querySelectorAll("button")].find((button) => button.innerText.includes("Open all terminals"))?.title ?? null`;
+  for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
+    const shown = await page.evaluate(title);
+    if (shown === hint) break;
+    assert.ok(Date.now() < deadline, `Open all terminals never read ${JSON.stringify(hint)}: ${JSON.stringify(shown)}`);
+  }
   const before = log.trail.length;
   await me.click("Open all terminals", "button");
   for (const deadline = Date.now() + STEP_MS; !log.trail.slice(before).some((call) => call.cmd === "desktop_open_terminal_windows"); await pause(POLL_MS)) {

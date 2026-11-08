@@ -184,6 +184,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
 
         const asked = spawnSync(bridgeBinary, ["ask-owner", runtime, project, String(agents[0]), "normal", QUESTION], { encoding: "utf8", env: { ...env } });
         assert.equal(asked.status, 0, `the agent's question reaches the engine: ${asked.stderr}`);
+        await me.asks();
         await me.waitFor("the question in the inbox", (text) => text.includes(QUESTION), STEP_MS);
         await me.click("Open terminal", "li.tg-question button");
         for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
