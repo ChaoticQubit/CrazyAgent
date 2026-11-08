@@ -8649,7 +8649,10 @@ fn an_agent_edit_inside_the_reset_an_engine_start_finishes_survives() {
     let mut stopped = store::load(&case.db, &id).unwrap();
     stopped.state = ChangeState::Discarded;
     stopped.restorable_until_ms = Some(NOW_MS + 7 * DAY_MS);
-    stopped.intent = Some(store::Intent::Reset { target: case.tip() });
+    stopped.intent = Some(store::Intent::Reset {
+        from: Some(head.clone()),
+        target: case.tip(),
+    });
     store::save(&case.db, &stopped).unwrap();
     let runs = edit_inside_resets(&case);
     owner::settled(&case.db, &id).unwrap();
@@ -9684,7 +9687,7 @@ fn an_agent_commit_and_edit_after_a_reset_moved_the_files_are_kept() {
 
 /// An agent that switches its branch inside a reset, after the files moved and before HEAD
 /// moves, is never reported as reset: the engine reads HEAD again through the branch it
-/// opened and refuses (RESET-KEEP r2).
+/// opened, refuses, and puts that branch and the files back (RESET-KEEP r2).
 #[test]
 fn a_branch_switch_inside_a_reset_is_never_reported_as_reset() {
     let case = Case::new();
@@ -9698,6 +9701,9 @@ fn a_branch_switch_inside_a_reset_is_never_reported_as_reset() {
     )
     .unwrap();
     let from = agent.head().unwrap();
+    let lease = git_in(&case.home, &master.worktree, &["symbolic-ref", "HEAD"])
+        .trim()
+        .to_owned();
     let target = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
     let (home, worktree) = (case.home.clone(), master.worktree.clone());
     let runs = plant(&flow::AFTER_READ_TREE, &master.git_dir, move || {
@@ -9712,5 +9718,13 @@ fn a_branch_switch_inside_a_reset_is_never_reported_as_reset() {
     assert_eq!(
         git_in(&case.home, &master.worktree, &["symbolic-ref", "HEAD"]).trim(),
         "refs/heads/side"
+    );
+    assert_eq!(
+        git_in(&case.home, &master.worktree, &["rev-parse", &lease]).trim(),
+        from
+    );
+    assert_eq!(
+        git_in(&case.home, &master.worktree, &["status", "--porcelain"]),
+        ""
     );
 }

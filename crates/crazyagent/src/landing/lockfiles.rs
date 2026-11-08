@@ -411,6 +411,7 @@ fn regenerated(
     (now.files, now.added, now.removed) = (stats.files, stats.added, stats.removed);
     now.updated_ms = flow::now_ms()?;
     now.intent = Some(Intent::Reset {
+        from: Some(before.head.clone()),
         target: commit.clone(),
     });
     store::save(db, &now)?;

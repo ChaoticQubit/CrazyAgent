@@ -879,11 +879,13 @@ fn run_planted(planted: &std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>>, agent: &
 }
 
 /// Moves an agent worktree from the commit it holds to another, never over the agent's
-/// work: git's two-tree read-tree moves its index and tracked files first and refuses,
-/// changing nothing, when a path it would change was edited, staged or is in its way
-/// untracked; then HEAD moves only while it still holds `from`, else the files go back. A
-/// stop between the two leaves a state an engine start can finish. Inputs: the worktree
-/// and both commits. Output: true once it holds `target`, false when nothing moved.
+/// work: an index git cannot refresh (locked, mid-merge) refuses; git's two-tree
+/// read-tree moves its index and tracked files and refuses, changing nothing, when a path
+/// it would change was edited, staged or is in its way untracked; then HEAD moves only
+/// while it still holds `from` and must still be the agent's pointer after, else HEAD and
+/// the files go back. A stop between the steps leaves a state an engine start can finish.
+/// Inputs: the worktree and both commits. Output: true once it holds `target`, false when
+/// it refused.
 pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
     assert!(is_object_id(from) && is_object_id(target));
     #[cfg(test)]
@@ -891,7 +893,12 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
     if agent.head()? != from {
         return Ok(false);
     }
-    agent.repo.run(&["update-index", "-q", "--refresh"])?;
+    let refreshed = agent
+        .repo
+        .exec(&["update-index", "-q", "--refresh"], None, &[], 4096)?;
+    if refreshed.code != 0 {
+        return Ok(false);
+    }
     let moved = agent
         .repo
         .exec(&["read-tree", "-u", "-m", from, target], None, &[], 4096)?;
@@ -904,12 +911,34 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
         .move_head(Some(from), target, "CrazyAgent: reset")
         .is_err()
     {
-        let _ = agent
-            .repo
-            .exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096);
+        files_back(agent, from, target);
+        return Ok(false);
+    }
+    if agent.head().is_err() {
+        eprintln!("landing_reset_head_left_its_pointer");
+        if agent
+            .move_head(Some(target), from, "CrazyAgent: reset back")
+            .is_err()
+        {
+            eprintln!("landing_reset_pointer_not_put_back");
+        }
+        files_back(agent, from, target);
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Puts an agent worktree's index and files back from `target` to `from` after its reset
+/// did not hold, with the same two-tree read-tree, so an edit the agent made meanwhile is
+/// never overwritten: git refuses, writing nothing, and the refusal is logged. Inputs:
+/// the worktree and both commits. Output: none.
+fn files_back(agent: &Agent, from: &str, target: &str) {
+    let back = agent
+        .repo
+        .exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096);
+    if !back.is_ok_and(|back| back.code == 0) {
+        eprintln!("landing_reset_files_back_refused");
+    }
 }
 
 /// Records a reset of the agent's worktree to `target` after its change set closed, runs
@@ -950,6 +979,7 @@ pub(super) fn reset_if_quiet(
         );
     };
     record.intent = Some(Intent::Reset {
+        from: Some(expected.to_owned()),
         target: target.to_owned(),
     });
     store::save(db, record)?;
@@ -2382,6 +2412,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     record.restorable_until_ms = None;
     record.updated_ms = now;
     record.intent = Some(Intent::Reset {
+        from: Some(current.clone()),
         target: record.head.clone(),
     });
     store::save(db, &record)?;
