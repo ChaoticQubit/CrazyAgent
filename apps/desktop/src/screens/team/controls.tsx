@@ -7,7 +7,7 @@ import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyL
 import type { IconName, SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { savedStale } from "../project/settings";
-import { CoordinationControls, ToolsControls } from "./coordination";
+import { CoordinationControls, PerHarnessControls, ToolsControls } from "./coordination";
 import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, type TeamProject } from "./setup-rows";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
@@ -227,6 +227,7 @@ export type SettingGroupId = "model" | "access" | "tools" | "coord" | "limits";
 
 const MERGE_INTO_MAIN = "Under Full access, merging into main";
 const RESTARTS_FROM_MAIN = "After you accept, the agent's branch restarts from main";
+const PER_HARNESS_ROWS = ["Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents"];
 
 /** The Agent settings groups in the order the approved mockup lists them, each with its purpose
  * line and the labels of its rows in the order they show. */
@@ -238,7 +239,7 @@ export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; 
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
     rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"] },
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
-    rows: ["Claude Code sub-agents", "Messages to Claude Code agents", "Claude Code terminal display", "Codex sub-agents", "Messages to Codex agents", "rcli sub-agents", "Messages to rcli agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents"] },
+    rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", ...PER_HARNESS_ROWS] },
   { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
     rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"] },
 ];
@@ -769,6 +770,8 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
             <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
           </SettingRow>
+          <h3 className="set-sub" hidden={!PER_HARNESS_ROWS.some((row) => matches(row, words))}>Per harness</h3>
+          <PerHarnessControls projectId={projectId} status={status} reload={reload} />
         </SettingGroup>
         <SettingGroup group={limitsGroup} prefix={prefix}>
           <SettingRow label="Each task may run">
