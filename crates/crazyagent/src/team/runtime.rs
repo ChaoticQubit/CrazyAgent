@@ -440,6 +440,9 @@ enum Report {
     ResumeRefused,
     TakeoverUnconfirmed,
     InputReady,
+    Held {
+        held: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7403,6 +7406,23 @@ impl TeamRuntime {
                     .input_ready = true;
                 Ok(false)
             }
+            Report::Held { held } => {
+                if self.workers[&id].busy.is_some() {
+                    let status = if held {
+                        AgentStatus::Idle
+                    } else {
+                        AgentStatus::Working
+                    };
+                    self.connection
+                        .execute(
+                            "UPDATE team_agents SET status=?2, heartbeat_ms=?3 WHERE id=?1
+                             AND status IN ('idle','working')",
+                            params![id, status.name(), now_ms()],
+                        )
+                        .map_err(error)?;
+                }
+                Ok(false)
+            }
             Report::TakeoverUnconfirmed => {
                 self.hold_unconfirmed(id)?;
                 Ok(false)
@@ -9889,8 +9909,10 @@ fn launch_end(problem: LaunchError) -> (TurnEnd, Option<String>) {
 /// for commands it started in the background, the owner's Background commands at task end
 /// choice: at once under Stop, after the grace time under Grace (DEC-111 Q13). A turn ended
 /// for its background commands is still held, so its caller stops the agent and them with
-/// it. Takes the session, the prompt, the reports channel, the cancel and interrupt flags
-/// and the turn's rules. Returns the turn's text, its end and the end's cause.
+/// it. Each change between held and running is reported, so a held agent shows idle and a
+/// message can be typed into it (DEC-119). Takes the session, the prompt, the reports
+/// channel, the cancel and interrupt flags and the turn's rules. Returns the turn's text,
+/// its end and the end's cause.
 fn turn(
     session: &mut AgentSession,
     prompt: &str,
@@ -9914,6 +9936,7 @@ fn turn(
     let mut cause = None;
     let mut held_since = None;
     let mut released = None;
+    let mut shown_held = false;
     let end = loop {
         if cancel.load(Ordering::SeqCst) {
             break TurnEnd::Cancelled;
@@ -9925,7 +9948,12 @@ fn turn(
             cause = Some(TURN_LIMIT.to_owned());
             break TurnEnd::TimedOut;
         }
-        if session.held() {
+        let held = session.held();
+        if held != shown_held {
+            shown_held = held;
+            let _ = reports.send(Report::Held { held });
+        }
+        if held {
             let since = *held_since.get_or_insert_with(Instant::now);
             released = match rules.background {
                 super::BackgroundAtEnd::Wait => None,

@@ -547,27 +547,35 @@ impl BranchMode {
 /// the background still runs (DEC-111 Q13): `Wait` keeps the task open until the command
 /// ends, bounded by the task time limit; `Grace` waits at most `secs` seconds, then stops
 /// it; `Stop` ends the task with its turn and stops it, and the agent's task prompt says
-/// so wherever the engine stops it. Wait is the default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// so wherever the engine stops it. A grace time of [`BACKGROUND_GRACE_SECS_DEFAULT`] is
+/// the default (DEC-119).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BackgroundAtEnd {
-    #[default]
     Wait,
-    Grace {
-        secs: u32,
-    },
+    Grace { secs: u32 },
     Stop,
 }
 
 /// The grace times, in seconds, the owner may give background commands at task end.
 pub const BACKGROUND_GRACE_SECS: std::ops::RangeInclusive<u32> = 10..=3600;
 
-/// The grace time, in seconds, offered when the owner first picks a grace time.
-pub const BACKGROUND_GRACE_SECS_DEFAULT: u32 = 120;
+/// The default grace time, in seconds, also offered when the owner first picks a grace
+/// time: 30 minutes (DEC-119).
+pub const BACKGROUND_GRACE_SECS_DEFAULT: u32 = 1800;
 
 /// The grace times, in seconds, a client steps through, each inside
 /// [`BACKGROUND_GRACE_SECS`].
 pub const BACKGROUND_GRACE_CHOICES_SECS: [u32; 8] = [10, 30, 60, 120, 300, 600, 1800, 3600];
+const _: () = assert!(BACKGROUND_GRACE_SECS_DEFAULT == BACKGROUND_GRACE_CHOICES_SECS[6]);
+
+impl Default for BackgroundAtEnd {
+    fn default() -> Self {
+        Self::Grace {
+            secs: BACKGROUND_GRACE_SECS_DEFAULT,
+        }
+    }
+}
 
 impl BackgroundAtEnd {
     /// The stored mode name and grace time. Output: `wait`, `grace` with its seconds, or
@@ -3587,7 +3595,8 @@ pub fn land_on(
 }
 
 /// What the project's sub-agent tasks do at their turn end while commands their agents
-/// started in the background still run (DEC-111 Q13): the owner's choice, Wait by default.
+/// started in the background still run (DEC-111 Q13): the owner's choice, a grace time of
+/// [`BACKGROUND_GRACE_SECS_DEFAULT`] by default (DEC-119).
 /// Takes a connection and the project. Returns the choice.
 pub fn background_at_end(
     connection: &Connection,

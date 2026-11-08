@@ -166,7 +166,8 @@ fn noted(row: &Row<'_>) -> rusqlite::Result<Noted> {
     })
 }
 
-/// Stores one `stopped` run for every team agent marked in a turn, keyed by the agent and
+/// Stores one `stopped` run for every team agent marked in a turn, or shown idle with its
+/// task still open while its turn is held for its background commands, keyed by the agent and
 /// the time it was last seen running, so noting the same stop twice keeps one run. The
 /// run's session is its pane record, else the record of the turn's own harness session;
 /// its folder is that session's working folder, else the agent's worktree.
@@ -185,7 +186,8 @@ pub(super) fn capture(db: &Connection, stopped_ms: Option<i64>) -> Result<(), En
                      SELECT MAX(id) FROM team_messages WHERE project=a.project AND state='sent')
                  LEFT JOIN team_panes p ON p.agent=a.id
                  LEFT JOIN recovery_sessions s ON s.agent=a.id
-                 WHERE a.status='working' AND a.role IN ('master','sub')
+                 WHERE (a.status='working' OR (a.status='idle' AND a.task IS NOT NULL))
+                 AND a.role IN ('master','sub')
                  ORDER BY a.id LIMIT ?1",
             )
             .map_err(storage)?;

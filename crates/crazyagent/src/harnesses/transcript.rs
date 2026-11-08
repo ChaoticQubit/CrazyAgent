@@ -17,6 +17,7 @@ const CONVERSATION_ID_BYTES_MAX: usize = 128;
 const EXCERPT_TAIL_BYTES_MAX: u64 = 4 * 1024 * 1024;
 const EXCERPT_MESSAGES_MAX: usize = 256;
 const CLAUDE_NOTIFICATION: &str = "<task-notification>";
+const CLAUDE_NOTIFICATION_MODE: &str = "task-notification";
 const NOTIFIED_TASKS_MAX: usize = 16;
 
 /// One fact read from a harness's own session record, whatever the harness.
@@ -24,6 +25,8 @@ const NOTIFIED_TASKS_MAX: usize = 16;
 /// `BackgroundStarted` and `BackgroundEnded` follow a command the harness runs on after its
 /// tool call returns, such as Claude Code's Bash `run_in_background`, by its task id: it
 /// ends with its task notification, or with the agent's own stop of it, which brings none.
+/// Claude Code records a notification that comes while the agent is idle as a user message
+/// that starts a turn, and one that comes during a turn as a queued command attachment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptEvent {
     TurnStarted,
@@ -508,19 +511,35 @@ fn codex_facts(value: &Value) -> Vec<TranscriptEvent> {
     }
 }
 
+/// The texts of a Claude Code content value: the string itself, or each text block of an
+/// array. Takes the value. Returns the texts, none for any other value.
+fn content_texts(content: &Value) -> Vec<&str> {
+    match content {
+        Value::String(text) => vec![text.as_str()],
+        Value::Array(items) => items
+            .iter()
+            .filter(|item| item["type"] == "text")
+            .filter_map(|item| item["text"].as_str())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
     let message = &value["message"];
     match value["type"].as_str() {
+        Some("attachment")
+            if value["attachment"]["type"] == "queued_command"
+                && value["attachment"]["commandMode"] == CLAUDE_NOTIFICATION_MODE =>
+        {
+            content_texts(&value["attachment"]["prompt"])
+                .iter()
+                .flat_map(|text| notified_tasks(text))
+                .map(|id| TranscriptEvent::BackgroundEnded { id })
+                .collect()
+        }
         Some("user") if value["isMeta"] != true => {
-            let texts: Vec<&str> = match &message["content"] {
-                Value::String(text) => vec![text.as_str()],
-                Value::Array(items) => items
-                    .iter()
-                    .filter(|item| item["type"] == "text")
-                    .filter_map(|item| item["text"].as_str())
-                    .collect(),
-                _ => Vec::new(),
-            };
+            let texts = content_texts(&message["content"]);
             let mut facts: Vec<TranscriptEvent> =
                 conversation_id(&value["toolUseResult"]["backgroundTaskId"])
                     .map(|id| TranscriptEvent::BackgroundStarted { id })

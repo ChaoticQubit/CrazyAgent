@@ -98,22 +98,23 @@ export const NEW_FOLDER_OPTIONS: SelectOption[] = [100, 1000, 10000, 100000].map
 }));
 export const NEW_FOLDER_DEFAULT = 1000;
 
-/** The choices of Background commands at task end, Wait first as the default. */
+/** The choices of Background commands at task end. A grace time is the default (DEC-119). */
 export const BACKGROUND_OPTIONS: SelectOption[] = [
   { value: "wait", label: "Wait for them" },
   { value: "grace", label: "Stop them after a grace time" },
   { value: "stop", label: "Stop them when the turn ends" },
 ];
 
-/** The grace time offered when the owner first picks one, and its bounds, in seconds. */
-export const GRACE_SECS_DEFAULT = 120;
+/** The default grace time, also offered when the owner first picks one, and its bounds,
+ * in seconds. */
+export const GRACE_SECS_DEFAULT = 1800;
 export const GRACE_SECS_MIN = 10;
 export const GRACE_SECS_MAX = 3600;
 
-/** The Background commands choice a team status holds, Wait when an older engine sends none.
- * Input: the status. Output: the choice. */
+/** The Background commands choice a team status holds, the default grace time when the
+ * engine sends none. Input: the status. Output: the choice. */
 export function backgroundChoice(status: Pick<TeamStatus, "background_at_end">): BackgroundAtEnd {
-  return status.background_at_end ?? { mode: "wait" };
+  return status.background_at_end ?? { mode: "grace", secs: GRACE_SECS_DEFAULT };
 }
 
 /** Reads a grace time the owner typed: whole seconds from 10 to 3600. Input: the text.
@@ -789,7 +790,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           <SettingRow label="Background commands at task end">
             <Select id={`tg-background-${projectId}`} label="Background commands at task end" value={backgroundShown.mode} options={BACKGROUND_OPTIONS}
               onValue={(value) => { if (!busy) chooseBackground(value); }}
-              helper="Wait keeps a task open until the commands its agent started in the background end, up to the task limit. A grace time gives them that long after the turn ends, then stops them. Stop ends the task with its turn and stops them; the agent is told first. Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice." />
+              helper="The default is a grace time of 30 minutes (1800 seconds). Wait keeps a task open until the commands its agent started in the background end, up to the task limit. A grace time gives them that long after the turn ends, then stops them. Stop ends the task with its turn and stops them; the agent is told first. Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice." />
             {graceTyped !== null && <form className="pj-row" aria-label="Grace time" onSubmit={(event) => { event.preventDefault(); const secs = graceSecs(graceTyped); if (secs === null) setNote(failureCopy("team_background_grace_invalid")); else void saveBackground({ mode: "grace", secs }); }}>
               <label htmlFor={`tg-grace-${projectId}`}>Grace time in seconds</label><input id={`tg-grace-${projectId}`} className="pj-input" inputMode="numeric" value={graceTyped}
                 onChange={(event) => setGraceText(event.target.value)} aria-describedby={`tg-grace-help-${projectId}`} />
