@@ -5,6 +5,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 const NOW_MS: u64 = 1_800_000_000_000;
@@ -7147,7 +7148,6 @@ fn a_lockfile_only_clash_is_rewritten_by_its_tool_as_an_engine_commit_on_top_of_
     let id = lockfile_clash(&case, "b = { path = \"../b\" }", "b");
     let before = case.view(&id).head;
     let tip = case.tip();
-    let _held = flow::hold(&case.repo);
     let mut record = store::load(&case.db, &id).unwrap();
     let regenerated =
         lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()]).unwrap();
@@ -7192,9 +7192,14 @@ fn a_lockfile_only_clash_is_rewritten_by_its_tool_as_an_engine_commit_on_top_of_
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
     assert_eq!(
+        case.agent_head(),
+        commit,
+        "the engine moved the agent's worktree to its commit"
+    );
+    assert_eq!(
         engine_notes(&case),
         [format!(
-            "The engine regenerated Cargo.lock on top of your work as {commit}. Run git reset --hard {commit} before you change anything else."
+            "The engine regenerated Cargo.lock on top of your work as {commit}."
         )]
     );
 }
@@ -7208,7 +7213,6 @@ fn a_lockfile_its_tool_cannot_rewrite_changes_nothing_and_leaves_nothing_behind(
     cargo_workspace(&mut case);
     let id = lockfile_clash(&case, "zzz-never-fetched = \"1\"", "zzz-never-fetched");
     let tip = case.tip();
-    let _held = flow::hold(&case.repo);
     let mut record = store::load(&case.db, &id).unwrap();
     let before = (record.head.clone(), record.base.clone(), record.state);
     assert_eq!(
@@ -7239,7 +7243,6 @@ fn a_clash_beyond_the_named_lockfiles_regenerates_nothing() {
         "one\ntwo\nthree from the owner\n",
         "Owner edits three",
     );
-    let _held = flow::hold(&case.repo);
     let mut record = store::load(&case.db, &id).unwrap();
     let head = record.head.clone();
     assert_eq!(
@@ -7252,15 +7255,44 @@ fn a_clash_beyond_the_named_lockfiles_regenerates_nothing() {
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
-/// The owner's dependency of `app` on crate `a` lands on main first; the agent then adds a
-/// dev-dependency with its own Cargo.lock and its turn ends the way a team turn does, so its
-/// set meets main at once. Inputs: the case, the agent's manifest line and the name it
-/// locks. Output: the agent's change set and what its turn end reported.
+const TURN_END_WITHIN: Duration = Duration::from_secs(20);
+const REGENERATED_WITHIN: Duration = Duration::from_secs(120);
+
+/// Ends the agent's turn the way a team turn does, on its own thread and store connection,
+/// and waits at most `within` for it to return. Inputs: the case, the turn id and the time.
+/// Output: what the turn end reported, or None when it had not returned in time.
+fn turn_end_within(
+    case: &Case,
+    turn: &str,
+    within: Duration,
+) -> Option<crate::landing_turns::Landed> {
+    let engine = case.repo.parent().unwrap().join("engine");
+    let workspace = case.workspace.clone();
+    let home = git::OWNER_HOME.with(|home| home.borrow().clone());
+    let end = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: turn.into(),
+        prompt_line: "Depend on b".into(),
+    };
+    let (sent, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        git::OWNER_HOME.with(|owner| *owner.borrow_mut() = home);
+        let db = open(&engine).unwrap();
+        let _ = sent.send(crate::landing_turns::record(&db, &workspace, &end).unwrap());
+    });
+    got.recv_timeout(within).ok()
+}
+
+/// The owner's dependency of `app` on crate `a` lands on main first, with any stand-in tool
+/// written beside it; the agent then adds a dev-dependency with its own Cargo.lock and its
+/// turn ends the way a team turn does. Inputs: the case, the agent's manifest line and the
+/// name it locks. Output: the agent's change set and what its turn end reported, None when
+/// it had not returned within `TURN_END_WITHIN`.
 fn lockfile_clash_at_turn_end(
     case: &Case,
     line: &str,
     name: &str,
-) -> (ChangeSetId, crate::landing_turns::Landed) {
+) -> (ChangeSetId, Option<crate::landing_turns::Landed>) {
     write(
         &case.repo.join("app/Cargo.toml"),
         &APP_MANIFEST.replace(
@@ -7279,32 +7311,147 @@ fn lockfile_clash_at_turn_end(
         ),
     );
     case.edit("Cargo.lock", &cargo_lock(&[name]));
-    let end = TurnEnd {
-        outcome: TurnOutcome::Succeeded,
-        turn: "turn-1".into(),
-        prompt_line: "Depend on b".into(),
-    };
-    let landed = crate::landing_turns::record(&case.db, &case.workspace, &end).unwrap();
-    let id = match &landed {
-        crate::landing_turns::Landed::Added(id) | crate::landing_turns::Landed::Waiting(id) => {
-            id.clone()
-        }
-        crate::landing_turns::Landed::Nothing => panic!("the agent's turn kept no change set"),
-    };
+    let landed = turn_end_within(case, "turn-1", TURN_END_WITHIN);
+    let id = list(&case.db, &case.workspace.project)
+        .unwrap()
+        .first()
+        .expect("the agent's turn kept a change set")
+        .id
+        .clone();
     (id, landed)
 }
 
-/// Two agents that each add a dependency clash only in Cargo.lock: at the second one's turn
-/// end the engine rewrites the lockfile with cargo on top of its set instead of sending the
-/// set back to its agent, so the set waits for the owner on main with both dependencies
-/// locked, and its Accept lands with no conflict shown (OS-8).
+/// Reads the case's set every 50 ms until `done` holds or `within` passes. Inputs: the case,
+/// the set, the time and the condition. Output: the set as last read.
+fn set_within(
+    case: &Case,
+    id: &ChangeSetId,
+    within: Duration,
+    done: impl Fn(&ChangeSetView) -> bool,
+) -> ChangeSetView {
+    let deadline = Instant::now() + within;
+    loop {
+        let set = case.view(id);
+        if done(&set) || Instant::now() >= deadline {
+            return set;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Tells whether a set's head is the engine's regeneration of its Cargo.lock. Inputs: the
+/// case and the set. Output: the answer.
+fn regenerated(case: &Case, set: &ChangeSetView) -> bool {
+    case.owner(&["log", "-1", "--format=%s", &set.head]).trim() == "Regenerate Cargo.lock on main"
+}
+
+/// A word unique to the case, for finding the processes its stand-in tool started. Input:
+/// the case. Output: the word.
+fn token(case: &Case) -> String {
+    let folder = case.repo.parent().unwrap().file_name().unwrap();
+    format!("ca-t8-{}", folder.to_string_lossy().trim_start_matches('.'))
+}
+
+/// Writes a stand-in `cargo` at `tools/cargo` in the owner's checkout, to land with the
+/// owner's next commit, and puts that folder first on this case's tool PATH with `time` for
+/// the whole regeneration. It runs `on_version` and prints a version for `--version`, and
+/// otherwise writes the Cargo.lock cargo writes for both dependencies, then runs
+/// `on_update`. Inputs: the case, the two shell snippets and the time. Output: none.
+fn stand_in_cargo(case: &Case, on_version: &str, on_update: &str, time: Duration) {
+    let lock = cargo_lock(&["a", "b"]);
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n{on_version}\necho 'cargo 1.90.0 (stand-in)'\nexit 0\nfi\ncat > Cargo.lock <<'LOCK'\n{lock}LOCK\n{on_update}\nexit 0\n"
+    );
+    let tool = case.repo.join("tools/cargo");
+    write(&tool, &script);
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    lockfiles::TEST_TOOLS
+        .lock()
+        .unwrap()
+        .insert(case.repo.clone(), ("tools".to_owned(), time));
+}
+
+/// A file outside the repository with bytes unique to the case. Input: the case. Output:
+/// its path and its bytes.
+fn outside_secret(case: &Case) -> (PathBuf, String) {
+    let outside = case.repo.parent().unwrap().join("outside-secret");
+    let secret = format!("outside secret {}\n", token(case));
+    write(&outside, &secret);
+    (outside, secret)
+}
+
+/// Tells whether the owner repository holds an object with exactly these bytes. Inputs:
+/// the case and the bytes. Output: the answer.
+fn holds_blob(case: &Case, bytes: &str) -> bool {
+    let probe = case.repo.parent().unwrap().join("probe-blob");
+    write(&probe, bytes);
+    let id = case.owner(&["hash-object", "--", probe.to_str().unwrap()]);
+    crate::spawn_gate::status(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .arg("-C")
+            .arg(&case.repo)
+            .args(["cat-file", "-e", id.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap()
+    .success()
+}
+
+/// Tells whether one commit of the owner repository is an ancestor of another. Inputs: the
+/// case and the two commits. Output: the answer.
+fn is_ancestor(case: &Case, older: &str, newer: &str) -> bool {
+    crate::spawn_gate::status(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .arg("-C")
+            .arg(&case.repo)
+            .args(["merge-base", "--is-ancestor", older, newer]),
+    )
+    .unwrap()
+    .success()
+}
+
+/// The processes still running whose command line holds `token`, after up to 3 s for them
+/// to end. Input: the token. Output: their ids.
+fn survivors(token: &str) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let found =
+            crate::spawn_gate::output(Command::new("/usr/bin/pgrep").args(["-f", token])).unwrap();
+        let ids: Vec<String> = String::from_utf8_lossy(&found.stdout)
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        if ids.is_empty() || Instant::now() >= deadline {
+            return ids;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Two agents that each add a dependency clash only in Cargo.lock: the agent's turn end
+/// returns at once and the engine rewrites the lockfile with cargo on top of its set, moves
+/// the agent's worktree there and tells it, so the set waits for the owner on main with
+/// both dependencies locked, and its Accept lands with no conflict shown (OS-8).
 #[test]
 fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
     let mut case = Case::new();
     cargo_workspace(&mut case);
     let (id, landed) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    assert_eq!(
+        landed,
+        Some(crate::landing_turns::Landed::Added(id.clone()))
+    );
     let tip = case.tip();
-    let set = case.view(&id);
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set)
+    });
     assert_eq!(
         (
             set.state,
@@ -7320,7 +7467,6 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
         ),
         "the set waits for the owner on main, not for its agent"
     );
-    assert_eq!(landed, crate::landing_turns::Landed::Added(id.clone()));
     assert_eq!(
         case.owner(&["log", "-1", "--format=%an <%ae>%n%s", &set.head]),
         "CrazyAgent <engine@crazyagent.invalid>\nRegenerate Cargo.lock on main\n"
@@ -7337,15 +7483,20 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
         ) && !lock.contains("<<<<<<<"),
         "cargo locked both dependencies:\n{lock}"
     );
+    assert_eq!(
+        case.agent_head(),
+        set.head,
+        "the engine moved the agent's worktree to its commit"
+    );
     let agent_lock = std::fs::read_to_string(case.workspace.worktree.join("Cargo.lock")).unwrap();
-    assert!(
-        !agent_lock.contains("<<<<<<<"),
-        "main is not merged into the agent's worktree:\n{agent_lock}"
+    assert_eq!(
+        agent_lock, lock,
+        "the agent's worktree holds the regenerated lockfile"
     );
     assert_eq!(
         engine_notes(&case),
         [format!(
-            "The engine regenerated Cargo.lock on top of your work as {0}. Run git reset --hard {0} before you change anything else.",
+            "The engine regenerated Cargo.lock on top of your work as {}.",
             set.head
         )]
     );
@@ -7376,14 +7527,15 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
 fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_end() {
     let mut case = Case::new();
     cargo_workspace(&mut case);
-    let (id, landed) =
+    let (id, _) =
         lockfile_clash_at_turn_end(&case, "zzz-never-fetched = \"1\"", "zzz-never-fetched");
-    let set = case.view(&id);
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating
+    });
     assert_eq!(
         (set.state, set.conflicts.clone()),
         (ChangeState::Updating, vec!["Cargo.lock".to_owned()])
     );
-    assert_eq!(landed, crate::landing_turns::Landed::Waiting(id.clone()));
     let agent_lock = std::fs::read_to_string(case.workspace.worktree.join("Cargo.lock")).unwrap();
     assert!(agent_lock.contains("<<<<<<<"), "{agent_lock}");
     assert!(
@@ -7393,4 +7545,286 @@ fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_e
         "no regeneration note goes out"
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// A lockfile the tool leaves as a link to a file outside the repository, as a folder or as
+/// a fifo is never read: the set goes back to its agent, no object holds the outside file's
+/// bytes and nothing temporary is left (OS-8).
+#[test]
+fn a_lockfile_its_tool_leaves_as_a_link_a_folder_or_a_fifo_is_never_read() {
+    for leave in [
+        "ln -s \"$OUTSIDE\" Cargo.lock",
+        "mkdir Cargo.lock",
+        "/usr/bin/mkfifo Cargo.lock",
+    ] {
+        let mut case = Case::new();
+        cargo_workspace(&mut case);
+        let (outside, secret) = outside_secret(&case);
+        stand_in_cargo(
+            &case,
+            "",
+            &format!("OUTSIDE='{}'\nrm -f Cargo.lock\n{leave}", outside.display()),
+            Duration::from_secs(60),
+        );
+        let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+        let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+            set.state == ChangeState::Updating
+        });
+        assert_eq!(
+            set.state,
+            ChangeState::Updating,
+            "{leave}: the set goes back to its agent"
+        );
+        assert!(
+            !holds_blob(&case, &secret),
+            "{leave}: the outside file's bytes were stored"
+        );
+        assert_eq!(regenerate_leftovers(&case), Vec::<String>::new(), "{leave}");
+    }
+}
+
+/// A process the tool leaves running in a session of its own, which swaps the lockfile for
+/// a link to a file outside the repository, has ended before the lockfile is read: the set
+/// goes back to its agent, no object holds the outside file's bytes and no process of the
+/// tool's run is left (OS-8).
+#[test]
+fn a_process_the_tool_leaves_running_has_ended_before_the_lockfile_is_read() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let token = token(&case);
+    let (outside, secret) = outside_secret(&case);
+    let swap = format!(
+        r#"/usr/bin/perl -MPOSIX -e 'my ($outside) = @ARGV; fork and exit; POSIX::setsid(); unlink "Cargo.lock"; symlink $outside, "Cargo.lock"; open my $done, ">", ".swapped"; close $done; my $end = time + 60; sleep 1 while time < $end' '{}' {token}
+while [ ! -e .swapped ]; do sleep 0.05; done
+rm -f .swapped"#,
+        outside.display()
+    );
+    stand_in_cargo(&case, "", &swap, Duration::from_secs(60));
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating
+    });
+    assert_eq!(set.state, ChangeState::Updating);
+    assert!(
+        !holds_blob(&case, &secret),
+        "the outside file's bytes were stored"
+    );
+    assert_eq!(
+        survivors(&token),
+        Vec::<String>::new(),
+        "every process of the tool's run ends before the lockfile is read"
+    );
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// A child of `cargo --version` that keeps its output pipe open in a session of its own
+/// never stalls the agent's turn end or keeps the repository held: the turn end returns at
+/// once, the regeneration ends within its time and lands, the repository is free after and
+/// no process of the run is left (OS-8).
+#[test]
+fn a_child_holding_the_version_pipe_never_stalls_the_turn_end_or_the_repository() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let token = token(&case);
+    stand_in_cargo(
+        &case,
+        &format!("/usr/bin/perl -MPOSIX -e 'fork and exit; POSIX::setsid(); sleep 120' {token}"),
+        "",
+        Duration::from_secs(60),
+    );
+    let (id, landed) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    assert!(landed.is_some(), "the turn end returned at once");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set) || set.state == ChangeState::Updating
+    });
+    assert!(regenerated(&case, &set), "{:?}", set.state);
+    let repo = case.repo.clone();
+    let (sent, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _held = flow::hold(&repo);
+        let _ = sent.send(());
+    });
+    assert!(
+        got.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "the repository is free once the regeneration ended"
+    );
+    assert_eq!(survivors(&token), Vec::<String>::new());
+}
+
+/// A tool still running when the whole regeneration's time is up is stopped and the set
+/// goes back to its agent through Task 7's update, well before the tool would end (OS-8).
+#[test]
+fn a_tool_past_the_regeneration_time_falls_back_to_the_agent_update() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(&case, "", "sleep 30", Duration::from_secs(4));
+    let started = Instant::now();
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(
+        &case,
+        &id,
+        TURN_END_WITHIN.saturating_sub(started.elapsed()),
+        |set| set.state == ChangeState::Updating,
+    );
+    assert_eq!(
+        set.state,
+        ChangeState::Updating,
+        "past its time the tool is stopped and the agent fixes the clash"
+    );
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// A tool that changes a file other than the clashing lockfiles, here the manifest, lands
+/// nothing: the set goes back to its agent through Task 7's update (OS-8).
+#[test]
+fn a_tool_that_also_rewrites_a_manifest_falls_back_to_the_agent_update() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(
+        &case,
+        "",
+        "printf '# rewritten\\n' >> app/Cargo.toml",
+        Duration::from_secs(60),
+    );
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating || regenerated(&case, set)
+    });
+    assert!(!regenerated(&case, &set), "the rewritten manifest landed");
+    assert_eq!(set.state, ChangeState::Updating);
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// A Cargo.lock-only clash of an agent the owner stopped, or of a project whose team the
+/// owner paused, is not regenerated and its agent gets no note; the stopped agent's set
+/// keeps its head for the owner (OS-8).
+#[test]
+fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
+    for stop in ["owner stop", "paused team"] {
+        let mut case = Case::new();
+        cargo_workspace(&mut case);
+        let project = case.workspace.project.as_str().to_owned();
+        if stop == "owner stop" {
+            case.db
+                .execute(
+                    "INSERT INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,1)",
+                    rusqlite::params![CLONE_AGENT, project],
+                )
+                .unwrap();
+        } else {
+            case.db
+                .execute(
+                    "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,1)",
+                    [project.as_str()],
+                )
+                .unwrap();
+        }
+        let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+        let head = case.view(&id).head;
+        let set = set_within(&case, &id, Duration::from_secs(10), |set| {
+            regenerated(&case, set)
+        });
+        assert!(!regenerated(&case, &set), "{stop}: the set was regenerated");
+        assert!(
+            engine_notes(&case)
+                .iter()
+                .all(|note| !note.contains("regenerated")),
+            "{stop}: the agent got a regeneration note"
+        );
+        if stop == "owner stop" {
+            assert_eq!(set.head, head, "the stopped agent's set keeps its head");
+        }
+    }
+}
+
+/// The engine's start removes the temporary worktree, its admin folder and the engine's
+/// scratch folders a regeneration left when the engine stopped mid-run (OS-8).
+#[test]
+fn the_engine_start_sweeps_the_regenerations_a_stopped_engine_left() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let set = "0123456789abcdef0123456789abcdef";
+    let worktree = crate::projects_home::state_folder(&case.repo)
+        .join("worktrees")
+        .join(format!("regenerate-{set}"));
+    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    case.owner(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        worktree.to_str().unwrap(),
+        "HEAD",
+    ]);
+    std::fs::create_dir_all(
+        case.repo
+            .parent()
+            .unwrap()
+            .join("engine/regenerate")
+            .join(set)
+            .join("home"),
+    )
+    .unwrap();
+    assert!(!regenerate_leftovers(&case).is_empty());
+    assert_eq!(crate::landing::sweep_regenerations(&case.db).unwrap(), 1);
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+    assert!(
+        !case
+            .owner(&["worktree", "list", "--porcelain"])
+            .contains("regenerate")
+    );
+}
+
+/// A regeneration's own merge gate reads the paths main changed too: an owner merge driver
+/// on the path main renamed the agent's file to never runs, and nothing is regenerated
+/// (OS-8, as Task 7's turn-end check).
+#[test]
+fn a_merge_driver_on_the_path_main_renamed_the_agent_s_file_to_never_runs_in_a_regeneration() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    case.edit("README", "uno\ntwo\nthree\n");
+    let id = lockfile_clash(&case, "b = { path = \"../b\" }", "b");
+    case.owner_commit("README", "eins\ntwo\nthree\n", "Say one in German");
+    case.owner(&["mv", "README", "LIESMICH"]);
+    case.owner(&["commit", "-q", "-m", "Rename README"]);
+    let marker = case.repo.parent().unwrap().join("driver-ran");
+    case.owner(&[
+        "config",
+        "merge.mark.driver",
+        &format!("/usr/bin/touch {}", marker.display()),
+    ]);
+    write(
+        &case.repo.join(".git/info/attributes"),
+        "LIESMICH merge=mark\n",
+    );
+    let mut record = store::load(&case.db, &id).unwrap();
+    let regenerated =
+        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()]).unwrap();
+    assert!(
+        !marker.exists(),
+        "the owner's merge driver ran at the path main renamed the agent's file to"
+    );
+    assert_eq!(regenerated, None);
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// An agent that ignores the engine's note and edits on keeps the regenerated lockfile: its
+/// worktree already holds the engine's commit, so its next turn end builds on it (OS-8).
+#[test]
+fn an_agent_that_ignores_the_note_keeps_the_regenerated_lockfile_at_its_next_turn_end() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set)
+    });
+    assert!(regenerated(&case, &set));
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    assert!(turn_end_within(&case, "turn-2", TURN_END_WITHIN).is_some());
+    let next = case.view(&id);
+    assert_ne!(next.head, set.head, "the next turn end added the edit");
+    assert!(
+        is_ancestor(&case, &set.head, &next.head),
+        "the agent's next turn end dropped the engine's regenerated lockfile"
+    );
 }

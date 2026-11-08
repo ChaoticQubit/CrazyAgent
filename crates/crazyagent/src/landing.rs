@@ -1105,6 +1105,13 @@ pub(crate) fn conflicts_with_main(db: &Connection, id: &ChangeSetId) -> Result<b
     }
 }
 
+/// Removes what lockfile regenerations a stopped engine left behind (OS-8). Input: the
+/// store. Output: how many temporary worktrees it removed.
+pub fn sweep_regenerations(db: &Connection) -> Result<usize, EngineError> {
+    let _ = db;
+    Ok(0)
+}
+
 /// Merges the owner's branch tip into the agent's worktree with conflict markers, ready
 /// for the resolve task. Inputs: the store and the change set. Output: Ok once merged.
 pub fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {

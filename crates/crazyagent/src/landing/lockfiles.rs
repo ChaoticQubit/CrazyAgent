@@ -33,6 +33,29 @@ const POLL: Duration = Duration::from_millis(20);
 const ENV: &str = "/usr/bin/env";
 const SCRATCH_FOLDER: &str = "regenerate";
 
+#[cfg(test)]
+/// Stand-in tools a landing test commits into its repository: the owner checkout maps to the
+/// worktree folder put first on its tools' PATH and the time one whole regeneration may take.
+pub(super) static TEST_TOOLS: std::sync::Mutex<BTreeMap<PathBuf, (String, Duration)>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// The folder of the temporary worktree a landing test puts first on its tools' PATH, with
+/// the time its whole regeneration may take. Input: the owner checkout. Output: both, never
+/// any outside tests.
+fn test_tools(repository: &Path) -> Option<(String, Duration)> {
+    #[cfg(test)]
+    return TEST_TOOLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(repository)
+        .cloned();
+    #[cfg(not(test))]
+    {
+        let _ = repository;
+        None
+    }
+}
+
 /// The program that writes a known lockfile, by the lockfile's file name: `cargo` for
 /// `Cargo.lock`, `uv`, `npm`, `pnpm`, `yarn` and `poetry` for theirs. Input: the lockfile's
 /// path in the repository. Output: the program's name, or None for another file or a path
@@ -181,6 +204,7 @@ pub(super) fn regenerate(
         }
     };
     let profile = scratch.folder.join("profile.sb");
+    let first = test_tools(&repository).map(|(folder, _)| worktree.join(folder));
     let mut majors: BTreeMap<&str, Option<u32>> = BTreeMap::new();
     for path in paths {
         let program = program_for(path).ok_or_else(|| failure("changes_git_failed"))?;
@@ -199,6 +223,7 @@ pub(super) fn regenerate(
                 &folder,
                 VERSION_TIME,
                 true,
+                first.as_deref(),
             )
             .filter(|(code, _)| *code == 0)
             .and_then(|(_, printed)| major_of(&printed))
@@ -206,7 +231,16 @@ pub(super) fn regenerate(
         let Some(command) = tool_for(path, major) else {
             return Ok(None);
         };
-        if run(&sandbox, &profile, command, &folder, TOOL_TIME, false).map(|(code, _)| code)
+        if run(
+            &sandbox,
+            &profile,
+            command,
+            &folder,
+            TOOL_TIME,
+            false,
+            first.as_deref(),
+        )
+        .map(|(code, _)| code)
             != Some(0)
         {
             return Ok(None);
@@ -355,9 +389,9 @@ fn confined(
 /// Runs one program through `/usr/bin/env` in the tool sandbox, from a folder of the
 /// temporary worktree, within `time`, and stops its whole process group when it ends or
 /// runs past the time. Inputs: the sandbox, its profile, the program and its arguments,
-/// the folder, the time and whether to keep at most `VERSION_BYTES_MAX` bytes of its
-/// output. Output: the exit code and the kept output, or None when it could not start, was
-/// stopped by a signal or ran past the time.
+/// the folder, the time, whether to keep at most `VERSION_BYTES_MAX` bytes of its output
+/// and a folder to put first on its PATH. Output: the exit code and the kept output, or
+/// None when it could not start, was stopped by a signal or ran past the time.
 fn run(
     sandbox: &ProjectSandbox,
     profile: &Path,
@@ -365,6 +399,7 @@ fn run(
     folder: &Path,
     time: Duration,
     keep: bool,
+    first: Option<&Path>,
 ) -> Option<(i32, Vec<u8>)> {
     let mut command: Command = sandbox.command(profile, Path::new(ENV));
     command
@@ -373,6 +408,18 @@ fn run(
         .stdin(Stdio::null())
         .stdout(if keep { Stdio::piped() } else { Stdio::null() })
         .stderr(Stdio::null());
+    if let Some(first) = first {
+        let path = command
+            .get_envs()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_os_string())
+            .unwrap_or_default();
+        let mut joined = first.as_os_str().to_os_string();
+        joined.push(":");
+        joined.push(path);
+        command.env("PATH", joined);
+    }
     let mut child = crate::spawn_gate::spawn(&mut command).ok()?;
     let group = child.id();
     let reader = child.stdout.take().map(|stdout| {
