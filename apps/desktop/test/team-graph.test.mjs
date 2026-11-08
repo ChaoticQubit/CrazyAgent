@@ -110,6 +110,19 @@ test("the Agents toolbar's team line counts the master's agents as the mockup wo
   assert.throws(() => graph.teamLine(team, -1), /whole number/);
 });
 
+test("the Agents toolbar says how many agents work and how many tasks are live after the team line, and nothing while the team is not read", () => {
+  const row = (props) => {
+    const markup = renderToStaticMarkup(createElement(view.AgentsToolbar, { projectId: "chores", name: "Chores", perWindow: 6, pool: "Work: 2 accounts", ...props }));
+    return markup.slice(markup.indexOf('class="tg-summary"'), markup.indexOf("Open all terminals"));
+  };
+  const dot = '<span aria-hidden="true"> · </span>';
+  assert.match(row({ team, line: graph.teamLine(team) }),
+    new RegExp(`<span role="status">Master and 4 agents</span>${dot}<span>1 of 4 agents working\\. 2 tasks live\\.</span>${dot}<span>Work: 2 accounts</span>`));
+  assert.match(row({ team, line: graph.teamLine(team, 3) }), /Master and 4 agents · 3 not shown<\/span><span aria-hidden="true"> · <\/span><span>1 of 4 agents working\. 2 tasks live\.<\/span>/,
+    "the left-out count stays on the team line only");
+  assert.doesNotMatch(row({ team: null, line: null }), /working|live/);
+});
+
 test("typed keys reach the agent as the UTF-8 bytes a terminal reads", () => {
   assert.deepEqual([...io.encodeTyped("ls\r")], [108, 115, 13]);
   assert.deepEqual([...io.encodeTyped("\x1b[A")], [27, 91, 65]);

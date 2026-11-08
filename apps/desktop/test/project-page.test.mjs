@@ -686,7 +686,7 @@ test("a long task prompt shows its first line, cut to fit a row", () => {
   assert.equal(research.firstLine(""), "");
 });
 
-test("the Agents toolbar's team line names the pool as the mockup does, and the working count stays in the Agents and tasks fold", async () => {
+test("the Agents toolbar's team line names the pool with its account count, Running and All count team agents and research, and the fold keeps its working count", async () => {
   const agents = await import("../src/screens/project/agents.tsx");
   const team = { project_id: "p-1", keep_warm: false, paused: false, min_agents: 0, max_agents: 5, harnesses: [], messages: [], plan: [],
     agents: [teamAgent(2, "working", { task: 10 }), teamAgent(3, "working", { task: 11 }), teamAgent(4, "stopped")],
@@ -697,12 +697,19 @@ test("the Agents toolbar's team line names the pool as the mockup does, and the 
     assigned: { pool: { id: "pool-1", name: "Work", members: ["a", "b"] } }, team: { result: { kind: "ok", value: team }, at: 1_000 } };
   const markup = renderToStaticMarkup(createElement(agents.AgentsTab, { data }));
   const line = markup.slice(markup.indexOf('class="tg-summary"'), markup.indexOf("Open all terminals"));
-  assert.match(line, /<button type="button" class="tg-asks" aria-haspopup="dialog">Questions<\/button><\/span><span aria-hidden="true"> · <\/span><span>Work<\/span>/);
-  assert.doesNotMatch(line, /working/, "the toolbar line names no working count");
+  assert.match(line, /<button type="button" class="tg-asks" aria-haspopup="dialog">Questions<\/button><\/span><span aria-hidden="true"> · <\/span><span>Work: 2 accounts<\/span>/);
+  const show = line.slice(line.indexOf('aria-label="Show"'));
+  assert.match(show, />Running \(3\)</, "Running counts the 2 working team agents and the running research");
+  assert.match(show, />All \(4\)</, "All counts the 3 team agents and the research");
   const fold = markup.slice(markup.indexOf('<details class="pj-stack-s" aria-label="Agents and tasks">'));
   assert.match(fold, /2 of 5 agents working\./, "the team table in the fold counts them");
+  const one = renderToStaticMarkup(createElement(agents.AgentsTab, { data: { ...data, assigned: { pool: { id: "pool-2", name: "Solo", members: ["a"] } } } }));
+  assert.match(one, /<span>Solo: 1 account<\/span>/);
   const none = renderToStaticMarkup(createElement(agents.AgentsTab, { data: { ...data, assigned: null } }));
   assert.match(none, /<span>No pool\. Pick a pool to start\.<\/span>/);
+  const settings = renderToStaticMarkup(createElement(agents.AgentsTab, { data, section: "settings" }));
+  assert.match(settings, /<span>Work: 2 accounts<\/span>/, "Agent settings draws the same toolbar row");
+  assert.match(settings, />Running \(3\)</);
 });
 
 test("the Agents tab labels research and asks the engine for the live team", async () => {
