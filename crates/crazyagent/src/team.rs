@@ -2199,6 +2199,7 @@ pub fn execute(
 /// owner's words with text the owner did not type, such as an IDE review comment, so the
 /// message is never an owner turn. Takes the transaction, the engine configuration and the
 /// action. Returns what `execute` returns.
+#[cfg(unix)]
 pub(crate) fn execute_framed(
     tx: &Transaction<'_>,
     access: &ModelAccess,

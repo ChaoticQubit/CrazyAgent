@@ -18,6 +18,7 @@ pub const FILE: &str = "crazyagent.code-workspace";
 /// holding more counts as holding one, so the git stop is kept rather than guessed away.
 pub(crate) const OLDER_ENTRIES_MAX: usize = 4096;
 
+#[cfg(unix)]
 const TEMPORARY: &str = "crazyagent.code-workspace.tmp";
 const PROJECTS_FOLLOWED_MAX: i64 = 64;
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_workspaces (
@@ -437,6 +438,7 @@ fn unavailable<E>(_: E) -> EngineError {
     failure("ide_workspace_unavailable")
 }
 
+#[cfg(unix)]
 fn unwritable(_: std::io::Error) -> EngineError {
     failure("ide_workspace_unwritable")
 }
