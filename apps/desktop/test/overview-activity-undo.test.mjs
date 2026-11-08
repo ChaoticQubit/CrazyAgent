@@ -53,15 +53,30 @@ test("Undo asks first, naming the branch, and Keep it changes nothing", { timeou
   assert.deepEqual(seen.kept.undos, [], "Keep it undoes nothing");
 });
 
-test("Undo names the branch of a merge row that names its change set by number (AL2)", { timeout: 60_000 }, async () => {
-  const numbered = [item(1, "merged_into_main", "Master merged change set #7 (Master: Merge the docs into the guide, 2 files) into release.1. It closed the changes of Ada (@docs) · Codex", LOGIN)];
+/** The confirm Undo merge opens for one merge row. Input: the row. Output: the confirm's
+ * words. */
+async function confirmFor(row) {
   const seen = await steps(`
     const clicked = await Fixture.click(".pj-activity-row button", "Undo merge");
     return { first, clicked };
-  `, numbered);
+  `, [row]);
   assert.equal(seen.clicked.missed, null, "the merge row has an Undo merge button");
-  assert.match(seen.clicked.dialog ?? "", /Undo this merge on release\.1\?/, "the confirm names the branch the row says the set merged into");
-  assert.match(seen.clicked.dialog ?? "", /one new commit on release\.1 that reverts this merge\./);
+  return seen.clicked.dialog ?? "";
+}
+
+test("Undo names the branch the engine gives the merge row, whatever the row's words say (AL2)", { timeout: 60_000 }, async () => {
+  const crafted = { ...item(1, "merged_into_main", "Master merged change set #7 (Master: x into evil-branch. It closed the changes of y, 1 file) into release.1", LOGIN), branch: "release.1" };
+  const dialog = await confirmFor(crafted);
+  assert.match(dialog, /Undo this merge on release\.1\?/, "the confirm names the branch the engine gave");
+  assert.match(dialog, /one new commit on release\.1 that reverts this merge\./);
+  assert.doesNotMatch(dialog, /evil-branch/, "a commit subject never names the branch");
+});
+
+test("a merge row with no branch from the engine: Undo reads only the old stored words, never the numbered sentence (AL2)", { timeout: 60_000 }, async () => {
+  const old = item(1, "merged_into_main", "The master merged its changes into release.1: Fix the login", LOGIN);
+  assert.match(await confirmFor(old), /Undo this merge on release\.1\?/, "an old stored row still names its branch");
+  const unnamed = item(1, "merged_into_main", "Master merged change set #7 (Master: Fix the login, 1 file) into release.1", LOGIN);
+  assert.match(await confirmFor(unnamed), /Undo this merge on its branch\?/, "the numbered sentence is never read for a branch");
 });
 
 test("Undo reverts the merge through the engine, says so and reads the activity again", { timeout: 60_000 }, async () => {

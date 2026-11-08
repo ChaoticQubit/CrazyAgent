@@ -8027,6 +8027,26 @@ fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_mast
     );
 }
 
+/// AL2 (rv-sec F1): the master's merge row gives the branch its set landed on as its own
+/// field, the ref an Undo reverts on, so the desktop never reads it from the row's words.
+#[test]
+fn a_master_merge_row_gives_the_branch_its_set_landed_on() {
+    let case = Case::new();
+    let (_, fix, _) = master_fixing_a_conflict(&case);
+    let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
+    assert!(
+        matches!(&outcome, Some(AcceptOutcome::Landed { branch, .. }) if branch == "main"),
+        "the master's fix lands on main: {outcome:?}"
+    );
+    let merged = activity_of(&case, &fix);
+    assert_eq!(merged.len(), 1, "one merge row: {merged:?}");
+    assert_eq!(
+        serde_json::to_value(&merged[0]).unwrap()["branch"],
+        serde_json::json!("main"),
+        "the merge row gives its branch as data"
+    );
+}
+
 #[test]
 fn an_ordinary_master_set_waits_for_the_owner_under_merges() {
     use crate::sandbox::policy::AgentAccess;
