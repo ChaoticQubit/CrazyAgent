@@ -143,7 +143,7 @@ test("each folder chooser names what the folder is for, and adding a project nev
     assert.deepEqual(calls, expected, file);
   }
   const lib = source("../src-tauri/src/lib.rs");
-  assert.match(lib, /async fn desktop_pick_folder\(\s*window: WebviewWindow,\s*purpose: FolderPurpose,\s*\)/);
+  assert.match(lib, /async fn desktop_pick_folder\(\s*webview: Webview,\s*purpose: FolderPurpose,\s*\)/);
   assert.match(lib, /bridge::picker::choose\(purpose\.script\(\)\)/);
   const picker = source("../src-tauri/src/bridge/picker.rs");
   assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*Memory,\s*Plugin,\s*\}/,

@@ -192,7 +192,7 @@ test("the TUI focus poll reaches the engine only while a project's IDE webview i
   assert.match(focus, /views: State<'_, ide::IdeViews>/);
   assert.match(focus, /if !views\.any_loaded\(\) \{\s*return Ok\(None\);\s*\}/, "with no IDE loaded no reveal can mark a focus");
   assert.ok(focus.indexOf("views.any_loaded()") < focus.indexOf("ide_focus()"), "the engine is not asked, and its bridge lock not taken, before the check");
-  assert.ok(focus.indexOf("main_window(&window)?") < focus.indexOf("views.any_loaded()"), "only the main window may ask");
+  assert.ok(focus.indexOf("main_window(&webview)?") < focus.indexOf("views.any_loaded()"), "only the main window may ask");
 });
 
 const command = (lib, name) => {
