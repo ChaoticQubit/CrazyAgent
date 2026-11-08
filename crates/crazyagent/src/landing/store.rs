@@ -78,8 +78,9 @@ const ADDED_COLUMNS: [(&str, &str); 6] = [
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
 /// an engine start can finish or undo it. `Land` moves the owner's `reference` from
 /// `old` to the squash commit `new`, `master` when it is the master landing its own set;
-/// `Reset` points the agent's worktree at `target`; `Undo` moves `reference` from `old` to
-/// the commit `new` that reverts the set's landed commit.
+/// `Reset` points the agent's worktree at `target` only while its HEAD is still `from`
+/// (an intent stored before `from` existed never moves a worktree); `Undo` moves
+/// `reference` from `old` to the commit `new` that reverts the set's landed commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Intent {
@@ -91,6 +92,8 @@ pub(super) enum Intent {
         master: bool,
     },
     Reset {
+        #[serde(default)]
+        from: Option<String>,
         target: String,
     },
     Undo {
