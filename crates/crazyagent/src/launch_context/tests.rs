@@ -260,6 +260,7 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
 
     let held = lock_only(&home).unwrap();
@@ -660,6 +661,7 @@ fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
             relay: None,
             model_proxy: None,
             claude_display: ClaudeDisplay::Classic,
+            catch_up_main: true,
         };
         let first = context.install("codex", &home, true).unwrap();
         drop(first);
@@ -705,6 +707,7 @@ fn a_codex_launch_that_cannot_remove_planted_system_skills_is_refused() {
         relay: None,
         model_proxy: None,
         claude_display: ClaudeDisplay::Classic,
+        catch_up_main: true,
     };
     let first = context.install("codex", &home, true).unwrap();
     drop(first);
@@ -3326,10 +3329,10 @@ fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
 #[test]
 fn the_team_tools_section_asks_for_log_activity_only_while_it_is_on() {
     const ASK: &str = "When you start a new phase of the work (for example architecture, building, testing) or finish a test run, call log_activity with the goal it serves and one line saying what happened.";
-    let on = team_tools_section(&[]);
+    let on = team_tools_section(&[], true, false);
     assert!(on.contains("\n- log_activity: "), "{on}");
     assert_eq!(on.matches(ASK).count(), 1, "{on}");
     assert!(on.len() <= TOOLS_SECTION_BYTES_MAX);
-    let off = team_tools_section(&["log_activity".to_owned()]);
+    let off = team_tools_section(&["log_activity".to_owned()], true, false);
     assert!(!off.contains("log_activity"), "{off}");
 }
