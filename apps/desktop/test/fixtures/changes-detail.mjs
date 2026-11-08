@@ -94,12 +94,12 @@ export async function click(words) {
   return state();
 }
 
-/** Scrolls the diff box to a share of its scroll height, 0 the top and 1 the end, then waits
- * two rendered frames so the browser reports what came on screen. Input: the share.
- * Output: the state. */
+/** Scrolls the diff box, when one is shown, to a share of its scroll height, 0 the top and
+ * 1 the end, then waits two rendered frames so the browser reports what came on screen.
+ * Input: the share. Output: the state. */
 export async function scrollTo(share) {
   const box = document.querySelector(".ch-diff");
-  box.scrollTop = (box.scrollHeight - box.clientHeight) * share;
+  if (box) box.scrollTop = (box.scrollHeight - box.clientHeight) * share;
   await act(async () => {
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done, 50))));
   });
