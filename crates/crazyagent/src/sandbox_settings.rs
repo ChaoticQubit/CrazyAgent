@@ -5,7 +5,7 @@ use crate::sandbox::LinuxSockets;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS sandbox_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     linux_sockets TEXT NOT NULL CHECK(linux_sockets IN ('tcp_only', 'refuse', 'tcp_ports'))
@@ -26,7 +26,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 
 /// Creates the settings table when it is missing. Input: the engine database. Output: Ok,
 /// or the database error.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }

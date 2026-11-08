@@ -7,7 +7,7 @@ use super::project_access::FULL_ACCESS_WARNING;
 use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
 use crate::sandbox::policy::AgentAccess;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
