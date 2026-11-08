@@ -79,11 +79,12 @@ pub fn team_attribution(
 ) -> Attribution {
     let project = ProjectId::new(project).ok();
     let account = connection.and_then(|connection| CredentialRef::new(connection).ok());
-    let (kind, agent) = if master {
-        (RunKind::Master, master_agent(project.as_ref()))
+    let kind = if master {
+        RunKind::Master
     } else {
-        (RunKind::Agent, format!("team-{id}"))
+        RunKind::Agent
     };
+    let agent = team_agent_key(id, project.as_ref(), master);
     Attribution {
         kind,
         pool: match (&project, &account) {
@@ -94,6 +95,17 @@ pub fn team_attribution(
         account,
         agent,
         harness: harness.to_owned(),
+    }
+}
+
+/// The usage key a team agent's tokens and turns count against: `master_agent` for the
+/// master, `team-<id>` for a sub-agent. Inputs: the agent id, its project and whether it is
+/// the master. Output: the key.
+pub fn team_agent_key(id: i64, project: Option<&ProjectId>, master: bool) -> String {
+    if master {
+        master_agent(project)
+    } else {
+        format!("team-{id}")
     }
 }
 

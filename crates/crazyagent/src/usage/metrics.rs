@@ -59,8 +59,9 @@ pub struct GroupRow {
 }
 
 /// The tokens one agent used in the range, with the name clients show for it when the store
-/// has it, and the first `NAMES_MAX` harnesses and accounts it used, once each in name order,
-/// with how many more there were.
+/// has it, the first `NAMES_MAX` harnesses and accounts it used, once each in name order,
+/// with how many more there were, and the turns it ended in the range: none for a row no
+/// team agent owns (onboarding, research), and none from an engine before turns were kept.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRow {
@@ -455,9 +456,42 @@ fn groups(
     Ok(rows)
 }
 
+/// The turns each agent ended in the range, from the usage turn rows, by project and agent
+/// key; empty for a store made before them. Inputs: the store, the project or None, and the
+/// range start. Output: the sums.
+fn turns(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+) -> Result<HashMap<(String, String), u64>, EngineError> {
+    if !has_table(db, "usage_turns")? {
+        return Ok(HashMap::new());
+    }
+    let mut statement = db
+        .prepare(
+            "SELECT project,agent,SUM(turns) FROM usage_turns
+             WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1) GROUP BY project,agent",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![project, since_ms], |row| {
+            Ok((
+                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(storage)?;
+    let mut ended = HashMap::new();
+    for row in rows {
+        let (key, sum) = row.map_err(storage)?;
+        ended.insert(key, u64::try_from(sum).map_err(storage)?);
+    }
+    Ok(ended)
+}
+
 /// The largest `ROWS_MAX` agents by the headline, each with the harnesses and accounts it used,
-/// once each in name order. Inputs: the store, the project or None, and the range start.
-/// Output: the rows.
+/// once each in name order, and a team agent's turns in the range (`turns`). Inputs: the
+/// store, the project or None, and the range start. Output: the rows.
 fn agents(
     db: &Connection,
     project: Option<&str>,
@@ -515,10 +549,18 @@ fn agents(
             rows[at].accounts.push(account);
         }
     }
+    let ended = turns(db, project, since_ms)?;
     for row in &mut rows {
         (row.harnesses, row.more_harnesses) = capped(std::mem::take(&mut row.harnesses));
         (row.accounts, row.more_accounts) = capped(std::mem::take(&mut row.accounts));
         row.label = agent_name(db, &row.project, &row.agent)?;
+        let team = row.agent.starts_with("master-") || row.agent.starts_with("team-");
+        row.turns = team.then(|| {
+            ended
+                .get(&(row.project.clone(), row.agent.clone()))
+                .copied()
+                .unwrap_or(0)
+        });
     }
     Ok(rows)
 }

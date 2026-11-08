@@ -7306,6 +7306,27 @@ impl TeamRuntime {
         }
     }
 
+    /// Counts one turn an agent ended: its own `team_agents` turns, and one turn in its
+    /// hour's usage row under the key its tokens count against (`usage::turns`), so the
+    /// Metrics range reads it. A usage store that cannot be written leaves that turn out of
+    /// Metrics and logs only the failure code. Inputs: the agent id, its project and whether
+    /// it is the master. Output: Ok, or the team store failure.
+    fn count_turn(&self, id: i64, project: &ProjectId, master: bool) -> Result<(), EngineError> {
+        self.connection
+            .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
+            .map_err(error)?;
+        let agent = crate::usage::service::team_agent_key(id, Some(project), master);
+        let counted = crate::usage::initialize(&self.connection)
+            .and_then(|()| crate::usage::turns::count(&self.connection, project, &agent, now_ms()));
+        if let Err(problem) = counted {
+            eprintln!(
+                "team turn not counted for metrics: {}",
+                crate::usage::service::failure_code(&problem)
+            );
+        }
+        Ok(())
+    }
+
     fn apply(&mut self, id: i64, report: Report) -> Result<bool, EngineError> {
         self.follow_resume(id, &report)?;
         match report {
@@ -7465,12 +7486,11 @@ impl TeamRuntime {
                 let held = worker.held;
                 let pin = worker.narrowed.is_none().then_some(id);
                 let team_tool = worker.team_tool;
+                let master = worker.role == AgentRole::Master;
                 if end == TurnEnd::RateLimited {
                     self.pause(&connection)?;
                 }
-                self.connection
-                    .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
-                    .map_err(error)?;
+                self.count_turn(id, &project, master)?;
                 if team_tool {
                     self.log_master_asks(&project, id)?;
                 }
@@ -7551,6 +7571,7 @@ impl TeamRuntime {
                     worker.connection.clone(),
                     worker.team_tool,
                 );
+                let master = worker.role == AgentRole::Master;
                 let live_session = worker.session.clone().filter(|_| worker.live);
                 if end == TurnEnd::RateLimited {
                     self.pause(&connection)?;
@@ -7572,9 +7593,7 @@ impl TeamRuntime {
                         &text,
                     )?;
                 }
-                self.connection
-                    .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
-                    .map_err(error)?;
+                self.count_turn(id, &project, master)?;
                 if !team_tool {
                     self.admit_reply_lines(&project, &text)?;
                 }
@@ -7618,12 +7637,11 @@ impl TeamRuntime {
                     hosted.set_busy(false);
                 }
                 let (project, connection) = (worker.project.clone(), worker.connection.clone());
+                let master = worker.role == AgentRole::Master;
                 if end == TurnEnd::RateLimited {
                     self.pause(&connection)?;
                 }
-                self.connection
-                    .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
-                    .map_err(error)?;
+                self.count_turn(id, &project, master)?;
                 self.own_turn_ended(id, &project, started, &text, end)?;
                 if idle {
                     self.mark_agent(id, AgentStatus::Idle, None)?;
@@ -7686,9 +7704,7 @@ impl TeamRuntime {
                         now_ms(),
                         TurnEnd::Closed.name(),
                     )?;
-                    self.connection
-                        .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
-                        .map_err(error)?;
+                    self.count_turn(id, &worker.project, worker.role == AgentRole::Master)?;
                     self.land_turn(
                         id,
                         &worker.project,
