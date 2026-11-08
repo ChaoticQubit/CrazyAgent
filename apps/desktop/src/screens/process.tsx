@@ -172,7 +172,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
                 disabled={Boolean(invalid) || !changed || busy !== null || Boolean(conflict)}>Save</Button>
               {changed && !conflict && <Button disabled={busy !== null} onClick={() => onDraft(saved.value)}>Discard edits</Button>}
               {mode === "project_only"
-                ? <span className="small muted">Project only gives agents this file alone. To use the app default, pick Both or App only under Delivery.</span>
+                ? <span className="small muted">Project only gives agents this file alone. To use the app default, pick App and project or App only under Delivery.</span>
                 : mode !== null && <Button disabled={busy !== null || draft === ""} onClick={() => onUseDefault?.()}>Use app default</Button>}
               <span className="small muted">{note}</span>
             </span>
@@ -233,28 +233,34 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
   if (settings.kind === "loading") return <Skeleton shape="card" count={1} />;
   if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
   const current = settings.kind === "ok" ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS;
-  const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[2];
+  const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[0];
   const delivery = EDIT_DELIVERIES.find((option) => option.value === current.edits) ?? EDIT_DELIVERIES[0];
   const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
-  return <Panel title="Delivery">
-    <div className="stack-small">
+  return <Panel title="Delivery" padded={false}>
+    {(settings.kind === "error" || failure) && <div className="pr-del-notes">
       {settings.kind === "error" && <Notice tone="danger" alert>{processMessage(settings)}</Notice>}
       {failure && <Notice tone="danger" alert>{failure}</Notice>}
-      <span>Instructions agents get</span>
-      <Segmented label="Instructions agents get" value={choice.value}
+    </div>}
+    <div className="pr-del-row">
+      <span className="pr-del-label">Instructions agents get</span>
+      <Segmented label="Instructions agents get" value={choice.value} describedBy="agent-instructions-note"
         options={INSTRUCTION_MODES.map(({ value, label }) => ({ value, label }))}
         onValue={(mode) => save({ ...current, mode })} />
-      <p className="secondary">{choice.note}</p>
-      <Switch id="agent-transcripts" label="Keep transcripts for headless Claude runs" checked={current.transcripts}
-        disabledReason={busy ? "Saving..." : undefined} onChecked={(transcripts) => save({ ...current, transcripts })} />
-      <p className="secondary">{current.transcripts
-        ? "Headless Claude runs keep their transcript in the agent's own home."
-        : "Headless Claude runs keep no transcript."}</p>
-      <span>When you edit instructions</span>
-      <Segmented label="When you edit instructions" value={delivery.value}
+      <span className="small muted pr-del-note" id="agent-instructions-note">{choice.note}</span>
+    </div>
+    <div className="pr-del-row">
+      <span className="pr-del-label">When you edit instructions</span>
+      <Segmented label="When you edit instructions" value={delivery.value} describedBy="agent-edits-note"
         options={EDIT_DELIVERIES.map(({ value, label }) => ({ value, label }))}
         onValue={(edits) => save({ ...current, edits })} />
-      <p className="secondary">{delivery.note}</p>
+      <span className="small muted pr-del-note" id="agent-edits-note">{delivery.note}</span>
+    </div>
+    <div className="pr-del-row pr-del-toggle">
+      <span className="pr-del-label"><strong>Keep transcripts</strong><span className="small muted">For headless Claude runs</span></span>
+      <Switch id="agent-transcripts" label="Keep transcripts for headless Claude runs" hideLabel checked={current.transcripts}
+        describedBy="agent-transcripts-note" disabledReason={busy ? "Saving..." : undefined}
+        onChecked={(transcripts) => save({ ...current, transcripts })} />
+      <span className="small muted pr-del-note" id="agent-transcripts-note">{current.transcripts ? "Kept in the agent's own home" : "No transcript kept"}</span>
     </div>
   </Panel>;
 }

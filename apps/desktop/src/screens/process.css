@@ -46,3 +46,10 @@
 .pr-link { border: 0; background: none; padding: 0; font: inherit; color: var(--accent-text); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .pr-link.pr-agent { color: var(--text); text-decoration: none; }
 .pr-link.pr-agent:hover { text-decoration: underline; }
+.pr-del-notes { display: grid; gap: 8px; padding: 12px 16px 0; }
+.pr-del-row { display: grid; gap: 8px; justify-items: start; padding: 12px 16px; }
+.pr-del-row + .pr-del-row { border-top: 1px solid var(--border); }
+.pr-del-label { display: grid; gap: 2px; font-weight: 600; }
+.pr-del-label .small { font-weight: 400; }
+.pr-del-toggle { grid-template-columns: minmax(0, 1fr) auto; align-items: center; justify-items: stretch; }
+.pr-del-toggle .pr-del-note { grid-column: 1 / -1; }

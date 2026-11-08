@@ -689,7 +689,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     let mut shell = opened(scope, "");
     let shown = screen(&mut shell);
     assert!(
-        shown.contains("Agent instructions: Both (app, then project appended)"),
+        shown.contains("Agent instructions: App and project"),
         "{shown}"
     );
     assert!(
@@ -697,7 +697,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         "{shown}"
     );
     assert!(shown.contains("Ctrl-F changes"), "{shown}");
-    assert!(shown.contains("Instruction edits: Next task"), "{shown}");
+    assert!(shown.contains("Instruction edits: At next task"), "{shown}");
     assert!(shown.contains("Ctrl-R changes"), "{shown}");
     let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
     assert!(
@@ -709,10 +709,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     for (mode, words) in [
         (Mode::ProjectOnly, "Agent instructions: Project only"),
         (Mode::AppOnly, "Agent instructions: App only"),
-        (
-            Mode::Both,
-            "Agent instructions: Both (app, then project appended)",
-        ),
+        (Mode::Both, "Agent instructions: App and project"),
     ] {
         shell.key(Key::Ctrl('f'));
         stored.mode = mode;
@@ -760,7 +757,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         ),
         (
             crate::instruction_files::EditDelivery::NextMessage,
-            "Instruction edits: Next task",
+            "Instruction edits: At next task",
             "next task starts with the sections you changed",
         ),
     ] {

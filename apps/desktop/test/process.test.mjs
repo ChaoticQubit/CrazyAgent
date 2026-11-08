@@ -134,7 +134,7 @@ test("As agents read it shows the text the engine gives agents, title and headin
 test("under Project only, Use app default is not offered and an empty file cannot be saved, so agents are never left with no instructions", () => {
   const only = projectPage({ view: "edit", mode: "project_only", subtitle: "This project's file only" });
   assert.doesNotMatch(only, />Use app default<\/button>/);
-  assert.match(plain(only), /Project only gives agents this file alone\. To use the app default, pick Both or App only under Delivery\./);
+  assert.match(plain(only), /Project only gives agents this file alone\. To use the app default, pick App and project or App only under Delivery\./);
   const empty = projectPage({ view: "edit", mode: "project_only", draft: "" });
   assert.match(saveButton(empty), /disabled=""/);
   assert.match(plain(empty), /Under Project only an empty file leaves agents with no instructions\./);
@@ -277,36 +277,34 @@ const html = (text) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").rep
 test("a project's agent settings offer every instructions mode and the transcript switch, the defaults first", () => {
   assert.deepEqual(client.DEFAULT_INSTRUCTION_SETTINGS, { mode: "both", transcripts: true, edits: "next_message" });
   assert.deepEqual(client.INSTRUCTION_MODES.map((choice) => [choice.value, choice.label]),
-    [["project_only", "Project only"], ["app_only", "App only"], ["both", "Both (app, then project appended)"]]);
+    [["both", "App and project"], ["project_only", "Project only"], ["app_only", "App only"]]);
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
   for (const choice of client.INSTRUCTION_MODES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
   const markup = agentSettings();
   assert.match(markup, /Instructions agents get/);
   for (const choice of client.INSTRUCTION_MODES) assert.match(markup, new RegExp(`role="radio"[^>]*>${escaped(choice.label)}</button>`));
-  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Both \(app, then project appended\)</);
-  assert.ok(markup.includes(html(client.INSTRUCTION_MODES[2].note)));
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>App and project</);
+  assert.ok(markup.includes(html(client.INSTRUCTION_MODES[0].note)));
   assert.match(markup, /role="switch"[^>]*aria-checked="true"/);
   assert.match(markup, /Keep transcripts for headless Claude runs/);
-  assert.match(markup, /keep their transcript in the agent&#x27;s own home/);
   assert.doesNotMatch(markup, /Project files|Project and user files/);
   for (const choice of client.INSTRUCTION_MODES) {
     const shown = agentSettings({ settings: { kind: "ok", value: { settings: { mode: choice.value, transcripts: false }, version: 3 } } });
     assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${escaped(choice.label)}</`));
     assert.ok(shown.includes(html(choice.note)), choice.value);
     assert.match(shown, /role="switch"[^>]*aria-checked="false"/);
-    assert.match(shown, /keep no transcript/);
   }
 });
 
-test("every way an instruction edit reaches running agents is offered with what it does, Next task first", () => {
+test("every way an instruction edit reaches running agents is offered with what it does, At next task first", () => {
   assert.deepEqual(client.EDIT_DELIVERIES.map((choice) => [choice.value, choice.label]),
-    [["next_message", "Next task"], ["restart", "Restart when idle"], ["badge", "Badge only"]]);
+    [["next_message", "At next task"], ["restart", "Restart when idle"], ["badge", "Badge only"]]);
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
   for (const choice of client.EDIT_DELIVERIES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
   const markup = agentSettings();
   assert.match(markup, /When you edit instructions/);
   for (const choice of client.EDIT_DELIVERIES) assert.match(markup, new RegExp(`role="radio"[^>]*>${escaped(choice.label)}</button>`));
-  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Next task</);
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>At next task</);
   assert.match(markup, /next task starts with the sections you changed/);
   for (const choice of client.EDIT_DELIVERIES) {
     const shown = agentSettings({ settings: { kind: "ok", value: { settings: { mode: "both", transcripts: true, edits: choice.value }, version: 0 } } });
@@ -314,16 +312,49 @@ test("every way an instruction edit reaches running agents is offered with what 
     assert.ok(shown.includes(html(choice.note)), choice.value);
   }
   assert.match(agentSettings({ settings: { kind: "ok", value: { settings: { mode: "both", transcripts: true }, version: 0 } } }),
-    /role="radio" aria-checked="true"[^>]*>Next task</, "an engine reply without the choice shows the default");
+    /role="radio" aria-checked="true"[^>]*>At next task</, "an engine reply without the choice shows the default");
   assert.match(client.EDIT_DELIVERIES[1].note, /restarts when it is next idle/);
   assert.match(client.EDIT_DELIVERIES[2].note, /shows Instructions changed/);
+});
+
+test("Delivery is compact rows with dividers, each choice with its chosen option's note as a short visible line, then Keep transcripts with its switch on the right and what it keeps (AL8)", () => {
+  const ok = (patch) => ({ settings: { kind: "ok", value: { settings: { ...client.DEFAULT_INSTRUCTION_SETTINGS, ...patch }, version: 0 } } });
+  const note = (id, text) => new RegExp(`<span class="small muted pr-del-note" id="${id}">${escaped(html(text))}</span>`);
+  for (const transcripts of [true, false]) {
+    const markup = agentSettings(ok({ transcripts }));
+    assert.equal((markup.match(/<div class="pr-del-row[ "]/g) ?? []).length, 3, "three rows: instructions, edits, transcripts");
+    const at = (text) => markup.indexOf(text);
+    assert.ok(at(">Instructions agents get<") >= 0 && at(">Instructions agents get<") < at(">When you edit instructions<"), "instructions first");
+    assert.ok(at(">When you edit instructions<") < at("<strong>Keep transcripts</strong>"), "edits before transcripts");
+    assert.match(markup, /<div class="pr-del-row pr-del-toggle"><span class="pr-del-label"><strong>Keep transcripts<\/strong><span class="small muted">For headless Claude runs<\/span><\/span><span class="switch-label"><button id="agent-transcripts"/);
+    assert.match(markup, new RegExp(`role="switch"[^>]*aria-checked="${transcripts}"`));
+    assert.match(markup, /<span id="agent-transcripts-label" class="visually-hidden">Keep transcripts for headless Claude runs<\/span>/);
+    assert.match(markup, note("agent-transcripts-note", transcripts ? "Kept in the agent's own home" : "No transcript kept"));
+    assert.match(markup, /role="switch"[^>]*aria-describedby="agent-transcripts-note"/, "the switch is described by what it keeps");
+    assert.doesNotMatch(markup, /<p[ >]/, "notes are short lines, not help paragraphs");
+    assert.doesNotMatch(markup, / title="/, "no note is left to hover text alone");
+  }
+  for (const choice of client.INSTRUCTION_MODES) {
+    const markup = agentSettings(ok({ mode: choice.value }));
+    assert.match(markup, note("agent-instructions-note", choice.note), `${choice.value}'s note is shown as text`);
+    assert.match(markup, /role="radiogroup" aria-label="Instructions agents get" aria-describedby="agent-instructions-note"/);
+  }
+  for (const choice of client.EDIT_DELIVERIES) {
+    const markup = agentSettings(ok({ edits: choice.value }));
+    assert.match(markup, note("agent-edits-note", choice.note), `${choice.value}'s note is shown as text`);
+    assert.match(markup, /role="radiogroup" aria-label="When you edit instructions" aria-describedby="agent-edits-note"/);
+  }
+  const css = readFileSync(new URL("../src/screens/process.css", import.meta.url), "utf8");
+  assert.match(css, /\.pr-del-row \+ \.pr-del-row \{[^}]*border-top: 1px solid var\(--border\)/, "a divider between rows");
+  assert.match(css, /\.pr-del-toggle \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto/, "the switch sits right of its label");
+  assert.match(css, /\.pr-del-toggle \.pr-del-note \{[^}]*grid-column: 1 \/ -1/, "what the switch keeps runs under the whole row");
 });
 
 test("unreadable agent settings say why and show the defaults so a change replaces them", () => {
   const markup = agentSettings({ settings: { kind: "error", code: "instruction_settings_invalid", message: "" } });
   assert.match(markup, /value CrazyAgent doesn&#x27;t know/);
   assert.doesNotMatch(markup, /instruction_settings_/);
-  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Both \(app, then project appended\)</);
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>App and project</);
   assert.match(agentSettings({ failure: "This project's agent settings couldn't be read. Try again." }), /couldn&#x27;t be read/);
   assert.match(agentSettings({ busy: true }), /Saving\.\.\./);
   assert.match(agentSettings({ settings: { kind: "not_ready" } }), /ready/);
@@ -391,7 +422,7 @@ test("picking an instructions mode, the transcript switch or an edit choice save
     }
     const first = await evaluate("Fixture.saves()");
     await evaluate(`Fixture.mount(${JSON.stringify({ ...client.DEFAULT_INSTRUCTION_SETTINGS, edits: "badge" })})`);
-    clicks.push(await evaluate(`Fixture.click("Next task")`));
+    clicks.push(await evaluate(`Fixture.click("At next task")`));
     return { clicks, saves: [...first, ...await evaluate("Fixture.saves()")] };
   });
   assert.deepEqual(seen.clicks, [true, true, true, true, true, true]);

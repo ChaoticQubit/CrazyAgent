@@ -85,3 +85,31 @@ test("a refused Delete everything reads as its own plain sentence, never the gen
     assert.doesNotMatch(failureCopy(code), /Something went wrong/, code);
   }
 });
+
+test("at the app's smallest and default windows the Delete everything dialog fits its frame, and the top choice, the whole loss list and the Delete button stay in view while the name is typed (AL20)", async () => {
+  const { bundle, withPage } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/remove-dialog-fit.mjs", import.meta.url).pathname);
+  const quiet = preview({ name: "Trash Me", running: [], open_change_sets: 0, losses: [],
+    folders: ["/private/var/folders/_c/xkqxv9g95_10s31wrrbg0ts80000gn/T/ca-rm-4dVIN1/volume/projects/trash-me"] });
+  for (const [width, height] of [[760, 560], [1180, 800]]) {
+    for (const [label, shown] of [["no loss", quiet], ["three losses", preview()]]) {
+      const fit = await withPage(async ({ evaluate, send }) => {
+        await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+        await evaluate(fixture);
+        await evaluate(`Fixture.mount(${JSON.stringify(shown)})`);
+        await evaluate("Fixture.frames()");
+        assert.equal(await evaluate("Fixture.focusName()"), true, "the name box is shown");
+        await evaluate("Fixture.frames()");
+        return evaluate("Fixture.fit()");
+      });
+      const seen = `${width}x${height} ${label}: ${JSON.stringify(fit)}`;
+      assert.equal(fit.window, height, seen);
+      assert.ok(fit.dialog.scroll <= fit.dialog.client && fit.dialog.top === 0, `the frame does not scroll: ${seen}`);
+      assert.ok(fit.body.scroll <= fit.body.client && fit.body.top === 0, `the body fits the frame: ${seen}`);
+      assert.ok(fit.cardTop >= 0 && fit.cardBottom <= fit.frame, `the top choice is in view: ${seen}`);
+      if (label === "no loss") assert.ok(fit.details.scroll <= fit.details.client, `one folder and no loss need no scroll at all: ${seen}`);
+      assert.equal(fit.remove, true, `the Delete everything button is in view: ${seen}`);
+      if (label === "three losses") assert.equal(fit.losses, true, `the whole loss list is in view and no box clips it: ${seen}`);
+    }
+  }
+});
