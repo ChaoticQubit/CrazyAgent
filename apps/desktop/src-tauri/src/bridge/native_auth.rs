@@ -253,7 +253,7 @@ impl NativeBridge {
     /// read (its drawer closed while it showed Cancelling) holds nothing up. Output: none, also
     /// when the engine answers that its own account entry is gone or changed, which leaves it
     /// stuck for the caller's refusal, or the error of another answer the bridge could not
-    /// confirm.
+    /// confirm. This read only checks the sign-in, so a held Claude code prompt stays open.
     async fn confirm_running_auth(&mut self) -> Result<(), BridgeError> {
         let Some(operation) = self
             .native_auth
@@ -262,6 +262,7 @@ impl NativeBridge {
         else {
             return Ok(());
         };
+        let prompt = operation.claude_prompt.clone();
         let scope = operation.original.scope().clone();
         let operation_id = operation.original.id().clone();
         let request = NativeAuthQuery {
@@ -270,7 +271,11 @@ impl NativeBridge {
             operation_id,
         };
         let read = self.controller()?.read_native_auth(request).await;
-        match self.settle_auth(read) {
+        let settled = self.settle_auth(read);
+        if let Some(operation) = self.native_auth.as_mut() {
+            operation.claude_prompt = prompt;
+        }
+        match settled {
             Ok(true) => {}
             Ok(false) => assert!(self.native_auth.as_ref().is_some_and(|value| value.running)),
             Err(error) if error.code == "native_profile_source_conflict" => {
