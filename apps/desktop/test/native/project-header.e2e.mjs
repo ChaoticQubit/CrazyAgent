@@ -157,6 +157,12 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.deepEqual([before.more?.hidden, before.more?.text, before.more?.expanded], [false, "more", "false"], "a cut description offers more");
         await me.capture("head-top");
 
+        execFileSync("git", ["checkout", "-q", "-b", "head-switch"], { cwd: folder, env });
+        let switched = await measure(page);
+        for (const until = Date.now() + STEP_MS; !switched.meta?.text.includes(" head-switch ") && Date.now() < until; switched = await measure(page)) await pause(POLL_MS);
+        assert.ok(switched.meta?.text.includes("larkspur-booking head-switch "), `the meta line follows a branch switch in the project folder without a page reload: ${switched.meta?.text}`);
+        await me.capture("head-branch-switched");
+
         await page.evaluate("document.querySelector('.main').scrollBy(0, 2000)");
         const deadline = Date.now() + STEP_MS;
         let after = await measure(page);
