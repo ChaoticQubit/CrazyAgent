@@ -235,6 +235,22 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.deepEqual([open.more?.text, open.more?.expanded], ["less", "true"], "more opens the whole description");
         assert.ok(open.desc.clientHeight > open.desc.line + 1, `the open description shows more than one line: ${JSON.stringify(open.desc)}`);
         await me.capture("head-open");
+
+        const paused = async (want) => {
+          let team = await value(bridge, "desktop_team_status", { id: project });
+          for (const until = Date.now() + STEP_MS; team.paused !== want && Date.now() < until; team = await value(bridge, "desktop_team_status", { id: project })) await pause(POLL_MS);
+          return team.paused;
+        };
+        assert.equal(await paused(false), false, "the team starts running");
+        await me.click("Project actions", "button[aria-label='Project actions']");
+        await me.click("Stop all", "[role=menuitem]");
+        await me.waitFor("the Stop all confirm", (text) => text.includes("Stop every agent of this project?"), STEP_MS);
+        await me.capture("menu-stop-all");
+        await me.click("Stop all", "dialog[open] button");
+        assert.equal(await paused(true), true, "Stop all in the project menu stops every agent of the project in the engine");
+        await me.click("Project actions", "button[aria-label='Project actions']");
+        await me.click("Start all again", "[role=menuitem]");
+        assert.equal(await paused(false), false, "Start all again in the project menu starts them again");
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
