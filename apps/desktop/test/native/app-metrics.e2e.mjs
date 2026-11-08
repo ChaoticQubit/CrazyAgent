@@ -5,7 +5,7 @@ import { POLL_MS } from "./e2e-harness.mjs";
 import { USAGE_MS, handOff, onEngine, tileParts, turnsOf } from "./codex-task-engine.mjs";
 
 const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
-const PROJECT_HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Share of tokens"];
+const PROJECT_HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Merges", "Share of tokens"];
 
 /** Reads what a Metrics page shows: the range line, each tile's lines, the project filter's
  * value and choices, and the breakdown's header and rows. Input: the page. Output: the

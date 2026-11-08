@@ -169,6 +169,36 @@ fn merge_counts(
     .map_err(storage)
 }
 
+fn project_merges(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+    rows: &mut [GroupRow],
+) -> Result<(), EngineError> {
+    if rows.is_empty() || !has_table(db, "project_activity")? {
+        return Ok(());
+    }
+    let mut statement = db
+        .prepare(
+            "SELECT project,COUNT(*) FROM project_activity
+             WHERE kind IN ('lead_merged','merged_into_main') AND at_ms>=?2
+               AND (?1 IS NULL OR project=?1)
+             GROUP BY project",
+        )
+        .map_err(storage)?;
+    let counts: HashMap<String, u64> = statement
+        .query_map(params![project, since_ms], |row| {
+            Ok((row.get::<_, String>(0)?, count(row.get(1)?)))
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    for row in rows {
+        row.merges = counts.get(&row.key).copied().unwrap_or(0);
+    }
+    Ok(())
+}
+
 fn series(
     db: &Connection,
     project: Option<&str>,
@@ -507,6 +537,8 @@ pub fn read(
     let [running, tasks_waiting, tasks_done, tasks_failed] = task_counts(db, project, since_ms)?;
     let [merges, merges_into_main, merges_undone] = merge_counts(db, project, since_ms)?;
     let bucket_ms = bucket_for(span_ms);
+    let mut projects = groups(db, "project", project, since_ms)?;
+    project_merges(db, project, since_ms, &mut projects)?;
     let metrics = fit(Metrics {
         running,
         tasks_waiting,
@@ -518,7 +550,7 @@ pub fn read(
         bucket_ms,
         series: series(db, project, since_ms, bucket_ms)?,
         runs: runs(db, project, since_ms)?,
-        projects: groups(db, "project", project, since_ms)?,
+        projects,
         agents: agents(db, project, since_ms)?,
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,

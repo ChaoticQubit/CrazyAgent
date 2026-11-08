@@ -115,6 +115,7 @@ export interface MetricsGroup {
   runs: number;
   projects: string[];
   more_projects: number;
+  merges: number;
 }
 
 export interface MetricsAgent {

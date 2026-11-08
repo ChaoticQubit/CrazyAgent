@@ -222,8 +222,8 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
   const projectColumn = across && (by === "agent" || by === "run");
   if (by === "project") {
     return {
-      head: "Project", extra: ["Agents", "Runs"], projectColumn,
-      rows: metrics.projects.map((row) => ({ key: row.key, name: projectName(row.key), tokens: row.tokens, extra: [String(row.agents), String(row.runs)] })),
+      head: "Project", extra: ["Agents", "Runs", "Merges"], projectColumn,
+      rows: metrics.projects.map((row) => ({ key: row.key, name: projectName(row.key), tokens: row.tokens, extra: [String(row.agents), String(row.runs), String(row.merges)] })),
     };
   }
   if (by === "run") {
