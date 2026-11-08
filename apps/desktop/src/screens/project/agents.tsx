@@ -13,7 +13,7 @@ import { FinishedAgentsCleanup } from "./cleanup";
 import type { ResearchRow } from "./research";
 import { FinishedAgentsPanel, TeamPanel } from "./team";
 import { TeamGraphView } from "../team";
-import { TeamControls } from "../team/controls";
+import { SETTING_GROUPS, TeamActions, TeamControls, type SettingGroupId } from "../team/controls";
 import { TeamEventsPanel } from "../team/wake-rules";
 import { QuestionsPanel } from "../team/questions";
 import { cardActivity } from "../dashboard";
@@ -63,9 +63,25 @@ function AgentLog({ data, job }: { data: ProjectData; job: ResearchJob }) {
   </div>;
 }
 
-/** Agents tab: the live team panel, then every research agent the project has started, with live
- * progress from the engine. Input: the project data. Output: the tab; rows refresh while they poll. */
-export function AgentsTab({ data }: { data: ProjectData }) {
+/** Which view of the Agents tab a route opens: Agent settings for "settings" or a setting
+ * group's id, at that group, and the Team view for anything else. Input: the route's section.
+ * Output: the view and the group to open at. */
+export function agentsView(section: string | undefined): { view: "team" | "settings"; group: SettingGroupId | null } {
+  if (section === "settings") return { view: "settings", group: null };
+  const group = SETTING_GROUPS.find((item) => item.id === section);
+  return group ? { view: "settings", group: group.id } : { view: "team", group: null };
+}
+
+const AGENTS_VIEWS: { value: "team" | "settings"; label: string }[] = [{ value: "team", label: "Team" }, { value: "settings", label: "Agent settings" }];
+
+/** Agents tab: Team, the live team panel with the team's actions and every research agent the
+ * project has started, with live progress from the engine; or Agent settings, grouped as the
+ * approved mockup shows them. Inputs: the project data and the route's section, which opens
+ * Agent settings, at a group when it names one. Output: the tab; rows refresh while they poll. */
+export function AgentsTab({ data, section }: { data: ProjectData; section?: string }) {
+  const opened = agentsView(section);
+  const [shownView, setShownView] = useState<"team" | "settings">(opened.view);
+  useEffect(() => { setShownView(opened.view); }, [section]);
   const [filter, setFilter] = useState<"running" | "all">("running");
   const [stopping, setStopping] = useState<ResearchJob | null>(null);
   const [note, setNote] = useState("");
@@ -108,7 +124,16 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     settle(await retryResearch(data.id, job.id, nextGeneration()), `${displayText(job.kind_label)} is queued again.`, "trying research again");
   }
 
+  const viewSwitch = <Segmented label="Agents view" value={shownView} onValue={setShownView} options={AGENTS_VIEWS} />;
+  if (shownView === "settings") return <div className="pj-stack">
+    <div className="pj-row between">{viewSwitch}</div>
+    {team.result === undefined && <p className="pj-muted" role="status">Loading...</p>}
+    {team.result?.kind === "not_ready" && <NotReady what="the live team isn't in this build." />}
+    {team.result?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team.result)}</p>}
+    {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} reload={data.reloadTeam} data={data} group={opened.group} />}
+  </div>;
   return <div className="pj-stack">
+    <div className="pj-row between">{viewSwitch}</div>
     <div className="pj-row between">
       <Segmented label="Show" value={filter} onValue={setFilter}
         options={[{ value: "running", label: `Running (${running.length + teamCount("running")})` }, { value: "all", label: `All (${jobs.length + teamCount("all")})` }]} />
@@ -121,7 +146,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <QuestionsPanel projectId={data.id} onOpen={setTerminal} />
     <TeamGraphView projectId={data.id} perWindow={teamValue.terminals_per_window ?? 6} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)} />
-    {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
+    {team.result?.kind === "ok" && <TeamActions projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
     {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
     <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />
     {finishedRows(teamValue, (id) => id, team.at).length > 0

@@ -3,7 +3,7 @@ import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
-import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
+import type { AgentAccess, AgentNetwork, AgentPolicy, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
 import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
 import { AccessLevels, FULL_ACCESS_WARNING, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
@@ -66,6 +66,33 @@ export function poolSaved(name: string | null): string {
   return name === null ? "This project has no pool now. Pick a pool to start." : `${name} is assigned.`;
 }
 
+/** Assigns a project's pool as the Pool section does: the pool first, then the project details
+ * name it too, then the project and its pools are read again. Inputs: the project data, the
+ * stored setup or null, and the pool id or null for none. Output: the error to show, empty once
+ * both steps applied, when the owner is told which pool is assigned. */
+export async function savePool(data: Pick<ProjectData, "id" | "pools" | "assigned" | "notify" | "reload" | "reloadPools">, setup: StoredSetup | null, choice: string | null): Promise<string> {
+  const steps = poolSteps(data.assigned?.pool.id ?? null, setup ? setup.pool : undefined, choice);
+  const found = choice === null ? undefined : valueOf(data.pools)?.find((item) => item.pool.id === choice);
+  const name = choice === null ? null : found ? poolName(found.pool) : "The pool";
+  let error = "";
+  if (steps.assign) {
+    const assigned = await setProjectPool(data.id, choice, nextGeneration());
+    error = assigned.kind !== "ok" ? failureCopy(assigned.kind === "error" ? assigned.code : "unknown")
+      : assigned.value.kind === "rejected" ? failureCopy(assigned.value)
+        : assigned.value.kind === "unconfirmed" ? "We couldn't confirm your last change. Check it and save again." : "";
+  }
+  if (!error && steps.record && setup) {
+    const recorded = await updateProjectSetup(data.id, { ...setupOf(setup, setup.team), pool: choice }, nextGeneration(), null, setup.revision);
+    if (recorded.kind !== "ok" || receiptState(recorded.value).kind !== "applied") {
+      error = `${choice === null ? "The project has no pool" : `${name} is assigned`}, but the project details still name the old pool. Save again.`;
+    }
+  }
+  data.reloadPools();
+  data.reload();
+  if (!error) data.notify(poolSaved(name));
+  return error;
+}
+
 function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {
   const pools = valueOf(data.pools);
   const [summaries] = useLoad(poolSummaries, [data.id], "pool-summaries");
@@ -77,25 +104,7 @@ function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | 
 
   async function save() {
     setState({ busy: true, error: "" });
-    const found = choice === null ? undefined : valueOf(data.pools)?.find((item) => item.pool.id === choice);
-    const name = choice === null ? null : found ? poolName(found.pool) : "The pool";
-    let error = "";
-    if (steps.assign) {
-      const assigned = await setProjectPool(data.id, choice, nextGeneration());
-      error = assigned.kind !== "ok" ? failureCopy(assigned.kind === "error" ? assigned.code : "unknown")
-        : assigned.value.kind === "rejected" ? failureCopy(assigned.value)
-          : assigned.value.kind === "unconfirmed" ? "We couldn't confirm your last change. Check it and save again." : "";
-    }
-    if (!error && steps.record && setup) {
-      const recorded = await updateProjectSetup(data.id, { ...setupOf(setup, setup.team), pool: choice }, nextGeneration(), null, setup.revision);
-      if (recorded.kind !== "ok" || receiptState(recorded.value).kind !== "applied") {
-        error = `${choice === null ? "The project has no pool" : `${name} is assigned`}, but the project details still name the old pool. Save again.`;
-      }
-    }
-    setState({ busy: false, error });
-    data.reloadPools();
-    data.reload();
-    if (!error) data.notify(poolSaved(name));
+    setState({ busy: false, error: await savePool(data, setup, choice) });
   }
 
   return <div className="pj-stack">
@@ -113,17 +122,27 @@ function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | 
   </div>;
 }
 
+/** Saves a project's team as the Team section does: the stored setup with this team, at the
+ * setup revision shown, so a save from an older read is refused. Inputs: the project data, the
+ * stored setup and the team. Output: the note to show, empty once the engine applied it, when
+ * the owner is told and the project is read again. */
+export async function saveTeam(data: Pick<ProjectData, "id" | "notify" | "reload">, setup: StoredSetup, team: TeamDraft): Promise<string> {
+  const result = await updateProjectSetup(data.id, setupOf(setup, team), nextGeneration(), null, setup.revision);
+  if (result.kind === "not_ready") return "Not ready yet: changing a project's team isn't in this build.";
+  if (result.kind === "error") return failureCopy(result);
+  const state = receiptState(result.value);
+  if (state.kind !== "applied") return state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.";
+  data.notify("Team saved.");
+  data.reload();
+  return "";
+}
+
 function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup }) {
   const harnesses = valueOf(data.harnesses);
   const [team, setTeam] = useState<TeamDraft>(setup.team);
   const [note, setNote] = useState("");
   async function save() {
-    const result = await updateProjectSetup(data.id, setupOf(setup, team), nextGeneration(), null, setup.revision);
-    if (result.kind === "not_ready") return setNote("Not ready yet: changing a project's team isn't in this build.");
-    if (result.kind === "error") return setNote(failureCopy(result));
-    const state = receiptState(result.value);
-    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
-    if (state.kind === "applied") { data.notify("Team saved."); data.reload(); }
+    setNote(await saveTeam(data, setup, team));
   }
   return <div className="pj-stack">
     <h2>Team</h2>
@@ -287,6 +306,13 @@ export const READ_PATHS_STALE = "These folders changed since you opened them. Th
  * it, once it shows the saved access again. */
 export const ACCESS_STALE = "Agent access changed since you opened it. The page now shows the saved access; make your change again.";
 
+const ACCESS_NOT_READY = "Not ready yet: agent access isn't in this build.";
+
+/** What the owner is told once agent access is saved. Input: the saved level. Output: the line. */
+export function accessSaved(access: AgentAccess): string {
+  return `Agent access saved: ${accessLabel(access)}. Agents and master turns started from now on use it.`;
+}
+
 /** Whether a versioned save, such as read-only folders or agent access, was refused because
  * the value changed since the screen read it, so the screen reads it again instead of
  * resending the same old version. Input: the save's result. Output: true for that refusal. */
@@ -442,6 +468,23 @@ function HiddenSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+/** Saves a project's agent access as the Agent access section does, at the policy version
+ * shown; a save from an older read reads the policy again and says so. Inputs: the project id,
+ * the policy shown and the policy to save. Output: the note to show, empty once the engine
+ * applied it, and the policy read again, or null when it was not read. */
+export async function saveAccess(projectId: string, view: PolicyView, policy: AgentPolicy): Promise<{ note: string; fresh: PolicyView | null }> {
+  const result = await saveAgentPolicy(projectId, policy, view.version, nextGeneration());
+  if (savedStale(result)) {
+    const fresh = await loadAgentPolicy(projectId);
+    return fresh.kind === "ok" ? { note: ACCESS_STALE, fresh: fresh.value } : { note: "Agent access changed since you opened it. Reopen this page to see it.", fresh: null };
+  }
+  if (result.kind !== "ok") return { note: result.kind === "not_ready" ? ACCESS_NOT_READY : failureCopy(result), fresh: null };
+  const state = receiptState(result.value);
+  if (state.kind !== "applied") return { note: state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.", fresh: null };
+  const fresh = await loadAgentPolicy(projectId);
+  return { note: "", fresh: fresh.kind === "ok" ? fresh.value : null };
+}
+
 function AccessSection({ data }: { data: ProjectData }) {
   const [view, setView] = useState<PolicyView | null>(null);
   const [access, setAccess] = useState<AgentAccess>("sandboxed");
@@ -451,7 +494,7 @@ function AccessSection({ data }: { data: ProjectData }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
-  const notReady = "Not ready yet: agent access isn't in this build.";
+  const notReady = ACCESS_NOT_READY;
   function seed(next: PolicyView) {
     setView(next);
     setAccess(next.access);
@@ -473,28 +516,11 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const result = await saveAgentPolicy(data.id, policyOf(view, access, network, allowed, ideGitHooks), view.version, nextGeneration());
-    if (savedStale(result)) {
-      const fresh = await loadAgentPolicy(data.id);
-      setBusy(false);
-      if (fresh.kind !== "ok") return setNote("Agent access changed since you opened it. Reopen this page to see it.");
-      seed(fresh.value);
-      return setNote(ACCESS_STALE);
-    }
-    if (result.kind !== "ok") {
-      setBusy(false);
-      return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
-    }
-    const state = receiptState(result.value);
-    if (state.kind !== "applied") {
-      setBusy(false);
-      return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
-    }
-    const fresh = await loadAgentPolicy(data.id);
+    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks));
     setBusy(false);
-    if (fresh.kind === "ok") seed(fresh.value);
-    setNote("");
-    data.notify(`Agent access saved: ${accessLabel(access)}. Agents and master turns started from now on use it.`);
+    if (saved.fresh) seed(saved.fresh);
+    setNote(saved.note);
+    if (saved.note === "") data.notify(accessSaved(access));
   }
 
   const changed = view !== null && (access !== view.access || network !== view.network || ideGitHooks !== view.ide_git_hooks || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));

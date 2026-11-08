@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { AGENTS_VIEW, INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
@@ -178,8 +178,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.enable");
         await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
-        await me.waitFor("the Catch up with main setting on the Agents tab", (text) => text.includes(SETTING));
+        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents?section=settings` });
+        await me.waitFor("the Catch up with main setting in Agent settings", (text) => text.includes(SETTING));
         const reload = async () => {
           await page.evaluate("window.__e2eBeforeReload = true");
           await page.send("Page.reload", { ignoreCache: true });
@@ -237,11 +237,12 @@ function showSetting(page) {
   return page.evaluate(`document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"]`)}).scrollIntoView({ block: "center" })`);
 }
 
-/** Hands a task to a Codex sub-agent from the Agents tab, as the owner does, and waits until
- * the engine finished it and its stand-in kept what `done` waits for. Inputs: the owner on the
- * page, the page, the project, the engine root, the task's words and the wait. Output: what
- * `taskRow` reads then. */
+/** Hands a task to a Codex sub-agent from the Agents tab's Team view, as the owner does, and
+ * waits until the engine finished it and its stand-in kept what `done` waits for. Inputs: the
+ * owner on the page, the page, the project, the engine root, the task's words and the wait.
+ * Output: what `taskRow` reads then. */
 async function handOff(me, page, project, runtime, prompt, done) {
+  await me.click("Team", AGENTS_VIEW);
   const picked = await page.evaluate(`(() => {
     const select = document.getElementById(${JSON.stringify(`tg-hand-to-${project}`)});
     if (!select || select.disabled || ![...select.options].some((option) => option.value === "codex")) return false;

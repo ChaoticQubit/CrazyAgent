@@ -108,7 +108,7 @@ test("the Task-start reminder row follows Workflow nudges with On as the default
   assert.equal(coord.COORD_DEFAULTS.task_start, "on");
   for (const [option, checked] of [["on", "On"], ["off", "Off"]]) {
     const status = { project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, task_start: option }, harnesses: [] } };
-    const markup = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden }));
+    const markup = renderToStaticMarkup(createElement(coord.ToolsControls, { projectId: "p", status, reload: forbidden }));
     const nudges = markup.indexOf('aria-label="Workflow nudges"');
     const reminder = markup.indexOf('aria-label="Task-start reminder"');
     const counted = markup.indexOf('aria-label="Counted tools"');
@@ -119,4 +119,62 @@ test("the Task-start reminder row follows Workflow nudges with On as the default
     assert.match(row, /ToolSearch/, option);
     assert.match(row, /first turn of each task/, option);
   }
+});
+
+/** Installs a fake engine holding each project's coordination settings: a team read answers
+ * with them, and a save stores what it sends unless it is refused, counting how many saves run
+ * at once. Input: the settings by project id. Output: the saves sent and that most. */
+function coordEngine(stored) {
+  const seen = { sent: [], most: 0 };
+  let running = 0;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command, args) {
+    if (command === "desktop_team_status") {
+      if (!(args.id in stored)) throw `Command ${command} not found`;
+      return { project_id: args.id === "wrong" ? "other" : args.id, coordination: { settings: { ...stored[args.id] }, harnesses: [] } };
+    }
+    assert.equal(command, "desktop_team_coordination");
+    running += 1;
+    seen.most = Math.max(seen.most, running);
+    seen.sent.push(args.settings);
+    await new Promise((done) => setTimeout(done, 20));
+    running -= 1;
+    const refused = args.settings.claude_display === "fullscreen";
+    if (!refused) stored[args.id] = { ...args.settings };
+    return { outcome: "applied", pending: false, rejection: refused ? "team_settings_invalid" : null };
+  } } };
+  return seen;
+}
+
+const pick = (settings) => [settings.overlaps, settings.nudges, settings.task_start, settings.claude_display];
+
+test("quick coordination saves from any row keep every change: one save at a time, each laid on the engine's newest settings", async () => {
+  assert.equal(typeof coord.saveCoordSettings, "function", "coordination.tsx has one save path for coordination settings");
+  const engine = coordEngine({ p1: { ...coord.COORD_DEFAULTS }, p2: { ...coord.COORD_DEFAULTS } });
+  const both = await Promise.all([coord.saveCoordSettings("p1", { overlaps: "block" }), coord.saveCoordSettings("p1", { nudges: "ten_minutes" })]);
+  assert.deepEqual(both.map((result) => result.kind), ["ok", "ok"]);
+  assert.equal(engine.most, 1, "one coordination save runs at a time");
+  assert.deepEqual(engine.sent.map(pick), [["block", "off", "on", "classic"], ["block", "ten_minutes", "on", "classic"]], "the second save keeps Block");
+  await coord.saveCoordSettings("p1", { claude_display: "fullscreen" });
+  await coord.saveCoordSettings("p1", { nudges: "first_edit" });
+  assert.deepEqual(pick(engine.sent[3]), ["block", "first_edit", "on", "classic"], "a refused save is not built on");
+  await coord.saveCoordSettings("p2", { task_start: "off" });
+  assert.deepEqual(pick(engine.sent[4]), ["warn", "off", "off", "classic"], "each project keeps its own saves");
+});
+
+test("a coordination save keeps the value the TUI or another window set since, even one equal to an older read, and sends nothing when the team read fails", async () => {
+  const stored = { p: { ...coord.COORD_DEFAULTS } };
+  const engine = coordEngine(stored);
+  await coord.saveCoordSettings("p", { overlaps: "block" });
+  stored.p = { ...stored.p, overlaps: "warn" };
+  await coord.saveCoordSettings("p", { nudges: "ten_minutes" });
+  assert.deepEqual(pick(engine.sent[1]), ["warn", "ten_minutes", "on", "classic"], "Warn set back elsewhere stays");
+  stored.p = { ...stored.p, overlaps: "block" };
+  await coord.saveCoordSettings("p", { task_start: "off" });
+  assert.deepEqual(pick(engine.sent[2]), ["block", "ten_minutes", "off", "classic"], "Block set elsewhere stays");
+  assert.deepEqual((await coord.saveCoordSettings("missing", { nudges: "off" })).kind, "not_ready", "a failed team read is the save's result");
+  assert.equal(engine.sent.length, 3, "nothing is sent without the engine's settings");
+  assert.throws(() => coord.saveCoordSettings("p", {}), /changes at least one setting/);
+  stored.wrong = { ...coord.COORD_DEFAULTS };
+  await assert.rejects(coord.saveCoordSettings("wrong", { nudges: "off" }), /its own project's team read/);
+  assert.equal(engine.sent.length, 3, "a save on another project's read sends nothing");
 });

@@ -210,8 +210,8 @@ async function acceptPreselected(me, lands, branch) {
 
 test("Land on: the master's branch receives a finished agent's merge by default and again after the owner switches back from a named branch", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-lo-m-", async ({ project, repo, worktree, tips, me, page, open, status, recordTurn, addAgent }) => {
-    await open("agents");
-    await me.waitFor("the Land on setting on the Agents tab", (text) => text.includes("Land on") && text.includes("Empty uses the master's branch."));
+    await open("agents?section=access");
+    await me.waitFor("the Land on setting in Agent settings", (text) => text.includes("Land on") && text.includes("Empty uses the master's branch."));
     assert.equal((await status()).land_on ?? null, null, "Land on starts as the master's branch");
     await saveBranch(me, "Master's branch", `tg-master-branch-${project}`, "main", "master_branch", status);
     await saveBranch(me, "Land on", `tg-land-on-${project}`, "stage", "land_on", status);
@@ -250,8 +250,8 @@ test("Land on: the master's branch receives a finished agent's merge by default 
 
 test("Land on: a named branch checked out nowhere receives the merge and the owner's checkout is untouched", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-lo-n-", async ({ project, repo, worktree, tips, me, open, status, recordTurn, addAgent }) => {
-    await open("agents");
-    await me.waitFor("the Land on setting on the Agents tab", (text) => text.includes("Land on") && text.includes("Empty uses the master's branch."));
+    await open("agents?section=access");
+    await me.waitFor("the Land on setting in Agent settings", (text) => text.includes("Land on") && text.includes("Empty uses the master's branch."));
     await me.type(`[id="tg-land-on-${project}"]`, "not a branch");
     await me.click("Save", 'form[aria-label="Land on"] button');
     await me.waitFor("the plain refusal for a bad branch name", (text) => text.includes("Type a branch name such as stage or release/2.0, or leave it empty for the master's branch."));
@@ -286,8 +286,8 @@ test("Land on: a named branch checked out nowhere receives the merge and the own
 
 test("Land on: a deleted Land on branch is named in the Accept dialog, which lands nowhere until the owner picks a branch", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-lo-d-", async ({ project, repo, worktree, tips, me, page, open, status, recordTurn, addAgent }) => {
-    await open("agents");
-    await me.waitFor("the Land on setting on the Agents tab", (text) => text.includes("Land on") && text.includes("Empty uses the master's branch."));
+    await open("agents?section=access");
+    await me.waitFor("the Land on setting in Agent settings", (text) => text.includes("Land on") && text.includes("Empty uses the master's branch."));
     await saveBranch(me, "Land on", `tg-land-on-${project}`, "stage", "land_on", status);
 
     git(repo, "worktree", "add", "-q", "--detach", worktree, tips.stage);

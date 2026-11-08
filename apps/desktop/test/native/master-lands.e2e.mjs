@@ -18,9 +18,9 @@ const GIT = "/usr/bin/git";
 const MASTER = "master-1";
 const MASTER_LABEL = "Master";
 const PROMPT = "Fix the seed service conflict";
-const SETTING = "When the master resolves conflicts";
-const MERGES = "Merge into main itself";
-const WAITS = "Wait for my Accept";
+const SETTING = "Under Full access, merging into main";
+const MERGES = "Master resolves conflicts and merges into main itself Default";
+const WAITS = "Master resolves conflicts, then waits for my accept";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const README = "# Seed service\n\nServes seeds over HTTP.\n";
 
@@ -163,8 +163,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
  * waits until the engine keeps it and the tab shows it picked. Inputs: the case's handles,
  * the choice's label and the engine's name for it. Output: none. */
 async function choose({ me, page, status }, label, mode) {
-  await me.click(label, `[role=radiogroup][aria-label="${SETTING}"] [role=radio]`);
-  const picked = `document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"] [role=radio][aria-checked=true]`)})?.innerText.trim() ?? null`;
+  await me.click(label, `[role=radiogroup][aria-label="${SETTING}"] .radio-card .title`);
+  const picked = `document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"] .radio-card:has(input:checked) .title`)})?.innerText.replace(/\\s+/g, " ").trim() ?? null`;
   for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
     const held = (await status()).master_lands;
     if (held === mode && (await page.evaluate(picked)) === label) return;
@@ -181,8 +181,8 @@ function waiting(sets, id) {
 test("below Full access the master merge setting is off, the master's edit waits for the owner's Accept and its merge of another agent's set is refused", { timeout: 600000 }, async (t) => {
   await withProject(t, "sandboxed", async (run) => {
     const { me, page, open, masterTurn, masterFix, changes, status, activity, repo } = run;
-    await open("agents", SETTING);
-    const row = await page.evaluate(`[...document.querySelectorAll(".pj-row")].find((node) => node.textContent.includes(${JSON.stringify(SETTING)}))?.innerText ?? ""`);
+    await open("agents?section=access", SETTING);
+    const row = await page.evaluate(`document.querySelector(${JSON.stringify(`.set-row[data-setting="${SETTING}"]`)})?.innerText ?? ""`);
     assert.match(row, /Only at Full access\./, "the row says the setting needs Full access");
     assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"]`)})`), null, "no choice is offered below Full access");
     assert.equal((await status()).master_lands, null, "the engine offers no choice below Full access");
@@ -203,7 +203,7 @@ test("below Full access the master merge setting is off, the master's edit waits
 test("at Full access Merge into main itself lands the master's conflict fix on main with no Accept and Activity lists it, while an ordinary master edit waits", { timeout: 600000 }, async (t) => {
   await withProject(t, "full", async (run) => {
     const { me, open, masterTurn, masterFix, changes, status, activity, repo, start } = run;
-    await open("agents", SETTING);
+    await open("agents?section=access", SETTING);
     assert.equal((await status()).master_lands, "merges", "Full access starts with Merge into main itself");
     await choose(run, WAITS, "waits");
     await choose(run, MERGES, "merges");
@@ -233,7 +233,7 @@ test("at Full access Merge into main itself lands the master's conflict fix on m
 test("at Full access Wait for my Accept leaves the master's fix in Changes", { timeout: 600000 }, async (t) => {
   await withProject(t, "full", async (run) => {
     const { me, open, masterFix, changes, activity, repo } = run;
-    await open("agents", SETTING);
+    await open("agents?section=access", SETTING);
     await choose(run, WAITS, "waits");
     await me.capture("full-waits-agents");
 

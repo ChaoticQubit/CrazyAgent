@@ -273,7 +273,7 @@ test("Agents tab coordination: each harness's mode and delivery, questions, over
     await until(`the Agents tab showing ${what}`, words, shown);
   };
 
-  await open(`#/projects/${encodeURIComponent(project)}/agents`, "the Coordination settings on the Agents tab", (text) => text.includes("Coordination") && text.includes("Counted tools"));
+  await open(`#/projects/${encodeURIComponent(project)}/agents?section=coord`, "the Coordination settings in Agent settings", (text) => text.includes("Coordination") && text.includes("Counted tools"));
   const wanted = {
     harnesses: [["claude-code", "app_spawned", "auto"], ["codex", "app_spawned", "auto"], ["rcli", "app_spawned", "auto"]],
     questions: "lead", overlaps: "warn", nudges: "off", counted: DEFAULT_COUNTED,

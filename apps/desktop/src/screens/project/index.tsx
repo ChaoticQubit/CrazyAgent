@@ -22,7 +22,7 @@ import { ImportMoveBanner, InstructionImportPrompt, ProcessEditor } from "../pro
 import { QuestionsTab } from "./questions";
 import { pauseSummary, shouldPoll } from "./research";
 import { RecoveryBanner } from "./recovery-banner";
-import { valueOf } from "./shared";
+import { routeSection, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
 import { TeamActivity } from "./team-activity";
@@ -174,7 +174,7 @@ function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly
 
 function hashSection(): string | undefined {
   if (typeof window === "undefined") return undefined;
-  return new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("section") ?? undefined;
+  return routeSection(window.location.hash);
 }
 
 /** The project page: header, tabs and the selected tab, read from the engine.
@@ -260,7 +260,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
-      {active === "agents" && <AgentsTab data={data} />}
+      {active === "agents" && <AgentsTab data={data} section={settingsSection} />}
       {active === "changes" && <ChangesTab data={data} />}
       {active === "questions" && <QuestionsTab data={data} />}
       {active === "context" && <ContextTab data={data} />}

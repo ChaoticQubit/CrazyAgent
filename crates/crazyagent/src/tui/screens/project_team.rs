@@ -21,9 +21,8 @@ use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
     CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, SwitchApply,
-    SwitchMode,
-    TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus,
-    TeamTask,
+    SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness,
+    TeamStatus, TeamTask,
 };
 use crate::tui::keys::Key;
 use crate::tui::seam::AccountRow;
