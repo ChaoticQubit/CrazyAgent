@@ -87,10 +87,10 @@ test("a read the engine cut counts each goal with a plus", () => {
   const now = 10 * 60_000;
   const items = Array.from({ length: 10 }, (_, i) => item(100 + i, now - i * 60_000, "Build the service"));
   const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: true, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
-  assert.match(html, /10\+ items · latest just now/);
+  assert.match(html, /10\+ items · last just now/);
   assert.match(html, />Show all \(10\+\)</);
   const whole = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
-  assert.match(whole, /10 items · latest just now/);
+  assert.match(whole, /10 items · last just now/);
 });
 
 test("the project's creation shows under Project", () => {
@@ -143,8 +143,21 @@ test("a goal's header shows its phase path, done steps checked and the latest st
   const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
   assert.match(html, /<span class="pj-activity-path"[^>]*><span class="done">✓ Architecture<\/span><span class="now">Building<\/span><\/span>/);
   assert.equal(html.match(/class="pj-activity-path"/g)?.length, 1, "a goal with no phase shows no path");
-  assert.match(html, /3 items · latest just now/);
-  assert.match(html, /1 item · latest 5 min ago/i);
+  assert.match(html, /3 items · last just now/);
+  assert.match(html, /1 item · last 5 min ago/i);
+});
+
+test("an activity row names who acted as the mockup does: You for the owner, the master merging by itself at Full access (AL2)", () => {
+  const now = Date.UTC(2026, 10, 8, 7, 0);
+  const items = [
+    item(3, now, null, { kind: "merged_into_main", actor: "Master", text: "Master merged change set #15 (Juniper: calendar API) into main" }),
+    item(2, now - 60_000, null, { kind: "accepted", actor: "Owner", text: "You accepted change set #14 (Wren: checkout UI, 9 files)" }),
+    item(1, now - 2 * 60_000, null, { kind: "task_started", actor: "Wren", text: "Started the checkout UI" }),
+  ];
+  const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
+  const actors = [...html.matchAll(/class="pj-small pj-muted pj-activity-by">([^<]*)</g)].map((match) => match[1]);
+  assert.deepEqual(actors, ["Master · Full access, merged by itself", "You", "Wren"]);
+  assert.match(html, /3 items · last just now/);
 });
 
 test("a goal named Project or Research is told apart from the events with no goal, in groups and in Timeline", () => {
