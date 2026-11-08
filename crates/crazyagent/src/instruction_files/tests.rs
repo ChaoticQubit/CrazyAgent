@@ -933,14 +933,16 @@ mod import {
             uncommitted_import(&checkout.folder).unwrap(),
             UncommittedImport {
                 files: Vec::new(),
-                branch: None
+                branch: None,
+                checked_out: Some("main".to_owned())
             },
-            "no move waits, so no branch is read"
+            "no move waits, so no branch is named for a refusal, and the head still reads it"
         );
         import(&checkout.folder).unwrap();
         let waiting = |branch: Option<&str>| UncommittedImport {
             files: vec!["CLAUDE.md".to_owned(), ".claude/CLAUDE.md".to_owned()],
             branch: branch.map(str::to_owned),
+            checked_out: branch.map(str::to_owned),
         };
         assert_eq!(
             uncommitted_import(&checkout.folder).unwrap(),
@@ -980,7 +982,8 @@ mod import {
             uncommitted_import(&checkout.folder).unwrap(),
             UncommittedImport {
                 files: vec!["CLAUDE.md".to_owned(), ".claude/CLAUDE.md".to_owned()],
-                branch: None
+                branch: None,
+                checked_out: None
             },
             "a branch that is not UTF-8 is not named, and the move still waits"
         );

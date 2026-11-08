@@ -461,8 +461,10 @@ async fn the_import_move_is_listed_committed_and_refused_again_through_the_owner
             .unwrap(),
         crate::engine::owner::UncommittedImport {
             files: Vec::new(),
-            branch: None
-        }
+            branch: None,
+            checked_out: Some("main".to_owned())
+        },
+        "the reply names the checked-out branch for the project head while no move waits"
     );
     let moved = client
         .confirm_instruction_import(project.clone())
@@ -482,7 +484,8 @@ async fn the_import_move_is_listed_committed_and_refused_again_through_the_owner
             .unwrap(),
         crate::engine::owner::UncommittedImport {
             files: vec!["CLAUDE.md".to_owned()],
-            branch: Some("main".to_owned())
+            branch: Some("main".to_owned()),
+            checked_out: Some("main".to_owned())
         },
         "the reply names the checked-out branch merges into are refused"
     );
@@ -506,8 +509,10 @@ async fn the_import_move_is_listed_committed_and_refused_again_through_the_owner
             .unwrap(),
         crate::engine::owner::UncommittedImport {
             files: Vec::new(),
-            branch: None
-        }
+            branch: None,
+            checked_out: Some("main".to_owned())
+        },
+        "the reply names the checked-out branch for the project head while no move waits"
     );
     assert_eq!(
         client

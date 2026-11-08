@@ -245,15 +245,18 @@ pub struct ImportCommit {
     pub files: Vec<String>,
 }
 
-/// The moved instruction files whose move the owner's checkout has not committed, and the
-/// branch that checkout has checked out, so a notice can name where merges are refused:
-/// none for a detached HEAD, a name over `BRANCH_BYTES_MAX`, a branch git cannot read for
-/// the engine (a name that is not UTF-8) or when no move waits.
+/// The moved instruction files whose move the owner's checkout has not committed, the
+/// branch that checkout has checked out while a move waits, so a notice can name where
+/// merges are refused, and in `checked_out` that branch whether or not a move waits, for the
+/// project head. A branch is none for a detached HEAD, a name over `BRANCH_BYTES_MAX` or a
+/// branch git cannot read for the engine (a name that is not UTF-8).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UncommittedImport {
     pub files: Vec<String>,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub checked_out: Option<String>,
 }
 
 /// Tells whether a name is one an instruction files record may hold, so a record read back
@@ -988,10 +991,15 @@ pub fn uncommitted_import(folder: &Path) -> Result<UncommittedImport, EngineErro
         return Ok(UncommittedImport {
             files,
             branch: None,
+            checked_out: None,
         });
     }
     let branch = crate::landing::checked_out_branch(&root).unwrap_or(None);
-    Ok(UncommittedImport { files, branch })
+    Ok(UncommittedImport {
+        files,
+        branch,
+        checked_out: None,
+    })
 }
 
 /// Commits the instruction import's move in the owner's checkout, as the owner chose: one

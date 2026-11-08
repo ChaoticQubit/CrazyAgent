@@ -179,6 +179,8 @@ enum Reply {
     Uncommitted {
         files: Vec<String>,
         branch: Option<String>,
+        #[serde(default)]
+        checked_out: Option<String>,
     },
     Committed {
         commit: ImportCommit,
@@ -421,8 +423,9 @@ impl OwnerClient {
     /// Lists the project's moved instruction files whose move the owner's checkout has not
     /// committed, so a merge refusal for uncommitted changes can name them and offer the
     /// commit, with the branch the checkout has checked out. Input: the project. Output: the
-    /// paths inside the project folder, empty when no move waits for a commit, and the
-    /// branch, none for a detached HEAD or when no move waits.
+    /// paths inside the project folder, empty when no move waits for a commit, the branch,
+    /// none for a detached HEAD or when no move waits, and the checked-out branch whether or
+    /// not a move waits, none for a detached HEAD.
     pub async fn uncommitted_instruction_import(
         &self,
         project: ProjectId,
@@ -431,15 +434,28 @@ impl OwnerClient {
             .process_exchange(Action::UncommittedImport { project }, None)
             .await?
         {
-            (Reply::Uncommitted { files, branch }, None)
-                if files.len() <= crate::instruction_files::PROJECT_FILES.len()
-                    && branch.as_ref().is_none_or(|name| {
-                        !files.is_empty()
-                            && !name.is_empty()
-                            && name.len() <= crate::landing::BRANCH_BYTES_MAX
-                    }) =>
+            (
+                Reply::Uncommitted {
+                    files,
+                    branch,
+                    checked_out,
+                },
+                None,
+            ) if files.len() <= crate::instruction_files::PROJECT_FILES.len()
+                && branch.as_ref().is_none_or(|name| {
+                    !files.is_empty()
+                        && !name.is_empty()
+                        && name.len() <= crate::landing::BRANCH_BYTES_MAX
+                })
+                && checked_out.as_ref().is_none_or(|name| {
+                    !name.is_empty() && name.len() <= crate::landing::BRANCH_BYTES_MAX
+                }) =>
             {
-                Ok(UncommittedImport { files, branch })
+                Ok(UncommittedImport {
+                    files,
+                    branch,
+                    checked_out,
+                })
             }
             _ => Err(unknown()),
         }
@@ -845,10 +861,21 @@ pub(super) async fn serve(
             assert!(files.len() <= crate::instruction_files::PROJECT_FILES.len());
             (Reply::Imports { files }, None)
         }
-        Ok(Answer::Uncommitted(UncommittedImport { files, branch })) => {
+        Ok(Answer::Uncommitted(UncommittedImport {
+            files,
+            branch,
+            checked_out,
+        })) => {
             assert!(files.len() <= crate::instruction_files::PROJECT_FILES.len());
             assert!(branch.is_none() || !files.is_empty());
-            (Reply::Uncommitted { files, branch }, None)
+            (
+                Reply::Uncommitted {
+                    files,
+                    branch,
+                    checked_out,
+                },
+                None,
+            )
         }
         Ok(Answer::Committed(commit)) => {
             assert!(!commit.files.is_empty());
