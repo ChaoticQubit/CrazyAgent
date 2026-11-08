@@ -371,6 +371,31 @@ fn every_team_setting_shows_at_80_columns_on_whole_rows_after_the_counts() {
 }
 
 #[test]
+fn a_short_window_keeps_the_plan_line_while_a_harness_cannot_run() {
+    use crate::team::events::WaitingAgent;
+    let mut status = team();
+    status.harnesses[1].runnable = false;
+    status.events.waiting = vec![WaitingAgent {
+        agent: 2,
+        text: "Do you want to proceed?".into(),
+    }];
+    status.events.paused = true;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let rows = frame(&view, 80, 24);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("Claude Code (can't run yet) x2"))
+            .count(),
+        1,
+        "{}",
+        rows.join("\n")
+    );
+    assert!(rows.iter().all(|row| row.chars().count() <= 80));
+}
+
+#[test]
 fn a_sub_agent_has_one_name_in_the_team_list_and_the_team_graph() {
     let graph = crate::team::graph(&team(), &Default::default());
     let working = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();

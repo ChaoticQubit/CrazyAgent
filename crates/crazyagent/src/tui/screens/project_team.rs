@@ -2742,8 +2742,9 @@ impl TeamView {
     /// Draws the Team view for the Team screen's settings box and the Team settings screen,
     /// and places the typing cursor.
     /// When the window is too short for the lists, the panel and any footer question, the
-    /// blank rows before the panel and before the tasks go first, then the settings summary
-    /// folds toward its first row, so every setting shows while blank rows can make room.
+    /// blank rows before the panel and before the tasks go first, then the plan line while
+    /// every harness can run, then the settings summary folds toward its first row, so every
+    /// setting shows while blank rows or the plan line can make room.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -2830,16 +2831,25 @@ impl TeamView {
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
         let over = (fixed + 2).saturating_sub(room);
         let spacers = over.min(2);
-        let folded = (over - spacers).min(summary_rows.saturating_sub(1));
+        let every_harness_runs = status.harnesses.iter().all(|harness| harness.runnable);
+        let plan_gives_way = usize::from(every_harness_runs && over > spacers);
+        let folded = (over - spacers - plan_gives_way).min(summary_rows.saturating_sub(1));
         assert!(
             folded < summary_rows.max(1),
             "the summary's first row stays"
         );
         assert!(folded == 0 || spacers == 2, "blank rows go before settings");
+        assert!(
+            folded == 0 || plan_gives_way == 1 || !every_harness_runs,
+            "the plan line goes before settings"
+        );
+        if plan_gives_way == 1 {
+            lines.remove(summary_rows);
+        }
         if folded > 0 {
             lines.drain(1..=folded);
         }
-        let fixed = fixed - spacers - folded;
+        let fixed = fixed - spacers - plan_gives_way - folded;
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
