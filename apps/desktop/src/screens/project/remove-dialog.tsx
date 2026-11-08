@@ -40,8 +40,9 @@ export function lossLines(preview: RemovalPreview): string[] {
 /** The remove dialog's body. Inputs: the preview, the picked choice, the typed name, whether a
  * removal is running and the change, confirm and cancel handlers. Output: the choices, why
  * Delete everything is not offered when the engine refuses it, the loss list and the name box,
- * then Keep project and the button that sends the picked choice. Only the folder and loss lists
- * scroll when the window is short, so the choices and the name box stay in the frame. */
+ * then Keep project and the button that sends the picked choice. Only the folder list scrolls
+ * when the window is short, so the choices, the whole loss list beside Delete everything and
+ * the name box stay in the frame. */
 export function RemoveDialogView({ preview, choice, typed, pending, onChoice, onTyped, onConfirm, onCancel }: {
   preview: RemovalPreview | null;
   choice: RemoveChoice;
@@ -75,15 +76,13 @@ export function RemoveDialogView({ preview, choice, typed, pending, onChoice, on
     </div>
     {preview && !offered && preview.blocked && <p className="pj-note" role="note">{displayText(preview.blocked)}</p>}
     {preview && everything && <>
-      <div className="pj-remove-details">
-        <div className="pj-field">
-          <span className="pj-label">Moves to the Trash</span>
-          <ul className="pj-rows" aria-label="Folders moved to the Trash">{preview.folders.map((folder) => <li className="pj-mono" key={folder}>{displayText(folder)}</li>)}</ul>
-        </div>
-        {losses.length > 0
-          ? <ul className="pj-rows pj-note warn" aria-label="What would be lost">{losses.map((line) => <li key={line}>{displayText(line)}</li>)}</ul>
-          : <p className="pj-secondary">No agent is running and no work is unlanded.</p>}
+      <div className="pj-field pj-remove-trash">
+        <span className="pj-label">Moves to the Trash</span>
+        <ul className="pj-rows pj-remove-details" aria-label="Folders moved to the Trash">{preview.folders.map((folder) => <li className="pj-mono" key={folder}>{displayText(folder)}</li>)}</ul>
       </div>
+      {losses.length > 0
+        ? <ul className="pj-note warn pj-remove-losses" aria-label="What would be lost">{losses.map((line) => <li key={line}>{displayText(line)}</li>)}</ul>
+        : <p className="pj-secondary">No agent is running and no work is unlanded.</p>}
       <label className="pj-field">
         <span className="pj-label">Type {displayText(preview.name)} to confirm</span>
         <input className="pj-input" aria-label="Type the project name" value={typed} disabled={pending} autoComplete="off" spellCheck={false} onChange={(event) => onTyped(event.currentTarget.value)} />

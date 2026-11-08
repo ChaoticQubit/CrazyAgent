@@ -298,9 +298,11 @@ dialog.drawer .set-row { grid-template-columns: minmax(0, 1fr) minmax(0, max-con
   .set-find { flex: 1 0 100%; margin: 0 0 4px; }
   .set-nav button { width: auto; }
 }
-.pj-remove { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+.pj-remove { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 .pj-remove .pj-radio-cards { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .pj-remove .pj-rows > li { padding-block: 6px; }
-.pj-remove-details { display: grid; gap: 16px; align-content: start; min-height: 0; overflow: auto; }
+.pj-remove-trash { grid-template-rows: auto minmax(32px, 1fr); }
+.pj-remove-details { overflow: auto; }
+.pj-remove-losses { list-style: none; margin: 0; gap: 2px; padding: 8px 12px; }
 dialog.dialog[open]:has(.pj-remove) { display: flex; flex-direction: column; }
 dialog.dialog[open]:has(.pj-remove) > .dialog-body { display: flex; flex-direction: column; min-height: 0; }
