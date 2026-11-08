@@ -134,22 +134,14 @@ impl AccessEdit {
         policy
     }
 
-    /// The box's lines: what the setting does, the level row, what lowering the level does
-    /// to running agents, the toolchain rows, the network row with its help, the IDE hooks
-    /// row with its line, the warning or the refusal, and the save line. Input: the look.
-    /// Output: the rows.
-    pub fn body(&self, look: &Look) -> Vec<Row> {
-        let (mut body, _) = self.form(look);
-        body.extend(self.actions(look));
-        body
-    }
-
-    /// The box's lines fitted to the rows the window leaves it: the whole body when it fits;
-    /// else the warning or refusal and the save line stay whole at the bottom, and the
-    /// settings above them show a window that keeps the cursor's row, with how many lines sit
-    /// above and below it. Input: the look and the rows for the body. Output: at most that
-    /// many rows, or the action lines, the cursor's row and the counts when even those do not
-    /// fit.
+    /// The box's lines fitted to the rows the window leaves it: what the setting does, the
+    /// level row, what lowering the level does to running agents, the toolchain rows, the
+    /// network row with its help, the IDE hooks row with its line, the warning or the refusal,
+    /// and the save line, all of them when they fit. Else the warning or refusal and the save
+    /// line stay whole at the bottom, and the settings above them show a window that keeps the
+    /// cursor's row, with how many lines sit above and below it. Input: the look and the rows
+    /// for the body. Output: at most that many rows, or the action lines, the cursor's row and
+    /// the counts when even those do not fit.
     pub fn rows(&self, look: &Look, room: usize) -> Vec<Row> {
         let (form, at) = self.form(look);
         let actions = self.actions(look);

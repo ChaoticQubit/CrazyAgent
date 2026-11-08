@@ -78,7 +78,7 @@ fn the_access_box_saves_only_changed_toolchains_and_full_access_needs_a_yes() {
     assert!(edit.confirm_full);
     let look = super::new_project_view::Look::plain();
     let shown: String = edit
-        .body(&look)
+        .rows(&look, usize::MAX)
         .iter()
         .map(|row| row.text())
         .collect::<Vec<_>>()
@@ -126,7 +126,7 @@ fn the_none_choice_says_it_limits_agents_to_their_models_own_hosts_and_full_acce
     let look = super::new_project_view::Look::plain();
     let note_shows = |access: AgentAccess| {
         let shown = AccessEdit::of(&PolicyView { access, ..view() })
-            .body(&look)
+            .rows(&look, usize::MAX)
             .iter()
             .map(|row| row.text())
             .collect::<Vec<_>>()
@@ -151,7 +151,11 @@ fn the_none_choice_says_it_limits_agents_to_their_models_own_hosts_and_full_acce
 fn the_access_box_says_beside_the_level_that_lowering_it_stops_agents_running_above_it() {
     let edit = AccessEdit::of(&view());
     let look = super::new_project_view::Look::plain();
-    let rows: Vec<String> = edit.body(&look).iter().map(|row| row.text()).collect();
+    let rows: Vec<String> = edit
+        .rows(&look, usize::MAX)
+        .iter()
+        .map(|row| row.text())
+        .collect();
     let level = rows
         .iter()
         .position(|row| row.contains("Access      "))
@@ -173,7 +177,11 @@ fn the_access_box_says_beside_the_level_that_lowering_it_stops_agents_running_ab
 fn the_access_box_says_beside_the_toolchains_that_turning_one_off_stops_agents_running_with_it() {
     let edit = AccessEdit::of(&view());
     let look = super::new_project_view::Look::plain();
-    let rows: Vec<String> = edit.body(&look).iter().map(|row| row.text()).collect();
+    let rows: Vec<String> = edit
+        .rows(&look, usize::MAX)
+        .iter()
+        .map(|row| row.text())
+        .collect();
     let heading = rows
         .iter()
         .position(|row| row.contains("Toolchains agents may use"))
@@ -199,7 +207,11 @@ fn the_access_box_saves_the_ide_hooks_switch_on_its_last_row_with_its_line() {
     }
     assert_eq!(edit.cursor, 4);
     let look = super::new_project_view::Look::plain();
-    let rows: Vec<String> = edit.body(&look).iter().map(|row| row.text()).collect();
+    let rows: Vec<String> = edit
+        .rows(&look, usize::MAX)
+        .iter()
+        .map(|row| row.text())
+        .collect();
     let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let switch = rows
         .iter()
