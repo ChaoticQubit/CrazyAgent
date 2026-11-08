@@ -276,9 +276,9 @@ export function SettingGroup({ group, prefix, level = 2, children }: { group: Se
   </section>;
 }
 
-/** One setting row: its label on the left and its control on the right, with any help below,
- * or all stacked for a wide row; hidden while Find a setting does not match its label. Inputs:
- * the label, whether it is wide and the row's parts. Output: the row. */
+/** One setting row: its label with any help under it on the left and its control on the
+ * right, or all stacked for a wide row; hidden while Find a setting does not match its label.
+ * Inputs: the label, whether it is wide and the row's parts. Output: the row. */
 export function SettingRow({ label, wide = false, children }: { label: string; wide?: boolean; children: ReactNode }) {
   const words = useContext(SettingFind);
   return <div className={wide ? "set-row wide" : "set-row"} data-setting={label} hidden={!matches(label, words)}>{children}</div>;
