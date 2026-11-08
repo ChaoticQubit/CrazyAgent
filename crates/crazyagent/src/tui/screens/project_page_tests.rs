@@ -135,6 +135,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::Catalog { .. } => "catalog",
                         SetupQuery::Setup { .. } => "setup",
                         SetupQuery::Jobs { .. } => "jobs",
+                        SetupQuery::Removal { .. } => "removal",
                         SetupQuery::Context { .. } => "context",
                         SetupQuery::Item { .. } => "item",
                         SetupQuery::Memories { .. } => "memories",

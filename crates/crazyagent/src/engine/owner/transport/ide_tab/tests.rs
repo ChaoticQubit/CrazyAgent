@@ -216,14 +216,26 @@ fn ide_tab_codes_cover_every_refusal_of_the_open_path() {
     assert_eq!(sorted, IDE_TAB_CODES);
 }
 
-/// A closed project page's stop ends the real IDE server an open started through the owner
-/// connection: the stop answers true, the server's process group is gone, and the project
-/// no longer counts as running.
+/// A test engine with a projects home and one set-up project, IDE stop, whose real IDE
+/// server an open through the owner connection started.
 #[cfg(target_os = "macos")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stop_ends_the_ide_server_an_open_started() {
+struct OpenIde {
+    _root: tempfile::TempDir,
+    home: tempfile::TempDir,
+    _stop: tokio::sync::watch::Sender<bool>,
+    service: EngineService,
+    controller: OwnerController,
+    project: ProjectId,
+    group: i32,
+}
+
+/// Starts a test engine, sets up the IDE stop project in its projects home and opens the
+/// project's IDE. Input: the prefix of the engine's folders. Output: the running setup with
+/// the server's process group.
+#[cfg(target_os = "macos")]
+async fn open_ide(prefix: &str) -> OpenIde {
     use crate::engine::owner::{OwnerResponse, OwnerResult};
-    use crate::ide::server::tests::{cached_build, gone, recorded_launch};
+    use crate::ide::server::tests::{cached_build, recorded_launch};
 
     let private = |prefix: &str| {
         let folder = tempfile::Builder::new()
@@ -233,13 +245,13 @@ async fn a_stop_ends_the_ide_server_an_open_started() {
         std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         folder
     };
-    let root = private("ca-idestop-");
-    let home = private("ca-idestop-home-");
+    let root = private(prefix);
+    let home = private(&format!("{prefix}home-"));
     let config =
         crate::config::resolve_config_bytes(&format!("timeout_ms = {}\n", WAIT.as_millis()), "")
             .unwrap();
-    let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let service = EngineService::start(root.path(), "e.sock", &config, &stopped)
         .await
         .unwrap();
     let mut controller = OwnerController::attach(root.path(), OwnerClientKind::Desktop, WAIT)
@@ -298,7 +310,6 @@ async fn a_stop_ends_the_ide_server_an_open_started() {
     )
     .unwrap();
     let client = controller.shared_client().unwrap();
-
     let server = client.ide_tab_open(project.clone()).await.unwrap();
     assert!(
         server.url.starts_with("http://127.0.0.1:"),
@@ -307,11 +318,33 @@ async fn a_stop_ends_the_ide_server_an_open_started() {
     );
     let group = recorded_launch(&ide.join(project.as_str()));
     assert!(client.ide_tab_touch(project.clone()).await.unwrap());
+    OpenIde {
+        _root: root,
+        home,
+        _stop: stop,
+        service,
+        controller,
+        project,
+        group,
+    }
+}
+
+/// A closed project page's stop ends the real IDE server an open started through the owner
+/// connection: the stop answers true, the server's process group is gone, and the project
+/// no longer counts as running.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_ends_the_ide_server_an_open_started() {
+    use crate::ide::server::tests::gone;
+
+    let mut open = open_ide("ca-idestop-").await;
+    let client = open.controller.shared_client().unwrap();
+    let project = open.project.clone();
     assert!(
         client.ide_tab_stop(project.clone()).await.unwrap(),
         "the stop finds the running server"
     );
-    gone(group).await;
+    gone(open.group).await;
     assert!(
         !client.ide_tab_touch(project.clone()).await.unwrap(),
         "no server runs once stopped"
@@ -320,5 +353,39 @@ async fn a_stop_ends_the_ide_server_an_open_started() {
         !client.ide_tab_stop(project.clone()).await.unwrap(),
         "a second stop finds nothing"
     );
-    service.shutdown().await.unwrap();
+    open.service.shutdown().await.unwrap();
+}
+
+/// Delete everything stops the project's IDE server before any folder moves, so no open IDE
+/// page writes into the project folder or recreates it after the move. The read-only home
+/// keeps the folder out of the Trash, and the server is gone all the same.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_everything_stops_the_projects_ide_server_before_any_folder_moves() {
+    use crate::engine::owner::{OwnerResponse, OwnerResult};
+    use crate::ide::server::tests::gone;
+
+    let mut open = open_ide("ca-idedel-").await;
+    let home = std::fs::canonicalize(open.home.path()).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let response = open
+        .controller
+        .delete_project(open.project.clone(), "IDE stop".into(), 3)
+        .await;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        matches!(
+            &response,
+            Ok(OwnerResponse::Applied { operation })
+                if operation.result == OwnerResult::Rejected { code: "home_trash_failed".into() }
+        ),
+        "{response:?}"
+    );
+    gone(open.group).await;
+    let client = open.controller.shared_client().unwrap();
+    assert!(
+        !client.ide_tab_touch(open.project.clone()).await.unwrap(),
+        "no IDE server runs for a project being deleted"
+    );
+    open.service.shutdown().await.unwrap();
 }

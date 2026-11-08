@@ -248,6 +248,7 @@ fn main() {
         "desktop_ide_extension_decline",
         "desktop_finished_agents",
         "desktop_remove_finished_agents",
+        "desktop_project_removal",
         "desktop_pick_folder",
         "desktop_pick_documents",
         "desktop_open_link",

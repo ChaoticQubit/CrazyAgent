@@ -190,6 +190,10 @@ pub enum OwnerMutation {
     RemoveProject {
         project_id: ProjectId,
     },
+    DeleteProject {
+        project_id: ProjectId,
+        name: String,
+    },
     RunSetup {
         pack: Vec<String>,
     },
@@ -415,6 +419,14 @@ impl OwnerMutation {
                     project_id: project_id.clone(),
                 },
             },
+            Self::DeleteProject { project_id, name } => {
+                let action = crate::project_setup::SetupAction::Delete {
+                    project_id: project_id.clone(),
+                    name: name.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
             Self::RunSetup { pack } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Run { pack: pack.clone() },
             },

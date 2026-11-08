@@ -316,6 +316,24 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Deletes a project with its files: the engine stops its agents, moves its folders to
+    /// the Trash and removes its records, only when the typed name is the project's exact
+    /// name. Takes the project id, the name the owner typed and the client generation.
+    /// Returns the actual owner response; a refusal names its plain code.
+    pub async fn delete_project(
+        &mut self,
+        project_id: ProjectId,
+        name: String,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_setup(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::DeleteProject { project_id, name },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
     /// Replaces a project's extra read-only folders for its agents' sandboxes.
     /// Takes the project id, the version the screen showed, the typed folders and the client
     /// generation. Returns the actual owner response; a refused folder is a plain rejection,

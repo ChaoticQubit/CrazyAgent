@@ -2,7 +2,7 @@ use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{CLEANUP_CODES, OwnerClient};
 use crazyagent::protocol::ProjectId;
-use crazyagent::team::cleanup::{FinishedAgent, Removal};
+use crazyagent::team::cleanup::{FinishedAgent, Removal, RemovalPreview};
 use std::sync::Arc;
 
 fn cleanup_error(error: EngineError) -> BridgeError {
@@ -46,6 +46,20 @@ impl NativeBridge {
         let client = self.cleanup_client()?;
         Ok(Box::pin(async move {
             client.finished_agents(project).await.map_err(cleanup_error)
+        }))
+    }
+
+    /// Reads what removing a project would do, run without the bridge lock: its name, the
+    /// folders Delete everything would move to the Trash, whether it may, and what would be
+    /// lost. Input: the project id. Output: the engine's preview; nothing changes.
+    pub fn removal_preview(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<RemovalPreview>, BridgeError> {
+        let project = project(project_id)?;
+        let client = self.cleanup_client()?;
+        Ok(Box::pin(async move {
+            client.removal_preview(project).await.map_err(cleanup_error)
         }))
     }
 

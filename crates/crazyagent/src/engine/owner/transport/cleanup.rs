@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::{ProjectId, encode_frame};
-use crate::team::cleanup::{self, FinishedAgent, RECLAIMABLE_MAX, Removal};
+use crate::team::cleanup::{self, FinishedAgent, RECLAIMABLE_MAX, Removal, RemovalPreview};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 2048;
@@ -52,6 +52,9 @@ enum Action {
         project: ProjectId,
         agents: Vec<i64>,
     },
+    Removal {
+        project: ProjectId,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,6 +72,9 @@ enum Reply {
     Removed {
         agents: Vec<i64>,
         kept: Option<String>,
+    },
+    Removal {
+        preview: RemovalPreview,
     },
     Rejected {
         code: String,
@@ -111,6 +117,16 @@ impl OwnerClient {
             {
                 Ok(Removal { agents, kept })
             }
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads what removing a project would do: its name, the folders Delete everything
+    /// would move and whether it may, its running agents, open change sets and the work
+    /// each agent would lose. Input: the project. Output: the preview.
+    pub async fn removal_preview(&self, project: ProjectId) -> Result<RemovalPreview, EngineError> {
+        match self.cleanup_exchange(Action::Removal { project }).await? {
+            Reply::Removal { preview } => Ok(preview),
             _ => Err(unknown()),
         }
     }
@@ -163,6 +179,7 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 /// removal still to admit, with the engine folder it changes.
 enum Prepared {
     Finished(Vec<FinishedAgent>),
+    Removal(Box<RemovalPreview>),
     Remove(PathBuf, ProjectId, Vec<i64>),
 }
 
@@ -188,6 +205,14 @@ pub(super) async fn serve(
             let barrier = engine.owner_egress.write().await;
             (
                 checked(authority, packet, admission).map(|()| Reply::Finished { agents }),
+                Some(barrier),
+            )
+        }
+        Ok(Prepared::Removal(preview)) => {
+            let barrier = engine.owner_egress.write().await;
+            (
+                checked(authority, packet, admission)
+                    .map(|()| Reply::Removal { preview: *preview }),
                 Some(barrier),
             )
         }
@@ -242,6 +267,14 @@ async fn prepare(
             let db = open(&root)?;
             let now = crate::team::now_ms();
             cleanup::finished(&db, &root.join("team"), &project, now).map(Prepared::Finished)
+        })
+        .await
+        .map_err(|_| failure("cleanup_unavailable"))?,
+        Action::Removal { project } => tokio::task::spawn_blocking(move || {
+            let mut db = open(&root)?;
+            let now = crate::team::now_ms();
+            cleanup::removal_preview(&mut db, &project, now)
+                .map(|preview| Prepared::Removal(Box::new(preview)))
         })
         .await
         .map_err(|_| failure("cleanup_unavailable"))?,

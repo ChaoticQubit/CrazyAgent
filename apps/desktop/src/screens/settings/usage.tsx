@@ -10,6 +10,9 @@ import { NextAccountsPanel } from "./account-choice";
 import "../project/projects.css";
 import "./usage.css";
 
+export const REMOVED_PROJECTS = "<removed>";
+export const REMOVED_LABEL = "Removed projects";
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -375,7 +378,7 @@ export function UsageView({ report, range, names, nowMs, failure, busy, next, on
   onRetry: () => void;
 }) {
   if (report.kind === "not_ready" || (report.kind === "error" && usageNotReady(report))) return <NotReady what="Usage" />;
-  const project = (key: string) => rowName(names.projects, key);
+  const project = (key: string) => key === REMOVED_PROJECTS ? REMOVED_LABEL : rowName(names.projects, key);
   const account = (key: string) => rowName(names.accounts, key);
   const pool = (key: string) => names.pools.get(key) ?? key;
   const head = <div className="row usage-head">

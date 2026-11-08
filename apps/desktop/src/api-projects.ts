@@ -323,6 +323,17 @@ const copy: Record<string, string> = {
   conversation_text_bounds: "Messages can be up to 8192 bytes.",
   unavailable: "The engine couldn't do this right now. Try again.",
   rejected: "The engine refused this change.",
+  delete_shared_folder: "Another project uses one of its folders, so deleting it would delete that project's files too. Remove it from the dashboard instead.",
+  delete_research_running: "Its research is still queued or running. Cancel it or let it finish, then delete the project. Nothing was deleted.",
+  delete_platform_unqualified: "Delete everything is only on macOS for now. Remove the project from the dashboard instead.",
+  delete_outside_home: "Only a project whose folders are all inside your projects folder can be deleted here. Remove it from the dashboard instead.",
+  delete_name_mismatch: "Type the project's name exactly as shown to delete it.",
+  delete_agents_running: "Its agents didn't stop in time, so nothing was deleted. They stay stopped; try again.",
+  delete_trash_partial: "Some of its folders are in the Trash and the rest couldn't be moved. The project stays listed; try again.",
+  delete_unavailable: "The engine couldn't check the project's agents. Nothing was deleted.",
+  home_trash_failed: "The folder couldn't be moved to the Trash. Nothing was deleted.",
+  home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
+  project_delete_interrupted: "Deleting the project stopped part way. Check the Trash and the project list before trying again.",
 };
 
 /** Plain sentence for one engine failure, never opaque.
@@ -650,12 +661,31 @@ export function updateProjectSetup(id: string, setup: ProjectSetup, generation: 
   return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation });
 }
 
-/** Removes a project from CrazyAgent; its research stops and its folder stays on disk. Once
- * the engine applied the removal, the project's terminal wall windows close; one that fails
- * to close leaves the removal as it is. Inputs: project id and a generation. Output: the
- * receipt. */
-export async function removeProject(id: string, generation: number): Promise<Result<IntentReceipt>> {
-  const result = await call<IntentReceipt>("desktop_remove_project", { id, generation });
+/** What removing a project would do, read before the owner picks how: its stored name, the folders
+ * Delete everything would move to the Trash and whether it may, its running agents, its open change
+ * sets and each agent whose work would be lost, with the plain code of what it holds. */
+export type RemovalPreview = {
+  name: string;
+  folders: string[];
+  can_delete: boolean;
+  blocked: string | null;
+  running: string[];
+  open_change_sets: number;
+  losses: { id: number; label: string; code: string }[];
+};
+
+/** Reads what removing a project would do. Input: the project id. Output: the preview. */
+export function loadRemovalPreview(id: string): Promise<Result<RemovalPreview>> {
+  return call<RemovalPreview>("desktop_project_removal", { id });
+}
+
+/** Removes a project from CrazyAgent. Without a name its folder stays on disk; with the name the
+ * owner typed, the engine stops its agents and moves its folders to the Trash, only when the name
+ * is the project's exact name. Either way, once the engine applied the removal, the project's
+ * terminal wall windows close; one that fails to close leaves the removal as it is. Inputs:
+ * project id, a generation and the typed name or null. Output: the receipt. */
+export async function removeProject(id: string, generation: number, deleteName: string | null = null): Promise<Result<IntentReceipt>> {
+  const result = await call<IntentReceipt>("desktop_remove_project", { id, generation, deleteName });
   if (result.kind === "ok" && receiptState(result.value).kind === "applied") await closeProjectWalls(id);
   return result;
 }

@@ -220,6 +220,74 @@ pub fn left_out_label(provider: poll::Provider, kind: WindowKind) -> &'static st
     }
 }
 
+/// The key a removed project's usage rows move to, so totals by account and by day stay
+/// whole and a project added again under the same id starts from nothing. It fails
+/// `validate_identity`, so no project can have it as its id.
+pub const REMOVED_PROJECTS: &str = "<removed>";
+
+/// Moves a removed project's usage to `REMOVED_PROJECTS`: its token rows add into the rows
+/// already kept there for the same hour and run, its unreported marks and seen sessions keep
+/// the latest time, and its runs and cuts keep counting there. A table this store lacks is
+/// skipped. Inputs: the owner's transaction and the project. Output: Ok, or the store failure.
+pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), EngineError> {
+    assert_ne!(project, REMOVED_PROJECTS);
+    let has = |table: &str| -> Result<bool, EngineError> {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(storage)
+    };
+    let moves = [
+        (
+            "usage_tokens",
+            format!(
+                "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
+                 SELECT hour_ms,kind,?2,pool,account,agent,harness,session,input,output,cache_read,cache_write
+                 FROM usage_tokens WHERE project=?1
+                 ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session) DO UPDATE SET
+                 input=MIN(input+excluded.input,{max}), output=MIN(output+excluded.output,{max}),
+                 cache_read=MIN(cache_read+excluded.cache_read,{max}),
+                 cache_write=MIN(cache_write+excluded.cache_write,{max})",
+                max = capture::ROW_TOKENS_MAX
+            ),
+        ),
+        (
+            "usage_unreported",
+            "INSERT INTO usage_unreported(hour_ms,kind,project,agent,harness,last_ms)
+             SELECT hour_ms,kind,?2,agent,harness,last_ms FROM usage_unreported WHERE project=?1
+             ON CONFLICT(hour_ms,kind,project,agent,harness) DO UPDATE SET last_ms=MAX(last_ms,excluded.last_ms)"
+                .to_owned(),
+        ),
+        (
+            "usage_seen",
+            "INSERT INTO usage_seen(project,agent,session,last_ms)
+             SELECT ?2,agent,session,last_ms FROM usage_seen WHERE project=?1
+             ON CONFLICT(project,agent,session) DO UPDATE SET last_ms=MAX(last_ms,excluded.last_ms)"
+                .to_owned(),
+        ),
+    ];
+    for (table, add) in moves {
+        if has(table)? {
+            db.execute(&add, params![project, REMOVED_PROJECTS])
+                .map_err(storage)?;
+            db.execute(&format!("DELETE FROM {table} WHERE project=?1"), [project])
+                .map_err(storage)?;
+        }
+    }
+    for table in ["usage_runs", "usage_cut"] {
+        if has(table)? {
+            db.execute(
+                &format!("UPDATE {table} SET project=?2 WHERE project=?1"),
+                params![project, REMOVED_PROJECTS],
+            )
+            .map_err(storage)?;
+        }
+    }
+    Ok(())
+}
+
 /// Adds the usage tables to a database when missing, and to a store made before them the
 /// polled copies of the windows, filled from the rows a poll wrote last, and the marks of
 /// windows a poll left out. Input: the connection. Output: done, or `usage_unavailable`.

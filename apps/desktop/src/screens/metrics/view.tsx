@@ -7,7 +7,7 @@ import { loadMetrics, loadUsage, usageNotReady, usageRefusal, type AccountLimits
 import { useLoad, type Loaded } from "../../state";
 import { LoadError, NotReady, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
-import { agentLabel, agoText, cacheShare, compactCount, headlineTokens, offsetMinutes, rangeStart, windowNow } from "../settings/usage";
+import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, offsetMinutes, rangeStart, windowNow } from "../settings/usage";
 import { HARNESS_NAMES } from "../team/coordination";
 import "../project/projects.css";
 import "./metrics.css";
@@ -211,7 +211,7 @@ function Chart({ metrics, sinceMs, nowMs, offset, reread }: { metrics: Metrics; 
  * names, now and the filter. Output: the first column's head, the own columns' heads, the
  * rows and whether a Project column shows. */
 function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageReport, metrics: Metrics, adoption: Adoption | null, names: MetricsNames, nowMs: number, filter: MetricsFilter | undefined): { head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean } {
-  const projectName = (id: string) => displayText(filter?.projects.find((project) => project.id === id)?.name ?? id);
+  const projectName = (id: string) => id === REMOVED_PROJECTS ? REMOVED_LABEL : displayText(filter?.projects.find((project) => project.id === id)?.name ?? id);
   const agent = (key: string, label?: string | null) => names.agents.get(key) ?? (label ? displayText(label) : agentLabel(key, projectName));
   const account = (key: string) => key === "" ? "Unattributed" : names.accounts.get(key) ?? key;
   const harness = (key: string) => HARNESS_NAMES[key as keyof typeof HARNESS_NAMES] ?? key;

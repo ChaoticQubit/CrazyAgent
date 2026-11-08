@@ -217,6 +217,7 @@
     "allow-desktop-ide-extension-decline",
     "allow-desktop-finished-agents",
     "allow-desktop-remove-finished-agents",
+    "allow-desktop-project-removal",
     "allow-desktop-change-diff",
     "allow-desktop-accept-change",
     "allow-desktop-change-branches",

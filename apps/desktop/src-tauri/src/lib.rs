@@ -1847,9 +1847,24 @@ async fn desktop_remove_project(
     state: State<'_, NativeState>,
     id: String,
     generation: u64,
+    delete_name: Option<String>,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.remove_project(&id, generation).await
+    lock(&state)
+        .await?
+        .remove_project(&id, generation, delete_name)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_project_removal(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<crazyagent::team::cleanup::RemovalPreview, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.removal_preview(id)?;
+    call.await
 }
 
 #[tauri::command]
@@ -4112,6 +4127,7 @@ pub fn run() {
             desktop_ide_extension_decline,
             desktop_finished_agents,
             desktop_remove_finished_agents,
+            desktop_project_removal,
             desktop_pick_folder,
             desktop_pick_documents,
             desktop_open_link,

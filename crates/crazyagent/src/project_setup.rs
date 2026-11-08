@@ -677,6 +677,10 @@ pub enum SetupQuery {
     Jobs {
         project: ProjectId,
     },
+    /// Reads what removing the project would do before the owner picks how (DEC-118).
+    Removal {
+        project: ProjectId,
+    },
     Context {
         project: ProjectId,
     },
@@ -743,6 +747,7 @@ pub enum SetupView {
     Catalog(Box<ProjectCatalog>),
     Setup(Option<Box<StoredSetup>>),
     Jobs(Vec<ResearchJob>),
+    Removal(Box<crate::team::cleanup::RemovalPreview>),
     Context(ProjectContext),
     ReadPaths(ReadPaths),
     HiddenPaths(Vec<String>),
@@ -789,6 +794,10 @@ pub enum SetupAction {
     },
     Remove {
         project_id: ProjectId,
+    },
+    Delete {
+        project_id: ProjectId,
+        name: String,
     },
     CancelResearch {
         project_id: ProjectId,
@@ -892,6 +901,12 @@ impl SetupAction {
                 setup.validate()
             }
             Self::Remove { .. } | Self::PlanRoadmap { .. } => Ok(()),
+            Self::Delete { name, .. } => {
+                if name.len() > DELETE_NAME_BYTES_MAX {
+                    return Err(failure("project_spec_bounds"));
+                }
+                Ok(())
+            }
             Self::CancelResearch { job, .. } | Self::RetryResearch { job, .. } => {
                 if *job <= 0 {
                     return Err(failure("research_job_missing"));
@@ -1880,6 +1895,7 @@ pub(crate) fn execute(
             setup,
         ),
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
+        SetupAction::Delete { .. } => Ok(rejected("project_delete_requires_transport")),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
         SetupAction::SetReadPaths {
             project_id,
@@ -2385,6 +2401,9 @@ fn plan_roadmap(
     Ok(Outcome::Applied)
 }
 
+/// The longest project name a Delete everything may carry as the owner typed it.
+const DELETE_NAME_BYTES_MAX: usize = 1024;
+
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
 const REMOVED_WITH_PROJECT: [&str; 39] = [
@@ -2579,6 +2598,7 @@ fn remove(
     crate::scheduling::forget_project(tx, project_id.as_str())?;
     crate::coord::forget_project(tx, project_id)?;
     crate::activity::forget_project(tx, project_id)?;
+    crate::usage::forget_project(tx, project_id.as_str())?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
@@ -2601,6 +2621,25 @@ fn remove(
     assert_eq!(removed, 1);
     crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
+}
+
+/// Records a Delete everything once the owner transport finished its disk work: the
+/// project's records go as in Remove from dashboard when every folder reached the Trash, and
+/// otherwise the refusal is kept with nothing removed. Inputs: the transaction, the action,
+/// the transport's outcome and the revision. Output: the outcome to record.
+pub(crate) fn record_delete(
+    tx: &Transaction<'_>,
+    action: &SetupAction,
+    outcome: &Result<(), String>,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    let SetupAction::Delete { project_id, .. } = action else {
+        return Err(failure("delete_record_invalid"));
+    };
+    match outcome {
+        Ok(()) => remove(tx, project_id, revision),
+        Err(code) => Ok(rejected(code)),
+    }
 }
 
 /// The team a New Project gets and the folder it lands in, after the checks

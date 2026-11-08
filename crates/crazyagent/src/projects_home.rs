@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS projects_home_move (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
     target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
     folders TEXT NOT NULL CHECK(length(CAST(folders AS BLOB)) BETWEEN 2 AND 1048576)
+);
+CREATE TABLE IF NOT EXISTS projects_delete_pending (
+    exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
 )";
 
 /// The owner's projects home folder and whether the engine is watching it.
@@ -245,7 +248,7 @@ fn overlaps(left: &Path, right: &Path) -> bool {
 /// or a repository it declares, each compared as recorded and, when it
 /// resolves, at its canonical path, so one declared through a link counts.
 /// Input: a canonical folder and the project. Output: whether it is in use.
-fn in_use(real: &Path, project: &Registered) -> bool {
+pub(crate) fn in_use(real: &Path, project: &Registered) -> bool {
     assert!(real.is_absolute());
     std::iter::once(&project.folder)
         .chain(&project.repositories)
@@ -609,6 +612,186 @@ pub fn trash(folder: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Checks the folders a Delete everything would move to the Trash: the project folder and
+/// every repository it declares. Inputs: the canonical home and the stored folders. Output:
+/// the fewest real folders to move, one holding another counted once and one already
+/// missing skipped, or `delete_outside_home` for any that is a link, not a folder, or not
+/// strictly below the home.
+pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, EngineError> {
+    assert!(home.is_absolute());
+    let mut real = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let climbs = folder
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir));
+        if !folder.is_absolute() || climbs {
+            return Err(refused("delete_outside_home"));
+        }
+        match real_folder(folder, "delete_folder_missing", "delete_outside_home") {
+            Ok(path) if path.starts_with(home) && path != home => real.push(path),
+            Ok(_) => return Err(refused("delete_outside_home")),
+            Err(missing) if missing.0 == "delete_folder_missing" => {}
+            Err(refusal) => return Err(refusal),
+        }
+    }
+    let mut moved: Vec<PathBuf> = Vec::with_capacity(real.len());
+    for path in &real {
+        let held = real
+            .iter()
+            .any(|other| other != path && path.starts_with(other));
+        if !held && !moved.contains(path) {
+            moved.push(path.clone());
+        }
+    }
+    assert!(
+        moved
+            .iter()
+            .all(|path| path.starts_with(home) && path != home)
+    );
+    Ok(moved)
+}
+
+/// Tells whether Delete everything is offered on a platform: only where a move to the Trash
+/// is proven, which in V2 is macOS (DEC-118 addendum). Windows and Linux offer Remove from
+/// dashboard only until a qualification row per platform exists. Input: the platform name as
+/// `std::env::consts::OS` gives it. Output: the answer.
+pub fn delete_qualified_on(os: &str) -> bool {
+    os == "macos"
+}
+
+/// Tells whether Delete everything is offered on the platform this engine runs on.
+/// Output: the answer for `std::env::consts::OS`.
+pub fn delete_offered() -> bool {
+    delete_qualified_on(std::env::consts::OS)
+}
+
+/// How long a Delete everything waits for the project's agents to stop after Stop all,
+/// before it refuses with nothing moved.
+pub const DELETE_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+const DELETE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const RESEARCH_RUNS_MAX: usize = 100_000;
+
+/// A checked Delete everything, after Stop all was recorded: the engine database, the
+/// project, the canonical home, the folders `plan_delete` gave and the project's agents,
+/// whose engine folders go once the records are removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletePlan {
+    pub database: PathBuf,
+    pub project: ProjectId,
+    pub home: PathBuf,
+    pub folders: Vec<PathBuf>,
+    pub agents: Vec<i64>,
+}
+
+impl DeletePlan {
+    /// Waits for the project's agents to stop, then moves its folders to the system Trash
+    /// in order. Output: Ok once every folder is gone from the home, or the refusal code.
+    pub fn run(&self) -> Result<(), String> {
+        self.run_with(DELETE_STOP_WAIT, &trash)
+    }
+
+    /// Runs the plan with a bounded wait and a mover: no folder moves while an agent of the
+    /// project runs (`delete_agents_running` past the wait), the folders are checked again
+    /// just before the first move, with any other project using one of them, research of the
+    /// project not finished or a pending home move refusing as the plan did, and a later
+    /// folder that fails leaves the earlier ones moved (`delete_trash_partial`). Inputs: the
+    /// wait and the mover. Output: the outcome.
+    pub(crate) fn run_with(
+        &self,
+        wait: std::time::Duration,
+        mover: &dyn Fn(&Path) -> Result<(), EngineError>,
+    ) -> Result<(), String> {
+        let unavailable = |_| "delete_unavailable".to_owned();
+        let mut db = rusqlite::Connection::open_with_flags(
+            &self.database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(unavailable)?;
+        db.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(unavailable)?;
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let running: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM team_agents WHERE project=?1 AND status NOT IN ('stopped','failed')",
+                    [self.project.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(unavailable)?;
+            if running == 0 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("delete_agents_running".into());
+            }
+            std::thread::sleep(DELETE_POLL);
+        }
+        let folders = plan_delete(&self.home, &self.folders).map_err(|refusal| refusal.0)?;
+        if let Some(code) = crate::storage::delete_recheck(&mut db, &self.project, &folders)
+            .map_err(|_| "delete_unavailable".to_owned())?
+        {
+            return Err(code);
+        }
+        for (moved, folder) in folders.iter().enumerate() {
+            if mover(folder).is_err() {
+                return Err(if moved == 0 {
+                    "home_trash_failed"
+                } else {
+                    "delete_trash_partial"
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Deletes the engine's own folders of a deleted project once its records are gone: each
+    /// agent's state folder and sandbox profile, and each research run of its jobs. A folder
+    /// left behind is logged as `project_files_left` and never undoes the removal. Input: the
+    /// project's research jobs. Output: none.
+    pub fn remove_engine_files(&self, research: &[i64]) {
+        let Some(root) = self.database.parent() else {
+            return;
+        };
+        let team = root.join("team");
+        let mut left = Vec::new();
+        for agent in &self.agents {
+            left.push(team.join("agents").join(format!("agent-{agent}")));
+            left.push(team.join("profiles").join(format!("agent-{agent}.sb")));
+        }
+        let runs = root.join("research").join("agents");
+        if let Ok(entries) = std::fs::read_dir(&runs) {
+            for entry in entries.flatten().take(RESEARCH_RUNS_MAX) {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if research
+                    .iter()
+                    .any(|job| name.starts_with(&format!("job-{job}-")))
+                {
+                    left.push(entry.path());
+                }
+            }
+        }
+        for path in left {
+            let gone = match std::fs::symlink_metadata(&path) {
+                Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    std::fs::remove_dir_all(&path)
+                }
+                Ok(_) => std::fs::remove_file(&path),
+                Err(problem) => Err(problem),
+            };
+            if gone.is_err() {
+                eprintln!(
+                    "project_files_left project={} kind=engine_folder",
+                    self.project.as_str()
+                );
+            }
+        }
+    }
+}
+
 /// The sentence shown after the owner removes a project from CrazyAgent.
 /// Input: the project folder. Output: a plain note that the folder stays.
 pub fn forgotten(folder: &str) -> String {
@@ -718,8 +901,9 @@ pub fn found(
     entries
 }
 
-/// Creates the projects home table, and the table that holds a home move
-/// recorded before its folders move, when the engine database opens.
+/// Creates the projects home table, the table that holds a home move recorded
+/// before its folders move and the table that holds each Delete everything planned
+/// and not yet settled, when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
@@ -819,6 +1003,31 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_trash_still_set_up" => "Remove the project from CrazyAgent first.",
         "home_trash_failed" => "The folder could not be moved to the Trash. Nothing was deleted.",
+        "delete_outside_home" => {
+            "Only a project whose folders are all inside your projects folder can be deleted here. Remove it from the dashboard instead."
+        }
+        "delete_name_mismatch" => "Type the project's name exactly as shown to delete it.",
+        "delete_shared_folder" => {
+            "Another project uses one of its folders, so deleting it would delete that project's files too. Remove it from the dashboard instead."
+        }
+        "delete_research_running" => {
+            "Its research is still queued or running. Cancel it or let it finish, then delete the project. Nothing was deleted."
+        }
+        "delete_platform_unqualified" => {
+            "Delete everything is only on macOS for now. Remove the project from the dashboard instead."
+        }
+        "delete_unavailable" => {
+            "The engine could not check the project's agents. Nothing was deleted."
+        }
+        "delete_agents_running" => {
+            "Its agents did not stop in time, so nothing was deleted. They stay stopped; try again."
+        }
+        "delete_trash_partial" => {
+            "Some of its folders are in the Trash and the rest could not be moved. The project stays listed; try again."
+        }
+        "project_delete_requires_transport" => {
+            "This engine cannot delete projects. Remove it from the dashboard instead."
+        }
         "home_new_project_failed" => "The project folder could not be created. Nothing was kept.",
         "home_source_missing" => "That folder is no longer there.",
         "home_source_not_folder" => "Pick a folder, not a file or a link.",
@@ -862,6 +1071,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_move_in_progress" => {
             "Your projects folder is still being moved. Try again when it finishes."
+        }
+        "home_move_delete_in_progress" => {
+            "A project in your projects folder is being deleted. Try again when it finishes. Nothing was moved."
         }
         "home_move_agent_work" => {
             "Agents still have work in projects in this folder, and moving it would cut them off from it. Land their changes and remove those agents first. An agent whose change you discarded can be removed 7 days later, when the change can no longer be restored. Nothing was moved."

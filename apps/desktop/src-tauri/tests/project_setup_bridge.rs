@@ -370,7 +370,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         .await?;
     assert_eq!(stale.rejection.as_deref(), Some("stale_revision"));
 
-    let removed = bridge.remove_project(&id, 17).await?;
+    let removed = bridge.remove_project(&id, 17, None).await?;
     assert!(
         matches!(removed.outcome, ActionOutcome::Applied),
         "{removed:?}"
