@@ -28,6 +28,7 @@ fn node(id: &str, kind: NodeKind, label: &str) -> GraphNode {
         no_worktree: false,
         hookless: false,
         message_note: None,
+        started_ms: None,
     }
 }
 

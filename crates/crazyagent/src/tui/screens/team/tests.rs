@@ -46,6 +46,7 @@ fn node(id: &str, kind: NodeKind, parent: Option<&str>, label: &str) -> GraphNod
         no_worktree: false,
         hookless: false,
         message_note: None,
+        started_ms: None,
     }
 }
 
@@ -991,6 +992,7 @@ fn finished_team() -> crate::team::TeamStatus {
         hookless: false,
         instructions_changed: false,
         message_note: None,
+        started_ms: None,
     };
     TeamStatus {
         project_id: project(),
@@ -1771,6 +1773,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 hookless: false,
                 instructions_changed: false,
                 message_note: None,
+                started_ms: None,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]
@@ -2237,6 +2240,7 @@ fn harnessed(on: Option<bool>, saved: &str, running: Option<&str>) -> Arrival {
             hookless: false,
             instructions_changed: false,
             message_note: None,
+            started_ms: None,
         })
         .collect();
     team_read(status)
