@@ -290,7 +290,7 @@ fn every_project_event_the_engine_sees_is_recorded_newest_first() {
     );
     assert_eq!(
         listed[4].text,
-        "Accepted the changes of Sub-agent 1: Build the login form"
+        "You accepted change set #1 (Sub-agent 1: Add the login form, 1 file)"
     );
     assert_eq!(listed[6].text, "Sub-agent 1 finished a task");
 }
