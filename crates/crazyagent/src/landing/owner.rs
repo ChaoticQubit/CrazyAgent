@@ -91,7 +91,12 @@ pub(super) fn owner_identity(
 /// those main changed since the set's merge base, each side of a rename apart, so the
 /// path git merges an edit at after main renamed the file is checked too. Inputs: the
 /// repository, the merge base, the tip and the set's head. Output: the paths, sorted once.
-fn merge_paths(repo: &Repo, from: &str, tip: &str, head: &str) -> Result<Vec<String>, EngineError> {
+pub(super) fn merge_paths(
+    repo: &Repo,
+    from: &str,
+    tip: &str,
+    head: &str,
+) -> Result<Vec<String>, EngineError> {
     let mut paths = diff::changed_paths(repo, from, head)?;
     paths.extend(diff::changed_paths(repo, from, tip)?);
     paths.sort_unstable();
@@ -103,7 +108,7 @@ fn merge_paths(repo: &Repo, from: &str, tip: &str, head: &str) -> Result<Vec<Str
 /// in any of the trees, reading attributes from each tree and the repository's own
 /// info/attributes. Inputs: the repository, the paths and the trees. Output: true when
 /// one does, so the change cannot land without running a configured command.
-fn uses_configured_commands(
+pub(super) fn uses_configured_commands(
     repo: &Repo,
     paths: &[String],
     trees: &[&str],
@@ -153,7 +158,7 @@ fn uses_configured_commands(
 /// Three-way merges a change set's work onto a commit with git's own merge and no
 /// merge driver. Inputs: the repository, the merge base and both sides.
 /// Output: the merged tree, holding conflict markers, and the conflicting paths.
-fn merge(
+pub(super) fn merge(
     repo: &Repo,
     base: &str,
     ours: &str,
@@ -1562,10 +1567,16 @@ pub(super) fn conflicts_with_tip(
 /// of an agent that takes its own resolve task is checked: a master's set keeps the
 /// owner's Accept and Update, a lead's worker while its lead merges it, or a native
 /// teammate, keeps its lead's merge, which tells the lead the files, and an agent's own
-/// clone waits for the owner, since its git takes no merge of the engine's commit.
-/// Inputs: the store and the change set. Output: the answer, or the plain code of a
-/// check that could not run.
-pub(super) fn conflicts_with_main(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
+/// clone waits for the owner, since its git takes no merge of the engine's commit. With
+/// `after`, a clash in known lockfiles only starts a regeneration off this thread instead
+/// ([`super::lockfiles::regenerate_later`]), and the set waits for it, not its agent.
+/// Inputs: the store, the change set and what runs after a regeneration that landed
+/// nothing. Output: the answer, or the plain code of a check that could not run.
+pub(super) fn conflicts_with_main(
+    db: &Connection,
+    id: &ChangeSetId,
+    after: Option<super::AfterRegeneration>,
+) -> Result<bool, EngineError> {
     let record = store::load(db, id)?;
     if record.state != ChangeState::Pending
         || record.intent.is_some()
@@ -1580,7 +1591,16 @@ pub(super) fn conflicts_with_main(db: &Connection, id: &ChangeSetId) -> Result<b
     {
         return Ok(false);
     }
-    Ok(!conflicts_with_tip(db, &record)?.is_empty())
+    let conflicts = conflicts_with_tip(db, &record)?;
+    if conflicts.is_empty() {
+        return Ok(false);
+    }
+    match after {
+        Some(after) => Ok(!super::lockfiles::regenerate_later(
+            db, &record, &conflicts, after,
+        )?),
+        None => Ok(true),
+    }
 }
 
 /// Finishes or undoes owner-checkout and worktree work an engine stop interrupted, one

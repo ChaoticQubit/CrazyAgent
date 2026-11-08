@@ -1364,7 +1364,16 @@ impl OwnerServer {
         authority.ide_servers.sweep_left().await;
         if let Ok(root) = changes::engine_root(&authority) {
             let swept = tokio::task::spawn_blocking(move || {
-                crate::landing::open(&root).and_then(|db| crate::worktrees::lock_existing(&db))
+                crate::landing::open(&root).and_then(|db| {
+                    let locked = crate::worktrees::lock_existing(&db);
+                    if let Err(problem) = crate::landing::sweep_regenerations(&db) {
+                        eprintln!(
+                            "landing_regenerate_sweep_failed cause={}",
+                            crate::protocol::plain_code(&problem.0)
+                        );
+                    }
+                    locked
+                })
             })
             .await;
             if let Ok(Err(problem)) = swept {
