@@ -492,6 +492,7 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
         owner: None,
         state: &state,
         asleep: &awake,
+        held: &awake,
     };
     let mut deliveries = Deliveries::default();
     let notice = send(NOTICE, format!("{NOTICES_KEY}{id}"));
@@ -588,6 +589,7 @@ fn a_steer_a_codex_turn_aborted_by_esc_dropped_goes_back_to_sent_and_comes_once_
         owner: None,
         state: &state,
         asleep: &awake,
+        held: &awake,
     };
     let mut deliveries = Deliveries::default();
     deliveries.tick(&db, &project, now_ms(), &reach).unwrap();
