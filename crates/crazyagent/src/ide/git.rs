@@ -119,7 +119,8 @@ pub const SHIM: &str = "git";
 /// engine as `ide.git` (DEC-098 addendum 13); before the extension starts they fail with a
 /// plain message. `worktree prune` and `worktree remove` are refused, since the IDE sees an
 /// agent worktree as missing and would drop it (IN1-FN1). Every other command runs the
-/// `git` on the server's PATH, as stock VS Code does.
+/// `git` on the server's PATH, as stock VS Code does, where the engine resolved no real git
+/// ([`shim_text`]).
 pub const SHIM_TEXT: &str = "#!/bin/sh\n\
 case \"$1\" in\n\
 push|pull|fetch|ls-remote)\n  \
@@ -142,34 +143,51 @@ exec git \"$@\"\n";
 
 const SHIM_EXEC: &str = "exec git \"$@\"\n";
 
-/// The shim for one IDE server start. Off, it is [`SHIM_TEXT`]. On, with the project folder
-/// the owner let run its own hooks, it first sets `GIT_CONFIG_COUNT` to
-/// [`PROJECT_HOOKS_COUNT`] when its physical working directory is exactly that folder, so
-/// git there runs the project's hooks and every other [`CONFIG_ENV`] key stays forced; an
-/// agent folder below it is never that folder. Input: the canonical project folder, or None
-/// for Off. Output: the text, or `ide_settings_invalid` for a folder that is not absolute,
-/// not UTF-8 or holds a quote or a control character.
-pub fn shim_text(project_hooks: Option<&Path>) -> Result<String, EngineError> {
+/// The shim for one IDE server start: [`SHIM_TEXT`] whose last line runs the real git the
+/// engine resolved, so the IDE never runs the `/usr/bin/git` xcrun shim, whose cache write
+/// its profile denies (FZ-7). For `/usr/bin/git` itself, or a path holding a quote or a
+/// control character, it keeps the PATH's git. On, with the project folder the owner let run
+/// its own hooks, it first sets `GIT_CONFIG_COUNT` to [`PROJECT_HOOKS_COUNT`] when its
+/// physical working directory is exactly that folder, so git there runs the project's hooks
+/// and every other [`CONFIG_ENV`] key stays forced; an agent folder below it is never that
+/// folder. Inputs: the canonical project folder, or None for Off, and the absolute git
+/// ([`crate::research::runner::sandboxed_git`]). Output: the text, or `ide_settings_invalid`
+/// for a folder that is not absolute, not UTF-8 or holds a quote or a control character.
+pub fn shim_text(project_hooks: Option<&Path>, git: &Path) -> Result<String, EngineError> {
     assert_eq!(CONFIG_ENV[0].1.parse::<usize>(), Ok(KEYS));
     assert_eq!(PROJECT_HOOKS_COUNT.parse::<usize>(), Ok(KEYS - 1));
     assert_eq!(
         CONFIG_ENV[2 * KEYS - 1],
         ("GIT_CONFIG_KEY_13", "core.hooksPath")
     );
+    assert!(
+        git.is_absolute(),
+        "the engine resolves git to an absolute path"
+    );
+    let exec = git
+        .to_str()
+        .filter(|text| {
+            *text != crate::research::runner::GIT
+                && !text.chars().any(|c| c.is_control() || c == '\'')
+        })
+        .map_or_else(
+            || SHIM_EXEC.to_owned(),
+            |text| format!("exec '{text}' \"$@\"\n"),
+        );
+    let head = SHIM_TEXT
+        .strip_suffix(SHIM_EXEC)
+        .expect("the shim ends by running git");
     let Some(project) = project_hooks else {
-        return Ok(SHIM_TEXT.to_owned());
+        return Ok(format!("{head}{exec}"));
     };
     let folder = project
         .to_str()
         .filter(|text| project.is_absolute() && !text.chars().any(|c| c.is_control() || c == '\''))
         .ok_or_else(|| failure("ide_settings_invalid"))?;
-    let head = SHIM_TEXT
-        .strip_suffix(SHIM_EXEC)
-        .expect("the shim ends by running git");
     let text = format!(
-        "{head}if [ \"$(pwd -P)\" = '{folder}' ]; then\n  GIT_CONFIG_COUNT={PROJECT_HOOKS_COUNT}\n  export GIT_CONFIG_COUNT\nfi\n{SHIM_EXEC}"
+        "{head}if [ \"$(pwd -P)\" = '{folder}' ]; then\n  GIT_CONFIG_COUNT={PROJECT_HOOKS_COUNT}\n  export GIT_CONFIG_COUNT\nfi\n{exec}"
     );
-    assert!(text.starts_with("#!/bin/sh\n") && text.ends_with(SHIM_EXEC));
+    assert!(text.starts_with("#!/bin/sh\n") && text.ends_with(&exec));
     Ok(text)
 }
 

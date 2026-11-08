@@ -496,7 +496,7 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
         );
         assert_eq!(
             std::fs::read_to_string(case.shim()).unwrap(),
-            super::super::git::SHIM_TEXT,
+            super::super::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap(),
             "after: {attempt}"
         );
     }
@@ -521,7 +521,7 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
     );
     assert_eq!(
         std::fs::read_to_string(case.shim()).unwrap(),
-        super::super::git::SHIM_TEXT
+        super::super::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
     );
 }
 
@@ -545,9 +545,10 @@ fn shim_run(shim: &Path, env: &[(&str, &str)], args: &[&str]) -> std::process::O
 }
 
 /// Every start writes `git.path` and its shim next to the Remote settings: an owner-only
-/// executable holding exactly [`super::super::git::SHIM_TEXT`]. It hands push, pull, fetch
-/// and ls-remote to the forwarder the extension names, refuses them plainly before the
-/// extension has named one, and runs the PATH's git for everything else.
+/// executable holding exactly the Off [`super::super::git::shim_text`] for the engine's
+/// resolved git. It hands push, pull, fetch and ls-remote to the forwarder the extension
+/// names, refuses them plainly before the extension has named one, and runs that git for
+/// everything else.
 #[test]
 fn the_git_shim_hands_network_commands_to_the_extension_and_runs_the_rest() {
     let case = Case::new();
@@ -558,7 +559,7 @@ fn the_git_shim_hands_network_commands_to_the_extension_and_runs_the_rest() {
     assert_eq!(metadata.mode() & 0o7777, 0o700);
     assert_eq!(
         std::fs::read_to_string(case.shim()).unwrap(),
-        super::super::git::SHIM_TEXT
+        super::super::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
     );
 
     let version = shim_run(&case.shim(), &[], &["--version"]);

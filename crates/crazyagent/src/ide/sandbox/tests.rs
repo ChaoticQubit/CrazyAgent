@@ -542,10 +542,35 @@ fn ide_git_recorded(
     dir: &Path,
     args: &[&str],
 ) -> std::process::Output {
+    let mut command = server_git(
+        profile,
+        shim,
+        home,
+        root,
+        older_agents,
+        "/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin",
+    );
+    command.args(args).current_dir(dir);
+    crate::spawn_gate::output(&mut command).unwrap()
+}
+
+/// The IDE server's git as VS Code starts it: the shim under the installed profile, in the
+/// server's environment built from this PATH and the home, with the project's ceiling for
+/// an agent recorded in the older agents root or not, and an owner identity. Inputs: the
+/// profile, the shim, the home, the project folder, that answer and the PATH. Output: the
+/// command, ready for its arguments and working folder.
+fn server_git(
+    profile: &Path,
+    shim: &Path,
+    home: &Path,
+    root: &Path,
+    older_agents: bool,
+    path: &str,
+) -> Command {
     let source = [
         (
             std::ffi::OsString::from("PATH"),
-            std::ffi::OsString::from("/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin"),
+            std::ffi::OsString::from(path),
         ),
         (
             std::ffi::OsString::from("HOME"),
@@ -561,8 +586,6 @@ fn ide_git_recorded(
     );
     let mut command = super::command(profile, shim);
     command
-        .args(args)
-        .current_dir(dir)
         .env_clear()
         .envs(env)
         .envs([
@@ -574,7 +597,7 @@ fn ide_git_recorded(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::spawn_gate::output(&mut command).unwrap()
+    command
 }
 
 /// Writes an executable script that records that it ran by creating `marker`, then passes
@@ -757,7 +780,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     crate::ide::settings::write(&mine, &home, &data, None).unwrap();
     assert_eq!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::SHIM_TEXT
+        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
     );
     let (status, said) = ide_git(
         &profile,
@@ -836,7 +859,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     crate::ide::settings::write(&mine, &home, &data, Some(&root)).unwrap();
     assert_ne!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::SHIM_TEXT
+        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
     );
     fs::write(root.join("a.txt"), "on\n").unwrap();
     let (staged, said) = ide_git(&profile, &shim, &home, &root, &root, &["add", "a.txt"]);
@@ -1311,5 +1334,76 @@ fn ide_git_never_prunes_an_agent_worktree() {
     assert!(collected.status.success(), "{}", said(&collected));
     assert!(registered(), "a gc in the IDE keeps the agent worktree");
     assert_eq!(setup(&agent, &["status", "--porcelain"]), "");
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
+/// FZ-7 under the installed IDE profile with the engine's own PATH, `/usr/bin` first: the
+/// IDE's git never runs the `/usr/bin/git` xcrun shim, whose `xcrun_db` cache write in the
+/// per-user temp folder the profile denies on every call. The status and the lookup of an
+/// unset key that VS Code makes on every refresh print no such error, and the lookup still
+/// exits 1 as git does, which VS Code logs as "Failed to execute git".
+#[test]
+fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    for path in [&mine, &home, &build, &root] {
+        folder(path);
+    }
+    setup(&root, &["init", "-q"]);
+    fs::write(root.join("a.txt"), "base\n").unwrap();
+    setup(&root, &["add", "a.txt"]);
+    setup(&root, &["commit", "-q", "-m", "base"]);
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
+    let ide = |args: &[&str]| {
+        let mut command = server_git(&profile, &shim, &home, &root, false, "/usr/bin:/bin");
+        command.args(args).current_dir(&root);
+        crate::spawn_gate::output(&mut command).unwrap()
+    };
+
+    let status = ide(&["status", "--porcelain"]);
+    let said = String::from_utf8_lossy(&status.stderr);
+    assert!(status.status.success(), "{said}");
+    assert!(
+        !said.contains("xcrun_db"),
+        "the IDE's status ran the xcrun shim: {said}"
+    );
+    let unset = ide(&["config", "--get", "--local", "core.virtualfilesystem"]);
+    let said = String::from_utf8_lossy(&unset.stderr);
+    assert_eq!(unset.status.code(), Some(1), "{said}");
+    assert!(
+        !said.contains("xcrun_db"),
+        "the IDE's config lookup ran the xcrun shim: {said}"
+    );
+    let git = crate::research::runner::sandboxed_git();
+    if git != Path::new("/usr/bin/git") {
+        assert!(
+            fs::read_to_string(&shim)
+                .unwrap()
+                .ends_with(&format!("exec '{}' \"$@\"\n", git.display())),
+            "the shim runs the engine's resolved git"
+        );
+    }
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }

@@ -87,7 +87,7 @@ pub fn write(
         folder,
         SHIM_TEMPORARY,
         &shim,
-        super::git::shim_text(project_hooks)?.as_bytes(),
+        super::git::shim_text(project_hooks, crate::research::runner::sandboxed_git())?.as_bytes(),
         0o700,
     )?;
     let target = machine.join(SETTINGS);
