@@ -3910,10 +3910,11 @@ async fn desktop_link_cli(webview: Webview) -> Result<String, BridgeError> {
     updates::link_cli().await
 }
 
-/// Puts one check in front of every native command: only the main window's page and terminal
-/// wall pages, by their exact labels, reach a command at all. Any other page, the IDE webview
-/// inside the main window included, gets `window_denied` before its arguments are read. Input:
-/// the generated handler. Output: the handler to register.
+/// Puts one check behind Tauri's capability check and in front of every native command. The
+/// capability check refuses the real IDE page first, because its address is not a local one.
+/// Any page that passes it reaches a command only under the main or a terminal wall label, and
+/// any other label gets `window_denied` before its arguments are read. Input: the generated
+/// handler. Output: the handler to register.
 fn admit_pages<R: Runtime>(
     handler: impl Fn(Invoke<R>) -> bool + Send + Sync + 'static,
 ) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
