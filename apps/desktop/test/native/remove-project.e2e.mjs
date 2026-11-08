@@ -68,6 +68,32 @@ function dialog(page) {
   })()`);
 }
 
+/** Reads whether the open dialog's top choice, loss list and Delete everything button each lie
+ * wholly inside the window and inside every box up to the dialog that clips them. Input: the
+ * page. Output: each answer (null when not shown), the window height and the dialog's visible
+ * and full heights. */
+function framed(page) {
+  return page.evaluate(`(() => {
+    const box = document.querySelector("dialog[open]");
+    const seen = (node) => {
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      const inside = (outer) => rect.top >= outer.top - 0.5 && rect.bottom <= outer.bottom + 0.5 && rect.left >= outer.left - 0.5 && rect.right <= outer.right + 0.5;
+      if (!inside({ top: 0, left: 0, bottom: innerHeight, right: innerWidth })) return false;
+      for (let up = node.parentElement; up && up !== box.parentElement; up = up.parentElement) {
+        const style = getComputedStyle(up);
+        if ((style.overflowY !== "visible" || style.overflowX !== "visible") && !inside(up.getBoundingClientRect())) return false;
+      }
+      return true;
+    };
+    const remove = [...box.querySelectorAll("button")].find((button) => button.innerText.trim() === ${JSON.stringify(DELETE)});
+    return {
+      window: innerHeight, client: box.clientHeight, scroll: box.scrollHeight,
+      card: seen(box.querySelector(".pj-radio-card")), losses: seen(box.querySelector("[aria-label='What would be lost']")), remove: seen(remove),
+    };
+  })()`);
+}
+
 /** Runs one case in a fresh page against the shared engine, keeping a failure capture.
  * Inputs: the evidence label and the steps. Output: none. */
 async function onPage(label, steps) {
@@ -190,14 +216,9 @@ test("Delete everything lists the loss, waits for the typed name, then moves the
     for (const deadline = Date.now() + STEP_MS; !(shown = await dialog(page)).deleteEnabled; await pause(POLL_MS)) {
       assert.ok(Date.now() < deadline, `Delete never enabled after the exact name: ${JSON.stringify(shown)}`);
     }
-    const fit = await page.evaluate(`(() => {
-      const box = document.querySelector("dialog[open]");
-      const frame = box.getBoundingClientRect();
-      const card = box.querySelector(".pj-radio-card").getBoundingClientRect();
-      return { window: innerHeight, client: box.clientHeight, scroll: box.scrollHeight, cardTop: card.top - frame.top, cardBottom: frame.bottom - card.bottom };
-    })()`);
-    assert.ok(fit.window === 560 && fit.scroll <= fit.client && fit.cardTop >= 0 && fit.cardBottom >= 0,
-      `at the app's smallest window the dialog fits its frame and the top choice is in view: ${JSON.stringify(fit)}`);
+    const fit = await framed(page);
+    assert.ok(fit.window === 560 && fit.scroll <= fit.client && fit.card === true && fit.remove === true,
+      `at the app's smallest window the dialog fits its frame and the top choice and Delete are in view: ${JSON.stringify(fit)}`);
     await me.capture("delete-ready");
     await me.click(DELETE, "dialog[open] button");
     await me.waitFor("Home after the delete", (text) => text.includes(`${name} was deleted`), 90000);
@@ -213,6 +234,33 @@ test("Delete everything lists the loss, waits for the typed name, then moves the
   assert.ok(!existsSync(folder), "the folder is gone from the projects folder");
   const volumeTrash = join(realpathSync(run.volume), ".Trashes", String(process.getuid()));
   assert.ok(readdirSync(volumeTrash).some((entry) => entry.startsWith(basename(folder))), "the folder is in the test volume's Trash");
+});
+
+test("with agents running and a change set open, Delete everything at the app's smallest window shows the whole loss list while its Delete button is in view", { timeout: 300000 }, async () => {
+  const name = "Losses Shown";
+  const { id } = await made(name);
+  const now = Date.now();
+  execFileSync(SQLITE, [run.database, `INSERT INTO team_agents (project, role, harness, tools, status, created_ms, heartbeat_ms) VALUES ('${id}','sub','codex',0,'working',${now},${now}),('${id}','sub','claude',0,'idle',${now},${now});
+    INSERT INTO landing_change_sets (id, project, agent_kind, agent_id, label, repository, worktree, git_dir, base, head, state, last_outcome, turn, prompt_line, files, added, removed, conflicts, created_ms, updated_ms)
+    VALUES ('e2e-open-set','${id}','sub','1','Open set','/nonexistent','/nonexistent','/nonexistent','base','head','pending','succeeded','turn-1','Change the header',1,1,0,'[]',${now},${now});`]);
+  await onPage("losses", async (page, me) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 760, height: 560, deviceScaleFactor: 1, mobile: false });
+    await openRemove(page, me, id, name);
+    await me.click(DELETE, "dialog[open] input[type=radio]");
+    await me.waitFor("the loss list and the name box", (text) => text.includes("will be stopped") && text.includes("not accepted or discarded") && text.includes("Type"));
+    await me.type("dialog[open] input[aria-label='Type the project name']", name);
+    for (const deadline = Date.now() + STEP_MS; !(await dialog(page)).deleteEnabled; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "Delete never enabled after the exact name");
+    }
+    const lines = await page.evaluate(`[...document.querySelectorAll("dialog[open] [aria-label='What would be lost'] li")].map((line) => line.innerText.trim())`);
+    assert.equal(lines.length, 3, `two running agents and one open change set: ${JSON.stringify(lines)}`);
+    const fit = await framed(page);
+    assert.ok(fit.window === 560 && fit.losses === true && fit.remove === true && fit.card === true,
+      `the whole loss list, the top choice and Delete are in view and no box clips them: ${JSON.stringify(fit)}`);
+    await me.capture("delete-losses");
+    await me.click("Keep project", "dialog[open] button");
+  });
+  assert.equal(await listed(id), true, "Keep project changes nothing");
 });
 
 test("a project set up from a folder outside the projects folder offers only Remove from dashboard", { timeout: 300000 }, async () => {

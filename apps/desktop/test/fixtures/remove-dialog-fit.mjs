@@ -34,11 +34,28 @@ export function focusName() {
   return Boolean(input);
 }
 
+/** Whether a node lies wholly inside the window and inside every box up to its dialog that
+ * clips what overflows it. Inputs: the node and its dialog. Output: true or false, or null
+ * when the node is not shown. */
+function seen(node, dialog) {
+  if (!node) return null;
+  const rect = node.getBoundingClientRect();
+  const inside = (outer) => rect.top >= outer.top - 0.5 && rect.bottom <= outer.bottom + 0.5 && rect.left >= outer.left - 0.5 && rect.right <= outer.right + 0.5;
+  if (!inside({ top: 0, left: 0, bottom: innerHeight, right: innerWidth })) return false;
+  for (let up = node.parentElement; up && up !== dialog.parentElement; up = up.parentElement) {
+    const style = getComputedStyle(up);
+    if ((style.overflowY !== "visible" || style.overflowX !== "visible") && !inside(up.getBoundingClientRect())) return false;
+  }
+  return true;
+}
+
 /** Measures the open dialog, its body and its top choice, rounded to whole pixels. Output: the
  * window height, the dialog's, its body's and its folder and loss lists' visible and full
- * heights and scroll offsets, and the top choice's edges against the dialog's visible edges. */
+ * heights and scroll offsets, the top choice's edges against the dialog's visible edges, and
+ * whether the loss list and the Delete everything button are wholly in view. */
 export function fit() {
   const dialog = document.querySelector("dialog[open]");
+  const remove = [...dialog.querySelectorAll("button")].find((button) => button.textContent.trim() === "Delete everything");
   const body = dialog.querySelector(".dialog-body");
   const frame = dialog.getBoundingClientRect();
   const card = dialog.querySelector(".pj-radio-card").getBoundingClientRect();
@@ -47,5 +64,6 @@ export function fit() {
   return {
     window: innerHeight, dialog: box(dialog), body: box(body), details: details ? box(details) : null,
     cardTop: Math.round(card.top - frame.top), cardBottom: Math.round(card.bottom - frame.top), frame: Math.round(frame.height),
+    losses: seen(dialog.querySelector("[aria-label='What would be lost']"), dialog), remove: seen(remove, dialog),
   };
 }

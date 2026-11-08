@@ -86,7 +86,7 @@ test("a refused Delete everything reads as its own plain sentence, never the gen
   }
 });
 
-test("at the app's smallest and default windows the Delete everything dialog fits its frame and the top choice stays in view while the name is typed (AL20)", async () => {
+test("at the app's smallest and default windows the Delete everything dialog fits its frame, and the top choice, the whole loss list and the Delete button stay in view while the name is typed (AL20)", async () => {
   const { bundle, withPage } = await import("./browser.mjs");
   const fixture = await bundle(new URL("./fixtures/remove-dialog-fit.mjs", import.meta.url).pathname);
   const quiet = preview({ name: "Trash Me", running: [], open_change_sets: 0, losses: [],
@@ -108,6 +108,8 @@ test("at the app's smallest and default windows the Delete everything dialog fit
       assert.ok(fit.body.scroll <= fit.body.client && fit.body.top === 0, `the body fits the frame: ${seen}`);
       assert.ok(fit.cardTop >= 0 && fit.cardBottom <= fit.frame, `the top choice is in view: ${seen}`);
       if (label === "no loss") assert.ok(fit.details.scroll <= fit.details.client, `one folder and no loss need no scroll at all: ${seen}`);
+      assert.equal(fit.remove, true, `the Delete everything button is in view: ${seen}`);
+      if (label === "three losses") assert.equal(fit.losses, true, `the whole loss list is in view and no box clips it: ${seen}`);
     }
   }
 });
