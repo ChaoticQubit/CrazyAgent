@@ -72,10 +72,13 @@ function undoable(item: ActivityItem): string | null {
   return item.kind === "merged_into_main" && !item.undone ? item.change_set : null;
 }
 
-/** The branch a master's merge row names, as the engine wrote it. Input: the row's words.
- * Output: the branch, or "its branch" when the words name none. */
+/** The branch a master's merge row names, as the engine writes it now or wrote it before
+ * change sets had numbers. Input: the row's words. Output: the branch, or "its branch" when
+ * the words name none. */
 function mergedBranch(text: string): string {
-  return /^The master merged its changes into (\S+): /.exec(text)?.[1] ?? "its branch";
+  const named = /^Master merged .*? into (\S+?)(?:\. It closed the changes of .*)?$/su.exec(text)
+    ?? /^The master merged its changes into (\S+): /u.exec(text);
+  return named?.[1] ?? "its branch";
 }
 
 /** Who an activity row says acted: You for the owner, the master's own merge into main as
