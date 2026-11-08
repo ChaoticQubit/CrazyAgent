@@ -1591,3 +1591,41 @@ async fn real_clear_stuck_sign_in_ends_it_once_the_engine_answers_for_it() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn real_panel_reads_its_sign_in_after_another_account_changed() {
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        let (basis, connection) = case.selected("a-codex").await;
+        let mut state = State::default();
+        state.open(basis.clone(), connection.clone()).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let started = ui.exchange(state.request().unwrap()).await;
+        assert_unavailable(real_reply(&started), "a-codex");
+        let operation = real_reply(&started).fact.operation_id.clone();
+        state.apply(started).unwrap();
+        remove_elsewhere(&case, "b-claude").await;
+        let (edited, current) = case.selected("a-codex").await;
+        assert_ne!(edited.config_id, basis.config_id);
+        assert_eq!(current, connection);
+        state.open(edited, current).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        advance(&mut state, 2);
+        assert_eq!(state.reduce(&UiEvent::Submit), Ok(true));
+        let read = state.request().expect("the panel reads its own sign-in");
+        let Command::Read(query) = &read.command else {
+            panic!("read required")
+        };
+        assert_eq!(query.operation_id, operation);
+        assert_eq!(query.scope, scope(&basis, &connection));
+        let answered = ui.exchange(read).await;
+        assert_eq!(real_reply(&answered).fact.operation_id, operation);
+        state.apply(answered).unwrap();
+        assert_eq!(state.operation_id(), Some(&operation));
+        assert!(state.request().is_none());
+    })
+    .await;
+}
