@@ -522,6 +522,38 @@ fn an_agent_whose_instructions_changed_says_so_in_its_status_until_it_starts_aga
 }
 
 #[test]
+fn a_node_says_when_its_running_task_started_and_nothing_while_it_runs_none() {
+    let mut team = status();
+    team.show_finished = true;
+    team.tasks[0].started_ms = Some(1_600_000_000_000);
+    team.tasks[1].started_ms = Some(1_700_000_120_000);
+    team.tasks.push(TeamTask {
+        started_ms: Some(1_700_000_000_000),
+        ..task(15, "claude-code", TaskStatus::Running, Some(3))
+    });
+    team.tasks.push(TeamTask {
+        started_ms: Some(1_700_000_060_000),
+        ..task(16, "codex", TaskStatus::Running, Some(2))
+    });
+    let graph = graph(&team, &none());
+    let started = |id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| node.started_ms)
+    };
+    assert_eq!(
+        started("team-3"),
+        Some(Some(1_700_000_000_000)),
+        "the earliest of its two running tasks"
+    );
+    assert_eq!(started("master"), Some(Some(1_700_000_060_000)));
+    assert_eq!(started("team-4"), Some(None), "its only task is done");
+    assert_eq!(started("team-6"), Some(None), "idle, no task");
+}
+
+#[test]
 fn a_team_with_no_agents_yet_is_the_master_alone() {
     let mut empty = status();
     empty.agents.clear();

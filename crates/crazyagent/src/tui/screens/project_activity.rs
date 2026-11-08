@@ -161,6 +161,7 @@ mod tests {
             no_worktree: false,
             hookless: false,
             message_note: None,
+            started_ms: None,
         }
     }
 

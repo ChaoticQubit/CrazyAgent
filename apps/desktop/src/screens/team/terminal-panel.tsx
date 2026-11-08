@@ -6,7 +6,7 @@ import type { GraphNode, TerminalMessage } from "../../engine-client";
 import type { InputChoice } from "./terminal-io";
 import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
-import { nodeRole, nodeStatus } from "./graph";
+import { nodeRole, nodeRunning, nodeStatus } from "./graph";
 import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const COPIED_MS = 2000;
@@ -293,6 +293,7 @@ function TerminalHead({ node, harness, tile, boxed, onMessage, onStop, onClose, 
 }) {
   const status = nodeStatus(node);
   const label = displayText(node.label);
+  const running = nodeRunning(node, Date.now());
   return <div className="tg-terminal-head">
     <span className="tg-terminal-title">
       <Icon name="square-terminal" size={15} />
@@ -311,6 +312,7 @@ function TerminalHead({ node, harness, tile, boxed, onMessage, onStop, onClose, 
     <span className="tg-terminal-meta">
       <span className="tg-terminal-fact"><Icon name="user-round" size={12} />{nodeRole(node)}</span>
       {node.branch && <span className="tg-terminal-fact"><Icon name="git-branch" size={12} /><span className="tg-terminal-branch">{displayText(node.branch)}</span></span>}
+      {running && <span className="tg-terminal-fact"><Icon name="clock" size={12} />{running}</span>}
       {node.account && <span className="tg-terminal-detail">{displayText(node.account)}</span>}
       {reported && <span className="tg-terminal-detail" title={displayText(reported)}>{displayText(reported)}</span>}
       {swaps && <span className="tg-terminal-fact tg-terminal-hint"><Icon name="info" size={12} />Click another agent to show it here</span>}

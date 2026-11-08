@@ -102,6 +102,15 @@ export async function click(selector, timeout = 15000) {
   await target.click();
 }
 
+/** Opens the fold with the given label, such as the Agents tab's "Agents and tasks", once it
+ * shows, and leaves an open one as it is. Input: the fold's label. */
+export async function unfold(label) {
+  const fold = `details[aria-label="${label}"]`;
+  await until(async () => await browser.execute((selector) => document.querySelector(selector) !== null, fold), 15000, `no "${label}" fold`);
+  if (!(await browser.execute((selector) => document.querySelector(selector).open, fold))) await click(`${fold} > summary`);
+  await until(async () => await browser.execute((selector) => document.querySelector(selector)?.open === true, fold), 10000, `the "${label}" fold did not open`);
+}
+
 /** Types into a field with WebDriver setValue once the owner could reach it, and waits for
  * the field to hold exactly that value. Inputs: the step selector and the value. */
 export async function type(selector, value) {

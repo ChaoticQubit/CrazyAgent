@@ -61,6 +61,14 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.cardTip(ada, { project_id: "p", nodes: [ada], edges: [] }, name)[0], "Ada (@onboarding-fix)");
   assert.equal(graph.nodeRole(team.nodes[2]), "Master");
   assert.equal(graph.nodeRole(node("x", "someday")), "Agent", "an unknown kind from a newer engine still reads");
+  const now = 1_700_000_000_000;
+  assert.equal(graph.nodeRunning({ started_ms: now - 45_000 }, now), "running 45 s");
+  assert.equal(graph.nodeRunning({ started_ms: now - 125 * 60_000 }, now), "running 2 h 5 min");
+  assert.equal(graph.nodeRunning({ started_ms: now + 5_000 }, now), "running 0 s", "a clock behind the engine's never says a negative time");
+  assert.equal(graph.nodeRunning({ started_ms: null }, now), null);
+  assert.equal(graph.nodeRunning({}, now), null);
+  assert.throws(() => graph.nodeRunning({ started_ms: 1.5 }, now), /whole ms/);
+  assert.throws(() => graph.nodeRunning({ started_ms: now }, Number.NaN), /now is a time/);
 });
 
 test("each graph line names its relation, and the live action while it happens", () => {
@@ -91,6 +99,15 @@ test("the graph reads again quickly only while work is live", () => {
   assert.equal(graph.graphSummary(quiet), "0 of 4 agents working. 0 tasks live.");
   const asking = { ...team, nodes: team.nodes.map((item) => item.id === "team-1" ? { ...item, waiting: "permission" } : item.id === "m" ? { ...item, owner_questions: 2 } : item) };
   assert.equal(graph.graphSummary(asking, 3), "1 of 4 agents working. 2 tasks live. 2 waiting on you. 3 agents not shown.");
+});
+
+test("the Agents toolbar's team line counts the master's agents as the mockup words it", () => {
+  assert.equal(graph.teamLine(team), "Master and 4 agents");
+  assert.equal(graph.teamLine(team, 3), "Master and 4 agents · 3 not shown");
+  assert.equal(graph.teamLine({ ...team, nodes: team.nodes.filter((item) => item.kind === "master" || item.id === "team-1") }), "Master and 1 agent");
+  assert.equal(graph.teamLine({ ...team, nodes: team.nodes.filter((item) => item.kind === "master") }), "Master, no agents yet");
+  assert.throws(() => graph.teamLine(team, 5), /hides 5 of 4 agents/);
+  assert.throws(() => graph.teamLine(team, -1), /whole number/);
 });
 
 test("typed keys reach the agent as the UTF-8 bytes a terminal reads", () => {
@@ -221,6 +238,20 @@ test("the terminal panel head is the mockup's: name, harness and state, Message,
   assert.doesNotMatch(master, /tg-terminal-branch/, "no branch, no branch part");
   const none = renderToStaticMarkup(createElement(view.TerminalPanel, { node: node("team-5", "sub"), onClose() {} }));
   assert.match(none, /<button type="button" class="btn small" disabled="">(?:(?!<\/button>)[^])*Message<\/button>/, "Message waits for a box to type in");
+});
+
+test("the terminal head says how long the agent's task has run, after the branch, only while one runs", async () => {
+  const { Icon } = await import("../src/ui/icon.tsx");
+  const clock = renderToStaticMarkup(createElement(Icon, { name: "clock", size: 12 }));
+  const meta = (extra) => {
+    const html = renderToStaticMarkup(createElement(view.TerminalPanel, { node: { ...team.nodes[0], branch: "crazyagent/calendar-api", ...extra }, onClose() {} }));
+    return html.slice(html.indexOf('class="tg-terminal-meta"'), html.indexOf('class="tg-terminal-state"'));
+  };
+  const running = meta({ started_ms: Date.now() - (14 * 60 + 5) * 1000 });
+  assert.ok(running.includes(`<span class="tg-terminal-fact">${clock}running 14 min</span>`), running);
+  assert.ok(running.indexOf("running 14 min") > running.indexOf("tg-terminal-branch"), "after the branch, as the mockup has it");
+  assert.doesNotMatch(meta({ started_ms: null }), /running/, "an idle agent says nothing");
+  assert.doesNotMatch(meta({}), /running/, "an engine without started_ms says nothing");
 });
 
 test("a terminal embedded in a console never also draws a wall tile's head or the swap hint", () => {

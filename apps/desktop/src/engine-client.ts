@@ -1565,7 +1565,8 @@ export type Receipt = "sent" | "delivered" | "typed" | "read" | "replied" | "fai
  * on the owner in its terminal, `waits_for` (the file its start waits for under Wait),
  * `owner_questions` (open For: Me questions) and `no_worktree` come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
  * it has no receipts; `message_note` is the engine's sentence when the Delivery setting leaves
- * the agent no way to get messages. Older engines leave the optional fields out. */
+ * the agent no way to get messages, and `started_ms` when its earliest running task started,
+ * null while it runs none. Older engines leave the optional fields out. */
 export interface GraphNode {
   id: string;
   kind: GraphNodeKind;
@@ -1587,6 +1588,7 @@ export interface GraphNode {
   no_worktree?: boolean;
   hookless?: boolean;
   message_note?: string | null;
+  started_ms?: number | null;
 }
 
 /** Unread messages from one party to another: how many and the newest one's receipt. Each end

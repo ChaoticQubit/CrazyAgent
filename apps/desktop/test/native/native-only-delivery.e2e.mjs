@@ -246,6 +246,7 @@ async function deliver(me, page, project, status, choice) {
  * the engine finishes it while its agent stays up. Inputs: the owner on the page, the page, the
  * project and the engine root. Output: what `engineRows` reads then. */
 async function handOff(me, page, project, runtime) {
+  await me.unfold("Agents and tasks");
   const picked = await page.evaluate(`(() => {
     const select = document.getElementById(${JSON.stringify(`tg-hand-to-${project}`)});
     if (!select || select.disabled || ![...select.options].some((option) => option.value === "codex")) return false;
@@ -275,8 +276,9 @@ function cardText(page, name) {
   })()`);
 }
 
-/** Reads the Agents tab's Team table row of one agent, or null when it has none. Inputs: the
- * page and the agent's name. Output: the row's text. */
+/** Reads the Agents tab's Team table row of one agent, in the Agents and tasks fold the
+ * caller opened, or null when it has none. Inputs: the page and the agent's name. Output: the
+ * row's text. */
 function rowText(page, name) {
   return page.evaluate(`(() => {
     const row = [...document.querySelectorAll("table.pj-table tbody tr")].find((item) => item.querySelector("th")?.innerText.includes(${JSON.stringify(name)}));
@@ -331,6 +333,7 @@ function typedOption(t, prefix, choice) {
     const name = (await graph()).nodes.find((node) => node.agent === done.agent)?.label ?? assert.fail("no card for the sub-agent");
     await shownTo(me, "the sub-agent's card", () => cardText(page, name), (text) => text !== null);
     assert.ok(!(await cardText(page, name)).includes(NO_CHANNEL), "the card does not say it can't receive messages");
+    await me.unfold("Agents and tasks");
     assert.ok(!((await rowText(page, name)) ?? "").includes(NO_CHANNEL), "the Agents row does not say it can't receive messages");
     assert.equal((await status()).agents.find((agent) => agent.id === done.agent)?.message_note ?? null, null);
     await message(me, name, "It goes to the agent's mailbox.");
@@ -353,6 +356,7 @@ test("Messages to Codex agents Native only: a tools-off Codex sub-agent's row, c
     const name = (await graph()).nodes.find((node) => node.agent === done.agent)?.label ?? assert.fail("no card for the sub-agent");
     assert.equal((await status()).agents.find((agent) => agent.id === done.agent)?.message_note, NO_CHANNEL, "the engine says it");
     await shownTo(me, "the sentence on the sub-agent's card", () => cardText(page, name), (text) => (text ?? "").includes(NO_CHANNEL));
+    await me.unfold("Agents and tasks");
     await shownTo(me, "the sentence on the sub-agent's Agents row", () => rowText(page, name), (text) => (text ?? "").includes(NO_CHANNEL));
     await me.capture("native-only-says-so");
     await message(me, name, WAITS);
@@ -365,6 +369,7 @@ test("Messages to Codex agents Native only: a tools-off Codex sub-agent's row, c
     await deliver(me, page, project, status, "auto");
     await typedIn(runtime, project, "the switch to Auto");
     await shownTo(me, "the sentence gone from the card", () => cardText(page, name), (text) => text !== null && !text.includes(NO_CHANNEL));
+    await me.unfold("Agents and tasks");
     await shownTo(me, "the sentence gone from the Agents row", () => rowText(page, name), (text) => text !== null && !text.includes(NO_CHANNEL));
     assert.equal((await status()).agents.find((agent) => agent.id === done.agent)?.message_note ?? null, null);
     await me.capture("native-only-then-auto");

@@ -10,8 +10,8 @@ import { displayText } from "../conversation";
 import { AgentSkillsDialog } from "../process";
 import {
   BADGE_HEIGHT, BADGE_WIDTH, DRAG_SLOP, ZOOM_STEP, badgeLabel, cardTask, cardText, cardTip, dotTone, fitView, fromOwner,
-  graphLive, graphSummary, layoutCards, layoutGraph, namedAccounts, nodeActions, nodeDetail, nodeStatus, panView, questionCount,
-  receiptTicks, tipPlace, viewKey, waitingOnOwner, wheelZoom, zoomView, type Link, type PlacedCard, type Size, type View,
+  graphLive, layoutCards, layoutGraph, namedAccounts, nodeActions, nodeDetail, nodeStatus, panView,
+  receiptTicks, teamLine, tipPlace, viewKey, waitingOnOwner, wheelZoom, zoomView, type Link, type PlacedCard, type Size, type View,
 } from "./graph";
 import { openAllHint, wallPages, type PerWindow } from "../terminals/pages";
 import { AgentSide } from "./agent-instructions";
@@ -29,6 +29,8 @@ const NODE_ICONS: Record<GraphNode["kind"], IconName> = {
   sub: "bot",
   teammate: "users",
 };
+
+const GRAPH_HINT = "Drag or use the arrow keys to move around. Pinch or Ctrl+scroll to zoom, 0 fits. Click a card to open its terminal; its menu shows its skill counts, sends a message, stops it or merges its work.";
 
 const BYTES = new TextEncoder();
 
@@ -223,13 +225,15 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
  * and keeps its terminal and draft when the graph then draws it. Open all terminals opens the
  * terminal wall windows, perWindow terminals each; once clicked, a team that needs more or
  * fewer windows opens or closes them while any stays open. The open panel's Stop asks as the
- * card menu's does. `tools` sit in the head right before Open all terminals.
+ * card menu's does. The head is the Agents toolbar, one row as the mockup draws it: `lead`,
+ * then the team line ("Master and 5 agents", what `asks` the owner and the `pool`), then
+ * `tools` and Open all terminals; it shows while the graph loads, fails or is empty too.
  * Inputs: the project id and name, the terminals per window, the agent whose terminal is open
- * and the open action, optional harness and account name lookups and the head's other tools.
+ * and the open action, optional harness and account name lookups, and the head's parts.
  * Output: the graph section. */
-export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open, onOpen, harness, account, tools }: {
+export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open, onOpen, harness, account, lead, asks, pool, tools }: {
   projectId: string; name?: string; perWindow?: PerWindow; open: GraphNode | null; onOpen: (node: GraphNode | null) => void;
-  harness?: (id: string) => string; account?: (id: string) => string; tools?: ReactNode;
+  harness?: (id: string) => string; account?: (id: string) => string; lead?: ReactNode; asks?: ReactNode; pool?: string; tools?: ReactNode;
 }) {
   const [read, reload] = useTeamGraph(projectId);
   const graph = read.shown;
@@ -357,6 +361,18 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
     </AgentSide>;
   };
   const walls = team === null ? null : wallPages(team.nodes, perWindow).length;
+  const head = (line: string | null) => {
+    const parts = [line && <span key="team" role="status">{line}</span>, asks && <span key="asks">{asks}</span>, pool && <span key="pool">{displayText(pool)}</span>]
+      .filter((part) => Boolean(part));
+    return <div className="tg-head">
+      <h3 id={`${ids}-title`} className="pj-sr">Team graph</h3>
+      {lead}
+      <span className="tg-summary">{parts.flatMap((part, index) => index === 0 ? [part] : [<span key={`dot-${index}`} aria-hidden="true"> · </span>, part])}</span>
+      {tools}
+      <Button size="small" icon="square-terminal" className="tg-open-all" title={openAllHint(walls ?? 0, perWindow)} disabled={!walls}
+        onClick={() => void openAll(walls ?? 0)}>Open all terminals</Button>
+    </div>;
+  };
   const status: ReactNode = graph === undefined ? <Skeleton shape="card" />
     : graph.kind === "not_ready" ? <NotReady what="The team graph" compact />
     : graph.kind === "error" ? <LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />
@@ -390,6 +406,7 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
   </>;
   if (team === null || status !== null) {
     return <section className="tg" aria-busy={graph === undefined || undefined} aria-label="Team graph">
+      {head(team !== null && team.nodes.length > 0 ? teamLine(team) : null)}
       {noted}
       <div key="split" className={`tg-split${open ? " with-terminal" : ""}`}>
         {status}
@@ -410,24 +427,15 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
   const pan = (dx: number, dy: number) => setMoved((current) => panView(current ?? shown, dx, dy, content, port));
   const zoom = (factor: number) => setMoved((current) => zoomView(current ?? shown, factor, { x: port.width / 2, y: port.height / 2 }, content, port));
   const place = tipCard && tipPlace(tipCard, shown, port);
-  const questions = cards.reduce((sum, item) => sum + questionCount(item.node), 0);
 
   return <section className="tg" aria-labelledby={`${ids}-title`}>
-    <div className="tg-head">
-      <h3 id={`${ids}-title`}>Team graph</h3>
-      <span className="tg-summary" role="status">
-        {graphSummary(team, layout.hidden)}{questions > 0 ? ` ${questions} ${questions === 1 ? "question" : "questions"} waiting.` : ""}
-      </span>
-      {tools}
-      <Button size="small" icon="square-terminal" className="tg-open-all" title={openAllHint(walls ?? 0, perWindow)} disabled={!walls}
-        onClick={() => void openAll(walls ?? 0)}>Open all terminals</Button>
-    </div>
+    {head(teamLine(team, layout.hidden))}
     {noted}
     {read.stale && <Notice tone="warn" alert>
       <span className="grow">{displayText(`Couldn't refresh the team graph. ${read.stale} Showing the last read.`)}</span>
       <Button size="small" icon="refresh-cw" onClick={reload}>Try again</Button>
     </Notice>}
-    <p className="tg-hint" id={`${ids}-hint`}>Drag or use the arrow keys to move around. Pinch or Ctrl+scroll to zoom, 0 fits. Click a card to open its terminal; its menu shows its skill counts, sends a message, stops it or merges its work.</p>
+    <p className="pj-sr" id={`${ids}-hint`}>{GRAPH_HINT}</p>
     <div key="split" className={`tg-split${openNode ? " with-terminal" : ""}`}>
       <div className="tg-stage">
         <div className="tg-tools" role="toolbar" aria-label="Graph view">
@@ -435,6 +443,7 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
           <span className="tg-zoom">{Math.round(shown.zoom * 100)}%</span>
           <Button size="small" icon="plus" iconOnly="Zoom in" onClick={() => zoom(ZOOM_STEP)} />
           <Button size="small" variant="quiet" icon="square" onClick={() => setMoved(null)}>Fit</Button>
+          <span className="tg-help" title={GRAPH_HINT} aria-hidden="true"><Icon name="info" size={14} /></span>
         </div>
         <div ref={setElement} className="tg-viewport" tabIndex={0} role="group" aria-label="Team graph view" aria-describedby={`${ids}-hint`}
           onPointerDown={(event) => {

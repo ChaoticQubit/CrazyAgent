@@ -80,11 +80,11 @@ test("a wall window draws its tiles master first with Message and Stop, then fre
   assert.deepEqual(html.match(/aria-label="Stop [^"]+"/gu), ["aria-label=\"Stop a1\""]);
 });
 
-test("each wall tile has the panel's head and input: name, harness and state, role and branch, then Type to and Send", async () => {
+test("each wall tile has the panel's head and input: name, harness and state, role, branch and running time, then Type to and Send", async () => {
   const wall = await import("../src/screens/terminals/index.tsx");
   const nodes = [
-    { ...node("m", "master"), label: "Master", agent: 9, status: "idle", status_label: "Idle", branch: "main" },
-    { ...node("a1"), agent: 1, status: "working", status_label: "Working", branch: "crazyagent/calendar-api" },
+    { ...node("m", "master"), label: "Master", agent: 9, status: "idle", status_label: "Idle", branch: "main", started_ms: null },
+    { ...node("a1"), agent: 1, status: "working", status_label: "Working", branch: "crazyagent/calendar-api", started_ms: Date.now() - 14 * 60_000 - 5_000 },
   ];
   const html = renderToStaticMarkup(createElement(wall.WallGrid, { projectId: "larkspur", tiles: nodes, nodes, perWindow: 4, onStop: () => {} }));
   const tiles = html.split('class="tw-tile"').slice(1);
@@ -94,6 +94,8 @@ test("each wall tile has the panel's head and input: name, harness and state, ro
   assert.match(sub, /<span class="tg-terminal-name">a1 · Codex<\/span><span class="badge tone-info">(?:(?!<\/span>)[^])*Working<\/span>/);
   assert.match(master, /class="tg-terminal-meta"[^]*>Master<\/span>[^]*<span class="tg-terminal-branch">main<\/span>/);
   assert.match(sub, /class="tg-terminal-meta"[^]*>Sub-agent<\/span>[^]*<span class="tg-terminal-branch">crazyagent\/calendar-api<\/span>/);
+  assert.match(sub, /<span class="tg-terminal-fact">(?:(?!<\/span>)[^])*running 14 min<\/span>/);
+  assert.doesNotMatch(master, /running \d/, "an idle master's tile says no running time");
   assert.match(master, /placeholder="Type to Master\.\.\."/);
   assert.match(sub, /placeholder="Type to a1\.\.\."/);
   assert.equal(html.match(/<button type="submit"[^>]*>(?:(?!<\/button>)[^])*Send<\/button>/gu)?.length, 2, "a Send per tile");

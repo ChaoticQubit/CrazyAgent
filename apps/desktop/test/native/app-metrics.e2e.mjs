@@ -80,6 +80,7 @@ test("the sidebar's Metrics page adds up every project, and its filter shows one
     const [first, second] = projects;
     assert.equal(await handOff(me, page, first, runtime), "done", "the first project's Codex sub-agent finished");
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(second)}/agents` });
+    await me.unfold("Agents and tasks");
     await me.waitFor("the second project's Hand off form", (text) => text.includes("Hand off"));
     assert.equal(await handOff(me, page, second, runtime), "done", "the second project's Codex sub-agent finished");
 
