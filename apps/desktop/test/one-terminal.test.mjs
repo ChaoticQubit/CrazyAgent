@@ -134,11 +134,12 @@ test("the panel's Message puts the cursor in its Type to box, its Stop asks firs
 /** Mounts the Agents tab at 1200x800 with a running task and a codex sub-agent harness, waits
  * until the graph drew and the questions inbox read, runs the steps and returns what each
  * step saw. Input: the steps as page expressions, by name. Output: what each returned. */
-async function agentsPage(steps) {
+async function agentsPage(steps, patch = {}, view = "{}") {
   return withPage(async ({ evaluate, send }) => {
     await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
     await evaluate(fixture);
-    await evaluate(`Fixture.mount(0, 'ok', [Fixture.runningTask(7)], { harnesses: [{ harness: "codex", role: "sub", agents_max: 2, tools: true, live: 1 }] })`);
+    const status = { harnesses: [{ harness: "codex", role: "sub", agents_max: 2, tools: true, live: 1 }], ...patch };
+    await evaluate(`Fixture.mount(0, 'ok', [Fixture.runningTask(7)], ${JSON.stringify(status)}, ${view})`);
     assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4)"), true, "the graph drew");
     await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent.includes('ask you'))");
     const seen = {};
@@ -188,8 +189,39 @@ test("under the graph the Team view keeps the team's agents, tasks, Hand a task,
   const { parts } = await agentsPage([["parts", "Fixture.folds()"]]);
   assert.deepEqual(parts.folds.find((fold) => fold.label === "Agents and tasks"), { label: "Agents and tasks", open: false }, JSON.stringify(parts));
   assert.deepEqual(parts.parts, {
-    "Stop all": "Agents and tasks", "Hand a task": "Agents and tasks", "Team agents": "Agents and tasks", "Team tasks": "Agents and tasks", "Wake rules": "Agents and tasks", "Usage": "Agents and tasks",
+    "Stop all": "Agents and tasks", "Start all again": null, "Team stopped": null, "Hand a task": "Agents and tasks", "Team agents": "Agents and tasks", "Team tasks": "Agents and tasks", "Wake rules": "Agents and tasks", "Usage": "Agents and tasks",
   }, JSON.stringify(parts));
+});
+
+test("a stopped team says so above the graph with Start all again while the Agents and tasks fold stays closed, for the owner's stop and for the token budget", async () => {
+  for (const [patch, line] of [
+    [{ paused: true }, "Every agent of this project is stopped until you start them again."],
+    [{ paused: true, budget_reached: true }, "Every agent of this project is stopped: its agents used the token budget. Start them again, or raise the budget first."],
+  ]) {
+    const { parts } = await agentsPage([["parts", "Fixture.folds()"]], patch);
+    const shown = JSON.stringify(parts);
+    assert.deepEqual(parts.folds.find((fold) => fold.label === "Agents and tasks"), { label: "Agents and tasks", open: false }, shown);
+    assert.equal(parts.stopped, line, shown);
+    assert.equal(parts.parts["Team stopped"], "page", `the stopped line is outside the fold: ${shown}`);
+    assert.equal(parts.parts["Start all again"], "page", `Start all again is outside the fold: ${shown}`);
+    assert.equal(parts.startAboveGraph, true, `Start all again comes before the graph: ${shown}`);
+    assert.equal(parts.parts["Stop all"], null, `a stopped team offers Start all again, not Stop all: ${shown}`);
+    assert.equal(parts.parts["Hand a task"], "Agents and tasks", shown);
+  }
+});
+
+test("the urgent question toast's Open opens Questions for you on that question and Waiting on you's toast on the waiting agent, once, and the Agents tab alone opens no drawer", async () => {
+  const QUESTION = "Should the deposit be refunded when a class is cancelled?";
+  const questions = `[Fixture.question(41, "high", ${JSON.stringify(QUESTION)}), Fixture.question(42, "normal", "Which colour for the calendar?")]`;
+  const toFocus = ["focus", "Fixture.until(() => Fixture.focused().row !== null).then(() => Fixture.focused())"];
+  const urgent = await agentsPage([["drawer", "Fixture.until(() => Fixture.drawer() !== null).then(() => Fixture.drawer())"], toFocus], {}, `{ section: "questions", questions: ${questions} }`);
+  assert.equal(urgent.drawer?.title, "Questions for you (2)", JSON.stringify(urgent));
+  assert.ok(urgent.focus.row?.includes(QUESTION), `the keyboard is on the urgent question: ${JSON.stringify(urgent.focus)}`);
+  assert.equal(urgent.focus.hash, "#/projects/alpha/agents", "the drawer opens once: the address drops its section");
+  const waiting = await agentsPage([["drawer", "Fixture.until(() => Fixture.drawer() !== null).then(() => Fixture.drawer())"], toFocus], {}, `{ section: "waiting", questions: ${questions} }`);
+  assert.ok(waiting.focus.row?.includes("Ada") && waiting.focus.row.includes("A permission prompt waits in its terminal."), `the keyboard is on the waiting agent: ${JSON.stringify(waiting.focus)}`);
+  const plain = await agentsPage([["settled", "new Promise((done) => setTimeout(() => done(true), 300))"], ["drawer", "Fixture.drawer()"]], {}, `{ questions: ${questions} }`);
+  assert.equal(plain.drawer, null, "the Agents tab without a section keeps the drawer closed");
 });
 
 test("N ask you opens a drawer with Questions for you and Sub-agent events, and Open terminal there closes it and opens the one panel", async () => {

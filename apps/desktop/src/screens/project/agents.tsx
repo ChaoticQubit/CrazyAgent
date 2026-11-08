@@ -15,12 +15,12 @@ import { FinishedAgentsPanel, TeamPanel } from "./team";
 import { AgentsToolbar, TeamGraphView, useTeamGraph } from "../team";
 import { teamLine } from "../team/graph";
 import type { PerWindow } from "../terminals/pages";
-import { SETTING_GROUPS, TeamActions, TeamControls, type SettingGroupId } from "../team/controls";
+import { SETTING_GROUPS, StopAll, TeamActions, TeamControls, type SettingGroupId } from "../team/controls";
 import { TeamEventsPanel, WakeRulesPanel } from "../team/wake-rules";
 import { QuestionsPanel, askCount, asksWords, questionsTitle, useQuestions } from "../team/questions";
 import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { Button, ConfirmDialog, Drawer, Icon, Segmented, type Tone } from "../../ui";
+import { Button, ConfirmDialog, Drawer, Icon, Segmented, navigate, type Tone } from "../../ui";
 import { useLoad } from "../../state";
 
 /** Words an agent row uses for a research job, from the design's fixed agent set.
@@ -129,12 +129,14 @@ function SettingsToolbar({ projectId, name, perWindow, lead, asks, pool, tools }
 
 /** Agents tab: Team, as the approved mockup draws it: one toolbar row (Team and Agent
  * settings, the team line whose "N ask you" opens the owner's questions and the sub-agent
- * events in a drawer, Running and All, Pause all, Open all terminals), the graph with its one
- * terminal panel, then the closed Agents and tasks fold (Stop all, Hand a task, the team's
- * agents and tasks, wake rules, usage), Finished agents and every research agent the project
- * has started, with live progress from the engine; or Agent settings under the same toolbar
- * row, grouped as the mockup shows them. Inputs: the project data and the route's section, which opens Agent settings, at
- * a group when it names one. Output: the tab; rows refresh while they poll. */
+ * events in a drawer, Running and All, Pause all, Open all terminals), a stopped team's line
+ * with Start all again, the graph with its one terminal panel, then the closed Agents and
+ * tasks fold (Stop all, Hand a task, the team's agents and tasks, wake rules, usage),
+ * Finished agents and every research agent the project has started, with live progress from
+ * the engine; or Agent settings under the same toolbar row, grouped as the mockup shows them.
+ * Inputs: the project data and the route's section, which opens Agent settings, at a group
+ * when it names one, or the questions drawer once on its questions or waiting agents, as a
+ * toast's Open asks. Output: the tab; rows refresh while they poll. */
 export function AgentsTab({ data, section }: { data: ProjectData; section?: string }) {
   const opened = agentsView(section);
   const [shownView, setShownView] = useState<"team" | "settings">(opened.view);
@@ -146,8 +148,15 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
   const [busy, setBusy] = useState<number | null>(null);
   const [terminal, setTerminal] = useState<GraphNode | null>(null);
   const [asking, setAsking] = useState(false);
+  const [focus, setFocus] = useState<"questions" | "waiting" | null>(null);
   const [inbox, reloadInbox] = useQuestions(data.id);
-  useEffect(() => { setTerminal(null); setAsking(false); }, [data.id]);
+  useEffect(() => { setTerminal(null); setAsking(false); setFocus(null); }, [data.id]);
+  useEffect(() => {
+    if (section !== "questions" && section !== "waiting") return;
+    setAsking(true);
+    setFocus(section);
+    navigate({ name: "project", id: data.id, tab: "agents" }, true);
+  }, [section, data.id]);
   const waits = stopping !== null && stopping.status !== "running";
   const jobs = valueOf(data.research)?.jobs ?? [];
   const harnesses = valueOf(data.harnesses);
@@ -184,13 +193,13 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
   const viewSwitch = <Segmented label="Agents view" value={shownView} onValue={setShownView} options={AGENTS_VIEWS} />;
   const bar = {
     lead: viewSwitch,
-    asks: <button type="button" className="tg-asks" aria-haspopup="dialog" onClick={() => setAsking(true)}>{asks}</button>,
+    asks: <button type="button" className="tg-asks" aria-haspopup="dialog" onClick={() => { setFocus(null); setAsking(true); }}>{asks}</button>,
     pool: data.assigned ? poolName(data.assigned.pool) : "No pool. Pick a pool to start.",
     tools: <><Segmented label="Show" value={filter} onValue={setFilter} options={SHOW_OPTIONS} /><PauseAll data={data} /></>,
   };
   const perWindow = teamValue.terminals_per_window ?? 6;
-  const drawer = <Drawer open={asking} title={questionsTitle(inbox)} onClose={() => setAsking(false)}>
-    <QuestionsPanel projectId={data.id} read={inbox} reload={reloadInbox} onOpen={(node) => { setAsking(false); setShownView("team"); setTerminal(node); }} />
+  const drawer = <Drawer open={asking} title={questionsTitle(inbox)} onClose={() => { setAsking(false); setFocus(null); }}>
+    <QuestionsPanel projectId={data.id} read={inbox} reload={reloadInbox} focus={focus} onOpen={(node) => { setAsking(false); setFocus(null); setShownView("team"); setTerminal(node); }} />
     {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
   </Drawer>;
   if (shownView === "settings") return <div className="pj-stack">
@@ -205,6 +214,7 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
+    {team.result?.kind === "ok" && team.result.value.paused && <StopAll projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
     <TeamGraphView projectId={data.id} perWindow={perWindow} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)}
       {...bar} />
     <details className="pj-stack-s" aria-label="Agents and tasks">

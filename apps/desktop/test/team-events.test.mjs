@@ -8,6 +8,8 @@ import "./load-source.mjs";
 const wake = await import("../src/screens/team/wake.ts");
 const panel = await import("../src/screens/team/wake-rules.tsx");
 const alerts = await import("../src/screens/settings/team-alerts.tsx");
+const router = await import("../src/ui/router.ts");
+const shared = await import("../src/screens/project/shared.tsx");
 
 const SHIPPED = { question: true, finished: true, failed: true, change_set_ready: true, progress: false, hourly_cap: 30 };
 const note = (id, project, seen = null) => ({ id, project_id: project, kind: "escalation", text: `note ${id}`, created_ms: id, seen_ms: seen });
@@ -143,4 +145,18 @@ test("an agent level the owner reset sends the version its Reset left, so the ne
   assert.match(client, /cleared: \{ agent: number; version: number \}\[\];/);
   const rust = readFileSync(new URL("../../../crates/crazyagent/src/team/events.rs", import.meta.url), "utf8");
   assert.match(rust, /pub cleared: Vec<ClearedRule>,/);
+});
+
+test("an urgent question's toast opens the project's Agents tab at its questions, an agent waiting in its terminal at Waiting on you, and other alerts open nothing", () => {
+  const urgent = wake.alertRoute({ kind: "urgent_question", project_id: "p 1" });
+  assert.deepEqual(urgent, { name: "project", id: "p 1", tab: "agents", section: "questions" });
+  assert.equal(router.formatRoute(urgent), "#/projects/p%201/agents?section=questions");
+  assert.equal(shared.routeSection(router.formatRoute(urgent)), "questions", "the project page reads the section the toast wrote");
+  const waiting = wake.alertRoute({ kind: "waiting_on_you", project_id: "p1" });
+  assert.deepEqual(waiting, { name: "project", id: "p1", tab: "agents", section: "waiting" });
+  assert.equal(router.formatRoute(waiting), "#/projects/p1/agents?section=waiting");
+  for (const kind of ["escalation", "wake_paused", "queue_full", "budget_stopped", "question"]) {
+    assert.equal(wake.alertRoute({ kind, project_id: "p1" }), undefined, kind);
+  }
+  assert.equal(router.formatRoute({ name: "project", id: "p1", tab: "agents" }), "#/projects/p1/agents", "a route without a section writes none");
 });

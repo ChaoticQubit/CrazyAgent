@@ -9,7 +9,13 @@ import { AgentsTab } from "../../src/screens/project/agents.tsx";
 import { teamStatus } from "./team-status.mjs";
 
 let root = null;
-const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok", release: () => {} };
+const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok", questions: [], release: () => {} };
+
+/** One open question Brook put to the owner, most urgent first as the engine lists them.
+ * Inputs: its id, its urgency and its text. Output: the question. */
+export function question(id, severity, text) {
+  return { id, agent: 2, label: "Brook", severity, asked_for: "me", for_label: "Me", text, assumption: null, created_ms: 0, terminal: "team-2" };
+}
 
 /** One team task the team status lists, running on Ada. Input: its id. Output: the task. */
 export function runningTask(id) {
@@ -50,7 +56,7 @@ const LIVE_TEAM = {
 };
 
 /** The owner's Questions inbox: Ada waits on a permission prompt in its terminal, and so does
- * Dune, an agent the graph does not draw. */
+ * Dune, an agent the graph does not draw. A mount may add open questions to it. */
 const INBOX = {
   project_id: "alpha", questions: [], more: 0,
   waiting: [
@@ -91,7 +97,7 @@ function bridge() {
   window.__TAURI_INTERNALS__ = {
     invoke: async (command, args) => {
       if (command === "desktop_team_graph") return graphRead(engine.graph);
-      if (command === "desktop_coord_questions") return INBOX;
+      if (command === "desktop_coord_questions") return { ...INBOX, questions: engine.questions };
       if (command === "desktop_terminal_attach") {
         engine.attaches.push(args.agent);
         await new Promise((done) => setTimeout(done, engine.delayMs));
@@ -124,10 +130,11 @@ function bridge() {
 /** Mounts the Agents tab of project alpha on a fresh page, as the project page shows it, with
  * Pool A assigned, the engine answering each terminal attach after the given delay, the team
  * graph read as the given mode and the team status listing the given tasks, with any other
- * status fields changed. Inputs: the delay in ms, the graph mode, the tasks and the changes. */
-export function mount(delayMs = 0, graph = "ok", tasks = [], patch = {}) {
+ * status fields changed; `view` gives the route's section and open questions for the inbox.
+ * Inputs: the delay in ms, the graph mode, the tasks, the changes and the view. */
+export function mount(delayMs = 0, graph = "ok", tasks = [], patch = {}, view = {}) {
   root?.unmount();
-  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs, graph });
+  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs, graph, questions: view.questions ?? [] });
   bridge();
   document.head.innerHTML = "";
   for (const text of [styles, projectStyles, teamStyles, xtermStyles]) {
@@ -142,7 +149,7 @@ export function mount(delayMs = 0, graph = "ok", tasks = [], patch = {}) {
     assigned: { pool: { id: "pool-a", name: "Pool A", members: [] } }, now: 0, navigate: () => {}, notify: (note) => engine.notes.push(note), reload: () => {}, reloadPools: () => {},
     team: { result: { kind: "ok", value: teamStatus({ tasks, ...patch }) }, at: 1 }, reloadTeam: () => {},
   };
-  flushSync(() => root.render(createElement(AgentsTab, { data })));
+  flushSync(() => root.render(createElement(AgentsTab, { data, section: view.section })));
 }
 
 /** Waits until a check holds or the time runs out. Inputs: the check and the limit in ms.
@@ -298,14 +305,20 @@ export function toolbar() {
   };
 }
 
-/** The Team view's folds under the graph and where each team part sits: Stop all, the Hand a
- * task form, the team table, the task list, the wake rules and the Usage card, each as the
- * label of the fold it is in, "page" when outside every fold, or null when it is not on the
- * page. */
+/** The Team view's folds under the graph and where each team part sits: Stop all, Start all
+ * again and the stopped team's line, the Hand a task form, the team table, the task list, the
+ * wake rules and the Usage card, each as the label of the fold it is in, "page" when outside
+ * every fold, or null when it is not on the page; and whether Start all again comes before
+ * the graph. */
 export function folds() {
   const heading = (text) => [...document.querySelectorAll("#panel h2, #panel h3, #panel h4")].find((item) => item.textContent.trim() === text) ?? null;
+  const button = (text) => [...document.querySelectorAll("#panel button")].find((item) => item.textContent.trim() === text) ?? null;
+  const start = button("Start all again");
+  const graph = document.querySelector("#panel section.tg");
   const parts = {
-    "Stop all": [...document.querySelectorAll("#panel button")].find((item) => item.textContent.trim() === "Stop all") ?? null,
+    "Stop all": button("Stop all"),
+    "Start all again": start,
+    "Team stopped": [...document.querySelectorAll("#panel [role=status]")].find((item) => item.textContent.startsWith("Every agent of this project is stopped")) ?? null,
     "Hand a task": document.querySelector("#panel form.tg-hand"),
     "Team agents": document.querySelector("#pj-team-title"),
     "Team tasks": document.querySelector('#panel [aria-label="Team tasks"]'),
@@ -315,7 +328,16 @@ export function folds() {
   return {
     folds: [...document.querySelectorAll("#panel details")].map((item) => ({ label: item.getAttribute("aria-label"), open: item.open })),
     parts: Object.fromEntries(Object.entries(parts).map(([name, item]) => [name, item === null ? null : item.closest("details")?.getAttribute("aria-label") ?? "page"])),
+    stopped: parts["Team stopped"]?.textContent ?? null,
+    startAboveGraph: start !== null && graph !== null && (start.compareDocumentPosition(graph) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
   };
+}
+
+/** Where the keyboard is: the text of the drawer row that holds the focus, or null when the
+ * focus is outside every row of an open drawer; and the page's location hash. */
+export function focused() {
+  const row = document.activeElement?.closest("dialog.drawer[open] li") ?? null;
+  return { row: row?.textContent ?? null, hash: location.hash };
 }
 
 /** The open drawer: its title and the labels of its sections, or null when none is open. */

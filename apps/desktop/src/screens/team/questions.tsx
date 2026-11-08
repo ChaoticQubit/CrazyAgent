@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState, type Ref } from "react";
 import { answerQuestion, loadQuestions } from "../../api";
 import type { Result } from "../../api";
 import type { GraphNode, OwnerQuestion, QuestionSeverity, QuestionsInbox, WaitingAgent } from "../../engine-client";
@@ -85,13 +85,14 @@ function OpenTerminal({ row, onOpen }: { row: Pick<OwnerQuestion | WaitingAgent,
 
 /** One question in the owner's inbox: its urgency, who asked, whom the asker meant it for
  * (For: Me, or the master's or lead's name), the question, its assumption, Open terminal and
- * Answer. Takes the project, the question and the open and answered callbacks. Returns the
- * row. */
-export function QuestionRow({ projectId, question, onOpen, onAnswered }: {
+ * Answer. Takes the project, the question, the open and answered callbacks and, for the row
+ * the drawer opens on, a ref that makes it take the focus. Returns the row. */
+export function QuestionRow({ projectId, question, onOpen, onAnswered, focusRef }: {
   projectId: string;
   question: OwnerQuestion;
   onOpen: (node: GraphNode) => void;
   onAnswered: () => void;
+  focusRef?: Ref<HTMLLIElement>;
 }) {
   const [text, setText] = useState("");
   const [writing, setWriting] = useState(false);
@@ -121,7 +122,7 @@ export function QuestionRow({ projectId, question, onOpen, onAnswered }: {
     onAnswered();
   }
 
-  return <li className={`tg-question ${question.severity}`}>
+  return <li ref={focusRef} className={`tg-question ${question.severity}`} tabIndex={focusRef ? -1 : undefined} data-autofocus={focusRef ? "" : undefined}>
     <div className="pj-row">
       <StatusBadge word={copy.word} tone={copy.tone} />
       <strong>{label}</strong>
@@ -171,10 +172,25 @@ export function questionsTitle(read: InboxState): string {
  * questions agents put to the owner, most urgent first, each with its urgency, the assumption
  * a low one carries on with, Answer and Open terminal while the asker runs; then the agents
  * waiting on the owner in their own terminal, each with Open terminal, which opens the agent
- * in the Agents tab's one terminal panel. The drawer's title names it. Inputs: the project id,
- * the inbox read the toolbar counts from with its reload, and the open action. Output: the
+ * in the Agents tab's one terminal panel. The drawer's title names it. Opened from a toast,
+ * the keyboard starts on the first question (most urgent first) or the first agent waiting in
+ * its terminal, once that row is read. Inputs: the project id, the inbox read the toolbar
+ * counts from with its reload, the open action and the row kind to focus. Output: the
  * section. */
-export function QuestionsPanel({ projectId, read, reload, onOpen }: { projectId: string; read: InboxState; reload: () => void; onOpen: (node: GraphNode) => void }) {
+export function QuestionsPanel({ projectId, read, reload, onOpen, focus = null }: {
+  projectId: string;
+  read: InboxState;
+  reload: () => void;
+  onOpen: (node: GraphNode) => void;
+  focus?: "questions" | "waiting" | null;
+}) {
+  const target = useRef<HTMLLIElement>(null);
+  const focused = useRef(false);
+  useEffect(() => {
+    if (focus === null || focused.current || target.current === null) return;
+    target.current.focus();
+    focused.current = document.activeElement === target.current;
+  });
   const shown = read.shown;
   if (shown === undefined) return <section className="tg-events" aria-busy="true" aria-label="Questions for you"><Skeleton shape="card" /></section>;
   if (shown.kind === "not_ready") return <NotReady what="Questions for you" compact />;
@@ -188,14 +204,17 @@ export function QuestionsPanel({ projectId, read, reload, onOpen }: { projectId:
     </Notice>}
     {count === 0 && inbox.waiting.length === 0 && <p className="tg-terminal-note">No agent is waiting on you.</p>}
     {inbox.questions.length > 0 && <ul className="pj-rows" aria-label="Open questions">
-      {inbox.questions.map((question) => <QuestionRow key={question.id} projectId={projectId} question={question} onOpen={onOpen} onAnswered={reload} />)}
+      {inbox.questions.map((question, index) => <QuestionRow key={question.id} projectId={projectId} question={question} onOpen={onOpen} onAnswered={reload}
+        focusRef={focus === "questions" && index === 0 ? target : undefined} />)}
     </ul>}
     {inbox.more > 0 && <p className="pj-secondary pj-small">
       {inbox.more} more {inbox.more === 1 ? "question waits" : "questions wait"}. They show here as you answer these.
     </p>}
     {inbox.waiting.length > 0 && <>
       <h4>Waiting on you in their terminal</h4>
-      <ul className="pj-rows" aria-label="Waiting on you in their terminal">{inbox.waiting.map((agent) => <li key={agent.agent} className="pj-row">
+      <ul className="pj-rows" aria-label="Waiting on you in their terminal">{inbox.waiting.map((agent, index) => <li key={agent.agent} className="pj-row"
+        ref={focus === "waiting" && index === 0 ? target : undefined} tabIndex={focus === "waiting" && index === 0 ? -1 : undefined}
+        data-autofocus={focus === "waiting" && index === 0 ? "" : undefined}>
         <StatusBadge word="Waiting on you" tone="warn" />
         <strong>{displayText(agent.label)}</strong>
         <span className="grow">{agent.waiting === "permission" ? "A permission prompt waits in its terminal." : "A question waits in its terminal."}</span>
