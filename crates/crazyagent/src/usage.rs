@@ -228,9 +228,9 @@ pub const REMOVED_PROJECTS: &str = "<removed>";
 
 /// Moves a removed project's usage to `REMOVED_PROJECTS`: its token rows add into the rows
 /// already kept there for the same hour and run, its unreported marks and seen sessions keep
-/// the latest time, and its runs and cuts keep counting there. Its turn rows are deleted, as
-/// only its own page shows them. A table this store lacks is skipped. Inputs: the owner's
-/// transaction and the project. Output: Ok, or the store failure.
+/// the latest time, its turn rows add into the rows kept there for the same hour and agent,
+/// and its runs and cuts keep counting there. A table this store lacks is skipped. Inputs:
+/// the owner's transaction and the project. Output: Ok, or the store failure.
 pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), EngineError> {
     assert_ne!(project, REMOVED_PROJECTS);
     let has = |table: &str| -> Result<bool, EngineError> {
@@ -269,6 +269,16 @@ pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), Engin
              ON CONFLICT(project,agent,session) DO UPDATE SET last_ms=MAX(last_ms,excluded.last_ms)"
                 .to_owned(),
         ),
+        (
+            "usage_turns",
+            format!(
+                "INSERT INTO usage_turns(hour_ms,project,agent,turns)
+                 SELECT hour_ms,?2,agent,turns FROM usage_turns WHERE project=?1
+                 ON CONFLICT(hour_ms,project,agent) DO UPDATE SET
+                 turns=MIN(turns+excluded.turns,{max})",
+                max = turns::HOUR_TURNS_MAX
+            ),
+        ),
     ];
     for (table, add) in moves {
         if has(table)? {
@@ -286,10 +296,6 @@ pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), Engin
             )
             .map_err(storage)?;
         }
-    }
-    if has("usage_turns")? {
-        db.execute("DELETE FROM usage_turns WHERE project=?1", [project])
-            .map_err(storage)?;
     }
     Ok(())
 }

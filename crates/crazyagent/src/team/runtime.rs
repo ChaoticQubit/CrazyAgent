@@ -763,6 +763,7 @@ impl TeamRuntime {
             .map_err(error)?;
         super::initialize(&connection)?;
         crate::project_setup::initialize(&connection)?;
+        crate::usage::initialize(&connection)?;
         crate::recovery::capture(&connection, None)?;
         let now = now_ms();
         connection
@@ -7289,15 +7290,13 @@ impl TeamRuntime {
             Some(worker.connection.as_str()),
             &(self.access)().unwrap_or_default(),
         );
-        let counted = crate::usage::initialize(&self.connection).and_then(|()| {
-            crate::usage::capture::count_reported(
-                &self.connection,
-                &attribution,
-                tokens,
-                "headless",
-                now_ms(),
-            )
-        });
+        let counted = crate::usage::capture::count_reported(
+            &self.connection,
+            &attribution,
+            tokens,
+            "headless",
+            now_ms(),
+        );
         if let Err(problem) = counted {
             eprintln!(
                 "team usage not counted: {}",
@@ -7316,8 +7315,7 @@ impl TeamRuntime {
             .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
             .map_err(error)?;
         let agent = crate::usage::service::team_agent_key(id, Some(project), master);
-        let counted = crate::usage::initialize(&self.connection)
-            .and_then(|()| crate::usage::turns::count(&self.connection, project, &agent, now_ms()));
+        let counted = crate::usage::turns::count(&self.connection, project, &agent, now_ms());
         if let Err(problem) = counted {
             eprintln!(
                 "team turn not counted for metrics: {}",
