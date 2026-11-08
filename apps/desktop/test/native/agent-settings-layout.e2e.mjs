@@ -57,7 +57,8 @@ function ownerRepo(folder) {
 }
 
 /** Starts the real engine and the bridge on a new project made from the owner's repository,
- * serves the built app to a browser page, runs the steps and stops everything. Inputs: the
+ * at Full access with one sub-agent harness, so every row with a control draws it, serves
+ * the built app to a browser page, runs the steps and stops everything. Inputs: the
  * test context, the temporary folder prefix and the steps, given the project, the owner on
  * the page, the page and the site's port. Output: none. */
 async function onEngine(t, prefix, steps) {
@@ -108,6 +109,17 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       if (!["waiting", "running"].includes(view.graph.kind) && !["waiting", "running"].includes(view.mapping.kind)) break;
       assert.ok(Date.now() < deadline, `onboarding still running: ${JSON.stringify(view)}`);
     }
+    const policy = await value(bridge, "desktop_project_agent_policy", { id: project });
+    const full = await value(bridge, "desktop_set_project_agent_policy", {
+      id: project, version: policy.version, generation: 4,
+      policy: { access: "full", network: policy.network, toolchains: [], ide_git_hooks: policy.ide_git_hooks },
+    });
+    assert.equal(full.outcome, "applied", `the project runs at Full access, so the merge row shows its choices: ${JSON.stringify(full)}`);
+    const stored = await value(bridge, "desktop_project_setup", { id: project });
+    const team = { ...stored.team, sub_harnesses: [{ harness: "rcli", agents: 2, tools: true }] };
+    const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team, documents: [] };
+    const saved = await value(bridge, "desktop_update_project_setup", { id: project, setup, name: null, revision: stored.revision, generation: 5 });
+    assert.equal(saved.outcome, "applied", `the team has a sub-agent harness, so its row shows its steppers: ${JSON.stringify(saved)}`);
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
