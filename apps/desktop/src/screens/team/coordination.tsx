@@ -87,10 +87,11 @@ export function RoleSkillsControls({ settings, skills, busy, onChoose }: {
 /** Each coordination harness id with the name the app shows for it. */
 export const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "rcli" };
 
-/** The Sub-agent mode choices; Native only for a harness kind with native teammates. */
+/** The Sub-agent mode choices in the mockup's words; Native agent teams first, and only for a
+ * harness kind that has them. Input: whether it has them. Output: the options. */
 export function modeOptions(native: boolean): SelectOption[] {
-  const spawned = { value: "app_spawned", label: "App-spawned sub-agents" };
-  return native ? [spawned, { value: "native", label: "Native teammates" }] : [spawned];
+  const spawned = { value: "app_spawned", label: "CrazyAgent workers" };
+  return native ? [{ value: "native", label: "Native agent teams" }, spawned] : [spawned];
 }
 
 /** The Claude Code terminal display choices, Classic first as the default. */
@@ -131,17 +132,18 @@ export function countedToolsInput(text: string): { kind: "ok"; tools: string[] }
   return { kind: "ok", tools };
 }
 
-const OVERLAP_LABELS: Record<Overlaps, string> = { warn: "Warn", block: "Block", off: "Off", wait: "Wait" };
+const OVERLAP_LABELS: Record<Overlaps, string> = { warn: "Warn both (default)", block: "Block the later one", off: "Off", wait: "Wait until the first lands" };
+const OVERLAP_ORDER: readonly Overlaps[] = ["warn", "wait", "block", "off"];
 
 function knownOverlap(value: string): value is Overlaps {
   return (OVERLAP_CHOICES as readonly string[]).includes(value);
 }
 
-/** The Overlapping edits choices: the engine's known ones in their order, then the engine's
- * value as it is when this app does not know it, so it is never dropped or remapped. Input:
- * the engine's value. Output: the options. */
+/** The Overlapping edits choices: the engine's known ones in the mockup's order and words, then
+ * the engine's value as it is when this app does not know it, so it is never dropped or
+ * remapped. Input: the engine's value. Output: the options. */
 export function overlapOptions(current: string): { value: string; label: string }[] {
-  const known = OVERLAP_CHOICES.map((value) => ({ value: value as string, label: OVERLAP_LABELS[value] }));
+  const known = OVERLAP_ORDER.filter((value) => (OVERLAP_CHOICES as readonly string[]).includes(value)).map((value) => ({ value: value as string, label: OVERLAP_LABELS[value] }));
   return knownOverlap(current) ? known : [...known, { value: current, label: displayText(current) }];
 }
 
@@ -282,8 +284,8 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
     {view.harnesses.map((row) => <SettingRow key={row.harness} label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
       <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={row.mode} options={modeOptions(row.native)}
         onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void run(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode"); }}
-        helper={row.native ? "Native teammates run inside the lead's own session. App-spawned sub-agents get their own terminal, worktree and branch."
-          : `${HARNESS_NAMES[row.harness]} has no native teammates, so its sub-agents are app-spawned.`} />
+        helper={row.native ? "Native agent teams run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch."
+          : `${HARNESS_NAMES[row.harness]} has no native agent teams, so its sub-agents are CrazyAgent workers.`} />
     </SettingRow>)}
     {children}
     <QuestionsSetting projectId={projectId} status={status} reload={reload} />

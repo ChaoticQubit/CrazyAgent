@@ -275,7 +275,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .set-head [tabindex="-1"]:focus { outline: none; }
 .set-head p { margin: 2px 0 0; color: var(--text-2); font-size: 12px; line-height: 16px; }
 .set-icon { display: inline-grid; flex: none; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-control); background: var(--accent-soft); color: var(--accent-text); }
-.set-sub { margin: 0; padding: 12px 16px 4px; border-top: 1px solid var(--border); color: var(--text-3); font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.set-sub { margin: 0; padding: 12px 16px 4px; border-top: 1px solid var(--border); color: var(--text-3); font: 500 12px/16px var(--mono); }
 .set-row { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, max-content); gap: 2px 16px; align-items: center; min-width: 0; padding: 12px 16px; border-top: 1px solid var(--border); }
 .set-row > * { grid-column: 1; min-width: 0; }
 .set-row > .field { display: contents; }

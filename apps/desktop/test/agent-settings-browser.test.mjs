@@ -92,7 +92,7 @@ test("two quick coordination changes from different rows both stay saved", { tim
     await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await page.evaluate(fixture);
     const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`);
-    const clicked = await page.evaluate(`Fixture.click('[aria-label="Overlapping edits"] [role="radio"]', "Block") && Fixture.click('[aria-label="Workflow nudges"] [role="radio"]', "Every 10 minutes")`);
+    const clicked = await page.evaluate(`Fixture.click('[aria-label="Overlapping edits"] [role="radio"]', "Block the later one") && Fixture.click('[aria-label="Workflow nudges"] [role="radio"]', "Every 10 minutes")`);
     await page.evaluate("Fixture.settle(600)");
     return { mounted, clicked, sent: await page.evaluate(`Fixture.sentTo("desktop_team_coordination")`) };
   });

@@ -31,7 +31,7 @@ test("the desktop defaults are the engine's counted tools", () => {
 
 test("Native is offered only where the harness kind has native teammates", () => {
   assert.deepEqual(coord.modeOptions(false).map((option) => option.value), ["app_spawned"]);
-  assert.deepEqual(coord.modeOptions(true).map((option) => option.value), ["app_spawned", "native"]);
+  assert.deepEqual(coord.modeOptions(true).map((option) => option.value), ["native", "app_spawned"], "native agent teams come first, as the mockup lists them");
   assert.deepEqual(coord.DELIVERY_OPTIONS.map((option) => option.value), ["auto", "native_only", "typing_only"]);
 });
 
