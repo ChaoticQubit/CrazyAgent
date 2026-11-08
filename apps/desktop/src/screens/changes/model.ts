@@ -38,12 +38,30 @@ const MARKS: Record<string, string> = {
 };
 
 const MESSAGE_BYTES_MAX = 4096;
+const SUBJECT_CHARS_MAX = 48;
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
 /** Names the agent whose work a change set holds, a sub-agent by the engine's label such as
  * "Ada (@onboarding-fix) · Claude Code". Input: the change set. Output: the name. */
 export function agentName(set: ChangeSet): string {
   return set.agent.kind === "master" ? "Master" : displayText(set.agent.label);
+}
+
+/** The first line of a change set's commit message, cut to a short subject, hidden
+ * characters shown as escapes. Input: the change set. Output: the subject, empty for an
+ * empty message. */
+export function subject(set: ChangeSet): string {
+  const chars = [...displayText(set.message.split("\n", 1)[0].trim())];
+  return chars.length > SUBJECT_CHARS_MAX ? `${chars.slice(0, SUBJECT_CHARS_MAX - 3).join("")}...` : chars.join("");
+}
+
+/** Names a change set as the owner reads it everywhere: "Change set #16 (Wren: checkout UI,
+ * 7 files)", or its agent alone for a set the engine has not numbered yet. Input: the
+ * change set. Output: the name. */
+export function changeSetName(set: ChangeSet): string {
+  if (set.number === undefined || set.number === null) return agentName(set);
+  const about = subject(set);
+  return `Change set #${set.number} (${agentName(set)}${about === "" ? "" : `: ${about}`}, ${plural(set.files, "file", "files")})`;
 }
 
 /** The size of a change set in files and lines. Input: the change set. Output: the line. */
@@ -233,9 +251,11 @@ export function waitingCount(sets: readonly ChangeSet[]): number {
   return sets.filter((set) => set.state === "pending" || set.state === "conflict").length;
 }
 
-/** The line that tells the owner change sets wait in Changes. Input: the count. Output: the
- * line, or null when none wait. */
-export function waitingLine(count: number): string | null {
+/** The line that tells the owner change sets wait where they are reviewed: Changes, or the
+ * IDE's Source Control once the IDE replaces Changes (DEC-097). Inputs: the count and the
+ * place. Output: the line, or null when none wait. */
+export function waitingLine(count: number, place: "changes" | "ide" = "changes"): string | null {
   if (count <= 0) return null;
-  return count === 1 ? "1 change set is waiting for you in Changes" : `${count} change sets are waiting for you in Changes`;
+  const where = place === "ide" ? "the IDE, under Source Control" : "Changes";
+  return count === 1 ? `1 change set is waiting for you in ${where}` : `${count} change sets are waiting for you in ${where}`;
 }

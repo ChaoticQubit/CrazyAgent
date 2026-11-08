@@ -23,6 +23,7 @@ export interface ChangeSet {
   message: string;
   waiting: boolean;
   outside: boolean;
+  number?: number | null;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";

@@ -579,9 +579,10 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
 }
 
 /// Keeps change sets tidy while the owner server runs: at start, and once a day after,
-/// it finishes or undoes Accepts and worktree resets an engine stop interrupted, closes
-/// open change sets the owner landed or removed outside the app and deletes discarded refs
-/// past their restore window, each step run on its own so a failing one never skips the
+/// it finishes or undoes Accepts and worktree resets an engine stop interrupted, numbers
+/// the change sets an engine without numbers stored, closes open change sets the owner
+/// landed or removed outside the app and deletes discarded refs past their restore
+/// window, each step run on its own so a failing one never skips the
 /// others. Inputs: the authority, held weakly so a server dropped without its stop path
 /// still releases it, and the server's stop, a sender dropped or sent. Runs until the stop
 /// or until the authority is gone; a pass already running ends first, since its blocking
@@ -595,6 +596,7 @@ pub(super) async fn upkeep(authority: std::sync::Weak<Authority>, mut stop: ones
             Ok(root) => tokio::task::spawn_blocking(move || match landing::open(&root) {
                 Ok(db) => [
                     landing::reconcile(&db).err(),
+                    landing::number_change_sets(&db).err(),
                     landing::observe(&db, None).err(),
                     now_ms().and_then(|now| landing::prune(&db, now)).err(),
                 ]

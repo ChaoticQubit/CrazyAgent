@@ -126,6 +126,7 @@ export interface ActivityItem {
   text: string;
   change_set: string | null;
   undone: boolean;
+  branch?: string | null;
 }
 
 export interface ContextItem {

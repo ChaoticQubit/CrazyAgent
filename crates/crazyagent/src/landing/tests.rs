@@ -8017,6 +8017,34 @@ fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_mast
         "the row names the set it closed and where it landed: {}",
         rows[0].text
     );
+    let number = case.view(&fix).number.unwrap();
+    assert!(
+        rows[0]
+            .text
+            .starts_with(&format!("Master merged change set #{number} (Master: ")),
+        "AL2: the row names the master's set by its number: {}",
+        rows[0].text
+    );
+}
+
+/// AL2 (rv-sec F1): the master's merge row gives the branch its set landed on as its own
+/// field, the ref an Undo reverts on, so the desktop never reads it from the row's words.
+#[test]
+fn a_master_merge_row_gives_the_branch_its_set_landed_on() {
+    let case = Case::new();
+    let (_, fix, _) = master_fixing_a_conflict(&case);
+    let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
+    assert!(
+        matches!(&outcome, Some(AcceptOutcome::Landed { branch, .. }) if branch == "main"),
+        "the master's fix lands on main: {outcome:?}"
+    );
+    let merged = activity_of(&case, &fix);
+    assert_eq!(merged.len(), 1, "one merge row: {merged:?}");
+    assert_eq!(
+        serde_json::to_value(&merged[0]).unwrap()["branch"],
+        serde_json::json!("main"),
+        "the merge row gives its branch as data"
+    );
 }
 
 #[test]
@@ -9736,5 +9764,254 @@ fn a_branch_switch_inside_a_reset_is_never_reported_as_reset() {
     assert_eq!(
         git_in(&case.home, &master.worktree, &["status", "--porcelain"]),
         ""
+    );
+}
+
+/// Saves a closed copy of `first` under a new id, made at `created_ms`, in `project`.
+/// Inputs: the case, the record copied, the id's hex digit, the time and the project.
+/// Output: the new id.
+fn closed_copy(
+    case: &Case,
+    first: &store::Record,
+    digit: char,
+    created_ms: u64,
+    project: &str,
+) -> ChangeSetId {
+    let mut copy = first.clone();
+    copy.id = ChangeSetId::new(digit.to_string().repeat(32)).unwrap();
+    copy.project = ProjectId::new(project).unwrap();
+    copy.state = ChangeState::Discarded;
+    copy.restorable_until_ms = Some(NOW_MS + 7 * DAY_MS);
+    copy.created_ms = created_ms;
+    store::save(&case.db, &copy).unwrap();
+    copy.id
+}
+
+/// The number each listed change set of a project carries, by id. Inputs: the case and
+/// the project. Output: the numbers.
+fn numbers(case: &Case, project: &str) -> BTreeMap<String, Option<u64>> {
+    list(&case.db, &ProjectId::new(project).unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|view| (view.id.as_str().to_owned(), view.number))
+        .collect()
+}
+
+/// Adds the engine's projects table holding these projects, the ones a start numbers sets
+/// of. Inputs: the case and the projects. Output: none.
+fn with_projects(case: &Case, projects: &[&str]) {
+    case.db
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+        )
+        .unwrap();
+    for project in projects {
+        case.db
+            .execute(
+                "INSERT INTO projects(id, body) VALUES (?1, '{}')",
+                [project],
+            )
+            .unwrap();
+    }
+}
+
+/// Drops the numbers of these sets, as an engine without numbers leaves the sets it
+/// writes. Inputs: the case and the sets. Output: none.
+fn drop_numbers(case: &Case, ids: &[&ChangeSetId]) {
+    for id in ids {
+        case.db
+            .execute(
+                "DELETE FROM landing_change_set_numbers WHERE change_set=?1",
+                [id.as_str()],
+            )
+            .unwrap();
+    }
+}
+
+/// AL17 (1): each change set a project adds gets the next number of that project, in the
+/// order the sets are added, and keeps it when the set is saved again.
+#[test]
+fn change_sets_are_numbered_in_the_order_a_project_adds_them() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &first).unwrap();
+    let second = closed_copy(&case, &record, 'b', record.created_ms - 10, "project-1");
+    let third = closed_copy(&case, &record, 'a', record.created_ms - 20, "project-1");
+    assert_eq!(case.view(&first).number, Some(1));
+    assert_eq!(case.view(&second).number, Some(2));
+    assert_eq!(case.view(&third).number, Some(3));
+    let mut again = store::load(&case.db, &first).unwrap();
+    again.prompt_line = "Saved again".into();
+    store::save(&case.db, &again).unwrap();
+    assert_eq!(case.view(&first).number, Some(1));
+}
+
+/// AL17 (2): change sets stored before numbers existed get numbers at the next engine
+/// start in the order they were made, the id breaking a tie, and a second start changes
+/// nothing.
+#[test]
+fn change_sets_stored_before_numbers_are_numbered_by_when_they_were_made() {
+    let case = Case::new();
+    with_projects(&case, &["project-1"]);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &first).unwrap();
+    let made = record.created_ms;
+    let tie_late = closed_copy(&case, &record, 'c', made - 100, "project-1");
+    let tie_early = closed_copy(&case, &record, 'b', made - 100, "project-1");
+    let oldest = closed_copy(&case, &record, 'd', made - 200, "project-1");
+    case.db
+        .execute_batch("DELETE FROM landing_change_set_numbers")
+        .unwrap();
+    assert!(numbers(&case, "project-1").values().all(Option::is_none));
+    assert_eq!(number_change_sets(&case.db).unwrap(), 4);
+    let expected = BTreeMap::from([
+        (oldest.as_str().to_owned(), Some(1)),
+        (tie_early.as_str().to_owned(), Some(2)),
+        (tie_late.as_str().to_owned(), Some(3)),
+        (first.as_str().to_owned(), Some(4)),
+    ]);
+    assert_eq!(numbers(&case, "project-1"), expected);
+    assert_eq!(number_change_sets(&case.db).unwrap(), 0);
+    assert_eq!(numbers(&case, "project-1"), expected);
+}
+
+/// AL17 (3): sets an engine without numbers wrote after numbered ones, as after a rollback
+/// to b19 and back, get numbers after the project's highest at the next start, and the
+/// numbered sets keep theirs.
+#[test]
+fn sets_written_without_a_number_are_numbered_after_the_highest_at_the_next_start() {
+    let case = Case::new();
+    with_projects(&case, &["project-1"]);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &first).unwrap();
+    let made = record.created_ms;
+    let second = closed_copy(&case, &record, 'b', made + 10, "project-1");
+    let late = closed_copy(&case, &record, 'c', made + 30, "project-1");
+    let early = closed_copy(&case, &record, 'd', made + 20, "project-1");
+    drop_numbers(&case, &[&late, &early]);
+    assert_eq!(number_change_sets(&case.db).unwrap(), 2);
+    let expected = BTreeMap::from([
+        (first.as_str().to_owned(), Some(1)),
+        (second.as_str().to_owned(), Some(2)),
+        (early.as_str().to_owned(), Some(3)),
+        (late.as_str().to_owned(), Some(4)),
+    ]);
+    assert_eq!(numbers(&case, "project-1"), expected);
+}
+
+/// AL17 (4): two projects number their change sets independently, each from 1, at insert
+/// and at the start that numbers sets stored without one; a removed project's sets are
+/// left unnumbered.
+#[test]
+fn two_projects_number_their_change_sets_independently() {
+    let case = Case::new();
+    with_projects(&case, &["project-1", "project-2"]);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &first).unwrap();
+    let made = record.created_ms;
+    let other = closed_copy(&case, &record, 'b', made + 10, "project-2");
+    let second = closed_copy(&case, &record, 'c', made + 20, "project-1");
+    let other_second = closed_copy(&case, &record, 'd', made + 30, "project-2");
+    let removed = closed_copy(&case, &record, 'e', made + 40, "project-3");
+    assert_eq!(
+        numbers(&case, "project-1"),
+        BTreeMap::from([
+            (first.as_str().to_owned(), Some(1)),
+            (second.as_str().to_owned(), Some(2))
+        ])
+    );
+    assert_eq!(
+        numbers(&case, "project-2"),
+        BTreeMap::from([
+            (other.as_str().to_owned(), Some(1)),
+            (other_second.as_str().to_owned(), Some(2))
+        ])
+    );
+    case.db
+        .execute_batch("DELETE FROM landing_change_set_numbers")
+        .unwrap();
+    assert_eq!(number_change_sets(&case.db).unwrap(), 4);
+    assert_eq!(numbers(&case, "project-2")[other_second.as_str()], Some(2));
+    assert_eq!(numbers(&case, "project-3")[removed.as_str()], None);
+}
+
+/// AL17: a numbers table holding a number below 1, which the store's own table refuses,
+/// trips the assertion that a project's numbers start at 1 when the next set is numbered.
+#[test]
+#[should_panic(expected = "a change set number starts at 1")]
+fn a_number_below_one_in_the_table_trips_the_numbering_assertion() {
+    let case = Case::new();
+    case.db
+        .execute_batch(
+            "DROP TABLE landing_change_set_numbers;
+             CREATE TABLE landing_change_set_numbers (change_set TEXT PRIMARY KEY, project TEXT NOT NULL, number INTEGER NOT NULL);
+             INSERT INTO landing_change_set_numbers VALUES ('x', 'project-1', -1);",
+        )
+        .unwrap();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let _ = case.turn(TurnOutcome::Succeeded);
+}
+
+/// AL17: a change set is named by its number, its agent, the first line of its message cut
+/// to 48 characters and its file count, as the desktop names it; one the engine has not
+/// numbered yet by its agent.
+#[test]
+fn a_change_set_name_carries_its_number_agent_subject_and_files() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let mut view = case.view(&id);
+    view.number = Some(16);
+    view.agent.label = "Wren".into();
+    view.message = "checkout UI\n\nThe form and its summary.".into();
+    view.files = 7;
+    assert_eq!(
+        change_set_name(&view),
+        "Change set #16 (Wren: checkout UI, 7 files)"
+    );
+    view.agent.kind = AgentKind::Master;
+    view.message = String::new();
+    view.files = 1;
+    assert_eq!(change_set_name(&view), "Change set #16 (Master, 1 file)");
+    view.agent.kind = AgentKind::Sub;
+    view.agent.label = "agent-1".into();
+    view.message = "x".repeat(80);
+    view.files = 3;
+    assert_eq!(
+        change_set_name(&view),
+        format!("Change set #16 (agent-1: {}..., 3 files)", "x".repeat(45))
+    );
+    view.number = None;
+    assert_eq!(change_set_name(&view), "agent-1");
+}
+
+/// AL2: the owner's Accept is listed as "You accepted change set #1 (Agent 1: ...)", the
+/// set named by its number as the mockup names it.
+#[test]
+fn the_owners_accept_names_the_set_by_its_number_in_the_activity() {
+    let case = Case::new();
+    case.db
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+        )
+        .unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    crate::activity::initialize(&case.db).unwrap();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.accept(&id).unwrap();
+    let texts: Vec<String> = crate::activity::list(&case.db, &case.workspace.project, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == crate::activity::ActivityKind::Accepted)
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["You accepted change set #1 (Agent 1: Add the fourth line, 1 file)".to_owned()]
     );
 }

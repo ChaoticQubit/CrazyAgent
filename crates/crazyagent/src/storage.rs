@@ -3479,6 +3479,79 @@ mod owner_actor_tests {
         );
     }
 
+    /// A project's change sets stay when the project is removed, so their numbers stay too:
+    /// sets A and B keep 1 and 2 through the removal, and a set D the project adds once it is
+    /// added again under the same id gets 3 (AL17, rv-code M1).
+    /// Input: a fresh engine database. Output: none.
+    #[test]
+    fn removing_a_project_keeps_its_change_set_numbers() {
+        let (_root, path, cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        owner_stop(&mut db, &started.host).unwrap();
+        let add_project = |db: &Connection| {
+            db.execute("INSERT INTO projects(id, body) VALUES ('kept', '{}')", [])
+                .unwrap();
+        };
+        let add_set = |db: &Connection, digit: char, created_ms: i64| {
+            db.execute(
+                "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,\
+                 worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,\
+                 removed,conflicts,created_ms,updated_ms) VALUES (?1,'kept','sub','agent-1',\
+                 'Agent 1','/r','/w','/g','b','h','discarded','succeeded','t','Fix',1,1,0,'[]',?2,?2)",
+                params![digit.to_string().repeat(32), created_ms],
+            )
+            .unwrap();
+            crate::landing::number_change_sets(db).unwrap();
+        };
+        let numbers = |db: &Connection| -> Vec<(char, i64)> {
+            db.prepare("SELECT change_set, number FROM landing_change_set_numbers ORDER BY number")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .map(|row| {
+                    let (id, number) = row.unwrap();
+                    (id.chars().next().unwrap(), number)
+                })
+                .collect()
+        };
+        add_project(&db);
+        crate::landing::number_change_sets(&db).unwrap();
+        add_set(&db, 'a', 1);
+        add_set(&db, 'b', 2);
+        assert_eq!(numbers(&db), [('a', 1), ('b', 2)]);
+
+        let tx = db.transaction().unwrap();
+        assert_eq!(
+            crate::project_setup::execute(
+                &tx,
+                &cfg,
+                &crate::project_setup::SetupAction::Remove {
+                    project_id: crate::protocol::ProjectId::new("kept").unwrap(),
+                },
+                2,
+            )
+            .unwrap(),
+            crate::protocol::Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            numbers(&db),
+            [('a', 1), ('b', 2)],
+            "the removal keeps the sets, so it keeps their numbers"
+        );
+
+        add_project(&db);
+        add_set(&db, 'd', 3);
+        assert_eq!(
+            numbers(&db),
+            [('a', 1), ('b', 2), ('d', 3)],
+            "a set the project adds once it is back gets the next number"
+        );
+    }
+
     /// The owner's questions log keeps out of the names the owner schema check reserves, so
     /// an engine whose committed questions write made the log starts again ready.
     /// Input: a fresh engine database. Output: none; the second owner start succeeds.

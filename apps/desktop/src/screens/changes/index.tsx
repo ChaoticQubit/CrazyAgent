@@ -6,7 +6,7 @@ import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
 import { useChangeList } from "./poll";
 import "./changes.css";
@@ -108,7 +108,7 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved }: {
   const asked = { ...set, head };
   return <section className="pj-stack-s ch-detail" aria-label={`Changes from ${agentName(set)}`}>
     <div className="pj-row between">
-      <h3>{agentName(set)}</h3>
+      <h3>{changeSetName(set)}</h3>
       <Badge word={stateBadge(set).word} tone={stateBadge(set).tone} />
     </div>
     <p className="pj-secondary pj-small">{sizeLine(set)}</p>
@@ -136,6 +136,17 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved }: {
       </div>}
     </>}
   </section>;
+}
+
+/** One change set in the Changes list: its agent, its state badge and its size. Inputs: the
+ * change set, whether it is the one shown and what selecting it does. Output: the row button. */
+export function ChangeRow({ set, active, onSelect }: { set: ChangeSet; active: boolean; onSelect: (id: string) => void }) {
+  const badge = stateBadge(set);
+  return <button type="button" className={`ch-row${active ? " active" : ""}`} aria-current={active} onClick={() => onSelect(set.id)}>
+    <strong>{changeSetName(set)}</strong>
+    <Badge word={badge.word} tone={badge.tone} />
+    <span className="pj-small pj-secondary">{sizeLine(set)}</span>
+  </button>;
 }
 
 /** Changes tab: every change set the project's agents made, newest first, with its diff and
@@ -192,11 +203,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     </ProjectEmpty>}
     {sets.length > 0 && <div className="ch-layout">
       <ul className="pj-rows ch-list" aria-label="Change sets">{sets.map((set) => <li key={set.id}>
-        <button type="button" className={`ch-row${shown?.id === set.id ? " active" : ""}`} aria-current={shown?.id === set.id} onClick={() => setSelected(set.id)}>
-          <strong>{agentName(set)}</strong>
-          <Badge word={stateBadge(set).word} tone={stateBadge(set).tone} />
-          <span className="pj-small pj-secondary">{sizeLine(set)}</span>
-        </button>
+        <ChangeRow set={set} active={shown?.id === set.id} onSelect={setSelected} />
       </li>)}</ul>
       {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} onMoved={reread} />}
     </div>}

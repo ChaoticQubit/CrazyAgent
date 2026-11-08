@@ -19,6 +19,7 @@ const GIT = "/usr/bin/git";
 const MASTER = "master-1";
 const MASTER_LABEL = "Master";
 const PROMPT = "Fix the seed service conflict";
+const escaped = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 
 /** Runs git in a folder with no system or user config. Inputs: the folder and git's
@@ -173,9 +174,11 @@ test("Undo merge on Overview asks naming the branch, reverts the master's merge 
     assert.notEqual(merged, tip, "main moved");
     assert.ok(!(await changes()).some((set) => set.id === id && set.state === "pending"), "nothing waits in Changes");
 
-    const words = `The master merged its changes into main: ${PROMPT}`;
+    const words = "Master merged change set #";
     await open("overview", words);
     assert.equal((await mergeRow(page, words))?.button, "Undo merge", "the master's merge row offers Undo merge");
+    assert.match((await mergeRow(page, words))?.text ?? "", new RegExp(`^Master merged change set #\\d+ \\(Master: ${escaped(PROMPT)}, \\d+ files?\\) into main`),
+      "the merge row names the master's set by its number");
     await me.capture("undo-before");
     await me.click("Undo merge", ".pj-activity-row button");
     await me.waitFor("the confirm naming the branch", (text) => text.includes("Undo this merge on main?") && text.includes("Later commits stay."));

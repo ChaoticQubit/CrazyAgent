@@ -243,7 +243,9 @@ pub struct TurnEnd {
 /// that resolves it. `outside` is true when the engine closed it because its work was
 /// landed outside the app (Accepted) or removed outside the app (Discarded, never
 /// restorable). While open, `files`, `added` and `removed` count only what is not yet on
-/// the owner's branch.
+/// the owner's branch. `number` is the set's number in its project, from 1 in the order the
+/// project's sets were added, None for a set an engine without numbers stored until the
+/// next engine start numbers it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeSetView {
@@ -267,6 +269,8 @@ pub struct ChangeSetView {
     pub waiting: bool,
     #[serde(default)]
     pub outside: bool,
+    #[serde(default)]
+    pub number: Option<u64>,
 }
 
 /// How a file changed between a change set's base and head.
@@ -394,6 +398,8 @@ pub const BRANCH_BYTES_MAX: usize = 255;
 /// before it fails.
 pub(crate) const BUSY_WAIT: Duration = Duration::from_secs(5);
 
+const SUBJECT_CHARS_MAX: usize = 48;
+
 fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
@@ -414,7 +420,7 @@ fn note_change(
     let label = &record.agent.label;
     let line = &record.prompt_line;
     let text = match kind {
-        ActivityKind::Accepted => crate::activity::accepted_text(label, line),
+        ActivityKind::Accepted => crate::activity::accepted_text(by, &named(db, record)),
         ActivityKind::Conflict => {
             format!("The changes of {label} conflict with the branch they land on: {line}")
         }
@@ -429,6 +435,26 @@ fn note_change(
         _ => unreachable!("note_change takes a change set action"),
     };
     note_text(db, record, kind, by, &text);
+}
+
+/// The words an activity row names a change set by, with its number once it has one; a
+/// number that cannot be read is logged by its plain code and the set named without it.
+/// Inputs: the store and the change set. Output: the words.
+#[cfg(unix)]
+fn named(db: &Connection, record: &store::Record) -> String {
+    let number = store::number_of(db, &record.id).unwrap_or_else(|error| {
+        eprintln!(
+            "landing_number_unread cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+        None
+    });
+    change_set_words(
+        number,
+        &agent_title(record.agent.kind, &record.agent.label),
+        &record.message(),
+        record.files,
+    )
 }
 
 /// Records the Undone row of a finished undo, naming the sets its merge closed whose work
@@ -1076,10 +1102,10 @@ pub fn waiting(
 /// `LIST_MAX`. Inputs: the store and the project. Output: the change sets.
 pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
     #[cfg(unix)]
-    return Ok(store::of_project(db, project, LIST_MAX)?
+    return store::of_project(db, project, LIST_MAX)?
         .iter()
-        .map(store::Record::view)
-        .collect());
+        .map(|record| Ok(record.view(store::number_of(db, &record.id)?)))
+        .collect();
     #[cfg(not(unix))]
     {
         let _ = (db, project);
@@ -1095,7 +1121,12 @@ pub fn change_set(
     id: &ChangeSetId,
 ) -> Result<Option<(ProjectId, ChangeSetView)>, EngineError> {
     #[cfg(unix)]
-    return Ok(store::find(db, id)?.map(|record| (record.project.clone(), record.view())));
+    return store::find(db, id)?
+        .map(|record| {
+            let number = store::number_of(db, &record.id)?;
+            Ok((record.project.clone(), record.view(number)))
+        })
+        .transpose();
     #[cfg(not(unix))]
     {
         let _ = (db, id);
@@ -1115,9 +1146,9 @@ pub fn open_change_set(
         let Some(worktree) = worktree.to_str() else {
             return Ok(None);
         };
-        Ok(store::open_for(db, worktree)?
-            .as_ref()
-            .map(store::Record::view))
+        store::open_for(db, worktree)?
+            .map(|record| Ok(record.view(store::number_of(db, &record.id)?)))
+            .transpose()
     }
     #[cfg(not(unix))]
     {
@@ -1452,6 +1483,81 @@ pub fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(), Engi
     #[cfg(not(unix))]
     {
         let _ = (db, id);
+        Err(unavailable())
+    }
+}
+
+/// Names a change set as the owner reads it everywhere: "Change set #16 (Wren: checkout
+/// UI, 7 files)", or its agent alone for a set the engine has not numbered yet. Input: the
+/// change set. Output: the name.
+pub fn change_set_name(set: &ChangeSetView) -> String {
+    let agent = agent_title(set.agent.kind, &set.agent.label);
+    match set.number {
+        Some(_) => change_set_words(set.number, &agent, &set.message, set.files).replacen(
+            "change set",
+            "Change set",
+            1,
+        ),
+        None => agent,
+    }
+}
+
+/// The words a sentence names a change set by: "change set #16 (Wren: checkout UI, 7
+/// files)", or "the changes of Wren: checkout UI" while the engine has not numbered it.
+/// Inputs: its number, its agent's name, its commit message and its file count. Output:
+/// the words.
+pub fn change_set_words(number: Option<u64>, agent: &str, message: &str, files: u32) -> String {
+    let subject = subject(message);
+    let about = if subject.is_empty() {
+        agent.to_owned()
+    } else {
+        format!("{agent}: {subject}")
+    };
+    let Some(number) = number else {
+        return format!("the changes of {about}");
+    };
+    assert!(number >= 1, "a change set number starts at 1");
+    let files = if files == 1 {
+        "1 file".to_owned()
+    } else {
+        format!("{files} files")
+    };
+    format!("change set #{number} ({about}, {files})")
+}
+
+/// The name a change set's agent goes by: Master for the master, else the label the owner
+/// knows it by. Inputs: the agent's kind and label. Output: the name.
+pub fn agent_title(kind: AgentKind, label: &str) -> String {
+    match kind {
+        AgentKind::Master => "Master".to_owned(),
+        AgentKind::Sub => label.to_owned(),
+    }
+}
+
+/// The first line of a commit message, cut to `SUBJECT_CHARS_MAX` characters ending in
+/// "..." when longer. Input: the message. Output: the subject, empty for an empty message.
+fn subject(message: &str) -> String {
+    let line = message.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= SUBJECT_CHARS_MAX {
+        return line.to_owned();
+    }
+    let kept: String = line.chars().take(SUBJECT_CHARS_MAX - 3).collect();
+    format!("{kept}...")
+}
+
+/// Numbers the change sets of the projects the engine has that carry no number yet, such
+/// as the ones an engine without numbers wrote, after each project's highest number, in the
+/// order they were made. Runs at every engine start. Input: the store. Output: how many
+/// sets got a number.
+pub fn number_change_sets(db: &Connection) -> Result<usize, EngineError> {
+    #[cfg(unix)]
+    {
+        store::initialize(db)?;
+        store::number_unnumbered(db)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = db;
         Err(unavailable())
     }
 }

@@ -20,6 +20,7 @@ const AGENT = "agent-builder";
 const AGENT_LABEL = "Ada (@builder) · Codex";
 const GOAL = "Build the service";
 const PROMPT = "Add the service endpoint";
+const escaped = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 
 /** Runs git in a folder with no system or user config. Inputs: the folder and git's
@@ -149,7 +150,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         let shown = null;
         for (;;) {
           shown = await group(GOAL);
-          if (shown?.includes(`Accepted the changes of ${AGENT_LABEL}: ${PROMPT}`)) break;
+          if (shown !== null && new RegExp(`You accepted change set #\\d+ \\(${escaped(AGENT_LABEL)}: ${escaped(PROMPT)}, \\d+ files?\\)`).test(shown)) break;
           if (Date.now() - accepted > SHOWN_MS) {
             await me.capture("timeout-accepted-under-goal");
             assert.fail(`Overview never showed the Accept under ${GOAL} within ${SHOWN_MS} ms; the group shows: ${shown}`);
@@ -158,8 +159,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         }
         t.diagnostic(`the Accept showed under its goal after ${Date.now() - accepted} ms`);
         await me.capture("overview-accepted");
-        assert.match(shown, /Owner/, "the row names who accepted");
-        assert.match(shown, /\d+ items? · latest just now/, "the goal says how many events it has and when the latest was");
+        assert.match(shown, /\bYou\b/, "the row names you as who accepted");
+        assert.doesNotMatch(shown, /\bOwner\b/, "the owner is You, never Owner");
+        assert.match(shown, /\d+ items? · last just now/, "the goal says how many events it has and when the last was");
         const first = await page.evaluate("document.querySelector('.pj-activity-goal')?.getAttribute('aria-label') ?? null");
         assert.equal(first, GOAL, "the goal with the newest event comes first");
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");

@@ -72,10 +72,21 @@ function undoable(item: ActivityItem): string | null {
   return item.kind === "merged_into_main" && !item.undone ? item.change_set : null;
 }
 
-/** The branch a master's merge row names, as the engine wrote it. Input: the row's words.
- * Output: the branch, or "its branch" when the words name none. */
-function mergedBranch(text: string): string {
-  return /^The master merged its changes into (\S+): /.exec(text)?.[1] ?? "its branch";
+/** The branch a master's merge row's Undo reverts on: the one the engine gives the row, or,
+ * for a row stored before it gave one, the branch the old words name first. Never read from
+ * the newer words, whose commit subject comes first. Input: the event. Output: the branch,
+ * or "its branch" when neither names one. */
+function mergedBranch(item: ActivityItem): string {
+  if (item.branch) return item.branch;
+  return /^The master merged its changes into (\S+): /u.exec(item.text)?.[1] ?? "its branch";
+}
+
+/** Who an activity row says acted: You for the owner, the master's own merge into main as
+ * merged by itself at Full access, anyone else by name. Input: the event. Output: the line. */
+function actorLine(item: ActivityItem): string {
+  if (item.actor === "Owner") return "You";
+  if (item.kind === "merged_into_main" && item.actor === "Master") return "Master · Full access, merged by itself";
+  return displayText(item.actor);
 }
 
 /** One activity row: when, the kind's icon, what happened, Undone when it was, and who, with
@@ -89,7 +100,7 @@ function ActivityRow({ item, now, goal, fresh = false, undo }: { item: ActivityI
     <span className="pj-small pj-muted">{ago(item.at_ms, now)}</span>
     <span className={`pj-activity-kind ${KINDS[item.kind].tone}`}><Icon name={KINDS[item.kind].icon} size={14} /></span>
     <span className="pj-activity-text">{KINDS[item.kind].own ? `${displayText(item.actor)} noted: ${displayText(item.text)}` : displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
-      <span className="pj-small pj-muted pj-activity-by">{displayText(item.actor)}{goal !== undefined && <> · <span className="pj-activity-tag">{displayText(goal)}</span></>}</span></span>
+      <span className="pj-small pj-muted pj-activity-by">{actorLine(item)}{goal !== undefined && <> · <span className="pj-activity-tag">{displayText(goal)}</span></>}</span></span>
     {undo && changeSet !== null && <button type="button" className="btn small pj-activity-undo" disabled={undo.undoing !== null}
       aria-busy={undo.undoing === changeSet} onClick={() => undo.onUndo(item)}>Undo merge</button>}
   </li>;
@@ -236,7 +247,7 @@ export function RecentActivity({ projectId, every = ACTIVITY_READ_MS, read: load
     onUndo: (item) => {
       const changeSet = undoable(item);
       if (undoing !== null || changeSet === null) return;
-      setAsking({ changeSet, branch: mergedBranch(item.text) });
+      setAsking({ changeSet, branch: mergedBranch(item) });
     },
   };
   const confirmUndo = () => {

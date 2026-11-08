@@ -17,6 +17,17 @@ const set = (extra = {}) => ({
 });
 const file = (extra = {}) => ({ path: "src/app.ts", old_path: null, status: "modified", kind: "text", marks: [], ...extra });
 
+test("a numbered change set is named by its number, agent, subject and files wherever it is named (AL17)", () => {
+  const wren = set({ number: 16, agent: { kind: "sub", id: "team-2", label: "Wren" }, message: "checkout UI\n\nThe form and its summary.", files: 7 });
+  assert.equal(model.changeSetName(wren), "Change set #16 (Wren: checkout UI, 7 files)");
+  assert.equal(model.changeSetName(set({ number: 1, agent: { kind: "master", id: "s-1", label: "master" }, message: "", files: 1 })), "Change set #1 (Master, 1 file)");
+  assert.equal(model.changeSetName(set({ number: 2, message: "x".repeat(80) })), `Change set #2 (agent-1: ${"x".repeat(45)}..., 3 files)`);
+  assert.equal(model.changeSetName(set({ number: null })), "agent-1", "a set the engine has not numbered yet is named by its agent");
+  assert.equal(model.changeSetName(set()), "agent-1", "an engine without numbers sends none");
+  const row = renderToStaticMarkup(createElement(view.ChangeRow, { set: wren, active: false, onSelect() {} }));
+  assert.match(row, /<strong>Change set #16 \(Wren: checkout UI, 7 files\)<\/strong>/u);
+});
+
 test("a change set reads as its agent, a state word, its size and that CrazyAgent did not check it", () => {
   assert.equal(model.agentName(set()), "agent-1");
   assert.equal(model.agentName(set({ agent: { kind: "sub", id: "7", label: "Ada (@onboarding-fix) \u00b7 Claude Code" } })), "Ada (@onboarding-fix) \u00b7 Claude Code");

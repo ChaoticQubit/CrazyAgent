@@ -18,6 +18,7 @@ const GIT = "/usr/bin/git";
 const MASTER = "master-1";
 const MASTER_LABEL = "Master";
 const PROMPT = "Fix the seed service conflict";
+const escaped = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const SETTING = "Under Full access, merging into main";
 const MERGES = "Master resolves conflicts and merges into main itself Default";
 const WAITS = "Master resolves conflicts, then waits for my accept";
@@ -226,8 +227,10 @@ test("at Full access Merge into main itself lands the master's conflict fix on m
     assert.deepEqual(sets.filter((set) => set.state === "pending").map((set) => set.id), [], "Changes stays empty");
 
     const rows = (await activity()).filter((item) => item.change_set === id);
-    assert.deepEqual(rows.map((item) => [item.kind, item.actor, item.text]), [["merged_into_main", "Master", `The master merged its changes into main: ${PROMPT}. It closed the changes of ${SUB_LABEL}`]],
+    assert.deepEqual(rows.map((item) => [item.kind, item.actor]), [["merged_into_main", "Master"]],
       "the project's activity, which Overview reads, holds one merge row by the master and no Accept by the owner");
+    assert.match(rows[0].text, new RegExp(`^Master merged change set #\\d+ \\(Master: ${escaped(PROMPT)}, \\d+ files?\\) into main\\. It closed the changes of ${escaped(SUB_LABEL)}$`),
+      "the merge row names the master's set by its number and the set it closed");
   });
 });
 
