@@ -1,7 +1,9 @@
 .ch-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 16px; align-items: start; }
 .ch-list { overflow: hidden; }
+.pj-rows.ch-list > li { padding: 0; border-top: 0; }
 .ch-row { display: grid; gap: 4px; justify-items: start; width: 100%; padding: 10px 12px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .ch-list li:last-child .ch-row { border-bottom: 0; }
+.ch-row .badge { font-family: var(--font); }
 .ch-row.active { background: var(--surface-raised, var(--surface)); box-shadow: inset 3px 0 0 var(--accent); }
 .ch-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .ch-detail { min-width: 0; }
