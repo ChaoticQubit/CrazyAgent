@@ -181,6 +181,7 @@ test("Background commands: a grace time the owner types and saves is kept and sh
   await onEngine(t, "ca-bg-g-", async ({ project, bridge, me, page, reload, status }) => {
     await choose(page, project, "wait");
     await kept(status, { mode: "wait" });
+    await reload();
     await choose(page, project, "grace");
     await kept(status, { mode: "grace", secs: 1800 });
     await reload();
