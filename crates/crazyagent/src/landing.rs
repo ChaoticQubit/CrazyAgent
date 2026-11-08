@@ -243,7 +243,9 @@ pub struct TurnEnd {
 /// that resolves it. `outside` is true when the engine closed it because its work was
 /// landed outside the app (Accepted) or removed outside the app (Discarded, never
 /// restorable). While open, `files`, `added` and `removed` count only what is not yet on
-/// the owner's branch.
+/// the owner's branch. `number` is the set's number in its project, from 1 in the order the
+/// project's sets were added, None for a set an engine without numbers stored until the
+/// next engine start numbers it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeSetView {
@@ -267,6 +269,8 @@ pub struct ChangeSetView {
     pub waiting: bool,
     #[serde(default)]
     pub outside: bool,
+    #[serde(default)]
+    pub number: Option<u64>,
 }
 
 /// How a file changed between a change set's base and head.
@@ -1454,6 +1458,23 @@ pub fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(), Engi
         let _ = (db, id);
         Err(unavailable())
     }
+}
+
+/// Numbers the change sets of the projects the engine has that carry no number yet, such
+/// as the ones an engine without numbers wrote, after each project's highest number, in the
+/// order they were made. Runs at every engine start. Input: the store. Output: how many
+/// sets got a number.
+pub fn number_change_sets(db: &Connection) -> Result<usize, EngineError> {
+    let _ = db;
+    Ok(0)
+}
+
+/// Forgets one project's change set numbers as its removal forgets its other rows; a store
+/// that never held numbers has none to forget. Inputs: the store and the project. Output:
+/// Ok once none is left.
+pub fn forget_change_set_numbers(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    let _ = (db, project);
+    Ok(())
 }
 
 /// Finishes or undoes an Accept or worktree reset an engine stop interrupted.

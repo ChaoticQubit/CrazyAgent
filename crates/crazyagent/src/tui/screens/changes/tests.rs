@@ -35,6 +35,7 @@ fn set(digit: char, state: ChangeState) -> ChangeSetView {
         message: "Add a file".into(),
         waiting: false,
         outside: false,
+        number: None,
     }
 }
 

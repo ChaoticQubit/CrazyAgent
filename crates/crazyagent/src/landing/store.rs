@@ -52,7 +52,13 @@ CREATE TABLE IF NOT EXISTS landing_agent_branches (
     branch TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS landing_agent_branches_repository
-    ON landing_agent_branches(repository, branch);";
+    ON landing_agent_branches(repository, branch);
+CREATE TABLE IF NOT EXISTS landing_change_set_numbers (
+    change_set TEXT PRIMARY KEY REFERENCES landing_change_sets(id),
+    project TEXT NOT NULL,
+    number INTEGER NOT NULL CHECK(number >= 1),
+    UNIQUE(project, number)
+);";
 
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
@@ -158,6 +164,7 @@ impl Record {
             message: self.message(),
             waiting: self.waiting && self.state == ChangeState::Updating,
             outside: self.outside,
+            number: None,
         }
     }
 
