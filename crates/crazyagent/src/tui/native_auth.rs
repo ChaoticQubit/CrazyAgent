@@ -9,7 +9,7 @@ use crate::engine::owner::{
     NativeAuthLogout, NativeAuthMethod, NativeAuthPhase, NativeAuthQuery, NativeAuthReply,
     NativeAuthScope, NativeAuthStart, OwnerData, OwnerReadReply,
 };
-use crate::protocol::RequestId;
+use crate::protocol::{ConfigId, RequestId};
 use crate::tui::text::plain_code;
 use std::borrow::Cow;
 
@@ -58,6 +58,7 @@ struct Retained {
     original: Job,
     fact: Option<NativeAuthFact>,
     uncertain: bool,
+    checked: Option<ConfigId>,
 }
 
 pub(super) struct State {
@@ -79,6 +80,7 @@ pub(super) struct State {
     notice: Cow<'static, str>,
     polled: Option<std::time::Instant>,
     clearing: bool,
+    rechecking: Option<ConfigId>,
 }
 
 impl Default for State {
@@ -102,6 +104,7 @@ impl Default for State {
             notice: Cow::Borrowed("Select a managed native connection"),
             polled: None,
             clearing: false,
+            rechecking: None,
         }
     }
 }
@@ -165,6 +168,7 @@ impl State {
         self.flight = None;
         self.job = None;
         self.clearing = false;
+        self.rechecking = None;
         self.inspected = false;
         self.context = None;
         if !basis.writable || !supported(&connection) {
@@ -191,6 +195,7 @@ impl State {
         self.flight = None;
         self.job = None;
         self.clearing = false;
+        self.rechecking = None;
         self.inspected = false;
         self.connected = connected && identity.is_some();
         if self.hide().is_err() {
@@ -289,8 +294,10 @@ impl State {
             .and_then(|_| self.open_account())
     }
 
-    /// Tells whether the owner connection or settings moved on since the retained sign-in
-    /// started, so its panel can no longer reach it. Input: the current basis, if known.
+    /// Tells whether the owner connection moved on since the retained sign-in started, so its
+    /// panel can no longer reach it. Settings edits do not move it: the engine goes on with a
+    /// sign-in while its own account entry is unchanged, and a changed entry marks it
+    /// unconfirmed once the panel or the engine sees it. Input: the current basis, if known.
     /// Output: false while it is unknown.
     fn moved(&self, basis: Option<&Basis>) -> bool {
         let Some(retained) = &self.retained else {
@@ -300,8 +307,6 @@ impl State {
         basis.is_some_and(|basis| {
             basis.identity.database_instance() != original.identity.database_instance()
                 || basis.identity.engine_epoch() != original.identity.engine_epoch()
-                || basis.config_id != original.config_id
-                || basis.source_hash != original.source_hash
         })
     }
 
@@ -382,6 +387,39 @@ impl State {
         }
         self.polled = Some(now);
         self.enqueue_query(false).is_ok()
+    }
+
+    /// Asks the engine, once per settings change, about a held sign-in whose panel is closed,
+    /// with the scope it started with. An unchanged own account entry answers it as running; a
+    /// removed or replaced one answers a conflict that marks it unconfirmed, so it shows as
+    /// stuck and c can clear it; any other failed read changes nothing, and it is not asked
+    /// again for those settings. Input: the current basis. Output: whether a read was queued;
+    /// never while the panel is open, which polls it, or another request is in flight.
+    pub(super) fn recheck(&mut self, basis: Option<&Basis>) -> bool {
+        let Some(basis) = basis.filter(|_| !self.open && self.connected && !self.loading()) else {
+            return false;
+        };
+        let Some(retained) = self.retained.as_ref().filter(|retained| {
+            !retained.uncertain
+                && retained.original.context.basis.config_id != basis.config_id
+                && retained.checked.as_ref() != Some(&basis.config_id)
+        }) else {
+            return false;
+        };
+        if !self.has_pending() || self.moved(Some(basis)) {
+            return false;
+        }
+        let mut context = retained.original.context.clone();
+        context.basis.identity = basis.identity.clone();
+        context.generation = self.generation;
+        let Ok(command) = self.query(false) else {
+            return false;
+        };
+        if self.queue(Job { context, command }).is_err() {
+            return false;
+        }
+        self.rechecking = Some(basis.config_id.clone());
+        true
     }
 
     pub(super) fn loading(&self) -> bool {
@@ -555,6 +593,7 @@ impl State {
             original: job,
             fact: None,
             uncertain: true,
+            checked: None,
         });
         self.presentation = None;
         self.notice =
@@ -603,10 +642,24 @@ impl State {
             .retained
             .as_ref()
             .ok_or("No original authentication operation")?;
-        if context.connection != retained.original.context.connection
-            || context.scope() != retained.original.context.scope()
+        let original = &retained.original.context;
+        if context.connection.id != original.connection.id
+            || context.basis.identity.database_instance()
+                != original.basis.identity.database_instance()
         {
-            return Err("Select the original connection and source to read or cancel".into());
+            return Err("Select the original connection to read or cancel".into());
+        }
+        if context.connection != original.connection {
+            let pending = self.has_pending();
+            if pending && let Some(retained) = &mut self.retained {
+                retained.uncertain = true;
+            }
+            return Err(if pending {
+                "This account changed after its sign-in started; close this panel, then c clears the stuck sign-in"
+            } else {
+                "This account changed after its sign-in started"
+            }
+            .into());
         }
         let command = self.query(cancel)?;
         self.queue(Job { context, command })?;
@@ -661,6 +714,25 @@ impl State {
                     "Settings changed after this sign-in started; the engine ends it within 10 minutes of its start, then press c again",
                 );
             }
+            Err(problem)
+                if self.rechecking.is_some() && crate::engine::owner::ends_operation(&problem) =>
+            {
+                self.retained = None;
+                self.presentation = None;
+                self.claude_code.clear();
+                self.notice = Cow::Borrowed("The sign-in ended; the engine no longer runs it");
+            }
+            Err(problem)
+                if self.rechecking.is_some() && problem == "native_profile_source_conflict" =>
+            {
+                if let Some(retained) = &mut self.retained {
+                    retained.uncertain = true;
+                }
+                self.notice = Cow::Borrowed(
+                    "This account changed or was removed after its sign-in started; c clears the stuck sign-in",
+                );
+            }
+            Err(_) if self.rechecking.is_some() => {}
             Ok(Output::Inspected(reply)) if matches!(event.job.command, Command::Inspect) => {
                 self.inspected = self.matches_inspection(&event.job, &reply);
                 self.notice = Cow::Borrowed(if self.inspected {
@@ -713,6 +785,11 @@ impl State {
         self.flight = None;
         self.job = None;
         self.clearing = false;
+        if let Some(config) = self.rechecking.take()
+            && let Some(retained) = &mut self.retained
+        {
+            retained.checked = Some(config);
+        }
         if list_using {
             self.queue(Job {
                 context: event.job.context,

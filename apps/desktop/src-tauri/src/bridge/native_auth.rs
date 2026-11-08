@@ -5,7 +5,7 @@ use crazyagent::engine::owner::{
     NativeAuthAction, NativeAuthCancel, NativeAuthLogout, NativeAuthMethod, NativeAuthPhase,
     NativeAuthQuery, NativeAuthReply, NativeAuthScope, NativeAuthStart,
 };
-use crazyagent::protocol::RequestId;
+use crazyagent::protocol::{ConfigId, RequestId};
 use serde::Serialize;
 
 mod claude;
@@ -42,6 +42,7 @@ pub(super) struct Operation {
     running: bool,
     claude_prompt: Option<(u64, String)>,
     claude_input_attempted: bool,
+    checked: Option<ConfigId>,
 }
 
 enum Original {
@@ -218,22 +219,41 @@ impl NativeBridge {
             .map(|value| &value.connection)
     }
 
-    /// Tells whether the engine database or settings moved on since a sign-in started, so its
-    /// sign-in page can no longer reach it. Input: the sign-in. Output: false while the bridge
-    /// has nothing to compare.
+    /// Tells whether the engine database moved on since a sign-in started, so its sign-in page
+    /// can no longer reach it. Settings edits do not move it: the engine judges those when it
+    /// answers for the sign-in, see `recheck_auth`. Input: the sign-in. Output: false while the
+    /// bridge has nothing to compare.
     fn auth_moved(&self, operation: &Operation) -> bool {
         let scope = operation.original.scope();
         self.controller.as_ref().is_some_and(|controller| {
             controller.identity().database_instance() != scope.expected_database_instance
-        }) || self
-            .current_view()
-            .is_some_and(|view| view.state.config_id != scope.expected_config_id)
+        })
+    }
+
+    /// Asks the engine about a running sign-in the first time an owner read shows settings it
+    /// did not start with, using the scope it started with. An unchanged own account entry
+    /// keeps it running; a removed or replaced one marks it stuck with no drawer open. Input:
+    /// the config the read showed. Output: none; the engine's answer is applied to the sign-in.
+    pub(super) async fn recheck_auth(&mut self, config: &ConfigId) {
+        let Some(operation) = self.native_auth.as_mut().filter(|value| {
+            value.unresolved
+                && value.running
+                && !value.uncertain
+                && &value.original.scope().expected_config_id != config
+                && value.checked.as_ref() != Some(config)
+        }) else {
+            return;
+        };
+        operation.checked = Some(config.clone());
+        let _ = self.confirm_running_auth().await;
     }
 
     /// Re-reads, with the scope it started with, a held sign-in the engine last answered as
     /// still running, and drops it once the engine says it ended, so one whose end no panel
-    /// read (its drawer closed while it showed Cancelling) holds nothing up. Output: none, or
-    /// the error of an answer the bridge could not confirm, which leaves the sign-in stuck.
+    /// read (its drawer closed while it showed Cancelling) holds nothing up. Output: none, also
+    /// when the engine answers that its own account entry is gone or changed, which leaves it
+    /// stuck for the caller's refusal, or the error of another answer the bridge could not
+    /// confirm. This read only checks the sign-in, so a held Claude code prompt stays open.
     async fn confirm_running_auth(&mut self) -> Result<(), BridgeError> {
         let Some(operation) = self
             .native_auth
@@ -242,6 +262,7 @@ impl NativeBridge {
         else {
             return Ok(());
         };
+        let prompt = operation.claude_prompt.clone();
         let scope = operation.original.scope().clone();
         let operation_id = operation.original.id().clone();
         let request = NativeAuthQuery {
@@ -250,8 +271,17 @@ impl NativeBridge {
             operation_id,
         };
         let read = self.controller()?.read_native_auth(request).await;
-        if !self.settle_auth(read)? {
-            assert!(self.native_auth.as_ref().is_some_and(|value| value.running));
+        let settled = self.settle_auth(read);
+        if let Some(operation) = self.native_auth.as_mut() {
+            operation.claude_prompt = prompt;
+        }
+        match settled {
+            Ok(true) => {}
+            Ok(false) => assert!(self.native_auth.as_ref().is_some_and(|value| value.running)),
+            Err(error) if error.code == "native_profile_source_conflict" => {
+                assert!(self.stuck_auth().is_some());
+            }
+            Err(error) => return Err(error),
         }
         Ok(())
     }
@@ -329,10 +359,12 @@ impl NativeBridge {
                     self.native_auth = None;
                     return Ok(true);
                 }
-                if error.code == "native_auth_outcome_unknown_read_same_operation"
-                    && let Some(operation) = self.native_auth.as_mut()
-                {
-                    operation.running = false;
+                if let Some(operation) = self.native_auth.as_mut() {
+                    if error.code == "native_auth_outcome_unknown_read_same_operation" {
+                        operation.running = false;
+                    } else if error.code == "native_profile_source_conflict" {
+                        operation.uncertain = true;
+                    }
                 }
                 return Err(self.auth_failure(error));
             }
@@ -365,6 +397,7 @@ impl NativeBridge {
             running: false,
             claude_prompt: None,
             claude_input_attempted: false,
+            checked: None,
         });
         let operation = self.native_auth.as_ref().expect("retained auth operation");
         assert_eq!(operation.original.id(), &operation.request_id);

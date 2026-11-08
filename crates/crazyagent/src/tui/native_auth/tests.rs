@@ -1591,3 +1591,279 @@ async fn real_clear_stuck_sign_in_ends_it_once_the_engine_answers_for_it() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn real_panel_reads_its_sign_in_after_another_account_changed() {
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        let (basis, connection) = case.selected("a-codex").await;
+        let mut state = State::default();
+        state.open(basis.clone(), connection.clone()).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let started = ui.exchange(state.request().unwrap()).await;
+        assert_unavailable(real_reply(&started), "a-codex");
+        let operation = real_reply(&started).fact.operation_id.clone();
+        state.apply(started).unwrap();
+        remove_elsewhere(&case, "b-claude").await;
+        let (edited, current) = case.selected("a-codex").await;
+        assert_ne!(edited.config_id, basis.config_id);
+        assert_eq!(current, connection);
+        state.open(edited, current).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        advance(&mut state, 2);
+        assert_eq!(state.reduce(&UiEvent::Submit), Ok(true));
+        let read = state.request().expect("the panel reads its own sign-in");
+        let Command::Read(query) = &read.command else {
+            panic!("read required")
+        };
+        assert_eq!(query.operation_id, operation);
+        assert_eq!(query.scope, scope(&basis, &connection));
+        let answered = ui.exchange(read).await;
+        assert_eq!(real_reply(&answered).fact.operation_id, operation);
+        state.apply(answered).unwrap();
+        assert_eq!(state.operation_id(), Some(&operation));
+        assert!(state.request().is_none());
+    })
+    .await;
+}
+
+/// Registers a Claude login that runs until the row creates its stop file, so a row ends a
+/// running sign-in without signalling anything. Input: the case. Output: the file the login
+/// writes once it runs and the stop file it waits for.
+async fn stoppable_claude(case: &Case) -> (PathBuf, PathBuf) {
+    let running = case.root.path().join("login-running");
+    let stop = case.root.path().join("login-stop");
+    let script = case.root.path().join("claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\ni=0\nwhile [ ! -e '{}' ] && [ \"$i\" -lt 300 ]; do /bin/sleep 0.1; i=$((i+1)); done\nexit 1\n",
+            running.display(),
+            stop.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let host = PathBuf::from(
+        std::env::var_os("CRAZYAGENT_TEST_NATIVE_AUTH_HOST")
+            .expect("the test run supplies the built crazyagent custodian executable path"),
+    );
+    let mut service = case.service.lock().await;
+    let service = service.as_mut().unwrap();
+    service.register_native_auth_host(&host).unwrap();
+    service.register_claude_executable(&script).unwrap();
+    (running, stop)
+}
+
+/// Waits for the stand-in login to run. Input: the file it writes. Output: none; panics past
+/// the bound.
+async fn login_started(running: &std::path::Path) {
+    for _ in 0..100 {
+        if std::fs::read_to_string(running)
+            .unwrap_or_default()
+            .ends_with('\n')
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the stand-in login never started");
+}
+
+/// Starts a Claude sign-in on b-claude through the real panel and closes the panel with the
+/// login still running. Inputs: the UI and the file the login writes. Output: none.
+async fn running_sign_in(ui: &mut Ui, running: &std::path::Path) {
+    ui.connections(1).await;
+    ui.key(KeyCode::F(2));
+    let inspected = ui.auth().await;
+    ui.apply(inspected);
+    ui.key(KeyCode::Enter);
+    let started = ui.auth().await;
+    ui.apply(started);
+    login_started(running).await;
+    ui.key(KeyCode::Esc);
+    assert!(ui.app.model_access.signing_in());
+}
+
+#[tokio::test]
+async fn real_sign_in_whose_own_account_was_removed_elsewhere_shows_stuck_and_c_clears_it_once_it_ends()
+ {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        running_sign_in(&mut ui, &running).await;
+        let healthy = ui.render(160, 50);
+        assert!(!healthy.contains("c clears a stuck sign-in"), "{healthy}");
+        remove_elsewhere(&case, "b-claude").await;
+        ui.connections(0).await;
+        let stuck = ui.render(160, 50);
+        assert!(stuck.contains("c clears a stuck sign-in"), "{stuck}");
+        ui.key(KeyCode::Char('c'));
+        let waiting = ui.auth().await;
+        assert_eq!(
+            waiting.result.as_ref().err().map(String::as_str),
+            Some("native_profile_source_conflict")
+        );
+        ui.apply(waiting);
+        assert!(ui.app.model_access.signing_in());
+        std::fs::write(&stop, "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while ui.app.model_access.signing_in() {
+            assert!(Instant::now() < deadline, "c never cleared the sign-in");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            ui.key(KeyCode::Char('c'));
+            let answer = ui.auth().await;
+            ui.apply(answer);
+        }
+        let cleared = ui.render(160, 50);
+        assert!(cleared.contains("Stuck sign-in cleared"), "{cleared}");
+    })
+    .await;
+}
+
+/// Changes a connection's model from another owner client, so the entry a sign-in was bound
+/// to is replaced. Inputs: the case and the connection id. Output: none; panics unless the
+/// change applied.
+async fn replace_elsewhere(case: &Case, id: &str) {
+    let mut other =
+        OwnerController::attach(case.root.path(), OwnerClientKind::Desktop, ENGINE_WAIT)
+            .await
+            .unwrap();
+    let read = other.read(record_query(id)).await.unwrap();
+    let OwnerData::ModelAccessRecord {
+        source_hash,
+        record: ModelAccessRecord::Connection { mut connection },
+        ..
+    } = read.data
+    else {
+        panic!("actual connection record required");
+    };
+    connection.model.id = "model-replaced".into();
+    other
+        .begin_mutation(
+            crate::engine::owner::OwnerMutation::ModelAccess {
+                expected_config_id: read.config_id,
+                expected_source_hash: source_hash,
+                edit: crate::config::ModelAccessEdit::ReplaceConnection { connection },
+            },
+            1,
+        )
+        .unwrap();
+    let replaced = other.send_pending().await.unwrap();
+    assert!(matches!(
+        replaced,
+        crate::engine::owner::OwnerResponse::Applied { operation }
+            if operation.result == crate::engine::owner::OwnerResult::Applied
+    ));
+}
+
+#[tokio::test]
+async fn real_sign_in_whose_own_account_was_replaced_elsewhere_shows_stuck_with_its_panel_closed() {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        running_sign_in(&mut ui, &running).await;
+        replace_elsewhere(&case, "b-claude").await;
+        ui.connections(1).await;
+        let stuck = ui.render(160, 50);
+        std::fs::write(&stop, "").unwrap();
+        assert!(stuck.contains("c clears a stuck sign-in"), "{stuck}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_running_sign_in_stays_healthy_after_another_account_was_removed_elsewhere() {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        running_sign_in(&mut ui, &running).await;
+        remove_elsewhere(&case, "a-codex").await;
+        ui.connections(0).await;
+        let screen = ui.render(160, 50);
+        assert!(!screen.contains("c clears a stuck sign-in"), "{screen}");
+        assert!(ui.app.model_access.signing_in());
+        std::fs::write(&stop, "").unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_panel_refuses_a_running_sign_in_whose_own_account_was_replaced_and_marks_it_stuck() {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        let (basis, connection) = case.selected("b-claude").await;
+        let mut state = State::default();
+        state.open(basis.clone(), connection.clone()).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let started = ui.exchange(state.request().unwrap()).await;
+        state.apply(started).unwrap();
+        login_started(&running).await;
+        assert!(state.has_pending());
+        assert!(state.stuck(Some(&basis)).is_none());
+        replace_elsewhere(&case, "b-claude").await;
+        let (edited, current) = case.selected("b-claude").await;
+        assert_ne!(current, connection);
+        state.open(edited.clone(), current).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        advance(&mut state, 1);
+        assert_eq!(
+            state.reduce(&UiEvent::Submit),
+            Err(
+                "This account changed after its sign-in started; close this panel, then c clears the stuck sign-in"
+                    .to_owned()
+            )
+        );
+        assert!(state.request().is_none());
+        assert_eq!(
+            state.stuck(Some(&edited)).map(|found| found.id.as_str()),
+            Some("b-claude")
+        );
+        std::fs::write(&stop, "").unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn unit_transient_error_on_a_recheck_leaves_a_running_sign_in_healthy() {
+    run(|case| async move {
+        let (basis, connection) = case.selected("b-claude").await;
+        let (mut state, job) = unit_started(basis.clone(), connection);
+        let mut reply = unit_signed_out_reply(&job, "unit@example.invalid");
+        reply.fact.phase = NativeAuthPhase::AwaitingOwner;
+        reply.account = None;
+        state
+            .apply(Event {
+                job,
+                result: Ok(Output::Auth(Box::new(reply))),
+            })
+            .unwrap();
+        state.hide().unwrap();
+        assert!(state.has_pending());
+        let mut moved = basis.clone();
+        moved.config_id = ConfigId::new("other-config").unwrap();
+        assert!(state.stuck(Some(&moved)).is_none());
+        assert!(state.recheck(Some(&moved)));
+        let read = state.request().unwrap();
+        assert!(matches!(read.command, Command::Read(_)));
+        state
+            .apply(Event {
+                job: read,
+                result: Err("owner_request_timed_out".into()),
+            })
+            .unwrap();
+        assert!(
+            state.stuck(Some(&moved)).is_none(),
+            "a check that could not be answered says nothing about the sign-in"
+        );
+        assert!(state.has_pending());
+    })
+    .await;
+}
