@@ -20,7 +20,7 @@ const GROUPS = [
   ["Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
   ["Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
   ["Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
-  ["Coordination", ["Claude Code sub-agents", "Messages to Claude Code agents", "Claude Code terminal display", "Codex sub-agents", "Messages to Codex agents", "rcli sub-agents", "Messages to rcli agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Catch up with main", "Finished agents"]],
+  ["Coordination", ["Claude Code sub-agents", "Messages to Claude Code agents", "Claude Code terminal display", "Codex sub-agents", "Messages to Codex agents", "rcli sub-agents", "Messages to rcli agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents"]],
   ["Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
 ];
 const READ_ONLY = ["MCP servers", "After you accept, the agent's branch restarts from main"];
@@ -56,8 +56,18 @@ function ownerRepo(folder) {
   }
 }
 
+/** Writes the stand-in Codex executable the engine is started with; it exits at once, so no
+ * model ever runs. Input: the test root. Output: its absolute path. */
+function standInHarness(root) {
+  mkdirSync(join(root, "bin"), { recursive: true, mode: 0o700 });
+  const path = join(root, "bin", "codex");
+  writeFileSync(path, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+  return path;
+}
+
 /** Starts the real engine and the bridge on a new project made from the owner's repository,
- * serves the built app to a browser page, runs the steps and stops everything. Inputs: the
+ * at Full access with one Codex sub-agent harness, so every row with a control draws it, serves
+ * the built app to a browser page, runs the steps and stops everything. Inputs: the
  * test context, the temporary folder prefix and the steps, given the project, the owner on
  * the page, the page and the site's port. Output: none. */
 async function onEngine(t, prefix, steps) {
@@ -92,7 +102,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   let site;
   try {
     ({ child: engine } = await launch(engineBinary,
-      ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"],
+      ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings", "--codex-executable", standInHarness(root)],
       { ...env }, evidence, "engine", /^ready$/m));
     const started = await launch(bridgeBinary, [join(runtime, "engine.sock")], { ...env }, evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
     bridgeProcess = started.child;
@@ -108,6 +118,20 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       if (!["waiting", "running"].includes(view.graph.kind) && !["waiting", "running"].includes(view.mapping.kind)) break;
       assert.ok(Date.now() < deadline, `onboarding still running: ${JSON.stringify(view)}`);
     }
+    const policy = await value(bridge, "desktop_project_agent_policy", { id: project });
+    const full = await value(bridge, "desktop_set_project_agent_policy", {
+      id: project, version: policy.version, generation: 4,
+      policy: { access: "full", network: policy.network, toolchains: [], ide_git_hooks: policy.ide_git_hooks },
+    });
+    assert.equal(full.outcome, "applied", `the project runs at Full access, so the merge row shows its choices: ${JSON.stringify(full)}`);
+    const pools = await value(bridge, "desktop_model_access_page", { collection: "pools", next: false });
+    const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 5 });
+    assert.equal(assigned.outcome, "applied", `the project gets the pool its sub-agents run on: ${JSON.stringify(assigned)}`);
+    const stored = await value(bridge, "desktop_project_setup", { id: project });
+    const team = { ...stored.team, sub_harnesses: [{ harness: "codex", agents: 2, tools: true }] };
+    const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team, documents: [] };
+    const saved = await value(bridge, "desktop_update_project_setup", { id: project, setup, name: null, revision: stored.revision, generation: 6 });
+    assert.equal(saved.outcome, "applied", `the team has a sub-agent harness, so its row shows its steppers: ${JSON.stringify(saved)}`);
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
