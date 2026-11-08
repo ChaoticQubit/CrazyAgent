@@ -223,6 +223,20 @@ test("the terminal panel head is the mockup's: name, harness and state, Message,
   assert.match(none, /<button type="button" class="btn small" disabled="">(?:(?!<\/button>)[^])*Message<\/button>/, "Message waits for a box to type in");
 });
 
+test("the terminal head says how long the agent's task has run, after the branch, only while one runs", async () => {
+  const { Icon } = await import("../src/ui/icon.tsx");
+  const clock = renderToStaticMarkup(createElement(Icon, { name: "clock", size: 12 }));
+  const meta = (extra) => {
+    const html = renderToStaticMarkup(createElement(view.TerminalPanel, { node: { ...team.nodes[0], branch: "crazyagent/calendar-api", ...extra }, onClose() {} }));
+    return html.slice(html.indexOf('class="tg-terminal-meta"'), html.indexOf('class="tg-terminal-state"'));
+  };
+  const running = meta({ started_ms: Date.now() - (14 * 60 + 5) * 1000 });
+  assert.ok(running.includes(`<span class="tg-terminal-fact">${clock}running 14 min</span>`), running);
+  assert.ok(running.indexOf("running 14 min") > running.indexOf("tg-terminal-branch"), "after the branch, as the mockup has it");
+  assert.doesNotMatch(meta({ started_ms: null }), /running/, "an idle agent says nothing");
+  assert.doesNotMatch(meta({}), /running/, "an engine without started_ms says nothing");
+});
+
 test("a terminal embedded in a console never also draws a wall tile's head or the swap hint", () => {
   const render = (props) => renderToStaticMarkup(createElement(view.TerminalPanel, { node: team.nodes[0], ...props }));
   assert.throws(() => render({ embedded: true, tile: true }), /either embedded in a console or a wall tile/);
