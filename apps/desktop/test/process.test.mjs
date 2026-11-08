@@ -317,9 +317,11 @@ test("every way an instruction edit reaches running agents is offered with what 
   assert.match(client.EDIT_DELIVERIES[2].note, /shows Instructions changed/);
 });
 
-test("Delivery is compact rows with dividers, each choice under its label, then Keep transcripts with its switch on the right, and no help paragraph (AL8)", () => {
+test("Delivery is compact rows with dividers, each choice with its chosen option's note as a short visible line, then Keep transcripts with its switch on the right and what it keeps (AL8)", () => {
+  const ok = (patch) => ({ settings: { kind: "ok", value: { settings: { ...client.DEFAULT_INSTRUCTION_SETTINGS, ...patch }, version: 0 } } });
+  const note = (id, text) => new RegExp(`<span class="small muted pr-del-note" id="${id}">${escaped(html(text))}</span>`);
   for (const transcripts of [true, false]) {
-    const markup = agentSettings({ settings: { kind: "ok", value: { settings: { ...client.DEFAULT_INSTRUCTION_SETTINGS, transcripts }, version: 0 } } });
+    const markup = agentSettings(ok({ transcripts }));
     assert.equal((markup.match(/<div class="pr-del-row[ "]/g) ?? []).length, 3, "three rows: instructions, edits, transcripts");
     const at = (text) => markup.indexOf(text);
     assert.ok(at(">Instructions agents get<") >= 0 && at(">Instructions agents get<") < at(">When you edit instructions<"), "instructions first");
@@ -327,14 +329,25 @@ test("Delivery is compact rows with dividers, each choice under its label, then 
     assert.match(markup, /<div class="pr-del-row pr-del-toggle"><span class="pr-del-label"><strong>Keep transcripts<\/strong><span class="small muted">For headless Claude runs<\/span><\/span><span class="switch-label"><button id="agent-transcripts"/);
     assert.match(markup, new RegExp(`role="switch"[^>]*aria-checked="${transcripts}"`));
     assert.match(markup, /<span id="agent-transcripts-label" class="visually-hidden">Keep transcripts for headless Claude runs<\/span>/);
-    assert.doesNotMatch(markup, /<p[ >]/, "no help paragraph under any control");
-    for (const choice of [...client.INSTRUCTION_MODES, ...client.EDIT_DELIVERIES]) {
-      assert.match(markup, new RegExp(`title="${escaped(html(choice.note))}"[^>]*>${escaped(choice.label)}</button>`), `${choice.value} keeps what it does as its hover text`);
-    }
+    assert.match(markup, note("agent-transcripts-note", transcripts ? "Kept in the agent's own home" : "No transcript kept"));
+    assert.match(markup, /role="switch"[^>]*aria-describedby="agent-transcripts-note"/, "the switch is described by what it keeps");
+    assert.doesNotMatch(markup, /<p[ >]/, "notes are short lines, not help paragraphs");
+    assert.doesNotMatch(markup, / title="/, "no note is left to hover text alone");
+  }
+  for (const choice of client.INSTRUCTION_MODES) {
+    const markup = agentSettings(ok({ mode: choice.value }));
+    assert.match(markup, note("agent-instructions-note", choice.note), `${choice.value}'s note is shown as text`);
+    assert.match(markup, /role="radiogroup" aria-label="Instructions agents get" aria-describedby="agent-instructions-note"/);
+  }
+  for (const choice of client.EDIT_DELIVERIES) {
+    const markup = agentSettings(ok({ edits: choice.value }));
+    assert.match(markup, note("agent-edits-note", choice.note), `${choice.value}'s note is shown as text`);
+    assert.match(markup, /role="radiogroup" aria-label="When you edit instructions" aria-describedby="agent-edits-note"/);
   }
   const css = readFileSync(new URL("../src/screens/process.css", import.meta.url), "utf8");
   assert.match(css, /\.pr-del-row \+ \.pr-del-row \{[^}]*border-top: 1px solid var\(--border\)/, "a divider between rows");
   assert.match(css, /\.pr-del-toggle \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto/, "the switch sits right of its label");
+  assert.match(css, /\.pr-del-toggle \.pr-del-note \{[^}]*grid-column: 1 \/ -1/, "what the switch keeps runs under the whole row");
 });
 
 test("unreadable agent settings say why and show the defaults so a change replaces them", () => {
