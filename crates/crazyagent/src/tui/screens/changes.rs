@@ -221,6 +221,7 @@ pub(in crate::tui) struct ProjectChanges {
     read_ms: i64,
     edit: Option<String>,
     reveal: Option<RevealTarget>,
+    painting: Cell<bool>,
 }
 
 impl ProjectChanges {
@@ -251,7 +252,16 @@ impl ProjectChanges {
             read_ms: 0,
             edit: None,
             reveal: None,
+            painting: Cell::new(true),
         }
+    }
+
+    /// Says whether the next drawings of this tab are painted on screen. Only a painted
+    /// drawing records that a moved diff's last line was seen, so a taller drawing that is
+    /// never shown cannot unlock Accept (RVA-1). Input: false while drawing a view that is
+    /// not painted. Output: none.
+    pub(in crate::tui) fn painting(&self, painted: bool) {
+        self.painting.set(painted);
     }
 
     /// Asks for a fresh list on the next `next_query`, as when the owner opens the tab.
@@ -908,9 +918,10 @@ impl ProjectChanges {
     }
 
     /// Draws the open diff under the chosen set's details, from the line the owner
-    /// scrolled to, and records once the last line of a complete diff was drawn whole on
-    /// screen, which Accept and Discard wait for after a move (RVA-1). Inputs: the diff, the
-    /// content width, the rows available, the time now and the look. Output: the rows.
+    /// scrolled to, and records, in a painted drawing only, once the last line of a complete
+    /// diff was drawn whole on screen, which Accept and Discard wait for after a move
+    /// (RVA-1). Inputs: the diff, the content width, the rows available, the time now and the
+    /// look. Output: the rows.
     fn diff_rows(
         &self,
         diff: &Diff,
@@ -971,7 +982,8 @@ impl ProjectChanges {
             } else {
                 "No text changes to show."
             };
-            diff.seen_all.set(diff.seen_all.get() || diff.complete);
+            diff.seen_all
+                .set(diff.seen_all.get() || (self.painting.get() && diff.complete));
             lines.push(Row::of(waiting, look.muted));
             return lines;
         }
@@ -1022,8 +1034,10 @@ impl ProjectChanges {
         }
         let whole = above + shown <= room.max(1);
         lines.truncate(room.max(1));
-        diff.seen_all
-            .set(diff.seen_all.get() || (diff.complete && whole && drawn_to == diff.lines.len()));
+        diff.seen_all.set(
+            diff.seen_all.get()
+                || (self.painting.get() && diff.complete && whole && drawn_to == diff.lines.len()),
+        );
         lines
     }
 
