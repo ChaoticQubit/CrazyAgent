@@ -48,7 +48,7 @@ test("the project Metrics tab shows this project's tokens with the headline from
     assert.deepEqual(shown.tiles.map((tile) => tile[0]), ["Tokens", "Re-read from cache", "Runs", "Tasks", "Merges", "Lines"], "six tiles (mockup note 9)");
     assert.deepEqual(shown.tiles[4].slice(1), ["0", "0 into main, 0 undone"], "nothing was merged yet");
     assert.deepEqual(shown.tiles[3].slice(1), ["1 done", "0 waiting, 0 failed"], "the finished task counts as done");
-    assert.equal(shown.chart, "Tokens per two hours: input, cache write and output");
+    assert.equal(shown.chart, "Tokens per day: input, cache write and output", "the tab opens on 7 days, one bar a day");
     assert.ok(shown.bars >= 1, "the chart draws a bar for today");
     assert.deepEqual(shown.head, AGENT_HEAD, "By agent shows the headline, the four parts and the tool counts, and no Turns");
     const agent = shown.rows.find((row) => row[0].endsWith(" · Codex"));

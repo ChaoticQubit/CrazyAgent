@@ -408,12 +408,12 @@ async function teamStatuses(ids: string[]): Promise<Result<[string, TeamStatus][
 }
 
 /** The Metrics page for one project, or every project when the id is null: reads usage and
- * metrics for the chosen range every 30 seconds, and its agents' names. The project tab (no
- * filter) also reads its tool counts and its team status for names with their harness, and
- * starts By agent; the app page (with a filter) takes agent names from the metrics read and
- * starts By project. Inputs: the project id or null, and the app page's filter. */
+ * metrics for the chosen range, 7 days at first, every 30 seconds, and its agents' names. The
+ * project tab (no filter) also reads its tool counts and its team status for names with their
+ * harness, and starts By agent; the app page (with a filter) takes agent names from the metrics
+ * read and starts By project. Inputs: the project id or null, and the app page's filter. */
 export function MetricsView({ projectId, filter }: { projectId: string | null; filter?: MetricsFilter }) {
-  const [range, setRange] = useState<MetricsRange>("today");
+  const [range, setRange] = useState<MetricsRange>("7d");
   const [by, setBy] = useState<MetricsBy>(filter ? "project" : "agent");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [ticks, setTicks] = useState(0);

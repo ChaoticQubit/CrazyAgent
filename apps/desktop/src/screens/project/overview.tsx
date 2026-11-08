@@ -129,7 +129,7 @@ export function ActivityGroups({ items, whole = items, more, now, expanded, clos
     return <section className="pj-panel pj-activity-goal" aria-label={group.goal} key={group.key}>
       <button type="button" className="pj-activity-head" aria-expanded={open} onClick={() => onToggle(group.key)}>
         <span className="pj-activity-name"><Icon name={open ? "chevron-down" : "chevron-right"} size={16} /><strong className="ellipsis">{displayText(group.goal)}</strong></span>
-        <span className="pj-activity-sub pj-small pj-muted"><PhasePath items={paths.get(group.key) ?? group.items} /><span>{count} {count === "1" ? "item" : "items"} · latest {ago(group.items[0].at_ms, now).toLowerCase()}</span></span>
+        <span className="pj-activity-sub pj-small pj-muted"><PhasePath items={paths.get(group.key) ?? group.items} /><span>{count} {count === "1" ? "item" : "items"} · last {ago(group.items[0].at_ms, now).toLowerCase()}</span></span>
       </button>
       {open && <ul className="pj-activity-list" aria-label={`${group.goal} activity`}>{(all ? group.items : group.items.slice(0, ACTIVITY_ROWS)).map((item) => <ActivityRow key={item.id} item={item} now={now} fresh={fresh.includes(item.id)} undo={undo} />)}</ul>}
       {open && !all && group.items.length > ACTIVITY_ROWS && <button type="button" className="pj-link pj-activity-more" onClick={() => onShowAll(group.key)}>Show all ({count})</button>}
