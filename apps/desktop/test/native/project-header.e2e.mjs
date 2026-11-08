@@ -120,6 +120,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     });
     assert.equal(receipt.outcome, "applied", `the project is made: ${JSON.stringify(receipt)}`);
     const project = receipt.project_id;
+    const pools = await value(bridge, "desktop_model_access_page", { collection: "pools", next: false });
+    assert.equal(pools.writable, true, "the test engine's settings are writable");
+    const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 4 });
+    assert.equal(assigned.outcome, "applied", `the project gets its pool: ${JSON.stringify(assigned)}`);
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
