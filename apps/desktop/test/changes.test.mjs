@@ -35,6 +35,12 @@ test("a change set reads as its agent, a state word, its size and that CrazyAgen
   assert.equal(model.outcomeNote(set({ last_outcome: "cancelled" })), "The agent's last turn was stopped. These are the changes it made before it stopped.");
 });
 
+test("a set its agent is fixing for conflicts with main says so in Changes", () => {
+  assert.deepEqual(model.stateBadge(set({ state: "updating", conflicts: ["README"] })), { word: "Agent is fixing conflicts with main", tone: "info" });
+  assert.deepEqual(model.stateBadge(set({ state: "updating", conflicts: ["README"], waiting: true })), { word: "Updated, waiting for the agent", tone: "warn" });
+  assert.deepEqual(model.stateBadge(set({ state: "updating" })), { word: "Agent is updating", tone: "info" });
+});
+
 test("each state offers only the actions the engine can take", () => {
   assert.deepEqual(model.actions(set(), NOW), { accept: true, discard: true, update: false, restore: false });
   assert.deepEqual(model.actions(set({ state: "conflict" }), NOW), { accept: true, discard: true, update: true, restore: false });

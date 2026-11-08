@@ -28,7 +28,7 @@ const CONFLICTS_SHOWN: usize = 5;
 const SHORT_COMMIT: usize = 7;
 const TAB_SPACES: &str = "    ";
 const AGENT_WIDTH: usize = 24;
-const STATE_WIDTH: usize = 30;
+const STATE_WIDTH: usize = 35;
 const NOT_READY_LINE: &str = "Landing changes isn't ready in this engine yet.";
 const MESSAGE_ROWS: usize = 6;
 const UPDATED_NOTICE: &str =
@@ -1288,6 +1288,7 @@ fn state_word(set: &ChangeSetView) -> &'static str {
         ChangeState::Pending => "Ready to review",
         ChangeState::Conflict => "Conflicts with your branch",
         ChangeState::Updating if set.waiting => "Updated, waiting for the agent",
+        ChangeState::Updating if !set.conflicts.is_empty() => "Agent is fixing conflicts with main",
         ChangeState::Updating => "Agent is updating",
         ChangeState::Accepted if set.outside => "Landed outside the app",
         ChangeState::Accepted => "Accepted",

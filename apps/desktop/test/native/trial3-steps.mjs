@@ -16,7 +16,7 @@ const INSTRUCTIONS = { first: "# Mandatory workflow", bytes: MODE === "fixture" 
 export const SETTINGS = { landOn: process.env.TRIAL_LAND_ON ?? "trial3-land", background: "wait", worker: "Chosen skills", nudges: "First edit", finished: "Show", network: "https", input: "Both" };
 const RUNNING = ["starting", "idle", "working"];
 const WORKER_BOX = "//*[@role=\"group\"][@aria-label=\"Skills per role\"]/div[.//*[@aria-label=\"Worker skills\"]]//label[.//input[@type=\"checkbox\"]]";
-const STATE_WORDS = ["Ready to review", "Conflicts with your branch", "Agent is updating", "Accepted", "Discarded", "Landed outside the app"];
+const STATE_WORDS = ["Ready to review", "Conflicts with your branch", "Agent is fixing conflicts with main", "Agent is updating", "Accepted", "Discarded", "Landed outside the app"];
 assert(Number.isFinite(SETUP_MS) && SETUP_MS > 0, "the setup deadline is positive");
 assert.match(SETTINGS.landOn, /^trial[0-9]{1,2}-land$/, "TRIAL_LAND_ON names the trial<n>-land branch the runner seeded");
 
@@ -391,7 +391,7 @@ export const TRIAL3_STEPS = [
         const all = await texts(rows);
         const words = STATE_WORDS.concat("no state").map((word) => [word, all.filter((row) => (STATE_WORDS.find((state) => row.includes(state)) ?? "no state") === word).length])
           .filter(([, count]) => count > 0).map(([word, count]) => `${word} x${count}`).join(", ");
-        return { done: all.length >= 2 && !all.some((row) => row.includes("Agent is updating")), seen: `${all.length} change sets: ${words || "none"}; leads ${run.leads.join(", ") || "unknown"}` };
+        return { done: all.length >= 2 && !all.some((row) => row.includes("Agent is updating") || row.includes("Agent is fixing conflicts with main")), seen: `${all.length} change sets: ${words || "none"}; leads ${run.leads.join(", ") || "unknown"}` };
       }, wait, "Changes never showed a settled change set for each lead");
     },
   },

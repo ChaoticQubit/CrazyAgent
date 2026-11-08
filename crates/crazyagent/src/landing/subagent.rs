@@ -341,6 +341,28 @@ fn team_kept(db: &Connection) -> Result<bool, EngineError> {
     Ok(tables == 2)
 }
 
+/// Tells whether a change set's agent is a native teammate, whose work its lead lands and
+/// which takes no resolve task of its own (OP9B-L3). Inputs: the store, the project and the
+/// change set's agent. Output: the answer, false where the engine keeps no team tables.
+pub(super) fn is_teammate(
+    db: &Connection,
+    project: &ProjectId,
+    agent: &super::ChangeAgent,
+) -> Result<bool, EngineError> {
+    if agent.kind != super::AgentKind::Sub || !team_kept(db)? {
+        return Ok(false);
+    }
+    let Ok(id) = agent.id.parse::<i64>() else {
+        return Ok(false);
+    };
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM team_agents WHERE id=?1 AND project=?2 AND role='teammate')",
+        params![id, project.as_str()],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
+}
+
 /// Tells whether a change set's agent is a worker of a lead. Inputs: the store, the
 /// project and the change set's agent. Output: the answer.
 pub(super) fn is_lead_worker(

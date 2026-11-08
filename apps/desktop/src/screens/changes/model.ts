@@ -52,11 +52,14 @@ export function sizeLine(set: ChangeSet): string {
 }
 
 /** The status word and tone of a change set's state, saying when the engine closed it
- * because its work was landed or removed outside the app. Input: the change set. */
+ * because its work was landed or removed outside the app, and when its agent is fixing
+ * conflicts with main (OS-8). Input: the change set. */
 export function stateBadge(set: ChangeSet): { word: string; tone: Tone } {
   if (set.outside && set.state === "accepted") return { word: "Landed outside the app", tone: "ok" };
   if (set.outside && set.state === "discarded") return { word: "Removed outside the app", tone: "neutral" };
-  return set.state === "updating" && set.waiting ? { word: "Updated, waiting for the agent", tone: "warn" } : STATES[set.state];
+  if (set.state === "updating" && set.waiting) return { word: "Updated, waiting for the agent", tone: "warn" };
+  if (set.state === "updating" && set.conflicts.length > 0) return { word: "Agent is fixing conflicts with main", tone: "info" };
+  return STATES[set.state];
 }
 
 /** Says plainly that CrazyAgent did not check a change set. Input: the change set.

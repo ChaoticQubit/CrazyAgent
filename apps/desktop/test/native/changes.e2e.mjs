@@ -214,11 +214,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.ok(statSync(join(repo, "bin", "grow.sh")).mode & 0o100, "the script stays runnable");
         assert.ok(lstatSync(join(repo, "latest")).isSymbolicLink() && readlinkSync(join(repo, "latest")) === "README.md", "the link stays a link");
 
+        writeFileSync(join(worktree, "README.md"), readFileSync(join(worktree, "README.md"), "utf8").replace("# Seed shop", "# Seed shop for gardens"));
+        const second = recordTurn("Name the shop for gardens");
         writeFileSync(join(repo, "README.md"), readFileSync(join(repo, "README.md"), "utf8").replace("# Seed shop", "# Seed shop, open daily"));
         git(repo, "commit", "-q", "-am", "Open daily");
         const daily = head();
-        writeFileSync(join(worktree, "README.md"), readFileSync(join(worktree, "README.md"), "utf8").replace("# Seed shop", "# Seed shop for gardens"));
-        const second = recordTurn("Name the shop for gardens");
         assert.notEqual(second, first, "a turn after an Accept opens a new change set");
         for (const deadline = Date.now() + STEP_MS; await rows() < 2; await pause(POLL_MS)) assert.ok(Date.now() < deadline, "the new change set reaches the list");
         await me.follow(".ch-row");
@@ -232,7 +232,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(conflicted.split("These files also changed on your branch").length - 1, 1, "the owner reads the conflict sentence once");
 
         await me.click("Ask agent to update");
-        await me.waitFor("the updating change set", (text) => /Agent is updating/.test(text) && text.includes("The agent is resolving the conflicts with your branch. Review again when it finishes."));
+        await me.waitFor("the updating change set", (text) => /Agent is fixing conflicts with main/.test(text) && text.includes("The agent is resolving the conflicts with your branch. Review again when it finishes."));
         await me.capture("changes-updating");
         assert.match(readFileSync(join(worktree, "README.md"), "utf8"), /^<<<<<<< /m, "the update merged the owner's branch into the agent's worktree with conflict markers");
         assert.equal(head(), daily, "an update never moves the owner's branch");
