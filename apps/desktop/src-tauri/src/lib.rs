@@ -3,6 +3,8 @@ pub mod ide;
 mod updates;
 
 #[cfg(feature = "native-webdriver")]
+mod ide_probe;
+#[cfg(feature = "native-webdriver")]
 mod native_refresh_observation;
 
 use bridge::intake::FolderSize;

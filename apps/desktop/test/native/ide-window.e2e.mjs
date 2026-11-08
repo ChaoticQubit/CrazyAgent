@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { go, until } from "./trial-kit.mjs";
@@ -68,6 +68,14 @@ async function buildReady() {
     assert.notEqual(build.state, "failed", `the IDE build failed: ${JSON.stringify(build)}`);
     assert.ok(Date.now() < deadline, `the IDE build is still ${JSON.stringify(build)}`);
   }
+}
+
+/** What the real IDE page got back when it called a native command. Output: the page's address
+ * and its answer, from the file the test build wrote; the webview may JSON-encode the script's
+ * result a second time. */
+function ideRefusal() {
+  const written = JSON.parse(readFileSync(join(evidence, "ide-refusal.json"), "utf8"));
+  return typeof written === "string" ? JSON.parse(written) : written;
 }
 
 /** The app's window number, found by its process. Output: the number as text; throws when
@@ -179,5 +187,8 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     assert.equal(panel("left"), null, "the IDE panel is gone from the page when the tab is left");
     assert.ok(panel("moved").y > panel("back").y, "the panel really moved");
     assert.equal(panel("closed"), null, "the page left the project");
+    const refusal = ideRefusal();
+    assert.match(refusal.origin, /^http:\/\/127\.0\.0\.1:\d+$/, `the call came from the real IDE page: ${JSON.stringify(refusal)}`);
+    assert.match(refusal.answer ?? "", /^refused: .*not allowed/, `the real IDE page gets no native command: ${JSON.stringify(refusal)}`);
   });
 });

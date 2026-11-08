@@ -441,6 +441,8 @@ pub fn show(
         webview.hide().map_err(failed)?;
         return Err(failed(error));
     }
+    #[cfg(feature = "native-webdriver")]
+    crate::ide_probe::ask_once(webview.clone());
     webview.set_focus().map_err(failed)?;
     Ok(())
 }
