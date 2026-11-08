@@ -1,13 +1,27 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { POLL_MS } from "./e2e-harness.mjs";
 import { TASK, USAGE_MS, handOff, onEngine, tileParts, turnsOf } from "./codex-task-engine.mjs";
 
 const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
-const AGENT_HEAD = ["Agent", "Tokens", "Input", "Cache write", "Output", "Cache read", "graphify", "ctx_*", "Skills", "Share of tokens"];
+const AGENT_HEAD = ["Agent", "Tokens", "Input", "Cache write", "Output", "Cache read", "Turns", "graphify", "ctx_*", "Skills", "Share of tokens"];
 const RUN_HEAD = ["Run", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agent", "Ended", "Result", "Share of tokens"];
 const PARTS = ["1.5K", "1.2K", "0", "300", "8K"];
+
+/** Reads the turns the engine counted for the project's Codex sub-agents. Inputs: the engine
+ * root and the project. Output: the sum, 0 before any agent exists. */
+function codexTurns(runtime, project) {
+  const store = new DatabaseSync(join(runtime, "engine.db"), { readOnly: true });
+  try {
+    store.exec("PRAGMA busy_timeout = 5000");
+    return store.prepare("SELECT COALESCE(SUM(turns),0) AS turns FROM team_agents WHERE project=? AND harness='codex' AND role<>'master'").get(project).turns;
+  } finally {
+    store.close();
+  }
+}
 
 /** Reads what the project's Metrics tab shows: the range line, each tile's lines, the chart's
  * label, the breakdown's header and rows, and whether a project picker is on the page.
@@ -50,11 +64,16 @@ test("the project Metrics tab shows this project's tokens with the headline from
     assert.deepEqual(shown.tiles[3].slice(1), ["1 done", "0 waiting, 0 failed"], "the finished task counts as done");
     assert.equal(shown.chart, "Tokens per day: input, cache write and output", "the tab opens on 7 days, one bar a day");
     assert.ok(shown.bars >= 1, "the chart draws a bar for today");
-    assert.deepEqual(shown.head, AGENT_HEAD, "By agent shows the headline, the four parts and the tool counts, and no Turns");
+    assert.deepEqual(shown.head, AGENT_HEAD, "By agent shows the headline, the four parts, the turns and the tool counts");
     const agent = shown.rows.find((row) => row[0].endsWith(" · Codex"));
     assert.ok(agent, `the Codex agent has a row with the headline Task 13 counts: ${JSON.stringify(shown.rows)}`);
     assert.deepEqual(agent.slice(1, 6), PARTS);
-    assert.ok(shown.rows.some((row) => row[0] === "Onboarding"), `onboarding's own runs have their row: ${JSON.stringify(shown.rows)}`);
+    const turns = codexTurns(runtime, project);
+    assert.ok(turns >= 1, `the engine counted the Codex agent's finished turn: ${turns}`);
+    assert.equal(agent[6], String(turns), `the Codex row's Turns is the engine's count: ${JSON.stringify(agent)}`);
+    const onboarding = shown.rows.find((row) => row[0] === "Onboarding");
+    assert.ok(onboarding, `onboarding's own runs have their row: ${JSON.stringify(shown.rows)}`);
+    assert.equal(onboarding[6], "", `onboarding's row shows no turns: ${JSON.stringify(onboarding)}`);
     const total = shown.rows.at(-1);
     assert.equal(total[0], "Total");
     assert.match(total.at(-1), /^cache read 87% of all read$/);

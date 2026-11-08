@@ -4292,6 +4292,11 @@ fn a_live_master_turn_cut_short_by_its_pane_ending_still_lands() {
     assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
     assert_eq!(sets[0].files, 1);
     assert_eq!(live_turns(&fixture.connection), (1, false));
+    assert_eq!(
+        usage_turns(&fixture, &format!("master-{PROJECT}")),
+        1,
+        "the cut-short turn counts once for Metrics, under the master's usage key"
+    );
     let outcome: String = fixture
         .connection
         .query_row(
@@ -4435,6 +4440,11 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
         ),
         1,
         "the restart started no second master"
+    );
+    assert_eq!(
+        usage_turns(&fixture, &format!("master-{PROJECT}")),
+        3,
+        "each live-terminal master turn counts exactly once for Metrics"
     );
     assert_eq!(again.shutdown().unwrap(), names(&[master]));
     host.close(&[]).unwrap();
@@ -20011,9 +20021,10 @@ done
 const QUIET_TASK: &str = "Write pear.md";
 
 /// What a re-ask test reads once its task is finished: the task's status and result, how
-/// many times the re-ask reached its agent, and that agent's turns. Takes the fixture.
+/// many times the re-ask reached its agent, that agent's turns and the turns the usage store
+/// counted for it. Takes the fixture.
 #[cfg(target_os = "macos")]
-fn quiet_task(fixture: &Fixture) -> (String, Option<String>, usize, i64) {
+fn quiet_task(fixture: &Fixture) -> (String, Option<String>, usize, i64, i64) {
     let (status, result, agent): (String, Option<String>, i64) = fixture
         .connection
         .query_row(
@@ -20031,14 +20042,30 @@ fn quiet_task(fixture: &Fixture) -> (String, Option<String>, usize, i64) {
         )
         .unwrap();
     let asked = pasted(fixture, agent).matches(super::REASK_EMPTY).count();
-    (status, result, asked, turns)
+    let counted = usage_turns(fixture, &format!("team-{agent}"));
+    (status, result, asked, turns, counted)
+}
+
+/// The turns the usage store counted for one agent key of the test project, every hour
+/// summed (AL4). Takes the fixture and the key.
+#[cfg(target_os = "macos")]
+fn usage_turns(fixture: &Fixture, agent: &str) -> i64 {
+    crate::usage::initialize(&fixture.connection).unwrap();
+    fixture
+        .connection
+        .query_row(
+            "SELECT COALESCE(SUM(turns),0) FROM usage_turns WHERE project=?1 AND agent=?2",
+            [PROJECT, agent],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 /// Runs one sub-agent task on a stand-in with the re-ask setting as given (None leaves the
 /// default) until the task is finished, then reads it. Takes the stand-in and the choice.
 /// Returns what `quiet_task` reads.
 #[cfg(target_os = "macos")]
-fn reask_run(script: &str, choice: Option<bool>) -> (String, Option<String>, usize, i64) {
+fn reask_run(script: &str, choice: Option<bool>) -> (String, Option<String>, usize, i64, i64) {
     let fixture = Fixture::new(1);
     let host = fixture.host();
     let mut team = limited_runtime(&fixture, &host, script, TeamLimits::default());
@@ -20061,6 +20088,62 @@ fn reask_run(script: &str, choice: Option<bool>) -> (String, Option<String>, usi
     read
 }
 
+/// A runtime whose usage tables cannot be made still opens and serves a turn, as the engine
+/// starts with usage not counted: an index already named `usage_turns` stops the usage turn
+/// table being made, the failure is logged by code, and the task's turns end and count on
+/// the agent while their Metrics rows are left out (AL4 close-out, rv-sec r2 F1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_runtime_whose_usage_tables_cannot_be_made_still_opens_and_serves_a_turn() {
+    let fixture = Fixture::new(1);
+    fixture
+        .connection
+        .execute_batch("CREATE TABLE taken(name TEXT); CREATE INDEX usage_turns ON taken(name);")
+        .unwrap();
+    let opened = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::new(),
+        Box::new(|| None),
+        TeamLimits::default(),
+    );
+    assert!(
+        opened.is_ok(),
+        "the runtime opens though its usage tables cannot be made: {:?}",
+        opened.err().map(|problem| problem.0)
+    );
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, QUIET_ONCE_CODEX, TeamLimits::default());
+    owner(&fixture, &[hand_off(&fixture, QUIET_TASK)]);
+    fixture.until(&mut team, "the task finishes", |f| {
+        task_of(f, QUIET_TASK).0 == "done"
+    });
+    idle_ticks(&mut team);
+    let (status, result, turns): (String, Option<String>, i64) = fixture
+        .connection
+        .query_row(
+            "SELECT t.status,t.result,a.turns FROM team_tasks t JOIN team_agents a ON a.id=t.agent WHERE t.prompt=?1",
+            [QUIET_TASK],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (status.as_str(), result.as_deref(), turns),
+        ("done", Some("pear"), 2)
+    );
+    let kind: String = fixture
+        .connection
+        .query_row(
+            "SELECT type FROM sqlite_master WHERE name='usage_turns'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind, "index", "no usage turn table was made over the index");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// With Re-ask empty reply on, the default, a sub-agent whose task turn ends with no reply
 /// text is asked once more, and its second reply is the task's result (DEC-111).
 #[cfg(target_os = "macos")]
@@ -20068,7 +20151,7 @@ fn reask_run(script: &str, choice: Option<bool>) -> (String, Option<String>, usi
 fn reask_on_asks_a_quiet_sub_agent_once_and_its_reply_is_the_result() {
     assert_eq!(
         reask_run(QUIET_ONCE_CODEX, None),
-        ("done".to_owned(), Some("pear".to_owned()), 1, 2)
+        ("done".to_owned(), Some("pear".to_owned()), 1, 2, 2)
     );
 }
 
@@ -20079,7 +20162,7 @@ fn reask_on_asks_a_quiet_sub_agent_once_and_its_reply_is_the_result() {
 fn reask_on_reports_a_second_empty_reply_without_asking_again() {
     assert_eq!(
         reask_run(QUIET_CODEX, Some(true)),
-        ("done".to_owned(), None, 1, 2)
+        ("done".to_owned(), None, 1, 2, 2)
     );
 }
 
@@ -20090,7 +20173,7 @@ fn reask_on_reports_a_second_empty_reply_without_asking_again() {
 fn reask_off_finishes_a_quiet_task_at_once() {
     assert_eq!(
         reask_run(QUIET_ONCE_CODEX, Some(false)),
-        ("done".to_owned(), None, 0, 1)
+        ("done".to_owned(), None, 0, 1, 1)
     );
 }
 

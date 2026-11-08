@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod poll;
 pub mod report;
 pub mod service;
+pub mod turns;
 
 pub const PLAN_BYTES_MAX: usize = 64;
 pub const FAILURE_BYTES_MAX: usize = 64;
@@ -227,8 +228,9 @@ pub const REMOVED_PROJECTS: &str = "<removed>";
 
 /// Moves a removed project's usage to `REMOVED_PROJECTS`: its token rows add into the rows
 /// already kept there for the same hour and run, its unreported marks and seen sessions keep
-/// the latest time, and its runs and cuts keep counting there. A table this store lacks is
-/// skipped. Inputs: the owner's transaction and the project. Output: Ok, or the store failure.
+/// the latest time, its turn rows add into the rows kept there for the same hour and agent,
+/// and its runs and cuts keep counting there. A table this store lacks is skipped. Inputs:
+/// the owner's transaction and the project. Output: Ok, or the store failure.
 pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), EngineError> {
     assert_ne!(project, REMOVED_PROJECTS);
     let has = |table: &str| -> Result<bool, EngineError> {
@@ -267,6 +269,16 @@ pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), Engin
              ON CONFLICT(project,agent,session) DO UPDATE SET last_ms=MAX(last_ms,excluded.last_ms)"
                 .to_owned(),
         ),
+        (
+            "usage_turns",
+            format!(
+                "INSERT INTO usage_turns(hour_ms,project,agent,turns)
+                 SELECT hour_ms,?2,agent,turns FROM usage_turns WHERE project=?1
+                 ON CONFLICT(hour_ms,project,agent) DO UPDATE SET
+                 turns=MIN(turns+excluded.turns,{max})",
+                max = turns::HOUR_TURNS_MAX
+            ),
+        ),
     ];
     for (table, add) in moves {
         if has(table)? {
@@ -297,7 +309,8 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     add_columns(db, "weekly_left_out", ADD_LEFT_OUT)?;
     db.execute_batch(capture::SCHEMA).map_err(storage)?;
     db.execute_batch(health::SCHEMA).map_err(storage)?;
-    db.execute_batch(report::SCHEMA).map_err(storage)
+    db.execute_batch(report::SCHEMA).map_err(storage)?;
+    db.execute_batch(turns::SCHEMA).map_err(storage)
 }
 
 fn add_columns(db: &Connection, last: &str, batch: &str) -> Result<(), EngineError> {

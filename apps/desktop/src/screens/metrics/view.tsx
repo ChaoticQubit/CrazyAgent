@@ -208,7 +208,7 @@ function Chart({ metrics, sinceMs, nowMs, offset, reread }: { metrics: Metrics; 
 /** The breakdown's rows and own columns for one choice. The app page (with a filter) adds By
  * project, names each agent's harnesses and accounts and each account's and harness's
  * projects, and shows a Project column on agents and runs across every project; the project
- * tab shows tool counts and account limits. Inputs: the choice, the project, the reads, the
+ * tab shows each agent's turns in the range, tool counts and account limits. Inputs: the choice, the project, the reads, the
  * names, now and the filter. Output: the first column's head, the own columns' heads, the
  * rows and whether a Project column shows. */
 function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageReport, metrics: Metrics, adoption: Adoption | null, names: MetricsNames, nowMs: number, filter: MetricsFilter | undefined): { head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean } {
@@ -271,14 +271,16 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
     };
   }
   const tools = new Map((adoption?.agents ?? []).map((row) => [agentKey(projectId, row), row]));
+  const turns = new Map(metrics.agents.filter((row) => row.project === projectId).map((row) => [row.agent, row.turns]));
   return {
-    head: "Agent", extra: ["graphify", "ctx_*", "Skills"], projectColumn,
+    head: "Agent", extra: ["Turns", "graphify", "ctx_*", "Skills"], projectColumn,
     rows: usage.agents.map((row) => {
       const used = tools.get(row.key);
       const skills = used ? (used.skills ?? []).reduce((sum, count) => sum + count, 0) + (used.other_skills ?? []).reduce((sum, other) => sum + other.count, 0) : null;
+      const ended = turns.get(row.key);
       return {
         key: row.key, name: agent(row.key), tokens: row.tokens,
-        extra: used ? [String(used.graphify ?? 0), String(used.context_mode ?? 0), String(skills)] : ["", "", ""],
+        extra: [typeof ended === "number" ? String(ended) : "", ...(used ? [String(used.graphify ?? 0), String(used.context_mode ?? 0), String(skills)] : ["", "", ""])],
       };
     }),
   };

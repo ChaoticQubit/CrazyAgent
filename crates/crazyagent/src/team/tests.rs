@@ -6202,3 +6202,32 @@ fn background_commands_at_task_end_default_to_a_thirty_minute_grace() {
         assert_eq!(background_at_end(&connection, &project).unwrap(), choice);
     }
 }
+
+/// Opening the team runtime makes the usage tables once, so a turn end writes its token and
+/// turn rows without making them again (AL4 r2).
+#[test]
+fn opening_the_runtime_makes_the_usage_tables_its_turn_ends_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    drop(Connection::open(&database).unwrap());
+    let _team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::new(),
+        Box::new(|| None),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+    let connection = Connection::open(&database).unwrap();
+    let tables: Vec<String> = connection
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('usage_tokens','usage_turns') ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(tables, ["usage_tokens", "usage_turns"]);
+}

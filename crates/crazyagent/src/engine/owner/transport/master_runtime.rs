@@ -914,9 +914,10 @@ impl OwnerRuntimeHandle {
 
     /// Counts one finished master turn under its project's master row before its home is
     /// removed: the usage Claude Code reported for the turn, the Codex records in the home,
-    /// or the usage frames an rcli host reported, which keeps no records. A store that cannot
-    /// be written leaves the turn uncounted and logs only the failure code. Inputs: the
-    /// prepared turn, its home when it has records and the reported usage.
+    /// or the usage frames an rcli host reported, which keeps no records, and one turn on the
+    /// same row (`usage::turns`). A store that cannot be written leaves the turn uncounted
+    /// and logs only the failure code. Inputs: the prepared turn, its home when it has
+    /// records and the reported usage.
     pub(super) async fn count_master_usage(
         &self,
         prepared: &PreparedMasterTurn,
@@ -938,17 +939,20 @@ impl OwnerRuntimeHandle {
             harness: harness.to_owned(),
         };
         let session = prepared.session.session_id.as_str().to_owned();
+        let project = prepared.session.project_id.clone();
         let root = super::changes::engine_root(&self.authority);
         let counted = tokio::task::spawn_blocking(move || {
             let db = crate::usage::open(&root?)?;
             let now_ms = crate::team::now_ms();
-            match (format, home) {
+            let tokens = match (format, home) {
                 (Some(format), Some(home)) => {
                     count_turn(&db, &home, format, &attribution, reported, &session, now_ms)
                         .map(|_| ())
                 }
                 _ => count_reported(&db, &attribution, reported, &session, now_ms),
-            }
+            };
+            let turn = crate::usage::turns::count(&db, &project, &attribution.agent, now_ms);
+            tokens.and(turn)
         })
         .await;
         let problem = match counted {

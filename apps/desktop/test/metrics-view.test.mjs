@@ -43,6 +43,10 @@ const metrics = (patch = {}) => ({
     { project: "alpha", agent: "master-alpha", session: "m-1", task: null, title: null, status: null, last_ms: NOW - 11 * MINUTE, tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }) },
   ],
   accounts: [{ key: "acct-a", tokens: tokens({ input: 1200, output: 300, cache_read: 4000, cache_write: 800 }), agents: 2, runs: 2 }],
+  agents: [
+    { project: "alpha", agent: "team-8", label: "Juniper", harnesses: ["codex"], more_harnesses: 0, accounts: ["acct-a"], more_accounts: 0, tokens: tokens({ input: 700, output: 200, cache_read: 3000, cache_write: 500 }), turns: 12 },
+    { project: "alpha", agent: "master-alpha", label: "Master", harnesses: ["claude-code"], more_harnesses: 0, accounts: ["acct-a"], more_accounts: 0, tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }), turns: 9 },
+  ],
   harnesses: [
     { key: "codex", tokens: tokens({ input: 700, output: 200, cache_read: 3000, cache_write: 500 }), agents: 1, runs: 1 },
     { key: "claude-code", tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }), agents: 1, runs: 1 },
@@ -107,15 +111,23 @@ test("the chart fills a week with one bar a day and labels each by its date", ()
   assert.throws(() => view.chartBars(metrics({ bucket_ms: 0 }), SINCE, NOW), /a chart bar spans time/);
 });
 
-test("By agent lists each agent's tokens in four parts, its tool counts and its share, with a total", () => {
+test("By agent lists each agent's tokens in four parts, its turns in the range, its tool counts and its share, with a total", () => {
   const markup = render();
   const table = tableText(markup);
-  assert.match(table, /^ Agent Tokens Input Cache write Output Cache read graphify ctx_\* Skills Share of tokens /);
-  assert.doesNotMatch(table, /Turns/);
-  assert.match(table, /Juniper · Codex 1\.4K 700 500 200 3K 44 37 6 61%/);
-  assert.match(table, /Master · Claude Code 900 500 300 100 1K 58 41 4 39%/);
+  assert.match(table, /^ Agent Tokens Input Cache write Output Cache read Turns graphify ctx_\* Skills Share of tokens /);
+  assert.match(table, /Juniper · Codex 1\.4K 700 500 200 3K 12 44 37 6 61%/);
+  assert.match(table, /Master · Claude Code 900 500 300 100 1K 9 58 41 4 39%/);
   assert.match(table, /Total 2\.3K 1\.2K 800 300 4K cache read 67% of all read/);
   assert.match(markup, /<th scope="col" class="num muted">Cache read<\/th>/);
+});
+
+test("By agent leaves Turns empty for an agent the engine gives no turns: a row no team agent owns, or a reply from an engine before turns were kept", () => {
+  const [juniper, master] = metrics().agents;
+  for (const agents of [[juniper, { ...master, turns: null }], [juniper, (({ turns, ...older }) => older)(master)], [juniper]]) {
+    const table = tableText(render({ metrics: { kind: "ok", value: metrics({ agents }) } }));
+    assert.match(table, /Juniper · Codex 1\.4K 700 500 200 3K 12 44 37 6 61%/);
+    assert.match(table, /Master · Claude Code 900 500 300 100 1K 58 41 4 39%/, JSON.stringify(agents));
+  }
 });
 
 test("By run titles each run by its task and shows its agent, end and result", () => {
@@ -144,7 +156,7 @@ test("Total is the Tokens tile and every share is out of it; an Other row holds 
   assert.doesNotMatch(full, /Other, not listed/);
   assert.match(full, /Total 2\.3K 1\.2K 800 300 4K/);
   const agents = tableText(render({ usage: { kind: "ok", value: usage({ agents: [usage().agents[1]] }) } }));
-  assert.match(agents, /Master · Claude Code 900 500 300 100 1K 58 41 4 39%/);
+  assert.match(agents, /Master · Claude Code 900 500 300 100 1K 9 58 41 4 39%/);
   assert.match(agents, /Other, not listed 1\.4K 700 500 200 3K 61%/);
 });
 
