@@ -282,27 +282,28 @@ fn reach_home(pty: &Pty, home: impl Fn(&str) -> bool) {
     }
 }
 
-/// Waits for Home's one move of the focus: once the setup checks and the accounts are in,
-/// Home moves the focus to its setup panel while setup has something left, which on a
-/// loaded machine lands after the first frame, so a Tab sent before it would be undone.
+/// Waits for Home's setup panel to show its tools check. The panel shows once the pools and
+/// the accounts are in, and the check is the last answer Home waits for before it decides
+/// where the focus goes, so from that frame on only keys move the focus.
 /// Input: the TUI on its first Home, on an engine with no account. Output: none; panics
-/// when the setup panel never takes the focus.
-fn setup_focused(pty: &Pty) {
-    let screen = pty.until("Home moves the focus to its setup panel", |now| {
-        enter_hint(now).is_some_and(|hint| hint != "Open")
+/// when the panel never shows the check.
+fn setup_checked(pty: &Pty) {
+    let screen = pty.until("Home's setup panel shows its tools check", |now| {
+        now.contains("Get set up")
+            && (now.contains("[x] Install tools") || now.contains("Missing: "))
     });
     assert!(
-        screen.contains("Get set up"),
-        "Home's setup panel is shown:\n{screen}"
+        enter_hint(&screen).is_some(),
+        "Home's footer names what Enter does:\n{screen}"
     );
 }
 
 /// Opens the team tree of the project named exactly `project` from the TUI's first Home,
-/// on an engine with no account, once Home's setup panel took the focus.
+/// on an engine with no account, once Home's setup panel shows its tools check.
 /// Inputs: the TUI and the project name. Output: none; panics when a step fails.
 fn open_team(pty: &Pty, project: &str) {
     reach_home(pty, |screen| at_home(screen, project));
-    setup_focused(pty);
+    setup_checked(pty);
     team_from_home(pty, project);
 }
 
