@@ -223,7 +223,7 @@ pub(in crate::tui) fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::ProjectOnly => "Project only",
         Mode::AppOnly => "App only",
-        Mode::Both => "Both (app, then project appended)",
+        Mode::Both => "App and project",
     }
 }
 
@@ -253,7 +253,7 @@ fn mode_note(mode: Mode) -> &'static str {
 /// choice. Output: its name.
 fn edits_label(edits: EditDelivery) -> &'static str {
     match edits {
-        EditDelivery::NextMessage => "Next task",
+        EditDelivery::NextMessage => "At next task",
         EditDelivery::Restart => "Restart when idle",
         EditDelivery::Badge => "Badge only",
     }
