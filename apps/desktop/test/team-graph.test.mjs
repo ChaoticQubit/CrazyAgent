@@ -54,13 +54,13 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.nodeDetail(team.nodes[4]), "Lead, claude");
   assert.equal(graph.nodeDetail(node("x", "someday", { account: "  " })), "Agent, codex", "an unknown kind from a newer engine still reads");
   const ada = node("team-7", "sub", { label: "Ada (@onboarding-fix)", harness: "claude", status: "working", status_label: "Working" });
-  assert.equal(graph.nodeLine(ada, name), "Ada (@onboarding-fix) \u00b7 Claude Code \u00b7 working");
+  assert.equal(graph.nodeRole(ada), "Sub-agent");
   assert.equal(graph.cardText(ada, [], name).title, "Ada (@onboarding-fix)");
   assert.equal(graph.cardText(ada, [], name).branch, null);
   assert.equal(graph.cardText({ ...ada, branch: " crazyagent/agent-7 " }, [], name).branch, "crazyagent/agent-7");
   assert.equal(graph.cardTip(ada, { project_id: "p", nodes: [ada], edges: [] }, name)[0], "Ada (@onboarding-fix)");
-  assert.equal(graph.nodeLine(team.nodes[2], name), "Master \u00b7 Codex \u00b7 idle");
-  assert.equal(graph.nodeLine(node("team-8", "sub", { label: "Grace" })), "Grace \u00b7 codex");
+  assert.equal(graph.nodeRole(team.nodes[2]), "Master");
+  assert.equal(graph.nodeRole(node("x", "someday")), "Agent", "an unknown kind from a newer engine still reads");
 });
 
 test("each graph line names its relation, and the live action while it happens", () => {
