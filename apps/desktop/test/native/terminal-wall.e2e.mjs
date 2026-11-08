@@ -256,6 +256,12 @@ async function openAll({ project, me, page, tiles: all, site, log }, perWindow, 
     await me.capture(`wall-${perWindow}-${number}-of-${windows}`);
     if (number === 1) await moves(page, log, project, windows);
   }
+  await openWall(page, site, project, windows + 1, name);
+  await me.waitFor("an empty wall window", (text) => text.includes("No terminals for this window"));
+  const empty = await wallShown(page);
+  assert.equal(empty.heading, `${name} · Terminals`);
+  assert.deepEqual(empty.tools, ["Back to Agents", ...Array.from({ length: windows }, (_, index) => `Window ${index + 1} of ${windows}`)], "an empty window keeps Back to Agents and the windows that exist");
+  await me.capture(`wall-${perWindow}-empty`);
   const attached = log.trail.slice(before).filter((call) => call.cmd === "desktop_terminal_attach").length;
   assert.equal(attached, all.length, "each window asks to attach each of its terminals once");
   assert.ok(log.trail.slice(before).some((call) => call.cmd === "desktop_terminals_per_window"), "each window reads the setting");

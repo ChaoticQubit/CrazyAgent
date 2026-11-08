@@ -130,10 +130,34 @@ test("a wall window's tools row is the mockup's: Back to Agents, a Window N of M
   assert.ok(html.indexOf("Back to Agents") < html.indexOf("Window 1 of 3"), "Back to Agents first");
   const shown = source("screens/terminals/index.tsx");
   assert.match(shown, /focusTerminalWindow\(projectId, target\)/u);
-  assert.match(shown, /<h1>\{tiles === undefined \? `\$\{name\} · Terminals` : wallTitle\(name, page, pages\.length\)\}<\/h1>/u);
+  assert.match(shown, /<h1>\{tiles === undefined \? `\$\{title\} · Terminals` : wallTitle\(title, page, pages\.length\)\}<\/h1>/u);
+  assert.match(shown, /const title = displayText\(name\);/u, "the tiled title takes the same cleaned name");
   assert.match(source("api.ts"), /call<void>\("desktop_focus_terminal_window", \{ id, target: String\(target\) \}\)/u);
   assert.match(source("main.tsx"), /<TerminalWall projectId=\{wall\.project\} page=\{wall\.page\} name=\{wall\.name\} \/>/u);
   assert.deepEqual(asked, []);
+});
+
+test("a wall window shows its project name through displayText, so a direction or zero-width character shows as its escape", async () => {
+  const wall = await import("../src/screens/terminals/index.tsx");
+  const loading = renderToStaticMarkup(createElement(wall.TerminalWall, { projectId: "larkspur", page: 3, name: "Lark\u202espur\u200b Booking" }));
+  assert.match(loading, /<h1>Lark\\u202espur\\u200b Booking · Terminals<\/h1>/u, loading);
+  assert.doesNotMatch(loading, /[\u202e\u200b]/u, "no direction or zero-width character reaches the page");
+});
+
+test("a wall window keeps its tools row whatever its page holds: Back to Agents while it loads and on an empty page, with the windows that exist", async () => {
+  const wall = await import("../src/screens/terminals/index.tsx");
+  const loading = renderToStaticMarkup(createElement(wall.TerminalWall, { projectId: "larkspur", page: 3, name: "Larkspur Booking" }));
+  assert.match(loading, /class="tw-tools"[^]*<button[^>]*>(?:(?!<\/button>)[^])*Back to Agents<\/button>/u, `Back to Agents shows before the team is read: ${loading}`);
+  const past = renderToStaticMarkup(createElement(wall.WallTools, { page: 3, pages: 2, onFocus: () => {} }));
+  assert.match(past, /<button[^>]*>(?:(?!<\/button>)[^])*Back to Agents<\/button>/u);
+  assert.doesNotMatch(past, /role="radio/u, "an empty page is none of the windows, so nothing is checked");
+  assert.match(past, /role="group" aria-label="Terminal windows"/u);
+  assert.deepEqual([...past.matchAll(/<button[^>]*>(?:<[^>]+>)*(Window \d of \d)<\/button>/gu)].map((match) => match[1]), ["Window 1 of 2", "Window 2 of 2"]);
+  const none = renderToStaticMarkup(createElement(wall.WallTools, { page: 1, pages: 0, onFocus: () => {} }));
+  assert.match(none, /Back to Agents/u);
+  assert.doesNotMatch(none, /Window \d of/u, "no window to switch to while none holds terminals");
+  assert.throws(() => renderToStaticMarkup(createElement(wall.WallTools, { page: 0, pages: 2, onFocus: () => {} })), /page 0 of 2/u);
+  assert.throws(() => renderToStaticMarkup(createElement(wall.WallTools, { page: 1, pages: -1, onFocus: () => {} })), /page 1 of -1/u);
 });
 
 test("the wall boots from main.tsx on its own address, Agents carries the button and the Coordination group the setting", () => {
