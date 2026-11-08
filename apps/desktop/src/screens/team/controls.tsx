@@ -346,39 +346,50 @@ export function ReaskSetting({ projectId, status, reload }: { projectId: string;
   </SettingRow>;
 }
 
-/** Stop all, or Start all again while the team is stopped, with its line and its confirm:
- * every agent of the project stops and stays stopped across restarts until the owner starts
- * them again. Exported for the project menu. Inputs: the project id, the latest team status
- * and a reload. Output: the row. */
-export function StopAll({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
-  const [stopAsked, setStopAsked] = useState(false);
+/** Stop all and Start all again for one project, shared by the Team view's row and the project
+ * menu: `ask` opens the one confirm, whose Stop all stops every agent; `start` starts them again
+ * at once. Inputs: the project id, a reload and where a change's note goes ("" once applied)
+ * with whether it stopped. Output: whether a change runs, ask, start and the confirm. */
+export function useStopAll(projectId: string, reload: () => void, onNote: (note: string, stopped: boolean) => void) {
+  const [asked, setAsked] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
 
-  async function stopAll(stopped: boolean) {
-    setStopAsked(false);
+  async function change(stopped: boolean) {
+    setAsked(false);
     setBusy(true);
     const message = changeNote(await setTeamStopped(projectId, stopped), stopped ? "stopping the team" : "starting the team again");
     setBusy(false);
-    setNote(message);
+    onNote(message, stopped);
     reload();
   }
+
+  const dialog = <ConfirmDialog open={asked} title="Stop every agent of this project?" confirmLabel="Stop all" cancelLabel="Keep running"
+    pending={busy} onCancel={() => setAsked(false)} onConfirm={() => void change(true)}>
+    The master, every harness and every teammate stop now, and stay stopped across app and engine restarts until you start them again. Their work waits for them.
+  </ConfirmDialog>;
+  return { busy, ask: () => setAsked(true), start: () => void change(false), dialog };
+}
+
+/** Stop all, or Start all again while the team is stopped, with its line and its confirm:
+ * every agent of the project stops and stays stopped across restarts until the owner starts
+ * them again. The project menu shares its action and confirm through `useStopAll`. Inputs:
+ * the project id, the latest team status and a reload. Output: the row. */
+export function StopAll({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const [note, setNote] = useState("");
+  const stop = useStopAll(projectId, reload, setNote);
 
   return <>
     <div className="pj-row">
       {status.paused
-        ? <Button variant="primary" size="small" pending={busy} onClick={() => void stopAll(false)}>Start all again</Button>
-        : <Button variant="danger" size="small" icon="circle-stop" disabled={busy} onClick={() => setStopAsked(true)}>Stop all</Button>}
+        ? <Button variant="primary" size="small" pending={stop.busy} onClick={stop.start}>Start all again</Button>
+        : <Button variant="danger" size="small" icon="circle-stop" disabled={stop.busy} onClick={stop.ask}>Stop all</Button>}
       <span className="tg-terminal-note" role="status">{status.paused
         ? status.budget_reached === true
           ? "Every agent of this project is stopped: its agents used the token budget. Start them again, or raise the budget first."
           : "Every agent of this project is stopped until you start them again."
         : "Stops the master, every harness and every teammate of this project. They stay stopped across restarts."}</span>
     </div>
-    <ConfirmDialog open={stopAsked} title="Stop every agent of this project?" confirmLabel="Stop all" cancelLabel="Keep running"
-      pending={busy} onCancel={() => setStopAsked(false)} onConfirm={() => void stopAll(true)}>
-      The master, every harness and every teammate stop now, and stay stopped across app and engine restarts until you start them again. Their work waits for them.
-    </ConfirmDialog>
+    {stop.dialog}
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </>;
 }

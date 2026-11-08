@@ -31,6 +31,7 @@ import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
 import { TeamActivity } from "./team-activity";
 import { useTeam } from "./team";
+import { useStopAll } from "../team/controls";
 import "./projects.css";
 
 export const TABS = [
@@ -138,6 +139,9 @@ function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly
   const team = data.team.result;
   const summary = pauseSummary(team?.kind === "ok" ? team.value.tasks : []);
   const researching = (valueOf(data.research)?.jobs ?? []).some((job) => job.status === "running");
+  const stopped = team?.kind === "ok" && team.value.paused;
+  const stopAll = useStopAll(data.id, data.reloadTeam, (note, stopping) => data.notify(note
+    || (stopping ? "Stopped. Every agent of this project stays stopped until you start them again." : "Started again. The agents of this project run again.")));
 
   async function reveal() {
     const result = await revealProjectFolder(data.id);
@@ -166,6 +170,7 @@ function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly
       ...replaced.map((item) => ({ label: `Open ${item.label}`, icon: item.icon, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/${item.id}`) })),
       { label: "Show folder in Finder", icon: "folder-open", onSelect: () => void reveal() },
       { label: "Pause all agents", icon: "circle-pause", onSelect: askPause },
+      stopped ? { label: "Start all again", icon: "refresh-cw", onSelect: stopAll.start } : { label: "Stop all", icon: "circle-stop", danger: true, onSelect: stopAll.ask },
       { label: "Remove from CrazyAgent", icon: "trash", danger: true, onSelect: () => data.navigate(`/projects/${encodeURIComponent(data.id)}/settings?section=remove&ask=remove`) },
     ]} />
     <ConfirmDialog open={pausing} title="Pause all agents?" confirmLabel="Pause all agents" cancelLabel="Keep working" pending={busy}
@@ -173,6 +178,7 @@ function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly
       {summary.line} Work so far stays in each agent's copy of the project. Stopped tasks don't start again on their own; ask the master when you want to continue.
       {researching ? " Research agents keep running." : ""}
     </ConfirmDialog>
+    {stopAll.dialog}
   </>;
 }
 
