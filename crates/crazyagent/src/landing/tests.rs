@@ -1029,9 +1029,11 @@ fn accept_lands_one_squash_commit_authored_by_the_repository_identity_on_the_che
             "{before}|Repo Owner <owner@example.invalid>|Repo Owner <owner@example.invalid>|Add the fourth line"
         )
     );
-    assert!(!case
-        .owner(&["log", "-1", "--format=%B", &commit])
-        .contains("CrazyAgent"));
+    assert!(
+        !case
+            .owner(&["log", "-1", "--format=%B", &commit])
+            .contains("CrazyAgent")
+    );
     assert_eq!(
         case.owner(&["ls-tree", "-r", "--name-only", &commit]),
         "README\nother.txt\nsrc/new.rs\n"
@@ -1420,10 +1422,12 @@ fn engine_head_moves_never_follow_a_reflog_link_in_the_agent_admin_folder() {
     assert_eq!(case.agent_head(), head);
     assert_eq!(std::fs::read(&config).unwrap(), before);
     assert!(std::fs::symlink_metadata(&shallow).is_err());
-    assert!(std::fs::symlink_metadata(logs.join("HEAD"))
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    assert!(
+        std::fs::symlink_metadata(logs.join("HEAD"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     assert_eq!(
         case.owner(&["config", "--get", "user.name"]).trim(),
         "Repo Owner"
@@ -1451,10 +1455,12 @@ fn a_fifo_planted_in_the_agent_git_folder_is_refused_without_waiting_on_it() {
                 "mkfifo failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert!(std::fs::symlink_metadata(path)
-                .unwrap()
-                .file_type()
-                .is_fifo());
+            assert!(
+                std::fs::symlink_metadata(path)
+                    .unwrap()
+                    .file_type()
+                    .is_fifo()
+            );
         };
         let git_dir = case.workspace.git_dir.clone();
         let head_file = git_dir.join("HEAD");
@@ -1470,10 +1476,12 @@ fn a_fifo_planted_in_the_agent_git_folder_is_refused_without_waiting_on_it() {
         assert_eq!(case.agent_head(), tip);
         restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
         assert_eq!(case.agent_head(), head);
-        assert!(std::fs::symlink_metadata(logs.join("HEAD"))
-            .unwrap()
-            .file_type()
-            .is_fifo());
+        assert!(
+            std::fs::symlink_metadata(logs.join("HEAD"))
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
         fifo(&head_file);
         case.edit("later.txt", "more work\n");
         let turn = TurnEnd {
@@ -1519,10 +1527,12 @@ fn a_fifo_planted_in_the_agent_git_folder_is_refused_without_waiting_on_it() {
         assert_eq!(refused(agent.head()), "changes_workspace_invalid");
         assert!(agent.move_head(None, &tip, "CrazyAgent: test").is_err());
         assert!(std::fs::symlink_metadata(git_dir.join("HEAD.lock")).is_err());
-        assert!(std::fs::symlink_metadata(&head_file)
-            .unwrap()
-            .file_type()
-            .is_fifo());
+        assert!(
+            std::fs::symlink_metadata(&head_file)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
         std::fs::remove_file(&head_file).unwrap();
         std::fs::write(&head_file, format!("{head}\n")).unwrap();
         fifo(&git_dir.join("gitdir"));
@@ -1655,10 +1665,8 @@ fn repository_hooks_filters_merge_drivers_textconv_and_fsmonitor_never_run() {
     case.edit("a.txt", "plain text\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     let page = diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
-    assert!(page
-        .files
-        .iter()
-        .any(|file| file.path == ".gitattributes" && file.marks.contains(&FileMark::Attributes)));
+    assert!(page.files.iter().any(|file| file.path == ".gitattributes"
+        && file.marks.contains(&FileMark::Attributes)));
     assert!(matches!(
         case.accept(&id).unwrap(),
         AcceptOutcome::Landed { .. }
@@ -2209,9 +2217,11 @@ fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
         text.contains("+\u{FFFD}[31mred\u{FFFD}txt\u{FFFD}\n"),
         "{text:?}"
     );
-    assert!(!text
-        .chars()
-        .any(|c| c == '\u{1b}' || c == '\u{202E}' || c == '\r'));
+    assert!(
+        !text
+            .chars()
+            .any(|c| c == '\u{1b}' || c == '\u{202E}' || c == '\r')
+    );
     let past = diff(&case.db, &id, &case.view(&id).head, page + 5).unwrap();
     assert!(past.files.is_empty() && past.text.is_empty() && past.next.is_none());
 }
@@ -4795,9 +4805,11 @@ fn a_reused_clone_gets_its_store_folders_back_and_a_linked_object_folder_is_refu
         std::fs::remove_dir(git_dir.join("objects").join(name)).unwrap();
     }
     ready_agent_clone(&case.workspace.worktree).unwrap();
-    assert!(store_folder_paths(&git_dir)
-        .iter()
-        .all(|folder| std::fs::symlink_metadata(folder).is_ok_and(|found| found.is_dir())));
+    assert!(
+        store_folder_paths(&git_dir)
+            .iter()
+            .all(|folder| std::fs::symlink_metadata(folder).is_ok_and(|found| found.is_dir()))
+    );
 
     let elsewhere = case.repo.parent().unwrap().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
@@ -6566,9 +6578,10 @@ fn a_poll_checks_every_open_head_with_one_git_run_for_the_repository() {
             .len(),
         6
     );
-    assert!(ids
-        .iter()
-        .all(|id| case.view(id).state == ChangeState::Pending));
+    assert!(
+        ids.iter()
+            .all(|id| case.view(id).state == ChangeState::Pending)
+    );
 
     let gone = &heads[3];
     std::fs::remove_file(
@@ -6732,9 +6745,11 @@ fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move
         (made.branch.as_str(), case.tip()),
         ("main", made.commit.clone())
     );
-    assert!(crate::instruction_files::uncommitted(&case.repo)
-        .unwrap()
-        .is_empty());
+    assert!(
+        crate::instruction_files::uncommitted(&case.repo)
+            .unwrap()
+            .is_empty()
+    );
     let AcceptOutcome::Landed { commit, branch } =
         accept_into(&case.db, &case.home, &id, &head, None, "main").unwrap()
     else {
@@ -7764,9 +7779,11 @@ fn the_engine_start_sweeps_the_regenerations_a_stopped_engine_left() {
     assert!(!regenerate_leftovers(&case).is_empty());
     assert_eq!(crate::landing::sweep_regenerations(&case.db).unwrap(), 1);
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
-    assert!(!case
-        .owner(&["worktree", "list", "--porcelain"])
-        .contains("regenerate"));
+    assert!(
+        !case
+            .owner(&["worktree", "list", "--porcelain"])
+            .contains("regenerate")
+    );
 }
 
 /// A regeneration's own merge gate reads the paths main changed too: an owner merge driver
