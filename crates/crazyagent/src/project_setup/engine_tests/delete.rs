@@ -174,6 +174,42 @@ async fn delete_everything_of_a_project_whose_folder_is_gone_removes_its_records
 }
 
 #[tokio::test]
+async fn delete_everything_removes_the_projects_master_lands_and_catch_up_choices() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    write_db(
+        &engine,
+        "INSERT INTO team_master_lands(project,mode) VALUES ('setup-pooled','waits'),('other','waits');
+         INSERT INTO team_catch_up_main(project,mode) VALUES ('setup-pooled','off'),('other','off');",
+    );
+    std::fs::remove_dir_all(&folder).unwrap();
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    for table in ["team_master_lands", "team_catch_up_main"] {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{table} keeps the deleted project's row"
+        );
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='other'"
+            )),
+            1,
+            "{table} loses another project's row"
+        );
+    }
+    drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
 async fn removing_a_project_keeps_its_usage_under_removed_projects() {
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
