@@ -473,11 +473,12 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
 }
 
 /// The section that names a live master's or sub-agent's team tools (DEC-104), each on
-/// one line, with the two question tags, the branch rule for the agents it leads
-/// (Q-W-LAND-26) and, while "Catch up with main" is on, how to bring a moved main into its
-/// own branch (OS-8). Inputs: the team tools left out and the setting. Output: at most
-/// `TOOLS_SECTION_BYTES_MAX` bytes of markdown.
-pub fn team_tools_section(off: &[String], catch_up_main: bool) -> String {
+/// one line, for a sub-agent in its own clone how to restart from main after an accepted
+/// change set, the two question tags, the branch rule for the agents it leads (Q-W-LAND-26)
+/// and, while "Catch up with main" is on, how to bring a moved main into its own branch
+/// (OS-8). Inputs: the team tools left out, the setting and whether the agent works in its
+/// own clone. Output: at most `TOOLS_SECTION_BYTES_MAX` bytes of markdown.
+pub fn team_tools_section(off: &[String], catch_up_main: bool, own_clone: bool) -> String {
     let mut section = format!(
         "\n## Team tools\n\nYour team tools are in the `{}` MCP server. The engine answers each by your place in the team:\n",
         crate::team::tool::SERVER_NAME
@@ -487,7 +488,11 @@ pub fn team_tools_section(off: &[String], catch_up_main: bool) -> String {
             section.push_str(&format!("- {name}: {line}\n"));
         }
     }
-    section.push_str("Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence.\nEvery question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.\nBranches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.\n");
+    section.push_str("Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence.");
+    if own_clone {
+        section.push_str(" After your change set is accepted, start your next work from main with git reset --keep crazyagent/main, unless you have newer commits.");
+    }
+    section.push_str("\nEvery question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.\nBranches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.\n");
     if !off
         .iter()
         .any(|tool| tool == crate::team::tool::ACTIVITY_TOOL)
@@ -791,20 +796,22 @@ impl AgentContext {
             off,
             AskReach::Live,
         )
-        .map(|context| context.with_tools_section(off))
+        .map(|context| context.with_tools_section(off, false))
     }
 
     /// Adds the engine's own MCP server that gives a sub-agent with tools its team tools
     /// (DEC-104) and the `ask` tool, answered by the engine through the mailbox folder, the
     /// section that names them, and tells it to ask the owner with `ask` or a for me
-    /// `update_work` question. Input: the absolute canonical engine executable, the absolute
-    /// mailbox in the agent's private temporary folder and the tools left out. Output: the
-    /// context, or a plain code as for [`Self::with_team_tool`].
+    /// `update_work` question; only one in its own clone hears how to restart from main.
+    /// Input: the absolute canonical engine executable, the absolute mailbox in the agent's
+    /// private temporary folder, the tools left out and whether it works in its own clone.
+    /// Output: the context, or a plain code as for [`Self::with_team_tool`].
     pub fn with_agent_team_tool(
         self,
         executable: &Path,
         mailbox: &Path,
         off: &[String],
+        own_clone: bool,
     ) -> Result<Self, LaunchError> {
         self.with_team_server(
             executable,
@@ -813,12 +820,12 @@ impl AgentContext {
             off,
             AskReach::SubAgent,
         )
-        .map(|context| context.with_tools_section(off))
+        .map(|context| context.with_tools_section(off, own_clone))
     }
 
-    fn with_tools_section(mut self, off: &[String]) -> Self {
+    fn with_tools_section(mut self, off: &[String], own_clone: bool) -> Self {
         self.instructions
-            .push_str(&team_tools_section(off, self.catch_up_main));
+            .push_str(&team_tools_section(off, self.catch_up_main, own_clone));
         assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         self
     }

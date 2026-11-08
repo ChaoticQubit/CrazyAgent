@@ -634,7 +634,7 @@ pub fn land_on(
 /// the project. Output: Ok, else `changes_unavailable`.
 pub fn refresh_main(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return owner::refresh_main(db, project, None);
+    return owner::refresh_main(db, project, None).map(|_| ());
     #[cfg(not(unix))]
     {
         let _ = (db, project);

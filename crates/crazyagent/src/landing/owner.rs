@@ -420,13 +420,13 @@ pub(super) fn land_on(
 /// None, else the caller's, and a repository other than the held one is logged and skipped.
 /// A worktree or repository it cannot reach is logged by its plain code and skipped, so
 /// one never stops the rest. Inputs: the store, the project and the repository the caller
-/// holds. Output: Ok once each was given or skipped, else `changes_unavailable` when the
-/// team records cannot be read.
+/// holds. Output: the own clones given main once each was given or skipped, else
+/// `changes_unavailable` when the team records cannot be read.
 pub(super) fn refresh_main(
     db: &Connection,
     project: &ProjectId,
     held: Option<&Path>,
-) -> Result<(), EngineError> {
+) -> Result<Vec<PathBuf>, EngineError> {
     let places = main_places(db, project)?;
     let mut by_repository: BTreeMap<&Path, Vec<&[PathBuf; 3]>> = BTreeMap::new();
     for place in &places {
@@ -435,6 +435,7 @@ pub(super) fn refresh_main(
             .or_default()
             .push(place);
     }
+    let mut given = Vec::new();
     for (repository, places) in by_repository {
         let _hold = match held {
             None => Some(hold(repository)),
@@ -444,15 +445,21 @@ pub(super) fn refresh_main(
                 continue;
             }
         };
-        give_main_in(db, project, repository, &places);
+        given.extend(give_main_in(db, project, repository, &places));
     }
-    Ok(())
+    Ok(given)
 }
 
 /// Gives one owner repository's agent worktrees the project's Land on tip as
 /// [`refresh_main`] says, logging by plain code each one it cannot reach. The caller holds
 /// the repository's hold. Inputs: the store, the project, the repository and its places.
-fn give_main_in(db: &Connection, project: &ProjectId, repository: &Path, places: &[&[PathBuf; 3]]) {
+/// Output: the own clones it gave main.
+fn give_main_in(
+    db: &Connection,
+    project: &ProjectId,
+    repository: &Path,
+    places: &[&[PathBuf; 3]],
+) -> Vec<PathBuf> {
     let tip = match land_on_branch(db, repository, project) {
         Ok(found) => found.map(|(_, tip)| tip),
         Err(error) => {
@@ -464,12 +471,15 @@ fn give_main_in(db: &Connection, project: &ProjectId, repository: &Path, places:
         }
     };
     let Some(tip) = tip else {
-        return;
+        return Vec::new();
     };
     let mut linked = false;
+    let mut clones = Vec::new();
     for [_, worktree, git_dir] in places.iter().copied() {
         let given = match flow::check_places(repository, worktree, git_dir) {
-            Ok(Layout::Clone) => clone::give_main(repository, worktree, &tip),
+            Ok(Layout::Clone) => {
+                clone::give_main(repository, worktree, &tip).map(|()| clones.push(worktree.clone()))
+            }
             Ok(Layout::Linked) => {
                 linked = true;
                 Ok(())
@@ -484,7 +494,7 @@ fn give_main_in(db: &Connection, project: &ProjectId, repository: &Path, places:
         }
     }
     if !linked {
-        return;
+        return clones;
     }
     let given = shared(repository).and_then(|repo| {
         flow::set_engine_ref(&repo, repository, clone::MAIN_REF, Some(tip.as_str()))
@@ -495,6 +505,7 @@ fn give_main_in(db: &Connection, project: &ProjectId, repository: &Path, places:
             crate::protocol::plain_code(&error.0)
         );
     }
+    clones
 }
 
 /// The repository, worktree and git folder of each agent worktree the team records for a
@@ -792,11 +803,12 @@ pub(super) fn commit_deletions(
 /// Marks a change set landed as `landed`, closes its agent's workers' open sets with it
 /// (F3, DEC-107), drops its pending ref, forgets the owner edits settled on it and points the
 /// agent's worktree at the landed commit when the worktree holds nothing newer than the set,
-/// gives every agent worktree the new main ([`refresh_main`]) and records the Accept in the
-/// project's activity by who accepted it. A worker set that cannot be closed now, or a main
-/// that cannot be given, is logged by its plain code and left, so the Accept itself never
-/// fails on it; so is a failure after the save for the master's own land, which its caller
-/// still lists as landed.
+/// gives every agent worktree the new main ([`refresh_main`]), tells the set's clone agent,
+/// only when its clone was given that main, that the set landed ([`tell_landed`]), and
+/// records the Accept in the project's activity by who accepted it. A worker set that cannot
+/// be closed now, or a main that cannot be given, is logged by its plain code and left, so
+/// the Accept itself never fails on it; so is a failure after the save for the master's own
+/// land, which its caller still lists as landed.
 fn finish(
     db: &Connection,
     record: &mut Record,
@@ -850,13 +862,53 @@ fn tidy(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engine
     super::owner_edit::logged("forget", super::owner_edit::forget(db, &record.id));
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)?;
-    if let Err(error) = refresh_main(db, &record.project, Some(record.repository.as_path())) {
-        eprintln!(
+    match refresh_main(db, &record.project, Some(record.repository.as_path())) {
+        Ok(given) if given.contains(&record.worktree) => tell_landed(db, record, landed),
+        Ok(_) => {}
+        Err(error) => eprintln!(
             "landing_main_not_refreshed code={}",
+            crate::protocol::plain_code(&error.0)
+        ),
+    }
+    Ok(())
+}
+
+/// Tells the sub-agent of an accepted set in its own clone, which the engine never resets
+/// (CC-N1), that the set landed, what its last commit was, so `git log <head>..HEAD` shows
+/// any newer work, and to start from the main it was just given with `git reset --keep`,
+/// which keeps uncommitted edits (OS-8, DEC-117): one Note from the engine keyed to the set,
+/// naming no merge, since the agent's git keeps the "Catch up with main" it launched with. A
+/// failed send is logged by its plain code and never fails the Accept. Inputs: the store,
+/// the accepted set and the landed commit. Output: none.
+pub(super) fn tell_landed(db: &Connection, record: &Record, landed: &str) {
+    if !flow::in_clone(record) || record.agent.kind != AgentKind::Sub {
+        return;
+    }
+    let Ok(agent) = record.agent.id.parse::<i64>() else {
+        return;
+    };
+    let head = record.head.get(..12).unwrap_or(&record.head);
+    let body = format!(
+        "Your change set landed on main as {}; its last commit was {head}. If git log {head}..HEAD shows no newer commits, start your next work from main: git reset --keep crazyagent/main.",
+        landed.get(..12).unwrap_or(landed)
+    );
+    let note = crate::coord::NewMessage {
+        project: record.project.clone(),
+        from: crate::coord::Party::Engine,
+        to: crate::coord::Party::Agent(agent),
+        kind: crate::coord::MessageKind::Note,
+        question: None,
+        work: None,
+        reply_to: None,
+        body,
+        idempotency_key: Some(format!("landed-{}", record.id.as_str())),
+    };
+    if let Err(error) = crate::coord::send(db, note, crate::team::now_ms()) {
+        eprintln!(
+            "landing_note_not_sent code={}",
             crate::protocol::plain_code(&error.0)
         );
     }
-    Ok(())
 }
 
 /// Who lands a change set, as the project's activity names them: someone whose Accept or
