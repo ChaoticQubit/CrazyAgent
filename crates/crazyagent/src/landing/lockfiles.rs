@@ -402,6 +402,7 @@ fn regenerated(
     if agent.head()? != now.head || !flow::holds_only(&agent.repo, &now.head)? {
         return Ok(Regenerated::Refused);
     }
+    let before = now.clone();
     now.waiting = false;
     now.base = tip;
     now.head = commit.clone();
@@ -414,14 +415,18 @@ fn regenerated(
     });
     store::save(db, &now)?;
     flow::set_engine_ref(&owner, &repository, &pending_ref(&now.id), Some(&commit))?;
-    flow::reset_agent(&agent, &record.head, &commit)?;
+    if !flow::reset_agent(&agent, &before.head, &commit)? {
+        store::save(db, &before)?;
+        flow::set_engine_ref(
+            &owner,
+            &repository,
+            &pending_ref(&before.id),
+            Some(&before.head),
+        )?;
+        return Ok(Regenerated::Refused);
+    }
     now.intent = None;
     store::save(db, &now)?;
-    assert_eq!(
-        agent.head()?,
-        commit,
-        "the agent's worktree holds the engine's commit"
-    );
     tell_regenerated(db, &now, &files, &commit);
     Ok(Regenerated::Applied)
 }
