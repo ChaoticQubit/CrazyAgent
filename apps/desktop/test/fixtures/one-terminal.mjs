@@ -9,7 +9,15 @@ import { AgentsTab } from "../../src/screens/project/agents.tsx";
 import { teamStatus } from "./team-status.mjs";
 
 let root = null;
-const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok", release: () => {} };
+const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok", release: () => {} };
+
+/** One team task the team status lists, running on Ada. Input: its id. Output: the task. */
+export function runningTask(id) {
+  return {
+    id, source: "master", harness: "codex", tools: true, prompt: "Calendar API endpoints", status: "running", status_label: "Running", agent: 1,
+    attempts: 1, result: null, problem: null, delivered: false, output_bytes: 0, created_ms: 0, started_ms: 0, finished_ms: null,
+  };
+}
 
 const node = (id, kind, extra = {}) => ({
   id, kind, parent: null, label: id, harness: "codex", status: "working", status_label: "Working", account: null, terminal: null, ...extra,
@@ -84,6 +92,10 @@ function bridge() {
         return null;
       }
       if (command === "desktop_terminal_resize") return null;
+      if (command === "desktop_team_cancel") {
+        engine.cancels.push(args.task);
+        return { generation: args.generation, outcome: "applied", pending: false, rejection: null };
+      }
       throw { code: "unknown", message: command };
     },
     transformCallback: (callback) => {
@@ -95,11 +107,12 @@ function bridge() {
 }
 
 /** Mounts the Agents tab of project alpha on a fresh page, as the project page shows it, with
- * the engine answering each terminal attach after the given delay and the team graph read as
- * the given mode. Inputs: the delay in ms and the graph mode. */
-export function mount(delayMs = 0, graph = "ok") {
+ * the engine answering each terminal attach after the given delay, the team graph read as
+ * the given mode and the team status listing the given tasks. Inputs: the delay in ms, the
+ * graph mode and the tasks. */
+export function mount(delayMs = 0, graph = "ok", tasks = []) {
   root?.unmount();
-  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], callbacks: new Map(), next: new Map(), delayMs, graph });
+  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs, graph });
   bridge();
   document.head.innerHTML = "";
   for (const text of [styles, projectStyles, teamStyles, xtermStyles]) {
@@ -111,8 +124,8 @@ export function mount(delayMs = 0, graph = "ok") {
   root = createRoot(document.getElementById("panel"));
   const data = {
     id: "alpha", name: "Alpha", setup: undefined, research: undefined, context: undefined, pools: undefined, harnesses: undefined,
-    assigned: null, now: 0, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
-    team: { result: { kind: "ok", value: teamStatus() }, at: 1 }, reloadTeam: () => {},
+    assigned: null, now: 0, navigate: () => {}, notify: (note) => engine.notes.push(note), reload: () => {}, reloadPools: () => {},
+    team: { result: { kind: "ok", value: teamStatus({ tasks }) }, at: 1 }, reloadTeam: () => {},
   };
   flushSync(() => root.render(createElement(AgentsTab, { data })));
 }
@@ -161,6 +174,30 @@ export function type(text) {
   Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(box, text);
   box.dispatchEvent(new Event("input", { bubbles: true }));
   return true;
+}
+
+/** Clicks the button named `name`, by its text or its label, inside the first element the
+ * selector finds. Inputs: the selector and the name. Output: whether the button was there. */
+export function press(selector, name) {
+  const scope = document.querySelector(selector);
+  const button = [...(scope?.querySelectorAll("button") ?? [])].find((item) => item.textContent.trim() === name || item.getAttribute("aria-label") === name);
+  if (!button) return false;
+  button.click();
+  return true;
+}
+
+/** What the owner sees around the panel: the button names of the graph head in order, where
+ * the cursor is, the open dialog's title and text, the pause calls the engine took and the
+ * notes the page left. */
+export function around() {
+  const dialog = document.querySelector("dialog[open]");
+  return {
+    head: [...(document.querySelector(".tg-head")?.querySelectorAll("button") ?? [])].map((item) => item.textContent.trim()),
+    focused: document.activeElement?.getAttribute("placeholder") ?? document.activeElement?.tagName ?? null,
+    dialog: dialog ? { title: dialog.querySelector("h2")?.textContent ?? "", text: dialog.textContent } : null,
+    cancels: [...engine.cancels],
+    notes: [...engine.notes],
+  };
 }
 
 /** What the page and the engine show now: the terminal panels and their names, the xterm
