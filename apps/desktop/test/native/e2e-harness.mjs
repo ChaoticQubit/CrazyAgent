@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { createWriteStream, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { createWriteStream, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
-import { extname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 
 export const READY_MS = 60000;
@@ -68,6 +68,30 @@ export async function stop(child) {
   const timer = setTimeout(() => child.kill("SIGKILL"), 20000);
   await exited;
   clearTimeout(timer);
+}
+
+/** Lists the tmux processes still serving an engine's agent terminals: each tmux process's
+ * first socket, followed through the short alias the engine gives a folder too long for a
+ * socket address, is matched against the engine's terminal folder. Input: the engine root.
+ * Output: their pids, none once the folder is gone. */
+export function terminalServers(runtime) {
+  let folder;
+  try {
+    folder = realpathSync(join(runtime, "terminal"));
+  } catch {
+    return [];
+  }
+  const listed = spawnSync("/bin/ps", ["-axww", "-o", "pid=,command="], { encoding: "utf8" });
+  assert.equal(listed.status, 0, `ps lists the processes: ${listed.stderr}`);
+  return listed.stdout.split("\n").flatMap((line) => {
+    const found = line.match(/^\s*(\d+)\s+\S*\/tmux\s.*?\s-S\s+(\S+)/);
+    if (!found) return [];
+    try {
+      return realpathSync(dirname(found[2])) === folder ? [Number(found[1])] : [];
+    } catch {
+      return [];
+    }
+  });
 }
 
 /** Sends one `desktop_*` command to the end-to-end bridge, as the app's invoke would.
