@@ -99,6 +99,9 @@ test("each wall tile has the panel's head and input: name, harness and state, ro
   assert.equal(html.match(/<button type="submit"[^>]*>(?:(?!<\/button>)[^])*Send<\/button>/gu)?.length, 2, "a Send per tile");
   assert.doesNotMatch(html, /Click another agent/, "a wall tile never swaps its agent");
   assert.doesNotMatch(html, /aria-label="Close terminal"/, "a wall tile has no Close");
+  const classes = [...html.matchAll(/<section class="([^"]*)"/gu)].map((match) => match[1].split(" "));
+  assert.equal(classes.length, 2);
+  assert.ok(classes.every((names) => !names.includes("tile")), `style.css .tile is a padded card, never a terminal: ${JSON.stringify(classes)}`);
 });
 
 test("the wall boots from main.tsx on its own address, Agents carries the button and the Coordination group the setting", () => {
