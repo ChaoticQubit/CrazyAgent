@@ -26,6 +26,9 @@ fn documented_cargo_run_selects_main_binary_with_probe_present() {
             std::fs::read(member_source.join("Cargo.toml")).unwrap()
         );
     }
+    for file in kept_files(workspace, "apps/ide-extension") {
+        copy_file(&workspace.join(&file), &root.path().join(&file));
+    }
     let mut manifest = std::fs::read_to_string(source.join("Cargo.toml")).unwrap();
     manifest.push_str("\n[[bin]]\nname = 'crazyagent-boundary-child'\npath = 'src/bin/crazyagent-boundary-child.rs'\n");
     std::fs::write(package.join("Cargo.toml"), manifest).unwrap();

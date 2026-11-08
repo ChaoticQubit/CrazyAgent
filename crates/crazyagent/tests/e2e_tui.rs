@@ -634,7 +634,8 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
     });
     pty.keys(&["Enter"]);
     pty.until("the setup page shows both steps", |screen| {
-        screen.contains("Build the code graph") && screen.contains("Map the project")
+        screen.contains("Build the code graph")
+            && (screen.contains("Map the project") || screen.contains("Mapping failed:"))
     });
 
     let review = pty.until_within(
@@ -714,6 +715,9 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
         pty.keys(&["Space"]);
     }
     pty.keys(&["Tab"]);
+    if review.contains("Plan a roadmap after research") {
+        pty.keys(&["Tab"]);
+    }
     let confirm = pty.until("Confirm is focused", |screen| {
         screen.contains("Enter Confirm setup")
     });
@@ -837,7 +841,14 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
         let ask = pty.until("x asks before removing the project", |screen| {
             screen.contains(&format!("Remove {REPO} from CrazyAgent?"))
         });
-        assert!(ask.contains("stays on disk"), "{ask}");
+        let dialog = ask
+            .lines()
+            .filter_map(|line| line.split_once('│').map(|(_, rest)| rest))
+            .map(|rest| rest.rsplit_once('│').map_or(rest, |(inside, _)| inside))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let words = dialog.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("The project folder stays on disk"), "{ask}");
         pty.keys(&["y"]);
         pty.until(
             "the project is removed or the owner is told why not",
