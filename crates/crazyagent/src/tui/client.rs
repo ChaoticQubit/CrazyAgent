@@ -2992,7 +2992,7 @@ mod creation_recovery_tests {
         )
         .unwrap();
         let mut expected = creation_table_counts(&db);
-        for table in ["projects", "events", "owner_operations"] {
+        for table in ["projects", "events", "owner_operations", "project_activity"] {
             assert_eq!(expected[table], 0);
             *expected.get_mut(table).unwrap() += 1;
         }
@@ -3020,6 +3020,8 @@ mod creation_recovery_tests {
         assert_exact_uncertain_creation(&h.native, &submission, &request, &hash);
         assert_eq!(creation_table_counts(&db), expected);
         restart_creation_service(&mut h).await;
+        *expected.get_mut("project_activity_backfill").unwrap() += 1;
+        assert_eq!(creation_table_counts(&db), expected);
         assert_exact_uncertain_creation(&h.native, &submission, &request, &hash);
         assert_eq!(
             read_committed_creation(&db, &request.request_id),

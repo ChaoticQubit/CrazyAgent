@@ -3677,15 +3677,18 @@ pub fn master_lands(
 }
 
 /// The owner's saved choice of what the master does with its own change set, as the team
-/// status offers it: None below Full access, where the master always waits. Takes a
-/// connection and the project. Returns the choice.
+/// status offers it: None below Full access, where the master always waits, and None while
+/// the project's agent access cannot be read, so the rest of the status still reads and the
+/// agents are told why they stopped. Takes a connection and the project. Returns the choice.
 fn offered_master_lands(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<Option<MasterLands>, EngineError> {
-    let access = crate::sandbox::policy::load(connection, project.as_str())
-        .map_err(error)?
-        .access;
+    let access = match crate::sandbox::policy::load(connection, project.as_str()) {
+        Ok(policy) => policy.access,
+        Err(rusqlite::Error::FromSqlConversionFailure(..)) => return Ok(None),
+        Err(failed) => return Err(error(failed)),
+    };
     if access != crate::sandbox::policy::AgentAccess::Full {
         return Ok(None);
     }
