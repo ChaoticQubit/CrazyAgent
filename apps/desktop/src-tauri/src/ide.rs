@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::webview::{NewWindowResponse, WebviewBuilder};
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Rect, Runtime, Url, WebviewUrl, WebviewWindow,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Rect, Runtime, Url, WebviewUrl, Window,
 };
 
 /// The script every IDE webview runs before the workbench loads: it drops the control
@@ -364,7 +364,7 @@ fn restore_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(), BridgeError> {
 /// newer open came while the engine opened it.
 pub fn show(
     app: &AppHandle,
-    window: &WebviewWindow,
+    window: &Window,
     views: &IdeViews,
     project: &ProjectId,
     workbench: Workbench,
@@ -419,8 +419,6 @@ pub fn show(
                     NewWindowResponse::Deny
                 });
             let webview = window
-                .as_ref()
-                .window()
                 .add_child(
                     builder,
                     LogicalPosition::new(bounds.x, bounds.y),

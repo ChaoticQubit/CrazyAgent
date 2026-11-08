@@ -146,6 +146,8 @@ test("a refused place, hide or close reaches the owner instead of vanishing", as
   assert.match(await opened(["desktop_ide_place"], (evaluate) => evaluate("Fixture.seen()")).then((seen) => seen.alert), /couldn't move to fit/, "a failed place shows on the tab");
   assert.ok((await opened(["desktop_ide_hide"], left)).reported.some((line) => /^hide: .*couldn't be hidden/.test(line)), "a failed hide reaches the page");
   assert.ok((await opened(["desktop_ide_close"], left)).reported.some((line) => /^close: .*didn't close/.test(line)), "a failed close reaches the owner");
+  const page = read("src/screens/project/index.tsx");
+  assert.ok(page.indexOf("{ideHideProblem &&") >= 0 && page.indexOf("{ideHideProblem &&") < page.indexOf('className="pj-tab-panel"'), "a failed hide shows above the tab panel, outside the box the IDE may still cover");
   const clean = await opened([], left);
   assert.deepEqual(clean.reported, ["hide: null"], "calls that work tell the owner nothing");
   assert.equal(clean.alert, null);

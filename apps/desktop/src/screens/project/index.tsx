@@ -228,6 +228,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const { data, toast, session } = useProject(projectId, navigate, name);
   const [ide, setIde] = useState<Result<IdeView>>();
   const [busy, setBusy] = useState(false);
+  const [ideHideProblem, setIdeHideProblem] = useState<string | null>(null);
   const view = ide?.kind === "ok" ? ide.value : undefined;
   const failure = ide !== undefined && ide.kind !== "ok" ? ide : undefined;
   const fetching = ideFetching(view);
@@ -298,6 +299,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <RecoveryBanner key={projectId} project={projectId} />
     <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />
+    {ideHideProblem && <p className="ide-problem" role="alert">{ideHideProblem}</p>}
     {active !== review && <WaitingChanges projectId={projectId} place={review} />}
     <ImportMoveBanner projectId={projectId} version={importMoves} />
     <InstructionImportPrompt projectId={projectId} name={data.name ? displayText(data.name) : projectId} onMoved={() => setImportMoves((count) => count + 1)} />
@@ -311,7 +313,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "metrics" && <MetricsView key={data.id} projectId={data.id} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
-      {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={(value) => setIde({ kind: "ok", value })} />}
+      {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={(value) => setIde({ kind: "ok", value })} onHideProblem={setIdeHideProblem} />}
     </div>
     {replaces && <IdeConfirm data={data} />}
     {replaces && <IdeExtensionConfirm data={data} />}

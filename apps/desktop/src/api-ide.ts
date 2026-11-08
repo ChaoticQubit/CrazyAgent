@@ -7,6 +7,15 @@ import { isMac } from "./ui/keys";
  * milliseconds. */
 export const HEARTBEAT_MS = 60_000;
 
+/** What the owner reads when the IDE webview didn't move with its panel. */
+export const IDE_NOT_PLACED = "The IDE couldn't move to fit its panel. Resize the window to try again.";
+
+/** What the owner reads when the IDE webview didn't hide, so it may still cover the page. */
+export const IDE_NOT_HIDDEN = "The IDE couldn't be hidden, so it may still cover this page. Restart CrazyAgent if it stays.";
+
+/** What the owner reads when a project's IDE didn't close with its page. */
+export const IDE_NOT_CLOSED = "The IDE didn't close cleanly. Restart CrazyAgent if it stays on screen.";
+
 /** Where the engine's pinned IDE build stands. */
 export type BuildState =
   | { state: "missing" }
