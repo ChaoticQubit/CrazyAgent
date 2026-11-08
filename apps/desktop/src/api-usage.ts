@@ -127,6 +127,7 @@ export interface MetricsAgent {
   accounts: string[];
   more_accounts: number;
   tokens: Tokens;
+  turns?: number | null;
 }
 
 export interface Metrics {

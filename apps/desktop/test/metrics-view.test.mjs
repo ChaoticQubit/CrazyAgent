@@ -156,7 +156,7 @@ test("Total is the Tokens tile and every share is out of it; an Other row holds 
   assert.doesNotMatch(full, /Other, not listed/);
   assert.match(full, /Total 2\.3K 1\.2K 800 300 4K/);
   const agents = tableText(render({ usage: { kind: "ok", value: usage({ agents: [usage().agents[1]] }) } }));
-  assert.match(agents, /Master · Claude Code 900 500 300 100 1K 58 41 4 39%/);
+  assert.match(agents, /Master · Claude Code 900 500 300 100 1K 9 58 41 4 39%/);
   assert.match(agents, /Other, not listed 1\.4K 700 500 200 3K 61%/);
 });
 
