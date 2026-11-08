@@ -178,9 +178,9 @@ function waiting(sets, id) {
   return sets.some((set) => set.id === id && set.state === "pending");
 }
 
-test("below Full access the master merge setting is off and the master's fix waits for the owner's Accept", { timeout: 600000 }, async (t) => {
+test("below Full access the master merge setting is off, the master's edit waits for the owner's Accept and its merge of another agent's set is refused", { timeout: 600000 }, async (t) => {
   await withProject(t, "sandboxed", async (run) => {
-    const { me, page, open, masterFix, changes, status, activity, repo } = run;
+    const { me, page, open, masterTurn, masterFix, changes, status, activity, repo } = run;
     await open("agents", SETTING);
     const row = await page.evaluate(`[...document.querySelectorAll(".pj-row")].find((node) => node.textContent.includes(${JSON.stringify(SETTING)}))?.innerText ?? ""`);
     assert.match(row, /Only at Full access\./, "the row says the setting needs Full access");
@@ -188,11 +188,15 @@ test("below Full access the master merge setting is off and the master's fix wai
     assert.equal((await status()).master_lands, null, "the engine offers no choice below Full access");
     await me.capture("sandboxed-agents");
 
-    const { id, how, tip } = await masterFix();
-    assert.equal(how, "waits", "below Full access the master does not merge");
-    assert.equal(git(repo, "rev-parse", "HEAD"), tip, "main did not move");
-    assert.ok(waiting(await changes(), id), "the master's fix waits in Changes");
-    assert.deepEqual((await activity()).filter((item) => item.change_set === id), [], "nothing was merged, so no activity row");
+    const plain = masterTurn(README);
+    assert.equal(plain.how, "waits", "below Full access the master's edit waits for the owner's Accept");
+    const before = (await changes()).find((set) => set.id === plain.id);
+    assert.equal(before?.state, "pending", "the master's edit waits in Changes");
+    await assert.rejects(masterFix(), /changes_outside_merge/, "below Full access the engine refuses the master's merge of another agent's set (DEC-117 Q2)");
+    assert.equal(git(repo, "log", "-1", "--format=%s"), "Plant the pear seed", "main holds the owner's commit only");
+    const after = (await changes()).find((set) => set.id === plain.id);
+    assert.deepEqual([after?.state, after?.head], ["pending", before.head], "the master's set is unchanged");
+    assert.deepEqual((await activity()).filter((item) => item.change_set === plain.id), [], "nothing was merged, so no activity row");
   });
 });
 
