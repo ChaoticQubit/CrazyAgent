@@ -35,6 +35,20 @@ const TEAM = {
   edges: [],
 };
 
+/** The team mid-handoff: the master hands Ada a task whose first line is longer than a card,
+ * Brook waits on the owner's answer, and Cove has a branch. */
+const LIVE_TEAM = {
+  ...TEAM,
+  nodes: TEAM.nodes.map((item) => item.id === "team-2" ? { ...item, waiting: "question", account: "Pool A, Codex 2" }
+    : item.id === "team-3" ? { ...item, branch: "crazyagent/calendar-api", account: "Pool A, Codex 3" } : item),
+  edges: [{ from: "m", to: "team-1", task_id: 7, source: "master", text: "Write the label notes for the shop", state: "running", reply: null }],
+  relations: [
+    { from: "m", to: "team-1", relation: "delegated_to", live: { action: "handing_off", task: "Write the label notes for the shop" } },
+    { from: "m", to: "team-2", relation: "delegated_to", live: null },
+    { from: "m", to: "team-3", relation: "delegated_to", live: null },
+  ],
+};
+
 /** The owner's Questions inbox: Ada waits on a permission prompt in its terminal, and so does
  * Dune, an agent the graph does not draw. */
 const INBOX = {
@@ -64,6 +78,7 @@ function graphRead(mode) {
   if (mode === "late") return new Promise((done) => { engine.release = () => done(TEAM); });
   if (mode === "error") return Promise.reject({ code: "engine_unreachable", message: "The engine isn't running." });
   if (mode === "not_ready") return Promise.reject("Command desktop_team_graph not found");
+  if (mode === "live") return Promise.resolve(LIVE_TEAM);
   return Promise.resolve(mode === "empty" ? { ...TEAM, nodes: [] } : TEAM);
 }
 
@@ -221,6 +236,27 @@ export function shown() {
     clients: [...engine.clients.values()],
     attaches: [...engine.attaches],
     detaches: [...engine.detaches],
+  };
+}
+
+/** The graph's cards as drawn, unzoomed: each card's title, size, the classes of its lines in
+ * order and whether its lines fit inside it; and the live label's words, width, the width of
+ * its badge row and whether its words are cut. */
+export function cards() {
+  const live = document.querySelector(".tg-edge-label.live");
+  const clip = live?.querySelector(".tg-clip");
+  return {
+    cards: [...document.querySelectorAll(".tg-card")].map((card) => {
+      const open = card.querySelector(".tg-card-open");
+      return {
+        title: card.querySelector(".tg-card-title .tg-clip")?.textContent ?? "",
+        w: card.offsetWidth,
+        h: card.offsetHeight,
+        lines: [...open.children].map((line) => line.className.split(" ")[0]),
+        fits: open.scrollHeight <= open.clientHeight,
+      };
+    }),
+    live: live ? { text: clip.textContent, w: live.offsetWidth, row: live.parentElement.offsetWidth, cut: clip.scrollWidth > clip.clientWidth } : null,
   };
 }
 

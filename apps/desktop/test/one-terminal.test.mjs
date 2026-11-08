@@ -147,6 +147,27 @@ async function agentsPage(steps) {
   });
 }
 
+test("cards are the mockup's compact 176 by 96 four lines that fit, and a live label shows its words whole past its row", async () => {
+  const seen = await withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate("Fixture.mount(0, 'live')");
+    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4 && document.querySelector('.tg-edge-label.live') !== null)"), true, "the graph drew");
+    return evaluate("Fixture.cards()");
+  });
+  for (const card of seen.cards) {
+    assert.deepEqual([card.w, card.h], [176, 96], JSON.stringify(card));
+    assert.equal(card.fits, true, `every line fits inside the card: ${JSON.stringify(card)}`);
+  }
+  const lines = Object.fromEntries(seen.cards.map((card) => [card.title, card.lines]));
+  assert.deepEqual(lines.Cove, ["tg-card-title", "tg-card-detail", "tg-card-branch", "tg-card-task"], "name, harness and account, branch, task");
+  assert.deepEqual(lines.Brook, ["tg-card-title", "tg-chips", "tg-card-task"], "a chip takes the harness line, the task line stays");
+  assert.equal(seen.live.text, "handing off: Write the label notes for the shop");
+  assert.equal(seen.live.cut, false, `the live label's words show whole: ${JSON.stringify(seen.live)}`);
+  assert.ok(seen.live.w > seen.live.row, `the live label reaches past its card-wide row: ${JSON.stringify(seen.live)}`);
+  assert.ok(seen.live.w <= 352, `at most two cards wide: ${JSON.stringify(seen.live)}`);
+});
+
 test("the Agents toolbar is the mockup's one row: Team and Agent settings, the team line, Running and All, Pause all and Open all terminals", async () => {
   const { bar } = await agentsPage([["bar", "Fixture.toolbar()"]]);
   assert.deepEqual(bar.names, ["Team", "Agent settings", "Master and 3 agents · 2 ask you · Pool A", "Running", "All", "Pause all", "Open all terminals"], JSON.stringify(bar));
