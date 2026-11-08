@@ -228,6 +228,45 @@ fn claude_background_commands_are_followed_by_task_id() {
     );
 }
 
+/// A background command that ends while its agent is still in the turn is recorded by
+/// Claude Code 2.1.309 as a queued command attachment inside that turn, not as a user
+/// message, in the shape its package code builds: its task id ends there and no turn starts. Only a task notification attachment
+/// ends a task; a queued prompt naming a task id does not (HackerBlog task 177, DEC-119).
+#[test]
+fn claude_a_background_command_that_ends_during_the_turn_ends_by_its_queued_notification() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"Run the check"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: bub9bmz4a."}]},"toolUseResult":{"backgroundTaskId":"bub9bmz4a"}}"#,
+            "\n",
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<tool-use-id>t1</tool-use-id>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>","commandMode":"task-notification","origin":{"kind":"task-notification"}}}"#,
+            "\n",
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>other1</task-id>\n</task-notification>","commandMode":"prompt"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Check passed"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::BackgroundStarted {
+                id: "bub9bmz4a".into()
+            },
+            TranscriptEvent::BackgroundEnded {
+                id: "bub9bmz4a".into()
+            },
+            text("Check passed\n"),
+            TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+}
+
 /// A background command the agent stops itself with TaskStop gets no task notification, so
 /// the stop's tool result, which names the task, ends it (w-review LTK-H1, the record shape
 /// a real Claude Code session wrote on 2026-10-29).

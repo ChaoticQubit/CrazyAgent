@@ -3538,10 +3538,10 @@ fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     let mut stored = team();
     let mut at = NOW;
     for (key, (choice, done, shown)) in [
-        ('B', grace(120, "2 min")),
-        ('G', grace(300, "5 min")),
+        ('B', grace(1800, "30 min")),
+        ('G', grace(3600, "1 h")),
         ('B', stop.clone()),
-        ('G', grace(120, "2 min")),
+        ('G', grace(1800, "30 min")),
         ('B', stop),
         ('B', wait),
     ] {

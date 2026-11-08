@@ -194,7 +194,7 @@ export const TRIAL3_STEPS = [
       await reopen("agents?section=settings");
       await until(async () => await shown(field) && (await $(field).getValue()) === SETTINGS.background, UI_MS, "Background commands did not read back");
       await inView(field);
-      return `Background commands reads Wait for them after reopening${changed ? "" : " (it already was; no row also means Wait)"}`;
+      return `Background commands reads Wait for them after reopening${changed ? "" : " (it already was)"}`;
     },
   },
   {

@@ -6170,3 +6170,35 @@ fn a_master_lands_change_is_saved_and_shown_only_at_full_access() {
         MasterLands::Waits
     );
 }
+
+/// DEC-119 (HackerBlog held turns): a project with no saved Background commands at task end
+/// choice gives its agents' background commands a grace time of 30 minutes, the time also
+/// offered when the owner first picks a grace time; every saved choice still reads back.
+#[test]
+fn background_commands_at_task_end_default_to_a_thirty_minute_grace() {
+    let connection = Connection::open_in_memory().unwrap();
+    initialize(&connection).unwrap();
+    let project = ProjectId::new("background").unwrap();
+    let thirty_minutes = BackgroundAtEnd::Grace { secs: 1800 };
+    assert_eq!(BackgroundAtEnd::default(), thirty_minutes);
+    assert_eq!(BACKGROUND_GRACE_SECS_DEFAULT, 1800);
+    assert!(BACKGROUND_GRACE_CHOICES_SECS.contains(&BACKGROUND_GRACE_SECS_DEFAULT));
+    assert_eq!(
+        background_at_end(&connection, &project).unwrap(),
+        thirty_minutes
+    );
+    for choice in [
+        BackgroundAtEnd::Wait,
+        BackgroundAtEnd::Grace { secs: 10 },
+        BackgroundAtEnd::Stop,
+    ] {
+        let (mode, secs) = choice.stored();
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO team_background(project,mode,grace_secs) VALUES (?1,?2,?3)",
+                rusqlite::params![project.as_str(), mode, secs],
+            )
+            .unwrap();
+        assert_eq!(background_at_end(&connection, &project).unwrap(), choice);
+    }
+}

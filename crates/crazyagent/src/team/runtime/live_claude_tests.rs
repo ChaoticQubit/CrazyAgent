@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 const TURN: Duration = Duration::from_secs(180);
 const REAPED: Duration = Duration::from_secs(10);
+const MID_TURN: Duration = Duration::from_secs(150);
 
 const RESUME_TURN: Duration = Duration::from_secs(180);
 const FIRST_CODEWORD: &str = "HERON-4417";
@@ -277,6 +278,65 @@ fn under_stop_a_real_claude_agent_s_background_command_ends_with_its_task() {
     assert!(
         left.is_empty(),
         "processes of the agent outlived its task: {left:?}"
+    );
+}
+
+/// The transcript lines that tell how a background command ended: each `attachment` line
+/// and each line whose tool result names a background task. Input: the transcript path.
+/// Output: the lines in transcript order.
+fn background_lines(record: &Path) -> Vec<String> {
+    std::fs::read_to_string(record)
+        .unwrap_or_else(|problem| panic!("no transcript at {}: {problem}", record.display()))
+        .lines()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line).is_ok_and(|entry| {
+                entry["type"] == "attachment"
+                    || entry["toolUseResult"]["backgroundTaskId"].is_string()
+                    || entry["toolUseResult"]["taskId"].is_string()
+                    || entry["toolUseResult"]["task_id"].is_string()
+            })
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// S1 (DEC-119, HackerBlog task 177): under Wait, a real Claude Code sub-agent whose
+/// background command ends while the agent still works in its turn ends its task with that
+/// turn. The agent starts a short sleep in the background, then runs a longer one in the
+/// foreground, so the background end lands mid-turn, then replies DONE. The task ends with
+/// success before its time limit, never held. Prints the background lines it recorded.
+#[test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+fn a_real_claude_agent_whose_background_command_ends_mid_turn_ends_its_task_with_its_turn() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-live-midturn-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
+    let mut agent = ManagedAgent::in_pane("claude-code", &claude(), host.clone(), AgentRole::Sub);
+    agent.background = BackgroundAtEnd::Wait;
+    let mut signed_in = SignedIn::claude();
+    let prompt = "Use your Bash tool with run_in_background set to true to run `/bin/sleep 4 && echo early`. Do not check on it. Next, use your Bash tool in the foreground, not in the background, to run `/bin/sleep 25 && echo late`. When that returns, reply with exactly the word DONE and end your turn.";
+    let turns = vec![(prompt, signed_in.acquire("claude-live-background-mid-turn"))];
+    let started = Instant::now();
+    let (reports, problem) = agent.run_turns(None, turns, MID_TURN);
+    let took = started.elapsed();
+    let (text, end, cause, conversation) = outcome(&reports);
+    println!("mid-turn background: end={end:?} cause={cause:?} took={took:?} reply={text:?}");
+    if let Some(conversation) = &conversation {
+        for line in background_lines(&conversation.record) {
+            println!("background line: {line}");
+        }
+    }
+    host.close(&[]).unwrap();
+    assert_eq!(problem, None);
+    assert_eq!(end, TurnEnd::Success, "{cause:?}");
+    assert!(text.contains("DONE"), "{text}");
+    assert!(
+        took < MID_TURN,
+        "the task stayed held until its time limit: {took:?}"
     );
 }
 
