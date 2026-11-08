@@ -9579,7 +9579,8 @@ fn an_agent_edit_inside_a_regeneration_reset_survives_and_the_set_keeps_its_head
     );
 }
 
-/// An index lock that stops an update's reset leaves no half-done reset behind: the agent's
+/// An index lock that stops an update's reset at its index refresh (a tracked file's stat
+/// changed, so git must write the index) leaves no half-done reset behind: the agent's
 /// commit made afterwards stays on its branch through the owner's next action, and the set
 /// is as it was (RESET-KEEP r2 M1).
 #[test]
@@ -9595,7 +9596,16 @@ fn an_agent_commit_after_a_reset_an_index_lock_stopped_stays_through_the_next_ow
     let before = store::load(&case.db, &id).unwrap();
     let lock = case.workspace.git_dir.join("index.lock");
     let held = lock.clone();
-    let runs = plant_inside_resets(&case, move || write(&held, ""));
+    let readme = case.workspace.worktree.join("README");
+    let runs = plant_inside_resets(&case, move || {
+        write(&held, "");
+        std::fs::File::options()
+            .write(true)
+            .open(&readme)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(946_684_800))
+            .unwrap();
+    });
     assert!(update(&case.db, &id).is_err());
     assert_eq!(unplant(&case, &runs), 1);
     std::fs::remove_file(&lock).unwrap();
