@@ -1529,6 +1529,7 @@ fn a_diff_that_moves_on_is_read_again_from_the_top_before_accept_or_discard() {
     );
     let asked = reply(&mut view, Ok(ChangesView::Diff(page("+three", None))));
     assert!(format!("{asked:?}").contains(&third), "{asked:?}");
+    assert!(text(&view).contains("+three"));
     assert!(view.key(key(KeyCode::Char('a')), NOW));
     assert!(view.key(key(KeyCode::Enter), NOW));
     let asked = view.next_query(NOW).expect("the accept is sent");
