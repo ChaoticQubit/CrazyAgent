@@ -415,6 +415,13 @@ test("the master's reply mark is the small mark with the reduced drawing for low
   assert.match(css, /\.pj-mark \.brand-name \{ display: none; \}/);
 });
 
+test("the IDE-unavailable notice keeps the same gap below it as the waiting-changes notice", () => {
+  const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
+  const gap = (selector) => new RegExp(`(?:^|\\n)${selector.replace(".", "\\.")} \\{[^}]*margin-bottom: ([^;]+);`).exec(css)?.[1] ?? null;
+  assert.equal(gap(".pj-waiting"), "var(--space-4)");
+  assert.equal(gap(".pj-ide-unavailable"), gap(".pj-waiting"), "the IDE notice does not touch the block under it");
+});
+
 test("Needs you names the project's pool accounts that aren't signed in", () => {
   const member = (id, status) => ({ id, kind: "chatgpt", provider: "openai", status, status_label: "" });
   const pool = (members) => ({ id: "pool-1", name: "Main pool", summary: "", members, project_count: 1 });

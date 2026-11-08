@@ -87,10 +87,10 @@ test("a read the engine cut counts each goal with a plus", () => {
   const now = 10 * 60_000;
   const items = Array.from({ length: 10 }, (_, i) => item(100 + i, now - i * 60_000, "Build the service"));
   const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: true, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
-  assert.match(html, /10\+ items · latest just now/);
+  assert.match(html, /10\+ items · last just now/);
   assert.match(html, />Show all \(10\+\)</);
   const whole = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
-  assert.match(whole, /10 items · latest just now/);
+  assert.match(whole, /10 items · last just now/);
 });
 
 test("the project's creation shows under Project", () => {
@@ -143,8 +143,8 @@ test("a goal's header shows its phase path, done steps checked and the latest st
   const html = renderToStaticMarkup(createElement(overview.ActivityGroups, { items, more: false, now, expanded: [], closed: [], onShowAll: () => {}, onToggle: () => {} }));
   assert.match(html, /<span class="pj-activity-path"[^>]*><span class="done">✓ Architecture<\/span><span class="now">Building<\/span><\/span>/);
   assert.equal(html.match(/class="pj-activity-path"/g)?.length, 1, "a goal with no phase shows no path");
-  assert.match(html, /3 items · latest just now/);
-  assert.match(html, /1 item · latest 5 min ago/i);
+  assert.match(html, /3 items · last just now/);
+  assert.match(html, /1 item · last 5 min ago/i);
 });
 
 test("a goal named Project or Research is told apart from the events with no goal, in groups and in Timeline", () => {

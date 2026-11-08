@@ -161,3 +161,10 @@ test("the project page lists Metrics after Process, and its route opens it", () 
   assert.equal(page.TABS.find((tab) => tab.id === "metrics").icon, "trending-up");
   assert.deepEqual(router.parseRoute("#/projects/alpha/metrics"), { name: "project", id: "alpha", tab: "metrics" });
 });
+
+test("both Metrics views open on 7 days, as the mockup does", () => {
+  for (const props of [{ projectId: "p" }, { projectId: null, filter: { projects: [], onProject: forbidden } }]) {
+    const markup = renderToStaticMarkup(createElement(view.MetricsView, props));
+    assert.match(markup, /aria-checked="true"[^>]*>7 days</, JSON.stringify(props));
+  }
+});
