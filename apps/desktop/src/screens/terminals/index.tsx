@@ -56,19 +56,25 @@ export function wallTitle(name: string, page: number, pages: number): string {
 }
 
 /** A wall window's tools row, as the mockup draws it: Back to Agents, which brings the main
- * window forward on the project's Agents tab, a Window N of M switch at this window's page,
- * which brings another of the project's wall windows forward, and the hint. Inputs: this
- * window's page, the window count and the focus action. Output: the row. */
+ * window forward on the project's Agents tab, then the windows that hold terminals, which
+ * bring another of the project's wall windows forward: a Window N of M switch at this
+ * window's page, or a button each on a page the team no longer fills, and the hint. It shows
+ * while the team loads too, so the owner can always leave. Inputs: this window's page, the
+ * count of windows that hold terminals and the focus action. Output: the row. */
 export function WallTools({ page, pages, onFocus }: { page: number; pages: number; onFocus: (target: "main" | number) => void }) {
-  if (!(Number.isSafeInteger(page) && Number.isSafeInteger(pages) && page >= 1 && page <= pages)) {
+  if (!(Number.isSafeInteger(page) && Number.isSafeInteger(pages) && page >= 1 && pages >= 0)) {
     throw new Error(`a wall window is page ${page} of ${pages}`);
   }
   const windows = Array.from({ length: pages }, (_, index) => ({ value: String(index + 1), label: `Window ${index + 1} of ${pages}` }));
   return <div className="tw-tools">
     <div className="tw-tools-row">
       <Button size="small" icon="bot" onClick={() => onFocus("main")}>Back to Agents</Button>
-      <Segmented label="Terminal windows" value={String(page)} options={windows}
-        onValue={(value) => { if (Number(value) !== page) onFocus(Number(value)); }} />
+      {page <= pages
+        ? <Segmented label="Terminal windows" value={String(page)} options={windows}
+          onValue={(value) => { if (Number(value) !== page) onFocus(Number(value)); }} />
+        : pages > 0 && <div className="tw-tools-row" role="group" aria-label="Terminal windows">
+          {windows.map((item) => <Button key={item.value} size="small" onClick={() => onFocus(Number(item.value))}>{item.label}</Button>)}
+        </div>}
     </div>
     <span className="tw-tools-hint">One click opens every window needed; new agents fill the last window or open a new one.</span>
   </div>;
@@ -77,9 +83,10 @@ export function WallTools({ page, pages, onFocus }: { page: number; pages: numbe
 /** A terminal wall window of one project: its page of the team's terminals, the master
  * first, side by side, read again with the team graph. It reaches only the terminal, graph,
  * Stop, Terminals per window and window growth commands, and asks for the windows a growing
- * team needs itself, whatever the main window shows. Its tools row brings the main window
- * forward on Agents or another of its wall windows forward. Inputs: the project id, the
- * window's page and the project name its address carries. Output: the window's page. */
+ * team needs itself, whatever the main window shows. Its tools row, there on every page,
+ * brings the main window forward on Agents or another of its wall windows forward; its
+ * heading shows the project name through displayText. Inputs: the project id, the window's
+ * page and the project name its address carries. Output: the window's page. */
 export function TerminalWall({ projectId, page, name }: { projectId: string; page: number; name: string }) {
   const [read, reload] = useTeamGraph(projectId);
   const graph = read.shown;
@@ -139,10 +146,11 @@ export function TerminalWall({ projectId, page, name }: { projectId: string; pag
       if (stop !== null) setStopping({ node, stop });
     }} />;
 
+  const title = displayText(name);
   return <main className="tw" aria-label="Terminals">
-    {tiles !== undefined && <WallTools page={page} pages={pages.length} onFocus={(target) => void focus(target)} />}
+    <WallTools page={page} pages={pages.length} onFocus={(target) => void focus(target)} />
     <div className="tw-head">
-      <h1>{tiles === undefined ? `${name} · Terminals` : wallTitle(name, page, pages.length)}</h1>
+      <h1>{tiles === undefined ? `${title} · Terminals` : wallTitle(title, page, pages.length)}</h1>
       {read.stale && <span className="tw-stale" role="status">{displayText(`Couldn't refresh the team. ${read.stale} Showing the last read.`)}</span>}
     </div>
     {note && <Notice tone="warn" alert>
