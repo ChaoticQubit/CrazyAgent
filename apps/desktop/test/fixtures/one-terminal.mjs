@@ -286,6 +286,23 @@ export async function settingsBar() {
   };
 }
 
+/** How the Agents toolbar fits its window: how far the page scrolls sideways and which of the
+ * row's parts reach past the row's own edge. Output: `sideways` in pixels and `past`, the
+ * words of each part that overflows. */
+export function toolbarFit() {
+  const scroller = document.documentElement;
+  const head = document.querySelector("#panel .tg-head");
+  const edge = head.getBoundingClientRect();
+  return {
+    sideways: scroller.scrollWidth - scroller.clientWidth,
+    past: [...head.querySelectorAll("*")].filter((part) => {
+      const box = part.getBoundingClientRect();
+      return box.width > 1 && (box.right > edge.right + 0.5 || box.left < edge.left - 0.5);
+    }).map((part) => part.textContent.trim()),
+    rows: new Set([...head.children].map((part) => Math.round(part.getBoundingClientRect().top))).size,
+  };
+}
+
 /** The Agents toolbar as the owner reads it, left to right: every button and the team line
  * above the graph, outside dialogs, with how many rows they take, the space between the
  * lowest of them and the graph, and whether a Questions for you section shows on the page. */

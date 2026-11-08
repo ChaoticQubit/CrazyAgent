@@ -707,9 +707,9 @@ test("the Agents toolbar's team line names the pool with its account count, Runn
   assert.match(one, /<span>Solo: 1 account<\/span>/);
   const none = renderToStaticMarkup(createElement(agents.AgentsTab, { data: { ...data, assigned: null } }));
   assert.match(none, /<span>No pool\. Pick a pool to start\.<\/span>/);
-  const settings = renderToStaticMarkup(createElement(agents.AgentsTab, { data, section: "settings" }));
+  const settings = renderToStaticMarkup(createElement(agents.AgentsTab, { data: { ...data, team: { result: undefined, at: 1_000 } }, section: "settings" }));
   assert.match(settings, /<span>Work: 2 accounts<\/span>/, "Agent settings draws the same toolbar row");
-  assert.match(settings, />Running \(3\)</);
+  assert.match(settings, />Running \(1\)</, "with the team not read yet, Running counts the research alone");
 });
 
 test("the Agents tab labels research and asks the engine for the live team", async () => {

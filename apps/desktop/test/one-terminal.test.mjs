@@ -134,6 +134,8 @@ test("the panel's Message puts the cursor in its Type to box, its Stop asks firs
 /** Mounts the Agents tab at 1200x800 with a running task and a codex sub-agent harness, waits
  * until the graph drew and the questions inbox read, runs the steps and returns what each
  * step saw. Input: the steps as page expressions, by name. Output: what each returned. */
+const TOOLBAR_NAMES = ["Team", "Agent settings", "Master and 3 agents · 3 of 3 agents working. 0 tasks live. · 2 ask you · Pool A: 0 accounts", "Running (0)", "All (0)", "Pause all", "Open all terminals"];
+
 async function agentsPage(steps, patch = {}, view = "{}") {
   return withPage(async ({ evaluate, send }) => {
     await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
@@ -169,18 +171,31 @@ test("cards are the mockup's compact 176 by 96 four lines that fit, and a live l
   assert.ok(seen.live.w <= 352, `at most two cards wide: ${JSON.stringify(seen.live)}`);
 });
 
-test("the Agents toolbar is the mockup's one row: Team and Agent settings, the team line, Running and All, Pause all and Open all terminals", async () => {
+test("the Agents toolbar is one row: Team and Agent settings, the team line with the working line and the pool's accounts, Running and All with their counts, Pause all and Open all terminals", async () => {
   const { bar } = await agentsPage([["bar", "Fixture.toolbar()"]]);
-  assert.deepEqual(bar.names, ["Team", "Agent settings", "Master and 3 agents · 2 ask you · Pool A", "Running", "All", "Pause all", "Open all terminals"], JSON.stringify(bar));
+  assert.deepEqual(bar.names, TOOLBAR_NAMES, JSON.stringify(bar));
   assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
   assert.ok(bar.gap !== null && bar.gap <= 24, `the graph starts right under the row: ${bar.gap} px`);
   assert.equal(bar.questions, false, "no Questions for you section on the page");
 });
 
+test("at the app's smallest window the Agents toolbar may wrap but never scrolls the page sideways", async () => {
+  const seen = await withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 760, height: 560, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    const status = { harnesses: [{ harness: "codex", role: "sub", agents_max: 2, tools: true, live: 1 }] };
+    await evaluate(`Fixture.mount(0, 'ok', [Fixture.runningTask(7)], ${JSON.stringify(status)}, {})`);
+    assert.equal(await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent.includes('ask you'))"), true, "the toolbar drew");
+    return evaluate("Fixture.toolbarFit()");
+  });
+  assert.equal(seen.sideways, 0, `the page does not scroll sideways: ${JSON.stringify(seen)}`);
+  assert.deepEqual(seen.past, [], `nothing in the row reaches past its edge: ${JSON.stringify(seen)}`);
+});
+
 test("Agent settings keeps the same toolbar row above its settings, and its N ask you opens the questions drawer", async () => {
   const { bar } = await agentsPage([["bar", "Fixture.settingsBar()"]]);
   assert.equal(bar.settings, true, `Agent settings shows, not the graph: ${JSON.stringify(bar)}`);
-  assert.deepEqual(bar.names, ["Team", "Agent settings", "Master and 3 agents · 2 ask you · Pool A", "Running", "All", "Pause all", "Open all terminals"], JSON.stringify(bar));
+  assert.deepEqual(bar.names, TOOLBAR_NAMES, JSON.stringify(bar));
   assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
   assert.equal(bar.drawer, "Questions for you", JSON.stringify(bar));
 });
