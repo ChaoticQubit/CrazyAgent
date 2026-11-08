@@ -14,12 +14,11 @@ import type { ResearchRow } from "./research";
 import { FinishedAgentsPanel, TeamPanel } from "./team";
 import { TeamGraphView } from "../team";
 import { SETTING_GROUPS, TeamActions, TeamControls, type SettingGroupId } from "../team/controls";
-import { TeamEventsPanel } from "../team/wake-rules";
-import { QuestionsPanel } from "../team/questions";
-import { cardActivity } from "../dashboard";
+import { TeamEventsPanel, WakeRulesPanel } from "../team/wake-rules";
+import { QuestionsPanel, askCount, asksWords, questionsTitle, useQuestions } from "../team/questions";
 import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { Button, ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
+import { Button, ConfirmDialog, Drawer, Icon, Segmented, type Tone } from "../../ui";
 import { useLoad } from "../../state";
 
 /** Words an agent row uses for a research job, from the design's fixed agent set.
@@ -73,6 +72,7 @@ export function agentsView(section: string | undefined): { view: "team" | "setti
 }
 
 const AGENTS_VIEWS: { value: "team" | "settings"; label: string }[] = [{ value: "team", label: "Team" }, { value: "settings", label: "Agent settings" }];
+const SHOW_OPTIONS: { value: "running" | "all"; label: string }[] = [{ value: "running", label: "Running" }, { value: "all", label: "All" }];
 
 /** Pause all on Agents, beside Open all terminals: the project menu's Pause all agents, the
  * same confirm and the same engine call, which stops every running team task and cancels
@@ -113,10 +113,14 @@ export function PauseAll({ data }: { data: ProjectData }) {
   </>;
 }
 
-/** Agents tab: Team, the live team panel with the team's actions and every research agent the
- * project has started, with live progress from the engine; or Agent settings, grouped as the
- * approved mockup shows them. Inputs: the project data and the route's section, which opens
- * Agent settings, at a group when it names one. Output: the tab; rows refresh while they poll. */
+/** Agents tab: Team, as the approved mockup draws it: one toolbar row (Team and Agent
+ * settings, the team line whose "N ask you" opens the owner's questions and the sub-agent
+ * events in a drawer, Running and All, Pause all, Open all terminals), the graph with its one
+ * terminal panel, then the closed Agents and tasks fold (Stop all, Hand a task, the team's
+ * agents and tasks, wake rules, usage), Finished agents and every research agent the project
+ * has started, with live progress from the engine; or Agent settings, grouped as the mockup
+ * shows them. Inputs: the project data and the route's section, which opens Agent settings, at
+ * a group when it names one. Output: the tab; rows refresh while they poll. */
 export function AgentsTab({ data, section }: { data: ProjectData; section?: string }) {
   const opened = agentsView(section);
   const [shownView, setShownView] = useState<"team" | "settings">(opened.view);
@@ -127,7 +131,9 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
   const [logOpen, setLogOpen] = useState<number | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [terminal, setTerminal] = useState<GraphNode | null>(null);
-  useEffect(() => setTerminal(null), [data.id]);
+  const [asking, setAsking] = useState(false);
+  const [inbox, reloadInbox] = useQuestions(data.id);
+  useEffect(() => { setTerminal(null); setAsking(false); }, [data.id]);
   const waits = stopping !== null && stopping.status !== "running";
   const jobs = valueOf(data.research)?.jobs ?? [];
   const harnesses = valueOf(data.harnesses);
@@ -135,12 +141,10 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
   const named = loadedAccounts.kind === "ok" ? loadedAccounts.value : [];
   const running = jobs.filter((job) => job.status === "running" || job.status === "queued");
   const list = filter === "running" ? running : jobs;
-  const accounts = data.assigned?.pool.members.length ?? 0;
   const team = data.team;
   const teamValue: Pick<TeamStatus, "agents" | "tasks" | "terminals_per_window"> = team.result?.kind === "ok" ? team.result.value : { agents: [], tasks: [] };
-  const teamCount = (shown: "running" | "all") => teamPanel(teamValue, [], (id) => id, shown, team.at).agents.length;
   const teamShown = teamPanel(teamValue, [], (id) => id, filter, team.at);
-  const working = cardActivity(team.result, data.research).agents;
+  const asks = inbox.shown?.kind === "ok" ? asksWords(askCount(inbox.shown.value)) : "Questions";
   const cleanup = <FinishedAgentsCleanup projectId={data.id} finished={teamValue.agents.filter((agent) => agent.status === "stopped" || agent.status === "failed").length} harness={(id) => harnessName(harnesses, id)} />;
 
   function settle(result: Result<IntentReceipt>, done: string, missing: string) {
@@ -172,27 +176,23 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} reload={data.reloadTeam} data={data} group={opened.group} />}
   </div>;
   return <div className="pj-stack">
-    <div className="pj-row between">{viewSwitch}</div>
-    <div className="pj-row between">
-      <Segmented label="Show" value={filter} onValue={setFilter}
-        options={[{ value: "running", label: `Running (${running.length + teamCount("running")})` }, { value: "all", label: `All (${jobs.length + teamCount("all")})` }]} />
-      <span className="pj-secondary">{data.assigned
-        ? `${working ? `${working}. ` : ""}${displayText(poolName(data.assigned.pool))}: ${accounts} ${accounts === 1 ? "account" : "accounts"}.`
-        : "No pool. Pick a pool to start."}</span>
-    </div>
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <QuestionsPanel projectId={data.id} onOpen={setTerminal} />
     <TeamGraphView projectId={data.id} perWindow={teamValue.terminals_per_window ?? 6} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)}
-      tools={<PauseAll data={data} />} />
-    {team.result?.kind === "ok" && <TeamActions projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
-    {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
-    <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />
+      lead={viewSwitch} asks={<button type="button" className="tg-asks" aria-haspopup="dialog" onClick={() => setAsking(true)}>{asks}</button>}
+      pool={data.assigned ? poolName(data.assigned.pool) : "No pool. Pick a pool to start."}
+      tools={<><Segmented label="Show" value={filter} onValue={setFilter} options={SHOW_OPTIONS} /><PauseAll data={data} /></>} />
+    <details className="pj-stack-s" aria-label="Agents and tasks">
+      <summary><strong>Agents and tasks</strong> <span className="pj-small pj-muted">Stop all, Hand a task, the team's agents and tasks, wake rules and usage.</span></summary>
+      {team.result?.kind === "ok" && <TeamActions projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
+      <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />
+      {team.result?.kind === "ok" && <WakeRulesPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
+      <AgentUsageCard projectId={data.id} agents={teamValue.agents} nowMs={data.now} />
+    </details>
     {finishedRows(teamValue, (id) => id, team.at).length > 0
       ? <FinishedAgentsPanel data={data} team={team} harnesses={harnesses} reload={data.reloadTeam}>{cleanup}</FinishedAgentsPanel>
       : cleanup}
-    <AgentUsageCard projectId={data.id} agents={teamValue.agents} nowMs={data.now} />
     {list.length > 0 && <h3>Research</h3>}
     {list.length > 0 ? <ul className="pj-rows" aria-label="Research agents">{list.map((job) => {
       const row = researchRow(job, data.now);
@@ -219,5 +219,9 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
       onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
       {waits ? "It won't start. Try again queues it later." : "Work so far stays in its working copy. Try again starts it over."}
     </ConfirmDialog>
+    <Drawer open={asking} title={questionsTitle(inbox)} onClose={() => setAsking(false)}>
+      <QuestionsPanel projectId={data.id} read={inbox} reload={reloadInbox} onOpen={(node) => { setAsking(false); setTerminal(node); }} />
+      {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
+    </Drawer>
   </div>;
 }

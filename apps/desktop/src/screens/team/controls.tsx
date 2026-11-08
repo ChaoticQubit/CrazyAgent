@@ -345,25 +345,14 @@ export function ReaskSetting({ projectId, status, reload }: { projectId: string;
   </SettingRow>;
 }
 
-/** The team's actions on the Agents tab's Team view: stop or start every agent of the project,
- * and hand one task straight to a sub-agent when the master should not plan it. A team view
- * the engine shortened says so. Inputs: the project id, the latest team status, a harness name
- * lookup and a reload. Output: the actions. */
-export function TeamActions({ projectId, status, harness, reload }: {
-  projectId: string;
-  status: TeamStatus;
-  harness?: (id: string) => string;
-  reload: () => void;
-}) {
+/** Stop all, or Start all again while the team is stopped, with its line and its confirm:
+ * every agent of the project stops and stays stopped across restarts until the owner starts
+ * them again. Exported for the project menu. Inputs: the project id, the latest team status
+ * and a reload. Output: the row. */
+export function StopAll({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
   const [stopAsked, setStopAsked] = useState(false);
-  const [target, setTarget] = useState(ANY_HARNESS);
-  const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
-  const [sent, setSent] = useState("");
-  const options = delegateOptions(status, harness);
-  const check = taskInput(text);
-  const subs = options.length > 1;
 
   async function stopAll(stopped: boolean) {
     setStopAsked(false);
@@ -373,6 +362,44 @@ export function TeamActions({ projectId, status, harness, reload }: {
     setNote(message);
     reload();
   }
+
+  return <>
+    <div className="pj-row">
+      {status.paused
+        ? <Button variant="primary" size="small" pending={busy} onClick={() => void stopAll(false)}>Start all again</Button>
+        : <Button variant="danger" size="small" icon="circle-stop" disabled={busy} onClick={() => setStopAsked(true)}>Stop all</Button>}
+      <span className="tg-terminal-note" role="status">{status.paused
+        ? status.budget_reached === true
+          ? "Every agent of this project is stopped: its agents used the token budget. Start them again, or raise the budget first."
+          : "Every agent of this project is stopped until you start them again."
+        : "Stops the master, every harness and every teammate of this project. They stay stopped across restarts."}</span>
+    </div>
+    <ConfirmDialog open={stopAsked} title="Stop every agent of this project?" confirmLabel="Stop all" cancelLabel="Keep running"
+      pending={busy} onCancel={() => setStopAsked(false)} onConfirm={() => void stopAll(true)}>
+      The master, every harness and every teammate stop now, and stay stopped across app and engine restarts until you start them again. Their work waits for them.
+    </ConfirmDialog>
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </>;
+}
+
+/** The team's actions in the Agents tab's Agents and tasks fold: Stop all, and hand one task
+ * straight to a sub-agent when the master should not plan it. A team view the engine
+ * shortened says so. Inputs: the project id, the latest team status, a harness name lookup
+ * and a reload. Output: the actions. */
+export function TeamActions({ projectId, status, harness, reload }: {
+  projectId: string;
+  status: TeamStatus;
+  harness?: (id: string) => string;
+  reload: () => void;
+}) {
+  const [target, setTarget] = useState(ANY_HARNESS);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [sent, setSent] = useState("");
+  const options = delegateOptions(status, harness);
+  const check = taskInput(text);
+  const subs = options.length > 1;
 
   async function hand() {
     if (check.kind !== "ok" || busy) return;
@@ -389,20 +416,7 @@ export function TeamActions({ projectId, status, harness, reload }: {
 
   return <section className="tg-controls" aria-label="Team controls">
     {status.partial && <p className="pj-note" role="status">{PARTIAL_LINE}</p>}
-    <div className="pj-row">
-      {status.paused
-        ? <Button variant="primary" size="small" pending={busy} onClick={() => void stopAll(false)}>Start all again</Button>
-        : <Button variant="danger" size="small" icon="circle-stop" disabled={busy} onClick={() => setStopAsked(true)}>Stop all</Button>}
-      <span className="tg-terminal-note" role="status">{status.paused
-        ? status.budget_reached === true
-          ? "Every agent of this project is stopped: its agents used the token budget. Start them again, or raise the budget first."
-          : "Every agent of this project is stopped until you start them again."
-        : "Stops the master, every harness and every teammate of this project. They stay stopped across restarts."}</span>
-    </div>
-    <ConfirmDialog open={stopAsked} title="Stop every agent of this project?" confirmLabel="Stop all" cancelLabel="Keep running"
-      pending={busy} onCancel={() => setStopAsked(false)} onConfirm={() => void stopAll(true)}>
-      The master, every harness and every teammate stop now, and stay stopped across app and engine restarts until you start them again. Their work waits for them.
-    </ConfirmDialog>
+    <StopAll projectId={projectId} status={status} reload={reload} />
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />

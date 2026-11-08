@@ -6,7 +6,7 @@ const fixture = await bundle(new URL("./fixtures/one-terminal.mjs", import.meta.
 
 /** Mounts the Agents tab in a 1200x800 page with the engine answering attaches after
  * `delayMs`, runs each step in turn (`["card", name]` clicks a graph card, `["waiting", name]`
- * clicks Open terminal on a "Waiting on you" row), waiting for that agent's terminal to go live
+ * clicks Open terminal on a "Waiting on you" row in the toolbar's questions drawer), waiting for that agent's terminal to go live
  * when `settle` is set, then waits for the page to settle. Inputs: the steps, the delay and
  * whether to wait. Output: what the page and the engine show. */
 async function run(steps, delayMs, settle) {
@@ -14,7 +14,7 @@ async function run(steps, delayMs, settle) {
     await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
     await evaluate(fixture);
     await evaluate(`Fixture.mount(${delayMs})`);
-    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4 && Fixture.openWaiting !== undefined && document.querySelector('[aria-label=\"Waiting on you in their terminal\"]') !== null)"), true, "the graph and the inbox drew");
+    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4 && document.querySelector('.tg-asks')?.textContent === '2 ask you')"), true, "the graph and the inbox drew");
     for (const [kind, name] of steps) {
       const step = kind === "card" ? `Fixture.click(${JSON.stringify(name)})` : `Fixture.openWaiting(${JSON.stringify(name)})`;
       assert.equal(await evaluate(step), true, `${kind} ${name}`);
@@ -66,7 +66,7 @@ test("Open terminal in Waiting on you opens the one panel while the team graph i
       await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
       await evaluate(fixture);
       await evaluate(`Fixture.mount(0, ${JSON.stringify(graph)})`);
-      assert.equal(await evaluate("Fixture.until(() => document.querySelector('[aria-label=\"Waiting on you in their terminal\"]') !== null)"), true, `${graph}: the inbox drew`);
+      assert.equal(await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent === '2 ask you')"), true, `${graph}: the inbox read`);
       assert.equal(await evaluate("Fixture.openWaiting('Ada')"), true, `${graph}: Open terminal on Ada`);
       await evaluate("Fixture.until(() => Fixture.shown().panels.includes('Ada terminal') && Fixture.shown().live > 0)");
       return evaluate("Fixture.shown()");
@@ -82,7 +82,7 @@ test("a panel opened from Waiting on you before the graph reads keeps its termin
     await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
     await evaluate(fixture);
     await evaluate("Fixture.mount(0, 'late')");
-    assert.equal(await evaluate("Fixture.until(() => document.querySelector('[aria-label=\"Waiting on you in their terminal\"]') !== null)"), true, "the inbox drew");
+    assert.equal(await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent === '2 ask you')"), true, "the inbox read");
     assert.equal(await evaluate("Fixture.openWaiting('Ada')"), true, "Open terminal on Ada");
     assert.equal(await evaluate("Fixture.until(() => Fixture.shown().live > 0 && document.querySelector('.tg-composer-input') !== null)"), true, "Ada's terminal went live");
     assert.equal(await evaluate("Fixture.type('Keep the menu on the home page')"), true, "the owner typed a draft");

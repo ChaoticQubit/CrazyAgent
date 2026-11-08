@@ -145,23 +145,43 @@ export function QuestionRow({ projectId, question, onOpen, onAnswered }: {
   </li>;
 }
 
-/** The owner's Questions inbox on the Agents tab (Q14, Q14b): the open questions agents put
- * to the owner, most urgent first, each with its urgency, the assumption a low one carries on
- * with, Answer and Open terminal while the asker runs; then the agents waiting on the owner in
- * their own terminal, each with Open terminal, which opens the agent in the Agents tab's one
- * terminal panel. Reads again every 5 s and after each answer. Inputs: the project id and the
- * open action. Output: the section. */
-export function QuestionsPanel({ projectId, onOpen }: { projectId: string; onOpen: (node: GraphNode) => void }) {
-  const [read, reload] = useQuestions(projectId);
-  const ids = useId();
+/** How many things wait on the owner in one inbox read: open questions, the ones the read
+ * left out, and agents waiting in their terminal. Input: the inbox. Output: the count. */
+export function askCount(inbox: QuestionsInbox): number {
+  const count = inbox.questions.length + inbox.more + inbox.waiting.length;
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error(`an inbox counts whole questions: ${count}`);
+  return count;
+}
+
+/** The Agents toolbar's words for what waits on the owner, as the mockup words it: "1 asks
+ * you", "3 ask you", or "no one asks you". Input: the count. Output: the words. */
+export function asksWords(count: number): string {
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error(`asks count a whole number: ${count}`);
+  return count === 0 ? "no one asks you" : `${count} ${count === 1 ? "asks" : "ask"} you`;
+}
+
+/** The title of the drawer that holds the owner's questions: "Questions for you", with the
+ * open questions counted once there are any. Input: the inbox read. Output: the title. */
+export function questionsTitle(read: InboxState): string {
+  const count = read.shown?.kind === "ok" ? read.shown.value.questions.length + read.shown.value.more : 0;
+  return count > 0 ? `Questions for you (${count})` : "Questions for you";
+}
+
+/** The owner's Questions inbox, in the drawer the Agents toolbar opens (Q14, Q14b): the open
+ * questions agents put to the owner, most urgent first, each with its urgency, the assumption
+ * a low one carries on with, Answer and Open terminal while the asker runs; then the agents
+ * waiting on the owner in their own terminal, each with Open terminal, which opens the agent
+ * in the Agents tab's one terminal panel. The drawer's title names it. Inputs: the project id,
+ * the inbox read the toolbar counts from with its reload, and the open action. Output: the
+ * section. */
+export function QuestionsPanel({ projectId, read, reload, onOpen }: { projectId: string; read: InboxState; reload: () => void; onOpen: (node: GraphNode) => void }) {
   const shown = read.shown;
   if (shown === undefined) return <section className="tg-events" aria-busy="true" aria-label="Questions for you"><Skeleton shape="card" /></section>;
   if (shown.kind === "not_ready") return <NotReady what="Questions for you" compact />;
   if (shown.kind === "error") return <LoadError message={`Couldn't load your questions. ${shown.message}`} onRetry={reload} />;
   const inbox = shown.value;
   const count = inbox.questions.length + inbox.more;
-  return <section className="tg-events" aria-labelledby={`${ids}-title`}>
-    <h3 id={`${ids}-title`}>Questions for you{count > 0 ? ` (${count})` : ""}</h3>
+  return <section className="tg-events" aria-label="Questions for you">
     {read.stale && <Notice tone="warn" alert>
       <span className="grow">{displayText(`Couldn't refresh your questions. ${read.stale} Showing the last read.`)}</span>
       <Button size="small" icon="refresh-cw" onClick={reload}>Try again</Button>

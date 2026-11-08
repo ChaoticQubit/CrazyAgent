@@ -645,6 +645,17 @@ export function graphLive(graph: TeamGraph): boolean {
     || graph.edges.some(live);
 }
 
+/** The team part of the Agents toolbar line, as the mockup words it: "Master and 5 agents",
+ * then how many of them the drawing leaves out. Inputs: the graph and the layout's hidden
+ * count. Output: the words. */
+export function teamLine(graph: TeamGraph, hidden = 0): string {
+  const agents = graph.nodes.filter((node) => node.kind !== "master").length;
+  if (!Number.isSafeInteger(hidden) || hidden < 0) throw new Error(`a hidden count is a whole number: ${hidden}`);
+  if (hidden > agents) throw new Error(`the drawing hides ${hidden} of ${agents} agents`);
+  const team = agents === 0 ? "Master, no agents yet" : `Master and ${plural(agents, "agent")}`;
+  return hidden > 0 ? `${team} · ${hidden} not shown` : team;
+}
+
 /** The one line under the graph title: how many agents work, how many tasks are live and how
  * many agents the drawing leaves out. Inputs: the graph and the layout's hidden count.
  * Output: the line. */

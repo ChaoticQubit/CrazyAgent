@@ -101,6 +101,15 @@ test("the graph reads again quickly only while work is live", () => {
   assert.equal(graph.graphSummary(asking, 3), "1 of 4 agents working. 2 tasks live. 2 waiting on you. 3 agents not shown.");
 });
 
+test("the Agents toolbar's team line counts the master's agents as the mockup words it", () => {
+  assert.equal(graph.teamLine(team), "Master and 4 agents");
+  assert.equal(graph.teamLine(team, 3), "Master and 4 agents · 3 not shown");
+  assert.equal(graph.teamLine({ ...team, nodes: team.nodes.filter((item) => item.kind === "master" || item.id === "team-1") }), "Master and 1 agent");
+  assert.equal(graph.teamLine({ ...team, nodes: team.nodes.filter((item) => item.kind === "master") }), "Master, no agents yet");
+  assert.throws(() => graph.teamLine(team, 5), /hides 5 of 4 agents/);
+  assert.throws(() => graph.teamLine(team, -1), /whole number/);
+});
+
 test("typed keys reach the agent as the UTF-8 bytes a terminal reads", () => {
   assert.deepEqual([...io.encodeTyped("ls\r")], [108, 115, 13]);
   assert.deepEqual([...io.encodeTyped("\x1b[A")], [27, 91, 65]);

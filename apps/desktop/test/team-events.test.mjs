@@ -74,7 +74,7 @@ test("a project's sidebar count comes from the engine, not from the newest notif
   assert.deepEqual([...wake.unseenByProject({ projects: [] })], []);
 });
 
-test("the Agents tab shows the paused notice, waiting agents, events and the project and agent rules", () => {
+test("the questions drawer shows the paused notice, waiting agents and events, and the Agents and tasks fold the project and agent rules", () => {
   const status = {
     project_id: "chores", keep_warm: false, paused: false, min_agents: 1, max_agents: 3, harnesses: [], tasks: [], messages: [], plan: [],
     agents: [agent(1, "master"), agent(7, "sub")],
@@ -89,10 +89,14 @@ test("the Agents tab shows the paused notice, waiting agents, events and the pro
   assert.match(markup, /Sub-agent 7<\/strong><span>Proceed\? \| 1\. Yes/);
   assert.match(markup, /claude-7 asks: Proceed\?/);
   assert.match(markup, /Mark 1 as seen/);
-  assert.match(markup, /Set here\. Reset to use the rule above it\./);
-  assert.match(markup, /value="5"/);
-  assert.match(markup, /<option value="7">Sub-agent 7<\/option>/);
-  assert.doesNotMatch(markup, /<option value="1">/);
+  assert.doesNotMatch(markup, /Wake the master for this project/, "the rules are in the fold, not the drawer");
+  const rules = renderToStaticMarkup(createElement(panel.WakeRulesPanel, { projectId: "chores", status, reload: () => {} }));
+  assert.match(rules, /<section class="tg-events" aria-label="Wake rules"><h3>Wake rules<\/h3><h4>Wake the master for this project<\/h4>/);
+  assert.match(rules, /Set here\. Reset to use the rule above it\./);
+  assert.match(rules, /value="5"/);
+  assert.match(rules, /<option value="7">Sub-agent 7<\/option>/);
+  assert.doesNotMatch(rules, /<option value="1">/);
+  assert.doesNotMatch(rules, /Auto-wake of the master is paused/, "the events are in the drawer, not the fold");
 });
 
 test("Settings groups the notifications by project, newest project first", () => {
