@@ -9511,8 +9511,9 @@ fn an_agent_commit_inside_a_discard_reset_stays_on_its_branch() {
 }
 
 /// An agent edit written inside the reset a lockfile regeneration applies, after its clean
-/// check, is never overwritten: the regeneration lands nothing, Task 7's update refuses on
-/// the same edit and the set waits for the owner on the agent's own head (RESET-KEEP).
+/// check, is never overwritten: the regeneration lands nothing, Task 7's update then finds
+/// the edit at its own clean check and refuses before any reset, and the set waits for the
+/// owner on the agent's own head (RESET-KEEP).
 #[test]
 fn an_agent_edit_inside_a_regeneration_reset_survives_and_the_set_keeps_its_head() {
     let mut case = Case::new();
@@ -9525,7 +9526,7 @@ fn an_agent_edit_inside_a_regeneration_reset_survives_and_the_set_keeps_its_head
     let pending = flow::pending_ref(&id);
     let deadline = Instant::now() + REGENERATED_WITHIN;
     while Instant::now() < deadline
-        && !(runs.load(std::sync::atomic::Ordering::SeqCst) >= 2
+        && !(runs.load(std::sync::atomic::Ordering::SeqCst) >= 1
             && store::load(&case.db, &id).unwrap().intent.is_none()
             && case.owner(&["rev-parse", &pending]).trim() == head)
     {
@@ -9533,8 +9534,8 @@ fn an_agent_edit_inside_a_regeneration_reset_survives_and_the_set_keeps_its_head
     }
     assert_eq!(
         unplant(&case, &runs),
-        2,
-        "the regeneration and Task 7's update each tried one reset"
+        1,
+        "only the regeneration reached a reset; Task 7's update refused at its clean check"
     );
     let set = case.view(&id);
     assert_eq!(
