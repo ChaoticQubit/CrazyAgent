@@ -130,7 +130,7 @@ test("next to the title the head shows how many agents work and how many questio
 });
 
 test("the meta line hides once the page scrolls, as the description drops to one line", () => {
-  assert.match(css, /\.pj-head\.scrolled \.pj-meta \{[^}]*display: none;/u);
+  assert.match(css, /\.pj-head\.scrolled \.page-header p\.pj-meta \{[^}]*display: none;/u);
 });
 
 test("the project page gives its head the meta line and the working and question counts", () => {
