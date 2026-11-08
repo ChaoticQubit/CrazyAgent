@@ -214,6 +214,20 @@ fn rows(db: &Connection) -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
+/// The rows a legacy database holds after an engine start: every row it had, plus the mark
+/// that the start brought the fixture project's activity history in, which every engine
+/// start does once per project (Task 10 backfill, 581da0a23). Input: the rows before the
+/// start. Output: the rows the start must leave.
+fn started(mut rows: BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
+    let marks = rows.get_mut("project_activity_backfill").unwrap();
+    assert!(marks.is_empty());
+    marks.push(format!(
+        "{:?}",
+        rusqlite::types::Value::Text("configured-project".into())
+    ));
+    rows
+}
+
 fn mode(path: &Path) -> u32 {
     std::fs::symlink_metadata(path).unwrap().mode() & 0o777
 }
@@ -281,7 +295,7 @@ async fn v1_database_upgrades_in_place_and_keeps_every_row() {
 
     let db = root.connection();
     assert_eq!(version(&db).unwrap(), latest(STEPS));
-    assert_eq!(rows(&db), before);
+    assert_eq!(rows(&db), started(before.clone()));
     drop(db);
     let backups = root.backups();
     assert_eq!(backups.len(), 1);
@@ -540,7 +554,7 @@ async fn step_that_ends_the_transaction_is_restored_from_the_backup() {
 
     close(root.open().await.unwrap()).await;
     assert_eq!(version(&root.connection()).unwrap(), latest(STEPS));
-    assert_eq!(rows(&root.connection()), before);
+    assert_eq!(rows(&root.connection()), started(before));
 }
 
 #[tokio::test]
