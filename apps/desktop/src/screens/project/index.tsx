@@ -279,7 +279,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const root = useRef<HTMLDivElement>(null);
   const scrolled = useProjectHead(root, projectId);
   const [policy] = useLoad(() => loadAgentPolicy(projectId), [projectId], "agent-policy");
-  const [checkout] = useLoad(() => loadUncommittedImport(projectId), [projectId]);
+  const [checkout] = useLoad(() => loadUncommittedImport(projectId), [projectId, data.team.at]);
   const questions = usePendingQuestions(projectId, data.team.at);
   const team = data.team.result?.kind === "ok" ? data.team.result.value : null;
   const working = team ? team.agents.filter((agent) => agent.status === "working").length : 0;
