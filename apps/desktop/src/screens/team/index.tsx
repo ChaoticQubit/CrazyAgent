@@ -222,13 +222,14 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
  * agent opened from elsewhere shows in that panel even while the graph loads, fails or is empty,
  * and keeps its terminal and draft when the graph then draws it. Open all terminals opens the
  * terminal wall windows, perWindow terminals each; once clicked, a team that needs more or
- * fewer windows opens or closes them while any stays open.
+ * fewer windows opens or closes them while any stays open. The open panel's Stop asks as the
+ * card menu's does. `tools` sit in the head right before Open all terminals.
  * Inputs: the project id and name, the terminals per window, the agent whose terminal is open
- * and the open action, and optional harness and account name lookups. Output: the graph
- * section. */
-export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open, onOpen, harness, account }: {
+ * and the open action, optional harness and account name lookups and the head's other tools.
+ * Output: the graph section. */
+export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open, onOpen, harness, account, tools }: {
   projectId: string; name?: string; perWindow?: PerWindow; open: GraphNode | null; onOpen: (node: GraphNode | null) => void;
-  harness?: (id: string) => string; account?: (id: string) => string;
+  harness?: (id: string) => string; account?: (id: string) => string; tools?: ReactNode;
 }) {
   const [read, reload] = useTeamGraph(projectId);
   const graph = read.shown;
@@ -347,10 +348,14 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
     };
   }, [element]);
 
-  const side = (node: GraphNode) => <AgentSide key={panelKey(node)} projectId={projectId} node={node} harness={harness} onClose={() => onOpen(null)}>
-    <NodeMessages projectId={projectId} node={node} refresh={graph} />
-  </AgentSide>;
   const team = graph?.kind === "ok" ? (account ? namedAccounts(graph.value, account) : graph.value) : null;
+  const side = (node: GraphNode) => {
+    const stop = nodeActions(node, team?.nodes ?? []).stop;
+    const onStop = stop === null ? undefined : () => setActing({ kind: "stop", node, stop });
+    return <AgentSide key={panelKey(node)} projectId={projectId} node={node} harness={harness} onClose={() => onOpen(null)} onStop={onStop}>
+      <NodeMessages projectId={projectId} node={node} refresh={graph} />
+    </AgentSide>;
+  };
   const walls = team === null ? null : wallPages(team.nodes, perWindow).length;
   const status: ReactNode = graph === undefined ? <Skeleton shape="card" />
     : graph.kind === "not_ready" ? <NotReady what="The team graph" compact />
@@ -359,12 +364,38 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
       Add a team in the project settings, then ask the master to build something.
     </EmptyState>
     : null;
+  const noted = note && <Notice tone="warn" alert>
+    <span className="grow">{displayText(note)}</span>
+    <Button size="small" variant="quiet" onClick={() => setNote(null)}>Dismiss</Button>
+  </Notice>;
+  const dialogs = <>
+    {acting?.kind === "skills" && <AgentSkillsDialog projectId={projectId} agent={acting.agent}
+      label={displayText(acting.node.label)} onClose={() => setActing(null)} />}
+    {acting?.kind === "message" && <Dialog open title={`Message ${displayText(acting.node.label)}`} busy={busy}
+      onClose={() => { setActing(null); setSendNote(null); }}
+      footer={<><Button disabled={busy} onClick={() => { setActing(null); setSendNote(null); }}>Cancel</Button>
+        <Button variant="primary" icon="send" pending={busy} disabled={messageProblem(draft) !== null} onClick={() => void send()}>Send</Button></>}>
+      <TextArea id={`${ids}-message`} label="Message" value={draft} onValue={(value) => { setDraft(value); setSendNote(null); }} rows={5}
+        maxLength={AGENT_MESSAGE_BYTES_MAX} counterAt={AGENT_MESSAGE_BYTES_MAX - 400} error={sendNote ?? undefined}
+        helper={displayText(messageHelper(acting.node))} />
+    </Dialog>}
+    {acting?.kind === "stop" && <ConfirmDialog open title={`Stop ${displayText(acting.node.label)}?`} confirmLabel="Stop" pending={busy}
+      onConfirm={() => void halt()} onCancel={() => setActing(null)}>
+      {acting.stop.kind === "teammate"
+        ? "This teammate's pane closes now, and its lead is told. Its lead keeps running."
+        : acting.node.kind === "teammate"
+          ? "This teammate's pane closes now. Its lead keeps running."
+          : "Its harness stops now. Work it has not handed in stays in its worktree, and you can wake it later from Finished agents."}
+    </ConfirmDialog>}
+  </>;
   if (team === null || status !== null) {
     return <section className="tg" aria-busy={graph === undefined || undefined} aria-label="Team graph">
+      {noted}
       <div key="split" className={`tg-split${open ? " with-terminal" : ""}`}>
         {status}
         {open && side(open)}
       </div>
+      {dialogs}
     </section>;
   }
   const layout = layoutGraph(team);
@@ -387,13 +418,11 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
       <span className="tg-summary" role="status">
         {graphSummary(team, layout.hidden)}{questions > 0 ? ` ${questions} ${questions === 1 ? "question" : "questions"} waiting.` : ""}
       </span>
+      {tools}
       <Button size="small" icon="square-terminal" className="tg-open-all" title={openAllHint(walls ?? 0, perWindow)} disabled={!walls}
         onClick={() => void openAll(walls ?? 0)}>Open all terminals</Button>
     </div>
-    {note && <Notice tone="warn" alert>
-      <span className="grow">{displayText(note)}</span>
-      <Button size="small" variant="quiet" onClick={() => setNote(null)}>Dismiss</Button>
-    </Notice>}
+    {noted}
     {read.stale && <Notice tone="warn" alert>
       <span className="grow">{displayText(`Couldn't refresh the team graph. ${read.stale} Showing the last read.`)}</span>
       <Button size="small" icon="refresh-cw" onClick={reload}>Try again</Button>
@@ -463,23 +492,6 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
       </div>
       {openNode && side(openNode)}
     </div>
-    {acting?.kind === "skills" && <AgentSkillsDialog projectId={projectId} agent={acting.agent}
-      label={displayText(acting.node.label)} onClose={() => setActing(null)} />}
-    {acting?.kind === "message" && <Dialog open title={`Message ${displayText(acting.node.label)}`} busy={busy}
-      onClose={() => { setActing(null); setSendNote(null); }}
-      footer={<><Button disabled={busy} onClick={() => { setActing(null); setSendNote(null); }}>Cancel</Button>
-        <Button variant="primary" icon="send" pending={busy} disabled={messageProblem(draft) !== null} onClick={() => void send()}>Send</Button></>}>
-      <TextArea id={`${ids}-message`} label="Message" value={draft} onValue={(value) => { setDraft(value); setSendNote(null); }} rows={5}
-        maxLength={AGENT_MESSAGE_BYTES_MAX} counterAt={AGENT_MESSAGE_BYTES_MAX - 400} error={sendNote ?? undefined}
-        helper={displayText(messageHelper(acting.node))} />
-    </Dialog>}
-    {acting?.kind === "stop" && <ConfirmDialog open title={`Stop ${displayText(acting.node.label)}?`} confirmLabel="Stop" pending={busy}
-      onConfirm={() => void halt()} onCancel={() => setActing(null)}>
-      {acting.stop.kind === "teammate"
-        ? "This teammate's pane closes now, and its lead is told. Its lead keeps running."
-        : acting.node.kind === "teammate"
-          ? "This teammate's pane closes now. Its lead keeps running."
-          : "Its harness stops now. Work it has not handed in stays in its worktree, and you can wake it later from Finished agents."}
-    </ConfirmDialog>}
+    {dialogs}
   </section>;
 }

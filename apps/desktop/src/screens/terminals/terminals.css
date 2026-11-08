@@ -56,24 +56,27 @@
   background: var(--terminal-bg);
 }
 
-.tw-tile-head {
-  display: flex;
-  align-items: center;
-  gap: 2px;
+.tw-tile .tg-terminal-head {
   padding: var(--space-1) var(--space-2);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
 }
 
-.tw-tile-head .tg-terminal-title {
-  flex: 1;
-  min-width: 0;
+.tw-tile .tg-terminal-actions {
+  gap: 2px;
 }
 
-.tw-tile-name {
+.tw-tile .tg-terminal-meta {
+  flex-wrap: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tw-tile .tg-terminal-meta > * {
+  flex: none;
+}
+
+.tw-tile .tg-terminal-meta > :nth-child(2) {
+  flex: 0 1 auto;
+  overflow: hidden;
 }
 
 .tw-tile .tg-terminal {
