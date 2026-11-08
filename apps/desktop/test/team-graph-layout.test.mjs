@@ -171,7 +171,7 @@ test("a line's label pill takes the pointer so its full words show on hover, whi
   assert.match(rule(".tg-badges .tg-edge-label"), /pointer-events: auto;/, "the label pill under the row takes the pointer, so the row's title shows its full words");
   const handing = { ...team, relations: [{ from: "m", to: "team-2", relation: "leads", live: { action: "handing_off", task: "Task 7" } }] };
   const markup = renderToStaticMarkup(createElement(view.LinkBadges, { link: graph.layoutGraph(handing).links.find((link) => link.to === "team-2") }));
-  assert.match(markup, /^<span class="tg-badges" role="img" aria-label="handing off: Task 7, [^"]+" title="handing off: Task 7, [^"]+"[^>]*><span class="tg-edge-label live">/,
+  assert.match(markup, /^<span class="tg-badges live" role="img" aria-label="handing off: Task 7, [^"]+" title="handing off: Task 7, [^"]+"[^>]*><span class="tg-edge-label live" style="max-width:352px">/,
     "the full words stay in the row's aria label and title, over the pill");
 });
 
@@ -386,7 +386,7 @@ test("a card's menu messages its agent, stops it or its teammate pane, and merge
   for (const agent of [0, -2, 1.5, "3", null]) assert.deepEqual(acts(node("team-3", "sub", { agent, status: "working" })), { message: null, stop: null, merge: null }, String(agent));
 });
 
-test("a card is the mockup's compact four lines, a presence dot, its menu and its full sentence for screen readers, and a chip takes its task line", () => {
+test("a card is the mockup's compact four lines, a presence dot, its menu and its full sentence for screen readers, and its chips take the harness line", () => {
   assert.deepEqual([graph.CARD_WIDTH, graph.CARD_HEIGHT, graph.TASK_LINES], [176, 96, 1], "the mockup's compact card: name, harness and account, branch, task");
   const html = renderToStaticMarkup(createElement(view.GraphCard, {
     placed: card(graph.layoutGraph(team), "team-2"), graph: team, items: [], open: false, tipId: null, onOpen() {}, onTip() {},
@@ -409,7 +409,8 @@ test("a card is the mockup's compact four lines, a presence dot, its menu and it
   assert.match(asking, /class="tg-dot tone-warn"/);
   assert.match(asking, /<span class="tg-chip warn">Waiting on you<\/span>/);
   assert.match(asking, /From you 2 \u2713\u2713/);
-  assert.doesNotMatch(asking, /tg-card-task/, "the chips take the task line, the task stays in the hover text and the sentence");
+  assert.doesNotMatch(asking, /tg-card-detail/, "the chips take the harness and account line, which stays in the hover text and the sentence");
+  assert.match(asking, /<\/span><\/span><span class="tg-card-task"><span class="tg-clip">Done: Task 3<\/span><\/span><\/button>/, "a card always keeps its task line, last");
   assert.match(asking, /aria-label="Actions for codex-3"/);
   assert.match(asking, /Waiting on you: it asks a question in its terminal\./);
 });

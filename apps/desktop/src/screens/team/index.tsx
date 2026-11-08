@@ -9,7 +9,7 @@ import { actions } from "../changes/model";
 import { displayText } from "../conversation";
 import { AgentSkillsDialog } from "../process";
 import {
-  BADGE_HEIGHT, BADGE_WIDTH, DRAG_SLOP, ZOOM_STEP, badgeLabel, cardTask, cardText, cardTip, dotTone, fitView, fromOwner,
+  BADGE_HEIGHT, BADGE_WIDTH, DRAG_SLOP, LIVE_LABEL_WIDTH_MAX, ZOOM_STEP, badgeLabel, cardTask, cardText, cardTip, dotTone, fitView, fromOwner,
   graphLive, layoutCards, layoutGraph, namedAccounts, nodeActions, nodeDetail, nodeStatus, panView,
   receiptTicks, teamLine, tipPlace, viewKey, waitingOnOwner, wheelZoom, zoomView, type Link, type PlacedCard, type Size, type View,
 } from "./graph";
@@ -66,7 +66,8 @@ export function GraphCard({ placed, graph, harness, open, tipId, items, onOpen, 
   const opens = node.terminal !== null;
   const waiting = waitingOnOwner(node);
   const unread = fromOwner(node, graph);
-  const text = cardText({ ...node, label: displayText(node.label) }, graph.edges.map((edge) => ({ ...edge, text: displayText(edge.text) })), harness);
+  const text = cardText({ ...node, label: displayText(node.label) }, graph.edges.map((edge) => ({ ...edge, text: displayText(edge.text) })), graph.nodes, harness);
+  const chips = waiting || unread || node.message_note;
   return <div className={`tg-card ${node.kind}${open ? " open" : ""}${opens ? "" : " static"}${waiting ? " waiting" : ""}`}
     style={{ left: placed.x, top: placed.y, width: placed.width, height: placed.height }}
     onPointerEnter={() => onTip(node.id)} onPointerLeave={() => onTip(null)}>
@@ -80,14 +81,14 @@ export function GraphCard({ placed, graph, harness, open, tipId, items, onOpen, 
         <Icon name={NODE_ICONS[node.kind] ?? "bot"} size={14} />
         <span className="tg-clip">{text.title}</span>
       </span>
-      <span className="tg-card-detail tg-clip">{displayText(text.detail)}</span>
-      {text.branch && <span className="tg-card-branch"><Icon name="git-branch" size={12} /><span className="tg-clip">{displayText(text.branch)}</span></span>}
-      <span className="tg-card-task">{text.task.map((line, index) => <span key={index} className="tg-clip">{line}</span>)}</span>
-      {(waiting || unread || node.message_note) && <span className="tg-chips">
+      {!chips && <span className="tg-card-detail tg-clip">{displayText(text.detail)}</span>}
+      {chips && <span className="tg-chips">
         {node.message_note && <span className="tg-chip warn note"><span className="tg-clip">{displayText(node.message_note)}</span></span>}
         {waiting && <span className="tg-chip warn">{waiting.word}</span>}
         {unread && <span className="tg-chip">From you {unread.unread}{node.hookless ? "" : ` ${receiptTicks(unread.receipt).ticks}`}</span>}
       </span>}
+      {text.branch && <span className="tg-card-branch"><Icon name="git-branch" size={12} /><span className="tg-clip">{displayText(text.branch)}</span></span>}
+      <span className="tg-card-task">{text.task.map((line, index) => <span key={index} className="tg-clip">{line}</span>)}</span>
     </button>
     {items.length > 0 && <span className="tg-card-menu"><Menu label={`Actions for ${displayText(node.label)}`} items={items} /></span>}
   </div>;
@@ -100,9 +101,9 @@ export function LinkBadges({ link }: { link: Link }) {
   const shown = displayText(link.label);
   const label = [shown, badgeLabel(link)].filter(Boolean).join(", ");
   if (!label) return null;
-  return <span className="tg-badges" role="img" aria-label={label} title={label}
+  return <span className={`tg-badges${link.live ? " live" : ""}`} role="img" aria-label={label} title={label}
     style={{ left: link.badge.x - BADGE_WIDTH / 2, top: link.badge.y - BADGE_HEIGHT / 2, width: BADGE_WIDTH, height: BADGE_HEIGHT }}>
-    {shown && <span className={`tg-edge-label${link.live ? " live" : ""}`}><span className="tg-clip">{shown}</span></span>}
+    {shown && <span className={`tg-edge-label${link.live ? " live" : ""}`} style={link.live ? { maxWidth: LIVE_LABEL_WIDTH_MAX } : undefined}><span className="tg-clip">{shown}</span></span>}
     {link.tasks > 0 && <span className="tg-badge"><Icon name="list-checks" size={12} />{link.tasks}</span>}
     {link.questions > 0 && <span className="tg-badge question"><Icon name="message-square" size={12} />{link.questions}</span>}
     {link.unread > 0 && <span className="tg-badge message"><Icon name="send" size={12} />{link.unread}{link.receipt && !link.hookless ? ` ${receiptTicks(link.receipt).ticks}` : ""}</span>}
