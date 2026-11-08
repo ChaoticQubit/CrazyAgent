@@ -186,13 +186,13 @@ export function press(selector, name) {
   return true;
 }
 
-/** What the owner sees around the panel: the button names of the graph head in order, where
- * the cursor is, the open dialog's title and text, the pause calls the engine took and the
- * notes the page left. */
+/** What the owner sees around the panel: the names of the graph head's own buttons in order,
+ * where the cursor is, the open dialog's title and text, the pause calls the engine took and
+ * the notes the page left. */
 export function around() {
   const dialog = document.querySelector("dialog[open]");
   return {
-    head: [...(document.querySelector(".tg-head")?.querySelectorAll("button") ?? [])].map((item) => item.textContent.trim()),
+    head: [...(document.querySelector(".tg-head")?.querySelectorAll(":scope > button") ?? [])].map((item) => item.textContent.trim()),
     focused: document.activeElement?.getAttribute("placeholder") ?? document.activeElement?.tagName ?? null,
     dialog: dialog ? { title: dialog.querySelector("h2")?.textContent ?? "", text: dialog.textContent } : null,
     cancels: [...engine.cancels],

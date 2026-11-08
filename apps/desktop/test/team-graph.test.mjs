@@ -223,6 +223,13 @@ test("the terminal panel head is the mockup's: name, harness and state, Message,
   assert.match(none, /<button type="button" class="btn small" disabled="">(?:(?!<\/button>)[^])*Message<\/button>/, "Message waits for a box to type in");
 });
 
+test("a terminal embedded in a console never also draws a wall tile's head or the swap hint", () => {
+  const render = (props) => renderToStaticMarkup(createElement(view.TerminalPanel, { node: team.nodes[0], ...props }));
+  assert.throws(() => render({ embedded: true, tile: true }), /either embedded in a console or a wall tile/);
+  assert.throws(() => render({ embedded: true, swaps: true }), /only a terminal with its own head says it swaps/);
+  assert.doesNotMatch(render({ embedded: true }), /tg-terminal-head/);
+});
+
 test("a failed background read keeps the last graph, so an open terminal stays mounted", () => {
   const ok = { kind: "ok", value: team };
   const busy = { kind: "error", code: "busy", message: "The engine is busy. Try again." };

@@ -613,12 +613,17 @@ const ROLE_WORDS: Record<GraphNode["kind"], string> = {
   teammate: "Teammate",
 };
 
+/** A node's place in the tree as one word, such as "Sub-agent", and "Agent" for a kind an
+ * older or newer engine sends that this build does not know. Input: the node. Output: the word. */
+export function nodeRole(node: Pick<GraphNode, "kind">): string {
+  return Object.hasOwn(ROLE_WORDS, node.kind) ? ROLE_WORDS[node.kind] : "Agent";
+}
+
 /** The second line of a node box: its place in the tree, its harness and its account, such
  * as "Lead, Claude Code, Work". Inputs: the node and a harness display name lookup. Output:
  * one short line; a node with no account leaves that part out. */
 export function nodeDetail(node: GraphNode, harness: (id: string) => string = (id) => id): string {
-  const role = Object.hasOwn(ROLE_WORDS, node.kind) ? ROLE_WORDS[node.kind] : "Agent";
-  return [role, harness(node.harness), node.account?.trim() || null].filter(Boolean).join(", ");
+  return [nodeRole(node), harness(node.harness), node.account?.trim() || null].filter(Boolean).join(", ");
 }
 
 /** Puts each node's account name in place of the engine's account id, so the graph names

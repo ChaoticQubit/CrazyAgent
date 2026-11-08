@@ -52,23 +52,26 @@ export function headReport(read: Loaded<Received>): string | undefined {
   return read.kind === "ok" && read.value.launched ? reportedLine(read.value) : undefined;
 }
 
-/** The open graph card's side: the agent's terminal, whose head carries the one-line report
- * of what its harness loaded and invoked, and the Instructions view under it, from one read
- * of what the agent received at its last launch and the project's skill catalog.
- * Inputs: the project id, the card's node, a harness name lookup and the close action.
- * Output: the side, with no Instructions view for a card without an agent. */
-export function AgentSide({ projectId, node, harness, onClose, children }: {
+/** The open graph card's side: the agent's terminal, the one panel a click on another card
+ * replaces, whose head carries Stop and the one-line report of what its harness loaded and
+ * invoked, and the Instructions view under it, from one read of what the agent received at
+ * its last launch and the project's skill catalog.
+ * Inputs: the project id, the card's node, a harness name lookup, the close action and the
+ * stop action when the agent can be stopped. Output: the side, with no Instructions view for
+ * a card without an agent. */
+export function AgentSide({ projectId, node, harness, onClose, onStop, children }: {
   projectId: string;
   node: GraphNode;
   harness?: (id: string) => string;
   onClose: () => void;
+  onStop?: () => void;
   children?: ReactNode;
 }) {
   const agent = agentOf(node);
   const [read] = useLoad(() => agent === undefined ? Promise.resolve(NO_AGENT) : loadAgentInstructions(projectId, agent), [projectId, node.id]);
   const [catalog] = useLoad(() => listSkills(projectId), [projectId]);
   return <div className="tg-side">
-    <TerminalPanel node={node} harness={harness} onClose={onClose} reported={agent === undefined ? undefined : headReport(read)} />
+    <TerminalPanel node={node} harness={harness} onClose={onClose} onStop={onStop} swaps reported={agent === undefined ? undefined : headReport(read)} />
     {agent !== undefined && <AgentInstructionsView read={read} skills={catalogOf(catalog)} />}
     {children}
   </div>;
