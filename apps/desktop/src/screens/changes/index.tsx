@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { Failure, Result } from "../../api";
 import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
 import type { ChangeDiff, ChangeSet, TargetBranches } from "../../api-changes";
@@ -6,7 +6,7 @@ import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, movedOn, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
 import { useChangeList } from "./poll";
 import "./changes.css";
@@ -14,9 +14,19 @@ import "./changes.css";
 type Asking = { kind: "accept" | "discard"; set: ChangeSet } | null;
 
 /** Shows diff text as plain text in a preformatted block: markup stays text and control
- * characters show as escapes. Input: the diff text. Output: the block. */
-export function DiffText({ text }: { text: string }) {
-  return <pre className="ch-diff" aria-label="Diff">{diffText(text)}</pre>;
+ * characters show as escapes. On the last page it calls `onEnd` once the end of the text
+ * is on screen inside the block's own scroll, not when the page arrived (RVA-1). Inputs:
+ * the diff text and, on the last page, what to do at its end. Output: the block. */
+export function DiffText({ text, onEnd }: { text: string; onEnd?: () => void }) {
+  const end = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    const marker = end.current;
+    if (!onEnd || marker === null) return;
+    const watch = new IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) onEnd(); });
+    watch.observe(marker);
+    return () => watch.disconnect();
+  }, [onEnd, text]);
+  return <pre className="ch-diff" aria-label="Diff">{diffText(text)}{onEnd && <span ref={end} className="ch-end" aria-hidden="true" />}</pre>;
 }
 
 /** The plain Not ready yet notice for an engine or build that cannot land changes yet. */
@@ -89,9 +99,14 @@ export function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved, lo
   const page = pages[pages.length - 1];
   const [diff, setDiff] = useState<Result<ChangeDiff>>();
   const [review, setReview] = useState<Review>(() => reviewOf(null, set));
+  const [staleAt, setStaleAt] = useState<ChangeSet | null>(null);
   const carried = reviewOf(review, set);
   if (carried !== review) {
     setReview(carried);
+    setPages([0]);
+  }
+  if (staleAt !== null && staleAt !== set) {
+    setStaleAt(null);
     setPages([0]);
   }
   const allowed = actions(set, now);
@@ -99,17 +114,21 @@ export function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved, lo
   const notes = [movedNote(carried), conflictNote(set), checkedNote(set), outcomeNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
   const head = carried.head;
   useEffect(() => {
+    if (staleAt !== null) return;
     let current = true;
     setDiff(undefined);
     void load(set.id, head, page).then((result) => {
       if (!current) return;
-      setDiff(result);
-      if (result.kind === "ok" && result.value.next === null) setReview((shown) => lastPageSeen(shown, head));
-      if (result.kind === "error" && result.code === "changes_stale") onMoved();
+      if (result.kind === "error" && result.code === "changes_stale") {
+        setStaleAt(set);
+        setReview(movedOn);
+        onMoved();
+      } else setDiff(result);
     });
     return () => { current = false; };
-  }, [set.id, head, page, load]);
+  }, [set.id, head, page, load, staleAt]);
   const value = diff?.kind === "ok" ? diff.value : null;
+  const endSeen = useCallback(() => setReview((shown) => lastPageSeen(shown, head)), [head]);
   const asked = { ...set, head };
   return <section className="pj-stack-s ch-detail" aria-label={`Changes from ${agentName(set)}`}>
     <div className="pj-row between">
@@ -132,7 +151,7 @@ export function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved, lo
         <span className="pj-mono">{fileLine(file)}</span>
         {fileMarks(file).map((mark) => <span className="ch-mark pj-small" key={mark}>{mark}</span>)}
       </li>)}</ul>
-      <DiffText text={value.text} />
+      <DiffText text={value.text} onEnd={value.next === null ? endSeen : undefined} />
       {value.truncated && <p className="pj-note warn">Part of this diff is not shown: it is longer than CrazyAgent shows at once.</p>}
       {(pages.length > 1 || value.next !== null) && <div className="pj-row">
         <button type="button" className="btn" disabled={pages.length === 1} onClick={() => setPages(pages.slice(0, -1))}>Previous page</button>
