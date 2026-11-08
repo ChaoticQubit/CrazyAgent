@@ -87,6 +87,8 @@ test("the sidebar's Metrics page adds up every project, and its filter shows one
     let shown = await tilesShow(page, everyProject, "both projects added up", true);
     await me.capture("app-metrics-all");
     assert.equal(shown.tiles[1][2], CACHE_LINE);
+    assert.deepEqual(shown.tiles.map((tile) => tile[0]), ["Tokens", "Re-read from cache", "Runs", "Tasks", "Merges", "Lines"], "the same six tiles as the project tab (mockup note 13)");
+    assert.deepEqual(shown.tiles[4].slice(1), ["0", "0 into main, 0 undone"], "nothing was merged yet");
     assert.equal(shown.heading, "Metrics");
     assert.equal(shown.current, "#/metrics", "the sidebar marks Metrics as the open page");
     assert.match(shown.line, /^2 projects · Updated .+ · provider-reported usage per turn$/);

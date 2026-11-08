@@ -133,6 +133,9 @@ export interface Metrics {
   tasks_waiting: number;
   tasks_done: number;
   tasks_failed: number;
+  merges: number;
+  merges_into_main: number;
+  merges_undone: number;
   bucket_ms: number;
   series: MetricsBucket[];
   runs: MetricsRun[];

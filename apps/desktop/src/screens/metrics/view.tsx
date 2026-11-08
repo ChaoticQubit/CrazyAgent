@@ -163,6 +163,7 @@ function Tiles({ usage, metrics }: { usage: UsageReport; metrics: Metrics }) {
       detail={share === null ? "Billed far lower, not in Tokens" : `${share}% of everything read; billed far lower, not in Tokens`} />
     <Tile label="Runs" value={String(usage.runs)} detail={`${metrics.running} running now`} />
     <Tile label="Tasks" value={`${metrics.tasks_done} done`} detail={`${metrics.tasks_waiting} waiting, ${metrics.tasks_failed} failed`} />
+    <Tile label="Merges" value={String(metrics.merges)} detail={`${metrics.merges_into_main} into main, ${metrics.merges_undone} undone`} />
     <Tile label="Lines" value={`+${compactCount(added)}`} detail={`−${compactCount(removed)} across ${sets} change sets`} />
   </div>;
 }
@@ -340,7 +341,7 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { b
 }
 
 /** The Metrics page as a pure view: the range switch and what it covers, the tiles (tokens
- * with their three parts, cache re-reads apart, runs, tasks and lines), the tokens chart and
+ * with their three parts, cache re-reads apart, runs, tasks, merges and lines), the tokens chart and
  * the breakdown by agent, run, account or harness, each with its four token parts and its
  * share of tokens. With a filter (the app page) it also picks a project and breaks down by
  * project. Inputs: the project, null for every project, the usage and metrics reads, the

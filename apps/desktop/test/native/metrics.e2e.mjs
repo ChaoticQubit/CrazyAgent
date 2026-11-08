@@ -45,7 +45,8 @@ test("the project Metrics tab shows this project's tokens with the headline from
     assert.equal(shown.tiles[1][2], CACHE_LINE);
     assert.match(shown.line, /^This project only · Updated .+ · provider-reported usage per turn$/);
     assert.equal(shown.picker, false, "the project tab has no project picker");
-    assert.deepEqual(shown.tiles.map((tile) => tile[0]), ["Tokens", "Re-read from cache", "Runs", "Tasks", "Lines"]);
+    assert.deepEqual(shown.tiles.map((tile) => tile[0]), ["Tokens", "Re-read from cache", "Runs", "Tasks", "Merges", "Lines"], "six tiles (mockup note 9)");
+    assert.deepEqual(shown.tiles[4].slice(1), ["0", "0 into main, 0 undone"], "nothing was merged yet");
     assert.deepEqual(shown.tiles[3].slice(1), ["1 done", "0 waiting, 0 failed"], "the finished task counts as done");
     assert.equal(shown.chart, "Tokens per two hours: input, cache write and output");
     assert.ok(shown.bars >= 1, "the chart draws a bar for today");

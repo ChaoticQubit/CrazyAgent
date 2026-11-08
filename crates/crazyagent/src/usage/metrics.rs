@@ -147,6 +147,25 @@ fn task_counts(
     .map_err(storage)
 }
 
+fn merge_counts(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+) -> Result<[u64; 3], EngineError> {
+    if !has_table(db, "project_activity")? {
+        return Ok([0; 3]);
+    }
+    db.query_row(
+        "SELECT COALESCE(SUM(kind IN ('lead_merged','merged_into_main')),0),
+            COALESCE(SUM(kind='merged_into_main'),0),
+            COALESCE(SUM(kind='merged_into_main' AND undone=1),0)
+         FROM project_activity WHERE at_ms>=?2 AND (?1 IS NULL OR project=?1)",
+        params![project, since_ms],
+        |row| Ok([count(row.get(0)?), count(row.get(1)?), count(row.get(2)?)]),
+    )
+    .map_err(storage)
+}
+
 fn series(
     db: &Connection,
     project: Option<&str>,
@@ -482,15 +501,16 @@ pub fn read(
         .ok_or_else(|| failure("usage_request_invalid"))?;
     let project = project.map(ProjectId::as_str);
     let [running, tasks_waiting, tasks_done, tasks_failed] = task_counts(db, project, since_ms)?;
+    let [merges, merges_into_main, merges_undone] = merge_counts(db, project, since_ms)?;
     let bucket_ms = bucket_for(span_ms);
     let metrics = fit(Metrics {
         running,
         tasks_waiting,
         tasks_done,
         tasks_failed,
-        merges: 0,
-        merges_into_main: 0,
-        merges_undone: 0,
+        merges,
+        merges_into_main,
+        merges_undone,
         bucket_ms,
         series: series(db, project, since_ms, bucket_ms)?,
         runs: runs(db, project, since_ms)?,
