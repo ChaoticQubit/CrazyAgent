@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { AGENTS_VIEW, INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
@@ -145,8 +145,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.enable");
         await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
-        await me.waitFor("the Terminals per window setting on the Agents tab", (text) => text.includes(SETTING) && text.includes("Open all terminals"));
+        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents?section=coord` });
+        await me.waitFor("the Terminals per window setting in Agent settings", (text) => text.includes(SETTING));
         const reload = async () => {
           await page.evaluate("window.__e2eBeforeReload = true");
           await page.send("Page.reload", { ignoreCache: true });
@@ -185,7 +185,7 @@ function pick(me, label) {
   return me.click(label, `[role=radiogroup][aria-label="${SETTING}"] [role=radio]`);
 }
 
-/** Reads which choice of the setting the Agents tab shows as picked. Input: the page.
+/** Reads which choice of the setting Agent settings shows as picked. Input: the page.
  * Output: the picked choice's label, or null. */
 function shown(page) {
   return page.evaluate(`document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label="${SETTING}"] [role=radio][aria-checked=true]`)})?.innerText.trim() ?? null`);
@@ -201,12 +201,14 @@ async function kept(status, perWindow) {
   }
 }
 
-/** Clicks Open all terminals and checks the one request it sends, then opens each window's
- * page as the native window would and checks its heading, its tiles in order, their Message
- * and Stop buttons and the free slots of the last window. Inputs: the steps' context, the
- * choice and the hint the button shows. Output: none. */
+/** Opens the Team view, clicks Open all terminals and checks the one request it sends, then
+ * opens each window's page as the native window would and checks its heading, its tiles in
+ * order, their Message and Stop buttons and the free slots of the last window. Inputs: the
+ * steps' context, the choice and the hint the button shows. Output: none. */
 async function openAll({ project, me, page, tiles: all, site, log }, perWindow, hint) {
   const windows = Math.ceil(all.length / perWindow);
+  await me.click("Team", AGENTS_VIEW);
+  await me.waitFor("Open all terminals on the Team view", (text) => text.includes("Open all terminals"));
   assert.equal(await page.evaluate(`[...document.querySelectorAll("button")].find((button) => button.innerText.includes("Open all terminals"))?.title ?? null`), hint);
   const before = log.trail.length;
   await me.click("Open all terminals", "button");
