@@ -54,13 +54,13 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.nodeDetail(team.nodes[4]), "Lead, claude");
   assert.equal(graph.nodeDetail(node("x", "someday", { account: "  " })), "Agent, codex", "an unknown kind from a newer engine still reads");
   const ada = node("team-7", "sub", { label: "Ada (@onboarding-fix)", harness: "claude", status: "working", status_label: "Working" });
-  assert.equal(graph.nodeLine(ada, name), "Ada (@onboarding-fix) \u00b7 Claude Code \u00b7 working");
+  assert.equal(graph.nodeRole(ada), "Sub-agent");
   assert.equal(graph.cardText(ada, [], name).title, "Ada (@onboarding-fix)");
   assert.equal(graph.cardText(ada, [], name).branch, null);
   assert.equal(graph.cardText({ ...ada, branch: " crazyagent/agent-7 " }, [], name).branch, "crazyagent/agent-7");
   assert.equal(graph.cardTip(ada, { project_id: "p", nodes: [ada], edges: [] }, name)[0], "Ada (@onboarding-fix)");
-  assert.equal(graph.nodeLine(team.nodes[2], name), "Master \u00b7 Codex \u00b7 idle");
-  assert.equal(graph.nodeLine(node("team-8", "sub", { label: "Grace" })), "Grace \u00b7 codex");
+  assert.equal(graph.nodeRole(team.nodes[2]), "Master");
+  assert.equal(graph.nodeRole(node("x", "someday")), "Agent", "an unknown kind from a newer engine still reads");
 });
 
 test("each graph line names its relation, and the live action while it happens", () => {
@@ -187,13 +187,47 @@ test("the terminal panel names the agent, says it is connecting and offers Close
   assert.match(html, /aria-label="codex-2 terminal"/);
   assert.match(html, /aria-label="Close terminal"/);
   assert.match(html, /Connecting to the terminal\.\.\./);
-  assert.match(html, /codex-2 \u00b7 codex \u00b7 working<\/span><span class="tg-terminal-detail">acct-work</);
+  assert.match(html, /<span class="tg-terminal-name">codex-2 \u00b7 codex<\/span><span class="badge tone-info">(?:(?!<\/span>)[^])*Working<\/span>/);
+  assert.match(html, /<span class="tg-terminal-detail">acct-work<\/span>/);
   const reported = renderToStaticMarkup(createElement(view.TerminalPanel, { node: team.nodes[0], onClose() {}, reported: "Instructions: AGENTS.md - Skills used: tdd" }));
   assert.match(reported, /<span class="tg-terminal-detail" title="Instructions: AGENTS.md - Skills used: tdd">Instructions: AGENTS\.md - Skills used: tdd<\/span>/,
     "the head says what the agent's harness reported, not only the Instructions panel");
   const none = renderToStaticMarkup(createElement(view.TerminalPanel, { node: node("team-5", "sub"), onClose() {} }));
   assert.match(none, /This agent has no terminal yet/);
   assert.doesNotMatch(none, /Connecting/);
+});
+
+test("the terminal panel head is the mockup's: name, harness and state, Message, Stop and Close, then role, branch and the swap hint", () => {
+  const harness = (id) => (id === "codex" ? "Codex" : id);
+  const sub = { ...team.nodes[0], branch: "crazyagent/calendar-api" };
+  const html = renderToStaticMarkup(createElement(view.TerminalPanel, { node: sub, harness, onClose() {}, onStop() {}, swaps: true }));
+  const head = html.slice(html.indexOf('class="tg-terminal-head"'), html.indexOf('class="tg-terminal-state"'));
+  assert.match(head, /<span class="tg-terminal-name">codex-2 · Codex<\/span><span class="badge tone-info">(?:(?!<\/span>)[^])*Working<\/span>/);
+  const order = [">Message</button>", ">Stop</button>", 'aria-label="Close terminal"'].map((part) => head.indexOf(part));
+  assert.ok(order.every((at) => at > 0), `Message, Stop and Close are in the head: ${JSON.stringify(order)}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order, "Message, then Stop, then Close");
+  const metaAt = head.indexOf('class="tg-terminal-meta"');
+  assert.ok(metaAt > order[2], "the meta row follows the actions");
+  const meta = head.slice(metaAt);
+  assert.match(meta, />Sub-agent<\/span>/);
+  assert.match(meta, /<span class="tg-terminal-branch">crazyagent\/calendar-api<\/span>/);
+  assert.match(meta, /<span class="tg-terminal-detail">acct-work<\/span>/, "the account stays in the head");
+  assert.match(meta, />Click another agent to show it here<\/span>/);
+  const master = renderToStaticMarkup(createElement(view.TerminalPanel, { node: team.nodes[2], harness, onClose() {} }));
+  assert.match(master, /<span class="tg-terminal-name">Master · Codex<\/span>/);
+  assert.match(master, />Master<\/span>/);
+  assert.doesNotMatch(master, />Stop<\/button>/, "no Stop without a stop action");
+  assert.doesNotMatch(master, /Click another agent/, "only the graph's one panel says it swaps");
+  assert.doesNotMatch(master, /tg-terminal-branch/, "no branch, no branch part");
+  const none = renderToStaticMarkup(createElement(view.TerminalPanel, { node: node("team-5", "sub"), onClose() {} }));
+  assert.match(none, /<button type="button" class="btn small" disabled="">(?:(?!<\/button>)[^])*Message<\/button>/, "Message waits for a box to type in");
+});
+
+test("a terminal embedded in a console never also draws a wall tile's head or the swap hint", () => {
+  const render = (props) => renderToStaticMarkup(createElement(view.TerminalPanel, { node: team.nodes[0], ...props }));
+  assert.throws(() => render({ embedded: true, tile: true }), /either embedded in a console or a wall tile/);
+  assert.throws(() => render({ embedded: true, swaps: true }), /only a terminal with its own head says it swaps/);
+  assert.doesNotMatch(render({ embedded: true }), /tg-terminal-head/);
 });
 
 test("a failed background read keeps the last graph, so an open terminal stays mounted", () => {
@@ -277,12 +311,14 @@ test("the composer names who reads the prompt and says a sub-agent's master is t
   const panel = (target) => renderToStaticMarkup(createElement(view.TerminalPanel, { node: target, onClose() {} }));
   const sub = panel(team.nodes[0]);
   assert.match(sub, /<label for="tg-prompt-team-2" class="pj-sr">Prompt codex-2<\/label>/);
-  assert.match(sub, /placeholder="Tell codex-2 what to do\. Its master is told what you send\."/);
+  assert.match(sub, /placeholder="Type to codex-2\.\.\."/);
+  assert.match(sub, /Tell codex-2 what to do\. Its master is told what you send\./, "where the prompt goes stays in the box's description");
   assert.doesNotMatch(sub, /<textarea id="tg-prompt-team-2"[^>]* disabled=""/, "the draft box takes typing before the terminal is live");
   assert.match(sub, /Sends once the terminal is live\./);
   assert.match(sub, /<button type="submit" class="btn primary small" disabled=""/);
   const master = panel(team.nodes[2]);
   assert.match(master, /Prompt the master/);
+  assert.match(master, /placeholder="Type to Master\.\.\."/);
   assert.doesNotMatch(master, /Its master is told/);
   assert.doesNotMatch(panel(node("team-5", "sub")), /tg-composer/);
 });

@@ -1,32 +1,32 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { extendTerminalWindows, loadTerminalsPerWindow, nextGeneration, type Result } from "../../api";
 import { stopTeamAgent, stopTeammate } from "../../api-projects";
 import type { GraphNode } from "../../engine-client";
 import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
+import { harnessName } from "../new-project/team-editor";
 import { actionNote, panelKey, useTeamGraph, wallNote } from "../team";
-import { nodeActions, nodeLine } from "../team/graph";
+import { nodeActions } from "../team/graph";
 import { TerminalPanel } from "../team/terminal-panel";
 import { wallPages, type PerWindow } from "./pages";
 import "./terminals.css";
 
 type Stopping = { node: GraphNode; stop: NonNullable<ReturnType<typeof nodeActions>["stop"]> };
 
-/** One terminal in a wall window: its agent's line, Message, which moves the cursor to the
- * message box under the terminal, Stop for an agent that can be stopped, and the terminal
+/** The harness names a wall window shows: the built-in ones, as a wall window reads no
+ * harness catalog. Input: the harness id. Output: its display name. */
+function builtInHarness(id: string): string {
+  return harnessName(null, id);
+}
+
+/** One terminal in a wall window, the same terminal as the Agents panel: its head with the
+ * agent's name, harness, state, role and branch, Message, which moves the cursor to the
+ * "Type to" box under the terminal, Stop for an agent that can be stopped, and the terminal
  * itself, typed into directly or through the box, attached for its project. Inputs: the
  * project id, the node, whether it can be stopped and the stop action. Output: the tile. */
 function WallTile({ projectId, node, stoppable, onStop }: { projectId: string; node: GraphNode; stoppable: boolean; onStop: () => void }) {
-  const tile = useRef<HTMLDivElement>(null);
-  const label = displayText(node.label);
-  return <div className="tw-tile" ref={tile}>
-    <div className="tw-tile-head">
-      <span className="tg-terminal-title"><Icon name="square-terminal" size={15} /><span className="tw-tile-name">{displayText(nodeLine(node))}</span></span>
-      <Button variant="quiet" size="small" icon="send" iconOnly={`Message ${label}`}
-        onClick={() => tile.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus()} />
-      {stoppable && <Button variant="quiet" size="small" icon="circle-stop" iconOnly={`Stop ${label}`} onClick={onStop} />}
-    </div>
-    <TerminalPanel node={node} projectId={projectId} embedded input="both" />
+  return <div className="tw-tile">
+    <TerminalPanel node={node} projectId={projectId} tile input="both" harness={builtInHarness} onStop={stoppable ? onStop : undefined} />
   </div>;
 }
 

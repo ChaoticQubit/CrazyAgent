@@ -97,3 +97,36 @@ test("a panel opened from Waiting on you before the graph reads keeps its termin
   assert.deepEqual(seen.detaches, [], JSON.stringify(seen));
   assert.deepEqual(seen.clients, ["team-1"], JSON.stringify(seen));
 });
+
+test("the panel's Message puts the cursor in its Type to box, its Stop asks first, and Pause all beside Open all terminals pauses the team", async () => {
+  const steps = await withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate("Fixture.mount(0, 'ok', [Fixture.runningTask(7)])");
+    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4)"), true, "the graph drew");
+    assert.equal(await evaluate("Fixture.click('Ada')"), true, "card Ada");
+    assert.equal(await evaluate("Fixture.until(() => Fixture.shown().live > 0)"), true, "Ada's terminal went live");
+    const seen = {};
+    assert.equal(await evaluate("Fixture.press('.tg-terminal-head', 'Message')"), true, "Message in the panel head");
+    seen.message = await evaluate("Fixture.around()");
+    assert.equal(await evaluate("Fixture.press('.tg-terminal-head', 'Stop')"), true, "Stop in the panel head");
+    seen.stop = await evaluate("Fixture.around()");
+    assert.equal(await evaluate("Fixture.press('dialog[open]', 'Cancel')"), true, "Cancel the stop");
+    assert.equal(await evaluate("Fixture.press('.tg-head', 'Pause all')"), true, "Pause all in the graph head");
+    seen.pause = await evaluate("Fixture.around()");
+    assert.equal(await evaluate("Fixture.press('dialog[open]', 'Pause all agents')"), true, "confirm the pause");
+    await evaluate("Fixture.until(() => Fixture.around().notes.length > 0)");
+    seen.paused = await evaluate("Fixture.around()");
+    return seen;
+  });
+  assert.equal(steps.message.focused, "Type to Ada...", JSON.stringify(steps.message));
+  assert.equal(steps.stop.dialog?.title, "Stop Ada?", JSON.stringify(steps.stop));
+  const head = steps.pause.head;
+  assert.equal(head[head.indexOf("Open all terminals") - 1], "Pause all", `Pause all sits right before Open all terminals: ${JSON.stringify(head)}`);
+  const gap = steps.pause.headGaps[head.indexOf("Open all terminals")];
+  assert.ok(gap >= 0 && gap <= 16, `Pause all sits beside Open all terminals, not across the head: ${gap} px`);
+  assert.equal(steps.pause.dialog?.title, "Pause all agents?", JSON.stringify(steps.pause));
+  assert.match(steps.pause.dialog?.text ?? "", /1 running task stops\./u);
+  assert.deepEqual(steps.paused.cancels, [null], `one pause of every task: ${JSON.stringify(steps.paused)}`);
+  assert.deepEqual(steps.paused.notes, ["Paused. Running tasks are stopping and waiting tasks are cancelled."], JSON.stringify(steps.paused));
+});

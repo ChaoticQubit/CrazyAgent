@@ -345,6 +345,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   team: "changing the team",
   project_setup_update: "updating the project setup",
   project_remove: "removing the project",
+  project_delete: "deleting the project",
   research_cancel: "cancelling the research",
   research_retry: "retrying the research",
   plan_roadmap: "planning the roadmap",
