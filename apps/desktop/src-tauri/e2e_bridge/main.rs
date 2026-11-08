@@ -26,6 +26,7 @@ const ASK_MODE: &str = "ask-owner";
 const SKILLS_MODE: &str = "role-skills";
 const RECORD_ARGS_MAX: usize = 10;
 const IDE_OPEN: &str = "e2e_ide_open";
+const CONFIGURE_PROFILE: &str = "desktop_configure_account_profile";
 
 /// The one bridge every route shares, as the app's `NativeState` does.
 type Shared = Arc<BridgeQueue>;
@@ -147,6 +148,39 @@ async fn ide_open(state: &Shared, args: Value) -> Routed {
     routed(result)
 }
 
+/// Sets a key-less account up for agents as the app's `desktop_configure_account_profile`
+/// does once the account is in a pool, so the engine can register a configured RCLI master.
+/// A key is refused: the end-to-end bridge never carries one. Inputs: the shared bridge and
+/// the invoke arguments. Output: the account profile view or the bridge's failure.
+async fn configure_profile(state: &Shared, args: Value) -> Routed {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Args {
+        ticket: String,
+        secret: Option<String>,
+        generation: u64,
+    }
+    let Args {
+        ticket,
+        secret,
+        generation,
+    } = match parse(args) {
+        Ok(args) => args,
+        Err(invalid) => return invalid,
+    };
+    if secret.is_some() {
+        return Routed::Invalid("the end-to-end bridge sets accounts up without a key".to_owned());
+    }
+    let result: Result<_, BridgeError> = async {
+        lock(state)
+            .await?
+            .configure_account_profile(&ticket, None, generation)
+            .await
+    }
+    .await;
+    routed(result)
+}
+
 /// Serves one connection: routes its invoke on the shared bridge and writes the answer.
 /// Input: the stream, the shared bridge and the token. Output: nothing; failures close it.
 async fn serve(mut stream: TcpStream, state: Shared, token: Arc<String>) {
@@ -158,6 +192,8 @@ async fn serve(mut stream: TcpStream, state: Shared, token: Arc<String>) {
                     let args = call.remove("args").unwrap_or_else(|| json!({}));
                     let routed = if command == IDE_OPEN {
                         ide_open(&state, args).await
+                    } else if command == CONFIGURE_PROFILE {
+                        configure_profile(&state, args).await
                     } else {
                         routes::route(&state, &command, args).await
                     };
