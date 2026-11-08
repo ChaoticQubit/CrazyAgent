@@ -1189,6 +1189,51 @@ pub(in crate::tui) mod tests {
         }
     }
 
+    /// A Home on an engine with no account and no pool whose setup check has not landed.
+    /// Input: none. Output: the shell on Home with its project list focused.
+    fn unchecked_home() -> Shell {
+        let mut ctx = ctx(80, 24);
+        ctx.store.projects = Load::Ready(Vec::new());
+        ctx.store.pools = Load::Ready(Vec::new());
+        ctx.store.accounts = Load::Ready(Vec::new());
+        let mut shell = Shell::with(ctx, Box::new(Home::new()));
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(footer.contains("Enter Open"), "{footer}");
+        shell
+    }
+
+    #[test]
+    fn with_no_key_pressed_home_moves_the_focus_to_setup_once_the_check_lands() {
+        let mut shell = unchecked_home();
+        shell.arrive(status(tools(&[])));
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(footer.contains("Enter Add an account"), "{footer}");
+    }
+
+    #[test]
+    fn a_key_that_moves_home_before_the_setup_check_lands_keeps_the_owner_s_focus() {
+        let mut shell = unchecked_home();
+        shell.key(Key::Tab);
+        shell.key(Key::Tab);
+        shell.arrive(status(tools(&[])));
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(
+            footer.contains("Enter Open"),
+            "the owner's Tab back to the projects holds: {footer}"
+        );
+
+        let mut shell = unchecked_home();
+        shell.key(Key::Char('/'));
+        shell.key(Key::Char('x'));
+        shell.arrive(status(tools(&[])));
+        shell.key(Key::Enter);
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(
+            footer.contains("Enter Open"),
+            "the filter the owner typed keeps the project list: {footer}"
+        );
+    }
+
     #[test]
     fn setup_is_done_with_an_account_ready_for_agents_a_pool_and_tools_found() {
         assert!(!Setup::of(&[], &[], true).done());
