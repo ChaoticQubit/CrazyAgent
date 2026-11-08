@@ -456,6 +456,10 @@ async fn a_pending_home_move_holds_a_delete_and_a_planned_delete_holds_a_home_mo
         rejected("home_trash_failed"),
         "the read-only home keeps the folder out of the Trash"
     );
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while planned() != 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(planned(), 0, "the plan is forgotten once the delete ends");
     assert!(folder.is_dir());
     assert_eq!(kept(&engine), 2);
