@@ -75,7 +75,7 @@ fn master_landed_note(
 fn master_land_words(outcome: &crate::landing::AcceptOutcome) -> String {
     match outcome {
         crate::landing::AcceptOutcome::Landed { branch, .. } => format!(
-            "The master merged the edits from this turn into {branch} itself, as this project's setting lets it at Full access. Activity lists the merge."
+            "The master merged its change set into {branch} itself, with everything in that set, as this project's setting lets it at Full access. Activity lists the merge."
         ),
         crate::landing::AcceptOutcome::Conflict { files } => {
             let named: Vec<&str> = files
@@ -90,7 +90,7 @@ fn master_land_words(outcome: &crate::landing::AcceptOutcome) -> String {
                 format!(" and {more} more")
             };
             format!(
-                "The edits from this turn conflict with the branch they land on in {}{more}, so the master did not merge them. They are waiting for you in Changes.",
+                "The master's change set conflicts with the branch it lands on in {}{more}, so the master did not merge it. It is waiting for you in Changes.",
                 named.join(", ")
             )
         }
