@@ -1,13 +1,13 @@
 import { listAccounts, nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { useEffect, useRef, useState } from "react";
-import { cancelResearch, failureCopy, loadResearchLog, retryResearch } from "../../api-projects";
+import { cancelResearch, cancelTeamTask, failureCopy, loadResearchLog, receiptState, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import type { GraphNode, IntentReceipt, TeamStatus } from "../../engine-client";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { accountName, changeOutcome, finishedRows, nearBottom, researchActions, researchRow, teamPanel } from "./research";
+import { accountName, changeOutcome, finishedRows, nearBottom, pauseSummary, researchActions, researchRow, teamPanel } from "./research";
 import { AgentUsageCard } from "./usage";
 import { FinishedAgentsCleanup } from "./cleanup";
 import type { ResearchRow } from "./research";
@@ -19,7 +19,7 @@ import { QuestionsPanel } from "../team/questions";
 import { cardActivity } from "../dashboard";
 import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
+import { Button, ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
 import { useLoad } from "../../state";
 
 /** Words an agent row uses for a research job, from the design's fixed agent set.
@@ -73,6 +73,45 @@ export function agentsView(section: string | undefined): { view: "team" | "setti
 }
 
 const AGENTS_VIEWS: { value: "team" | "settings"; label: string }[] = [{ value: "team", label: "Team" }, { value: "settings", label: "Agent settings" }];
+
+/** Pause all on Agents, beside Open all terminals: the project menu's Pause all agents, the
+ * same confirm and the same engine call, which stops every running team task and cancels
+ * every waiting one. Research agents keep running. Input: the project data. Output: the
+ * button and its confirm. */
+export function PauseAll({ data }: { data: ProjectData }) {
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const team = data.team.result;
+  const summary = pauseSummary(team?.kind === "ok" ? team.value.tasks : []);
+  const researching = (valueOf(data.research)?.jobs ?? []).some((job) => job.status === "running");
+
+  function ask() {
+    if (team === undefined) return data.notify("Still loading the team. Try again in a moment.");
+    if (team.kind === "not_ready") return data.notify("Not ready yet: pausing agents isn't in this build.");
+    if (team.kind === "error") return data.notify(`Couldn't load the team. ${failureCopy(team)}`);
+    if (summary.count === 0) return data.notify(summary.line);
+    setAsking(true);
+  }
+  async function pause() {
+    setBusy(true);
+    const result = await cancelTeamTask(data.id, null, nextGeneration());
+    setBusy(false);
+    setAsking(false);
+    data.reloadTeam();
+    if (result.kind !== "ok") return data.notify(result.kind === "not_ready" ? "Not ready yet: pausing agents isn't in this build." : failureCopy(result));
+    const state = receiptState(result.value);
+    if (state.kind === "applied") return data.notify("Paused. Running tasks are stopping and waiting tasks are cancelled.");
+    data.notify(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the Agents tab before trying again.");
+  }
+  return <>
+    <Button size="small" icon="circle-pause" onClick={ask}>Pause all</Button>
+    <ConfirmDialog open={asking} title="Pause all agents?" confirmLabel="Pause all agents" cancelLabel="Keep working" pending={busy}
+      onCancel={() => setAsking(false)} onConfirm={() => void pause()}>
+      {summary.line} Work so far stays in each agent's copy of the project. Stopped tasks don't start again on their own; ask the master when you want to continue.
+      {researching ? " Research agents keep running." : ""}
+    </ConfirmDialog>
+  </>;
+}
 
 /** Agents tab: Team, the live team panel with the team's actions and every research agent the
  * project has started, with live progress from the engine; or Agent settings, grouped as the
@@ -145,7 +184,8 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <QuestionsPanel projectId={data.id} onOpen={setTerminal} />
-    <TeamGraphView projectId={data.id} perWindow={teamValue.terminals_per_window ?? 6} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)} />
+    <TeamGraphView projectId={data.id} perWindow={teamValue.terminals_per_window ?? 6} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)}
+      tools={<PauseAll data={data} />} />
     {team.result?.kind === "ok" && <TeamActions projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
     {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
     <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />

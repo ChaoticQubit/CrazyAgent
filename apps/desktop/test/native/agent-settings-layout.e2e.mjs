@@ -56,8 +56,18 @@ function ownerRepo(folder) {
   }
 }
 
+/** Writes the stand-in Codex executable the engine is started with; it exits at once, so no
+ * model ever runs. Input: the test root. Output: its absolute path. */
+function standInHarness(root) {
+  mkdirSync(join(root, "bin"), { recursive: true, mode: 0o700 });
+  const path = join(root, "bin", "codex");
+  writeFileSync(path, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+  return path;
+}
+
 /** Starts the real engine and the bridge on a new project made from the owner's repository,
- * serves the built app to a browser page, runs the steps and stops everything. Inputs: the
+ * at Full access with one Codex sub-agent harness, so every row with a control draws it, serves
+ * the built app to a browser page, runs the steps and stops everything. Inputs: the
  * test context, the temporary folder prefix and the steps, given the project, the owner on
  * the page, the page and the site's port. Output: none. */
 async function onEngine(t, prefix, steps) {
@@ -92,7 +102,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   let site;
   try {
     ({ child: engine } = await launch(engineBinary,
-      ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"],
+      ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings", "--codex-executable", standInHarness(root)],
       { ...env }, evidence, "engine", /^ready$/m));
     const started = await launch(bridgeBinary, [join(runtime, "engine.sock")], { ...env }, evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
     bridgeProcess = started.child;
@@ -108,6 +118,20 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       if (!["waiting", "running"].includes(view.graph.kind) && !["waiting", "running"].includes(view.mapping.kind)) break;
       assert.ok(Date.now() < deadline, `onboarding still running: ${JSON.stringify(view)}`);
     }
+    const policy = await value(bridge, "desktop_project_agent_policy", { id: project });
+    const full = await value(bridge, "desktop_set_project_agent_policy", {
+      id: project, version: policy.version, generation: 4,
+      policy: { access: "full", network: policy.network, toolchains: [], ide_git_hooks: policy.ide_git_hooks },
+    });
+    assert.equal(full.outcome, "applied", `the project runs at Full access, so the merge row shows its choices: ${JSON.stringify(full)}`);
+    const pools = await value(bridge, "desktop_model_access_page", { collection: "pools", next: false });
+    const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 5 });
+    assert.equal(assigned.outcome, "applied", `the project gets the pool its sub-agents run on: ${JSON.stringify(assigned)}`);
+    const stored = await value(bridge, "desktop_project_setup", { id: project });
+    const team = { ...stored.team, sub_harnesses: [{ harness: "codex", agents: 2, tools: true }] };
+    const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team, documents: [] };
+    const saved = await value(bridge, "desktop_update_project_setup", { id: project, setup, name: null, revision: stored.revision, generation: 6 });
+    assert.equal(saved.outcome, "applied", `the team has a sub-agent harness, so its row shows its steppers: ${JSON.stringify(saved)}`);
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });

@@ -80,6 +80,30 @@ test("a wall window draws its tiles master first with Message and Stop, then fre
   assert.deepEqual(html.match(/aria-label="Stop [^"]+"/gu), ["aria-label=\"Stop a1\""]);
 });
 
+test("each wall tile has the panel's head and input: name, harness and state, role and branch, then Type to and Send", async () => {
+  const wall = await import("../src/screens/terminals/index.tsx");
+  const nodes = [
+    { ...node("m", "master"), label: "Master", agent: 9, status: "idle", status_label: "Idle", branch: "main" },
+    { ...node("a1"), agent: 1, status: "working", status_label: "Working", branch: "crazyagent/calendar-api" },
+  ];
+  const html = renderToStaticMarkup(createElement(wall.WallGrid, { projectId: "larkspur", tiles: nodes, nodes, perWindow: 4, onStop: () => {} }));
+  const tiles = html.split('class="tw-tile"').slice(1);
+  assert.equal(tiles.length, 2);
+  const [master, sub] = tiles;
+  assert.match(master, /<span class="tg-terminal-name">Master · Codex<\/span><span class="badge">(?:(?!<\/span>)[^])*Idle<\/span>/);
+  assert.match(sub, /<span class="tg-terminal-name">a1 · Codex<\/span><span class="badge tone-info">(?:(?!<\/span>)[^])*Working<\/span>/);
+  assert.match(master, /class="tg-terminal-meta"[^]*>Master<\/span>[^]*<span class="tg-terminal-branch">main<\/span>/);
+  assert.match(sub, /class="tg-terminal-meta"[^]*>Sub-agent<\/span>[^]*<span class="tg-terminal-branch">crazyagent\/calendar-api<\/span>/);
+  assert.match(master, /placeholder="Type to Master\.\.\."/);
+  assert.match(sub, /placeholder="Type to a1\.\.\."/);
+  assert.equal(html.match(/<button type="submit"[^>]*>(?:(?!<\/button>)[^])*Send<\/button>/gu)?.length, 2, "a Send per tile");
+  assert.doesNotMatch(html, /Click another agent/, "a wall tile never swaps its agent");
+  assert.doesNotMatch(html, /aria-label="Close terminal"/, "a wall tile has no Close");
+  const classes = [...html.matchAll(/<section class="([^"]*)"/gu)].map((match) => match[1].split(" "));
+  assert.equal(classes.length, 2);
+  assert.ok(classes.every((names) => !names.includes("tile")), `style.css .tile is a padded card, never a terminal: ${JSON.stringify(classes)}`);
+});
+
 test("the wall boots from main.tsx on its own address, Agents carries the button and the Coordination group the setting", () => {
   assert.match(source("main.tsx"), /wallRoute\(window\.location\.hash\)/u);
   assert.match(source("main.tsx"), /<TerminalWall /u);
@@ -107,7 +131,7 @@ test("the wall grows itself: each wall window asks the bridge for its project's 
 });
 
 test("a wall tile attaches naming its own project, so the bridge can refuse a terminal of another project", () => {
-  assert.match(source("screens/terminals/index.tsx"), /<TerminalPanel node=\{node\} projectId=\{projectId\} embedded input="both" \/>/u);
+  assert.match(source("screens/terminals/index.tsx"), /<TerminalPanel node=\{node\} projectId=\{projectId\} tile input="both" /u);
   const panel = source("screens/team/terminal-panel.tsx");
   assert.match(panel, /projectId\?: string;/u);
   assert.match(panel, /attachTerminal\(name, channel, pane, projectId \?\? null\)/u);
