@@ -3860,7 +3860,9 @@ fn head_of(worktree: &Path, home: &Path) -> String {
             .arg("-C")
             .arg(worktree)
             .args(["rev-parse", "HEAD"])
-            .stdin(Stdio::null()),
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
     )
     .unwrap();
     assert!(output.status.success());
