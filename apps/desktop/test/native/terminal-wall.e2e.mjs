@@ -171,6 +171,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
   } finally {
     log.closing = true;
     writeFileSync(join(evidence, "calls.json"), JSON.stringify(log.calls, null, 1));
+    writeFileSync(join(evidence, "trail.json"), JSON.stringify(log.trail.map(({ at, ms, cmd, args }) => ({ at, ms, cmd, id: args?.id ?? null })), null, 1));
     site?.server.close();
     await stop(bridgeProcess);
     await stop(engine);
@@ -221,8 +222,7 @@ async function openAll({ project, me, page, tiles: all, site, log }, perWindow, 
   for (let number = 1; number <= windows; number += 1) {
     const slice = all.slice((number - 1) * perWindow, number * perWindow);
     const mark = log.trail.length;
-    await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/terminals/${encodeURIComponent(project)}/${number}` });
-    await page.send("Page.reload", { ignoreCache: true });
+    await openWall(page, site, project, number);
     for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
       const wall = await wallShown(page).catch(() => null);
       if (wall?.tiles.length === slice.length) break;
@@ -236,13 +236,31 @@ async function openAll({ project, me, page, tiles: all, site, log }, perWindow, 
     assert.equal(wall.stops, slice.filter((tile) => !tile.master).length, "each agent's tile has Stop; the master's has none");
     const extend = await asked(log, mark, windows);
     assert.ok(extend.every((call) => call.args.id === project), `window ${number} asks only for its own project's windows: ${JSON.stringify(extend)}`);
-    const attaches = log.trail.slice(mark).filter((call) => call.cmd === "desktop_terminal_attach");
-    assert.ok(attaches.length > 0 && attaches.every((call) => call.args.id === project), `window ${number} attaches naming its own project: ${JSON.stringify(attaches.map((call) => call.args))}`);
+    const attaches = () => log.trail.slice(mark).filter((call) => call.cmd === "desktop_terminal_attach");
+    for (const deadline = Date.now() + STEP_MS; attaches().length < slice.length; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, `window ${number} attached ${attaches().length} of its ${slice.length} terminals`);
+    }
+    assert.ok(attaches().every((call) => call.args.id === project), `window ${number} attaches naming its own project: ${JSON.stringify(attaches().map((call) => call.args))}`);
     await me.capture(`wall-${perWindow}-${number}-of-${windows}`);
   }
   const attached = log.trail.slice(before).filter((call) => call.cmd === "desktop_terminal_attach").length;
   assert.equal(attached, all.length, "each window asks to attach each of its terminals once");
   assert.ok(log.trail.slice(before).some((call) => call.cmd === "desktop_terminals_per_window"), "each window reads the setting");
+}
+
+let wallLoads = 0;
+
+/** Opens one wall window's page as a new document, the way its native window starts, and
+ * waits until the page before it is gone, so the page boots on the wall and never reloads the
+ * route it showed before. Inputs: the page, the site, the project and the window number.
+ * Output: none. */
+async function openWall(page, site, project, number) {
+  wallLoads += 1;
+  await page.evaluate("window.__e2eLeaving = true");
+  await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/?load=${wallLoads}#/terminals/${encodeURIComponent(project)}/${number}` });
+  for (const deadline = Date.now() + STEP_MS; await page.evaluate("window.__e2eLeaving === true").catch(() => true); await pause(POLL_MS)) {
+    assert.ok(Date.now() < deadline, `window ${number}'s page never replaced the page before it`);
+  }
 }
 
 /** Waits until a wall window has asked the bridge for its project's windows with the given
@@ -264,8 +282,7 @@ async function grows({ project, page, graph, runtime, site, log }, perWindow) {
   const before = tiles(await graph()).length;
   const windows = Math.ceil(before / perWindow);
   const mark = log.trail.length;
-  await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/terminals/${encodeURIComponent(project)}/1` });
-  await page.send("Page.reload", { ignoreCache: true });
+  await openWall(page, site, project, 1);
   await asked(log, mark, windows);
   restingAgents(runtime, project, windows * perWindow - before + 1);
   const after = tiles(await graph()).length;
