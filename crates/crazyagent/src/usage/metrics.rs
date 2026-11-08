@@ -150,6 +150,11 @@ fn task_counts(
     .map_err(storage)
 }
 
+/// Counts the merges in the range (a lead's merge of a sub-agent's work and the master's merge
+/// into main), those into main and those undone, from `project_activity`, the only record of a
+/// lead's merge. That table keeps a project's newest 9,000 engine and owner events
+/// (`activity::record`), so past that many in the range the oldest merges drop out of the count.
+/// Inputs: the store, the project or None and the range start. Output: the counts, or zeros.
 fn merge_counts(
     db: &Connection,
     project: Option<&str>,
@@ -169,13 +174,17 @@ fn merge_counts(
     .map_err(storage)
 }
 
+/// Gives each project row its merges in the range as `merge_counts` counts them, and adds a row
+/// with no tokens, after the rows that used tokens and in name order, for a project with merges
+/// and no tokens in the range, up to `ROWS_MAX` rows, so the rows add up to the Merges tile.
+/// Inputs: the store, the project or None, the range start and the rows. Output: none.
 fn project_merges(
     db: &Connection,
     project: Option<&str>,
     since_ms: i64,
-    rows: &mut [GroupRow],
+    rows: &mut Vec<GroupRow>,
 ) -> Result<(), EngineError> {
-    if rows.is_empty() || !has_table(db, "project_activity")? {
+    if !has_table(db, "project_activity")? {
         return Ok(());
     }
     let mut statement = db
@@ -183,19 +192,34 @@ fn project_merges(
             "SELECT project,COUNT(*) FROM project_activity
              WHERE kind IN ('lead_merged','merged_into_main') AND at_ms>=?2
                AND (?1 IS NULL OR project=?1)
-             GROUP BY project",
+             GROUP BY project ORDER BY project",
         )
         .map_err(storage)?;
-    let counts: HashMap<String, u64> = statement
+    let counts: Vec<(String, u64)> = statement
         .query_map(params![project, since_ms], |row| {
             Ok((row.get::<_, String>(0)?, count(row.get(1)?)))
         })
         .map_err(storage)?
         .collect::<Result<_, _>>()
         .map_err(storage)?;
-    for row in rows {
-        row.merges = counts.get(&row.key).copied().unwrap_or(0);
+    let index: HashMap<String, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| (row.key.clone(), at))
+        .collect();
+    for (key, merges) in counts {
+        if let Some(&at) = index.get(&key) {
+            rows[at].merges = merges;
+        } else if rows.len() < ROWS_MAX {
+            rows.push(GroupRow {
+                projects: vec![key.clone()],
+                key,
+                merges,
+                ..GroupRow::default()
+            });
+        }
     }
+    assert!(rows.len() <= ROWS_MAX);
     Ok(())
 }
 
