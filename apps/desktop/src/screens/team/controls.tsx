@@ -382,9 +382,9 @@ export function StopAll({ projectId, status, reload }: { projectId: string; stat
   </>;
 }
 
-/** The team's actions in the Agents tab's Agents and tasks fold: Stop all, and hand one task
- * straight to a sub-agent when the master should not plan it. A team view the engine
- * shortened says so. Inputs: the project id, the latest team status, a harness name lookup
+/** The team's actions in the Agents tab's Agents and tasks fold: Stop all while the team runs
+ * (a stopped team's line and Start all again sit above the graph), and hand one task straight
+ * to a sub-agent when the master should not plan it. A team view the engine shortened says so. Inputs: the project id, the latest team status, a harness name lookup
  * and a reload. Output: the actions. */
 export function TeamActions({ projectId, status, harness, reload }: {
   projectId: string;
@@ -416,7 +416,7 @@ export function TeamActions({ projectId, status, harness, reload }: {
 
   return <section className="tg-controls" aria-label="Team controls">
     {status.partial && <p className="pj-note" role="status">{PARTIAL_LINE}</p>}
-    <StopAll projectId={projectId} status={status} reload={reload} />
+    {!status.paused && <StopAll projectId={projectId} status={status} reload={reload} />}
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />

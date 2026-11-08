@@ -19,7 +19,7 @@ export type Route =
   | { name: "welcome" }
   | { name: "home" }
   | { name: "new-project"; step: NewProjectStep }
-  | { name: "project"; id: string; tab: ProjectTab }
+  | { name: "project"; id: string; tab: ProjectTab; section?: string }
   | { name: "add-project"; way: AddProjectWay }
   | { name: "onboarding"; id: string }
   | { name: "metrics" }
@@ -66,14 +66,15 @@ export function parseRoute(hash: string): Route {
   return { name: "home" };
 }
 
-/** Writes a route as a location hash, the inverse of parseRoute.
+/** Writes a route as a location hash, the inverse of parseRoute. A project route's section
+ * goes after "?section=", where the project page reads it, not parseRoute.
  * Input: a route. Output: a hash string starting with "#/". */
 export function formatRoute(route: Route): string {
   switch (route.name) {
     case "welcome": return "#/welcome";
     case "home": return "#/home";
     case "new-project": return `#/projects/new?step=${route.step}`;
-    case "project": return `#/projects/${encodeURIComponent(route.id)}/${route.tab}`;
+    case "project": return `#/projects/${encodeURIComponent(route.id)}/${route.tab}${route.section ? `?section=${encodeURIComponent(route.section)}` : ""}`;
     case "add-project": return `#/projects/add/${route.way}`;
     case "onboarding": return `#/projects/${encodeURIComponent(route.id)}/setup`;
     case "metrics": return "#/metrics";
