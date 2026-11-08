@@ -1748,6 +1748,31 @@ pub(super) fn start(
     set_base(db, repository, worktree, git_dir, &head)
 }
 
+/// Records the commit a master's leased worktree holds as the base its change sets open
+/// above, as [`start`] does for a team agent's new worktree, unless a base is stored for it
+/// already, which then never moves past commits the master made. Inputs: the store, the
+/// owner checkout, the worktree on its lease branch and its git folder. Output: Ok once a
+/// base is stored.
+pub(super) fn start_master(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<(), EngineError> {
+    store::initialize(db)?;
+    let _held = hold(repository);
+    if store::base_of(db, super::subagent::path_text(worktree)?)?.is_some() {
+        return Ok(());
+    }
+    let head = open_agent(db, AgentKind::Master, repository, worktree, git_dir)?.head()?;
+    set_base(db, repository, worktree, git_dir, &head)?;
+    assert_eq!(
+        store::base_of(db, super::subagent::path_text(worktree)?)?.as_deref(),
+        Some(head.as_str())
+    );
+    Ok(())
+}
+
 /// The commit an agent worktree holds now, for a worker cut from its lead (N1): a linked
 /// worktree's HEAD, or the tip of a clone's branch as fetched into the owner repository,
 /// so the worker's own copy reads it through the owner's objects. Inputs: the store, the
