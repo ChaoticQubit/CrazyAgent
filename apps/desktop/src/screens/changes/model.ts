@@ -46,6 +46,12 @@ export function agentName(set: ChangeSet): string {
   return set.agent.kind === "master" ? "Master" : displayText(set.agent.label);
 }
 
+/** Names a change set as the owner reads it everywhere. Input: the change set. Output: the
+ * name. */
+export function changeSetName(set: ChangeSet): string {
+  return agentName(set);
+}
+
 /** The size of a change set in files and lines. Input: the change set. Output: the line. */
 export function sizeLine(set: ChangeSet): string {
   return `${plural(set.files, "file", "files")}, ${plural(set.added, "line", "lines")} added, ${set.removed} removed`;
