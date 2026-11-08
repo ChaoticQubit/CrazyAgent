@@ -1,5 +1,6 @@
 import { HOOKLESS_WORDS, type GraphEdge, type GraphEdgeState, type GraphNode, type MessageEdge, type OverlapEdge, type Presence, type LiveAction, type Receipt, type RelationEdge, type TeamAgentStatus, type TeamGraph } from "../../engine-client";
 import type { Tone } from "../../ui";
+import { elapsed } from "../project/research";
 
 export const CARD_WIDTH = 216;
 export const CARD_HEIGHT = 132;
@@ -610,6 +611,17 @@ const ROLE_WORDS: Record<GraphNode["kind"], string> = {
  * older or newer engine sends that this build does not know. Input: the node. Output: the word. */
 export function nodeRole(node: Pick<GraphNode, "kind">): string {
   return Object.hasOwn(ROLE_WORDS, node.kind) ? ROLE_WORDS[node.kind] : "Agent";
+}
+
+/** How long the node's running task has run, as a terminal head says it, such as
+ * "running 14 min". Inputs: the node and now, in ms. Output: the words, or null while it
+ * runs no task or the engine does not say when its task started. */
+export function nodeRunning(node: Pick<GraphNode, "started_ms">, now: number): string | null {
+  const started = node.started_ms;
+  if (started === undefined || started === null) return null;
+  if (!Number.isSafeInteger(started)) throw new Error(`a task starts at a whole ms: ${started}`);
+  if (!Number.isFinite(now)) throw new Error(`now is a time in ms: ${now}`);
+  return `running ${elapsed(now - started)}`;
 }
 
 /** The second line of a node box: its place in the tree, its harness and its account, such

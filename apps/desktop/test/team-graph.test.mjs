@@ -61,6 +61,14 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.cardTip(ada, { project_id: "p", nodes: [ada], edges: [] }, name)[0], "Ada (@onboarding-fix)");
   assert.equal(graph.nodeRole(team.nodes[2]), "Master");
   assert.equal(graph.nodeRole(node("x", "someday")), "Agent", "an unknown kind from a newer engine still reads");
+  const now = 1_700_000_000_000;
+  assert.equal(graph.nodeRunning({ started_ms: now - 45_000 }, now), "running 45 s");
+  assert.equal(graph.nodeRunning({ started_ms: now - 125 * 60_000 }, now), "running 2 h 5 min");
+  assert.equal(graph.nodeRunning({ started_ms: now + 5_000 }, now), "running 0 s", "a clock behind the engine's never says a negative time");
+  assert.equal(graph.nodeRunning({ started_ms: null }, now), null);
+  assert.equal(graph.nodeRunning({}, now), null);
+  assert.throws(() => graph.nodeRunning({ started_ms: 1.5 }, now), /whole ms/);
+  assert.throws(() => graph.nodeRunning({ started_ms: now }, Number.NaN), /now is a time/);
 });
 
 test("each graph line names its relation, and the live action while it happens", () => {
