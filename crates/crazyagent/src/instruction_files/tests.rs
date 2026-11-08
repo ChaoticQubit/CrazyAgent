@@ -1012,6 +1012,76 @@ mod import {
     }
 
     #[test]
+    fn a_reftable_checkout_names_the_branch_it_switched_to() {
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-reftable-")
+            .tempdir_in(fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let (home, folder) = (root.join("home"), root.join("repo"));
+        for made in [&home, &folder] {
+            fs::create_dir(made).unwrap();
+        }
+        let engine_git = crate::research::runner::setup_git();
+        let run = |args: &[&str]| {
+            crate::spawn_gate::output(
+                Command::new(engine_git)
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("HOME", &home)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("LC_ALL", "C")
+                    .arg("-C")
+                    .arg(&folder)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap()
+        };
+        let made = run(&[
+            "init",
+            "-q",
+            "--template=",
+            "--ref-format=reftable",
+            "-b",
+            "main",
+        ]);
+        if !made.status.success() {
+            eprintln!(
+                "SKIPPED: {} cannot make a reftable checkout: {}",
+                engine_git.display(),
+                String::from_utf8_lossy(&made.stderr)
+            );
+            return;
+        }
+        assert!(folder.join(".git").join("reftable").is_dir());
+        for args in [
+            &["config", "user.name", "Repo Owner"][..],
+            &["config", "user.email", "repo@example.invalid"],
+            &["config", "commit.gpgSign", "false"],
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+        ] {
+            assert!(run(args).status.success(), "git {args:?}");
+        }
+        let checked_out = || uncommitted_import(&folder).unwrap().checked_out;
+        assert_eq!(checked_out(), Some("main".to_owned()));
+        assert!(
+            run(&["checkout", "-q", "-b", "release/2.0"])
+                .status
+                .success()
+        );
+        assert_eq!(
+            checked_out(),
+            Some("release/2.0".to_owned()),
+            "a reftable checkout's .git/HEAD stub stays the same across a switch, so the branch is read again"
+        );
+        assert!(run(&["checkout", "-q", "--detach"]).status.success());
+        assert_eq!(checked_out(), None);
+    }
+
+    #[test]
     fn a_branch_name_the_engine_cannot_read_keeps_the_waiting_move_with_no_branch() {
         let checkout = Checkout::new();
         import(&checkout.folder).unwrap();
