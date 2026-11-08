@@ -8661,7 +8661,7 @@ fn cargo_lock(app_dependencies: &[&str]) -> String {
 /// and `b` with its lockfile, seats the case's agent as team sub-agent `CLONE_AGENT` so it
 /// can be sent notes, and starts its turn there. Input: the case. Output: none.
 fn cargo_workspace(case: &mut Case) {
-    seat_clone_agent(case);
+    seat_team_agent(case);
     let crate_manifest = |name: &str| {
         format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
     };
