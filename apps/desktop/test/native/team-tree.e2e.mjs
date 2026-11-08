@@ -125,7 +125,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
         await me.waitFor("the Agents tab with the team graph", (text) => text.includes("Master") && text.includes("Running") && text.includes("Finished (3)"), STEP_MS);
-        await me.click("All", "[role=radio]");
+        await me.click(null, '[role=radiogroup][aria-label="Show"] [role=radio]:last-child');
         await me.unfold("Agents and tasks");
         const all = await me.waitFor("every team task, done ones too", (text) => text.includes(LEAD_TASK) && WORKER_TASKS.every((task) => text.includes(task)), STEP_MS);
         await me.capture("team-tree-stopped");

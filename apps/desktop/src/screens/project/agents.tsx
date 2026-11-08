@@ -74,7 +74,6 @@ export function agentsView(section: string | undefined): { view: "team" | "setti
 }
 
 const AGENTS_VIEWS: { value: "team" | "settings"; label: string }[] = [{ value: "team", label: "Team" }, { value: "settings", label: "Agent settings" }];
-const SHOW_OPTIONS: { value: "running" | "all"; label: string }[] = [{ value: "running", label: "Running" }, { value: "all", label: "All" }];
 
 /** Pause all on Agents, beside Open all terminals: the project menu's Pause all agents, the
  * same confirm and the same engine call, which stops every running team task and cancels
@@ -128,8 +127,9 @@ function SettingsToolbar({ projectId, name, perWindow, lead, asks, pool, tools }
 }
 
 /** Agents tab: Team, as the approved mockup draws it: one toolbar row (Team and Agent
- * settings, the team line whose "N ask you" opens the owner's questions and the sub-agent
- * events in a drawer, Running and All, Pause all, Open all terminals), a stopped team's line
+ * settings, the team line with the working line and the pool's account count, whose "N ask
+ * you" opens the owner's questions and the sub-agent events in a drawer, Running and All with
+ * their counts, Pause all, Open all terminals), a stopped team's line
  * with Start all again, the graph with its one terminal panel, then the closed Agents and
  * tasks fold (Stop all, Hand a task, the team's agents and tasks, wake rules, usage),
  * Finished agents and every research agent the project has started, with live progress from
@@ -164,8 +164,10 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
   const named = loadedAccounts.kind === "ok" ? loadedAccounts.value : [];
   const running = jobs.filter((job) => job.status === "running" || job.status === "queued");
   const list = filter === "running" ? running : jobs;
+  const accounts = data.assigned?.pool.members.length ?? 0;
   const team = data.team;
   const teamValue: Pick<TeamStatus, "agents" | "tasks" | "terminals_per_window"> = team.result?.kind === "ok" ? team.result.value : { agents: [], tasks: [] };
+  const teamCount = (shown: "running" | "all") => teamPanel(teamValue, [], (id) => id, shown, team.at).agents.length;
   const teamShown = teamPanel(teamValue, [], (id) => id, filter, team.at);
   const asks = inbox.shown?.kind === "ok" ? asksWords(askCount(inbox.shown.value)) : "Questions";
   const cleanup = <FinishedAgentsCleanup projectId={data.id} finished={teamValue.agents.filter((agent) => agent.status === "stopped" || agent.status === "failed").length} harness={(id) => harnessName(harnesses, id)} />;
@@ -194,8 +196,10 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
   const bar = {
     lead: viewSwitch,
     asks: <button type="button" className="tg-asks" aria-haspopup="dialog" onClick={() => { setFocus(null); setAsking(true); }}>{asks}</button>,
-    pool: data.assigned ? poolName(data.assigned.pool) : "No pool. Pick a pool to start.",
-    tools: <><Segmented label="Show" value={filter} onValue={setFilter} options={SHOW_OPTIONS} /><PauseAll data={data} /></>,
+    pool: data.assigned ? `${poolName(data.assigned.pool)}: ${accounts} ${accounts === 1 ? "account" : "accounts"}` : "No pool. Pick a pool to start.",
+    tools: <><Segmented label="Show" value={filter} onValue={setFilter}
+      options={[{ value: "running", label: `Running (${running.length + teamCount("running")})` }, { value: "all", label: `All (${jobs.length + teamCount("all")})` }]} />
+      <PauseAll data={data} /></>,
   };
   const perWindow = teamValue.terminals_per_window ?? 6;
   const drawer = <Drawer open={asking} title={questionsTitle(inbox)} onClose={() => { setAsking(false); setFocus(null); }}>

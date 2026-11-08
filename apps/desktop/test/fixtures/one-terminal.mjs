@@ -130,7 +130,8 @@ function bridge() {
 /** Mounts the Agents tab of project alpha on a fresh page, as the project page shows it, with
  * Pool A assigned, the engine answering each terminal attach after the given delay, the team
  * graph read as the given mode and the team status listing the given tasks, with any other
- * status fields changed; `view` gives the route's section and open questions for the inbox.
+ * status fields changed; `view` gives the route's section, open questions for the inbox and
+ * the assigned pool's name.
  * Inputs: the delay in ms, the graph mode, the tasks, the changes and the view. */
 export function mount(delayMs = 0, graph = "ok", tasks = [], patch = {}, view = {}) {
   root?.unmount();
@@ -146,7 +147,7 @@ export function mount(delayMs = 0, graph = "ok", tasks = [], patch = {}, view = 
   root = createRoot(document.getElementById("panel"));
   const data = {
     id: "alpha", name: "Alpha", setup: undefined, research: undefined, context: undefined, pools: undefined, harnesses: undefined,
-    assigned: { pool: { id: "pool-a", name: "Pool A", members: [] } }, now: 0, navigate: () => {}, notify: (note) => engine.notes.push(note), reload: () => {}, reloadPools: () => {},
+    assigned: { pool: { id: "pool-a", name: view.pool ?? "Pool A", members: [] } }, now: 0, navigate: () => {}, notify: (note) => engine.notes.push(note), reload: () => {}, reloadPools: () => {},
     team: { result: { kind: "ok", value: teamStatus({ tasks, ...patch }) }, at: 1 }, reloadTeam: () => {},
   };
   flushSync(() => root.render(createElement(AgentsTab, { data, section: view.section })));
@@ -286,9 +287,27 @@ export async function settingsBar() {
   };
 }
 
+/** How the Agents toolbar fits its window: how far .main, the page's scroller, scrolls
+ * sideways and which of the row's parts reach past the row's own edge. Output: `sideways` in
+ * pixels and `past`, the words of each part that overflows. */
+export function toolbarFit() {
+  const scroller = document.querySelector(".main");
+  const head = document.querySelector("#panel .tg-head");
+  const edge = head.getBoundingClientRect();
+  return {
+    sideways: scroller.scrollWidth - scroller.clientWidth,
+    past: [...head.querySelectorAll("*")].filter((part) => {
+      const box = part.getBoundingClientRect();
+      return box.width > 1 && (box.right > edge.right + 0.5 || box.left < edge.left - 0.5);
+    }).map((part) => part.textContent.trim()),
+    rows: new Set([...head.children].map((part) => Math.round(part.getBoundingClientRect().top))).size,
+  };
+}
+
 /** The Agents toolbar as the owner reads it, left to right: every button and the team line
- * above the graph, outside dialogs, with how many rows they take, the space between the
- * lowest of them and the graph, and whether a Questions for you section shows on the page. */
+ * above the graph, outside dialogs, with how many rows they take, how far apart their centres
+ * sit, the space between the lowest of them and the graph, and whether a Questions for you
+ * section shows on the page. */
 export function toolbar() {
   const split = document.querySelector(".tg-split");
   const above = (item) => split !== null && (item.compareDocumentPosition(split) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
@@ -300,6 +319,7 @@ export function toolbar() {
   return {
     names: items.map((item) => item.textContent.replace(/\s+/gu, " ").trim() || item.getAttribute("aria-label")),
     rows,
+    spread: Math.round((middles[middles.length - 1] - middles[0]) * 10) / 10,
     gap: split === null || boxes.length === 0 ? null : Math.round(split.getBoundingClientRect().top - Math.max(...boxes.map((box) => box.bottom))),
     questions: [...document.querySelectorAll("#panel section")].some((item) => !item.closest("dialog") && /^Questions for you/u.test(item.getAttribute("aria-label") ?? item.querySelector("h3")?.textContent ?? "")),
   };

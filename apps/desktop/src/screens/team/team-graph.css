@@ -13,10 +13,16 @@
   gap: var(--space-2);
 }
 
+.tg-head > .segmented {
+  align-self: center;
+}
+
 .tg-summary {
-  flex: 1 1 auto;
+  flex: 1 1 0;
+  min-width: 180px;
   color: var(--text-2);
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .tg-asks {
