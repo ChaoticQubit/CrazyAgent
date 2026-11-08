@@ -1197,4 +1197,71 @@ mod tests {
                 .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
         }));
     }
+
+    /// RVA-L1 guard (051798248's red on today's head-only API): the owner read a change set,
+    /// committed on main and asked the agent to update, and the agent's next turn checked the
+    /// reviewed head out again. An Accept naming the head the owner read must never land a
+    /// revert of the owner's commit.
+    #[cfg(unix)]
+    #[test]
+    fn a_reviewed_head_checked_out_after_an_update_lands_nothing_unseen() {
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-chg-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = tmp.path();
+        let (repo, home) = (root.join("repo"), root.join("home"));
+        let (workspace, id) = recorded(root);
+        let db = landing::open(root).unwrap();
+        let (_, read) = landing::change_set(&db, &id).unwrap().unwrap();
+        std::fs::write(repo.join("OWNER"), "owner work\n").unwrap();
+        git(&home, &repo, &["add", "OWNER"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "-c",
+                "user.name=O",
+                "-c",
+                "user.email=o@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Owner work",
+            ],
+        );
+        let owner_tip = git(&home, &repo, &["rev-parse", "HEAD"]);
+        landing::update(&db, &id).unwrap();
+        let (_, updated) = landing::change_set(&db, &id).unwrap().unwrap();
+        assert_eq!(updated.base, owner_tip.trim());
+        git(
+            &home,
+            &workspace.worktree,
+            &["checkout", "-q", "--detach", &read.head],
+        );
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-2".into(),
+            prompt_line: "Resolve the update".into(),
+        };
+        let turned = landing::record_turn_end(&db, &workspace, &turn).map_err(|problem| problem.0);
+        let after = landing::change_set(&db, &id).unwrap().unwrap().1;
+        std::fs::write(
+            home.join(".gitconfig"),
+            "[user]\n\tname = O\n\temail = o@example.invalid\n",
+        )
+        .unwrap();
+        let accepted =
+            landing::accept(&db, &home, &id, &read.head, None).map_err(|problem| problem.0);
+        let kept = git(&home, &repo, &["ls-tree", "--name-only", "HEAD", "OWNER"]);
+        assert_eq!(
+            kept.trim(),
+            "OWNER",
+            "the owner's commit is reverted unseen: turn end {turned:?}, set now base {} head {} (read base {} head {}), accept {accepted:?}",
+            after.base,
+            after.head,
+            read.base,
+            read.head
+        );
+    }
 }

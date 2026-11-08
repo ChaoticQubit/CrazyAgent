@@ -33,7 +33,7 @@ const NOT_READY_LINE: &str = "Landing changes isn't ready in this engine yet.";
 const MESSAGE_ROWS: usize = 6;
 const UPDATED_NOTICE: &str =
     "Your branch is merged into the agent's copy. The list shows when the agent picks it up.";
-const MOVED_NOTE: &str = "These changes moved on since you opened them. They are read again from the top: Accept and Discard come back at the last page.";
+const MOVED_NOTE: &str = "These changes moved on since you opened them. They are read again from the top: Accept and Discard come back once you scroll to the end.";
 const WAITING_NOTE: &str = "Your branch is merged into the agent's copy, but the agent wasn't handed the work to resolve it. Ask it to update again, or discard.";
 const NO_FILE_SHOWN: &str = "Scroll the diff to a changed text file to open it in your editor.";
 
@@ -54,7 +54,8 @@ struct Diff {
     truncated: bool,
     top: usize,
     moved: bool,
-    seen_all: bool,
+    complete: bool,
+    seen_all: Cell<bool>,
     skip: usize,
     width: Cell<usize>,
 }
@@ -75,17 +76,19 @@ impl Diff {
             truncated: false,
             top: 0,
             moved,
-            seen_all: false,
+            complete: false,
+            seen_all: Cell::new(false),
             skip: 0,
             width: Cell::new(0),
         }
     }
 
     /// Tells whether Accept and Discard may name this diff's head: always for the head
-    /// the owner opened, and after a move only once the new head's last page was read
-    /// (RV-DS-79). Output: the answer.
+    /// the owner opened, and after a move only once the last line of the new head's last
+    /// page was drawn on screen, not when that page arrived (RV-DS-79, RVA-1). Output: the
+    /// answer.
     fn reviewed(&self) -> bool {
-        !self.moved || self.seen_all
+        !self.moved || self.seen_all.get()
     }
 
     /// Whether the next page is wanted now: while the file list is not complete, so every
@@ -218,6 +221,7 @@ pub(in crate::tui) struct ProjectChanges {
     read_ms: i64,
     edit: Option<String>,
     reveal: Option<RevealTarget>,
+    painting: Cell<bool>,
 }
 
 impl ProjectChanges {
@@ -248,7 +252,16 @@ impl ProjectChanges {
             read_ms: 0,
             edit: None,
             reveal: None,
+            painting: Cell::new(true),
         }
+    }
+
+    /// Says whether the next drawings of this tab are painted on screen. Only a painted
+    /// drawing records that a moved diff's last line was seen, so a taller drawing that is
+    /// never shown cannot unlock Accept (RVA-1). Input: false while drawing a view that is
+    /// not painted. Output: none.
+    pub(in crate::tui) fn painting(&self, painted: bool) {
+        self.painting.set(painted);
     }
 
     /// Asks for a fresh list on the next `next_query`, as when the owner opens the tab.
@@ -345,7 +358,7 @@ impl ProjectChanges {
                         None => self.diff = None,
                         Some(set)
                             if set.head != diff.head
-                                || (diff.moved && !diff.seen_all && diff.next.is_none()) =>
+                                || (diff.moved && !diff.complete && diff.next.is_none()) =>
                         {
                             *diff = Diff::at(set.id.clone(), set.head.clone(), true);
                             self.notice = Some(Notice::problem(MOVED_NOTE));
@@ -368,7 +381,7 @@ impl ProjectChanges {
                     && diff.next == Some(*page)
                 {
                     diff.add(page_diff);
-                    diff.seen_all = diff.next.is_none();
+                    diff.complete = diff.next.is_none();
                 }
             }
             (ChangesQuery::Diff { id, .. }, Err(code)) if code == "changes_stale" => {
@@ -904,6 +917,11 @@ impl ProjectChanges {
         lines
     }
 
+    /// Draws the open diff under the chosen set's details, from the line the owner
+    /// scrolled to, and records, in a painted drawing only, once the last line of a complete
+    /// diff was drawn whole on screen, which Accept and Discard wait for after a move
+    /// (RVA-1). Inputs: the diff, the content width, the rows available, the time now and the
+    /// look. Output: the rows.
     fn diff_rows(
         &self,
         diff: &Diff,
@@ -959,15 +977,18 @@ impl ProjectChanges {
         }
         lines.push(Row::default());
         if diff.lines.is_empty() {
-            let waiting = if diff.next.is_some() || !diff.reviewed() {
+            let waiting = if diff.next.is_some() || (diff.moved && !diff.complete) {
                 "Loading changes..."
             } else {
                 "No text changes to show."
             };
+            diff.seen_all
+                .set(diff.seen_all.get() || (self.painting.get() && diff.complete));
             lines.push(Row::of(waiting, look.muted));
             return lines;
         }
-        let text_rows = room.saturating_sub(lines.len()).max(1);
+        let above = lines.len();
+        let text_rows = room.saturating_sub(above).max(1);
         diff.width.set(content.max(1));
         let mut inside = diff
             .lines
@@ -977,6 +998,7 @@ impl ProjectChanges {
             .find(|line| line.starts_with(DIFF_HEADER))
             .is_some_and(|header| diff.marked_header(header));
         let mut shown = 0;
+        let mut drawn_to = diff.top;
         for (index, line) in diff.lines.iter().enumerate().skip(diff.top) {
             if shown >= text_rows {
                 break;
@@ -991,7 +1013,9 @@ impl ProjectChanges {
                     true => diff.skip.min(pieces.len().saturating_sub(1)),
                     false => 0,
                 };
-                for piece in pieces.into_iter().skip(skip).take(text_rows - shown) {
+                let left = pieces.len() - skip;
+                let taken = left.min(text_rows - shown);
+                for piece in pieces.into_iter().skip(skip).take(taken) {
                     lines.push(Row::of(piece, style).pad(content));
                     shown += 1;
                 }
@@ -999,12 +1023,21 @@ impl ProjectChanges {
                     lines.push(Row::of(String::new(), style).pad(content));
                     shown += 1;
                 }
+                if taken == left {
+                    drawn_to = index + 1;
+                }
             } else {
                 lines.push(Row::of(line.clone(), style).pad(content));
                 shown += 1;
+                drawn_to = index + 1;
             }
         }
+        let whole = above + shown <= room.max(1);
         lines.truncate(room.max(1));
+        diff.seen_all.set(
+            diff.seen_all.get()
+                || (self.painting.get() && diff.complete && whole && drawn_to == diff.lines.len()),
+        );
         lines
     }
 

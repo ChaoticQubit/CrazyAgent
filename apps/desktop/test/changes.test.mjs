@@ -271,8 +271,9 @@ test("every diff page is read at the head under review, and a page refused as mo
   const api = readFileSync(new URL("../src/api-changes.ts", import.meta.url), "utf8");
   assert.match(api, /call<ChangeDiff>\("desktop_change_diff", \{ id, head, page \}\)/);
   const source = readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8");
-  assert.match(source, /loadChangeDiff\(set\.id, head, page\)/);
-  assert.match(source, /if \(result\.kind === "error" && result\.code === "changes_stale"\) onMoved\(\);/);
+  assert.match(source, /load = loadChangeDiff \}/, "Detail reads pages from the engine unless a test hands it a reader");
+  assert.match(source, /void load\(set\.id, head, page\)/);
+  assert.match(source, /if \(result\.kind === "error" && result\.code === "changes_stale"\) \{\n\s+setStaleAt\(set\);\n\s+setReview\(movedOn\);\n\s+onMoved\(\);/);
   assert.match(source, /const \[list, reread\] = useChangeList\(data\.id\);/);
   assert.match(source, /onMoved=\{reread\}/);
 });

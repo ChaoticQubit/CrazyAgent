@@ -96,7 +96,7 @@ export function outcomeNote(set: ChangeSet): string | null {
 
 /** What the owner is reviewing of one change set: its id, the head its diff pages are read
  * at and that Accept and Discard send, whether that head moved on since the owner opened
- * it, and whether every page of the moved head was shown since. */
+ * it, and whether the end of the moved head's last page was on screen since. */
 export interface Review {
   id: string;
   head: string;
@@ -114,23 +114,31 @@ export function reviewOf(previous: Review | null, set: ChangeSet): Review {
   return previous;
 }
 
-/** Records that the last diff page read at `head` was shown. Inputs: the review and the
- * head that page was read at. Output: the review, unchanged for a page of another head. */
+/** Records that the end of the last diff page read at `head` was on screen. Inputs: the
+ * review and the head that page was read at. Output: the review, unchanged for a page of
+ * another head. */
 export function lastPageSeen(review: Review, head: string): Review {
   return review.head === head && !review.seenAll ? { ...review, seenAll: true } : review;
 }
 
+/** Marks the review moved and unread after a diff page was refused as moved on, so Accept
+ * and Discard wait for a read from the top even when the list then shows the same head
+ * again (RVA-L2). Input: the review. Output: the review, moved and unseen. */
+export function movedOn(review: Review): Review {
+  return { ...review, moved: true, seenAll: false };
+}
+
 /** Whether Accept and Discard may act on what the owner reviewed: not after the change set
- * moved on until every page of its new head was shown. Input: the review. Output: true when
- * they may act. */
+ * moved on until the end of its new head's last page was on screen. Input: the review.
+ * Output: true when they may act. */
 export function reviewed(review: Review): boolean {
   return !review.moved || review.seenAll;
 }
 
 /** The note shown while a change set moved on since the owner opened it and its new head is
- * not yet read to the last page. Input: the review. Output: the note, or null. */
+ * not yet read to the end of its last page. Input: the review. Output: the note, or null. */
 export function movedNote(review: Review): string | null {
-  return reviewed(review) ? null : "These changes moved on since you opened them. Review them again: Accept and Discard come back once you reach the last page.";
+  return reviewed(review) ? null : "These changes moved on since you opened them. Review them again: Accept and Discard come back once you scroll to the end of the last page.";
 }
 
 /** The actions a change set's state allows now. Inputs: the change set and now in

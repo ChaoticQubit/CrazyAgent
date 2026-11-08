@@ -1205,7 +1205,9 @@ impl ProjectPage {
 
     fn redraw(&mut self, ctx: &Ctx) {
         self.screen.width = ctx.width;
+        self.screen.changes.painting(false);
         self.view = project_screen(&mut self.screen, ctx.width, ctx.height, &look(ctx));
+        self.screen.changes.painting(true);
     }
 
     fn pump(&mut self, ctx: &mut Ctx) {
