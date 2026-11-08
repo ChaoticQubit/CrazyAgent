@@ -107,10 +107,10 @@ function bridge() {
 }
 
 /** Mounts the Agents tab of project alpha on a fresh page, as the project page shows it, with
- * the engine answering each terminal attach after the given delay, the team graph read as
- * the given mode and the team status listing the given tasks. Inputs: the delay in ms, the
- * graph mode and the tasks. */
-export function mount(delayMs = 0, graph = "ok", tasks = []) {
+ * Pool A assigned, the engine answering each terminal attach after the given delay, the team
+ * graph read as the given mode and the team status listing the given tasks, with any other
+ * status fields changed. Inputs: the delay in ms, the graph mode, the tasks and the changes. */
+export function mount(delayMs = 0, graph = "ok", tasks = [], patch = {}) {
   root?.unmount();
   Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs, graph });
   bridge();
@@ -124,8 +124,8 @@ export function mount(delayMs = 0, graph = "ok", tasks = []) {
   root = createRoot(document.getElementById("panel"));
   const data = {
     id: "alpha", name: "Alpha", setup: undefined, research: undefined, context: undefined, pools: undefined, harnesses: undefined,
-    assigned: null, now: 0, navigate: () => {}, notify: (note) => engine.notes.push(note), reload: () => {}, reloadPools: () => {},
-    team: { result: { kind: "ok", value: teamStatus({ tasks }) }, at: 1 }, reloadTeam: () => {},
+    assigned: { pool: { id: "pool-a", name: "Pool A", members: [] } }, now: 0, navigate: () => {}, notify: (note) => engine.notes.push(note), reload: () => {}, reloadPools: () => {},
+    team: { result: { kind: "ok", value: teamStatus({ tasks, ...patch }) }, at: 1 }, reloadTeam: () => {},
   };
   flushSync(() => root.render(createElement(AgentsTab, { data })));
 }
@@ -150,10 +150,16 @@ export function click(name) {
   return true;
 }
 
-/** Clicks Open terminal on the agent's row under "Waiting on you in their terminal". Input:
+/** Clicks Open terminal on the agent's row under "Waiting on you in their terminal", opening
+ * the drawer behind the toolbar's "N ask you" first when the rows are not on the page. Input:
  * the name. Output: whether the row and its button were there. */
-export function openWaiting(name) {
-  const rows = document.querySelector('[aria-label="Waiting on you in their terminal"]');
+export async function openWaiting(name) {
+  const list = '[aria-label="Waiting on you in their terminal"]';
+  if (!document.querySelector(list)) {
+    document.querySelector(".tg-asks")?.click();
+    await until(() => document.querySelector(list) !== null);
+  }
+  const rows = document.querySelector(list);
   const row = [...(rows?.querySelectorAll("li") ?? [])].find((item) => item.textContent.includes(name));
   const button = [...(row?.querySelectorAll("button") ?? [])].find((item) => item.textContent.includes("Open terminal"));
   if (!button) return false;
@@ -215,5 +221,54 @@ export function shown() {
     clients: [...engine.clients.values()],
     attaches: [...engine.attaches],
     detaches: [...engine.detaches],
+  };
+}
+
+/** The Agents toolbar as the owner reads it, left to right: every button and the team line
+ * above the graph, outside dialogs, with how many rows they take, the space between the
+ * lowest of them and the graph, and whether a Questions for you section shows on the page. */
+export function toolbar() {
+  const split = document.querySelector(".tg-split");
+  const above = (item) => split !== null && (item.compareDocumentPosition(split) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+  const items = [...document.querySelectorAll("#panel button, #panel .tg-summary")]
+    .filter((item) => above(item) && item.offsetParent !== null && !item.closest("dialog") && !item.parentElement.closest(".tg-summary"));
+  const boxes = items.map((item) => item.getBoundingClientRect());
+  const middles = boxes.map((box) => box.top + box.height / 2).sort((a, b) => a - b);
+  const rows = middles.filter((middle, index) => index === 0 || middle - middles[index - 1] > 8).length;
+  return {
+    names: items.map((item) => item.textContent.replace(/\s+/gu, " ").trim() || item.getAttribute("aria-label")),
+    rows,
+    gap: split === null || boxes.length === 0 ? null : Math.round(split.getBoundingClientRect().top - Math.max(...boxes.map((box) => box.bottom))),
+    questions: [...document.querySelectorAll("#panel section")].some((item) => !item.closest("dialog") && /^Questions for you/u.test(item.getAttribute("aria-label") ?? item.querySelector("h3")?.textContent ?? "")),
+  };
+}
+
+/** The Team view's folds under the graph and where each team part sits: Stop all, the Hand a
+ * task form, the team table, the task list, the wake rules and the Usage card, each as the
+ * label of the fold it is in, "page" when outside every fold, or null when it is not on the
+ * page. */
+export function folds() {
+  const heading = (text) => [...document.querySelectorAll("#panel h2, #panel h3, #panel h4")].find((item) => item.textContent.trim() === text) ?? null;
+  const parts = {
+    "Stop all": [...document.querySelectorAll("#panel button")].find((item) => item.textContent.trim() === "Stop all") ?? null,
+    "Hand a task": document.querySelector("#panel form.tg-hand"),
+    "Team agents": document.querySelector("#pj-team-title"),
+    "Team tasks": document.querySelector('#panel [aria-label="Team tasks"]'),
+    "Wake rules": heading("Wake the master for this project"),
+    "Usage": heading("Usage"),
+  };
+  return {
+    folds: [...document.querySelectorAll("#panel details")].map((item) => ({ label: item.getAttribute("aria-label"), open: item.open })),
+    parts: Object.fromEntries(Object.entries(parts).map(([name, item]) => [name, item === null ? null : item.closest("details")?.getAttribute("aria-label") ?? "page"])),
+  };
+}
+
+/** The open drawer: its title and the labels of its sections, or null when none is open. */
+export function drawer() {
+  const open = document.querySelector("dialog.drawer[open]");
+  if (!open) return null;
+  return {
+    title: open.querySelector("h2")?.textContent ?? "",
+    sections: [...open.querySelectorAll("section")].map((item) => item.getAttribute("aria-label") ?? item.querySelector("h3")?.textContent ?? ""),
   };
 }

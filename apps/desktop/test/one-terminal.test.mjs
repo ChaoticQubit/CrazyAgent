@@ -130,3 +130,51 @@ test("the panel's Message puts the cursor in its Type to box, its Stop asks firs
   assert.deepEqual(steps.paused.cancels, [null], `one pause of every task: ${JSON.stringify(steps.paused)}`);
   assert.deepEqual(steps.paused.notes, ["Paused. Running tasks are stopping and waiting tasks are cancelled."], JSON.stringify(steps.paused));
 });
+
+/** Mounts the Agents tab at 1200x800 with a running task and a codex sub-agent harness, waits
+ * until the graph drew and the questions inbox read, runs the steps and returns what each
+ * step saw. Input: the steps as page expressions, by name. Output: what each returned. */
+async function agentsPage(steps) {
+  return withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(0, 'ok', [Fixture.runningTask(7)], { harnesses: [{ harness: "codex", role: "sub", agents_max: 2, tools: true, live: 1 }] })`);
+    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4)"), true, "the graph drew");
+    await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent.includes('ask you'))");
+    const seen = {};
+    for (const [name, step] of steps) seen[name] = await evaluate(step);
+    return seen;
+  });
+}
+
+test("the Agents toolbar is the mockup's one row: Team and Agent settings, the team line, Running and All, Pause all and Open all terminals", async () => {
+  const { bar } = await agentsPage([["bar", "Fixture.toolbar()"]]);
+  assert.deepEqual(bar.names, ["Team", "Agent settings", "Master and 3 agents · 2 ask you · Pool A", "Running", "All", "Pause all", "Open all terminals"], JSON.stringify(bar));
+  assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
+  assert.ok(bar.gap !== null && bar.gap <= 24, `the graph starts right under the row: ${bar.gap} px`);
+  assert.equal(bar.questions, false, "no Questions for you section on the page");
+});
+
+test("under the graph the Team view keeps the team's agents, tasks, Hand a task, Stop all, wake rules and usage in a closed Agents and tasks fold", async () => {
+  const { parts } = await agentsPage([["parts", "Fixture.folds()"]]);
+  assert.deepEqual(parts.folds.find((fold) => fold.label === "Agents and tasks"), { label: "Agents and tasks", open: false }, JSON.stringify(parts));
+  assert.deepEqual(parts.parts, {
+    "Stop all": "Agents and tasks", "Hand a task": "Agents and tasks", "Team agents": "Agents and tasks", "Team tasks": "Agents and tasks", "Wake rules": "Agents and tasks", "Usage": "Agents and tasks",
+  }, JSON.stringify(parts));
+});
+
+test("N ask you opens a drawer with Questions for you and Sub-agent events, and Open terminal there closes it and opens the one panel", async () => {
+  const seen = await agentsPage([
+    ["pressed", "Fixture.press('.tg-summary', '2 ask you')"],
+    ["drawer", "Fixture.until(() => Fixture.drawer() !== null).then(() => Fixture.drawer())"],
+    ["opened", "Fixture.openWaiting('Ada')"],
+    ["live", "Fixture.until(() => Fixture.shown().panels.includes('Ada terminal') && Fixture.shown().live > 0)"],
+    ["after", "Fixture.drawer()"],
+  ]);
+  assert.equal(seen.pressed, true, "2 ask you is a button in the team line");
+  assert.equal(seen.drawer?.title, "Questions for you", JSON.stringify(seen.drawer));
+  assert.deepEqual(seen.drawer?.sections, ["Questions for you", "Sub-agent events"], JSON.stringify(seen.drawer));
+  assert.equal(seen.opened, true, "Open terminal on Ada in the drawer");
+  assert.equal(seen.live, true, "Ada's terminal opened in the one panel");
+  assert.equal(seen.after, null, "the drawer closed");
+});
