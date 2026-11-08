@@ -4264,9 +4264,17 @@ mod tests {
     use tauri::webview::{InvokeRequest, WebviewBuilder};
     use tauri::{LogicalPosition, LogicalSize, Webview};
 
+    struct Page(Webview<MockRuntime>);
+
+    impl AsRef<Webview<MockRuntime>> for Page {
+        fn as_ref(&self) -> &Webview<MockRuntime> {
+            &self.0
+        }
+    }
+
     fn ask(page: &Webview<MockRuntime>, command: &str, args: Value) -> Result<(), Value> {
         get_ipc_response(
-            page,
+            &Page(page.clone()),
             InvokeRequest {
                 cmd: command.into(),
                 callback: CallbackFn(0),

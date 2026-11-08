@@ -194,7 +194,7 @@ test("the TUI focus poll reaches the engine only while a project's IDE webview i
 });
 
 const command = (lib, name) => {
-  const start = lib.indexOf(`async fn ${name}(`);
+  const start = lib.search(new RegExp(`async fn ${name}(<R: Runtime>)?\\(`));
   assert.ok(start >= 0, `${name} exists`);
   return lib.slice(start, lib.indexOf("#[tauri::command]", start));
 };
