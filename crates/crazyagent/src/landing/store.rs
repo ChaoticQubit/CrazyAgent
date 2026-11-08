@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS landing_change_set_numbers (
     UNIQUE(project, number)
 );";
 
+const NUMBER_PASS_MAX: i64 = 10_000;
+
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
     restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone,landed_on";
@@ -145,7 +147,9 @@ pub(super) struct Record {
 }
 
 impl Record {
-    pub(super) fn view(&self) -> ChangeSetView {
+    /// The change set as the owner's Changes shows it. Input: its number, None while an
+    /// engine without numbers stored it. Output: the view.
+    pub(super) fn view(&self, number: Option<u64>) -> ChangeSetView {
         ChangeSetView {
             id: self.id.clone(),
             agent: self.agent.clone(),
@@ -164,7 +168,7 @@ impl Record {
             message: self.message(),
             waiting: self.waiting && self.state == ChangeState::Updating,
             outside: self.outside,
-            number: None,
+            number,
         }
     }
 
@@ -339,10 +343,19 @@ fn signed(value: u64) -> Result<i64, EngineError> {
     i64::try_from(value).map_err(|_| failure("changes_unavailable"))
 }
 
-/// Writes a change set, adding it or updating every column of the row with its id.
+/// Writes a change set, adding it or updating every column of the row with its id, and
+/// gives a set with no number the next number of its project in the same savepoint.
 /// Inputs: the store and the record. Output: Ok once stored; a second open change set
 /// for the same worktree is refused with `changes_agent_has_pending` and both rows stay.
 pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> {
+    within(db, "landing_save", || {
+        write(db, record)?;
+        number(db, &record.id, &record.project)?;
+        Ok(())
+    })
+}
+
+fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
     let intent = record
         .intent
         .as_ref()
@@ -399,6 +412,125 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
         _ => storage(error),
     })?;
     Ok(())
+}
+
+/// Gives a change set the next number of its project when it has none yet: the project's
+/// highest number plus one. A set that has one keeps it. Inputs: the store, the set and its
+/// project. Output: the set's number, at least 1 and held by no other set of the project.
+fn number(db: &Connection, id: &ChangeSetId, project: &ProjectId) -> Result<u64, EngineError> {
+    db.execute(
+        "INSERT INTO landing_change_set_numbers(change_set,project,number) \
+         SELECT ?1, ?2, COALESCE(MAX(number), 0) + 1 FROM landing_change_set_numbers \
+         WHERE project=?2 ON CONFLICT(change_set) DO NOTHING",
+        params![id.as_str(), project.as_str()],
+    )
+    .map_err(storage)?;
+    let (number, holders): (i64, i64) = db
+        .query_row(
+            "SELECT number, (SELECT COUNT(*) FROM landing_change_set_numbers other \
+             WHERE other.project=own.project AND other.number=own.number) \
+             FROM landing_change_set_numbers own WHERE change_set=?1",
+            [id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(storage)?;
+    assert!(number >= 1, "a change set number starts at 1");
+    assert_eq!(
+        holders, 1,
+        "a change set number is held by one set of its project"
+    );
+    Ok(number.unsigned_abs())
+}
+
+/// Reads the number a change set carries. Inputs: the store and the set. Output: the
+/// number, or None for a set an engine without numbers stored since the last start.
+pub(super) fn number_of(db: &Connection, id: &ChangeSetId) -> Result<Option<u64>, EngineError> {
+    let number: Option<i64> = db
+        .query_row(
+            "SELECT number FROM landing_change_set_numbers WHERE change_set=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    Ok(number.map(|number| {
+        assert!(number >= 1, "a change set number starts at 1");
+        number.unsigned_abs()
+    }))
+}
+
+/// Numbers the change sets of the projects the engine has that carry no number yet, such
+/// as the ones an engine without numbers wrote, after each project's highest number, in the
+/// order they were made, the id breaking a tie, at most `NUMBER_PASS_MAX` a pass. Input: the
+/// store. Output: how many sets got a number.
+pub(super) fn number_unnumbered(db: &Connection) -> Result<usize, EngineError> {
+    let sets = db
+        .prepare(
+            "SELECT id, project FROM landing_change_sets \
+             WHERE id NOT IN (SELECT change_set FROM landing_change_set_numbers) \
+             AND project IN (SELECT id FROM projects) ORDER BY created_ms, id LIMIT ?1",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([NUMBER_PASS_MAX], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(storage)?;
+    within(db, "landing_numbers", || {
+        for (id, project) in &sets {
+            let id = ChangeSetId::new(id.clone()).map_err(|_| failure("changes_unavailable"))?;
+            let project =
+                ProjectId::new(project.clone()).map_err(|_| failure("changes_unavailable"))?;
+            number(db, &id, &project)?;
+        }
+        Ok(sets.len())
+    })
+}
+
+/// Forgets one project's change set numbers, as the project's removal forgets its other
+/// rows; a store that never had numbers has none to forget. Inputs: the store and the
+/// project. Output: Ok once none is left.
+pub(super) fn forget_numbers(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    let has: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='landing_change_set_numbers')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if has {
+        db.execute(
+            "DELETE FROM landing_change_set_numbers WHERE project=?1",
+            [project.as_str()],
+        )
+        .map_err(storage)?;
+    }
+    Ok(())
+}
+
+/// Runs `work` inside a savepoint, kept when it succeeds and undone when it fails, so it
+/// nests inside a caller's transaction. Inputs: the store, the savepoint's name and the
+/// work. Output: the work's result.
+fn within<T>(
+    db: &Connection,
+    name: &str,
+    work: impl FnOnce() -> Result<T, EngineError>,
+) -> Result<T, EngineError> {
+    db.execute_batch(&format!("SAVEPOINT {name}"))
+        .map_err(storage)?;
+    match work() {
+        Ok(value) => {
+            db.execute_batch(&format!("RELEASE {name}"))
+                .map_err(storage)?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = db.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
+            Err(error)
+        }
+    }
 }
 
 /// Stores the commit the next change set of a worktree opens above. Inputs: the store,

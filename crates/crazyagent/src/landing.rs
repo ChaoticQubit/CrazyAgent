@@ -1080,10 +1080,10 @@ pub fn waiting(
 /// `LIST_MAX`. Inputs: the store and the project. Output: the change sets.
 pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
     #[cfg(unix)]
-    return Ok(store::of_project(db, project, LIST_MAX)?
+    return store::of_project(db, project, LIST_MAX)?
         .iter()
-        .map(store::Record::view)
-        .collect());
+        .map(|record| Ok(record.view(store::number_of(db, &record.id)?)))
+        .collect();
     #[cfg(not(unix))]
     {
         let _ = (db, project);
@@ -1099,7 +1099,12 @@ pub fn change_set(
     id: &ChangeSetId,
 ) -> Result<Option<(ProjectId, ChangeSetView)>, EngineError> {
     #[cfg(unix)]
-    return Ok(store::find(db, id)?.map(|record| (record.project.clone(), record.view())));
+    return store::find(db, id)?
+        .map(|record| {
+            let number = store::number_of(db, &record.id)?;
+            Ok((record.project.clone(), record.view(number)))
+        })
+        .transpose();
     #[cfg(not(unix))]
     {
         let _ = (db, id);
@@ -1119,9 +1124,9 @@ pub fn open_change_set(
         let Some(worktree) = worktree.to_str() else {
             return Ok(None);
         };
-        Ok(store::open_for(db, worktree)?
-            .as_ref()
-            .map(store::Record::view))
+        store::open_for(db, worktree)?
+            .map(|record| Ok(record.view(store::number_of(db, &record.id)?)))
+            .transpose()
     }
     #[cfg(not(unix))]
     {
@@ -1465,16 +1470,29 @@ pub fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(), Engi
 /// order they were made. Runs at every engine start. Input: the store. Output: how many
 /// sets got a number.
 pub fn number_change_sets(db: &Connection) -> Result<usize, EngineError> {
-    let _ = db;
-    Ok(0)
+    #[cfg(unix)]
+    {
+        store::initialize(db)?;
+        store::number_unnumbered(db)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = db;
+        Err(unavailable())
+    }
 }
 
 /// Forgets one project's change set numbers as its removal forgets its other rows; a store
 /// that never held numbers has none to forget. Inputs: the store and the project. Output:
 /// Ok once none is left.
 pub fn forget_change_set_numbers(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
-    let _ = (db, project);
-    Ok(())
+    #[cfg(unix)]
+    return store::forget_numbers(db, project);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project);
+        Ok(())
+    }
 }
 
 /// Finishes or undoes an Accept or worktree reset an engine stop interrupted.

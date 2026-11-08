@@ -69,7 +69,8 @@ pub(crate) fn view(
     project: &ProjectId,
     id: &ChangeSetId,
 ) -> Result<ChangeSetView, EngineError> {
-    Ok(of_project(db, project, id)?.view())
+    let record = of_project(db, project, id)?;
+    Ok(record.view(store::number_of(db, &record.id)?))
 }
 
 /// Lists every file a change set touches, which the engine computes once per base and
