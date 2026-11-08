@@ -1586,3 +1586,56 @@ fn a_marked_line_taller_than_the_view_can_be_stepped_through_to_its_last_row_and
         "Up steps back through the same rows: {back}"
     );
 }
+
+/// After a move, Accept and Discard come back only once the last line of the new diff was
+/// on screen, not when its last page arrived: a one-page diff longer than the view keeps
+/// them held until the owner scrolls to its end (RVA-1).
+#[test]
+fn a_moved_diff_longer_than_the_view_holds_accept_until_its_end_was_on_screen() {
+    let long: String = (1..=100).map(|line| format!("+line {line}\n")).collect();
+    let page = |text: &str| ChangeDiff {
+        files: Vec::new(),
+        text: text.into(),
+        next: None,
+        truncated: false,
+    };
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    reply(&mut view, Ok(ChangesView::Diff(page("+one"))));
+    let mut moved = set('1', ChangeState::Pending);
+    moved.head = "2".repeat(40);
+    view.refresh();
+    reply(&mut view, Ok(ChangesView::List(vec![moved])));
+    reply(&mut view, Ok(ChangesView::Diff(page(&long))));
+    let shown = text(&view);
+    assert!(
+        shown.lines().any(|row| row.trim_end() == "+line 1") && !shown.contains("+line 100"),
+        "{shown}"
+    );
+    assert!(
+        !view.key(key(KeyCode::Char('a')), NOW),
+        "the last page arrived but its end was never on screen"
+    );
+    assert!(!view.key(key(KeyCode::Char('d')), NOW));
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(!help.contains(&("a", "Accept")), "{help:?}");
+    for _ in 0..3 {
+        assert!(view.key(key(KeyCode::PageDown), NOW));
+        assert!(!text(&view).contains("+line 100"));
+        assert!(!view.key(key(KeyCode::Char('a')), NOW));
+    }
+    while !text(&view).contains("+line 100") {
+        assert!(view.key(key(KeyCode::PageDown), NOW));
+    }
+    for _ in 0..5 {
+        assert!(view.key(key(KeyCode::Up), NOW));
+    }
+    assert!(
+        view.key(key(KeyCode::Char('a')), NOW),
+        "the end was on screen once, so Accept stays offered"
+    );
+}
+
+/// A base that moves under an unchanged head is a move too: the open diff is read again
+/// from the top at the new base, Accept and Discard wait for its last page, and Accept then
+/// names the new base with the head (RVA-L1).
