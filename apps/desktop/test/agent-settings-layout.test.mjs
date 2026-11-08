@@ -1,5 +1,6 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -118,11 +119,22 @@ test("Find a setting keeps the rows whose label matches and the groups that hold
   assert.deepEqual(controls.matchingGroups("no such setting"), []);
 });
 
-test("Overlapping edits lists the engine's choices in their order and shows an unknown engine value as it is", () => {
+test("Overlapping edits lists the engine's choices in the mockup's order and words and shows an unknown engine value as it is", () => {
   assert.deepEqual(client.OVERLAP_CHOICES, ["warn", "block", "off", "wait"]);
   const coordination = (overlaps) => ({ settings: { questions_to: "lead", overlaps, nudges: "off", counted_tools: [], role_skills: { master: null, lead: null, worker: null }, claude_display: "classic", task_start: "on" }, harnesses: [] });
-  assert.deepEqual(radios(settingsHtml({ coordination: coordination("block") }), "Overlapping edits"), { labels: ["Warn", "Block", "Off", "Wait"], checked: ["Block"] });
-  assert.deepEqual(radios(settingsHtml({ coordination: coordination("hold") }), "Overlapping edits"), { labels: ["Warn", "Block", "Off", "Wait", "hold"], checked: ["hold"] });
+  const words = ["Warn both (default)", "Wait until the first lands", "Block the later one", "Off"];
+  assert.deepEqual(radios(settingsHtml({ coordination: coordination("block") }), "Overlapping edits"), { labels: words, checked: ["Block the later one"] });
+  assert.deepEqual(radios(settingsHtml({ coordination: coordination("hold") }), "Overlapping edits"), { labels: [...words, "hold"], checked: ["hold"] });
+});
+
+test("a harness's sub-agents read as the mockup words them, native agent teams first where the harness has them", async () => {
+  const coord = await import("../src/screens/team/coordination.tsx");
+  assert.deepEqual(coord.modeOptions(true), [{ value: "native", label: "Native agent teams" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions(false), [{ value: "app_spawned", label: "CrazyAgent workers" }]);
+  const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
+  const sub = /(?:^|\n)\.set-sub \{([^}]*)\}/.exec(css)?.[1] ?? "";
+  assert.ok(sub.length > 0, "the sub-heading has its rule");
+  assert.doesNotMatch(sub, /text-transform: uppercase/, "Branches reads as the mockup writes it, not in capitals");
 });
 
 test("the Team view keeps the team's actions, and Agent settings holds none of them", () => {
