@@ -282,8 +282,34 @@ fn reach_home(pty: &Pty, home: impl Fn(&str) -> bool) {
     }
 }
 
+/// Waits for Home's one move of the focus: once the setup checks and the accounts are in,
+/// Home moves the focus to its setup panel while setup has something left, which on a
+/// loaded machine lands after the first frame, so a Tab sent before it would be undone.
+/// Input: the TUI on its first Home, on an engine with no account. Output: none; panics
+/// when the setup panel never takes the focus.
+fn setup_focused(pty: &Pty) {
+    let screen = pty.until("Home moves the focus to its setup panel", |now| {
+        enter_hint(now).is_some_and(|hint| hint != "Open")
+    });
+    assert!(
+        screen.contains("Get set up"),
+        "Home's setup panel is shown:\n{screen}"
+    );
+}
+
+/// Opens the team tree of the project named exactly `project` from the TUI's first Home,
+/// on an engine with no account, once Home's setup panel took the focus.
+/// Inputs: the TUI and the project name. Output: none; panics when a step fails.
 fn open_team(pty: &Pty, project: &str) {
     reach_home(pty, |screen| at_home(screen, project));
+    setup_focused(pty);
+    team_from_home(pty, project);
+}
+
+/// Opens the team tree of the project named exactly `project` from Home: Tab to the
+/// project list, pick the card, open it and walk to the Agents tab's team tree.
+/// Inputs: the TUI on Home and the project name. Output: none; panics when a step fails.
+fn team_from_home(pty: &Pty, project: &str) {
     tab_until_enter(pty, "Open");
     pick_card(pty, project);
     pty.keys(&["Enter"]);
@@ -917,7 +943,8 @@ fn the_tui_types_into_a_live_agent_terminal_from_the_team_tree() {
     let probe = scratch("ca-e2e-probe-");
     let tmux = installed(probe.path()).expect(TMUX);
     let pty = Pty::launch(tmux, &socket);
-    open_team(&pty, &project);
+    reach_home(&pty, |screen| at_home(screen, &project));
+    team_from_home(&pty, &project);
     pty.keys(&["Enter"]);
     for step in 0..=STEPS_MAX {
         if pty.screen().contains("Back to the team") {
