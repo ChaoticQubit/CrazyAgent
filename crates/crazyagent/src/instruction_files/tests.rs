@@ -979,20 +979,20 @@ mod import {
             crate::landing::checked_out_branch(&root)
         };
         let main = Some("main".to_owned());
-        assert_eq!(branch_of(&root, &read), main);
-        assert_eq!(branch_of(&root, &read), main);
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(branch_of(&root, read), main);
         assert_eq!(reads.get(), 1, "an unchanged HEAD is not read again");
         checkout.git(&["checkout", "-q", "-b", "release/2.0"]);
         let release = Some("release/2.0".to_owned());
-        assert_eq!(branch_of(&root, &read), release);
-        assert_eq!(branch_of(&root, &read), release);
+        assert_eq!(branch_of(&root, read), release);
+        assert_eq!(branch_of(&root, read), release);
         assert_eq!(reads.get(), 2, "a branch switch is read once");
         checkout.git(&["checkout", "-q", "--detach"]);
-        assert_eq!(branch_of(&root, &read), None);
-        assert_eq!(branch_of(&root, &read), None);
+        assert_eq!(branch_of(&root, read), None);
+        assert_eq!(branch_of(&root, read), None);
         assert_eq!(reads.get(), 3, "a detached HEAD is read once");
         checkout.git(&["checkout", "-q", "main"]);
-        assert_eq!(branch_of(&root, &read), main);
+        assert_eq!(branch_of(&root, read), main);
         assert_eq!(reads.get(), 4, "back on main is read again");
         let other = Checkout::new();
         let other_root = std::fs::canonicalize(&other.folder).unwrap();
