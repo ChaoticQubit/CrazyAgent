@@ -15,12 +15,13 @@ const ITEMS = [
 const read = (items) => ({ kind: "ok", value: { project_id: "alpha", items, more: false } });
 const LONG = 60_000;
 
-/** Mounts Recent activity with the events above and no poll of its own, then runs steps.
- * Input: the steps, as source that returns an object. Output: what the steps returned. */
-function steps(source) {
+/** Mounts Recent activity with these events, the ones above unless given, and no poll of
+ * its own, then runs steps. Inputs: the steps, as source that returns an object, and the
+ * events. Output: what the steps returned. */
+function steps(source, items = ITEMS) {
   return withPage(async ({ evaluate }) => {
     await evaluate(fixture);
-    return evaluate(`(async () => { await Fixture.mount("alpha", ${LONG}); const first = await Fixture.reply(${JSON.stringify(read(ITEMS))}); ${source} })()`);
+    return evaluate(`(async () => { await Fixture.mount("alpha", ${LONG}); const first = await Fixture.reply(${JSON.stringify(read(items))}); ${source} })()`);
   });
 }
 
@@ -49,6 +50,17 @@ test("Undo asks first, naming the branch, and Keep it changes nothing", { timeou
   assert.equal(seen.kept.missed, null, "the confirm has Keep it");
   assert.equal(seen.kept.dialog, null, "Keep it closes the confirm");
   assert.deepEqual(seen.kept.undos, [], "Keep it undoes nothing");
+});
+
+test("Undo names the branch of a merge row that names its change set by number (AL2)", { timeout: 60_000 }, async () => {
+  const numbered = [item(1, "merged_into_main", "Master merged change set #7 (Master: Merge the docs into the guide, 2 files) into release.1. It closed the changes of Ada (@docs) · Codex", LOGIN)];
+  const seen = await steps(`
+    const clicked = await Fixture.click(".pj-activity-row button", "Undo");
+    return { first, clicked };
+  `, numbered);
+  assert.equal(seen.clicked.missed, null, "the merge row has an Undo button");
+  assert.match(seen.clicked.dialog ?? "", /Undo this merge on release\.1\?/, "the confirm names the branch the row says the set merged into");
+  assert.match(seen.clicked.dialog ?? "", /one new commit on release\.1 that reverts this merge\./);
 });
 
 test("Undo reverts the merge through the engine, says so and reads the activity again", { timeout: 60_000 }, async () => {
