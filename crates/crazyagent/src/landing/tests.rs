@@ -7321,8 +7321,10 @@ fn lockfile_clash_at_turn_end(
     (id, landed)
 }
 
-/// Reads the case's set every 50 ms until `done` holds or `within` passes. Inputs: the case,
-/// the set, the time and the condition. Output: the set as last read.
+/// Reads the case's set every 50 ms until `done` holds with no step of the engine's left
+/// half done (its stored intent cleared, so an update or a regeneration has also moved the
+/// agent's worktree) or `within` passes. Inputs: the case, the set, the time and the
+/// condition. Output: the set as last read.
 fn set_within(
     case: &Case,
     id: &ChangeSetId,
@@ -7332,7 +7334,8 @@ fn set_within(
     let deadline = Instant::now() + within;
     loop {
         let set = case.view(id);
-        if done(&set) || Instant::now() >= deadline {
+        let settled = store::load(&case.db, id).unwrap().intent.is_none();
+        if (done(&set) && settled) || Instant::now() >= deadline {
             return set;
         }
         std::thread::sleep(Duration::from_millis(50));
