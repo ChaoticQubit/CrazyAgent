@@ -1,6 +1,8 @@
 import { harnessCatalog, nextGeneration, type Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
-import { cancelTeamTask, failureCopy, loadContext, loadPools, loadResearch, loadSetup, receiptState, revealProjectFolder } from "../../api-projects";
+import { cancelTeamTask, failureCopy, loadAgentPolicy, loadContext, loadPools, loadResearch, loadSetup, receiptState, revealProjectFolder } from "../../api-projects";
+import { loadUncommittedImport } from "../../api-process";
+import { loadQuestionCounts, pendingByProject } from "../../api-questions";
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { ConfirmDialog, Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
@@ -15,9 +17,11 @@ import { IdeExtensionConfirm } from "./ide-extensions";
 import { IDE_POLL_MS, IdeTab, IdeUnavailable } from "./ide";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
-import { ProjectHead, useProjectHead } from "./head";
+import { ProjectHead, useProjectHead, type HeadMeta } from "./head";
+import { accessSummary } from "./access";
+import { poolName, poolSummary } from "../new-project/wizard";
 import { IdeConfirm } from "./ide-confirm";
-import { OverviewTab } from "./overview";
+import { OverviewTab, folderLabel, projectFolder } from "./overview";
 import { ImportMoveBanner, InstructionImportPrompt, ProcessEditor } from "../process";
 import { QuestionsTab } from "./questions";
 import { pauseSummary, shouldPoll } from "./research";
@@ -172,6 +176,33 @@ function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly
   </>;
 }
 
+/** The head's meta line for a project: its folder, the checked-out branch, the agents' access
+ * and the pool with its size, each null until read. Inputs: the project data, the access
+ * policy read and the checkout read. Output: the meta. */
+function headMeta(data: ProjectData, access: string | null, branch: string | null): HeadMeta {
+  const setup = valueOf(data.setup);
+  return {
+    folder: setup ? folderLabel(projectFolder(setup.folder)) : null,
+    branch,
+    access,
+    pool: data.assigned ? `${poolName(data.assigned.pool)}, ${poolSummary(data.assigned.members)}` : null,
+  };
+}
+
+/** How many questions of one project wait for the owner, read again with each team read.
+ * Inputs: the project id and the time of the latest team read. Output: the count, 0 until read. */
+function usePendingQuestions(projectId: string, at: number): number {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    let live = true;
+    void loadQuestionCounts().then((result) => {
+      if (live && result.kind === "ok") setCount(pendingByProject(result.value).get(projectId) ?? 0);
+    });
+    return () => { live = false; };
+  }, [projectId, at]);
+  return count;
+}
+
 function hashSection(): string | undefined {
   if (typeof window === "undefined") return undefined;
   return routeSection(window.location.hash);
@@ -247,10 +278,16 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
 
   const root = useRef<HTMLDivElement>(null);
   const scrolled = useProjectHead(root, projectId);
+  const [policy] = useLoad(() => loadAgentPolicy(projectId), [projectId], "agent-policy");
+  const [checkout] = useLoad(() => loadUncommittedImport(projectId), [projectId]);
+  const questions = usePendingQuestions(projectId, data.team.at);
+  const team = data.team.result?.kind === "ok" ? data.team.result.value : null;
+  const working = team ? team.agents.filter((agent) => agent.status === "working").length : 0;
+  const meta = headMeta(data, policy.kind === "ok" ? accessSummary(policy.value) : null, checkout.kind === "ok" ? checkout.value.branch : null);
 
   return <div className="pj pj-project" ref={root}>
     <ProjectHead title={data.name ? displayText(data.name) : <span className="skeleton line pj-title-skeleton" role="status" aria-label="Loading project name" />}
-      about={setup?.about ?? ""} actions={<ProjectMenu data={data} replaced={replacedTabs(view)} />} current={active} scrolled={scrolled}
+      about={setup?.about ?? ""} meta={meta} working={working} questions={questions} actions={<ProjectMenu data={data} replaced={replacedTabs(view)} />} current={active} scrolled={scrolled}
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <RecoveryBanner key={projectId} project={projectId} />
     <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />

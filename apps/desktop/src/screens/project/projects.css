@@ -32,6 +32,11 @@
 .pj-head .page-header h1 { overflow-wrap: anywhere; transition: font-size var(--dur-base) var(--ease); }
 .pj-head.scrolled .page-header h1 { font-size: 18px; line-height: 24px; }
 .pj-head .page-header p { max-width: 96ch; }
+.pj-head .page-title { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2) var(--space-3); min-width: 0; }
+.pj-head-chips { display: inline-flex; flex-wrap: wrap; gap: var(--space-2); }
+.pj-head .page-header p.pj-meta { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin-top: var(--space-1); font-size: 12px; color: var(--text-2); }
+.pj-meta-part { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.pj-head.scrolled .pj-meta { display: none; }
 .pj-desc-wrap { display: flex; align-items: flex-end; gap: 6px; min-width: 0; }
 .pj-desc { overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; min-width: 0; }
 .pj-head.scrolled .pj-desc { -webkit-line-clamp: 1; line-clamp: 1; }
