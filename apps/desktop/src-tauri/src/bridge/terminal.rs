@@ -113,16 +113,50 @@ pub fn wall_focus(
     project: &ProjectId,
     target: &str,
 ) -> Result<WallFocus, BridgeError> {
-    let _ = (caller, project, target);
-    Err(failure("window_denied"))
+    if caller == "main" || !window_admits(caller, project) {
+        return Err(failure("window_denied"));
+    }
+    if target == "main" {
+        let id = project.as_str();
+        assert!(
+            id.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+        );
+        let hash = format!("#/projects/{id}/agents");
+        assert!(hash.starts_with("#/projects/") && hash.ends_with("/agents"));
+        return Ok(WallFocus::Main { hash });
+    }
+    let page = Some(target)
+        .filter(|target| target.len() == 1)
+        .and_then(|target| target.parse::<usize>().ok())
+        .filter(|page| (1..=WINDOWS_MAX).contains(page))
+        .ok_or_else(|| failure("window_denied"))?;
+    Ok(WallFocus::Wall {
+        label: wall_label(project, page),
+    })
 }
 
 /// The address a terminal wall window opens at, `index.html#/terminals/<project>/<page>/<name>`,
 /// the name percent-encoded as a URI component so the page reads it back as text. Takes the
 /// project, the page and the shown name. Returns the address.
 pub fn wall_url(project: &ProjectId, page: usize, name: &str) -> String {
-    let _ = name;
-    format!("index.html#/terminals/{}/{page}", project.as_str())
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    assert!((1..=WINDOWS_MAX).contains(&page));
+    let mut encoded = String::with_capacity(name.len() * 3);
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    assert!(encoded.bytes().all(|b| !b"/#?".contains(&b)));
+    format!(
+        "index.html#/terminals/{}/{page}/{encoded}",
+        project.as_str()
+    )
 }
 
 const WALL_TITLE_SEPARATOR: &str = " \u{b7} Terminals ";
