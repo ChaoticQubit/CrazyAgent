@@ -117,12 +117,42 @@ fn merges_count_lead_and_main_merges_in_the_range_with_those_undone() {
     crate::activity::initialize(&db).unwrap();
     let beta = ProjectId::new("beta").unwrap();
     for (project, kind, change_set, at_ms) in [
-        (alpha(), ActivityKind::MergedIntoMain, "set-1", MIDNIGHT + HOUR),
-        (alpha(), ActivityKind::MergedIntoMain, "set-2", MIDNIGHT + 2 * HOUR),
-        (alpha(), ActivityKind::LeadMerged, "set-3", MIDNIGHT + 3 * HOUR),
-        (alpha(), ActivityKind::Accepted, "set-4", MIDNIGHT + 4 * HOUR),
-        (alpha(), ActivityKind::MergedIntoMain, "set-5", MIDNIGHT - HOUR),
-        (beta.clone(), ActivityKind::MergedIntoMain, "set-6", MIDNIGHT + HOUR),
+        (
+            alpha(),
+            ActivityKind::MergedIntoMain,
+            "set-1",
+            MIDNIGHT + HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::MergedIntoMain,
+            "set-2",
+            MIDNIGHT + 2 * HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::LeadMerged,
+            "set-3",
+            MIDNIGHT + 3 * HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::Accepted,
+            "set-4",
+            MIDNIGHT + 4 * HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::MergedIntoMain,
+            "set-5",
+            MIDNIGHT - HOUR,
+        ),
+        (
+            beta.clone(),
+            ActivityKind::MergedIntoMain,
+            "set-6",
+            MIDNIGHT + HOUR,
+        ),
     ] {
         let item = NewActivity {
             kind,
@@ -153,7 +183,11 @@ fn merges_are_zero_without_the_activity_table() {
     let (_directory, db) = database();
     let metrics = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap();
     assert_eq!(
-        (metrics.merges, metrics.merges_into_main, metrics.merges_undone),
+        (
+            metrics.merges,
+            metrics.merges_into_main,
+            metrics.merges_undone
+        ),
         (0, 0, 0)
     );
 }
