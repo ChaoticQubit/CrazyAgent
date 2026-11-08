@@ -9956,23 +9956,6 @@ fn a_number_below_one_in_the_table_trips_the_numbering_assertion() {
     let _ = case.turn(TurnOutcome::Succeeded);
 }
 
-/// AL17: removing a project forgets its change set numbers and no other project's; a store
-/// that never held numbers has none to forget.
-#[test]
-fn forgetting_a_project_forgets_only_its_change_set_numbers() {
-    let case = Case::new();
-    case.edit("README", "one\ntwo\nthree\nfour\n");
-    let first = case.turn(TurnOutcome::Succeeded).unwrap();
-    let record = store::load(&case.db, &first).unwrap();
-    let other = closed_copy(&case, &record, 'b', record.created_ms + 10, "project-2");
-    assert_eq!(case.view(&first).number, Some(1));
-    forget_change_set_numbers(&case.db, &ProjectId::new("project-1").unwrap()).unwrap();
-    assert_eq!(case.view(&first).number, None);
-    assert_eq!(numbers(&case, "project-2")[other.as_str()], Some(1));
-    let bare = Connection::open_in_memory().unwrap();
-    forget_change_set_numbers(&bare, &ProjectId::new("project-1").unwrap()).unwrap();
-}
-
 /// AL17: a change set is named by its number, its agent, the first line of its message cut
 /// to 48 characters and its file count, as the desktop names it; one the engine has not
 /// numbered yet by its agent.

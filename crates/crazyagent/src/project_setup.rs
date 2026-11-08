@@ -2581,7 +2581,6 @@ fn remove(
         )
         .map_err(error)?;
     }
-    crate::landing::forget_change_set_numbers(tx, project_id)?;
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::storage::agent_text::forget_project(tx, project_id)?;
     crate::questions::forget_project(tx, project_id)?;

@@ -489,27 +489,6 @@ pub(super) fn number_unnumbered(db: &Connection) -> Result<usize, EngineError> {
     })
 }
 
-/// Forgets one project's change set numbers, as the project's removal forgets its other
-/// rows; a store that never had numbers has none to forget. Inputs: the store and the
-/// project. Output: Ok once none is left.
-pub(super) fn forget_numbers(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
-    let has: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='landing_change_set_numbers')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(storage)?;
-    if has {
-        db.execute(
-            "DELETE FROM landing_change_set_numbers WHERE project=?1",
-            [project.as_str()],
-        )
-        .map_err(storage)?;
-    }
-    Ok(())
-}
-
 /// Runs `work` inside a savepoint, kept when it succeeds and undone when it fails, so it
 /// nests inside a caller's transaction. Inputs: the store, the savepoint's name and the
 /// work. Output: the work's result.

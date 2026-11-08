@@ -1562,19 +1562,6 @@ pub fn number_change_sets(db: &Connection) -> Result<usize, EngineError> {
     }
 }
 
-/// Forgets one project's change set numbers as its removal forgets its other rows; a store
-/// that never held numbers has none to forget. Inputs: the store and the project. Output:
-/// Ok once none is left.
-pub fn forget_change_set_numbers(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
-    #[cfg(unix)]
-    return store::forget_numbers(db, project);
-    #[cfg(not(unix))]
-    {
-        let _ = (db, project);
-        Ok(())
-    }
-}
-
 /// Finishes or undoes an Accept or worktree reset an engine stop interrupted.
 /// Input: the store. Output: Ok once nothing is left in flight.
 pub fn reconcile(db: &Connection) -> Result<(), EngineError> {
