@@ -30,6 +30,8 @@ const DRAWER_GROUPS = [
   ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
   ["Access", ["Full access"]],
 ];
+const DRAWER_SETTLED = `Promise.all(document.querySelector("dialog.drawer[open]").getAnimations({ subtree: true })
+  .filter((animation) => animation.effect?.getTiming().iterations !== Infinity).map((animation) => animation.finished)).then(() => true)`;
 const DRAWER_MEASURE = `(() => {
   const drawer = document.querySelector("dialog.drawer[open]");
   if (!drawer) return null;
@@ -42,6 +44,7 @@ const DRAWER_MEASURE = `(() => {
   const access = drawer.querySelector('.set-row[data-setting="Full access"]');
   return {
     title: drawer.querySelector(".dialog-head h2")?.textContent ?? null,
+    opacity: getComputedStyle(drawer).opacity,
     groups: [...drawer.querySelectorAll("section.set-group")].map((group) => [group.querySelector("h3")?.textContent ?? null, [...group.querySelectorAll(".set-row")].map((row) => row.dataset.setting)]),
     access: access ? [...access.querySelectorAll(".set-label, button, .tg-terminal-note")].map((part) => part.textContent) : null,
     past: [...new Set(past)],
@@ -232,9 +235,11 @@ test("the Conversation tab's Master settings drawer draws the mockup's Master, C
     await me.waitFor("the conversation head", (text) => text.includes("Master settings"));
     await me.click("Master settings", "button");
     await me.waitFor("the Master settings drawer", (text) => text.includes("Change in Agent settings") && text.includes("Re-ask a sub-agent's empty reply"));
+    assert.equal(await page.evaluate(DRAWER_SETTLED), true, "the drawer finished sliding in");
     const drawer = await page.evaluate(DRAWER_MEASURE);
     assert.ok(drawer, "the drawer is open");
     assert.equal(drawer.title, "Master settings");
+    assert.equal(drawer.opacity, "1", "the drawer is drawn in full, not part way through sliding in");
     assert.deepEqual(drawer.groups, DRAWER_GROUPS, "the drawer groups its rows as the mockup does, with the extra Apply a master harness change row");
     assert.equal(drawer.access[0], "Full access", `the Access row names the access: ${JSON.stringify(drawer.access)}`);
     assert.equal(drawer.access[1], "Change in Agent settings", `access changes in Agent settings: ${JSON.stringify(drawer.access)}`);
