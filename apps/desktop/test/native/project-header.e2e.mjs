@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -124,6 +125,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     assert.equal(pools.writable, true, "the test engine's settings are writable");
     const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 4 });
     assert.equal(assigned.outcome, "applied", `the project gets its pool: ${JSON.stringify(assigned)}`);
+    const folder = join(projects, "larkspur-booking");
+    assert.ok(existsSync(folder), "the project folder is made under the projects home");
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: folder, env, stdio: "ignore" });
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
@@ -141,10 +145,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(await page.evaluate("document.visibilityState"), "visible", "the window is drawn: a locked screen hides it (ENV-LOCKED)");
 
         let before = await measure(page);
-        for (const until = Date.now() + STEP_MS; !(before.meta?.text.includes("local-pool") && before.meta.text.includes("larkspur-booking")) && Date.now() < until; before = await measure(page)) await pause(POLL_MS);
+        for (const until = Date.now() + STEP_MS; !(before.meta?.text.includes("local-pool") && before.meta.text.includes("larkspur-booking") && before.meta.text.includes(" main ")) && Date.now() < until; before = await measure(page)) await pause(POLL_MS);
         assert.equal(before.head, "pj-head", "the head starts in its full form");
         assert.ok(before.meta?.shown, `the meta line shows under the description (OS-1): ${JSON.stringify(before.meta)}`);
-        assert.match(before.meta.text, /larkspur-booking .*local-pool, 1 local model$/u, "the meta line names the project folder first and the pool with its size last");
+        assert.match(before.meta.text, /larkspur-booking main .*local-pool, 1 local model$/u, "the meta line names the project folder first, then its checked-out branch, and the pool with its size last");
         assert.ok(before.desc, "the description is shown");
         assert.ok(before.desc.text.includes("V2 adds recurring classes"), "the description keeps every line");
         assert.ok(before.desc.scrollWidth <= before.desc.clientWidth, `the description wraps inside its box: ${JSON.stringify(before.desc)}`);
