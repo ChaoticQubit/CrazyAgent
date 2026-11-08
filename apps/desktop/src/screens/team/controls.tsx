@@ -729,7 +729,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
             <span className="set-label" aria-hidden="true">Ask me before merging into the master's branch</span>
             <Segmented label="Ask me before merging into the master's branch" value={askMerge ?? (status.ask_before_merge === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
               options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
-            <span className="tg-terminal-note">On keeps each finished harness's work in Changes for your Accept instead of the master merging it.</span>
+            <span className="tg-terminal-note">On stops the master's merge tool: each finished harness's work waits in Changes for your Accept. At Full access, a master change set that merges it in can still land by itself.</span>
           </SettingRow>
           <h3 className="set-sub" hidden={!access.rows.slice(3).some((row) => matches(row, words))}>Branches</h3>
           <SettingRow label="Agent branches">
