@@ -9,7 +9,8 @@ use crazyagent::research::runner::{
     ResearchAccount, ResearchLimits, ResearchProject, ResearchRunner, RunError,
 };
 use research_support::{
-    EngineRuntime, claude, codex, hanging_endpoint, processes_with, recording_hanging_endpoint,
+    EngineRuntime, claude, codex, counted_hanging_endpoint, hanging_endpoint, processes_with,
+    recording_hanging_endpoint,
 };
 use std::fs;
 use std::io::{Read, Write};
@@ -17,6 +18,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 const OLLAMA_HOST: &str = "127.0.0.1:11434";
@@ -859,7 +861,7 @@ fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
     let id = jobs
         .enqueue("project-a", "design_research", "claude", false)
         .unwrap();
-    let (port, _server) = hanging_endpoint();
+    let (port, _server, requests) = counted_hanging_endpoint();
     let runner = Arc::new(
         runner(&case, limits(Duration::from_secs(120)))
             .with_claude(&claude())
@@ -888,13 +890,19 @@ fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
         .join(format!("job-{id}-1"))
         .join("home")
         .join("crazyagent");
-    wait_for_file(&state.join("instructions.md"), Duration::from_secs(30));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while requests.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the claude agent never asked its model"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
     let instructions = fs::read_to_string(state.join("instructions.md")).unwrap();
     assert!(instructions.contains(&marker), "{instructions}");
     let servers = fs::read_to_string(state.join("mcp.json")).unwrap();
     assert!(servers.contains("mcpServers"), "{servers}");
     assert!(!state.join("plugin").exists());
-    std::thread::sleep(Duration::from_secs(1));
     assert!(jobs.request_cancel(id).unwrap());
     let run = handle.join().unwrap();
     assert_eq!(run.status, ResearchStatus::Cancelled);
