@@ -191,8 +191,8 @@ export function readCards() {
   }));
 }
 
-/** Reads the graph line under the Team graph title. Output: its text, empty when the graph
- * is not shown. */
+/** Reads the team line in the Agents toolbar. Output: its text, empty when the graph is not
+ * shown. */
 export function summary() {
   return browser.execute(() => document.querySelector(".tg-summary")?.textContent ?? "");
 }

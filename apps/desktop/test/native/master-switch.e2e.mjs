@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { TURN_S } from "./master-switch.wdio.conf.mjs";
-import { click, shown, toasts } from "./settings-steps.mjs";
+import { click, shown, toasts, unfold } from "./settings-steps.mjs";
 import { go, paste, pick, reopen, run, tab, until, waitFor } from "./trial-kit.mjs";
 import { masterRows, sendToMaster, startIfPaused, terminalLive } from "./trial4/n-d8-master-reply.mjs";
 
@@ -224,6 +224,7 @@ describe("A saved master harness change reaches the live master as the owner's A
     }
     assert.deepEqual(switches(id), []);
     await tab("agents");
+    await unfold("Agents and tasks");
     await click("button=Stop all");
     await click(STOP);
     await until(async () => !(await shown("dialog[open]")), 60000, "the Stop all dialog stayed open");

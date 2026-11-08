@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { borrowSignIn, engineProfileHomes, managedCodexHome } from "./v1-flow-auth.mjs";
+import { unfold } from "./settings-steps.mjs";
 
 const source = managedCodexHome(process.env);
 const root = process.env.V1_ROOT;
@@ -275,6 +276,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
 
   it("shows the master in the Team panel", async () => {
     await click("#tab-agents");
+    await unfold("Agents and tasks");
     let seen;
     await until(async () => {
       seen = await team();
@@ -292,6 +294,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
   it("pauses every agent after the master hands a task to a sub-agent", async () => {
     await sendToMaster(HANDOFF, 660000);
     await click("#tab-agents");
+    await unfold("Agents and tasks");
     let seen;
     await until(async () => {
       seen = await team();
@@ -305,7 +308,7 @@ describe("CrazyAgent V1 flow on the real desktop app and engine", () => {
     await click("dialog[open] .btn.danger");
     await until(async () => !(await page("dialog[open] .btn.danger")), 60000, "Pause all confirm did not close");
     assert.doesNotMatch(await text("body"), /Not ready yet: pausing agents/);
-    await click("text=All (");
+    await click("button=All");
     await until(async () => {
       seen = await team();
       return /^0 of \d+ agents working\.$/.test(seen.working) && seen.tasks.length > 0 &&

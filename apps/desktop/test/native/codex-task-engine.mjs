@@ -195,6 +195,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
+        await me.unfold("Agents and tasks");
         await me.waitFor("the Hand off form on the Agents tab", (text) => text.includes("Hand off"));
         await steps({ project, projects: ids, runtime, me, page, site, bridge });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
@@ -221,6 +222,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
  * until the engine finished it. Inputs: the owner on the page, the page, the project and the
  * engine root. Output: the task's final status. */
 export async function handOff(me, page, project, runtime) {
+  await me.unfold("Agents and tasks");
   const picked = await page.evaluate(`(() => {
     const select = document.getElementById(${JSON.stringify(`tg-hand-to-${project}`)});
     if (!select || select.disabled || ![...select.options].some((option) => option.value === "codex")) return false;

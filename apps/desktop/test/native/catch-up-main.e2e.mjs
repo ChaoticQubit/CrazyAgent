@@ -248,6 +248,7 @@ async function showSetting(me, page) {
  * owner on the page, the page, the project, the engine root, the task's words and the wait.
  * Output: what `taskRow` reads then. */
 async function handOff(me, page, project, runtime, prompt, done) {
+  await me.unfold("Agents and tasks");
   await me.click("Team", AGENTS_VIEW);
   const picked = await page.evaluate(`(() => {
     const select = document.getElementById(${JSON.stringify(`tg-hand-to-${project}`)});

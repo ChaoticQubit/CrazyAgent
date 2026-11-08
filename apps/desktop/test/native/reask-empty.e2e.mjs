@@ -215,6 +215,7 @@ async function kept(status, on) {
  * until the engine finishes it. Inputs: the owner on the page, the page, the project and the
  * engine root. Output: what `taskRow` reads once the task is done. */
 async function handOff(me, page, project, runtime) {
+  await me.unfold("Agents and tasks");
   await me.click("Team", AGENTS_VIEW);
   const picked = await page.evaluate(`(() => {
     const select = document.getElementById(${JSON.stringify(`tg-hand-to-${project}`)});
@@ -236,14 +237,17 @@ async function handOff(me, page, project, runtime) {
   }
 }
 
-/** Reads the Agents tab's latest sub-agent events. Input: the page. Output: their text. */
+/** Reads the latest sub-agent events in the open questions drawer. Input: the page. Output:
+ * their text. */
 function events(page) {
   return page.evaluate(`document.querySelector('section[aria-label="Sub-agent events"] ul[aria-label="Latest events"]')?.innerText ?? ""`);
 }
 
-/** Waits until the Agents tab's latest sub-agent events show the text. Inputs: the owner on
- * the page, the page, what the owner waits for and the text. Output: none. */
+/** Waits until the latest sub-agent events, in the drawer behind the Agents toolbar's "N ask
+ * you", show the text, opening the drawer first. Inputs: the owner on the page, the page,
+ * what the owner waits for and the text. Output: none. */
 async function eventShown(me, page, what, text) {
+  if (!(await page.evaluate(`document.querySelector("dialog.drawer[open]") !== null`))) await me.asks();
   for (const deadline = Date.now() + STEP_MS; !(await events(page)).includes(text); await pause(POLL_MS)) {
     if (Date.now() > deadline) {
       await me.capture(`timeout-${what.replace(/[^a-z0-9]+/gi, "-").slice(0, 40)}`);
