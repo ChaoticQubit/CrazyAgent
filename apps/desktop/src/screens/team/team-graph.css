@@ -227,7 +227,6 @@
   display: flex;
   gap: 4px;
   min-width: 0;
-  margin-top: auto;
 }
 
 .tg-chip {
@@ -370,6 +369,14 @@
 
 .tg-badges .tg-edge-label {
   pointer-events: auto;
+}
+
+.tg-badges.live {
+  z-index: 1;
+}
+
+.tg-badges .tg-edge-label.live {
+  flex: none;
 }
 
 .tg-edge-label.live {

@@ -95,6 +95,70 @@ pub fn walls_to_close<'a>(
         .collect()
 }
 
+/// Where a terminal wall window's Back to Agents or Window switch brings the owner: the main
+/// window, moved to its project's Agents tab by `hash`, or another wall window of the same
+/// project by its label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WallFocus {
+    Main { hash: String },
+    Wall { label: String },
+}
+
+/// Resolves what a terminal wall window asks to bring forward. Takes the calling window
+/// label, the project and the target, "main" or a page from 1 to `WINDOWS_MAX`. Returns the
+/// window to focus, or `window_denied` for the main window, another project's wall window
+/// and any other target.
+pub fn wall_focus(
+    caller: &str,
+    project: &ProjectId,
+    target: &str,
+) -> Result<WallFocus, BridgeError> {
+    if caller == "main" || !window_admits(caller, project) {
+        return Err(failure("window_denied"));
+    }
+    if target == "main" {
+        let id = project.as_str();
+        assert!(
+            id.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+        );
+        let hash = format!("#/projects/{id}/agents");
+        assert!(hash.starts_with("#/projects/") && hash.ends_with("/agents"));
+        return Ok(WallFocus::Main { hash });
+    }
+    let page = Some(target)
+        .filter(|target| target.len() == 1)
+        .and_then(|target| target.parse::<usize>().ok())
+        .filter(|page| (1..=WINDOWS_MAX).contains(page))
+        .ok_or_else(|| failure("window_denied"))?;
+    Ok(WallFocus::Wall {
+        label: wall_label(project, page),
+    })
+}
+
+/// The address a terminal wall window opens at, `index.html#/terminals/<project>/<page>/<name>`,
+/// the name percent-encoded as a URI component so the page reads it back as text. Takes the
+/// project, the page and the shown name. Returns the address.
+pub fn wall_url(project: &ProjectId, page: usize, name: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    assert!((1..=WINDOWS_MAX).contains(&page));
+    let mut encoded = String::with_capacity(name.len() * 3);
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    assert!(encoded.bytes().all(|b| !b"/#?".contains(&b)));
+    format!(
+        "index.html#/terminals/{}/{page}/{encoded}",
+        project.as_str()
+    )
+}
+
 const WALL_TITLE_SEPARATOR: &str = " \u{b7} Terminals ";
 
 /// The project name a wall window's title shows, for the windows a growing wall opens.
@@ -882,6 +946,81 @@ mod tests {
 
     /// A wall window reaches only the project its label was made for; the main window reaches
     /// every project, and any other window none.
+    #[test]
+    fn a_wall_window_brings_forward_only_main_on_its_agents_tab_or_its_own_projects_walls() {
+        let larkspur = ProjectId::new("larkspur").unwrap();
+        let other = ProjectId::new("other.project:2").unwrap();
+        let own = wall_label(&larkspur, 1);
+        assert_eq!(
+            wall_focus(&own, &larkspur, "main").unwrap(),
+            WallFocus::Main {
+                hash: "#/projects/larkspur/agents".to_owned()
+            }
+        );
+        assert_eq!(
+            wall_focus(&wall_label(&other, 3), &other, "main").unwrap(),
+            WallFocus::Main {
+                hash: "#/projects/other.project:2/agents".to_owned()
+            }
+        );
+        for page in 1..=WINDOWS_MAX {
+            assert_eq!(
+                wall_focus(&own, &larkspur, &page.to_string()).unwrap(),
+                WallFocus::Wall {
+                    label: wall_label(&larkspur, page)
+                }
+            );
+        }
+        assert_eq!(
+            code(wall_focus(&wall_label(&other, 1), &larkspur, "2")),
+            Some("window_denied"),
+            "another project's wall window"
+        );
+        assert_eq!(
+            code(wall_focus(&wall_label(&other, 1), &larkspur, "main")),
+            Some("window_denied"),
+            "another project's wall window"
+        );
+        assert_eq!(
+            code(wall_focus("main", &larkspur, "2")),
+            Some("window_denied"),
+            "the main window moves itself"
+        );
+        for target in [
+            "0", "9", "10", "", " 2", "main ", "Main", "-1", "+2", "1/../2", "2\n", "\u{661}",
+        ] {
+            assert_eq!(
+                code(wall_focus(&own, &larkspur, target)),
+                Some("window_denied"),
+                "{target:?}"
+            );
+        }
+        for caller in ["", "settings", "terminals-zz-1"] {
+            assert_eq!(
+                code(wall_focus(caller, &larkspur, "1")),
+                Some("window_denied"),
+                "{caller:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wall_window_address_carries_its_project_page_and_name_as_text() {
+        let project = ProjectId::new("larkspur:booking_2.x").unwrap();
+        assert_eq!(
+            wall_url(&project, 2, "Larkspur Booking"),
+            "index.html#/terminals/larkspur:booking_2.x/2/Larkspur%20Booking"
+        );
+        assert_eq!(
+            wall_url(&project, 1, "a/b#c?d%e <x>&'\""),
+            "index.html#/terminals/larkspur:booking_2.x/1/a%2Fb%23c%3Fd%25e%20%3Cx%3E%26%27%22"
+        );
+        assert_eq!(
+            wall_url(&project, WINDOWS_MAX, "Caf\u{e9} \u{b7} -_.~"),
+            "index.html#/terminals/larkspur:booking_2.x/8/Caf%C3%A9%20%C2%B7%20-_.~"
+        );
+    }
+
     #[test]
     fn a_wall_window_acts_only_on_the_project_its_label_was_made_for() {
         let larkspur = ProjectId::new("larkspur").unwrap();

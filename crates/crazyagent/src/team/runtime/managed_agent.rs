@@ -251,6 +251,7 @@ pub(super) fn shown(reports: &[Report]) -> Vec<String> {
             Report::ResumeRefused => "ResumeRefused".to_owned(),
             Report::TakeoverUnconfirmed => "TakeoverUnconfirmed".to_owned(),
             Report::InputReady => "InputReady".to_owned(),
+            Report::Held { held } => format!("Held held={held}"),
         })
         .collect()
 }

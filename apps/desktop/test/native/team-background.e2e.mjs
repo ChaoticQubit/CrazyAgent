@@ -164,8 +164,8 @@ function shown(page, project) {
 
 test("Background commands: the owner's pick of Wait is kept by the engine and shown again after a reload", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-bg-w-", async ({ project, me, page, reload, status }) => {
-    assert.deepEqual((await status()).background_at_end, { mode: "wait" }, "Wait is the default");
-    assert.deepEqual(await shown(page, project), { choice: "wait", grace: null }, "the tab shows the default");
+    assert.deepEqual((await status()).background_at_end, { mode: "grace", secs: 1800 }, "a 30 minute grace time is the default");
+    assert.deepEqual(await shown(page, project), { choice: "grace", grace: "1800" }, "the tab shows the default");
     await choose(page, project, "stop");
     await kept(status, { mode: "stop" });
     await reload();
@@ -179,10 +179,13 @@ test("Background commands: the owner's pick of Wait is kept by the engine and sh
 
 test("Background commands: a grace time the owner types and saves is kept and shown after a reload, and a refused time changes nothing", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-bg-g-", async ({ project, bridge, me, page, reload, status }) => {
-    await choose(page, project, "grace");
-    await kept(status, { mode: "grace", secs: 120 });
+    await choose(page, project, "wait");
+    await kept(status, { mode: "wait" });
     await reload();
-    assert.deepEqual(await shown(page, project), { choice: "grace", grace: "120" }, "the offered grace time is kept");
+    await choose(page, project, "grace");
+    await kept(status, { mode: "grace", secs: 1800 });
+    await reload();
+    assert.deepEqual(await shown(page, project), { choice: "grace", grace: "1800" }, "the offered 30 minute grace time is kept");
     await me.type(`[id="tg-grace-${project}"]`, "45");
     await me.click("Save", 'form[aria-label="Grace time"] button');
     await kept(status, { mode: "grace", secs: 45 });
