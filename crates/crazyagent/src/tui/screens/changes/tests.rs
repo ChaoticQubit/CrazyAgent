@@ -1639,3 +1639,47 @@ fn a_moved_diff_longer_than_the_view_holds_accept_until_its_end_was_on_screen() 
 /// A base that moves under an unchanged head is a move too: the open diff is read again
 /// from the top at the new base, Accept and Discard wait for its last page, and Accept then
 /// names the new base with the head (RVA-L1).
+/// A page refused as moved on whose list read shows the same head again (A to B to A) is
+/// read again from the top at that head, with Accept and Discard held until its end was on
+/// screen (RV-DS-79, RVA-L3).
+#[test]
+fn a_moved_diff_whose_list_shows_the_same_head_again_is_read_again_from_the_top() {
+    let first = "1".repeat(40);
+    let page = |text: &str, next: Option<u16>| ChangeDiff {
+        files: Vec::new(),
+        text: text.into(),
+        next,
+        truncated: false,
+    };
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    reply(&mut view, Ok(ChangesView::Diff(page("+one", Some(1)))));
+    let asked = reply(&mut view, Err("changes_stale".into()));
+    assert!(
+        matches!(asked, ChangesQuery::Diff { page: 1, .. }),
+        "{asked:?}"
+    );
+    let asked = reply(
+        &mut view,
+        Ok(ChangesView::List(vec![set('1', ChangeState::Pending)])),
+    );
+    assert!(matches!(asked, ChangesQuery::List { .. }), "{asked:?}");
+    assert!(
+        !view.key(key(KeyCode::Char('a')), NOW),
+        "the same head after a move is read again before Accept"
+    );
+    assert!(!view.key(key(KeyCode::Char('d')), NOW));
+    let asked = view
+        .next_query(NOW)
+        .expect("the diff is read again from the top, not left loading");
+    assert!(
+        matches!(&asked, ChangesQuery::Diff { head, page: 0, .. } if *head == first),
+        "{asked:?}"
+    );
+    view.apply(&ChangesEvent {
+        query: asked,
+        result: Ok(ChangesView::Diff(page("+one again", None))),
+    });
+    assert!(text(&view).contains("+one again"));
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+}
