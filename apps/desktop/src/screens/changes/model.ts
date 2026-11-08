@@ -233,9 +233,11 @@ export function waitingCount(sets: readonly ChangeSet[]): number {
   return sets.filter((set) => set.state === "pending" || set.state === "conflict").length;
 }
 
-/** The line that tells the owner change sets wait in Changes. Input: the count. Output: the
- * line, or null when none wait. */
-export function waitingLine(count: number): string | null {
+/** The line that tells the owner change sets wait where they are reviewed: Changes, or the
+ * IDE's Source Control once the IDE replaces Changes (DEC-097). Inputs: the count and the
+ * place. Output: the line, or null when none wait. */
+export function waitingLine(count: number, place: "changes" | "ide" = "changes"): string | null {
   if (count <= 0) return null;
-  return count === 1 ? "1 change set is waiting for you in Changes" : `${count} change sets are waiting for you in Changes`;
+  const where = place === "ide" ? "the IDE, under Source Control" : "Changes";
+  return count === 1 ? `1 change set is waiting for you in ${where}` : `${count} change sets are waiting for you in ${where}`;
 }

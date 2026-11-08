@@ -196,6 +196,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const fetching = ideFetching(view);
   const tabs = projectTabs(view, tab);
   const active = routedTab(tab, tabs);
+  const review: TabId = tabs.some((item) => item.id === "changes") ? "changes" : "ide";
   const setup = valueOf(data.setup);
   const settingsSection = section ?? hashSection();
   const [importMoves, setImportMoves] = useState(0);
@@ -254,7 +255,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <RecoveryBanner key={projectId} project={projectId} />
     <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />
-    {active !== "changes" && <WaitingChanges projectId={projectId} />}
+    {active !== review && <WaitingChanges projectId={projectId} place={review} />}
     <ImportMoveBanner projectId={projectId} version={importMoves} />
     <InstructionImportPrompt projectId={projectId} name={data.name ? displayText(data.name) : projectId} onMoved={() => setImportMoves((count) => count + 1)} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
