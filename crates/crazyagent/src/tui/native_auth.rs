@@ -392,7 +392,8 @@ impl State {
     /// Asks the engine, once per settings change, about a held sign-in whose panel is closed,
     /// with the scope it started with. An unchanged own account entry answers it as running; a
     /// removed or replaced one answers a conflict that marks it unconfirmed, so it shows as
-    /// stuck and c can clear it. Input: the current basis. Output: whether a read was queued;
+    /// stuck and c can clear it; any other failed read changes nothing, and it is not asked
+    /// again for those settings. Input: the current basis. Output: whether a read was queued;
     /// never while the panel is open, which polls it, or another request is in flight.
     pub(super) fn recheck(&mut self, basis: Option<&Basis>) -> bool {
         let Some(basis) = basis.filter(|_| !self.open && self.connected && !self.loading()) else {
@@ -731,6 +732,7 @@ impl State {
                     "This account changed or was removed after its sign-in started; c clears the stuck sign-in",
                 );
             }
+            Err(_) if self.rechecking.is_some() => {}
             Ok(Output::Inspected(reply)) if matches!(event.job.command, Command::Inspect) => {
                 self.inspected = self.matches_inspection(&event.job, &reply);
                 self.notice = Cow::Borrowed(if self.inspected {
