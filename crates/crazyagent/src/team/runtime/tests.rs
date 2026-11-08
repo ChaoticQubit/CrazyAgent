@@ -6227,13 +6227,28 @@ fn wake_call(
     agent: &str,
     text: &str,
 ) -> (String, bool) {
+    master_call(
+        fixture,
+        mailbox,
+        call,
+        serde_json::json!({"tool": "update_work", "kind": "message", "to": agent, "text": text}),
+    )
+}
+
+/// Plants one live master tool call in a mailbox and answers it the way the runtime's tick
+/// does, as the project's first master. Takes the fixture, the mailbox, a call number and
+/// the call. Returns the reply text and whether it is an error.
+#[cfg(target_os = "macos")]
+fn master_call(
+    fixture: &Fixture,
+    mailbox: &Path,
+    call: u32,
+    body: serde_json::Value,
+) -> (String, bool) {
     let id = format!("{call:032x}");
     std::fs::write(
         mailbox.join(format!("{id}.call")),
-        serde_json::to_vec(
-            &serde_json::json!({"tool": "update_work", "kind": "message", "to": agent, "text": text}),
-        )
-        .unwrap(),
+        serde_json::to_vec(&body).unwrap(),
     )
     .unwrap();
     let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
@@ -7817,6 +7832,282 @@ fn a_task_stays_open_until_the_background_command_it_started_ends() {
     assert!(!typed.contains(BACKGROUND_STOPS_LINE), "{typed}");
 }
 
+/// Sends the owner's prompt to a team agent, with Claude Code messages set to Typing only so
+/// it is typed as soon as the agent can take it. Takes the fixture, the agent and the text.
+/// Returns the message id.
+#[cfg(target_os = "macos")]
+fn typed_prompt(fixture: &Fixture, agent: i64, body: &str) -> i64 {
+    crate::coord::ensure(&fixture.connection).unwrap();
+    crate::coord::settings::set_delivery(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        crate::coord::settings::HarnessKind::ClaudeCode,
+        crate::coord::settings::Delivery::TypingOnly,
+    )
+    .unwrap();
+    crate::coord::send(
+        &fixture.connection,
+        crate::coord::NewMessage {
+            project: ProjectId::new(PROJECT).unwrap(),
+            from: crate::coord::Party::Owner,
+            to: crate::coord::Party::Agent(agent),
+            kind: crate::coord::MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: body.into(),
+            idempotency_key: None,
+        },
+        crate::team::now_ms(),
+    )
+    .unwrap()
+}
+
+/// A message's receipt as stored. Takes the fixture and the message. Returns the receipt.
+#[cfg(target_os = "macos")]
+fn receipt(fixture: &Fixture, message: i64) -> String {
+    fixture
+        .connection
+        .query_row(
+            "SELECT receipt FROM coord_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// S2 (DEC-119, HackerBlog messages 440, 445, 461 and 475): a sub-agent whose turn ended but
+/// is held open for a command it started in the background waits at its prompt, so a
+/// message sent to it is typed into its pane, while it shows working on its task and its
+/// task stays open.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_message_to_an_agent_held_for_its_background_command_is_typed_into_its_pane() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let mut team = check_runtime(&fixture, &host, &long_background(120), None, Some(agents));
+    fixture.until(&mut team, "the agent's turn is held", |f| {
+        subs(f)
+            .first()
+            .is_some_and(|agent| stand_in_file(f, *agent, "held").exists())
+    });
+    let agent = subs(&fixture)[0];
+    let message = typed_prompt(&fixture, agent, "End your turn now.");
+    fixture.until(&mut team, "the message is typed into the held agent", |f| {
+        receipt(f, message) == "typed"
+    });
+    let typed = std::fs::read_to_string(stand_in_file(&fixture, agent, "typed")).unwrap();
+    assert!(typed.contains("End your turn now."), "{typed}");
+    assert_eq!(fixture.agent_status(agent).0, AgentStatus::Working);
+    assert_eq!(check_end(&fixture), None, "the held task stays open");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// How long a held row ticks the runtime after its stand-in marked the turn held, so the
+/// runtime has read the held turn before the row looks at the agent.
+#[cfg(target_os = "macos")]
+const HELD_SETTLE: Duration = Duration::from_secs(3);
+
+/// Waits until the sub-agent of [`long_background`] ended its turn held for its background
+/// command, then ticks the runtime for `HELD_SETTLE`. Takes the fixture and the runtime.
+/// Returns the agent.
+#[cfg(target_os = "macos")]
+fn held_agent(fixture: &Fixture, team: &mut TeamRuntime) -> i64 {
+    fixture.until(team, "the agent's turn is held", |f| {
+        subs(f)
+            .first()
+            .is_some_and(|agent| stand_in_file(f, *agent, "held").exists())
+    });
+    let settle = Instant::now() + HELD_SETTLE;
+    while Instant::now() < settle {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    subs(fixture)[0]
+}
+
+/// DEC-119 r2: a sub-agent held for its background command still works on its task, so it
+/// shows working and its worktree stays read-only in the owner's IDE workspace.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_held_agent_shows_working_and_its_worktree_stays_locked_in_the_ide() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    let host = fixture.host();
+    let mut team = check_runtime(&fixture, &host, &long_background(120), None, None);
+    let agent = held_agent(&fixture, &mut team);
+    assert_eq!(fixture.agent_status(agent).0, AgentStatus::Working);
+    let worktree: String = fixture
+        .connection
+        .query_row(
+            "SELECT worktree FROM team_worktrees WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let locked =
+        crate::ide::readonly::settings(&fixture.connection, &ProjectId::new(PROJECT).unwrap())
+            .unwrap()
+            .readonly_include;
+    assert!(locked.contains(&format!("{worktree}/**")), "{locked:?}");
+    assert_eq!(check_end(&fixture), None, "the held task stays open");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// DEC-119 r2: the master's merge refuses a sub-agent held for its background command, as
+/// it refuses any agent still working on its task.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_cannot_merge_an_agent_held_for_its_background_command() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    let host = fixture.host();
+    let mut team = check_runtime(&fixture, &host, &long_background(120), None, None);
+    let agent = held_agent(&fixture, &mut team);
+    fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
+    let mailbox = fixture.base.join("mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let (text, refused) = master_call(
+        &fixture,
+        &mailbox,
+        1,
+        serde_json::json!({"tool": crate::team::tool::MERGE_TOOL, "agent": format!("team-{agent}")}),
+    );
+    assert!(refused && text.contains("is still working"), "{text}");
+    assert_eq!(check_end(&fixture), None, "the held task stays open");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// The Claude Code stand-in of [`BACKGROUND_CLAUDE`] whose turn runs 20 s with no command in
+/// the background: it marks `running` as the turn starts and ends it after. Returns the
+/// script.
+#[cfg(target_os = "macos")]
+fn running_turn() -> String {
+    let start =
+        "  printf '{\"type\":\"user\",\"message\":{\"content\":\"Owner turn\"}}\\n' >> \"$f\"\n";
+    let (head, _) = BACKGROUND_CLAUDE.split_once(start).unwrap();
+    format!(
+        "{head}{start}  printf running > \"$CLAUDE_CONFIG_DIR/running\"\n  /bin/sleep 20\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Checked.\"}}],\"stop_reason\":\"end_turn\"}}}}' '{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":300}}' >> \"$f\"\ndone\n"
+    )
+}
+
+/// S2 (DEC-119): a message to a sub-agent whose turn really runs is not typed into its pane,
+/// even while its screen is quiet, and the agent shows working until its task ends.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_message_to_an_agent_in_a_running_turn_is_not_typed_into_it() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let mut team = check_runtime(&fixture, &host, &running_turn(), None, Some(agents));
+    fixture.until(&mut team, "the agent's turn runs", |f| {
+        subs(f)
+            .first()
+            .is_some_and(|agent| stand_in_file(f, *agent, "running").exists())
+    });
+    let agent = subs(&fixture)[0];
+    let message = typed_prompt(&fixture, agent, "End your turn now.");
+    let quiet = Instant::now() + crate::coord::delivery::typing::APP_QUIET * 2;
+    while Instant::now() < quiet {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        receipt(&fixture, message),
+        "sent",
+        "typed into a running turn"
+    );
+    assert_eq!(fixture.agent_status(agent).0, AgentStatus::Working);
+    let typed = std::fs::read_to_string(stand_in_file(&fixture, agent, "typed")).unwrap();
+    assert!(!typed.contains("End your turn now."), "{typed}");
+    fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// The queued command attachment Claude Code 2.1.309 writes when a background command ends
+/// while its agent is still in the turn, for task `bgcheck1`, with the fields of the line in
+/// the HackerBlog transcript (task 177); the freeze live pass checks it end to end.
+#[cfg(target_os = "macos")]
+const MID_TURN_NOTICE: &str = r#"{"parentUuid":"00000000-0000-4000-8000-0000000000e3","isSidechain":false,"attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>bgcheck1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bgcheck1.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>","source_uuid":"00000000-0000-4000-8000-0000000000b3","delivery_id":"00000000-0000-4000-8000-0000000000c3","commandMode":"task-notification","origin":{"kind":"task-notification","producer":"session-task"},"runId":"00000000-0000-4000-8000-0000000000d3","timestamp":"2026-11-07T18:52:03.000Z"},"type":"attachment","uuid":"00000000-0000-4000-8000-0000000000f3","timestamp":"2026-11-07T18:52:03.000Z","rendered":[{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>bgcheck1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bgcheck1.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>"}}],"renderedInHumanTurn":[{"content":"<task-notification>\n<task-id>bgcheck1</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<output-file>/work/agent/.claude/tasks/bgcheck1.output</output-file>\n<status>completed</status>\n<summary>Background command \"check\" completed (exit code 0)</summary>\n</task-notification>"}],"renderedRole":"user","session_id":"00000000-0000-4000-8000-0000000000a1","userType":"external","entrypoint":"cli","cwd":"/work/agent","sessionId":"00000000-0000-4000-8000-0000000000a1","version":"2.1.309","gitBranch":"agent/check"}"#;
+
+/// The Claude Code stand-in of HackerBlog task 177: each turn starts a command in the
+/// background that writes `background.txt` in the agent's folder and marks
+/// `background-done`; the agent goes on working until that command ended, gets its end as
+/// a queued notification inside the same turn, and ends the turn. Returns the script.
+#[cfg(target_os = "macos")]
+fn mid_turn_background() -> String {
+    let start =
+        "  printf '{\"type\":\"user\",\"message\":{\"content\":\"Owner turn\"}}\\n' >> \"$f\"\n";
+    let (head, _) = BACKGROUND_CLAUDE.split_once(start).unwrap();
+    let notice = MID_TURN_NOTICE.replace('\'', "'\\''");
+    format!(
+        "{head}{start}  (\n    /bin/sleep 1\n    printf mine > background.txt\n    printf done > \"$CLAUDE_CONFIG_DIR/background-done\"\n  ) &\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu_bg\",\"name\":\"Bash\",\"input\":{{\"command\":\"check\",\"run_in_background\":true}}}}],\"stop_reason\":\"tool_use\"}}}}' '{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_bg\",\"content\":\"Command running in background with ID: bgcheck1.\"}}]}},\"toolUseResult\":{{\"backgroundTaskId\":\"bgcheck1\"}}}}' >> \"$f\"\n  while [ ! -e \"$CLAUDE_CONFIG_DIR/background-done\" ]; do /bin/sleep 0.1; done\n  printf '%s\\n' '{notice}' >> \"$f\"\n  printf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Check passed.\"}}],\"stop_reason\":\"end_turn\"}}}}' '{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":300}}' >> \"$f\"\ndone\n"
+    )
+}
+
+/// S1 (DEC-119, HackerBlog task 177): under Wait, a task whose background command ended
+/// while its agent was still in the turn ends with that turn: the engine reads the queued
+/// notification Claude Code records inside the turn, so the turn is never held.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_whose_background_command_ends_during_its_turn_ends_with_that_turn() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    let (status, result, error, finished) = background_task(&fixture, &mid_turn_background(), None);
+    assert!(finished.exists(), "the background command never ran");
+    assert_eq!(status, "done", "{result:?} {error:?}");
+    assert!(
+        result.unwrap_or_default().contains("Check passed."),
+        "the task ends with its own turn"
+    );
+}
+
+/// S3 (DEC-119): a task whose turn waited on its background command, which wrote a file,
+/// posts its change set when it ends, holding that file, with no stop of the agent.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_held_task_that_ends_posts_its_change_set_with_its_background_work_and_no_stop() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    let host = fixture.host();
+    let mut team = check_runtime(&fixture, &host, &mid_turn_background(), None, None);
+    fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
+    let agent = subs(&fixture)[0];
+    let landing = crate::landing::open(&fixture.base).unwrap();
+    let sets = crate::landing::list(&landing, &fixture.setup.project_id).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].agent.id, agent.to_string());
+    assert_eq!(sets[0].files, 1, "{sets:#?}");
+    let worktree: String = fixture
+        .connection
+        .query_row(
+            "SELECT worktree FROM team_worktrees WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let changed = level_git(
+        &fixture.base.join("project").join(&worktree),
+        &fixture.base,
+        &["diff", "--name-only", &sets[0].base, &sets[0].head],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&changed.stdout),
+        "background.txt\n",
+        "{changed:?}"
+    );
+    assert_ne!(fixture.agent_status(agent).0, AgentStatus::Stopped);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// Saves the project's Background commands at task end choice through the team action, as
 /// the owner's Team settings save it, and reads it back. Takes the fixture and the choice.
 #[cfg(target_os = "macos")]
@@ -8508,7 +8799,7 @@ fn send_own_rules_bounds_a_kept_lead_s_own_turn_by_the_session_time_left() {
     let Ok(Order::Rules(rules)) = orders.try_recv() else {
         panic!("no rules for the own turn");
     };
-    assert_eq!(rules.background, crate::team::BackgroundAtEnd::Wait);
+    assert_eq!(rules.background, crate::team::BackgroundAtEnd::default());
     let limit = rules.limit.expect("a bound for the own turn");
     assert!(
         limit > Duration::from_secs(2) && limit <= Duration::from_secs(3),
@@ -12569,6 +12860,7 @@ fn between_turns(
         live: false,
         briefed: true,
         input_ready: true,
+        background_held: false,
         kept_session,
         own_turn: None,
         own_rules: None,
@@ -19936,6 +20228,7 @@ fn a_kept_lead_with_working_teammates_gets_no_reask_and_takes_its_messages() {
             host.as_ref(),
             Some(&owner),
             lead,
+            false,
             "[crazyagent msg 1] from the owner: check the page",
             now_ms(),
         )

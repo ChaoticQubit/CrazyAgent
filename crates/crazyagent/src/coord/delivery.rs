@@ -49,13 +49,16 @@ const _: () = assert!(SENDER_BYTES_MAX + 100 < HEAD_BYTES_MAX);
 
 /// What a tick needs besides the database: the terminal host team agents run in, none
 /// when they run headless; the owner typing signal; the team state folder that holds
-/// each agent's home (`crate::team::runtime::agent_home`); and the idle agents whose
-/// messages wait for the turn the engine wakes them with instead of being typed in.
+/// each agent's home (`crate::team::runtime::agent_home`); the idle agents whose
+/// messages wait for the turn the engine wakes them with instead of being typed in; and
+/// the working agents whose task turn is held for their background commands, which wait
+/// at their prompt and may be typed into (DEC-119).
 pub struct Reach<'a> {
     pub host: Option<&'a dyn Host>,
     pub owner: Option<&'a OwnerTyping>,
     pub state: &'a Path,
     pub asleep: &'a BTreeSet<AgentId>,
+    pub held: &'a BTreeSet<AgentId>,
 }
 
 /// The delivery loop's memory between ticks: when each agent whose messages could not go
@@ -268,7 +271,8 @@ fn deliver_to(
         return Ok(false);
     };
     let (text, carried) = batch(db, agent, ready)?;
-    match typing::type_into(db, host, reach.owner, agent, &text, now)? {
+    let held = reach.held.contains(&agent);
+    match typing::type_into(db, host, reach.owner, agent, held, &text, now)? {
         Typing::Typed => {
             mark_all(db, &carried, Receipt::Typed, now)?;
             Ok(carried.len() == messages.len())

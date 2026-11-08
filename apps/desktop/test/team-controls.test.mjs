@@ -128,13 +128,17 @@ test("Land on offers the master's branch by default and a named branch, and show
   assert.ok(named.includes('<button type="button" class="btn small">Use the master&#x27;s branch</button>'), "a named branch can go back to the master's branch");
 });
 
-test("Background commands at task end offers Wait first, a grace time and Stop, says which agents it acts on, and shows the engine's choice", () => {
+test("Background commands at task end defaults to a 30 minute grace time, offers Wait, a grace time and Stop, says which agents it acts on, and shows the engine's choice", () => {
   const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
-  const wait = render();
-  assert.match(wait, /<label for="tg-background-chores">Background commands at task end<\/label>/);
+  const unset = render();
+  assert.match(unset, /<label for="tg-background-chores">Background commands at task end<\/label>/);
+  assert.match(unset, /<option value="wait">Wait for them<\/option><option value="grace" selected="">Stop them after a grace time<\/option><option value="stop">Stop them when the turn ends<\/option>/);
+  assert.match(unset, /<label for="tg-grace-chores">Grace time in seconds<\/label><input id="tg-grace-chores"[^>]* value="1800"/, "with no choice saved the 30 minute default shows");
+  assert.ok(unset.includes("The default is a grace time of 30 minutes (1800 seconds)."), "the setting says its default");
+  assert.ok(unset.includes("Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice."), "the setting says which agents it acts on");
+  const wait = render({ background_at_end: { mode: "wait" } });
   assert.match(wait, /<option value="wait" selected="">Wait for them<\/option><option value="grace">Stop them after a grace time<\/option><option value="stop">Stop them when the turn ends<\/option>/);
   assert.doesNotMatch(wait, /id="tg-grace-chores"/, "no grace time to type while Wait is on");
-  assert.ok(wait.includes("Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice."), "the setting says which agents it acts on");
   const grace = render({ background_at_end: { mode: "grace", secs: 300 } });
   assert.match(grace, /<option value="wait">Wait for them<\/option><option value="grace" selected="">Stop them after a grace time<\/option>/);
   assert.match(grace, /<label for="tg-grace-chores">Grace time in seconds<\/label><input id="tg-grace-chores"[^>]* value="300"/);
@@ -144,7 +148,8 @@ test("Background commands at task end offers Wait first, a grace time and Stop, 
   assert.doesNotMatch(stop, /id="tg-grace-chores"/, "no grace time to type while Stop is on");
   assert.deepEqual(["10", "3600", "120", " 45 "].map(controls.graceSecs), [10, 3600, 120, 45]);
   assert.deepEqual(["9", "3601", "1.5", "", "2e3", "-10", "0120x"].map(controls.graceSecs), [null, null, null, null, null, null, null]);
-  assert.deepEqual(controls.backgroundChoice(status()), { mode: "wait" });
+  assert.equal(controls.GRACE_SECS_DEFAULT, 1800);
+  assert.deepEqual(controls.backgroundChoice(status()), { mode: "grace", secs: 1800 });
 });
 
 test("Catch up with main says it applies to agents started from now on and what each choice does", () => {
