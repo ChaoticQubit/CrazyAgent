@@ -1465,6 +1465,16 @@ pub fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(), Engi
     }
 }
 
+/// Names a change set as the owner reads it everywhere: "Change set #16 (Wren: checkout
+/// UI, 7 files)", or its agent alone for a set the engine has not numbered yet. Input: the
+/// change set. Output: the name.
+pub fn change_set_name(set: &ChangeSetView) -> String {
+    match set.agent.kind {
+        AgentKind::Master => "Master".to_owned(),
+        AgentKind::Sub => set.agent.label.clone(),
+    }
+}
+
 /// Numbers the change sets of the projects the engine has that carry no number yet, such
 /// as the ones an engine without numbers wrote, after each project's highest number, in the
 /// order they were made. Runs at every engine start. Input: the store. Output: how many

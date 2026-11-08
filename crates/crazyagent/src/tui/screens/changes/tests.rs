@@ -104,6 +104,23 @@ fn a_pending_change_set_shows_its_agent_size_and_that_crazyagent_did_not_check_i
     assert!(!help.iter().any(|(key, _)| *key == "u" || *key == "r"));
 }
 
+/// AL17: the Changes list shows a numbered set's number before its agent and the details
+/// name it in full; a set the engine has not numbered yet keeps its agent name.
+#[test]
+fn a_numbered_change_set_shows_its_number_in_the_list_and_its_name_in_the_details() {
+    let mut numbered = set('1', ChangeState::Pending);
+    numbered.number = Some(7);
+    let shown = text(&listed(vec![numbered]));
+    assert!(shown.contains("#7 Sub-agent 1"), "{shown}");
+    assert!(
+        shown.contains("Change set #7 (Sub-agent 1: Add a file, 1 file)"),
+        "{shown}"
+    );
+    let shown = text(&listed(vec![set('1', ChangeState::Pending)]));
+    assert!(!shown.contains("Change set #"), "{shown}");
+    assert!(!shown.contains("#1 "), "{shown}");
+}
+
 #[test]
 fn an_empty_project_says_where_agent_changes_will_appear() {
     let view = listed(Vec::new());

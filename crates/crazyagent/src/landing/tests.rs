@@ -8017,6 +8017,14 @@ fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_mast
         "the row names the set it closed and where it landed: {}",
         rows[0].text
     );
+    let number = case.view(&fix).number.unwrap();
+    assert!(
+        rows[0]
+            .text
+            .starts_with(&format!("Master merged change set #{number} (Master: ")),
+        "AL2: the row names the master's set by its number: {}",
+        rows[0].text
+    );
 }
 
 #[test]
@@ -9943,4 +9951,64 @@ fn forgetting_a_project_forgets_only_its_change_set_numbers() {
     assert_eq!(numbers(&case, "project-2")[other.as_str()], Some(1));
     let bare = Connection::open_in_memory().unwrap();
     forget_change_set_numbers(&bare, &ProjectId::new("project-1").unwrap()).unwrap();
+}
+
+/// AL17: a change set is named by its number, its agent, the first line of its message cut
+/// to 48 characters and its file count, as the desktop names it; one the engine has not
+/// numbered yet by its agent.
+#[test]
+fn a_change_set_name_carries_its_number_agent_subject_and_files() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let mut view = case.view(&id);
+    view.number = Some(16);
+    view.agent.label = "Wren".into();
+    view.message = "checkout UI\n\nThe form and its summary.".into();
+    view.files = 7;
+    assert_eq!(
+        change_set_name(&view),
+        "Change set #16 (Wren: checkout UI, 7 files)"
+    );
+    view.agent.kind = AgentKind::Master;
+    view.message = String::new();
+    view.files = 1;
+    assert_eq!(change_set_name(&view), "Change set #16 (Master, 1 file)");
+    view.agent.kind = AgentKind::Sub;
+    view.agent.label = "agent-1".into();
+    view.message = "x".repeat(80);
+    view.files = 3;
+    assert_eq!(
+        change_set_name(&view),
+        format!("Change set #16 (agent-1: {}..., 3 files)", "x".repeat(45))
+    );
+    view.number = None;
+    assert_eq!(change_set_name(&view), "agent-1");
+}
+
+/// AL2: the owner's Accept is listed as "You accepted change set #1 (Agent 1: ...)", the
+/// set named by its number as the mockup names it.
+#[test]
+fn the_owners_accept_names_the_set_by_its_number_in_the_activity() {
+    let case = Case::new();
+    case.db
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+        )
+        .unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    crate::activity::initialize(&case.db).unwrap();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.accept(&id).unwrap();
+    let texts: Vec<String> = crate::activity::list(&case.db, &case.workspace.project, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == crate::activity::ActivityKind::Accepted)
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["You accepted change set #1 (Agent 1: Add the fourth line, 1 file)".to_owned()]
+    );
 }
