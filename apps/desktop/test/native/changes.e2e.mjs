@@ -181,7 +181,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         const diff = await page.evaluate("document.querySelector('pre.ch-diff')?.textContent ?? null");
         assert.ok(diff?.includes("+Now with tomatoes."), "the diff is the engine's text");
         assert.ok(diff.includes(`+${XSS}`), "markup in the diff shows as text");
-        assert.equal(await page.evaluate("document.querySelector('.ch-detail img') === null && document.querySelectorAll('.ch-diff *').length <= 1 && [...document.querySelectorAll('.ch-diff *')].every((element) => element.matches('span.ch-end[aria-hidden=true]:empty') && element.attributes.length === 2) && window.__changesXss === undefined"), true, "markup in the diff never renders or runs: the box holds only its own empty end marker");
+        assert.equal(await page.evaluate("document.querySelector('.ch-detail img') === null && document.querySelectorAll('.ch-diff *').length === 1 && document.querySelector('.ch-diff *').matches('span.ch-end[aria-hidden=true]:empty') && document.querySelector('.ch-diff *').attributes.length === 2 && window.__changesXss === undefined"), true, "markup in the diff never renders or runs: the last page's box holds exactly its own empty end marker");
 
         await me.click("Discard");
         await me.waitFor("the discard question", (text) => /Discard these changes\?/.test(text));
