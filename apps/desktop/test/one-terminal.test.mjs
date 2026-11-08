@@ -123,6 +123,8 @@ test("the panel's Message puts the cursor in its Type to box, its Stop asks firs
   assert.equal(steps.stop.dialog?.title, "Stop Ada?", JSON.stringify(steps.stop));
   const head = steps.pause.head;
   assert.equal(head[head.indexOf("Open all terminals") - 1], "Pause all", `Pause all sits right before Open all terminals: ${JSON.stringify(head)}`);
+  const gap = steps.pause.headGaps[head.indexOf("Open all terminals")];
+  assert.ok(gap >= 0 && gap <= 16, `Pause all sits beside Open all terminals, not across the head: ${gap} px`);
   assert.equal(steps.pause.dialog?.title, "Pause all agents?", JSON.stringify(steps.pause));
   assert.match(steps.pause.dialog?.text ?? "", /1 running task stops\./u);
   assert.deepEqual(steps.paused.cancels, [null], `one pause of every task: ${JSON.stringify(steps.paused)}`);

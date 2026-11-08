@@ -193,6 +193,8 @@ export function around() {
   const dialog = document.querySelector("dialog[open]");
   return {
     head: [...(document.querySelector(".tg-head")?.querySelectorAll(":scope > button") ?? [])].map((item) => item.textContent.trim()),
+    headGaps: [...(document.querySelector(".tg-head")?.querySelectorAll(":scope > button") ?? [])].map((item, index, all) =>
+      index === 0 ? 0 : Math.round(item.getBoundingClientRect().left - all[index - 1].getBoundingClientRect().right)),
     focused: document.activeElement?.getAttribute("placeholder") ?? document.activeElement?.tagName ?? null,
     dialog: dialog ? { title: dialog.querySelector("h2")?.textContent ?? "", text: dialog.textContent } : null,
     cancels: [...engine.cancels],
