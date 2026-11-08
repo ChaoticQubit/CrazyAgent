@@ -134,7 +134,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-activity-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .pj-activity-tag { font-weight: 600; }
 .pj-activity-list { list-style: none; margin: 0; padding: 0; }
-.pj-activity-row { display: grid; grid-template-columns: 96px 24px minmax(0, 1fr); gap: 8px; align-items: start; padding: 9px 16px; border-top: 1px solid var(--border); }
+.pj-activity-row { display: grid; grid-template-columns: 96px 24px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 9px 16px; border-top: 1px solid var(--border); }
 .pj-activity-row:first-child { border-top: 0; }
 .pj-activity-kind { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: var(--radius-control); background: var(--surface-2); color: var(--text-2); }
 .pj-activity-kind.merge { background: var(--accent-soft); color: var(--accent-text); }
