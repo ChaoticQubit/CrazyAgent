@@ -49,11 +49,17 @@ const pages = await import("../src/screens/terminals/pages.ts");
 const io = await import("../src/screens/team/terminal-io.ts");
 const source = (path) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
 
-test("a wall window reads its project and page from its own address and nothing else", () => {
-  assert.deepEqual(pages.wallRoute("#/terminals/larkspur/1"), { project: "larkspur", page: 1 });
-  assert.deepEqual(pages.wallRoute("#/terminals/my%20app/8"), { project: "my app", page: 8 });
+test("a wall window reads its project, page and project name from its own address and nothing else", () => {
+  assert.deepEqual(pages.wallRoute("#/terminals/larkspur/1"), { project: "larkspur", page: 1, name: "Project" });
+  assert.deepEqual(pages.wallRoute("#/terminals/my%20app/8"), { project: "my app", page: 8, name: "Project" });
+  assert.deepEqual(pages.wallRoute("#/terminals/larkspur/2/Larkspur%20Booking"), { project: "larkspur", page: 2, name: "Larkspur Booking" });
+  assert.deepEqual(pages.wallRoute("#/terminals/larkspur/2/a%2Fb%23c%3Fd%25e%20%3Cx%3E%26%27%22"), { project: "larkspur", page: 2, name: "a/b#c?d%e <x>&'\"" });
+  assert.deepEqual(pages.wallRoute("#/terminals/larkspur/2/Caf%C3%A9%20%C2%B7%20-_.~"), { project: "larkspur", page: 2, name: "Café · -_.~" });
+  for (const blank of ["#/terminals/larkspur/2/", "#/terminals/larkspur/2/%20%20", "#/terminals/larkspur/2/%E0%A4%A", "#/terminals/larkspur/2/a%0Ab"]) {
+    assert.equal(pages.wallRoute(blank)?.name, "Project", blank);
+  }
   for (const bad of ["", "#/projects/larkspur", "#/terminals/larkspur", "#/terminals/larkspur/0", "#/terminals/larkspur/9",
-    "#/terminals/larkspur/2x", "#/terminals//1", "#/terminals/a/b/1", "#/terminals/%E0%A4%A/1"]) {
+    "#/terminals/larkspur/2x", "#/terminals//1", "#/terminals/a/b/1", "#/terminals/%E0%A4%A/1", "#/terminals/larkspur/2/a/b"]) {
     assert.equal(pages.wallRoute(bad), null, bad);
   }
 });
@@ -104,6 +110,30 @@ test("each wall tile has the panel's head and input: name, harness and state, ro
   const classes = [...html.matchAll(/<section class="([^"]*)"/gu)].map((match) => match[1].split(" "));
   assert.equal(classes.length, 2);
   assert.ok(classes.every((names) => !names.includes("tile")), `style.css .tile is a padded card, never a terminal: ${JSON.stringify(classes)}`);
+});
+
+test("a wall window's tools row is the mockup's: Back to Agents, a Window N of M switch at its own page and the hint, over its named title", async () => {
+  const wall = await import("../src/screens/terminals/index.tsx");
+  assert.equal(typeof wall.WallTools, "function", "the wall exports its tools row");
+  assert.equal(typeof wall.wallTitle, "function", "the wall exports its title");
+  assert.equal(wall.wallTitle("Larkspur Booking", 1, 2), "Larkspur Booking · Terminals 1 of 2");
+  assert.equal(wall.wallTitle("Project", 3, 3), "Project · Terminals 3 of 3");
+  assert.throws(() => wall.wallTitle("Larkspur Booking", 3, 2), /page 3 of 2/u);
+  assert.throws(() => wall.wallTitle("Larkspur Booking", 0, 2), /page 0 of 2/u);
+  const asked = [];
+  const html = renderToStaticMarkup(createElement(wall.WallTools, { page: 2, pages: 3, onFocus: (target) => asked.push(target) }));
+  assert.match(html, /<button[^>]*>(?:(?!<\/button>)[^])*Back to Agents<\/button>/u);
+  assert.deepEqual([...html.matchAll(/role="radio" aria-checked="(true|false)"[^>]*>([^<]+)</gu)].map((match) => [match[2], match[1]]),
+    [["Window 1 of 3", "false"], ["Window 2 of 3", "true"], ["Window 3 of 3", "false"]]);
+  assert.match(html, /role="radiogroup" aria-label="Terminal windows"/u);
+  assert.ok(html.includes("One click opens every window needed; new agents fill the last window or open a new one."), html);
+  assert.ok(html.indexOf("Back to Agents") < html.indexOf("Window 1 of 3"), "Back to Agents first");
+  const shown = source("screens/terminals/index.tsx");
+  assert.match(shown, /focusTerminalWindow\(projectId, target\)/u);
+  assert.match(shown, /<h1>\{tiles === undefined \? `\$\{name\} · Terminals` : wallTitle\(name, page, pages\.length\)\}<\/h1>/u);
+  assert.match(source("api.ts"), /call<void>\("desktop_focus_terminal_window", \{ id, target: String\(target\) \}\)/u);
+  assert.match(source("main.tsx"), /<TerminalWall projectId=\{wall\.project\} page=\{wall\.page\} name=\{wall\.name\} \/>/u);
+  assert.deepEqual(asked, []);
 });
 
 test("the wall boots from main.tsx on its own address, Agents carries the button and the Coordination group the setting", () => {
