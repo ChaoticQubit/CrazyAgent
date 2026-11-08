@@ -2195,7 +2195,7 @@ const SWEEP_WORKTREES_MAX: usize = 512;
 /// worktrees were added from and those its leases are in, at most
 /// `SWEEP_REPOSITORIES_MAX`. Input: the store. Output: the repositories.
 #[cfg(unix)]
-fn known_repositories(
+pub(crate) fn known_repositories(
     connection: &Connection,
 ) -> Result<std::collections::BTreeSet<PathBuf>, EngineError> {
     let mut repositories = std::collections::BTreeSet::new();
