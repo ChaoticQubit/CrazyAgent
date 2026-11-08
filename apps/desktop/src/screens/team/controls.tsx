@@ -685,18 +685,17 @@ export function TeamControls({ projectId, status, reload, data, group }: {
         <SettingGroup group={access} prefix={prefix}>
           <AgentAccessSetting projectId={projectId} notify={data?.notify} reload={reload} />
           <SettingRow label={MERGE_INTO_MAIN} wide>
-            <span className="set-label" aria-hidden={status.master_lands ? true : undefined}>{MERGE_INTO_MAIN}</span>
-            {status.master_lands
-              ? <div className="radio-cards" role="radiogroup" aria-label={MERGE_INTO_MAIN}>
-                <RadioCard name={`${prefix}-merge`} value="merges" checked={(masterLandsHeld ?? status.master_lands) === "merges"}
-                  onChecked={() => { if (!busy) void chooseMasterLands("merges"); }}
-                  title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
-                  details={["Finished work lands on main as soon as the master has resolved it and its checks pass."]} />
-                <RadioCard name={`${prefix}-merge`} value="waits" checked={(masterLandsHeld ?? status.master_lands) === "waits"}
-                  onChecked={() => { if (!busy) void chooseMasterLands("waits"); }}
-                  title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
-              </div>
-              : <span className="tg-terminal-note">Only at Full access.</span>}
+            <span className="set-label" aria-hidden="true">{MERGE_INTO_MAIN}</span>
+            <div className="radio-cards" role="radiogroup" aria-label={MERGE_INTO_MAIN}>
+              <RadioCard name={`${prefix}-merge`} value="merges" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "merges"} disabled={!status.master_lands}
+                onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("merges"); }}
+                title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
+                details={["Finished work lands on main as soon as the master has resolved it and its checks pass."]} />
+              <RadioCard name={`${prefix}-merge`} value="waits" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "waits"} disabled={!status.master_lands}
+                onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("waits"); }}
+                title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
+            </div>
+            {!status.master_lands && <span className="tg-terminal-note">Only at Full access.</span>}
             <span className="tg-terminal-note">Each merge shows in Activity and can be undone. Sandboxed keeps today's limits.</span>
           </SettingRow>
           <SettingRow label="Ask me before merging into the master's branch">
