@@ -8471,3 +8471,140 @@ fn a_set_message_leaves_out_main_commits_its_agent_merged_in() {
         .expect("the agent's own commit makes its change set");
     assert_eq!(case.view(&id).message, "Agent work");
 }
+
+/// Writes "agent edit" to the case's README inside this thread's next engine reset, after
+/// its caller checked the worktree held nothing new (RESET-KEEP). Input: the case.
+fn edit_inside_next_reset(case: &Case) {
+    let file = case.workspace.worktree.join("README");
+    flow::BEFORE_RESET.with(|hook| {
+        assert!(hook.borrow().is_none());
+        *hook.borrow_mut() = Some(Box::new(move || write(&file, "agent edit\n")));
+    });
+}
+
+/// Asserts this thread's engine reset ran the edit [`edit_inside_next_reset`] planted, the
+/// edit is still in the agent's worktree, its HEAD is still `head` and the set holds no
+/// half-done step. Inputs: the case, the set and the head kept.
+fn assert_edit_kept(case: &Case, id: &ChangeSetId, head: &str) {
+    assert!(
+        flow::BEFORE_RESET.with(|hook| hook.borrow().is_none()),
+        "no engine reset ran"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        "agent edit\n",
+        "the engine's reset overwrote the agent's edit"
+    );
+    assert_eq!(case.agent_head(), head);
+    assert!(store::load(&case.db, id).unwrap().intent.is_none());
+}
+
+/// The start the store records for the case's agent worktree. Input: the case. Output: it.
+fn recorded_start(case: &Case) -> Option<String> {
+    store::base_of(&case.db, case.workspace.worktree.to_str().unwrap()).unwrap()
+}
+
+/// An agent edit written inside a discard's reset, after its clean check, is never
+/// overwritten: the worktree keeps the set's head and its next set opens above it.
+#[test]
+fn an_agent_edit_inside_a_discard_reset_survives_and_the_worktree_keeps_its_head() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    edit_inside_next_reset(&case);
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_edit_kept(&case, &id, &head);
+    assert_eq!(recorded_start(&case), Some(head));
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+}
+
+/// An agent edit written inside the reset after its set landed is never overwritten: the
+/// set lands, the worktree keeps the set's head and its next set opens above it.
+#[test]
+fn an_agent_edit_inside_the_reset_after_accept_survives_and_the_worktree_keeps_its_head() {
+    let case = Case::new();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.owner_commit("README", "one\ntwo\nthree\nowner\n", "Owner edit");
+    edit_inside_next_reset(&case);
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_edit_kept(&case, &id, &head);
+    assert_eq!(recorded_start(&case), Some(head));
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+}
+
+/// An agent edit written inside a restore's reset is never overwritten: the restore is
+/// refused and the set, its refs and the worktree stay as the discard left them.
+#[test]
+fn an_agent_edit_inside_a_restore_reset_survives_and_the_set_stays_discarded() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    let tip = case.tip();
+    let before = store::load(&case.db, &id).unwrap();
+    edit_inside_next_reset(&case);
+    assert_eq!(
+        refused(restore(&case.db, &id, NOW_MS + DAY_MS)),
+        "changes_agent_busy"
+    );
+    assert_edit_kept(&case, &id, &tip);
+    assert_eq!(recorded_start(&case), Some(tip));
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+    assert_eq!(
+        case.owner(&["rev-parse", &flow::discarded_ref(&id)]).trim(),
+        head
+    );
+    assert_eq!(
+        case.owner(&["for-each-ref", "refs/crazyagent/pending/"]),
+        ""
+    );
+}
+
+/// An agent edit written inside an update's reset is never overwritten: the update is
+/// refused and the set and its pending ref stay as they were.
+#[test]
+fn an_agent_edit_inside_an_update_reset_survives_and_the_update_is_refused() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    let before = store::load(&case.db, &id).unwrap();
+    edit_inside_next_reset(&case);
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_edit_kept(&case, &id, &before.head);
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+    assert_eq!(
+        case.owner(&["rev-parse", &flow::pending_ref(&id)]).trim(),
+        before.head
+    );
+}
+
+/// An agent edit written inside the reset an engine start finishes for a discard an
+/// engine stop cut short is never overwritten: the worktree keeps the set's head.
+#[test]
+fn an_agent_edit_inside_the_reset_an_engine_start_finishes_survives() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let mut stopped = store::load(&case.db, &id).unwrap();
+    stopped.state = ChangeState::Discarded;
+    stopped.restorable_until_ms = Some(NOW_MS + 7 * DAY_MS);
+    stopped.intent = Some(store::Intent::Reset { target: case.tip() });
+    store::save(&case.db, &stopped).unwrap();
+    edit_inside_next_reset(&case);
+    owner::settled(&case.db, &id).unwrap();
+    assert_edit_kept(&case, &id, &head);
+    assert_eq!(recorded_start(&case), Some(head));
+}

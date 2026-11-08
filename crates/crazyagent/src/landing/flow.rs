@@ -840,11 +840,30 @@ pub(super) fn holds_only_except(
     Ok(untracked.stdout.is_empty())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam (RESET-KEEP): an edit this thread's next [`reset_agent`] makes first, after
+    /// its caller checked the worktree, the way an agent can write in that window.
+    pub(super) static BEFORE_RESET: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs and clears the edit a test planted in [`BEFORE_RESET`], if any. Takes nothing.
+/// Returns nothing.
+#[cfg(test)]
+fn before_reset() {
+    if let Some(edit) = BEFORE_RESET.with(|hook| hook.borrow_mut().take()) {
+        edit();
+    }
+}
+
 /// Points an agent worktree at a commit: its index and tracked files first, then its
 /// HEAD, so a stop between the two leaves a state an engine start can finish. A detached
 /// HEAD the agent moved again meanwhile is `changes_agent_busy`, never a crash.
 /// Inputs: the worktree and the commit. Output: Ok once it holds the commit.
 pub(super) fn reset_agent(agent: &Agent, target: &str) -> Result<(), EngineError> {
+    #[cfg(test)]
+    before_reset();
     agent.repo.run(&["read-tree", "-u", "--reset", target])?;
     agent.move_head(None, target, "CrazyAgent: reset")?;
     match &agent.pointer {
