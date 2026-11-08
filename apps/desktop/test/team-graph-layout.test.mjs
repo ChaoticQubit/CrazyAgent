@@ -144,14 +144,17 @@ test("each link shows its pair's label first in its badge row, live while an act
     "an engine that sends no relations draws no labels");
   const live = renderToStaticMarkup(createElement(view.LinkBadges, { link: layout.links[1] }));
   assert.match(live, /aria-label="handing off: Task 7, 1 live task, 2 questions waiting"/);
-  assert.match(live, /<span class="tg-edge-label live"><span class="tg-clip">handing off: Task 7<\/span><\/span><span class="tg-badge">/);
+  assert.match(live, /^<span class="tg-badges live" /);
+  assert.match(live, /<span class="tg-edge-label live" style="max-width:352px"><span class="tg-clip">handing off: Task 7<\/span><\/span><span class="tg-badge">/);
   const standing = renderToStaticMarkup(createElement(view.LinkBadges, { link: layout.links[0] }));
   assert.match(standing, /aria-label="teammate of"/);
+  assert.match(standing, /^<span class="tg-badges" /);
   assert.match(standing, /<span class="tg-edge-label"><span class="tg-clip">teammate of<\/span><\/span><\/span>$/);
   assert.equal(renderToStaticMarkup(createElement(view.LinkBadges, { link: layout.links[3] })), "", "a link with no label and no counts draws nothing");
   const hostile = graph.layoutGraph({ ...related, relations: [{ from: "m", to: "team-2", relation: "leads", live: { action: "handing_off", task: "Fix‮ it" } }] });
   assert.match(renderToStaticMarkup(createElement(view.LinkBadges, { link: hostile.links[1] })), /handing off: Fix\\u202e it/, "a direction mark in a task shows as an escape");
-  assert.equal(graph.BADGE_WIDTH, graph.CARD_WIDTH, "a badge row is as wide as its card, so a long label never reaches a sibling's row");
+  assert.equal(graph.BADGE_WIDTH, graph.CARD_WIDTH, "a badge row is as wide as its card, so a standing label never reaches a sibling's row");
+  assert.equal(graph.LIVE_LABEL_WIDTH_MAX, 2 * graph.CARD_WIDTH, "a live label may reach past its row, up to two cards wide, drawn above its neighbours while it lasts");
   assertApart(layout.links.map(badgeBox), "badge rows");
   for (const box of layout.links.map(badgeBox)) assert.ok(graph.layoutCards(layout).every((item) => !overlaps(box, item)), "a badge row never covers a card");
   const legend = renderToStaticMarkup(createElement(view.EdgeLegend));
@@ -308,18 +311,21 @@ test("text is wrapped into card lines and clipped with an ellipsis", () => {
   assert.throws(() => graph.clipLines("text", 10, 0), /at least one line/);
 });
 
-test("a card shows its title, role line, branch and newest task, and the full text stays for hover", () => {
+test("a card shows its title, harness and account, branch and one newest task line, and the full text stays for hover", () => {
   const name = (id) => ({ codex: "Codex", claude: "Claude Code" })[id] ?? id;
   const long = { ...team, edges: [...team.edges, edge(10, "m", "team-3", "running", { text: "Rename every helper in the chores list so the names match the house plan" })] };
-  const text = graph.cardText(card(graph.layoutGraph(long), "team-3").node, long.edges, name);
-  assert.deepEqual(text, { title: "codex-3", detail: "Sub-agent, Codex", branch: null, task: ["Rename every helper in the", "chores list so the names ma..."] });
-  assert.equal(graph.cardText(team.nodes[1], team.edges, name).branch, "crazyagent/agent-2");
+  const text = graph.cardText(card(graph.layoutGraph(long), "team-3").node, long.edges, long.nodes, name);
+  assert.deepEqual(text, { title: "codex-3", detail: "Codex", branch: null, task: ["Rename every helper in the..."] });
+  assert.equal(graph.cardText(team.nodes[1], team.edges, team.nodes, name).branch, "crazyagent/agent-2");
+  assert.deepEqual(team.nodes.map((item) => graph.cardText(item, team.edges, team.nodes, name).detail),
+    ["Codex", "Codex lead · Work ChatGPT", "Codex", "Claude Code lead", "Teammate of claude-4"], "the mockup's second line: harness and account, a lead's harness says lead, a teammate names its lead");
+  assert.equal(graph.cardText(node("t", "teammate", { parent: "gone" }), [], team.nodes, name).detail, "Codex teammate", "a teammate whose lead the graph does not draw names its harness");
   assert.equal(graph.cardTask(node("team-3", "sub"), team.edges), "Done: Task 3");
   assert.equal(graph.cardTask(node("team-5", "sub"), team.edges), "No task yet.");
   assert.equal(graph.cardTask(node("t", "teammate"), []), "Works beside its lead, in its lead's terminal.");
   assert.equal(graph.cardTask(node("m", "master"), team.edges), "2 tasks live, 1 waiting for an agent.");
   assert.equal(graph.cardTask(node("m", "master"), [edge(1, "m", "team-1", "running")]), "1 task live.");
-  const title = graph.cardText(node("a", "sub", { label: "Ada Lovelace (@onboarding-fix-for-reused-ids)" }), [], name).title;
+  const title = graph.cardText(node("a", "sub", { label: "Ada Lovelace (@onboarding-fix-for-reused-ids)" }), [], [], name).title;
   assert.equal(title, "Ada Lovelace (@onbo...");
   assert.ok(Array.from(title).length <= graph.TITLE_CHARS);
   assert.deepEqual(graph.cardTip(talk.nodes[2], talk, name), [
@@ -380,13 +386,15 @@ test("a card's menu messages its agent, stops it or its teammate pane, and merge
   for (const agent of [0, -2, 1.5, "3", null]) assert.deepEqual(acts(node("team-3", "sub", { agent, status: "working" })), { message: null, stop: null, merge: null }, String(agent));
 });
 
-test("a card renders clipped lines, a presence dot, its chips, its menu and its full sentence for screen readers", () => {
+test("a card is the mockup's compact four lines, a presence dot, its menu and its full sentence for screen readers, and a chip takes its task line", () => {
+  assert.deepEqual([graph.CARD_WIDTH, graph.CARD_HEIGHT, graph.TASK_LINES], [176, 96, 1], "the mockup's compact card: name, harness and account, branch, task");
   const html = renderToStaticMarkup(createElement(view.GraphCard, {
     placed: card(graph.layoutGraph(team), "team-2"), graph: team, items: [], open: false, tipId: null, onOpen() {}, onTip() {},
   }));
   assert.match(html, /class="tg-dot tone-info"/);
   assert.match(html, /<span class="tg-clip">codex-2<\/span>/);
-  assert.match(html, /Lead, codex, Work ChatGPT/);
+  assert.match(html, /<span class="tg-card-detail tg-clip">codex lead · Work ChatGPT<\/span>/);
+  assert.match(html, /<span class="tg-card-task"><span class="tg-clip">Task 7<\/span><\/span>/);
   assert.match(html, /crazyagent\/agent-2/);
   assert.match(html, /Task 7/);
   assert.match(html, /aria-label="codex-2, Lead, codex, Work ChatGPT, branch crazyagent\/agent-2, Working\. Task 7\. Opens its terminal\."/);
@@ -401,6 +409,7 @@ test("a card renders clipped lines, a presence dot, its chips, its menu and its 
   assert.match(asking, /class="tg-dot tone-warn"/);
   assert.match(asking, /<span class="tg-chip warn">Waiting on you<\/span>/);
   assert.match(asking, /From you 2 \u2713\u2713/);
+  assert.doesNotMatch(asking, /tg-card-task/, "the chips take the task line, the task stays in the hover text and the sentence");
   assert.match(asking, /aria-label="Actions for codex-3"/);
   assert.match(asking, /Waiting on you: it asks a question in its terminal\./);
 });

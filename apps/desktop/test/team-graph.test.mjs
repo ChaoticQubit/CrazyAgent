@@ -55,9 +55,9 @@ test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.equal(graph.nodeDetail(node("x", "someday", { account: "  " })), "Agent, codex", "an unknown kind from a newer engine still reads");
   const ada = node("team-7", "sub", { label: "Ada (@onboarding-fix)", harness: "claude", status: "working", status_label: "Working" });
   assert.equal(graph.nodeRole(ada), "Sub-agent");
-  assert.equal(graph.cardText(ada, [], name).title, "Ada (@onboarding-fix)");
-  assert.equal(graph.cardText(ada, [], name).branch, null);
-  assert.equal(graph.cardText({ ...ada, branch: " crazyagent/agent-7 " }, [], name).branch, "crazyagent/agent-7");
+  assert.equal(graph.cardText(ada, [], [], name).title, "Ada (@onboarding-fix)");
+  assert.equal(graph.cardText(ada, [], [], name).branch, null);
+  assert.equal(graph.cardText({ ...ada, branch: " crazyagent/agent-7 " }, [], [], name).branch, "crazyagent/agent-7");
   assert.equal(graph.cardTip(ada, { project_id: "p", nodes: [ada], edges: [] }, name)[0], "Ada (@onboarding-fix)");
   assert.equal(graph.nodeRole(team.nodes[2]), "Master");
   assert.equal(graph.nodeRole(node("x", "someday")), "Agent", "an unknown kind from a newer engine still reads");
@@ -373,5 +373,5 @@ test("an agent waiting for a file under Wait leads its card's task line and its 
   assert.equal(graph.cardTask({ ...waiting, waits_for: null }, edges), "Draw the chart", "an agent waiting for nothing shows its task alone");
   assert.equal(graph.cardTask({ ...waiting, waits_for: undefined }, edges), "Draw the chart", "an older engine leaves the field out");
   assert.ok(graph.cardTip(waiting, { ...team, nodes: [...team.nodes, waiting], edges }).includes("Waiting for src/ui/chart.ts. Draw the chart"));
-  assert.ok(graph.cardText(waiting, edges).task[0].startsWith("Waiting for src/ui/chart.ts."), "the card shows it on its first task line");
+  assert.ok(graph.cardText(waiting, edges, []).task[0].startsWith("Waiting for src/ui/chart.ts."), "the card shows it on its first task line");
 });
