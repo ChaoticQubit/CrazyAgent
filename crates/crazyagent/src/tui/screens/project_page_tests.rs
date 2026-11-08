@@ -4754,3 +4754,163 @@ async fn a_second_lost_reply_on_a_recovering_creation_says_the_project_is_unconf
         "the reconcile's reply was lost too, so the outcome is still unknown: {shown}"
     );
 }
+
+/// While the uncommitted-move banner takes rows above the tabs, the Changes tab offers
+/// Accept on a moved diff only once its last line was painted in the frame the owner
+/// sees, never from the taller view drawn after each key (RVA-1 r1 F2).
+#[test]
+fn with_the_move_banner_showing_accept_waits_for_the_moved_diffs_last_line_painted() {
+    use crate::engine::owner::UncommittedImport;
+    use crate::landing::{
+        AgentKind, ChangeAgent, ChangeDiff, ChangeSetId, ChangeSetView, ChangeState, TurnOutcome,
+    };
+    use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
+    use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(100, 30);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Changes,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let asked = |shell: &mut Shell| {
+        let (mut changes, mut process) = (Vec::new(), Vec::new());
+        while let Some(request) = shell.ctx.next_request() {
+            match request {
+                Request::Changes(query) => changes.push(*query),
+                Request::Process(query) => process.push(*query),
+                _ => {}
+            }
+        }
+        (changes, process)
+    };
+    let answer = |shell: &mut Shell, query: ChangesQuery, result: Result<ChangesView, String>| {
+        shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Changes(Box::new(
+            ChangesEvent { query, result },
+        )))));
+    };
+    let set = |head: char| ChangeSetView {
+        id: ChangeSetId::new("1".repeat(32)).unwrap(),
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-1".into(),
+            label: crate::team::AgentRole::Sub.agent_label(1),
+        },
+        state: ChangeState::Pending,
+        base: "b".repeat(40),
+        head: head.to_string().repeat(40),
+        files: 1,
+        added: 60,
+        removed: 0,
+        last_outcome: TurnOutcome::Succeeded,
+        checked: false,
+        created_ms: 1,
+        updated_ms: 2,
+        restorable_until_ms: None,
+        conflicts: Vec::new(),
+        message: "Add lines".into(),
+        waiting: false,
+        outside: false,
+        number: None,
+    };
+    let page = |text: &str, next: Option<u16>| {
+        Ok(ChangesView::Diff(ChangeDiff {
+            files: Vec::new(),
+            text: text.into(),
+            next,
+            truncated: false,
+        }))
+    };
+
+    let (changes, process) = asked(&mut shell);
+    let uncommitted = ProcessQuery::Uncommitted {
+        project: notes.clone(),
+    };
+    assert!(process.contains(&uncommitted), "{process:?}");
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(
+        ProcessEvent {
+            query: uncommitted,
+            result: Ok(ProcessReply::Uncommitted(UncommittedImport {
+                files: vec!["CLAUDE.md".into()],
+                branch: Some("main".into()),
+                checked_out: Some("main".into()),
+            })),
+        },
+    )))));
+    assert_eq!(
+        changes,
+        [ChangesQuery::List {
+            project: notes.clone()
+        }]
+    );
+    answer(
+        &mut shell,
+        changes[0].clone(),
+        Ok(ChangesView::List(vec![set('1')])),
+    );
+    shell.key(Key::Enter);
+    let (changes, _) = asked(&mut shell);
+    assert!(
+        matches!(changes[..], [ChangesQuery::Diff { page: 0, .. }]),
+        "{changes:?}"
+    );
+    answer(&mut shell, changes[0].clone(), page("+one\n", Some(1)));
+    let (changes, _) = asked(&mut shell);
+    assert!(
+        matches!(changes[..], [ChangesQuery::Diff { page: 1, .. }]),
+        "{changes:?}"
+    );
+    answer(&mut shell, changes[0].clone(), Err("changes_stale".into()));
+    let (changes, _) = asked(&mut shell);
+    assert_eq!(
+        changes,
+        [ChangesQuery::List {
+            project: notes.clone()
+        }]
+    );
+    answer(
+        &mut shell,
+        changes[0].clone(),
+        Ok(ChangesView::List(vec![set('2')])),
+    );
+    let (changes, _) = asked(&mut shell);
+    assert!(
+        matches!(&changes[..], [ChangesQuery::Diff { page: 0, head, .. }] if *head == "2".repeat(40)),
+        "{changes:?}"
+    );
+    let long: String = (1..=60).map(|line| format!("+line {line}\n")).collect();
+    answer(&mut shell, changes[0].clone(), page(&long, None));
+
+    let first = render(&mut shell, 100, 30);
+    assert!(
+        first.contains("Git still shows CLAUDE.md as deleted"),
+        "the banner shows\n{first}"
+    );
+    assert!(first.contains("+line 1"), "{first}");
+    let offered = |shown: &str| shown.lines().last().unwrap_or("").contains("a Accept");
+    let mut painted_end = false;
+    for _ in 0..80 {
+        let shown = render(&mut shell, 100, 30);
+        painted_end = shown.lines().any(|row| row.trim() == "+line 60");
+        assert!(
+            painted_end || !offered(&shown),
+            "Accept is offered while the moved diff's last line was never painted\n{shown}"
+        );
+        if painted_end {
+            break;
+        }
+        shell.key(Key::Down);
+    }
+    assert!(painted_end, "scrolling reaches the last line");
+    shell.key(Key::Down);
+    let shown = render(&mut shell, 100, 30);
+    assert!(
+        offered(&shown),
+        "once the last line was painted, Accept comes back\n{shown}"
+    );
+}
