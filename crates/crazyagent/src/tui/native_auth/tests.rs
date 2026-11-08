@@ -1629,3 +1629,157 @@ async fn real_panel_reads_its_sign_in_after_another_account_changed() {
     })
     .await;
 }
+
+/// Registers a Claude login that runs until the row creates its stop file, so a row ends a
+/// running sign-in without signalling anything. Input: the case. Output: the file the login
+/// writes once it runs and the stop file it waits for.
+async fn stoppable_claude(case: &Case) -> (PathBuf, PathBuf) {
+    let running = case.root.path().join("login-running");
+    let stop = case.root.path().join("login-stop");
+    let script = case.root.path().join("claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\ni=0\nwhile [ ! -e '{}' ] && [ \"$i\" -lt 300 ]; do /bin/sleep 0.1; i=$((i+1)); done\nexit 1\n",
+            running.display(),
+            stop.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let host = PathBuf::from(
+        std::env::var_os("CRAZYAGENT_TEST_NATIVE_AUTH_HOST")
+            .expect("the test run supplies the built crazyagent custodian executable path"),
+    );
+    let mut service = case.service.lock().await;
+    let service = service.as_mut().unwrap();
+    service.register_native_auth_host(&host).unwrap();
+    service.register_claude_executable(&script).unwrap();
+    (running, stop)
+}
+
+/// Waits for the stand-in login to run. Input: the file it writes. Output: none; panics past
+/// the bound.
+async fn login_started(running: &std::path::Path) {
+    for _ in 0..100 {
+        if std::fs::read_to_string(running)
+            .unwrap_or_default()
+            .ends_with('\n')
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the stand-in login never started");
+}
+
+/// Starts a Claude sign-in on b-claude through the real panel and closes the panel with the
+/// login still running. Inputs: the UI and the file the login writes. Output: none.
+async fn running_sign_in(ui: &mut Ui, running: &std::path::Path) {
+    ui.connections(1).await;
+    ui.key(KeyCode::F(2));
+    let inspected = ui.auth().await;
+    ui.apply(inspected);
+    ui.key(KeyCode::Enter);
+    let started = ui.auth().await;
+    ui.apply(started);
+    login_started(running).await;
+    ui.key(KeyCode::Esc);
+    assert!(ui.app.model_access.signing_in());
+}
+
+#[tokio::test]
+async fn real_sign_in_whose_own_account_was_removed_elsewhere_shows_stuck_and_c_clears_it_once_it_ends()
+ {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        running_sign_in(&mut ui, &running).await;
+        let healthy = ui.render(160, 50);
+        assert!(!healthy.contains("c clears a stuck sign-in"), "{healthy}");
+        remove_elsewhere(&case, "b-claude").await;
+        ui.connections(0).await;
+        let stuck = ui.render(160, 50);
+        assert!(stuck.contains("c clears a stuck sign-in"), "{stuck}");
+        ui.key(KeyCode::Char('c'));
+        let waiting = ui.auth().await;
+        assert_eq!(
+            waiting.result.as_ref().err().map(String::as_str),
+            Some("native_profile_source_conflict")
+        );
+        ui.apply(waiting);
+        assert!(ui.app.model_access.signing_in());
+        std::fs::write(&stop, "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while ui.app.model_access.signing_in() {
+            assert!(Instant::now() < deadline, "c never cleared the sign-in");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            ui.key(KeyCode::Char('c'));
+            let answer = ui.auth().await;
+            ui.apply(answer);
+        }
+        let cleared = ui.render(160, 50);
+        assert!(cleared.contains("Stuck sign-in cleared"), "{cleared}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_running_sign_in_stays_healthy_after_another_account_was_removed_elsewhere() {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        running_sign_in(&mut ui, &running).await;
+        remove_elsewhere(&case, "a-codex").await;
+        ui.connections(0).await;
+        let screen = ui.render(160, 50);
+        assert!(!screen.contains("c clears a stuck sign-in"), "{screen}");
+        assert!(ui.app.model_access.signing_in());
+        std::fs::write(&stop, "").unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_panel_refuses_a_running_sign_in_whose_own_account_was_replaced_and_marks_it_stuck() {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        let (basis, connection) = case.selected("b-claude").await;
+        let mut state = State::default();
+        state.open(basis.clone(), connection.clone()).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let started = ui.exchange(state.request().unwrap()).await;
+        state.apply(started).unwrap();
+        login_started(&running).await;
+        assert!(state.has_pending());
+        assert!(state.stuck(Some(&basis)).is_none());
+        std::fs::write(
+            &case.global,
+            CATALOG.replace("model-claude", "model-claude-2"),
+        )
+        .unwrap();
+        let (edited, current) = case.selected("b-claude").await;
+        assert_ne!(current, connection);
+        state.open(edited.clone(), current).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        advance(&mut state, 1);
+        assert_eq!(
+            state.reduce(&UiEvent::Submit),
+            Err(
+                "This account changed after its sign-in started; close this panel, then c clears the stuck sign-in"
+                    .to_owned()
+            )
+        );
+        assert!(state.request().is_none());
+        assert_eq!(
+            state.stuck(Some(&edited)).map(|found| found.id.as_str()),
+            Some("b-claude")
+        );
+        std::fs::write(&stop, "").unwrap();
+    })
+    .await;
+}
