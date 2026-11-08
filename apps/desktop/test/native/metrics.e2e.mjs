@@ -2,12 +2,9 @@ import assert from "node:assert/strict";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { POLL_MS } from "./e2e-harness.mjs";
-import { TASK, USAGE_MS, handOff, onEngine } from "./codex-task-engine.mjs";
+import { TASK, USAGE_MS, handOff, onEngine, tileParts, turnsOf } from "./codex-task-engine.mjs";
 
-const TILES = [
-  ["Tokens", "1.5K", "1.2K input, 0 cache write, 300 output"],
-  ["Re-read from cache", "8K", "87% of everything read; billed far lower, not in Tokens"],
-];
+const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
 const AGENT_HEAD = ["Agent", "Tokens", "Input", "Cache write", "Output", "Cache read", "graphify", "ctx_*", "Skills", "Share of tokens"];
 const RUN_HEAD = ["Run", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agent", "Ended", "Result", "Share of tokens"];
 const PARTS = ["1.5K", "1.2K", "0", "300", "8K"];
@@ -38,11 +35,14 @@ test("the project Metrics tab shows this project's tokens with the headline from
     let shown = null;
     for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS * 20)) {
       shown = await metricsShown(page).catch(() => null);
-      if (JSON.stringify(shown?.tiles?.slice(0, 2)) === JSON.stringify(TILES)) break;
-      assert.ok(Date.now() < deadline, `the Metrics tiles never showed ${JSON.stringify(TILES)}: ${JSON.stringify(shown)}`);
+      const { parts, runs } = tileParts(shown?.tiles);
+      const codex = shown?.rows?.find((row) => row[0].endsWith(" · Codex"));
+      if (turnsOf(parts, runs) && JSON.stringify(codex?.slice(1, 6)) === JSON.stringify(PARTS)) break;
+      assert.ok(Date.now() < deadline, `the Metrics tiles never added up one stand-in turn per run with the Codex agent's turn in: ${JSON.stringify(shown)}`);
       await page.send("Page.reload", { ignoreCache: true });
     }
     await me.capture("metrics-tab");
+    assert.equal(shown.tiles[1][2], CACHE_LINE);
     assert.match(shown.line, /^This project only · Updated .+ · provider-reported usage per turn$/);
     assert.equal(shown.picker, false, "the project tab has no project picker");
     assert.deepEqual(shown.tiles.map((tile) => tile[0]), ["Tokens", "Re-read from cache", "Runs", "Tasks", "Lines"]);
@@ -50,9 +50,10 @@ test("the project Metrics tab shows this project's tokens with the headline from
     assert.equal(shown.chart, "Tokens per two hours: input, cache write and output");
     assert.ok(shown.bars >= 1, "the chart draws a bar for today");
     assert.deepEqual(shown.head, AGENT_HEAD, "By agent shows the headline, the four parts and the tool counts, and no Turns");
-    const agent = shown.rows.find((row) => row[1] === "1.5K");
+    const agent = shown.rows.find((row) => row[0].endsWith(" · Codex"));
     assert.ok(agent, `the Codex agent has a row with the headline Task 13 counts: ${JSON.stringify(shown.rows)}`);
     assert.deepEqual(agent.slice(1, 6), PARTS);
+    assert.ok(shown.rows.some((row) => row[0] === "Onboarding"), `onboarding's own runs have their row: ${JSON.stringify(shown.rows)}`);
     const total = shown.rows.at(-1);
     assert.equal(total[0], "Total");
     assert.match(total.at(-1), /^cache read 87% of all read$/);

@@ -47,6 +47,33 @@ while IFS= read -r line; do
 done
 `;
 
+/** One stand-in turn as the engine keeps it, in the order the Metrics page lists the parts:
+ * tokens, new input, cache write, output and cache re-reads. */
+export const TURN = [1500, 1200, 0, 300, 8000];
+
+/** Reads a count the Metrics page shows, such as 300, 4.8K or 12K. Input: the text. Output:
+ * the number, or NaN for any other text. */
+function count(text) {
+  const match = /^(\d+(?:\.\d+)?)([KM]?)$/.exec(text ?? "");
+  return match ? Number(match[1]) * { "": 1, K: 1e3, M: 1e6 }[match[2]] : Number.NaN;
+}
+
+/** Says whether five shown parts, in TURN's order, are one stand-in turn per run, within the
+ * page's rounding. Every run the stand-in serves, onboarding's included, takes one turn.
+ * Inputs: the shown texts and the run count. Output: true when they are. */
+export function turnsOf(parts, runs) {
+  return Number.isInteger(runs) && runs > 0 && parts.length === TURN.length
+    && TURN.every((one, index) => Math.abs(count(parts[index]) - one * runs) <= one * runs * 0.05);
+}
+
+/** Reads the Tokens, Re-read from cache and Runs tiles as five parts in TURN's order and the
+ * run count. Input: the tiles as shown. Output: { parts, runs }, empty while a tile is missing. */
+export function tileParts(tiles) {
+  const split = /^(\S+) input, (\S+) cache write, (\S+) output$/.exec(tiles?.[0]?.[2] ?? "");
+  if (!split || tiles[1]?.[0] !== "Re-read from cache" || tiles[2]?.[0] !== "Runs") return { parts: [], runs: 0 };
+  return { parts: [tiles[0][1], split[1], split[2], split[3], tiles[1][1]], runs: Number(tiles[2][1]) };
+}
+
 /** Makes the owner's project folder: a git repository on main with one commit. Input: the
  * folder. Output: none. */
 function ownerRepo(folder) {

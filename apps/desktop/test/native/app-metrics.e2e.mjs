@@ -2,18 +2,10 @@ import assert from "node:assert/strict";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { POLL_MS } from "./e2e-harness.mjs";
-import { USAGE_MS, handOff, onEngine } from "./codex-task-engine.mjs";
+import { USAGE_MS, handOff, onEngine, tileParts, turnsOf } from "./codex-task-engine.mjs";
 
-const BOTH = [
-  ["Tokens", "3K", "2.4K input, 0 cache write, 600 output"],
-  ["Re-read from cache", "16K", "87% of everything read; billed far lower, not in Tokens"],
-];
-const ONE = [
-  ["Tokens", "1.5K", "1.2K input, 0 cache write, 300 output"],
-  ["Re-read from cache", "8K", "87% of everything read; billed far lower, not in Tokens"],
-];
+const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
 const PROJECT_HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Share of tokens"];
-const PARTS = ["1.5K", "1.2K", "0", "300", "8K"];
 
 /** Reads what a Metrics page shows: the range line, each tile's lines, the project filter's
  * value and choices, and the breakdown's header and rows. Input: the page. Output: the
@@ -36,14 +28,33 @@ function metricsShown(page) {
   })()`);
 }
 
-/** Waits until the page's first two tiles show the wanted lines, reloading between reads
- * since usage rows land on the engine's own schedule. Inputs: the page, the wanted tiles and
+/** Says whether an every-project reading has both projects' sub-agent turns in: each project
+ * row lists two agents, Onboarding and its Codex sub-agent, and is one stand-in turn per run,
+ * and the tiles add up those runs. Input: a reading. Output: true when it has. */
+function everyProject(shown) {
+  const rows = (shown?.rows ?? []).filter((row) => row[0] !== "Total");
+  const { parts, runs } = tileParts(shown?.tiles);
+  return rows.length === 2 && rows.every((row) => row[6] === "2" && turnsOf(row.slice(1, 6), Number(row[7])))
+    && turnsOf(parts, runs) && runs === rows.reduce((sum, row) => sum + Number(row[7]), 0);
+}
+
+/** Makes the check that a reading's tiles are one project's runs, one stand-in turn each.
+ * Input: that project's run count. Output: the check, taking a reading. */
+function oneProject(runs) {
+  return (shown) => {
+    const tiles = tileParts(shown?.tiles);
+    return tiles.runs === runs && turnsOf(tiles.parts, tiles.runs);
+  };
+}
+
+/** Waits until a reading of the page passes the check, reloading between reads since usage
+ * rows land on the engine's own schedule. Inputs: the page, the check, what it waits for and
  * whether to reload. Output: the last reading. */
-async function tilesShow(page, wanted, reload) {
+async function tilesShow(page, ready, what, reload) {
   for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS * 20)) {
     const shown = await metricsShown(page).catch(() => null);
-    if (JSON.stringify(shown?.tiles?.slice(0, 2)) === JSON.stringify(wanted)) return shown;
-    assert.ok(Date.now() < deadline, `the Metrics tiles never showed ${JSON.stringify(wanted)}: ${JSON.stringify(shown)}`);
+    if (ready(shown)) return shown;
+    assert.ok(Date.now() < deadline, `the Metrics page never showed ${what}: ${JSON.stringify(shown)}`);
     if (reload) await page.send("Page.reload", { ignoreCache: true });
   }
 }
@@ -73,8 +84,9 @@ test("the sidebar's Metrics page adds up every project, and its filter shows one
     assert.equal(await handOff(me, page, second, runtime), "done", "the second project's Codex sub-agent finished");
 
     await me.click("Metrics", ".app-nav a.nav-item");
-    let shown = await tilesShow(page, BOTH, true);
+    let shown = await tilesShow(page, everyProject, "both projects added up", true);
     await me.capture("app-metrics-all");
+    assert.equal(shown.tiles[1][2], CACHE_LINE);
     assert.equal(shown.heading, "Metrics");
     assert.equal(shown.current, "#/metrics", "the sidebar marks Metrics as the open page");
     assert.match(shown.line, /^2 projects · Updated .+ · provider-reported usage per turn$/);
@@ -84,26 +96,27 @@ test("the sidebar's Metrics page adds up every project, and its filter shows one
     assert.deepEqual(shown.head, PROJECT_HEAD, "the page opens By project");
     for (const id of projects) {
       const name = shown.choices.find((choice) => choice[0] === id)[1];
-      assert.ok(shown.rows.some((row) => row[0] === name && JSON.stringify(row.slice(1, 6)) === JSON.stringify(PARTS)), `${name} has its own row: ${JSON.stringify(shown.rows)}`);
+      assert.ok(shown.rows.some((row) => row[0] === name), `${name} has its own row: ${JSON.stringify(shown.rows)}`);
     }
 
-    await pick(page, first);
-    const picked = await tilesShow(page, ONE, false);
     const name = shown.choices.find((choice) => choice[0] === first)[1];
+    const one = oneProject(Number(shown.rows.find((row) => row[0] === name)[7]));
+    await pick(page, first);
+    const picked = await tilesShow(page, one, `${name}'s own runs`, false);
     assert.match(picked.line, new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} · Updated .+ · provider-reported usage per turn$`));
     assert.equal(picked.filter, first);
     await me.capture("app-metrics-one");
 
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(first)}/metrics` });
-    const tab = await tilesShow(page, ONE, true);
+    const tab = await tilesShow(page, one, `${name}'s Metrics tab`, true);
     assert.deepEqual(picked.tiles, tab.tiles, "the filtered page shows the same tiles as the project's own Metrics tab");
 
     await me.click("Metrics", ".app-nav a.nav-item");
-    shown = await tilesShow(page, BOTH, true);
+    shown = await tilesShow(page, everyProject, "both projects added up", true);
     await pick(page, first);
-    await tilesShow(page, ONE, false);
+    await tilesShow(page, one, `${name}'s own runs`, false);
     await pick(page, "");
-    shown = await tilesShow(page, BOTH, false);
+    shown = await tilesShow(page, everyProject, "both projects added up again", false);
     assert.equal(shown.filter, "", "All projects is picked again");
     assert.match(shown.line, /^2 projects · /);
   }, 2);
