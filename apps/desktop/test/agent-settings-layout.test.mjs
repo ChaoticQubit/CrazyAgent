@@ -192,6 +192,8 @@ test("Access and merging words the merge choice as the mockup does, with its two
   assert.deepEqual(cards(settingsHtml({ master_lands: "waits" })).map((card) => card.checked), [false, true]);
   assert.match(plain(row(merges, MERGE)), /Each merge shows in Activity and can be undone\. Sandboxed keeps today's limits\./);
   assert.match(plain(row(settingsHtml(), MERGE)), /Only at Full access\./, "below Full access the engine sends no merge choice");
+  assert.deepEqual(cards(settingsHtml()).map((card) => card.text), cards(merges).map((card) => card.text), "below Full access the row shows the same two choices");
+  assert.equal([...row(settingsHtml(), MERGE).matchAll(/<input type="radio"[^>]*disabled=""/g)].length, 2, "below Full access both choices are locked");
   const restart = row(merges, RESTART);
   assert.match(plain(restart), /Always/);
   assert.doesNotMatch(restart, /<(button|select|input|textarea)/, "the restart line has no control while it has no setting");
