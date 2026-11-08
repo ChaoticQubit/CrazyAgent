@@ -1,6 +1,6 @@
 {
   "identifier": "terminal-wall",
-  "description": "Terminal wall windows reach only the agent terminals, the team graph, Stop, the Terminals per window setting and opening their own project's next windows.",
+  "description": "Terminal wall windows reach only the agent terminals, the team graph, Stop, the Terminals per window setting, opening their own project's next windows and bringing forward the main window or their own project's windows.",
   "local": true,
   "windows": ["terminals-*"],
   "webviews": ["terminals-*"],
@@ -14,6 +14,7 @@
     "allow-desktop-team-stop-agent",
     "allow-desktop-team-stop-teammate",
     "allow-desktop-terminals-per-window",
-    "allow-desktop-extend-terminal-windows"
+    "allow-desktop-extend-terminal-windows",
+    "allow-desktop-focus-terminal-window"
   ]
 }

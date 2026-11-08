@@ -1,6 +1,6 @@
 import { listAccounts, nextGeneration } from "../../api";
 import type { Result } from "../../api";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cancelResearch, cancelTeamTask, failureCopy, loadResearchLog, receiptState, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import type { GraphNode, IntentReceipt, TeamStatus } from "../../engine-client";
@@ -12,7 +12,9 @@ import { AgentUsageCard } from "./usage";
 import { FinishedAgentsCleanup } from "./cleanup";
 import type { ResearchRow } from "./research";
 import { FinishedAgentsPanel, TeamPanel } from "./team";
-import { TeamGraphView } from "../team";
+import { AgentsToolbar, TeamGraphView, useTeamGraph } from "../team";
+import { teamLine } from "../team/graph";
+import type { PerWindow } from "../terminals/pages";
 import { SETTING_GROUPS, StopAll, TeamActions, TeamControls, type SettingGroupId } from "../team/controls";
 import { TeamEventsPanel, WakeRulesPanel } from "../team/wake-rules";
 import { QuestionsPanel, askCount, asksWords, questionsTitle, useQuestions } from "../team/questions";
@@ -113,16 +115,28 @@ export function PauseAll({ data }: { data: ProjectData }) {
   </>;
 }
 
+/** The Agents toolbar above Agent settings: the row the Team view draws over its graph, read
+ * from the same team graph. Inputs: the project id and name, the terminals per window and
+ * the row's parts. Output: the row. */
+function SettingsToolbar({ projectId, name, perWindow, lead, asks, pool, tools }: {
+  projectId: string; name: string; perWindow: PerWindow; lead: ReactNode; asks: ReactNode; pool: string; tools: ReactNode;
+}) {
+  const [read] = useTeamGraph(projectId);
+  const team = read.shown?.kind === "ok" ? read.shown.value : null;
+  return <AgentsToolbar projectId={projectId} name={name} perWindow={perWindow} team={team}
+    line={team !== null && team.nodes.length > 0 ? teamLine(team) : null} lead={lead} asks={asks} pool={pool} tools={tools} />;
+}
+
 /** Agents tab: Team, as the approved mockup draws it: one toolbar row (Team and Agent
  * settings, the team line whose "N ask you" opens the owner's questions and the sub-agent
  * events in a drawer, Running and All, Pause all, Open all terminals), a stopped team's line
  * with Start all again, the graph with its one terminal panel, then the closed Agents and
  * tasks fold (Stop all, Hand a task, the team's agents and tasks, wake rules, usage),
  * Finished agents and every research agent the project has started, with live progress from
- * the engine; or Agent settings, grouped as the mockup shows them. Inputs: the project data
- * and the route's section, which opens Agent settings, at a group when it names one, or the
- * questions drawer once on its questions or waiting agents, as a toast's Open asks. Output:
- * the tab; rows refresh while they poll. */
+ * the engine; or Agent settings under the same toolbar row, grouped as the mockup shows them.
+ * Inputs: the project data and the route's section, which opens Agent settings, at a group
+ * when it names one, or the questions drawer once on its questions or waiting agents, as a
+ * toast's Open asks. Output: the tab; rows refresh while they poll. */
 export function AgentsTab({ data, section }: { data: ProjectData; section?: string }) {
   const opened = agentsView(section);
   const [shownView, setShownView] = useState<"team" | "settings">(opened.view);
@@ -177,22 +191,32 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
   }
 
   const viewSwitch = <Segmented label="Agents view" value={shownView} onValue={setShownView} options={AGENTS_VIEWS} />;
+  const bar = {
+    lead: viewSwitch,
+    asks: <button type="button" className="tg-asks" aria-haspopup="dialog" onClick={() => { setFocus(null); setAsking(true); }}>{asks}</button>,
+    pool: data.assigned ? poolName(data.assigned.pool) : "No pool. Pick a pool to start.",
+    tools: <><Segmented label="Show" value={filter} onValue={setFilter} options={SHOW_OPTIONS} /><PauseAll data={data} /></>,
+  };
+  const perWindow = teamValue.terminals_per_window ?? 6;
+  const drawer = <Drawer open={asking} title={questionsTitle(inbox)} onClose={() => { setAsking(false); setFocus(null); }}>
+    <QuestionsPanel projectId={data.id} read={inbox} reload={reloadInbox} focus={focus} onOpen={(node) => { setAsking(false); setFocus(null); setShownView("team"); setTerminal(node); }} />
+    {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
+  </Drawer>;
   if (shownView === "settings") return <div className="pj-stack">
-    <div className="pj-row between">{viewSwitch}</div>
+    <SettingsToolbar projectId={data.id} name={data.name} perWindow={perWindow} {...bar} />
     {team.result === undefined && <p className="pj-muted" role="status">Loading...</p>}
     {team.result?.kind === "not_ready" && <NotReady what="the live team isn't in this build." />}
     {team.result?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team.result)}</p>}
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} reload={data.reloadTeam} data={data} group={opened.group} />}
+    {drawer}
   </div>;
   return <div className="pj-stack">
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     {team.result?.kind === "ok" && team.result.value.paused && <StopAll projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
-    <TeamGraphView projectId={data.id} perWindow={teamValue.terminals_per_window ?? 6} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)}
-      lead={viewSwitch} asks={<button type="button" className="tg-asks" aria-haspopup="dialog" onClick={() => { setFocus(null); setAsking(true); }}>{asks}</button>}
-      pool={data.assigned ? poolName(data.assigned.pool) : "No pool. Pick a pool to start."}
-      tools={<><Segmented label="Show" value={filter} onValue={setFilter} options={SHOW_OPTIONS} /><PauseAll data={data} /></>} />
+    <TeamGraphView projectId={data.id} perWindow={perWindow} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)}
+      {...bar} />
     <details className="pj-stack-s" aria-label="Agents and tasks">
       <summary><strong>Agents and tasks</strong> <span className="pj-small pj-muted">Stop all, Hand a task, the team's agents and tasks, wake rules and usage.</span></summary>
       {team.result?.kind === "ok" && <TeamActions projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
@@ -229,9 +253,6 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
       onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
       {waits ? "It won't start. Try again queues it later." : "Work so far stays in its working copy. Try again starts it over."}
     </ConfirmDialog>
-    <Drawer open={asking} title={questionsTitle(inbox)} onClose={() => { setAsking(false); setFocus(null); }}>
-      <QuestionsPanel projectId={data.id} read={inbox} reload={reloadInbox} focus={focus} onOpen={(node) => { setAsking(false); setFocus(null); setTerminal(node); }} />
-      {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
-    </Drawer>
+    {drawer}
   </div>;
 }

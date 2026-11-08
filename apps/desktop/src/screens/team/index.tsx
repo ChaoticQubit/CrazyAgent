@@ -9,7 +9,7 @@ import { actions } from "../changes/model";
 import { displayText } from "../conversation";
 import { AgentSkillsDialog } from "../process";
 import {
-  BADGE_HEIGHT, BADGE_WIDTH, DRAG_SLOP, ZOOM_STEP, badgeLabel, cardTask, cardText, cardTip, dotTone, fitView, fromOwner,
+  BADGE_HEIGHT, BADGE_WIDTH, DRAG_SLOP, LIVE_LABEL_WIDTH_MAX, ZOOM_STEP, badgeLabel, cardTask, cardText, cardTip, dotTone, fitView, fromOwner,
   graphLive, layoutCards, layoutGraph, namedAccounts, nodeActions, nodeDetail, nodeStatus, panView,
   receiptTicks, teamLine, tipPlace, viewKey, waitingOnOwner, wheelZoom, zoomView, type Link, type PlacedCard, type Size, type View,
 } from "./graph";
@@ -66,7 +66,8 @@ export function GraphCard({ placed, graph, harness, open, tipId, items, onOpen, 
   const opens = node.terminal !== null;
   const waiting = waitingOnOwner(node);
   const unread = fromOwner(node, graph);
-  const text = cardText({ ...node, label: displayText(node.label) }, graph.edges.map((edge) => ({ ...edge, text: displayText(edge.text) })), harness);
+  const text = cardText({ ...node, label: displayText(node.label) }, graph.edges.map((edge) => ({ ...edge, text: displayText(edge.text) })), graph.nodes, harness);
+  const chips = waiting || unread || node.message_note;
   return <div className={`tg-card ${node.kind}${open ? " open" : ""}${opens ? "" : " static"}${waiting ? " waiting" : ""}`}
     style={{ left: placed.x, top: placed.y, width: placed.width, height: placed.height }}
     onPointerEnter={() => onTip(node.id)} onPointerLeave={() => onTip(null)}>
@@ -80,14 +81,14 @@ export function GraphCard({ placed, graph, harness, open, tipId, items, onOpen, 
         <Icon name={NODE_ICONS[node.kind] ?? "bot"} size={14} />
         <span className="tg-clip">{text.title}</span>
       </span>
-      <span className="tg-card-detail tg-clip">{displayText(text.detail)}</span>
-      {text.branch && <span className="tg-card-branch"><Icon name="git-branch" size={12} /><span className="tg-clip">{displayText(text.branch)}</span></span>}
-      <span className="tg-card-task">{text.task.map((line, index) => <span key={index} className="tg-clip">{line}</span>)}</span>
-      {(waiting || unread || node.message_note) && <span className="tg-chips">
+      {!chips && <span className="tg-card-detail tg-clip">{displayText(text.detail)}</span>}
+      {chips && <span className="tg-chips">
         {node.message_note && <span className="tg-chip warn note"><span className="tg-clip">{displayText(node.message_note)}</span></span>}
         {waiting && <span className="tg-chip warn">{waiting.word}</span>}
         {unread && <span className="tg-chip">From you {unread.unread}{node.hookless ? "" : ` ${receiptTicks(unread.receipt).ticks}`}</span>}
       </span>}
+      {text.branch && <span className="tg-card-branch"><Icon name="git-branch" size={12} /><span className="tg-clip">{displayText(text.branch)}</span></span>}
+      <span className="tg-card-task">{text.task.map((line, index) => <span key={index} className="tg-clip">{line}</span>)}</span>
     </button>
     {items.length > 0 && <span className="tg-card-menu"><Menu label={`Actions for ${displayText(node.label)}`} items={items} /></span>}
   </div>;
@@ -100,9 +101,9 @@ export function LinkBadges({ link }: { link: Link }) {
   const shown = displayText(link.label);
   const label = [shown, badgeLabel(link)].filter(Boolean).join(", ");
   if (!label) return null;
-  return <span className="tg-badges" role="img" aria-label={label} title={label}
+  return <span className={`tg-badges${link.live ? " live" : ""}`} role="img" aria-label={label} title={label}
     style={{ left: link.badge.x - BADGE_WIDTH / 2, top: link.badge.y - BADGE_HEIGHT / 2, width: BADGE_WIDTH, height: BADGE_HEIGHT }}>
-    {shown && <span className={`tg-edge-label${link.live ? " live" : ""}`}><span className="tg-clip">{shown}</span></span>}
+    {shown && <span className={`tg-edge-label${link.live ? " live" : ""}`} style={link.live ? { maxWidth: LIVE_LABEL_WIDTH_MAX } : undefined}><span className="tg-clip">{shown}</span></span>}
     {link.tasks > 0 && <span className="tg-badge"><Icon name="list-checks" size={12} />{link.tasks}</span>}
     {link.questions > 0 && <span className="tg-badge question"><Icon name="message-square" size={12} />{link.questions}</span>}
     {link.unread > 0 && <span className="tg-badge message"><Icon name="send" size={12} />{link.unread}{link.receipt && !link.hookless ? ` ${receiptTicks(link.receipt).ticks}` : ""}</span>}
@@ -214,6 +215,44 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
   return [state, () => setRound((value) => value + 1)];
 }
 
+/** The Agents toolbar, one row as the mockup draws it above both Agents views: `lead`, then
+ * the team line (`line`, what `asks` the owner and the `pool`), then `tools` and Open all
+ * terminals, which opens the terminal wall windows, perWindow terminals each, and says why
+ * under the row when they could not open. Inputs: the project id and name, the terminals per
+ * window, the drawn team or null while it is not read, the team line and the row's parts.
+ * Output: the row and its note. */
+export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, asks, pool, tools }: {
+  projectId: string; name: string; perWindow: PerWindow; team: TeamGraph | null; line: string | null;
+  lead?: ReactNode; asks?: ReactNode; pool?: string; tools?: ReactNode;
+}) {
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => { setNote(null); }, [projectId]);
+  if (line !== null && team === null) throw new Error("a team line comes from a read team");
+  const walls = team === null ? null : wallPages(team.nodes, perWindow).length;
+  if (walls !== null && !(Number.isSafeInteger(walls) && walls >= 0)) throw new Error(`a team needs a whole number of windows: ${walls}`);
+
+  async function openAll(windows: number) {
+    if (windows === 0) return;
+    setNote(wallNote(await openTerminalWindows(projectId, name, windows, true)));
+  }
+
+  const parts = [line && <span key="team" role="status">{line}</span>, asks && <span key="asks">{asks}</span>, pool && <span key="pool">{displayText(pool)}</span>]
+    .filter((part) => Boolean(part));
+  return <>
+    <div className="tg-head">
+      {lead}
+      <span className="tg-summary">{parts.flatMap((part, index) => index === 0 ? [part] : [<span key={`dot-${index}`} aria-hidden="true"> · </span>, part])}</span>
+      {tools}
+      <Button size="small" icon="square-terminal" className="tg-open-all" title={openAllHint(walls ?? 0, perWindow)} disabled={!walls}
+        onClick={() => void openAll(walls ?? 0)}>Open all terminals</Button>
+    </div>
+    {note && <Notice tone="warn" alert>
+      <span className="grow">{displayText(note)}</span>
+      <Button size="small" variant="quiet" onClick={() => setNote(null)}>Dismiss</Button>
+    </Notice>}
+  </>;
+}
+
 /** The live team graph of one project as a tree of who leads whom (DEC-104 Q16): the master
  * on top, each lead under it and each lead's agents under that lead, joined by solid
  * assignment lines whose badges count live tasks, waiting questions and unread messages with
@@ -259,11 +298,6 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
     setSendNote(null);
     setNote(null);
   }, [projectId]);
-
-  async function openAll(windows: number) {
-    if (windows === 0) return;
-    setNote(wallNote(await openTerminalWindows(projectId, name, windows, true)));
-  }
 
   async function send() {
     if (acting?.kind !== "message" || busy) return;
@@ -360,19 +394,10 @@ export function TeamGraphView({ projectId, name = "Project", perWindow = 6, open
       <NodeMessages projectId={projectId} node={node} refresh={graph} />
     </AgentSide>;
   };
-  const walls = team === null ? null : wallPages(team.nodes, perWindow).length;
-  const head = (line: string | null) => {
-    const parts = [line && <span key="team" role="status">{line}</span>, asks && <span key="asks">{asks}</span>, pool && <span key="pool">{displayText(pool)}</span>]
-      .filter((part) => Boolean(part));
-    return <div className="tg-head">
-      <h3 id={`${ids}-title`} className="pj-sr">Team graph</h3>
-      {lead}
-      <span className="tg-summary">{parts.flatMap((part, index) => index === 0 ? [part] : [<span key={`dot-${index}`} aria-hidden="true"> · </span>, part])}</span>
-      {tools}
-      <Button size="small" icon="square-terminal" className="tg-open-all" title={openAllHint(walls ?? 0, perWindow)} disabled={!walls}
-        onClick={() => void openAll(walls ?? 0)}>Open all terminals</Button>
-    </div>;
-  };
+  const head = (line: string | null) => <>
+    <h3 id={`${ids}-title`} className="pj-sr">Team graph</h3>
+    <AgentsToolbar projectId={projectId} name={name} perWindow={perWindow} team={team} line={line} lead={lead} asks={asks} pool={pool} tools={tools} />
+  </>;
   const status: ReactNode = graph === undefined ? <Skeleton shape="card" />
     : graph.kind === "not_ready" ? <NotReady what="The team graph" compact />
     : graph.kind === "error" ? <LoadError message={`Couldn't load the team graph. ${graph.message}`} onRetry={reload} />

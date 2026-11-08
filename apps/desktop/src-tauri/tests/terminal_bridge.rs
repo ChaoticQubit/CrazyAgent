@@ -67,7 +67,7 @@ fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     }
 }
 
-const WALL_COMMANDS: [&str; 10] = [
+const WALL_COMMANDS: [&str; 11] = [
     "desktop_terminal_attach",
     "desktop_terminal_input",
     "desktop_terminal_prompt",
@@ -78,14 +78,16 @@ const WALL_COMMANDS: [&str; 10] = [
     "desktop_team_stop_teammate",
     "desktop_terminals_per_window",
     "desktop_extend_terminal_windows",
+    "desktop_focus_terminal_window",
 ];
 
-const PROJECT_WALL_COMMANDS: [&str; 5] = [
+const PROJECT_WALL_COMMANDS: [&str; 6] = [
     "desktop_team_graph",
     "desktop_team_stop_agent",
     "desktop_team_stop_teammate",
     "desktop_terminals_per_window",
     "desktop_extend_terminal_windows",
+    "desktop_focus_terminal_window",
 ];
 
 const WALL_GUARD: &str = "terminal_window(&window)?;";
@@ -176,6 +178,32 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
     assert!(
         attach.contains("bridge::terminal::graph_shows(&graph, &agent)"),
         "{attach}"
+    );
+}
+
+/// A wall window opens at an address naming its project, page and project name, and moves
+/// the owner only through `wall_focus`: to the main window on its project's Agents tab or to
+/// another wall window of its own project, never from the main window.
+#[test]
+fn a_wall_window_opens_at_its_named_address_and_moves_only_through_wall_focus() {
+    let commands = command_bodies();
+    let focus = commands
+        .iter()
+        .find(|(name, _)| *name == "desktop_focus_terminal_window")
+        .map_or("", |(_, body)| *body);
+    assert!(
+        focus.contains("bridge::terminal::wall_focus(window.label(), &project, &target)?"),
+        "{focus}"
+    );
+    assert!(!focus.contains("main_window(&window)?;"), "{focus}");
+    let bindings = include_str!("../src/lib.rs");
+    assert!(
+        bindings.contains("bridge::terminal::wall_url(project, page, name)"),
+        "build_wall opens the named address"
+    );
+    assert!(
+        !bindings.contains("format!(\"index.html#/terminals/"),
+        "no wall address is built by hand"
     );
 }
 

@@ -1661,6 +1661,40 @@ async fn desktop_extend_terminal_windows(
     open_walls(&app, &project, &name, count.max(1), false)
 }
 
+/// Brings forward, for a terminal wall window, the main window on its project's Agents tab or
+/// another wall window of its own project, as the wall's Back to Agents and Window switch do.
+/// Main and other projects' windows get `window_denied`. Inputs: the calling wall window, the
+/// app, the project id and the target, "main" or a page. Output: unit, `window_denied`, or
+/// `terminal_window_failed` when that window is not open or does not come forward.
+#[tauri::command]
+fn desktop_focus_terminal_window(
+    window: WebviewWindow,
+    app: AppHandle,
+    id: String,
+    target: String,
+) -> Result<(), BridgeError> {
+    terminal_window_for(&window, &id)?;
+    let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
+    let failed = || engine_failure("terminal_window_failed");
+    match bridge::terminal::wall_focus(window.label(), &project, &target)? {
+        bridge::terminal::WallFocus::Main { hash } => {
+            assert!(
+                hash.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.:/#".contains(&b))
+            );
+            let main = app.get_webview_window("main").ok_or_else(failed)?;
+            main.eval(format!("window.location.hash = \"{hash}\";"))
+                .map_err(|_| failed())?;
+            main.set_focus().map_err(|_| failed())
+        }
+        bridge::terminal::WallFocus::Wall { label } => app
+            .get_webview_window(&label)
+            .ok_or_else(failed)?
+            .set_focus()
+            .map_err(|_| failed()),
+    }
+}
+
 /// Closes one project's terminal wall windows once the main window removed the project.
 /// Inputs: the calling window, the app and the project id. Output: unit, `window_denied`
 /// from any window but main, or `invalid_project`.
@@ -1779,26 +1813,27 @@ fn open_walls(
                     let _ = wall.set_focus();
                 }
             }
-            None => build_wall(app, &label, project, page, &title)?,
+            None => build_wall(app, &label, project, page, name, &title)?,
         }
     }
     assert!(count <= bridge::terminal::WINDOWS_MAX);
     Ok(())
 }
 
-/// Builds one terminal wall window on the wall page of its project, with the main window's
-/// navigation rule, a page load that clears only its own terminal views, and a close that
-/// forgets them. Inputs: the app, the window label, the project, the page and the title.
-/// Output: unit or `terminal_window_failed`.
+/// Builds one terminal wall window on the wall page of its project, at the address naming
+/// its project name, with the main window's navigation rule, a page load that clears only its
+/// own terminal views, and a close that forgets them. Inputs: the app, the window label, the
+/// project, the page, the shown name and the title. Output: unit or `terminal_window_failed`.
 fn build_wall(
     app: &AppHandle,
     label: &str,
     project: &ProjectId,
     page: usize,
+    name: &str,
     title: &str,
 ) -> Result<(), BridgeError> {
     assert!(bridge::terminal::window_label_valid(label));
-    let url = format!("index.html#/terminals/{}/{page}", project.as_str());
+    let url = bridge::terminal::wall_url(project, page, name);
     let wall = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
         .title(title)
         .inner_size(1280.0, 820.0)
@@ -3961,6 +3996,7 @@ pub fn run() {
             desktop_terminals_per_window,
             desktop_open_terminal_windows,
             desktop_extend_terminal_windows,
+            desktop_focus_terminal_window,
             desktop_close_project_walls,
             desktop_update_project_setup,
             desktop_remove_project,

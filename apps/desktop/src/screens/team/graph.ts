@@ -2,8 +2,8 @@ import { HOOKLESS_WORDS, type GraphEdge, type GraphEdgeState, type GraphNode, ty
 import type { Tone } from "../../ui";
 import { elapsed } from "../project/research";
 
-export const CARD_WIDTH = 216;
-export const CARD_HEIGHT = 132;
+export const CARD_WIDTH = 176;
+export const CARD_HEIGHT = 96;
 export const CARD_GAP = 16;
 export const LEVEL_GAP = 72;
 export const ROW_GAP = 40;
@@ -13,9 +13,10 @@ export const MARGIN = 24;
 export const NODES_MAX = 64;
 export const BADGE_WIDTH = CARD_WIDTH;
 export const BADGE_HEIGHT = 24;
+export const LIVE_LABEL_WIDTH_MAX = 2 * CARD_WIDTH;
 export const TITLE_CHARS = 22;
 export const LINE_CHARS = 30;
-export const TASK_LINES = 2;
+export const TASK_LINES = 1;
 export const TIP_CHARS = 1000;
 export const TIP_HALF = 160;
 export const TIP_GAP = 8;
@@ -450,18 +451,32 @@ function taskLine(node: GraphNode, edges: readonly GraphEdge[]): string {
   return live(task) ? task.text : `${edgeStatus(task).word}: ${task.text}`;
 }
 
-/** The clipped text of one card: the title, the role, harness and account line, the branch
- * line when the agent has a branch, and up to `TASK_LINES` task lines. Inputs: the node, the
- * edges and a harness name lookup. Output: the card text. */
-export function cardText(node: GraphNode, edges: readonly GraphEdge[], harness?: (id: string) => string):
+/** The clipped text of one card: the title, the harness and account line, the branch line
+ * when the agent has a branch, and up to `TASK_LINES` task lines. Inputs: the node, the
+ * edges, the graph's nodes and a harness name lookup. Output: the card text. */
+export function cardText(node: GraphNode, edges: readonly GraphEdge[], nodes: readonly GraphNode[], harness?: (id: string) => string):
   { title: string; detail: string; branch: string | null; task: string[] } {
   const branch = node.branch?.trim();
   return {
     title: clipLines(node.label, TITLE_CHARS, 1)[0] ?? "",
-    detail: clipLines(nodeDetail(node, harness), LINE_CHARS, 1)[0] ?? "",
+    detail: clipLines(cardDetail(node, nodes, harness), LINE_CHARS, 1)[0] ?? "",
     branch: branch ? clipChars(branch, LINE_CHARS) : null,
     task: clipLines(cardTask(node, edges), LINE_CHARS, TASK_LINES),
   };
+}
+
+/** A card's second line, as the mockup words it: the harness and the account, a lead's
+ * harness followed by "lead", and a teammate named after its lead, or after its harness
+ * when the graph does not draw its lead. Inputs: the node, the graph's nodes and a harness
+ * name lookup. Output: the line, before clipping. */
+export function cardDetail(node: GraphNode, nodes: readonly GraphNode[], harness: (id: string) => string = (id) => id): string {
+  assert(Array.isArray(nodes), "a card reads the graph's nodes");
+  const lead = node.kind === "teammate" ? nodes.find((item) => item.id === node.parent && item.id !== node.id) : undefined;
+  if (lead) return `Teammate of ${lead.label}`;
+  const name = harness(node.harness);
+  assert(typeof name === "string", "a harness lookup gives a name");
+  const role = node.kind === "lead" ? `${name} lead` : node.kind === "teammate" ? `${name} teammate` : name;
+  return [role, node.account?.trim() || null].filter(Boolean).join(" · ");
 }
 
 /** The full text a card shows on hover: title, role line, branch, status and presence, that

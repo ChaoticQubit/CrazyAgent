@@ -82,6 +82,7 @@ fn main() {
         "desktop_terminals_per_window",
         "desktop_open_terminal_windows",
         "desktop_extend_terminal_windows",
+        "desktop_focus_terminal_window",
         "desktop_close_project_walls",
         "desktop_update_project_setup",
         "desktop_remove_project",

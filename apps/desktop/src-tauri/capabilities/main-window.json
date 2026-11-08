@@ -86,6 +86,7 @@
     "allow-desktop-team-terminals-per-window",
     "allow-desktop-open-terminal-windows",
     "allow-desktop-extend-terminal-windows",
+    "allow-desktop-focus-terminal-window",
     "allow-desktop-close-project-walls",
     "allow-desktop-terminals-per-window",
     "allow-desktop-update-project-setup",
