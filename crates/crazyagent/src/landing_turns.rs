@@ -55,7 +55,18 @@ pub fn record(
 /// to its agent, false when it waits for the owner, or the plain refusal of a step before
 /// the merge, the set then waiting for the owner too.
 fn catch_up(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
-    if !landing::conflicts_with_main(db, id)? {
+    catch_up_with(db, id, Some(after_regeneration))
+}
+
+/// Runs [`catch_up`], where a clash in lockfiles only may start a regeneration only with
+/// `after`. Inputs: the store, the change set and what runs after a regeneration that
+/// landed nothing. Output: as `catch_up`.
+fn catch_up_with(
+    db: &Connection,
+    id: &ChangeSetId,
+    after: Option<landing::AfterRegeneration>,
+) -> Result<bool, EngineError> {
+    if !landing::conflicts_with_main(db, id, after)? {
         return Ok(false);
     }
     let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
@@ -65,6 +76,21 @@ fn catch_up(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
         eprintln!("resolve_not_started_after_turn cause={}", problem.0);
     }
     Ok(true)
+}
+
+/// Checks a set again once its lockfile regeneration landed nothing (OS-8): after a
+/// refusal the clash goes to its agent as Task 7's update, after the set or main moved
+/// the check may start another regeneration; a step that cannot run is logged by its plain
+/// code and the set waits for the owner. Inputs: the store, the set and whether another
+/// regeneration may start.
+fn after_regeneration(db: &Connection, id: &ChangeSetId, again: bool) {
+    let after = again.then_some(after_regeneration as landing::AfterRegeneration);
+    if let Err(problem) = catch_up_with(db, id, after) {
+        eprintln!(
+            "catch_up_skipped cause={}",
+            crate::protocol::plain_code(&problem.0)
+        );
+    }
 }
 
 const RESOLVE_PROMPT_BYTES_MAX: usize = crate::team::TASK_PROMPT_BYTES_MAX;

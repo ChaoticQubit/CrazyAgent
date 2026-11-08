@@ -1093,23 +1093,39 @@ pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), Eng
 /// of a sub-agent in a linked worktree that its own resolve task fixes is checked, and
 /// never with an owner-configured filter or merge driver on a path it changes. A clash in
 /// known lockfiles only is rewritten by their tools on top of the set instead, which then
-/// waits for the owner. Inputs: the store and the change set. Output: the answer, or the
-/// plain code of a check that could not run.
-pub(crate) fn conflicts_with_main(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
+/// waits for it, not its agent, when `after` is given: the rewrite then runs off this
+/// thread and `after` runs once it lands nothing. Inputs: the store, the change set and
+/// what runs after. Output: the answer, or the plain code of a check that could not run.
+pub(crate) fn conflicts_with_main(
+    db: &Connection,
+    id: &ChangeSetId,
+    after: Option<AfterRegeneration>,
+) -> Result<bool, EngineError> {
     #[cfg(unix)]
-    return owner::conflicts_with_main(db, id);
+    return owner::conflicts_with_main(db, id, after);
     #[cfg(not(unix))]
     {
-        let _ = (db, id);
+        let _ = (db, id, after);
         Err(unavailable())
     }
 }
 
-/// Removes what lockfile regenerations a stopped engine left behind (OS-8). Input: the
-/// store. Output: how many temporary worktrees it removed.
+/// What runs after a lockfile regeneration that landed nothing, on its own thread with its
+/// own store: the set, and whether another regeneration may start, which is false once
+/// one refused the clash and true when the set or main moved meanwhile.
+pub(crate) type AfterRegeneration = fn(&Connection, &ChangeSetId, bool);
+
+/// Removes what lockfile regenerations a stopped engine left behind (OS-8): their
+/// temporary worktrees with their admin folders and the engine's scratch folders. Input:
+/// the store. Output: how many temporary worktrees it removed.
 pub fn sweep_regenerations(db: &Connection) -> Result<usize, EngineError> {
-    let _ = db;
-    Ok(0)
+    #[cfg(unix)]
+    return lockfiles::sweep(db);
+    #[cfg(not(unix))]
+    {
+        let _ = db;
+        Ok(0)
+    }
 }
 
 /// Merges the owner's branch tip into the agent's worktree with conflict markers, ready

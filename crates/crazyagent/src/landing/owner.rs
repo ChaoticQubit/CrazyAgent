@@ -89,7 +89,12 @@ pub(super) fn owner_identity(
 /// those main changed since the set's merge base, each side of a rename apart, so the
 /// path git merges an edit at after main renamed the file is checked too. Inputs: the
 /// repository, the merge base, the tip and the set's head. Output: the paths, sorted once.
-fn merge_paths(repo: &Repo, from: &str, tip: &str, head: &str) -> Result<Vec<String>, EngineError> {
+pub(super) fn merge_paths(
+    repo: &Repo,
+    from: &str,
+    tip: &str,
+    head: &str,
+) -> Result<Vec<String>, EngineError> {
     let mut paths = diff::changed_paths(repo, from, head)?;
     paths.extend(diff::changed_paths(repo, from, tip)?);
     paths.sort_unstable();
@@ -1174,11 +1179,16 @@ pub(super) fn conflicts_with_tip(
 /// of an agent that takes its own resolve task is checked: a master's set keeps the
 /// owner's Accept and Update, a lead's worker while its lead merges it, or a native
 /// teammate, keeps its lead's merge, which tells the lead the files, and an agent's own
-/// clone waits for the owner, since its git takes no merge of the engine's commit. A
-/// clash in known lockfiles only is first rewritten by their tools on top of the set, see
-/// [`lockfiles_regenerated`], and the set then no longer conflicts. Inputs: the store and
-/// the change set. Output: the answer, or the plain code of a check that could not run.
-pub(super) fn conflicts_with_main(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
+/// clone waits for the owner, since its git takes no merge of the engine's commit. With
+/// `after`, a clash in known lockfiles only starts a regeneration off this thread instead
+/// ([`super::lockfiles::regenerate_later`]), and the set waits for it, not its agent.
+/// Inputs: the store, the change set and what runs after a regeneration that landed
+/// nothing. Output: the answer, or the plain code of a check that could not run.
+pub(super) fn conflicts_with_main(
+    db: &Connection,
+    id: &ChangeSetId,
+    after: Option<super::AfterRegeneration>,
+) -> Result<bool, EngineError> {
     let record = store::load(db, id)?;
     if record.state != ChangeState::Pending
         || record.intent.is_some()
@@ -1194,38 +1204,15 @@ pub(super) fn conflicts_with_main(db: &Connection, id: &ChangeSetId) -> Result<b
         return Ok(false);
     }
     let conflicts = conflicts_with_tip(db, &record)?;
-    Ok(!conflicts.is_empty() && !lockfiles_regenerated(db, id, &conflicts)?)
-}
-
-/// Rewrites a clash made of known lockfiles only with their tools, as the engine's commit
-/// on top of the set, under [`hold`] on the repository (OS-8). Any other clashing path, a
-/// set that changed state meanwhile, or a tool that is missing or fails rewrites nothing,
-/// and Task 7's update then hands the clash to the agent. Inputs: the store, the change
-/// set and its clashing paths. Output: whether the set now holds the rewritten lockfiles.
-fn lockfiles_regenerated(
-    db: &Connection,
-    id: &ChangeSetId,
-    conflicts: &[String],
-) -> Result<bool, EngineError> {
-    if conflicts.is_empty()
-        || conflicts.len() > super::lockfiles::PATHS_MAX
-        || conflicts
-            .iter()
-            .any(|path| super::lockfiles::program_for(path).is_none())
-    {
+    if conflicts.is_empty() {
         return Ok(false);
     }
-    let repository = store::load(db, id)?.repository;
-    let _held = hold(&repository);
-    let mut record = store::load(db, id)?;
-    if record.state != ChangeState::Pending || record.intent.is_some() {
-        return Ok(false);
+    match after {
+        Some(after) => Ok(!super::lockfiles::regenerate_later(
+            db, &record, &conflicts, after,
+        )?),
+        None => Ok(true),
     }
-    let regenerated = super::lockfiles::regenerate(db, &mut record, conflicts)?;
-    if let Some(head) = &regenerated {
-        assert_eq!(&record.head, head);
-    }
-    Ok(regenerated.is_some())
 }
 
 /// Finishes or undoes owner-checkout and worktree work an engine stop interrupted, one
