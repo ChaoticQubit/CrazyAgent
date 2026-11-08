@@ -1830,3 +1830,40 @@ async fn real_panel_refuses_a_running_sign_in_whose_own_account_was_replaced_and
     })
     .await;
 }
+
+#[tokio::test]
+async fn unit_transient_error_on_a_recheck_leaves_a_running_sign_in_healthy() {
+    run(|case| async move {
+        let (basis, connection) = case.selected("b-claude").await;
+        let (mut state, job) = unit_started(basis.clone(), connection);
+        let mut reply = unit_signed_out_reply(&job, "unit@example.invalid");
+        reply.fact.phase = NativeAuthPhase::AwaitingOwner;
+        reply.account = None;
+        state
+            .apply(Event {
+                job,
+                result: Ok(Output::Auth(Box::new(reply))),
+            })
+            .unwrap();
+        state.hide().unwrap();
+        assert!(state.has_pending());
+        let mut moved = basis.clone();
+        moved.config_id = ConfigId::new("other-config").unwrap();
+        assert!(state.stuck(Some(&moved)).is_none());
+        assert!(state.recheck(Some(&moved)));
+        let read = state.request().unwrap();
+        assert!(matches!(read.command, Command::Read(_)));
+        state
+            .apply(Event {
+                job: read,
+                result: Err("owner_request_timed_out".into()),
+            })
+            .unwrap();
+        assert!(
+            state.stuck(Some(&moved)).is_none(),
+            "a check that could not be answered says nothing about the sign-in"
+        );
+        assert!(state.has_pending());
+    })
+    .await;
+}
