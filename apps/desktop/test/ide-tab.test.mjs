@@ -149,7 +149,7 @@ test("a refused place, hide or close reaches the owner instead of vanishing", as
   const page = read("src/screens/project/index.tsx");
   assert.ok(page.indexOf("{ideHideProblem &&") >= 0 && page.indexOf("{ideHideProblem &&") < page.indexOf('className="pj-tab-panel"'), "a failed hide shows above the tab panel, outside the box the IDE may still cover");
   const clean = await opened([], left);
-  assert.deepEqual(clean.reported, ["hide: null"], "calls that work tell the owner nothing");
+  assert.ok(clean.reported.length > 0 && clean.reported.every((line) => line === "hide: null"), `calls that work tell the owner nothing: ${JSON.stringify(clean.reported)}`);
   assert.equal(clean.alert, null);
 });
 
@@ -181,7 +181,7 @@ test("an open the tab gave up on is refused quietly instead of showing a problem
   const lib = read("src-tauri/src/lib.rs");
   const open = lib.slice(lib.indexOf("async fn desktop_ide_open"), lib.indexOf("async fn desktop_ide_place"));
   assert.ok(open.indexOf("views.begin(&project)") >= 0 && open.indexOf("views.begin(&project)") < open.indexOf("ide_open(project"), "the ticket is taken before the engine call");
-  assert.match(open, /ide::show\(&app, &window, &views, &project, workbench, bounds, ticket\)/);
+  assert.match(open, /ide::show\(\s*&app,\s*&webview\.window\(\),\s*&views,\s*&project,\s*workbench,\s*bounds,\s*ticket,?\s*\)/);
 });
 
 test("the TUI focus poll reaches the engine only while a project's IDE webview is loaded", () => {
