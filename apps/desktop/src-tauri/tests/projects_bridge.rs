@@ -36,13 +36,13 @@ fn project_creation_has_one_named_native_command_and_local_main_window_permissio
         1
     );
     assert_eq!(capability["local"], true);
-    assert_eq!(capability["windows"], json!(["main"]));
+    assert!(capability.get("windows").is_none());
     assert_eq!(capability["webviews"], json!(["main"]));
     let permissions = capability["permissions"].as_array().unwrap();
     let handlers: Vec<&str> = bindings
-        .split("generate_handler![")
+        .split("native_commands! {")
         .nth(1)
-        .and_then(|rest| rest.split(']').next())
+        .and_then(|rest| rest.split('}').next())
         .unwrap()
         .split(',')
         .map(str::trim)
