@@ -34,6 +34,7 @@ function measure(page) {
       tabs: box(document.querySelector(".pj-head [role=tablist]")),
       desc: desc ? { text: desc.textContent, scrollWidth: desc.scrollWidth, clientWidth: desc.clientWidth, clientHeight: desc.clientHeight, line: parseFloat(getComputedStyle(desc).lineHeight) } : null,
       more: more ? { hidden: more.hidden, text: more.textContent, expanded: more.getAttribute("aria-expanded") } : null,
+      meta: (() => { const line = document.querySelector(".pj-head .pj-meta"); return line ? { text: line.innerText.replace(/\\s+/g, " ").trim(), shown: line.offsetParent !== null } : null; })(),
     };
   })()`);
 }
@@ -135,8 +136,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.waitFor("the project's Settings tab", (text) => text.includes(NAME) && text.includes("Settings"), STEP_MS);
         assert.equal(await page.evaluate("document.visibilityState"), "visible", "the window is drawn: a locked screen hides it (ENV-LOCKED)");
 
-        const before = await measure(page);
+        let before = await measure(page);
+        for (const until = Date.now() + STEP_MS; !(before.meta?.text.includes("local-pool") && before.meta.text.includes("larkspur-booking")) && Date.now() < until; before = await measure(page)) await pause(POLL_MS);
         assert.equal(before.head, "pj-head", "the head starts in its full form");
+        assert.ok(before.meta?.shown, `the meta line shows under the description (OS-1): ${JSON.stringify(before.meta)}`);
+        assert.match(before.meta.text, /larkspur-booking .*local-pool, 1 local model$/u, "the meta line names the project folder first and the pool with its size last");
         assert.ok(before.desc, "the description is shown");
         assert.ok(before.desc.text.includes("V2 adds recurring classes"), "the description keeps every line");
         assert.ok(before.desc.scrollWidth <= before.desc.clientWidth, `the description wraps inside its box: ${JSON.stringify(before.desc)}`);
@@ -158,6 +162,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         }
         assert.ok(after.desc.scrollWidth <= after.desc.clientWidth, `the description still wraps: ${JSON.stringify(after.desc)}`);
         assert.ok(after.desc.clientHeight <= after.desc.line + 1, `the description shrinks to one line: ${JSON.stringify(after.desc)}`);
+        assert.equal(after.meta?.shown, false, `the meta line hides once the page scrolls: ${JSON.stringify(after.meta)}`);
         await me.capture("head-scrolled");
 
         const hidden = await page.evaluate(`(() => {
