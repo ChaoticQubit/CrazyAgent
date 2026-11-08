@@ -970,6 +970,48 @@ mod import {
     }
 
     #[test]
+    fn the_head_branch_is_read_again_only_when_the_checkout_head_changes() {
+        let checkout = Checkout::new();
+        let root = std::fs::canonicalize(&checkout.folder).unwrap();
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            crate::landing::checked_out_branch(&root)
+        };
+        let main = Some("main".to_owned());
+        assert_eq!(branch_of(&root, &read), main);
+        assert_eq!(branch_of(&root, &read), main);
+        assert_eq!(reads.get(), 1, "an unchanged HEAD is not read again");
+        checkout.git(&["checkout", "-q", "-b", "release/2.0"]);
+        let release = Some("release/2.0".to_owned());
+        assert_eq!(branch_of(&root, &read), release);
+        assert_eq!(branch_of(&root, &read), release);
+        assert_eq!(reads.get(), 2, "a branch switch is read once");
+        checkout.git(&["checkout", "-q", "--detach"]);
+        assert_eq!(branch_of(&root, &read), None);
+        assert_eq!(branch_of(&root, &read), None);
+        assert_eq!(reads.get(), 3, "a detached HEAD is read once");
+        checkout.git(&["checkout", "-q", "main"]);
+        assert_eq!(branch_of(&root, &read), main);
+        assert_eq!(reads.get(), 4, "back on main is read again");
+        let other = Checkout::new();
+        let other_root = std::fs::canonicalize(&other.folder).unwrap();
+        let failing = || {
+            reads.set(reads.get() + 1);
+            Err(failure("process_commit_failed"))
+        };
+        assert_eq!(branch_of(&other_root, failing), None);
+        assert_eq!(
+            branch_of(&other_root, || crate::landing::checked_out_branch(
+                &other_root
+            )),
+            main,
+            "a failed read is not kept"
+        );
+        assert_eq!(reads.get(), 5);
+    }
+
+    #[test]
     fn a_branch_name_the_engine_cannot_read_keeps_the_waiting_move_with_no_branch() {
         let checkout = Checkout::new();
         import(&checkout.folder).unwrap();

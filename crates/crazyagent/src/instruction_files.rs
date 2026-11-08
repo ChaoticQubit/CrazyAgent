@@ -980,6 +980,16 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
         .collect())
 }
 
+/// Reads the branch a checkout has checked out through `read`, the git read; a failed read
+/// shows none. Inputs: the canonical checkout root and the read. Output: the branch.
+fn branch_of(
+    root: &Path,
+    read: impl FnOnce() -> Result<Option<String>, EngineError>,
+) -> Option<String> {
+    let _ = root;
+    read().unwrap_or(None)
+}
+
 /// Lists the moved instruction files whose move the owner's checkout has not committed, as
 /// `uncommitted` does, with the branch the checkout has checked out, named as the refusal's
 /// branch only while any wait; a branch that cannot be read is left unnamed, so the move
@@ -988,7 +998,7 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
 pub fn uncommitted_import(folder: &Path) -> Result<UncommittedImport, EngineError> {
     let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
     let files = uncommitted(&root)?;
-    let checked_out = crate::landing::checked_out_branch(&root).unwrap_or(None);
+    let checked_out = branch_of(&root, || crate::landing::checked_out_branch(&root));
     let branch = (!files.is_empty()).then(|| checked_out.clone()).flatten();
     Ok(UncommittedImport {
         files,
