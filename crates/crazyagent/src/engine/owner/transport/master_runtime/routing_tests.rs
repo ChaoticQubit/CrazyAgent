@@ -3929,3 +3929,48 @@ async fn a_master_turn_records_where_its_leased_worktree_starts_before_it_runs()
     drop(db);
     case.finish().await;
 }
+
+/// Each console master turn counts one turn on its project's master row, the key its tokens
+/// count against, so the master's Turns covers its console turns as well as its
+/// live-terminal ones (AL4 r2, rv-code M1).
+#[tokio::test]
+async fn each_console_master_turn_counts_one_turn_on_its_project_s_master_row() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    let project = prepared.session.project_id.clone();
+    let reported = Tokens {
+        input: 100,
+        output: 10,
+        cache_read: 0,
+        cache_write: 0,
+    };
+    let started = crate::team::now_ms();
+    for _ in 0..2 {
+        case.runtime()
+            .count_master_usage(&prepared, None, reported)
+            .await;
+    }
+    let db = crate::usage::open(case.root.path()).unwrap();
+    let counted: Vec<(String, i64)> = db
+        .prepare("SELECT agent,SUM(turns) FROM usage_turns WHERE project=?1 GROUP BY agent")
+        .unwrap()
+        .query_map([project.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let master = crate::usage::service::master_agent(Some(&project));
+    assert_eq!(counted, [(master.clone(), 2)]);
+    let since = started - started.rem_euclid(3_600_000);
+    let shown: Vec<(String, Option<u64>)> =
+        crate::usage::metrics::read(&db, Some(&project), since, crate::team::now_ms())
+            .unwrap()
+            .agents
+            .into_iter()
+            .map(|row| (row.agent, row.turns))
+            .collect();
+    assert_eq!(shown, [(master, Some(2))]);
+    drop(db);
+    drop(prepared);
+    case.finish().await;
+}

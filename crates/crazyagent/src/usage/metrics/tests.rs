@@ -1682,20 +1682,44 @@ fn each_agent_row_counts_the_turns_it_ended_in_the_range_in_its_own_project() {
     assert_eq!(earlier[0], row("alpha", "master-alpha", Some(3)));
 }
 
-/// Removing a project deletes its usage turn rows and keeps every other project's (AL4).
+/// Removing a project moves its usage turn rows to the removed projects' rows with their
+/// counts, as its token rows move: they add into a row already kept there for the same hour
+/// and agent, the removed rows' Turns read those counts, and every other project's rows stay
+/// (AL4 r2, rv-code L1 = rv-sec F1).
 #[test]
-fn removing_a_project_deletes_its_turn_rows_and_keeps_the_others() {
+fn removing_a_project_moves_its_turn_rows_to_the_removed_rows_with_their_counts() {
     let (_directory, db) = database();
+    for (project, agent, turns) in [
+        ("alpha", "master-alpha", 2),
+        ("alpha", "team-7", 2),
+        ("beta", "team-9", 2),
+        (crate::usage::REMOVED_PROJECTS, "master-alpha", 1),
+    ] {
+        db.execute(
+            "INSERT INTO usage_turns(hour_ms,project,agent,turns) VALUES (?1,?2,?3,?4)",
+            params![MIDNIGHT + HOUR, project, agent, turns],
+        )
+        .unwrap();
+    }
     for (project, agent) in [
         ("alpha", "master-alpha"),
         ("alpha", "team-7"),
         ("beta", "team-9"),
     ] {
-        db.execute(
-            "INSERT INTO usage_turns(hour_ms,project,agent,turns) VALUES (?1,?2,?3,2)",
-            params![MIDNIGHT + HOUR, project, agent],
-        )
-        .unwrap();
+        let session = format!("s-{agent}");
+        used(
+            &db,
+            MIDNIGHT + HOUR,
+            project,
+            "acct-a",
+            agent,
+            "codex",
+            &session,
+            100,
+            10,
+            0,
+            0,
+        );
     }
     crate::usage::forget_project(&db, "alpha").unwrap();
     let kept: Vec<(String, String, i64)> = db
@@ -1705,5 +1729,29 @@ fn removing_a_project_deletes_its_turn_rows_and_keeps_the_others() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(kept, [("beta".to_owned(), "team-9".to_owned(), 2)]);
+    let row = |project: &str, agent: &str, turns| (project.to_owned(), agent.to_owned(), turns);
+    let removed = crate::usage::REMOVED_PROJECTS;
+    assert_eq!(
+        kept,
+        [
+            row(removed, "master-alpha", 3),
+            row(removed, "team-7", 2),
+            row("beta", "team-9", 2),
+        ]
+    );
+    let mut shown: Vec<(String, String, Option<u64>)> = read(&db, None, MIDNIGHT, NOW)
+        .unwrap()
+        .agents
+        .into_iter()
+        .map(|agent| (agent.project, agent.agent, agent.turns))
+        .collect();
+    shown.sort();
+    assert_eq!(
+        shown,
+        [
+            row(removed, "master-alpha", Some(3)),
+            row(removed, "team-7", Some(2)),
+            row("beta", "team-9", Some(2)),
+        ]
+    );
 }

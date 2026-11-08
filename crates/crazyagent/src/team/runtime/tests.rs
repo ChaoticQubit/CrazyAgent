@@ -4441,6 +4441,11 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
         1,
         "the restart started no second master"
     );
+    assert_eq!(
+        usage_turns(&fixture, &format!("master-{PROJECT}")),
+        3,
+        "each live-terminal master turn counts exactly once for Metrics"
+    );
     assert_eq!(again.shutdown().unwrap(), names(&[master]));
     host.close(&[]).unwrap();
     assert!(host.alive().unwrap().is_empty());
