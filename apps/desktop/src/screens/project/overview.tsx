@@ -101,8 +101,8 @@ function ActivityRow({ item, now, goal, fresh = false, undo }: { item: ActivityI
     <span className={`pj-activity-kind ${KINDS[item.kind].tone}`}><Icon name={KINDS[item.kind].icon} size={14} /></span>
     <span className="pj-activity-text">{KINDS[item.kind].own ? `${displayText(item.actor)} noted: ${displayText(item.text)}` : displayText(item.text)}{item.undone && <> <Badge word="Undone" tone="neutral" /></>}
       <span className="pj-small pj-muted pj-activity-by">{actorLine(item)}{goal !== undefined && <> · <span className="pj-activity-tag">{displayText(goal)}</span></>}</span></span>
-    {undo && changeSet !== null && <button type="button" className="pj-link pj-activity-undo" disabled={undo.undoing !== null}
-      aria-busy={undo.undoing === changeSet} onClick={() => undo.onUndo(item)}>Undo</button>}
+    {undo && changeSet !== null && <button type="button" className="btn small pj-activity-undo" disabled={undo.undoing !== null}
+      aria-busy={undo.undoing === changeSet} onClick={() => undo.onUndo(item)}>Undo merge</button>}
   </li>;
 }
 
@@ -338,6 +338,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {suggested > 0 && <div className="pj-need"><span>{suggestedLine(suggested)}</span>
           <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=%40memory`)}>Review</button></div>}
       </section>}
+      <RecentActivity projectId={data.id} />
       <section className="pj-stack-s" aria-labelledby="pj-research"><h2 id="pj-research">Research</h2>
         {data.research === undefined && <p className="pj-muted" role="status">Loading research...</p>}
         {data.research?.kind === "not_ready" && <NotReady what="research progress isn't in this build." />}
@@ -354,7 +355,6 @@ export function OverviewTab({ data }: { data: ProjectData }) {
         {allDone && <p>Research finished. <button type="button" className="pj-link" onClick={() => data.navigate(`${base}/conversation`)}>Ask the master what to build first.</button></p>}
       </section>
       <PlanningLine data={data} />
-      <RecentActivity projectId={data.id} />
     </div>
     <aside className="pj-panel pj-facts" aria-label="Project facts">
       {data.setup?.kind === "not_ready" && <NotReady what="project details aren't in this build." />}

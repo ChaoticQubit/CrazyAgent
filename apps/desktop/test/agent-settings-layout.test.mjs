@@ -1,5 +1,6 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -15,7 +16,7 @@ const GROUPS = [
   ["model", "Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
   ["access", "Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
   ["tools", "Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
-  ["coord", "Coordination", ["Claude Code sub-agents", "Messages to Claude Code agents", "Claude Code terminal display", "Codex sub-agents", "Messages to Codex agents", "rcli sub-agents", "Messages to rcli agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents"]],
+  ["coord", "Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents"]],
   ["limits", "Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
 ];
 const MASTER_GROUPS = [
@@ -118,11 +119,22 @@ test("Find a setting keeps the rows whose label matches and the groups that hold
   assert.deepEqual(controls.matchingGroups("no such setting"), []);
 });
 
-test("Overlapping edits lists the engine's choices in their order and shows an unknown engine value as it is", () => {
+test("Overlapping edits lists the engine's choices in the mockup's order and words and shows an unknown engine value as it is", () => {
   assert.deepEqual(client.OVERLAP_CHOICES, ["warn", "block", "off", "wait"]);
   const coordination = (overlaps) => ({ settings: { questions_to: "lead", overlaps, nudges: "off", counted_tools: [], role_skills: { master: null, lead: null, worker: null }, claude_display: "classic", task_start: "on" }, harnesses: [] });
-  assert.deepEqual(radios(settingsHtml({ coordination: coordination("block") }), "Overlapping edits"), { labels: ["Warn", "Block", "Off", "Wait"], checked: ["Block"] });
-  assert.deepEqual(radios(settingsHtml({ coordination: coordination("hold") }), "Overlapping edits"), { labels: ["Warn", "Block", "Off", "Wait", "hold"], checked: ["hold"] });
+  const words = ["Warn both (default)", "Wait until the first lands", "Block the later one", "Off"];
+  assert.deepEqual(radios(settingsHtml({ coordination: coordination("block") }), "Overlapping edits"), { labels: words, checked: ["Block the later one"] });
+  assert.deepEqual(radios(settingsHtml({ coordination: coordination("hold") }), "Overlapping edits"), { labels: [...words, "hold"], checked: ["hold"] });
+});
+
+test("a harness's sub-agents read as the mockup words them, native agent teams first where the harness has them", async () => {
+  const coord = await import("../src/screens/team/coordination.tsx");
+  assert.deepEqual(coord.modeOptions(true), [{ value: "native", label: "Native agent teams" }, { value: "app_spawned", label: "CrazyAgent workers" }]);
+  assert.deepEqual(coord.modeOptions(false), [{ value: "app_spawned", label: "CrazyAgent workers" }]);
+  const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
+  const sub = /(?:^|\n)\.set-sub \{([^}]*)\}/.exec(css)?.[1] ?? "";
+  assert.ok(sub.length > 0, "the sub-heading has its rule");
+  assert.doesNotMatch(sub, /text-transform: uppercase/, "Branches reads as the mockup writes it, not in capitals");
 });
 
 test("the Team view keeps the team's actions, and Agent settings holds none of them", () => {
@@ -192,6 +204,8 @@ test("Access and merging words the merge choice as the mockup does, with its two
   assert.deepEqual(cards(settingsHtml({ master_lands: "waits" })).map((card) => card.checked), [false, true]);
   assert.match(plain(row(merges, MERGE)), /Each merge shows in Activity and can be undone\. Sandboxed keeps today's limits\./);
   assert.match(plain(row(settingsHtml(), MERGE)), /Only at Full access\./, "below Full access the engine sends no merge choice");
+  assert.deepEqual(cards(settingsHtml()).map((card) => card.text), cards(merges).map((card) => card.text), "below Full access the row shows the same two choices");
+  assert.equal([...row(settingsHtml(), MERGE).matchAll(/<input type="radio"[^>]*disabled=""/g)].length, 2, "below Full access both choices are locked");
   const restart = row(merges, RESTART);
   assert.match(plain(restart), /Always/);
   assert.doesNotMatch(restart, /<(button|select|input|textarea)/, "the restart line has no control while it has no setting");
@@ -227,4 +241,16 @@ test("an agents?section= route opens Agent settings at the group it names", () =
   assert.equal(shared.routeSection("#/projects/alpha/agents?section=settings&x=1"), "settings");
   assert.equal(shared.routeSection("#/projects/alpha/agents"), undefined);
   assert.deepEqual(agents.agentsView(shared.routeSection("#/projects/alpha/agents?section=tools")), { view: "settings", group: "tools" });
+});
+
+test("Overlapping edits and the merge choice take the row's full width with the help above the choices, as the mockup draws them", () => {
+  const html = settingsHtml({ master_lands: "merges" });
+  for (const [label, help] of [["Overlapping edits", "Warn tells both agents"], [MERGE, "Each merge shows in Activity"]]) {
+    const start = html.indexOf(`data-setting="${attr(label)}"`);
+    assert.match(html.slice(html.lastIndexOf("<div", start), start), /class="set-row wide"/, `${label} takes the row's full width`);
+    const part = row(html, label);
+    const [words, choices] = [part.indexOf(help), part.indexOf(`aria-label="${attr(label)}"`)];
+    assert.ok(words >= 0 && choices >= 0, `${label} has its help and its choices`);
+    assert.ok(words < choices, `${label}: the help sits above the choices`);
+  }
 });

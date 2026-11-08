@@ -42,8 +42,9 @@ pub struct RunRow {
 }
 
 /// The tokens one project, account or harness used in the range, with how many agents and
-/// runs used it and the first `NAMES_MAX` projects they ran in, once each in name order,
-/// with how many more there were.
+/// runs used it, the first `NAMES_MAX` projects they ran in, once each in name order, with
+/// how many more there were, and for a project row the merges of the range as the Merges
+/// tile counts them (zero for an account or harness row).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupRow {
@@ -53,6 +54,8 @@ pub struct GroupRow {
     pub runs: u64,
     pub projects: Vec<String>,
     pub more_projects: u64,
+    #[serde(default)]
+    pub merges: u64,
 }
 
 /// The tokens one agent used in the range, with the name clients show for it when the store
@@ -72,8 +75,9 @@ pub struct AgentRow {
 }
 
 /// What the Metrics page counts besides the usage report: team tasks running now, waiting
-/// now, and done or failed in the range; the tokens chart in bars of `bucket_ms`; and the
-/// breakdown by run, project, agent, account and harness.
+/// now, and done or failed in the range; the merges in the range, those into main and those
+/// undone; the tokens chart in bars of `bucket_ms`; and the breakdown by run, project, agent,
+/// account and harness.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metrics {
@@ -81,6 +85,12 @@ pub struct Metrics {
     pub tasks_waiting: u64,
     pub tasks_done: u64,
     pub tasks_failed: u64,
+    #[serde(default)]
+    pub merges: u64,
+    #[serde(default)]
+    pub merges_into_main: u64,
+    #[serde(default)]
+    pub merges_undone: u64,
     pub bucket_ms: i64,
     pub series: Vec<Bucket>,
     pub runs: Vec<RunRow>,
@@ -138,6 +148,81 @@ fn task_counts(
         },
     )
     .map_err(storage)
+}
+
+/// Counts the merges in the range (a lead's merge of a sub-agent's work and the master's merge
+/// into main), those into main and those undone, from `project_activity`, the only record of a
+/// lead's merge. That table keeps a project's newest 9,000 engine and owner events
+/// (`activity::record`), so past that many in the range the oldest merges drop out of the count.
+/// Inputs: the store, the project or None and the range start. Output: the counts, or zeros.
+fn merge_counts(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+) -> Result<[u64; 3], EngineError> {
+    if !has_table(db, "project_activity")? {
+        return Ok([0; 3]);
+    }
+    db.query_row(
+        "SELECT COALESCE(SUM(kind IN ('lead_merged','merged_into_main')),0),
+            COALESCE(SUM(kind='merged_into_main'),0),
+            COALESCE(SUM(kind='merged_into_main' AND undone=1),0)
+         FROM project_activity WHERE at_ms>=?2 AND (?1 IS NULL OR project=?1)",
+        params![project, since_ms],
+        |row| Ok([count(row.get(0)?), count(row.get(1)?), count(row.get(2)?)]),
+    )
+    .map_err(storage)
+}
+
+/// Gives each project row its merges in the range as `merge_counts` counts them, and adds a row
+/// with no tokens, after the rows that used tokens and in name order, for a project with merges
+/// and no tokens in the range, up to `ROWS_MAX` (25) rows. The rows add up to the Merges tile
+/// only while every project with merges has a row: past `ROWS_MAX` such projects, or when `fit`
+/// trims the rows to fit one reply, the tile counts merges that no row shows.
+/// Inputs: the store, the project or None, the range start and the rows. Output: none.
+fn project_merges(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+    rows: &mut Vec<GroupRow>,
+) -> Result<(), EngineError> {
+    if !has_table(db, "project_activity")? {
+        return Ok(());
+    }
+    let mut statement = db
+        .prepare(
+            "SELECT project,COUNT(*) FROM project_activity
+             WHERE kind IN ('lead_merged','merged_into_main') AND at_ms>=?2
+               AND (?1 IS NULL OR project=?1)
+             GROUP BY project ORDER BY project",
+        )
+        .map_err(storage)?;
+    let counts: Vec<(String, u64)> = statement
+        .query_map(params![project, since_ms], |row| {
+            Ok((row.get::<_, String>(0)?, count(row.get(1)?)))
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    let index: HashMap<String, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| (row.key.clone(), at))
+        .collect();
+    for (key, merges) in counts {
+        if let Some(&at) = index.get(&key) {
+            rows[at].merges = merges;
+        } else if rows.len() < ROWS_MAX {
+            rows.push(GroupRow {
+                projects: vec![key.clone()],
+                key,
+                merges,
+                ..GroupRow::default()
+            });
+        }
+    }
+    assert!(rows.len() <= ROWS_MAX);
+    Ok(())
 }
 
 fn series(
@@ -334,6 +419,7 @@ fn groups(
                 runs: count(row.get(6)?),
                 projects: Vec::new(),
                 more_projects: 0,
+                merges: 0,
             })
         })
         .map_err(storage)?
@@ -475,16 +561,22 @@ pub fn read(
         .ok_or_else(|| failure("usage_request_invalid"))?;
     let project = project.map(ProjectId::as_str);
     let [running, tasks_waiting, tasks_done, tasks_failed] = task_counts(db, project, since_ms)?;
+    let [merges, merges_into_main, merges_undone] = merge_counts(db, project, since_ms)?;
     let bucket_ms = bucket_for(span_ms);
+    let mut projects = groups(db, "project", project, since_ms)?;
+    project_merges(db, project, since_ms, &mut projects)?;
     let metrics = fit(Metrics {
         running,
         tasks_waiting,
         tasks_done,
         tasks_failed,
+        merges,
+        merges_into_main,
+        merges_undone,
         bucket_ms,
         series: series(db, project, since_ms, bucket_ms)?,
         runs: runs(db, project, since_ms)?,
-        projects: groups(db, "project", project, since_ms)?,
+        projects,
         agents: agents(db, project, since_ms)?,
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,

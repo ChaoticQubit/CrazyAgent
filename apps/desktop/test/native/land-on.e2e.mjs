@@ -323,7 +323,7 @@ test("Land on: under Wait a start on a file another agent's work holds waits, th
   await onEngine(t, "ca-lo-w-", async ({ runtime, project, repo, worktree, tips, me, open, status, graph, stand, recordTurn, addAgent }) => {
     await open("agents?section=settings");
     await me.waitFor("the Overlapping edits and Land on settings in Agent settings", (text) => text.includes("Overlapping edits") && text.includes("Land on"));
-    await me.click("Wait", '[role=radiogroup][aria-label="Overlapping edits"] [role=radio]');
+    await me.click("Wait until the first lands", '[role=radiogroup][aria-label="Overlapping edits"] [role=radio]');
     for (const deadline = Date.now() + STEP_MS; (await status()).coordination?.settings.overlaps !== "wait"; await pause(POLL_MS)) {
       assert.ok(Date.now() < deadline, "the engine never kept Overlapping edits at Wait");
     }

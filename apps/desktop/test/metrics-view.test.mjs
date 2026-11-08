@@ -33,7 +33,7 @@ const usage = (patch = {}) => ({
   agent_lines: [], limits: [limits()], partial_homes: 0, ...patch,
 });
 const metrics = (patch = {}) => ({
-  running: 2, tasks_waiting: 4, tasks_done: 5, tasks_failed: 1, bucket_ms: 2 * HOUR,
+  running: 2, tasks_waiting: 4, tasks_done: 5, tasks_failed: 1, merges: 12, merges_into_main: 3, merges_undone: 0, bucket_ms: 2 * HOUR,
   series: [
     { start_ms: SINCE, tokens: tokens({ input: 100, cache_write: 50, output: 20, cache_read: 999 }) },
     { start_ms: SINCE + 4 * HOUR, tokens: tokens({ input: 300, cache_write: 10, output: 40 }) },
@@ -75,6 +75,8 @@ test("the Metrics tab's tiles show the headline with its three parts and the cac
   assert.match(shown, /Runs 3 2 running now/);
   assert.match(shown, /Tasks 5 done 4 waiting, 1 failed/);
   assert.match(shown, /Lines \+90 −57 across 3 change sets/);
+  assert.match(shown, /Tasks 5 done 4 waiting, 1 failed Merges 12 3 into main, 0 undone Lines /, "six tiles, Merges between Tasks and Lines");
+  assert.equal((render().match(/class="mx-tile( quiet)?"/gu) ?? []).length, 6, "six tiles");
 });
 
 test("the project tab shows this project only, with no project picker", () => {
@@ -158,4 +160,11 @@ test("the project page lists Metrics after Process, and its route opens it", () 
   assert.equal(ids.indexOf("metrics"), ids.indexOf("process") + 1);
   assert.equal(page.TABS.find((tab) => tab.id === "metrics").icon, "trending-up");
   assert.deepEqual(router.parseRoute("#/projects/alpha/metrics"), { name: "project", id: "alpha", tab: "metrics" });
+});
+
+test("both Metrics views open on 7 days, as the mockup does", () => {
+  for (const props of [{ projectId: "p" }, { projectId: null, filter: { projects: [], onProject: forbidden } }]) {
+    const markup = renderToStaticMarkup(createElement(view.MetricsView, props));
+    assert.match(markup, /aria-checked="true"[^>]*>7 days</, JSON.stringify(props));
+  }
 });

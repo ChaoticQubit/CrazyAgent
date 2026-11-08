@@ -307,15 +307,17 @@ test("Settings, Team offers Apply a master harness change with When the master i
   assert.match(choose, /setNote\(message\);\s*data\.reloadTeam\(\);/, "the page reads the team again after every save, stale or not");
 });
 
-test("what the master does with its conflict fixes is a choice only at Full access", () => {
+test("what the master does with its conflict fixes shows its two choices always and is a choice only at Full access", () => {
   const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
-  const cards = (html) => [...html.matchAll(/<label class="radio-card"><input type="radio"([^>]*)\/>/g)].map((card) => [card[1].match(/value="([^"]*)"/)?.[1], /checked=""/.test(card[1])]);
+  const cards = (html) => [...html.matchAll(/<label class="radio-card"><input type="radio"([^>]*)\/>/g)].map((card) => [card[1].match(/value="([^"]*)"/)?.[1], /checked=""/.test(card[1]), /disabled=""/.test(card[1])]);
   const merges = render({ master_lands: "merges" });
   assert.match(merges, /role="radiogroup" aria-label="Under Full access, merging into main"/);
-  assert.deepEqual(cards(merges), [["merges", true], ["waits", false]]);
-  assert.deepEqual(cards(render({ master_lands: "waits" })), [["merges", false], ["waits", true]]);
+  assert.deepEqual(cards(merges), [["merges", true, false], ["waits", false, false]]);
+  assert.deepEqual(cards(render({ master_lands: "waits" })), [["merges", false, false], ["waits", true, false]]);
+  assert.doesNotMatch(merges, /Only at Full access\./, "at Full access the choice needs no note");
   for (const below of [render({ master_lands: null }), render({})]) {
-    assert.doesNotMatch(below, /aria-label="Under Full access, merging into main"/, "no choice below Full access");
+    assert.match(below, /role="radiogroup" aria-label="Under Full access, merging into main"/, "the mockup's two choices show below Full access too");
+    assert.deepEqual(cards(below), [["merges", false, true], ["waits", true, true]], "below Full access both are locked and the master waits for your accept, as the engine does");
     assert.match(below, /Under Full access, merging into main<\/span>[\s\S]*?Only at Full access\./);
   }
 });

@@ -15,18 +15,19 @@ const STILL = `
 let root = null;
 
 /** A project page as the app draws one: the real head and its scroll hook over a long body.
- * Output: the page element. */
-function Page() {
+ * Input: the head's meta line, or null. Output: the page element. */
+function Page({ meta }) {
   const page = useRef(null);
   const scrolled = useProjectHead(page, "p1");
   return h("div", { className: "pj pj-project", ref: page },
-    h(ProjectHead, { title: "Larkspur Booking", about: "", actions: null, tabs: [{ id: "overview", label: "Overview", href: "#/projects/p1/overview" }], current: "overview", scrolled }),
+    h(ProjectHead, { title: "Larkspur Booking", about: "", actions: null, meta, tabs: [{ id: "overview", label: "Overview", href: "#/projects/p1/overview" }], current: "overview", scrolled }),
     h("div", { style: { height: "2000px" } }, "Overview"));
 }
 
 /** Mounts the real app shell with the real stylesheets around a project page whose head
- * takes its scrolled form with no transition and no change of size. */
-export function mountStill() {
+ * takes its scrolled form with no transition and no change of size. Input: the head's meta
+ * line, or none. */
+export function mountStill(meta = null) {
   root?.unmount();
   document.head.innerHTML = "";
   const style = document.createElement("style");
@@ -35,7 +36,7 @@ export function mountStill() {
   document.body.innerHTML = '<div id="root"></div>';
   root = createRoot(document.getElementById("root"));
   const sidebar = h(Sidebar, { route: { name: "home" }, projects: [{ id: "p1", name: "Project 1" }], profileName: "Mira Okafor", engine: "running", onRetry: () => {} });
-  flushSync(() => root.render(h(AppShell, { sidebar }, h(Page))));
+  flushSync(() => root.render(h(AppShell, { sidebar }, h(Page, { meta }))));
 }
 
 export function frames(count = 2) {
@@ -45,7 +46,8 @@ export function frames(count = 2) {
   });
 }
 
-/** Reads the head's form and height and the room under the page. Output: the values. */
+/** Reads the head's form and height, the room under the page and whether the meta line is
+ * drawn. Output: the values. */
 export function state() {
   const head = document.querySelector(".pj-head");
   const page = document.querySelector(".pj-project");
@@ -54,5 +56,6 @@ export function state() {
     height: head.offsetHeight,
     room: parseFloat(getComputedStyle(page).getPropertyValue("--pj-head-room")) || 0,
     top: document.querySelector(".main").scrollTop,
+    meta: document.querySelector(".pj-head .pj-meta")?.getClientRects().length > 0,
   };
 }

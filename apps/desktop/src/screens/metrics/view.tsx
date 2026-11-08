@@ -163,6 +163,7 @@ function Tiles({ usage, metrics }: { usage: UsageReport; metrics: Metrics }) {
       detail={share === null ? "Billed far lower, not in Tokens" : `${share}% of everything read; billed far lower, not in Tokens`} />
     <Tile label="Runs" value={String(usage.runs)} detail={`${metrics.running} running now`} />
     <Tile label="Tasks" value={`${metrics.tasks_done} done`} detail={`${metrics.tasks_waiting} waiting, ${metrics.tasks_failed} failed`} />
+    <Tile label="Merges" value={String(metrics.merges)} detail={`${metrics.merges_into_main} into main, ${metrics.merges_undone} undone`} />
     <Tile label="Lines" value={`+${compactCount(added)}`} detail={`−${compactCount(removed)} across ${sets} change sets`} />
   </div>;
 }
@@ -221,8 +222,8 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
   const projectColumn = across && (by === "agent" || by === "run");
   if (by === "project") {
     return {
-      head: "Project", extra: ["Agents", "Runs"], projectColumn,
-      rows: metrics.projects.map((row) => ({ key: row.key, name: projectName(row.key), tokens: row.tokens, extra: [String(row.agents), String(row.runs)] })),
+      head: "Project", extra: ["Agents", "Runs", "Merges"], projectColumn,
+      rows: metrics.projects.map((row) => ({ key: row.key, name: projectName(row.key), tokens: row.tokens, extra: [String(row.agents), String(row.runs), String(row.merges)] })),
     };
   }
   if (by === "run") {
@@ -340,7 +341,7 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { b
 }
 
 /** The Metrics page as a pure view: the range switch and what it covers, the tiles (tokens
- * with their three parts, cache re-reads apart, runs, tasks and lines), the tokens chart and
+ * with their three parts, cache re-reads apart, runs, tasks, merges and lines), the tokens chart and
  * the breakdown by agent, run, account or harness, each with its four token parts and its
  * share of tokens. With a filter (the app page) it also picks a project and breaks down by
  * project. Inputs: the project, null for every project, the usage and metrics reads, the
@@ -407,12 +408,12 @@ async function teamStatuses(ids: string[]): Promise<Result<[string, TeamStatus][
 }
 
 /** The Metrics page for one project, or every project when the id is null: reads usage and
- * metrics for the chosen range every 30 seconds, and its agents' names. The project tab (no
- * filter) also reads its tool counts and its team status for names with their harness, and
- * starts By agent; the app page (with a filter) takes agent names from the metrics read and
- * starts By project. Inputs: the project id or null, and the app page's filter. */
+ * metrics for the chosen range, 7 days at first, every 30 seconds, and its agents' names. The
+ * project tab (no filter) also reads its tool counts and its team status for names with their
+ * harness, and starts By agent; the app page (with a filter) takes agent names from the metrics
+ * read and starts By project. Inputs: the project id or null, and the app page's filter. */
 export function MetricsView({ projectId, filter }: { projectId: string | null; filter?: MetricsFilter }) {
-  const [range, setRange] = useState<MetricsRange>("today");
+  const [range, setRange] = useState<MetricsRange>("7d");
   const [by, setBy] = useState<MetricsBy>(filter ? "project" : "agent");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [ticks, setTicks] = useState(0);

@@ -23,7 +23,7 @@ const GROUPS = [
   ["Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
   ["Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
   ["Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
-  ["Coordination", ["Claude Code sub-agents", "Messages to Claude Code agents", "Claude Code terminal display", "Codex sub-agents", "Messages to Codex agents", "rcli sub-agents", "Messages to rcli agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents"]],
+  ["Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents"]],
   ["Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
 ];
 const MASTER = [
@@ -62,6 +62,8 @@ for (const width of [1024, 1440]) {
     assert.ok(seen.measured.width > 500, `the groups have room, ${seen.measured.width} px`);
     assert.deepEqual(seen.measured.past, [], "nothing runs past a group's panel");
     assert.ok(seen.measured.sideways <= 0, `the page does not scroll sideways, ${seen.measured.sideways} px`);
+    assert.ok(seen.measured.help.rows >= 25, `rows with a label, a help line and a control are measured, ${seen.measured.help.rows}`);
+    assert.deepEqual(seen.measured.help.apart, [], "each row's help line sits under its label, left of the control");
     assert.deepEqual(GROUPS.flatMap(([, rows]) => rows).filter((row) => !READ_ONLY.includes(row) && !seen.reached.includes(row)), [], "Tab reaches every setting with a control");
   });
 }
@@ -80,6 +82,8 @@ test("the master's settings drawer holds its four groups with nothing past the d
   assert.deepEqual(seen.measured.groups, MASTER.map(([title, rows]) => ({ title, rows })));
   assert.deepEqual(seen.measured.past, [], "nothing runs past a group's panel");
   assert.ok(seen.measured.sideways <= 0, `the drawer does not scroll sideways, ${seen.measured.sideways} px`);
+  assert.ok(seen.measured.help.rows >= 3, `drawer rows with a label, a help line and a control are measured, ${seen.measured.help.rows}`);
+  assert.deepEqual(seen.measured.help.apart, [], "each drawer row's help line sits under its label, left of the control");
   assert.deepEqual(seen.controls.filter((row) => !seen.reached.includes(row)), [], "Tab reaches every control in the drawer");
 });
 
@@ -88,7 +92,7 @@ test("two quick coordination changes from different rows both stay saved", { tim
     await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await page.evaluate(fixture);
     const mounted = await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`);
-    const clicked = await page.evaluate(`Fixture.click('[aria-label="Overlapping edits"] [role="radio"]', "Block") && Fixture.click('[aria-label="Workflow nudges"] [role="radio"]', "Every 10 minutes")`);
+    const clicked = await page.evaluate(`Fixture.click('[aria-label="Overlapping edits"] [role="radio"]', "Block the later one") && Fixture.click('[aria-label="Workflow nudges"] [role="radio"]', "Every 10 minutes")`);
     await page.evaluate("Fixture.settle(600)");
     return { mounted, clicked, sent: await page.evaluate(`Fixture.sentTo("desktop_team_coordination")`) };
   });

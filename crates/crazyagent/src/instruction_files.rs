@@ -2,13 +2,14 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
+use std::time::SystemTime;
 
 pub const FILE_BYTES_MAX: usize = 64 * 1024;
 pub const FILES_BYTES_MAX: usize = 64 * 1024;
@@ -73,6 +74,8 @@ const _: () = {
 };
 
 static IMPORTING: Mutex<()> = Mutex::new(());
+const HEADS_MAX: usize = 256;
+static HEADS: Mutex<BTreeMap<PathBuf, (HeadStamp, Option<String>)>> = Mutex::new(BTreeMap::new());
 
 /// Which of the owner's two instruction texts a project's agents get: the project's own,
 /// the app-wide one, or both with the project's appended after the app's (the default).
@@ -245,15 +248,18 @@ pub struct ImportCommit {
     pub files: Vec<String>,
 }
 
-/// The moved instruction files whose move the owner's checkout has not committed, and the
-/// branch that checkout has checked out, so a notice can name where merges are refused:
-/// none for a detached HEAD, a name over `BRANCH_BYTES_MAX`, a branch git cannot read for
-/// the engine (a name that is not UTF-8) or when no move waits.
+/// The moved instruction files whose move the owner's checkout has not committed, the
+/// branch that checkout has checked out while a move waits, so a notice can name where
+/// merges are refused, and in `checked_out` that branch whether or not a move waits, for the
+/// project head. A branch is none for a detached HEAD, a name over `BRANCH_BYTES_MAX` or a
+/// branch git cannot read for the engine (a name that is not UTF-8).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UncommittedImport {
     pub files: Vec<String>,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub checked_out: Option<String>,
 }
 
 /// Tells whether a name is one an instruction files record may hold, so a record read back
@@ -977,21 +983,88 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
         .collect())
 }
 
+/// The stat of a checkout's `.git/HEAD`. With the files ref format git rewrites that file
+/// through a new lock file on every branch switch, detach or rename of the current branch, so
+/// an equal stamp means the checked-out branch is the one read before.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HeadStamp {
+    file: u64,
+    len: u64,
+    modified: SystemTime,
+}
+
+/// Stats a checkout's `.git/HEAD`. Inputs: the checkout root. Output: the stamp, or None when
+/// that file cannot be read as a plain file, as in a linked worktree whose `.git` is a file,
+/// or when `.git/reftable` exists or cannot be checked: a reftable checkout's HEAD is a stub
+/// that no switch changes.
+fn head_stamp(root: &Path) -> Option<HeadStamp> {
+    let git = root.join(".git");
+    match fs::symlink_metadata(git.join("reftable")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return None,
+    }
+    let meta = fs::symlink_metadata(git.join("HEAD")).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    let file = meta.ino();
+    #[cfg(not(unix))]
+    let file = 0;
+    Some(HeadStamp {
+        file,
+        len: meta.len(),
+        modified: meta.modified().ok()?,
+    })
+}
+
+/// Reads the branch a checkout has checked out through `read`, the git read, again only when
+/// the checkout's HEAD stamp changed since the last read of that root, at most `HEADS_MAX`
+/// roots kept. A failed read shows none and is not kept. Inputs: the canonical checkout root
+/// and the read. Output: the branch.
+fn branch_of(
+    root: &Path,
+    read: impl FnOnce() -> Result<Option<String>, EngineError>,
+) -> Option<String> {
+    let Some(stamp) = head_stamp(root) else {
+        return read().unwrap_or(None);
+    };
+    let kept = HEADS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(root)
+        .filter(|(seen, _)| *seen == stamp)
+        .map(|(_, branch)| branch.clone());
+    if let Some(branch) = kept {
+        return branch;
+    }
+    let Ok(branch) = read() else {
+        return None;
+    };
+    let mut heads = HEADS.lock().unwrap_or_else(PoisonError::into_inner);
+    if heads.len() == HEADS_MAX && !heads.contains_key(root) {
+        heads.clear();
+    }
+    heads.insert(root.to_path_buf(), (stamp, branch.clone()));
+    assert!(heads.len() <= HEADS_MAX);
+    branch
+}
+
 /// Lists the moved instruction files whose move the owner's checkout has not committed, as
-/// `uncommitted` does, with the branch the checkout has checked out while any wait; a
-/// branch that cannot be read is left unnamed, so the move still shows. Input: the project
-/// folder. Output: the files and branch, or a plain code as `uncommitted`.
+/// `uncommitted` does, with the branch the checkout has checked out, named as the refusal's
+/// branch only while any wait; a branch that cannot be read is left unnamed, so the move
+/// still shows. Input: the project folder. Output: the files and branches, or a plain code
+/// as `uncommitted`.
 pub fn uncommitted_import(folder: &Path) -> Result<UncommittedImport, EngineError> {
     let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
     let files = uncommitted(&root)?;
-    if files.is_empty() {
-        return Ok(UncommittedImport {
-            files,
-            branch: None,
-        });
-    }
-    let branch = crate::landing::checked_out_branch(&root).unwrap_or(None);
-    Ok(UncommittedImport { files, branch })
+    let checked_out = branch_of(&root, || crate::landing::checked_out_branch(&root));
+    let branch = (!files.is_empty()).then(|| checked_out.clone()).flatten();
+    Ok(UncommittedImport {
+        files,
+        branch,
+        checked_out,
+    })
 }
 
 /// Commits the instruction import's move in the owner's checkout, as the owner chose: one

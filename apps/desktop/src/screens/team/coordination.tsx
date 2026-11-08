@@ -87,10 +87,11 @@ export function RoleSkillsControls({ settings, skills, busy, onChoose }: {
 /** Each coordination harness id with the name the app shows for it. */
 export const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "rcli" };
 
-/** The Sub-agent mode choices; Native only for a harness kind with native teammates. */
+/** The Sub-agent mode choices in the mockup's words; Native agent teams first, and only for a
+ * harness kind that has them. Input: whether it has them. Output: the options. */
 export function modeOptions(native: boolean): SelectOption[] {
-  const spawned = { value: "app_spawned", label: "App-spawned sub-agents" };
-  return native ? [spawned, { value: "native", label: "Native teammates" }] : [spawned];
+  const spawned = { value: "app_spawned", label: "CrazyAgent workers" };
+  return native ? [{ value: "native", label: "Native agent teams" }, spawned] : [spawned];
 }
 
 /** The Claude Code terminal display choices, Classic first as the default. */
@@ -131,17 +132,18 @@ export function countedToolsInput(text: string): { kind: "ok"; tools: string[] }
   return { kind: "ok", tools };
 }
 
-const OVERLAP_LABELS: Record<Overlaps, string> = { warn: "Warn", block: "Block", off: "Off", wait: "Wait" };
+const OVERLAP_LABELS: Record<Overlaps, string> = { warn: "Warn both (default)", block: "Block the later one", off: "Off", wait: "Wait until the first lands" };
+const OVERLAP_ORDER: readonly Overlaps[] = ["warn", "wait", "block", "off"];
 
 function knownOverlap(value: string): value is Overlaps {
   return (OVERLAP_CHOICES as readonly string[]).includes(value);
 }
 
-/** The Overlapping edits choices: the engine's known ones in their order, then the engine's
- * value as it is when this app does not know it, so it is never dropped or remapped. Input:
- * the engine's value. Output: the options. */
+/** The Overlapping edits choices: the engine's known ones in the mockup's order and words, then
+ * the engine's value as it is when this app does not know it, so it is never dropped or
+ * remapped. Input: the engine's value. Output: the options. */
 export function overlapOptions(current: string): { value: string; label: string }[] {
-  const known = OVERLAP_CHOICES.map((value) => ({ value: value as string, label: OVERLAP_LABELS[value] }));
+  const known = OVERLAP_ORDER.filter((value) => (OVERLAP_CHOICES as readonly string[]).includes(value)).map((value) => ({ value: value as string, label: OVERLAP_LABELS[value] }));
   return knownOverlap(current) ? known : [...known, { value: current, label: displayText(current) }];
 }
 
@@ -266,12 +268,12 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
   </>;
 }
 
-/** The Coordination rows of Agent settings: each harness kind's sub-agent mode and message
- * delivery, the Claude Code terminal display, then the rows handed in, where sub-agent
- * questions go and what overlapping claims do, with the engine's choices and any value it holds
- * that this app does not know. Every option is selectable; the plan defaults show for an older
- * engine. Inputs: the project id, the latest team status, a reload and rows to show after the
- * harness rows. Output: the rows. */
+/** The Coordination rows of Agent settings in the approved mockup's order: each harness kind's
+ * sub-agent mode, then the rows handed in, where sub-agent questions go, what overlapping claims
+ * do and the terminals per window, with the engine's choices and any value it holds that this
+ * app does not know. Every option is selectable; the plan defaults show for an older engine.
+ * Inputs: the project id, the latest team status, a reload and rows to show after the sub-agent
+ * rows. Output: the rows. */
 export function CoordinationControls({ projectId, status, reload, children }: { projectId: string; status: TeamStatus; reload: () => void; children?: ReactNode }) {
   const view = coordination(status);
   const { note, run } = useChange(reload);
@@ -279,27 +281,19 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
     run(() => saveCoordSettings(projectId, patch), what);
 
   return <>
-    {view.harnesses.map((row) => <div className="set-harness" role="group" aria-label={HARNESS_NAMES[row.harness]} key={row.harness}>
-      <SettingRow label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
-        <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={row.mode} options={modeOptions(row.native)}
-          onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void run(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode"); }}
-          helper={row.native ? "Native teammates run inside the lead's own session. App-spawned sub-agents get their own terminal, worktree and branch."
-            : `${HARNESS_NAMES[row.harness]} has no native teammates, so its sub-agents are app-spawned.`} />
-      </SettingRow>
-      <DeliverySetting projectId={projectId} row={row} reload={reload} />
-      {row.harness === "claude-code" && <SettingRow label="Claude Code terminal display">
-        <Select id={`tg-display-claude-code-${projectId}`} label="Claude Code terminal display" value={view.settings.claude_display} options={DISPLAY_OPTIONS}
-          onValue={(value) => { if (value === "classic" || value === "fullscreen") void save({ claude_display: value }, "the Claude Code terminal display"); }}
-          helper={DISPLAY_HELPER[view.settings.claude_display]} />
-      </SettingRow>}
-    </div>)}
+    {view.harnesses.map((row) => <SettingRow key={row.harness} label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
+      <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={row.mode} options={modeOptions(row.native)}
+        onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void run(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode"); }}
+        helper={row.native ? "Native agent teams run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch."
+          : `${HARNESS_NAMES[row.harness]} has no native agent teams, so its sub-agents are CrazyAgent workers.`} />
+    </SettingRow>)}
     {children}
     <QuestionsSetting projectId={projectId} status={status} reload={reload} />
-    <SettingRow label="Overlapping edits">
+    <SettingRow label="Overlapping edits" wide>
       <span className="set-label" aria-hidden="true">Overlapping edits</span>
+      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit. Wait holds back an agent starting on a file another agent is on, and tells it when the file is free.</span>
       <Segmented label="Overlapping edits" value={view.settings.overlaps as string} options={overlapOptions(view.settings.overlaps)}
         onValue={(value) => { if (knownOverlap(value)) void save({ overlaps: value }, "overlapping edits"); }} />
-      <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit. Wait holds back an agent starting on a file another agent is on, and tells it when the file is free.</span>
     </SettingRow>
     <SettingRow label="Terminals per window">
       <span className="set-label" aria-hidden="true">Terminals per window</span>
@@ -308,6 +302,26 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
         options={[{ value: "4", label: "4" }, { value: "6", label: "6 (default)" }, { value: "9", label: "9" }]} />
       <span className="tg-terminal-note">How many terminals Open all terminals puts in one window. More agents open more windows.</span>
     </SettingRow>
+    <ChangeNote note={note} />
+  </>;
+}
+
+/** The per-harness rows the approved mockup leaves off Agent settings, kept under each harness:
+ * how messages reach its agents and, for Claude Code, the terminal display. Every option is
+ * selectable; the plan defaults show for an older engine. Inputs: the project id, the latest
+ * team status and a reload. Output: one group per harness kind. */
+export function PerHarnessControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const view = coordination(status);
+  const { note, run } = useChange(reload);
+  return <>
+    {view.harnesses.map((row) => <div className="set-harness" role="group" aria-label={HARNESS_NAMES[row.harness]} key={row.harness}>
+      <DeliverySetting projectId={projectId} row={row} reload={reload} />
+      {row.harness === "claude-code" && <SettingRow label="Claude Code terminal display">
+        <Select id={`tg-display-claude-code-${projectId}`} label="Claude Code terminal display" value={view.settings.claude_display} options={DISPLAY_OPTIONS}
+          onValue={(value) => { if (value === "classic" || value === "fullscreen") void run(() => saveCoordSettings(projectId, { claude_display: value }), "the Claude Code terminal display"); }}
+          helper={DISPLAY_HELPER[view.settings.claude_display]} />
+      </SettingRow>}
+    </div>)}
     <ChangeNote note={note} />
   </>;
 }

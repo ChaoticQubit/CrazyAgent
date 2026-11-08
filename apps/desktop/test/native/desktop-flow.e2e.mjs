@@ -138,7 +138,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         if (graphify.state.state !== "checking") break;
         assert.ok(Date.now() < deadline, "the engine never finished checking Graphify");
       }
-      const settled = await me.waitFor("both setup steps settled", (text) => !/Running|Waiting|Starting/.test(text.split("Overview")[0] ?? text), SETTLE_MS);
+      const settled = await me.waitFor("both setup steps settled and the form drawn", (text) => !/Working|Waiting/.test(text.split("Overview")[0] ?? text) && text.includes("What is it about?"), SETTLE_MS);
       await me.capture("setup-settled");
       const steps = settled.split("Overview")[0];
       if (graphify.state.state === "found") {

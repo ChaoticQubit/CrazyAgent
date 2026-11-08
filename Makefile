@@ -3,6 +3,7 @@
 NODE_TESTS := $(filter-out $(NODE_TESTS_EXCLUDE),$(shell find apps crates scripts \( -name node_modules -o -name target -o -name dist \) -prune -o \( -name '*.test.mjs' -o -name '*.test.cjs' \) -type f -print | LC_ALL=C sort))
 BUN_TESTS := $(filter-out $(BUN_TESTS_EXCLUDE),$(shell find scripts -name '*.test.ts' -type f -print | LC_ALL=C sort))
 ENGINE_TESTS := $(filter-out $(ENGINE_TESTS_EXCLUDE),$(basename $(notdir $(wildcard crates/crazyagent/tests/*.rs))))
+ENGINE_ROWS_EXCLUDE := $(foreach test,$(ENGINE_TESTS_EXCLUDE),$(if $(findstring ::,$(test)),$(test)))
 DESKTOP_TESTS := $(filter-out $(DESKTOP_TESTS_EXCLUDE),$(basename $(notdir $(wildcard apps/desktop/src-tauri/tests/*.rs))))
 BUN ?= $(shell command -v bun)
 RCLI_SDK ?= $(CURDIR)/.local-state/tools/rcli-source
@@ -29,7 +30,7 @@ test: desktop-dist
 
 test-rust-selected: desktop-dist
 	cargo build -p crazyagent --bin crazyagent --locked --offline
-	cargo test -p crazyagent --locked --offline --lib --bins $(foreach test,$(ENGINE_TESTS),--test $(test))
+	cargo test -p crazyagent --locked --offline --lib --bins $(foreach test,$(ENGINE_TESTS),--test $(test))$(if $(ENGINE_ROWS_EXCLUDE), -- --exact $(foreach row,$(ENGINE_ROWS_EXCLUDE),--skip $(row)))
 	cargo test -p crazyagent-desktop --locked --offline --lib --bins $(foreach test,$(DESKTOP_TESTS),--test $(test))
 
 test-node:

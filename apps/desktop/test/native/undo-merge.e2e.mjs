@@ -165,7 +165,7 @@ function mergeRow(page, words) {
   return page.evaluate(`(() => { const row = [...document.querySelectorAll(".pj-activity-row")].find((node) => node.innerText.includes(${JSON.stringify(words)})); return row ? { text: row.querySelector(".pj-activity-text")?.innerText ?? "", button: row.querySelector("button")?.textContent ?? null } : null; })()`);
 }
 
-test("Undo on Overview asks naming the branch, reverts the master's merge into main and the row shows Undone", { timeout: 600000 }, async (t) => {
+test("Undo merge on Overview asks naming the branch, reverts the master's merge into main and the row shows Undone", { timeout: 600000 }, async (t) => {
   await withProject(t, "full", async ({ me, page, open, masterFix, changes, status, activity, repo }) => {
     assert.equal((await status()).master_lands, "merges", "at Full access the master merges its own conflict fixes");
     const { id, how, tip } = await masterFix();
@@ -176,11 +176,11 @@ test("Undo on Overview asks naming the branch, reverts the master's merge into m
 
     const words = "Master merged change set #";
     await open("overview", words);
-    assert.equal((await mergeRow(page, words))?.button, "Undo", "the master's merge row offers Undo");
+    assert.equal((await mergeRow(page, words))?.button, "Undo merge", "the master's merge row offers Undo merge");
     assert.match((await mergeRow(page, words))?.text ?? "", new RegExp(`^Master merged change set #\\d+ \\(Master: ${escaped(PROMPT)}, \\d+ files?\\) into main`),
       "the merge row names the master's set by its number");
     await me.capture("undo-before");
-    await me.click("Undo", ".pj-activity-row button");
+    await me.click("Undo merge", ".pj-activity-row button");
     await me.waitFor("the confirm naming the branch", (text) => text.includes("Undo this merge on main?") && text.includes("Later commits stay."));
     await me.capture("undo-confirm");
     await me.click("Undo merge", "dialog[open] button");

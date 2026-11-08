@@ -104,6 +104,248 @@ fn tasks_count_running_and_waiting_now_and_done_or_failed_in_the_range() {
     );
 }
 
+/// Merges count the merges the Overview's Merges filter shows in the range, a lead's merge
+/// and the master's merge into main; into main counts the master's, and undone those an Undo
+/// merge reverted. An owner's Accept is a change, not a merge. One project counts only its
+/// own merges, None counts all.
+#[test]
+fn merges_count_lead_and_main_merges_in_the_range_with_those_undone() {
+    use crate::activity::{ActivityKind, MASTER_ACTOR, NewActivity};
+    let (_directory, db) = database();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+        .unwrap();
+    crate::activity::initialize(&db).unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    for (project, kind, change_set, at_ms) in [
+        (
+            alpha(),
+            ActivityKind::MergedIntoMain,
+            "set-1",
+            MIDNIGHT + HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::MergedIntoMain,
+            "set-2",
+            MIDNIGHT + 2 * HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::LeadMerged,
+            "set-3",
+            MIDNIGHT + 3 * HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::Accepted,
+            "set-4",
+            MIDNIGHT + 4 * HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::MergedIntoMain,
+            "set-5",
+            MIDNIGHT - HOUR,
+        ),
+        (
+            beta.clone(),
+            ActivityKind::MergedIntoMain,
+            "set-6",
+            MIDNIGHT + HOUR,
+        ),
+    ] {
+        let item = NewActivity {
+            kind,
+            actor: MASTER_ACTOR,
+            agent: None,
+            goal: None,
+            text: "Merged",
+            change_set: Some(change_set),
+        };
+        crate::activity::record(&db, &project, &item, at_ms).unwrap();
+    }
+    crate::activity::mark_undone(&db, &alpha(), "set-2");
+    let one = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap();
+    assert_eq!(
+        (one.merges, one.merges_into_main, one.merges_undone),
+        (3, 2, 1)
+    );
+    let all = read(&db, None, MIDNIGHT, NOW).unwrap();
+    assert_eq!(
+        (all.merges, all.merges_into_main, all.merges_undone),
+        (4, 3, 1)
+    );
+}
+
+/// Each project row of the breakdown counts that project's merges in the range as the
+/// Merges tile does, a lead's merge and the master's merge into main; account and harness
+/// rows count none.
+#[test]
+fn each_project_row_counts_its_merges_in_the_range() {
+    use crate::activity::{ActivityKind, MASTER_ACTOR, NewActivity};
+    let (_directory, db) = database();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+        .unwrap();
+    crate::activity::initialize(&db).unwrap();
+    for project in ["alpha", "beta"] {
+        used(
+            &db,
+            MIDNIGHT + HOUR,
+            project,
+            "acct-a",
+            "team-1",
+            "codex",
+            "s1",
+            10,
+            0,
+            0,
+            0,
+        );
+    }
+    let beta = ProjectId::new("beta").unwrap();
+    for (project, kind, change_set, at_ms) in [
+        (
+            alpha(),
+            ActivityKind::MergedIntoMain,
+            "set-1",
+            MIDNIGHT + HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::LeadMerged,
+            "set-2",
+            MIDNIGHT + 2 * HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::Accepted,
+            "set-3",
+            MIDNIGHT + 2 * HOUR,
+        ),
+        (
+            alpha(),
+            ActivityKind::MergedIntoMain,
+            "set-4",
+            MIDNIGHT - HOUR,
+        ),
+        (
+            beta.clone(),
+            ActivityKind::LeadMerged,
+            "set-5",
+            MIDNIGHT + HOUR,
+        ),
+    ] {
+        let item = NewActivity {
+            kind,
+            actor: MASTER_ACTOR,
+            agent: None,
+            goal: None,
+            text: "Merged",
+            change_set: Some(change_set),
+        };
+        crate::activity::record(&db, &project, &item, at_ms).unwrap();
+    }
+    let merges = |rows: &[GroupRow]| -> Vec<(String, u64)> {
+        rows.iter()
+            .map(|row| (row.key.clone(), row.merges))
+            .collect()
+    };
+    let all = read(&db, None, MIDNIGHT, NOW).unwrap();
+    assert_eq!(
+        merges(&all.projects),
+        [("alpha".to_owned(), 2), ("beta".to_owned(), 1)]
+    );
+    assert!(
+        all.accounts
+            .iter()
+            .chain(&all.harnesses)
+            .all(|row| row.merges == 0)
+    );
+    let one = read(&db, Some(&beta), MIDNIGHT, NOW).unwrap();
+    assert_eq!(merges(&one.projects), [("beta".to_owned(), 1)]);
+}
+
+/// A project with merges in the range and no tokens there still has its row, with zero
+/// tokens after the rows that used tokens, so below `ROWS_MAX` projects the project rows add up
+/// to the Merges tile.
+#[test]
+fn a_project_with_merges_and_no_tokens_in_the_range_has_its_row() {
+    use crate::activity::{ActivityKind, MASTER_ACTOR, NewActivity};
+    let (_directory, db) = database();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY)")
+        .unwrap();
+    crate::activity::initialize(&db).unwrap();
+    used(
+        &db,
+        MIDNIGHT + HOUR,
+        "alpha",
+        "acct-a",
+        "team-1",
+        "codex",
+        "s1",
+        10,
+        0,
+        0,
+        0,
+    );
+    let gamma = ProjectId::new("gamma").unwrap();
+    for (project, kind, change_set) in [
+        (alpha(), ActivityKind::MergedIntoMain, "set-1"),
+        (gamma.clone(), ActivityKind::MergedIntoMain, "set-2"),
+        (gamma.clone(), ActivityKind::LeadMerged, "set-3"),
+    ] {
+        let item = NewActivity {
+            kind,
+            actor: MASTER_ACTOR,
+            agent: None,
+            goal: None,
+            text: "Merged",
+            change_set: Some(change_set),
+        };
+        crate::activity::record(&db, &project, &item, MIDNIGHT + HOUR).unwrap();
+    }
+    let merges_only = GroupRow {
+        key: "gamma".to_owned(),
+        tokens: Tokens::default(),
+        agents: 0,
+        runs: 0,
+        projects: vec!["gamma".to_owned()],
+        more_projects: 0,
+        merges: 2,
+    };
+    let all = read(&db, None, MIDNIGHT, NOW).unwrap();
+    assert_eq!(
+        all.projects
+            .iter()
+            .map(|row| (row.key.as_str(), row.merges))
+            .collect::<Vec<_>>(),
+        [("alpha", 1), ("gamma", 2)]
+    );
+    assert_eq!(all.projects[1], merges_only);
+    assert_eq!(
+        all.projects.iter().map(|row| row.merges).sum::<u64>(),
+        all.merges
+    );
+    let one = read(&db, Some(&gamma), MIDNIGHT, NOW).unwrap();
+    assert_eq!(one.projects, [merges_only]);
+    assert_eq!(one.merges, 2);
+}
+
+/// A store without the activity table counts no merges.
+#[test]
+fn merges_are_zero_without_the_activity_table() {
+    let (_directory, db) = database();
+    let metrics = read(&db, Some(&alpha()), MIDNIGHT, NOW).unwrap();
+    assert_eq!(
+        (
+            metrics.merges,
+            metrics.merges_into_main,
+            metrics.merges_undone
+        ),
+        (0, 0, 0)
+    );
+}
+
 const MINUTE: i64 = 60 * 1000;
 
 /// A project whose team runs Codex and Claude Code sub-agents, as onboarding stores one.
