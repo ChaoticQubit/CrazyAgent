@@ -231,9 +231,10 @@ impl NativeBridge {
     }
 
     /// Asks the engine about a running sign-in the first time an owner read shows settings it
-    /// did not start with, using the scope it started with. An unchanged own account entry
-    /// keeps it running; a removed or replaced one marks it stuck with no drawer open. Input:
-    /// the config the read showed. Output: none; the engine's answer is applied to the sign-in.
+    /// did not start with, using the scope it started with. A removed or replaced own entry
+    /// marks it stuck; an ended one stays held so an open drawer's next read shows the end; a
+    /// failed read is tried again by the next owner read. Input: the config the read showed.
+    /// Output: none; the engine's answer is applied to the sign-in.
     pub(super) async fn recheck_auth(&mut self, config: &ConfigId) {
         let Some(operation) = self.native_auth.as_mut().filter(|value| {
             value.unresolved
@@ -245,7 +246,11 @@ impl NativeBridge {
             return;
         };
         operation.checked = Some(config.clone());
-        let _ = self.confirm_running_auth().await;
+        if self.confirm_running_auth(true).await.is_err()
+            && let Some(operation) = self.native_auth.as_mut()
+        {
+            operation.checked = None;
+        }
     }
 
     /// Re-reads, with the scope it started with, a held sign-in the engine last answered as
@@ -254,7 +259,8 @@ impl NativeBridge {
     /// when the engine answers that its own account entry is gone or changed, which leaves it
     /// stuck for the caller's refusal, or the error of another answer the bridge could not
     /// confirm. This read only checks the sign-in, so a held Claude code prompt stays open.
-    async fn confirm_running_auth(&mut self) -> Result<(), BridgeError> {
+    /// Input: whether a sign-in that ended stays held for the drawer's own read.
+    async fn confirm_running_auth(&mut self, keep_ended: bool) -> Result<(), BridgeError> {
         let Some(operation) = self
             .native_auth
             .as_ref()
@@ -271,7 +277,11 @@ impl NativeBridge {
             operation_id,
         };
         let read = self.controller()?.read_native_auth(request).await;
-        let settled = self.settle_auth(read);
+        let settled = if keep_ended && Self::ends_it(&read) {
+            Ok(false)
+        } else {
+            self.settle_auth(read)
+        };
         if let Some(operation) = self.native_auth.as_mut() {
             operation.claude_prompt = prompt;
         }
@@ -322,7 +332,7 @@ impl NativeBridge {
     ) -> Result<(), BridgeError> {
         self.allow_change()?;
         if self.held_auth().is_some_and(&touches) {
-            self.confirm_running_auth().await?;
+            self.confirm_running_auth(false).await?;
         }
         if self.held_auth().is_some_and(&touches) {
             return Err(self.held_refusal());
@@ -336,12 +346,21 @@ impl NativeBridge {
     pub(super) async fn allow_new_auth(&mut self) -> Result<(), BridgeError> {
         self.allow_change()?;
         if self.held_auth().is_some() {
-            self.confirm_running_auth().await?;
+            self.confirm_running_auth(false).await?;
         }
         if self.held_auth().is_some() {
             return Err(self.held_refusal());
         }
         Ok(())
+    }
+
+    /// Says whether an answer means the engine no longer runs the held sign-in. Input: the
+    /// answer. Output: true for a finished phase or a refusal that ends the operation.
+    fn ends_it(read: &Result<NativeAuthReply, EngineError>) -> bool {
+        match read {
+            Ok(reply) => !reply.fact.phase.unfinished(),
+            Err(error) => crazyagent::engine::owner::ends_operation(auth_error(error.clone()).code),
+        }
     }
 
     /// Applies one engine answer about the held sign-in. Output: true when the answer ends
