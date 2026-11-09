@@ -155,8 +155,8 @@ fn task_counts(
 
 /// Counts the merges in the range (a lead's merge of a sub-agent's work and the master's merge
 /// into main), those into main and those undone, from `project_activity`, the only record of a
-/// lead's merge. That table keeps a project's newest 9,000 engine and owner events
-/// (`activity::record`), so past that many in the range the oldest merges drop out of the count.
+/// lead's merge. That table keeps a project's newest 50,000 merges apart from its other
+/// events (`activity::record`), so only past that many in the range do the oldest drop out.
 /// Inputs: the store, the project or None and the range start. Output: the counts, or zeros.
 fn merge_counts(
     db: &Connection,

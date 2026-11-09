@@ -665,7 +665,7 @@ fn merges_keep_their_own_share_and_other_events_never_push_them_out() {
         count("kind='task_started'"),
         KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX
     );
-    filler("lead_merged", newest + 1, 50_000);
+    filler("lead_merged", newest + 1, MERGES_KEPT_MAX);
     record(
         &db,
         &project(),
@@ -673,7 +673,7 @@ fn merges_keep_their_own_share_and_other_events_never_push_them_out() {
         newest + 60_000,
     )
     .unwrap();
-    assert_eq!(count(merges), 50_000);
+    assert_eq!(count(merges), MERGES_KEPT_MAX);
     assert_eq!(count(&format!("{merges} AND at_ms <= 3")), 0);
     assert_eq!(
         count("kind='task_started'"),
