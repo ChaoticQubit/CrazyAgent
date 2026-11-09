@@ -746,7 +746,7 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             match (argument("title").map(str::trim), claims) {
                 (Some(title), Some(claims))
                     if super::text_valid(title, crate::coord::TITLE_BYTES_MAX)
-                        && !title.contains(['\n', '\t']) =>
+                        && !title.contains(|c: char| super::events::line_break(c) || c == '\t') =>
                 {
                     Ok(Call::StartWork {
                         title: title.to_owned(),

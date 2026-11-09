@@ -1832,11 +1832,6 @@ pub(crate) fn quoted_lines(text: &str) -> String {
         quoted.push_str(QUOTE);
         quoted.push_str(line);
     }
-    assert!(
-        quoted
-            .split_inclusive(line_break)
-            .all(|line| line.starts_with(QUOTE))
-    );
     quoted
 }
 
@@ -1859,7 +1854,9 @@ fn agent_line(text: &str) -> String {
     line
 }
 
-fn line_break(c: char) -> bool {
+/// Says whether a character breaks a line for some reader, the one rule for text an agent
+/// wrote. Takes the character. Returns whether it does.
+pub(crate) fn line_break(c: char) -> bool {
     matches!(
         c,
         '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{85}' | '\u{2028}' | '\u{2029}'

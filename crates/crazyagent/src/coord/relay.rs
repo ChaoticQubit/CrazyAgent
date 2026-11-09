@@ -1424,9 +1424,9 @@ pub(crate) fn clip(text: &str, bytes: usize) -> &str {
     &text[..end]
 }
 
-/// A text on one line: every run of line breaks and tabs becomes one space.
+/// A text on one line: every run of `line_break` characters and tabs becomes one space.
 fn one_line(text: &str) -> String {
-    text.split(['\n', '\r', '\t'])
+    text.split(|c: char| crate::team::events::line_break(c) || c == '\t')
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
