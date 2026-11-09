@@ -24,6 +24,10 @@ pub const LINE_TOKENS_MAX: u64 = 1_000_000_000;
 pub(super) const ROW_TOKENS_MAX: i64 = 1_000_000_000_000_000;
 const TOOLS_PER_READ_MAX: usize = 4096;
 const ARGUMENTS_BYTES_MAX: usize = 64 * 1024;
+/// The most records one read of one file parses before it stops at a line boundary.
+const USAGES_PER_READ_MAX: usize = 4096;
+/// The most rows transcript lines can create in each counted table.
+pub(super) const TABLE_ROWS_MAX: i64 = 4 * 1024 * 1024;
 
 pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_tokens (
     hour_ms INTEGER NOT NULL,
@@ -986,6 +990,11 @@ pub(super) struct Added {
     pub(super) cost_nanos: i64,
 }
 
+/// Not written yet. Input: the store. Output: done.
+pub(super) fn count_rows(_db: &Connection) -> Result<(), EngineError> {
+    Ok(())
+}
+
 /// Adds a session's new tokens to the usage hour that holds `now_ms`, after recording
 /// `now_ms` as when that run was last counted. Inputs: the store, the time, the
 /// attribution, the session, the model and what it added. Output: done, or
@@ -1263,3 +1272,6 @@ mod tests;
 
 #[cfg(test)]
 mod migration_tests;
+
+#[cfg(test)]
+mod counting_tests;
