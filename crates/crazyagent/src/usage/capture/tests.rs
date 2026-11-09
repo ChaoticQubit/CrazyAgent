@@ -902,9 +902,11 @@ fn a_run_past_its_day_is_forgotten_with_its_records_once_its_home_is_gone() {
     let homes = tempfile::tempdir().unwrap();
     let gone = homes.path().join("run");
     let kept = homes.path().join("run-2");
-    for home in [&gone, &kept] {
+    for (home, thread) in [(&gone, "a"), (&kept, "b")] {
         append(
-            &home.join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-r.jsonl"),
+            &home.join(format!(
+                "sessions/2026/10/27/rollout-2026-10-27T03-00-00-{thread}.jsonl"
+            )),
             &codex_count(400, 100, 20),
         );
         register_run(&db, home, &unattributed("codex"), NOW).unwrap();
