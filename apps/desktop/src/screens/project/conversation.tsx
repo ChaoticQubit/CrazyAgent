@@ -17,7 +17,7 @@ import type { ProjectData } from "./shared";
 import { Button, Drawer, Menu, type Tone } from "../../ui";
 import { OnSwitchSetting, ReaskSetting, SettingGroup, SettingRow, type SettingGroupInfo } from "../team/controls";
 import { DeliverySetting, QuestionsSetting, coordination } from "../team/coordination";
-import { AccountSetting, MasterHarnessSetting } from "../team/setup-rows";
+import { AccountSetting, MasterHarnessSetting, useTeam } from "../team/setup-rows";
 import { ApplySwitch } from "./settings";
 import { SessionsBar, ownerText, switchDivider, withOwnerLines } from "./sessions";
 
@@ -326,6 +326,7 @@ const MASTER_GROUPS: readonly SettingGroupInfo[] = [
  * do before a button leaves the drawer for another page. Output: the groups, or the team read's
  * state. */
 export function MasterSettings({ data, onLeave = () => {} }: { data: ProjectData; onLeave?: () => void }) {
+  const harnessRows = useTeam(data);
   const team = data.team.result;
   if (team === undefined) return <p className="pj-muted" role="status">Loading...</p>;
   if (team.kind === "not_ready") return <NotReady what="the live team isn't in this build." />;
@@ -338,7 +339,7 @@ export function MasterSettings({ data, onLeave = () => {} }: { data: ProjectData
   const [masterGroup, talk, messages, access] = MASTER_GROUPS;
   return <div className="set-groups">
     <SettingGroup group={masterGroup} prefix={prefix} level={3}>
-      <MasterHarnessSetting data={data} label="Harness" id={`${prefix}-harness`} helper="A change reaches the running master as Apply a master harness change says." />
+      <MasterHarnessSetting rows={harnessRows} data={data} label="Harness" id={`${prefix}-harness`} helper="A change reaches the running master as Apply a master harness change says." />
       <AccountSetting data={data} id={`${prefix}-account`} />
     </SettingGroup>
     <SettingGroup group={talk} prefix={prefix} level={3}>
