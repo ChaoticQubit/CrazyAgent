@@ -24,7 +24,7 @@ test("a grouped list replaces the tab row: Access, Agents and App in the approve
   assert.deepEqual(shown.groups, [
     { name: "Access", links: ["Accounts", "Pools", "GitHub", "Profile"] },
     { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Pack", "Memory"] },
-    { name: "App", links: ["Projects folder", "Sandbox", "Team alerts", "Updates", "Usage"] },
+    { name: "App", links: ["Projects folder", "Sandbox", "Team alerts", "Updates"] },
   ]);
   assert.deepEqual(shown.current, ["Pools"]);
   assert.equal(shown.tabs, 0, "no tab roles are left");

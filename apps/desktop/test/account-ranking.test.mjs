@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const { AccountChoiceView, NextAccountsPanel, atText, standingLine } = await import("../src/screens/settings/account-choice.tsx");
-const { UsageView } = await import("../src/screens/settings/usage.tsx");
+const { MetricsPage } = await import("../src/screens/metrics/view.tsx");
 
 const monday = new Date(2026, 9, 26, 8, 0).getTime();
 const member = (id) => ({ id, kind: "claude", provider: "Claude", status: "signed_in", status_label: "Signed in" });
@@ -60,13 +60,15 @@ test("Settings, Pools shows each pool's next accounts in order with why the rest
   assert.match(failed, /Couldn&#x27;t read the next accounts\./);
 });
 
-test("the Usage page's account section carries the next accounts panel", () => {
+test("the Metrics page's account section carries the next accounts panel", () => {
   const panel = createElement(NextAccountsPanel, { ranking: { kind: "ok", value: ranking }, pools: { kind: "ok", value: [pool] }, names, nowMs: monday });
-  const report = { total: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, limits: [], projects: [], pools: [], accounts: [], agents: [], days: [], lines: [] };
-  const html = renderToStaticMarkup(createElement(UsageView, {
-    report: { kind: "ok", value: report }, range: "7d", names: { projects: new Map(), pools: new Map(), accounts: new Map() },
-    nowMs: monday, failure: "", busy: null, next: panel,
-    onRange: forbidden, onRefresh: forbidden, onSetReset: forbidden, onRetry: forbidden,
+  const report = { total: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, runs: 0, limits: [], projects: [], pools: [], accounts: [], agents: [], days: [], lines: [], partial_homes: 0 };
+  const metrics = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: 86_400_000, series: [], runs: [], projects: [], agents: [], accounts: [], harnesses: [] };
+  const limits = { pools: new Map(), failure: "", busy: null, next: panel, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
+  const html = renderToStaticMarkup(createElement(MetricsPage, {
+    projectId: null, usage: { kind: "ok", value: report }, metrics: { kind: "ok", value: metrics }, adoption: null, range: "7d", by: "project",
+    names: { agents: new Map(), accounts: new Map() }, sinceMs: monday - 7 * 86_400_000, nowMs: monday, updatedMs: monday, offset: 0,
+    filter: { projects: [], onProject: forbidden, limits }, onRange: forbidden, onBy: forbidden, onRetry: forbidden,
   }));
   assert.ok(html.indexOf("Account limits") < html.indexOf("Next accounts"), html);
   assert.match(html, /Main/);
