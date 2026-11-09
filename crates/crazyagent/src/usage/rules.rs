@@ -271,10 +271,246 @@ pub(super) fn timestamp_ms(text: &str) -> Option<i64> {
     Some((days * 86_400 + hour * 3600 + minute * 60 + second) * 1000 + fraction)
 }
 
-/// What a rollout's earlier lines settled. Not filled in yet.
+const REPLAY_GAP_MS: i64 = 1000;
+const REPLAY_WINDOW_MS: i64 = 5000;
+const INFO_BYTES_MAX: usize = 2048;
+
+/// The burst of copied records at the start of a forked rollout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Replay {
+    started_ms: i64,
+    last_ms: i64,
+    active: bool,
+}
+
+impl Replay {
+    /// Whether a record at this time was copied from the parent. A gap over a second ends
+    /// the burst, as does five seconds past the fork; a time before the fork stays a copy.
+    /// Input: the record's time. Output: the answer.
+    fn covers(&mut self, at_ms: Option<i64>) -> bool {
+        let Some(at_ms) = at_ms.filter(|_| self.active) else {
+            return false;
+        };
+        if at_ms < self.started_ms {
+            return true;
+        }
+        if at_ms - self.started_ms > REPLAY_WINDOW_MS {
+            self.active = false;
+            return false;
+        }
+        if at_ms < self.last_ms {
+            return true;
+        }
+        if at_ms - self.last_ms > REPLAY_GAP_MS {
+            self.active = false;
+            return false;
+        }
+        self.last_ms = at_ms;
+        true
+    }
+}
+
+/// What a rollout's earlier lines settled: its thread, the parent it copies, the model and
+/// speed in force, and the counters that tell a new record from a copy.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct CodexState {}
+pub(super) struct CodexState {
+    #[serde(default)]
+    thread: Option<String>,
+    #[serde(default)]
+    parent: Option<String>,
+    #[serde(default)]
+    replay: Option<Replay>,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    fast: bool,
+    #[serde(default)]
+    epoch: u64,
+    #[serde(default)]
+    usage_records: bool,
+    #[serde(default)]
+    cumulative: Option<u64>,
+    #[serde(default)]
+    last_info: Option<String>,
+}
+
+fn bounded_text(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|text| !text.is_empty() && text.len() <= KEY_BYTES_MAX)
+        .map(str::to_owned)
+}
+
+/// One call's counts in engine terms: input without its cached or cache-written part, a
+/// Codex cache write being carved out of the uncached input. Input: a usage object.
+/// Output: the tokens, capped.
+fn codex_tokens(usage: &Value) -> Tokens {
+    let count = |key: &str| usage[key].as_u64().unwrap_or(0);
+    let cached = count("cached_input_tokens");
+    let uncached = count("input_tokens").saturating_sub(cached);
+    let written = count("cache_write_input_tokens").min(uncached);
+    Tokens {
+        input: uncached - written,
+        output: count("output_tokens"),
+        cache_read: cached,
+        cache_write: written,
+    }
+    .at_most(LINE_TOKENS_MAX)
+}
+
+/// The record a Codex rollout line reports, advancing the rollout's state. A forked or
+/// spawned rollout's copied burst counts nothing, and records share a key with the parent's
+/// so a copy past the burst or in a resumed rollout collides. Inputs: the parsed line, the
+/// cumulative counters so far, the state and the thread to use when no line named one.
+/// Output: the record to count, None for any other line. Rules ported from CodeBurn (MIT,
+/// THIRD_PARTY_NOTICES.md).
+pub(super) fn codex_usage(
+    value: &Value,
+    total: &mut Tokens,
+    state: &mut CodexState,
+    fallback_thread: &str,
+) -> Option<Usage> {
+    let at_ms = value["timestamp"].as_str().and_then(timestamp_ms);
+    let replayed = state
+        .replay
+        .as_mut()
+        .is_some_and(|replay| replay.covers(at_ms));
+    let payload = &value["payload"];
+    let kind = value["type"].as_str()?;
+    if kind == "session_meta" {
+        state.thread = bounded_text(&payload["id"]).or(state.thread.take());
+        state.parent = bounded_text(&payload["forked_from_id"])
+            .or_else(|| bounded_text(&payload["parent_thread_id"]))
+            .or_else(|| {
+                bounded_text(&payload["source"]["subagent"]["thread_spawn"]["parent_thread_id"])
+            });
+        if state.parent.is_some() {
+            state.replay = at_ms.map(|at| Replay {
+                started_ms: at,
+                last_ms: at,
+                active: true,
+            });
+            state.last_info = None;
+        }
+        return None;
+    }
+    if kind == "turn_context" {
+        if payload["model"].is_string() {
+            state.model = model_name(&payload["model"]);
+        }
+        return None;
+    }
+    if kind == "event_msg" && payload["type"] == "thread_settings_applied" {
+        state.fast = matches!(
+            payload["thread_settings"]["service_tier"].as_str(),
+            Some("priority" | "fast")
+        );
+        return None;
+    }
+    let scope = state
+        .parent
+        .clone()
+        .or_else(|| state.thread.clone())
+        .unwrap_or_else(|| fallback_thread.to_owned());
+    if kind == "token_usage_record" {
+        let usage = &payload["usage"];
+        if !usage.is_object() || replayed {
+            return None;
+        }
+        state.usage_records = true;
+        return Some(Usage {
+            key: bounded_text(&payload["response_id"])
+                .map(|id| format!("codex:{scope}:response:{id}")),
+            exact: true,
+            model: named_model(payload, state),
+            tokens: codex_tokens(usage),
+            fast: state.fast,
+            at_ms,
+            ..Usage::default()
+        });
+    }
+    if kind != "event_msg" || payload["type"] != "token_count" || state.usage_records {
+        return None;
+    }
+    let info = &payload["info"];
+    if !info.is_object() {
+        return None;
+    }
+    let identity = Some(info.to_string()).filter(|text| text.len() <= INFO_BYTES_MAX);
+    if identity.is_some() && identity == state.last_info {
+        return None;
+    }
+    state.last_info = identity;
+    let totals = &info["total_token_usage"];
+    let cumulative = totals["total_tokens"].as_u64();
+    if cumulative.is_some() && cumulative == state.cumulative {
+        return None;
+    }
+    let previous = state.cumulative;
+    state.cumulative = cumulative;
+    let now = codex_tokens(totals);
+    let last = &info["last_token_usage"];
+    let tokens = if last.is_object() {
+        codex_tokens(last)
+    } else if cumulative.unwrap_or(0) > 0 {
+        let restarted = match (previous, cumulative) {
+            (Some(before), Some(current)) => current.saturating_mul(10) <= before,
+            _ => false,
+        };
+        if restarted {
+            state.epoch += 1;
+            *total = Tokens::default();
+        }
+        now.growth_over(*total)
+    } else {
+        return None;
+    };
+    if totals.is_object() {
+        *total = now;
+    }
+    if replayed {
+        return None;
+    }
+    let raw = |key: &str| totals[key].as_u64().unwrap_or(0);
+    let key = cumulative.map(|current| {
+        format!(
+            "codex:{scope}:{current}:{}:{}:{}:{}:{}",
+            raw("input_tokens"),
+            raw("cached_input_tokens"),
+            raw("output_tokens"),
+            raw("reasoning_output_tokens"),
+            state.epoch
+        )
+    });
+    Some(Usage {
+        key: key.filter(|key| key.len() <= 3 * KEY_BYTES_MAX),
+        exact: true,
+        model: named_model(payload, state),
+        tokens,
+        fast: state.fast,
+        at_ms,
+        ..Usage::default()
+    })
+}
+
+/// The model of a Codex record: the record's own name, else the turn's. Inputs: the payload
+/// and the state. Output: the model, empty when none was named.
+fn named_model(payload: &Value, state: &CodexState) -> String {
+    for name in [
+        &payload["model"],
+        &payload["model_name"],
+        &payload["info"]["model"],
+        &payload["info"]["model_name"],
+    ] {
+        let name = model_name(name);
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    state.model.clone()
+}
 
 #[cfg(test)]
 mod tests;

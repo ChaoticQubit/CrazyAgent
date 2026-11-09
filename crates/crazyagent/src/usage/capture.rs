@@ -1,4 +1,4 @@
-use super::rules::{CodexState, Usage, advisor_usages, claude_usage};
+use super::rules::{CodexState, Usage, advisor_usages, claude_usage, codex_usage};
 use super::{LimitSource, LimitWindow, Observation, failure, record_observation, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
@@ -126,7 +126,7 @@ impl Tokens {
 
     /// How much this count grew past an earlier one, field by field, never below zero.
     /// Input: the earlier count. Output: the growth.
-    fn growth_over(self, earlier: Tokens) -> Tokens {
+    pub(super) fn growth_over(self, earlier: Tokens) -> Tokens {
         Tokens {
             input: self.input.saturating_sub(earlier.input),
             output: self.output.saturating_sub(earlier.output),
@@ -299,33 +299,25 @@ fn codex_window(value: &Value, now_ms: i64) -> Option<(u64, LimitWindow)> {
     ))
 }
 
-/// What one Codex rollout line shows: the growth of the session's cumulative token totals
-/// past the last ones counted, each capped at `LINE_TOKENS_MAX`, and the account's limit
-/// windows when the line carries them. Codex counts cached input inside input; the growth
-/// keeps them apart. Inputs: the parsed line, the file's progress and the time.
-/// Output: the growth as a record with no key, None when nothing grew, and the limits.
+/// What one Codex rollout line shows: the record it reports, advancing the rollout's
+/// counters, and the account's limit windows when the line carries them. Inputs: the parsed
+/// line, the file's progress, the time and the thread to use when no line named one.
+/// Output: the record and the limits.
 fn codex_line(
     value: &Value,
     progress: &mut Progress,
     now_ms: i64,
+    fallback_thread: &str,
 ) -> (Option<Usage>, Option<Observation>) {
+    let usage = codex_usage(
+        value,
+        &mut progress.total,
+        &mut progress.codex,
+        fallback_thread,
+    );
     let payload = &value["payload"];
     if value["type"] != "event_msg" || payload["type"] != "token_count" {
-        return (None, None);
-    }
-    let mut growth = Tokens::default();
-    let total = &payload["info"]["total_token_usage"];
-    if total.is_object() {
-        let count = |key: &str| total[key].as_u64().unwrap_or(0);
-        let cached = count("cached_input_tokens");
-        let seen = Tokens {
-            input: count("input_tokens").saturating_sub(cached),
-            output: count("output_tokens"),
-            cache_read: cached,
-            cache_write: 0,
-        };
-        growth = seen.growth_over(progress.total).at_most(LINE_TOKENS_MAX);
-        progress.total = seen;
+        return (usage, None);
     }
     let limits = &payload["rate_limits"];
     let mut observation = Observation {
@@ -345,10 +337,6 @@ fn codex_line(
         }
     }
     let reported = observation.five_hour.is_some() || observation.weekly.is_some();
-    let usage = (!growth.is_empty()).then(|| Usage {
-        tokens: growth,
-        ..Usage::default()
-    });
     (usage, reported.then_some(observation))
 }
 
@@ -705,7 +693,7 @@ fn read_record(
     let Some(opened) = open_record(path) else {
         return (Vec::new(), None);
     };
-    read_opened(opened, format, progress, now_ms)
+    read_opened(opened, format, progress, now_ms, &session_name(path))
 }
 
 /// Reads one record as `read_record` does and also collects the tool calls its new lines
@@ -721,7 +709,14 @@ fn read_record_with(
     let Some(opened) = open_record(path) else {
         return (Vec::new(), None);
     };
-    read_opened_with(opened, format, progress, now_ms, Some(tools))
+    read_opened_with(
+        opened,
+        format,
+        progress,
+        now_ms,
+        Some(tools),
+        &session_name(path),
+    )
 }
 
 fn read_opened(
@@ -729,8 +724,9 @@ fn read_opened(
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
+    fallback_thread: &str,
 ) -> (Vec<Usage>, Option<Observation>) {
-    read_opened_with(opened, format, progress, now_ms, None)
+    read_opened_with(opened, format, progress, now_ms, None, fallback_thread)
 }
 
 /// Reads what an open record gained since its stored progress, up to the length it had
@@ -739,13 +735,15 @@ fn read_opened(
 /// the same, under the crate-wide volume renumber rule, and the pin then moves to the live
 /// device, so a reboot never counts a whole record again. Inputs: the open record with its
 /// identity and length, its progress, the time and where to collect the tool calls read,
-/// at most `TOOLS_PER_READ_MAX`, if anywhere. Output: the records and the last limits.
+/// at most `TOOLS_PER_READ_MAX`, if anywhere, and the thread to use when no line named one.
+/// Output: the records and the last limits.
 fn read_opened_with(
     (mut file, identity, length): (File, (u64, u64), u64),
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
     mut tools: Option<&mut Vec<String>>,
+    fallback_thread: &str,
 ) -> (Vec<Usage>, Option<Observation>) {
     if crate::file_identity::same_files(&[progress.identity], &[identity])
         && length >= progress.offset
@@ -799,7 +797,7 @@ fn read_opened_with(
                 }
             }
             Format::Codex => {
-                let (usage, observed) = codex_line(&value, progress, now_ms);
+                let (usage, observed) = codex_line(&value, progress, now_ms, fallback_thread);
                 if let Some(usage) = usage {
                     reading.add(usage);
                 }

@@ -283,8 +283,7 @@ fn codex_count(input: u64, cached: u64, output: u64) -> String {
                         "output_tokens": output,
                         "reasoning_output_tokens": 0,
                         "total_tokens": input + output
-                    },
-                    "last_token_usage": {"input_tokens": 1, "output_tokens": 1}
+                    }
                 },
                 "rate_limits": null
             }
@@ -427,7 +426,7 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
     let opened = open_record(&record).unwrap();
     let length = opened.2;
     append(&record, &claude_assistant("g2", 3, 1, 0, 0, "end_turn"));
-    let growth = tokens_of(&read_opened(opened, Format::Claude, &mut progress, NOW).0);
+    let growth = tokens_of(&read_opened(opened, Format::Claude, &mut progress, NOW, "").0);
     assert_eq!(
         growth,
         Tokens {
@@ -456,7 +455,7 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
     append(&record, head);
     let opened = open_record(&record).unwrap();
     append(&record, tail);
-    let growth = tokens_of(&read_opened(opened, Format::Claude, &mut progress, NOW + 2).0);
+    let growth = tokens_of(&read_opened(opened, Format::Claude, &mut progress, NOW + 2, "").0);
     assert_eq!(growth, Tokens::default());
     assert_eq!(progress.offset, grown);
     let growth = tokens_of(&read_record(&record, Format::Claude, &mut progress, NOW + 3).0);
