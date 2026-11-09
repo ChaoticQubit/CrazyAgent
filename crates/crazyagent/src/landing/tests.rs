@@ -10512,6 +10512,104 @@ fn a_master_worktree_start_is_recorded_once_and_never_moves_past_its_commits() {
     );
 }
 
+/// T3-R2-S1: a master turn reads its stored start without the repository hold, so a long
+/// holder of that hold never delays the turn.
+#[test]
+fn a_master_turn_with_a_stored_start_does_not_wait_for_the_repository_hold() {
+    let case = Case::new();
+    case.start();
+    let master = master_agent(&case);
+    record_master_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    let held = flow::hold(&master.repository);
+    let engine = case.repo.parent().unwrap().join("engine");
+    let home = git::OWNER_HOME.with(|home| home.borrow().clone());
+    let turn = master.clone();
+    let (sent, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        git::OWNER_HOME.with(|owner| *owner.borrow_mut() = home);
+        let db = open(&engine).unwrap();
+        let _ = sent.send(record_master_start(
+            &db,
+            &turn.repository,
+            &turn.worktree,
+            &turn.git_dir,
+        ));
+    });
+    let waited = got.recv_timeout(Duration::from_secs(5));
+    drop(held);
+    assert!(matches!(waited, Ok(Ok(()))), "the turn waited: {waited:?}");
+}
+
+/// T3-R2-S2: a master that only fast-forwarded its worktree to main has nothing to land, so
+/// its turn end opens no empty set.
+#[test]
+fn a_master_that_only_fast_forwarded_to_main_opens_no_change_set() {
+    let case = Case::new();
+    case.start();
+    let master = master_agent(&case);
+    record_master_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    case.owner_commit("LATER", "later\n", "Owner adds a file");
+    git_in(
+        &case.home,
+        &master.worktree,
+        &["merge", "-q", "--ff-only", "main"],
+    );
+    assert_eq!(
+        record_turn_end(&case.db, &master, &merge_turn()).unwrap(),
+        None
+    );
+}
+
+/// T3-R2-S2: the same holds for a team agent, since the rule sits where every set opens.
+#[test]
+fn a_team_agent_that_only_fast_forwarded_to_main_opens_no_change_set() {
+    let case = Case::new();
+    case.start();
+    let agent = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir).unwrap();
+    case.owner_commit("LATER", "later\n", "Owner adds a file");
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &["merge", "-q", "--ff-only", "main"],
+    );
+    assert_eq!(
+        record_turn_end(&case.db, &agent, &merge_turn()).unwrap(),
+        None
+    );
+}
+
+/// T3-R2-S4: an ordinary Accept's stored intent keeps the shape an older engine reads, and a
+/// master's still carries its mark.
+#[test]
+fn an_ordinary_land_intent_is_stored_in_the_shape_an_older_engine_reads() {
+    let land = |master| store::Intent::Land {
+        reference: "refs/heads/main".into(),
+        old: "a".into(),
+        new: "b".into(),
+        master,
+    };
+    let stored = serde_json::to_value(land(false)).unwrap();
+    assert!(stored.get("master").is_none(), "{stored}");
+    let marked = serde_json::to_string(&land(true)).unwrap();
+    assert_eq!(
+        serde_json::from_str::<store::Intent>(&marked).unwrap(),
+        land(true)
+    );
+}
+
 /// A set's proposed message names only the agent's own commits: owner commits the agent
 /// brought in by merging main are already on main, so they never become its subject or
 /// its list (T4 r2: an undo named the owner's commit).
