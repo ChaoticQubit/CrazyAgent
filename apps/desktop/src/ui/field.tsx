@@ -43,8 +43,9 @@ export function TextField({ id, label, value, onValue, helper, error, maxLength,
 }
 
 /** A labelled multi-line text area with helper, error and an optional near-limit counter.
- * Inputs: id, label, value, change handler, rows, helper, error, max length, counter threshold. */
-export function TextArea({ id, label, value, onValue, rows = 3, helper, error, maxLength, counterAt, readOnly = false }: {
+ * Inputs: id, label, value, change handler, rows, helper, error, max length, counter threshold
+ * and whether a label elsewhere on the page already names it. */
+export function TextArea({ id, label, value, onValue, rows = 3, helper, error, maxLength, counterAt, readOnly = false, labelOutside = false }: {
   id: string;
   label: string;
   value: string;
@@ -55,9 +56,10 @@ export function TextArea({ id, label, value, onValue, rows = 3, helper, error, m
   maxLength?: number;
   counterAt?: number;
   readOnly?: boolean;
+  labelOutside?: boolean;
 }) {
   return <div className="field">
-    <label htmlFor={id}>{label}</label>
+    {!labelOutside && <label htmlFor={id}>{label}</label>}
     <textarea id={id} className="textarea" rows={rows} value={value} maxLength={maxLength} readOnly={readOnly} aria-invalid={error ? true : undefined}
       aria-describedby={describedBy(id, helper, error)} onChange={(event) => onValue(event.target.value)} />
     <Counter value={value} maxLength={maxLength} counterAt={counterAt} />
