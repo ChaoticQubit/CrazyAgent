@@ -144,7 +144,7 @@ export function Screen({ route, session, alerts }: { route: Route; session: Sess
  * launch skeleton, the first-run Welcome page while the profile is empty, or the shell with the
  * routed screen. Settings, Updates opens on its own in place of all but the shell. Inputs: the
  * session and the current route. */
-export function AppView({ session, route, alerts }: { session: Session; route: Route; alerts?: Map<string, number> }) {
+export function AppView({ session, route, alerts }: { session: Session; route: Route; alerts?: Map<string, number>; working?: ReadonlyMap<string, number> }) {
   const updates = route.name === "settings" && route.tab === "updates";
   if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} />;
   if (session.engine === "outdated") return updates ? <UpdatesAlone session={session} /> : <EngineOutdated onRetry={session.retry} />;
@@ -203,6 +203,15 @@ function useShortcuts() {
 
 export const ALERT_READ_MS = 10_000;
 
+const NONE_WORKING: ReadonlyMap<string, number> = new Map();
+
+/** What the sidebar shows from the team alert read: each project's flag count and its agents
+ * at work. */
+export interface TeamAlerts {
+  alerts: Map<string, number>;
+  working: ReadonlyMap<string, number>;
+}
+
 /** Watches the owner's team notifications and pending questions while the engine runs: every
  * 10 s it reads them, shows a new notification as a toast, with Open to the Agents tab's
  * Questions for you drawer on an urgent question or an agent waiting in its terminal, keeps
@@ -211,7 +220,7 @@ export const ALERT_READ_MS = 10_000;
  * same counts read drives the question notification watch, so the counts are read once per
  * look. Inputs: whether the engine runs and the toast action. Output: what each project's
  * sidebar flag counts. */
-function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): Map<string, number> {
+export function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): TeamAlerts {
   const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
   const toast = useRef(showToast);
   toast.current = showToast;
@@ -246,7 +255,7 @@ function useTeamAlerts(running: boolean, showToast: (message: string, open?: Rou
       watch.stop();
     };
   }, [running]);
-  return counts;
+  return { alerts: counts, working: NONE_WORKING };
 }
 
 export const IDE_FOCUS_POLL_MS = 1_000;
@@ -287,7 +296,7 @@ export function App() {
   const route = useRoute();
   useShortcuts();
   useUpdateWatch(session.showToast);
-  const alerts = useTeamAlerts(session.engine === "running", session.showToast);
+  const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
-  return <AppView session={session} route={route} alerts={alerts} />;
+  return <AppView session={session} route={route} alerts={alerts} working={working} />;
 }

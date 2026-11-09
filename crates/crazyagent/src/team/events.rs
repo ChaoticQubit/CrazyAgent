@@ -34,6 +34,7 @@ pub const STATUS_AGENTS_MAX: i64 = super::STATUS_AGENTS_MAX;
 pub const VIEW_NOTIFICATIONS_MAX: i64 = 20;
 pub const APP_NOTIFICATIONS_MAX: i64 = 50;
 pub const UNSEEN_PROJECTS_MAX: i64 = 200;
+pub const WORKING_PROJECTS_MAX: i64 = 200;
 pub const HOUR_MS: i64 = 3_600_000;
 pub const SCAN_EVERY: Duration = Duration::from_secs(2);
 pub(crate) const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
@@ -451,6 +452,16 @@ pub struct AppEvents {
     pub unseen: i64,
     #[serde(default)]
     pub projects: Vec<ProjectUnseen>,
+    #[serde(default)]
+    pub working: Vec<ProjectWorking>,
+}
+
+/// How many agents one project has at work, for its sidebar dot: team agents working plus
+/// research jobs running, the sum its project card shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectWorking {
+    pub project_id: ProjectId,
+    pub agents: i64,
 }
 
 /// How many of one project's owner notifications are unseen, for its sidebar count, and how
@@ -2209,6 +2220,7 @@ pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
         notifications: app_notifications(connection)?,
         unseen,
         projects: unseen_by_project(connection)?,
+        working: Vec::new(),
     })
 }
 

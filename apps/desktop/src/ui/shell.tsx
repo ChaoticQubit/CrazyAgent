@@ -11,6 +11,7 @@ export interface SidebarProject {
   id: string;
   name: string;
   flag?: string;
+  working?: number;
 }
 
 /** The fixed 220 px sidebar as the approved design draws it: the brand, the project list alone
