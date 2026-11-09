@@ -7878,6 +7878,54 @@ fn a_stopped_master_s_finished_work_is_held_for_its_open_set_by_the_sweep() {
     assert_eq!(second_start(&case), 0, "the master's set landed");
 }
 
+/// Land-7 r2: a team master's set is recorded as a sub-agent's with its row id, so the sweep
+/// finds it by that id and holds the work the master finished before it stopped.
+#[test]
+fn a_stopped_team_master_s_finished_work_is_held_for_its_open_set_by_the_sweep() {
+    let case = Case::new();
+    let mut master = team_with_master(&case);
+    master.agent.kind = AgentKind::Sub;
+    master.agent.id = "3".into();
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let id = turn_of(&case, &master, "Add the line");
+    master_finishes_readme(&case);
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=3", [])
+        .unwrap();
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS).unwrap();
+    assert_eq!(second_start(&case), 1, "the master's set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the master's set landed");
+}
+
+/// Land-7 r2: with two open master sets the sweep holds a stopped master's finished work for
+/// the newest, so closing the older one does not end the hold.
+#[test]
+fn a_stopped_master_s_finished_work_is_held_for_its_newest_open_set() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    case.start();
+    case.edit("OLDER", "older\n");
+    let older = case.turn(TurnOutcome::Succeeded).unwrap();
+    let mut record = store::load(&case.db, &older).unwrap();
+    record.agent.kind = AgentKind::Master;
+    store::save(&case.db, &record).unwrap();
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let newer = turn_of(&case, &master, "Add the line");
+    master_finishes_readme(&case);
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=3", [])
+        .unwrap();
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS).unwrap();
+    assert_eq!(
+        crate::coord::held_sets(&case.db, 3).unwrap(),
+        vec![newer.as_str().to_owned()]
+    );
+}
+
 /// OS-8 L1: closing a change set releases only the claims of the work it holds. Work the
 /// agent finished after the set's last turn end keeps its claims through that set's Accept
 /// and is released by the Accept of the next set, which holds it.

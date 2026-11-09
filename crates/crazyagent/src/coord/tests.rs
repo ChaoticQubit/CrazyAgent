@@ -1022,6 +1022,51 @@ fn one_agent_s_flood_of_claimed_work_refuses_only_that_agent() {
     assert!(overlaps.is_empty(), "{overlaps:?}");
 }
 
+/// Land-7 r2: a master's finished work counts against its claims limit until its set closes,
+/// as a sub-agent's does, so past the limit its next start is refused.
+#[cfg(unix)]
+#[test]
+fn a_master_at_its_claims_limit_is_refused_new_work() {
+    let connection = db();
+    let master = agent(&connection, "master", None);
+    let claims = |unit: usize| -> Vec<String> {
+        (0..super::CLAIMS_PER_WORK_MAX)
+            .map(|file| format!("done/{unit}/{file}.rs"))
+            .collect()
+    };
+    for unit in 0..super::AGENT_CLAIMS_MAX / super::CLAIMS_PER_WORK_MAX {
+        let (work, _) = start_work(
+            &connection,
+            &project(),
+            master,
+            format!("Unit {unit}"),
+            claims(unit),
+            NOW,
+        )
+        .unwrap();
+        finish(
+            &connection,
+            work,
+            1,
+            Finish::Complete,
+            "Done.".into(),
+            master,
+            NOW,
+        )
+        .unwrap();
+    }
+    let refused = start_work(
+        &connection,
+        &project(),
+        master,
+        "One more".into(),
+        vec!["done/more.rs".into()],
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(refused.0, "coord_agent_claims_full");
+}
+
 /// OS-8 r2 M1: a stopped agent's claims on work it was still on leave the overlap check, so
 /// built-up claims of agents that never run again stop no one; they are not released, and
 /// they count and overlap again once the agent is resumed under its own id.
