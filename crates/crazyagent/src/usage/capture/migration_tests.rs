@@ -236,6 +236,47 @@ fn a_progress_row_the_step_cannot_read_stops_nothing() {
     }
 }
 
+#[test]
+fn step_seeds_only_an_id_a_live_scan_could_key() {
+    let (_root, db) = old_store();
+    let longest = "a".repeat(128);
+    let ids = [
+        longest.clone(),
+        "b".repeat(129),
+        "\u{e9}".repeat(65),
+        String::new(),
+    ];
+    for (index, id) in ids.iter().enumerate() {
+        let progress = serde_json::json!({
+            "identity": [1, 2], "offset": 9, "skipping": false, "message": id,
+            "counted": {"input": 1, "output": 1, "cache_read": 0, "cache_write": 0},
+            "total": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+        });
+        db.execute(
+            "INSERT INTO usage_files VALUES (?1,?2)",
+            params![format!("/h/{index}.jsonl"), progress.to_string()],
+        )
+        .unwrap();
+    }
+    migrate(&db);
+    let seeded: Vec<String> = db
+        .prepare("SELECT id FROM usage_messages")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(seeded, [format!("claude:{longest}")]);
+    let kept: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM usage_files WHERE json_type(progress,'$.message') IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 0, "no stored row keeps its message");
+}
+
 fn store_new() -> (tempfile::TempDir, Connection) {
     let root = tempfile::tempdir().unwrap();
     let db = super::super::open(root.path()).unwrap();
