@@ -17,7 +17,7 @@ enum Step {
     Record(HomeEffect),
     Staged(Result<Staged, String>),
     Size(u64),
-    Deleted(Result<(DeletePlan, Vec<i64>), String>),
+    Deleted(Result<(PathBuf, Vec<String>), String>),
 }
 
 enum Work {
@@ -45,7 +45,10 @@ impl Work {
             }
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::New(plan) => Step::Staged(plan.run()),
-            Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| (plan, research))),
+            Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| {
+                let files = plan.engine_files(&research);
+                (plan.database, files)
+            })),
         }
     }
 }
@@ -171,7 +174,7 @@ pub(super) async fn serve(
         _ => None,
     };
     let deleted = match &step {
-        Ok(Step::Deleted(Ok((plan, research)))) => Some((plan.clone(), research.clone())),
+        Ok(Step::Deleted(Ok(files))) => Some(files.clone()),
         _ => None,
     };
     let answer = async {
@@ -200,8 +203,18 @@ pub(super) async fn serve(
         )
     };
     let answered = tokio::time::timeout_at(deadline, answer).await;
-    if let (Ok((_, true, _)), Some((plan, research))) = (&answered, deleted) {
-        let _ = tokio::task::spawn_blocking(move || plan.remove_engine_files(&research)).await;
+    if let (Ok((_, true, _)), Some((database, files))) = (&answered, deleted) {
+        let done = tokio::task::spawn_blocking(move || {
+            crate::projects_home::remove_engine_files(&database, &files)
+        })
+        .await
+        .unwrap_or_default();
+        if let Err(e) = engine
+            .owner_job(|reply| Job::DeleteFilesClear(done, reply))
+            .await
+        {
+            eprintln!("project_delete_files_not_cleared cause={}", e.0);
+        }
     }
     let forgotten = matches!(&answered, Ok((_, _, true)));
     let answered = answered.map(|(written, _, _)| written);
@@ -450,7 +463,8 @@ async fn finish(
         Step::Deleted(outcome) => OwnerResponse::Applied {
             operation: engine
                 .owner_job(|reply| {
-                    Job::DeleteRecord(a.clone(), Box::new(request), outcome.map(|_| ()), reply)
+                    let files = outcome.map(|(_, files)| files);
+                    Job::DeleteRecord(a.clone(), Box::new(request), files, reply)
                 })
                 .await?,
         },

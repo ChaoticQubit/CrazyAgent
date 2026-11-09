@@ -692,7 +692,11 @@ async fn an_engine_start_keeps_every_engine_file_no_record_names_exactly() {
     for path in &made {
         assert!(path.exists(), "{} stays", path.display());
     }
-    assert_eq!(recorded(&engine), 0, "a name that is no engine file is dropped");
+    assert_eq!(
+        recorded(&engine),
+        0,
+        "a name that is no engine file is dropped"
+    );
     engine.stop().await;
 }
 

@@ -416,7 +416,34 @@ pub(super) fn delete_settle(db: &Connection, exchange: Option<u64>) -> Result<()
     Ok(())
 }
 
+/// Finishes at engine start the engine files a delete recorded and never removed, the
+/// record's names only, at most `DELETE_FILES_PER_START` a start. Inputs: the connection and
+/// the database path. Output: Ok once the finished names are cleared.
+pub(super) fn delete_files_finish(db: &Connection, path: &Path) -> Result<(), EngineError> {
+    let mut query = db
+        .prepare("SELECT name FROM projects_delete_files ORDER BY name LIMIT ?1")
+        .map_err(error)?;
+    let names = query
+        .query_map([DELETE_FILES_PER_START], |row| row.get::<_, String>(0))
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    delete_files_clear(db, &home::remove_engine_files(path, &names))
+}
+
+/// Clears the record of engine files that are finished, the last step of a delete. Inputs:
+/// the connection and the finished names. Output: Ok once none of them is recorded.
+pub(super) fn delete_files_clear(db: &Connection, names: &[String]) -> Result<(), EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    for name in names {
+        tx.execute("DELETE FROM projects_delete_files WHERE name=?1", [name])
+            .map_err(error)?;
+    }
+    tx.commit().map_err(error)
+}
+
 const DELETE_ROWS_MAX: i64 = 100_000;
+const DELETE_FILES_PER_START: i64 = 1024;
 
 /// Plans a Delete everything before the owner transport moves anything: the owner's grant
 /// and revision, the project, its exact name and [`delete_check`] are checked, then Stop all
