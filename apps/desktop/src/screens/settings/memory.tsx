@@ -140,7 +140,7 @@ function SuggestedSection({ suggested, busy, onSave, onSaveEdited, onDismiss }: 
         <div className="set-ctl set-line-ctl">
           <Button variant="primary" size="small" icon="brain" pending={busy === suggestion.id} pendingLabel="Saving..." onClick={() => onSave(suggestion)}>Save to memory</Button>
           <Button size="small" icon="pencil" disabled={busy === suggestion.id} onClick={() => setEditing(key)}>Edit</Button>
-          <Button size="small" onClick={() => onDismiss(suggestion)}>Dismiss</Button>
+          <Button size="small" disabled={busy === suggestion.id} onClick={() => onDismiss(suggestion)}>Dismiss</Button>
         </div>
       </SettingRow>;
     })}
