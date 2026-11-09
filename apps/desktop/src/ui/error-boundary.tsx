@@ -20,8 +20,8 @@ export class AppErrorBoundary extends Component<{ children: ReactNode }, { faile
         <BrandMark />
         <Icon name="circle-alert" size={28} />
         <h1>This window stopped working</h1>
-        <p className="secondary">Something went wrong while drawing it. Your projects and agents aren't affected. Reload to bring it back. Anything you typed and didn't save will be lost.</p>
-        <span className="row"><Button variant="primary" icon="refresh-cw" onClick={() => window.location.reload()}>Reload</Button></span>
+        <p className="secondary">Something went wrong while drawing it. Your projects and agents aren't affected. Reload to bring it back. If this comes back, restart the app. Anything you typed and didn't save will be lost.</p>
+        <span className="row"><Button variant="primary" icon="refresh-cw" autoFocus onClick={() => window.location.reload()}>Reload</Button></span>
       </div>
     </main>;
   }
