@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Icon, type IconName } from "./icon";
 
 /** An on/off switch (role "switch"). When a reason is given the switch is unavailable but
@@ -36,9 +36,9 @@ export function Checkbox({ label, checked, onChecked, disabled }: {
   </label>;
 }
 
-/** A radio group drawn as segments (role "radiogroup"); arrow keys move the choice.
- * Inputs: accessible label, value, options with optional icons, change handler, optional id of
- * text describing the group. */
+/** A radio group drawn as segments (role "radiogroup"); arrow keys move the choice and the focus
+ * goes with it, so a keyboard user stays on the option that is checked. Inputs: accessible label,
+ * value, options with optional icons, change handler, optional id of text describing the group. */
 export function Segmented<T extends string>({ label, value, options, onValue, describedBy }: {
   label: string;
   value: T;
@@ -46,11 +46,16 @@ export function Segmented<T extends string>({ label, value, options, onValue, de
   onValue: (value: T) => void;
   describedBy?: string;
 }) {
+  const group = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const box = group.current;
+    if (box?.contains(document.activeElement)) box.querySelector<HTMLElement>('[aria-checked="true"]')?.focus();
+  }, [value]);
   const move = (step: number) => {
     const index = options.findIndex((option) => option.value === value);
     onValue(options[(index + step + options.length) % options.length].value);
   };
-  return <div className="segmented" role="radiogroup" aria-label={label} aria-describedby={describedBy}
+  return <div ref={group} className="segmented" role="radiogroup" aria-label={label} aria-describedby={describedBy}
     onKeyDown={(event) => {
       if (event.key === "ArrowRight" || event.key === "ArrowDown") { event.preventDefault(); move(1); }
       if (event.key === "ArrowLeft" || event.key === "ArrowUp") { event.preventDefault(); move(-1); }

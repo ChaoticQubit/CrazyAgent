@@ -169,18 +169,18 @@ function PlanRow({ id, name, plan, onSave }: { id: string; name: string; plan: A
 }
 
 /** One account order select: it keeps the owner's pick while its save and the read after it run,
- * and shows the saved value again after a refused save. Inputs: the select's parts and the
- * change action. Output: the select. */
-function StrategySelect({ id, label, value, options, helper, save }: {
+ * and shows the saved value again after a refused save. Inputs: the select's parts, the help line
+ * for a value and the change action. Output: the select. */
+function StrategySelect({ id, label, value, options, hint, save }: {
   id: string;
   label: string;
   value: string;
   options: SelectOption[];
-  helper?: string;
+  hint?: (value: string) => string | undefined;
   save: (value: string) => Promise<Result<void>>;
 }) {
   const [shown, hold] = useHeld(value);
-  return <Select id={id} label={label} value={shown} options={options} helper={helper} onValue={(next) => {
+  return <Select id={id} label={label} value={shown} options={options} helper={hint?.(shown)} onValue={(next) => {
     const settled = hold(next);
     void save(next).then((result) => settled(result.kind === "ok" ? "" : result.kind));
   }} />;
@@ -208,12 +208,11 @@ export function AccountChoiceView({ schedule, pools, names, ranking, nowMs, onCh
     setError(result.kind === "ok" ? undefined : result.kind === "not_ready" ? "Account choice isn't ready in this build." : result.message);
     return result;
   };
-  const app = STRATEGIES.find((item) => item.value === current.strategy);
   return <Panel title="Account choice">
     <div className="stack">
       <StrategySelect id="schedule-app" label="How every pool picks an account" value={current.strategy}
         options={STRATEGIES.map((item) => ({ value: item.value, label: item.label }))}
-        helper={app?.hint} save={(value) => send({ kind: "app_strategy", strategy: value as AccountStrategy })} />
+        hint={(value) => STRATEGIES.find((item) => item.value === value)?.hint} save={(value) => send({ kind: "app_strategy", strategy: value as AccountStrategy })} />
       {error && <Notice tone="danger" alert>{error}</Notice>}
       {pools.value.map((pool) => <div className="stack-small" key={pool.id}>
         <StrategySelect id={`schedule-${pool.id}`} label={`${pool.name}: account order`} value={poolStrategy(current, pool.id) ?? ""}

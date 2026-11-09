@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listMcpServers, type HarnessEntry, type McpServerView } from "../../api";
-import { failureCopy, loadAgentPolicy, type AgentAccess, type PolicyView, type PoolChoice, type StoredSetup } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadSetup, type AgentAccess, type PolicyView, type PoolChoice, type StoredSetup } from "../../api-projects";
 import { useHeld, useLoad } from "../../state";
 import { Button, ConfirmDialog, Icon, Segmented, Select, Switch, type SelectOption } from "../../ui";
 import { displayText } from "../conversation";
@@ -228,8 +228,9 @@ export function McpServersSetting({ projectId }: { projectId: string }) {
 }
 
 /** The master's account as a select of the project's pools, any account of the chosen pool,
- * saved in place through project Settings' own pool save. Inputs: the project data and the
- * select's id. Output: the row. */
+ * saved in place through project Settings' own pool save. While a pick is held the page's reads
+ * are older than the last save, so a new pick starts from the held pool and reads the project
+ * details again. Inputs: the project data and the select's id. Output: the row. */
 export function AccountSetting({ data, id }: { data: TeamProject; id: string }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
@@ -238,11 +239,18 @@ export function AccountSetting({ data, id }: { data: TeamProject; id: string }) 
   const current = data.assigned?.pool.id ?? "";
   const [shown, hold] = useHeld(current);
 
+  async function save(value: string): Promise<string> {
+    const fresh = shown === current ? null : await loadSetup(data.id);
+    if (fresh !== null && fresh.kind !== "ok") return failureCopy(fresh.kind === "error" ? fresh.code : "unknown");
+    const assigned = pools.find((choice) => choice.pool.id === shown) ?? null;
+    return savePool({ ...data, assigned }, valueOf(fresh ?? data.setup), value === "" ? null : value);
+  }
+
   async function choose(value: string) {
-    if (busy || value === current) return;
+    if (busy || value === shown) return;
     const settled = hold(value);
     setBusy(true);
-    const error = await savePool(data, valueOf(data.setup), value === "" ? null : value);
+    const error = await save(value);
     setBusy(false);
     settled(error);
     setNote(error);

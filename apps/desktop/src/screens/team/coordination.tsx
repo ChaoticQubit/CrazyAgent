@@ -3,7 +3,7 @@ import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, setTe
 import { loadTeamStatus } from "../../api-projects";
 import { OVERLAP_CHOICES } from "../../engine-client";
 import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, IntentReceipt, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
-import { useHeld, useLoad, type Loaded } from "../../state";
+import { sameJson, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
@@ -165,10 +165,6 @@ export function saveCoordSettings(projectId: string, patch: Partial<CoordSetting
   return run;
 }
 
-function sameSettings(a: CoordSettings, b: CoordSettings): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
 function ChangeNote({ note }: { note: string }) {
   return note ? <p className="pj-note warn" role="alert">{displayText(note)}</p> : null;
 }
@@ -206,7 +202,7 @@ export function DeliverySetting({ projectId, row, reload }: { projectId: string;
  * defaults show for an older engine. Inputs: the project id, the latest team status and a
  * reload. Output: the rows. */
 export function ToolsControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
-  const [settings, hold] = useHeld(coordination(status).settings, sameSettings);
+  const [settings, hold] = useHeld(coordination(status).settings, sameJson);
   const [skills] = useLoad(() => listSkills(projectId), [projectId], "skills");
   const { busy, note, change } = useChange(reload);
   const [counted, setCounted] = useState<string | null>(null);

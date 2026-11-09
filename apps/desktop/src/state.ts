@@ -334,6 +334,12 @@ export function shownChoice<T>(held: Held<T> | null, current: T, same: (a: T, b:
   return held !== null && same(held.from, current) ? held.choice : current;
 }
 
+/** Whether two plain values read the same, for a held setting made of several fields. Inputs: the
+ * two values. Output: true when they do. */
+export function sameJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 /** Starts holding a picked value and gives the call that settles it with the save's note. */
 export type Hold<T> = (choice: T) => (note: string) => void;
 
@@ -348,7 +354,7 @@ export function useHeld<T>(current: T, same: (a: T, b: T) => boolean = Object.is
   const hold: Hold<T> = (choice) => {
     const kept = { choice, from: current };
     setHeld(kept);
-    return (note) => setHeld(afterSave(kept, note));
+    return (note) => setHeld((now) => now === kept ? afterSave(kept, note) : now);
   };
   return [shownChoice(held, current, same), hold];
 }
