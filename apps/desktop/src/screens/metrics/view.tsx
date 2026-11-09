@@ -237,7 +237,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
     };
   };
   const reported = new Set(usage.agents.map((row) => row.key));
-  const turnsOnly = metrics.agents.filter((row) => row.project === projectId && !reported.has(row.agent) && (row.turns ?? 0) > 0);
+  const turnsOnly = metrics.agents.filter((row) => row.project === projectId && !reported.has(row.agent) && (row.turns ?? 0) > 0 && headlineTokens(row.tokens) + row.tokens.cache_read === 0);
   return {
     head: "Agent", extra: ["Turns", "graphify", "ctx_*", "Skills"], projectColumn,
     rows: [...usage.agents.map((row) => agentRow(row.key, agent(row.key), row.tokens)), ...turnsOnly.map((row) => agentRow(row.agent, agent(row.agent, row.label), row.tokens))],

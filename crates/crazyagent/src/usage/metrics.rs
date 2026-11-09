@@ -660,7 +660,9 @@ pub fn read(
     assert!(metrics.accounts.len() <= ROWS_MAX && metrics.harnesses.len() <= ROWS_MAX);
     assert!(metrics.projects.len() <= ROWS_MAX && metrics.agents.len() <= ROWS_MAX);
     assert!(metrics.agents.iter().all(|row| {
-        row.harnesses.is_sorted() && row.accounts.is_sorted() && !row.harnesses.is_empty()
+        row.harnesses.is_sorted()
+            && row.accounts.is_sorted()
+            && (!row.harnesses.is_empty() || row.tokens == Tokens::default())
     }));
     assert!(
         metrics
