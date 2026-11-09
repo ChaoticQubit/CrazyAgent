@@ -2962,7 +2962,8 @@ fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
 
 /// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs: a confined child reads neither
 /// the arguments nor the environment of a process outside its sandbox through either
-/// process-arguments sysctl, and still reads an ordinary sysctl value.
+/// process-arguments sysctl, and still reads a process of its own sandbox and an ordinary
+/// sysctl value.
 #[test]
 fn a_confined_child_reads_no_process_arguments_by_sysctl() {
     const NAME: &str = "a_confined_child_reads_no_process_arguments_by_sysctl";
@@ -3033,9 +3034,19 @@ fn a_confined_child_reads_no_process_arguments_by_sysctl() {
         &case.profiles.join("ncpu.sb"),
         &format!("/usr/bin/perl -e '{NCPU}'"),
     );
+    let inside = run(
+        &confined,
+        &case.profiles.join("inside.sb"),
+        &format!("/bin/sleep 30 & p=$!; /usr/bin/perl -e '{PROBE}' 49 $p; c=$?; kill $p; exit $c"),
+    );
     for child in [&mut dummy, &mut apple] {
         let _ = child.kill();
         let _ = child.wait();
+    }
+    if !inside.status.success() || !holds(&inside, "sleep") {
+        problems.push(format!(
+            "a process of the same sandbox was not readable: {inside:?}"
+        ));
     }
     if !ordinary.status.success() || !holds(&ordinary, "cpus=") {
         problems.push(format!("an ordinary sysctl read failed: {ordinary:?}"));
