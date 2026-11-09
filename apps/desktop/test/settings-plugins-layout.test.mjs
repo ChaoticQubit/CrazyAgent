@@ -229,6 +229,32 @@ test("while a server is approved, its Check waits and keeps its own word", async
   assert.deepEqual(seen.check, { words: "Check", disabled: true });
 });
 
+test("a failed Check lets go of its button, with its word back", async () => {
+  const button = await onPlugins({}, async (page) => {
+    await openSection(page, "MCP servers");
+    await press(page, 'button[aria-label="Check github"]');
+    return buttonState(page, "Check github");
+  });
+  assert.deepEqual(button, { words: "Check", disabled: false });
+});
+
+test("while one server is checked, every other server's Check and Approve wait, and no second call goes out", async () => {
+  const seen = await onPlugins({ hold: "desktop_check_mcp_server" }, async (page) => {
+    await openSection(page, "MCP servers");
+    await press(page, 'button[aria-label="Check github"]');
+    await press(page, 'button[aria-label="Check waiting"]');
+    return {
+      first: await buttonState(page, "Check github"), check: await buttonState(page, "Check waiting"), approve: await buttonState(page, "Approve waiting"),
+      again: await buttonState(page, "Check again broken"), commands: await sent(page),
+    };
+  });
+  assert.deepEqual(seen.first, { words: "Checking...", disabled: true });
+  assert.deepEqual(seen.check, { words: "Check", disabled: true });
+  assert.deepEqual(seen.approve, { words: "Approve", disabled: true });
+  assert.deepEqual(seen.again, { words: "Check again", disabled: true });
+  assert.equal(seen.commands.filter((command) => command === "desktop_check_mcp_server").length, 1, JSON.stringify(seen.commands));
+});
+
 test("a broken server's Check again is named with the words it shows", async () => {
   const [section] = await onPlugins({}, async (page) => { await openSection(page, "MCP servers"); return read(page); });
   const broken = section.rows.find((row) => row.label === "broken");
