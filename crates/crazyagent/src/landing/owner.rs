@@ -869,7 +869,8 @@ fn finish(
         };
         super::note_accepted(db, record, by, &closed);
     }
-    if let Err(error) = super::subagent::close_with_lead(db, record) {
+    let owner_pressed = by == By::Named(OWNER_ACTOR);
+    if let Err(error) = super::subagent::close_with_lead(db, record, owner_pressed) {
         eprintln!(
             "landing_settle_failed cause={}",
             crate::protocol::plain_code(&error.0)
@@ -2265,6 +2266,12 @@ fn observe_one(
             Ok(None)
         }
         Judged::Landed if super::subagent::has_open_worker(db, &record)? => Ok(None),
+        Judged::Landed
+            if matches!(against, Against::Lead(_))
+                && !super::merges::holds_changes_since(owner, tip, &record.base, &record.head)? =>
+        {
+            Ok(None)
+        }
         Judged::Landed => {
             record.outside = true;
             let by = match against {
@@ -2344,7 +2351,7 @@ fn against(db: &Connection, records: &[Record]) -> Vec<Against> {
 /// Notices what the owner did outside the app to every open change set of one project, or
 /// of every project, one repository at a time under its hold, reading each owner tip once,
 /// each lead's tip once before the hold, and checking every open head with one git run,
-/// after closing lead workers' sets their lead's closed set left open (DEC-107).
+/// after landing lead workers' sets their lead's landed set holds (DEC-107).
 /// A change set that cannot be judged now is logged by its plain code and left as it was.
 /// Inputs: the store and the project, None for every project. Output: Ok once each was
 /// judged or left.
