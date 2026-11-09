@@ -5,10 +5,11 @@ import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
 import { loadMetrics, loadUsage, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type MetricsBucket, type Tokens, type UsageReport } from "../../api-usage";
 import { useLoad, type Loaded } from "../../state";
-import { LoadError, NotReady, Panel, Segmented, Select, Skeleton } from "../../ui";
+import { LoadError, NotReady, Notice, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
-import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, offsetMinutes, rangeStart, windowNow } from "../settings/usage";
 import { HARNESS_NAMES } from "../team/coordination";
+import { AccountLimitsPanel, CheckLimits, type LimitsControls } from "./limits";
+import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, healthText, offsetMinutes, PartialNotice, rangeStart, rowName, windowNow } from "./usage-model";
 import "../project/projects.css";
 import "./metrics.css";
 
@@ -59,11 +60,12 @@ export interface MetricsNames {
   accounts: Map<string, string>;
 }
 
-/** The app Metrics page's project filter: the engine's projects and the action that picks
- * one, null for every project. */
+/** What makes a Metrics page the app page: the engine's projects, the action that picks one,
+ * null for every project, and what its account limits need from the page around them. */
 export interface MetricsFilter {
   projects: { id: string; name: string }[];
   onProject: (id: string | null) => void;
+  limits: LimitsControls;
 }
 
 /** One breakdown row: its name, its project when the breakdown spans projects, its tokens and
@@ -342,11 +344,24 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { b
   </Panel>;
 }
 
+/** The app page's words above its numbers: what it counts, that the counting is the old one,
+ * and anything wrong with this reading. Inputs: the usage read, the last failed action and
+ * now. */
+function AppNotices({ usage, failure, nowMs }: { usage: UsageReport; failure: string; nowMs: number }) {
+  return <>
+    <p className="secondary">Tokens your agents used and each account's limits. Counts come from each run's own record; limits are checked every 10 minutes.</p>
+    <Notice tone="warn"><strong>These numbers still use the old counting.</strong> The recount comes in the next update, and you will see old and new side by side once.</Notice>
+    {failure && <Notice tone="danger" alert>{failure}</Notice>}
+    {(usage.health ?? []).map((item) => <Notice key={item.step} tone={item.recovered_ms === null ? "warn" : "info"}>{healthText(item, nowMs)}</Notice>)}
+    <PartialNotice homes={usage.partial_homes} />
+  </>;
+}
+
 /** The Metrics page as a pure view: the range switch and what it covers, the tiles (tokens
  * with their three parts, cache re-reads apart, runs, tasks, merges and lines), the tokens chart and
  * the breakdown by agent, run, account or harness, each with its four token parts and its
- * share of tokens. With a filter (the app page) it also picks a project and breaks down by
- * project. Inputs: the project, null for every project, the usage and metrics reads, the
+ * share of tokens. With a filter (the app page) it also picks a project, breaks down by
+ * project and shows each account's limits with the usage notices. Inputs: the project, null for every project, the usage and metrics reads, the
  * project's adoption read, the range, the breakdown, the names, the range start, now, when
  * the page last read, the viewer's offset, the filter and the actions. */
 export function MetricsPage({ projectId, usage, metrics, adoption, range, by, names, sinceMs, nowMs, updatedMs, offset, filter, onRange, onBy, onRetry }: {
@@ -377,14 +392,24 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
     </div> : ranges}
     <span className="mx-count">{covers} · {updatedText(updatedMs, nowMs)} · provider-reported usage per turn</span>
   </div>;
+  const check = filter && <CheckLimits busy={filter.limits.busy} onRefresh={filter.limits.onRefresh} />;
   const reads = [usage, metrics];
   if (reads.some((read) => read.kind === "not_ready" || (read.kind === "error" && usageNotReady(read)))) return <NotReady what="Metrics" />;
   if (usage.kind === "error" || metrics.kind === "error") {
     const failed = usage.kind === "error" ? usage : metrics.kind === "error" ? metrics : null;
-    return <div className="stack">{tools}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
+    return <div className="stack">{tools}{check}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
   }
-  if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{tools}<Skeleton shape="card" count={3} /></div>;
+  if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{tools}{check}<Skeleton shape="card" count={3} /></div>;
   const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs, filter);
+  if (filter) return <div className="stack mx-page">
+    {tools}
+    <AppNotices usage={usage.value} failure={filter.limits.failure} nowMs={nowMs} />
+    <Tiles usage={usage.value} metrics={metrics.value} />
+    <Chart metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} reread={usage.value.total.cache_read} />
+    <AccountLimitsPanel limits={usage.value.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />
+    {filter.limits.next}
+    <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={APP_BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} />
+  </div>;
   return <div className="stack mx-page">
     {tools}
     <Tiles usage={usage.value} metrics={metrics.value} />
@@ -421,12 +446,13 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
   const [ticks, setTicks] = useState(0);
   const [updatedMs, setUpdatedMs] = useState<number | null>(null);
   const reload = Math.floor(ticks / RELOAD_TICKS);
+  const revision = filter?.limits.revision;
   const sinceMs = rangeStart(range, new Date(nowMs)) ?? 0;
   const [usage, retryUsage] = useLoad(() => {
     const now = new Date();
     return loadUsage(rangeStart(range, now), offsetMinutes(now), projectId);
-  }, [range, reload, projectId]);
-  const [metrics, retryMetrics] = useLoad(() => loadMetrics(rangeStart(range, new Date()) ?? 0, projectId), [range, reload, projectId]);
+  }, [range, reload, projectId, revision]);
+  const [metrics, retryMetrics] = useLoad(() => loadMetrics(rangeStart(range, new Date()) ?? 0, projectId), [range, reload, projectId, revision]);
   const named = namedProjects(projectId, filter);
   const [adoption] = useLoad<Adoption | null>(() => projectId === null || filter ? Promise.resolve({ kind: "ok" as const, value: null }) : loadAdoption(projectId), [projectId, reload, Boolean(filter)]);
   const [statuses] = useLoad(() => teamStatuses(named), [named.join("\n"), reload]);

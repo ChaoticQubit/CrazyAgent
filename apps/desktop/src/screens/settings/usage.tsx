@@ -1,197 +1,24 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { accountRanking, listAccounts, poolSummaries, type Result } from "../../api";
 import {
-  loadUsage, pollFailure, refreshUsage, setManualReset, usageNotReady, usageRefusal,
-  type AccountLimits, type DayTokens, type LimitWindow, type LinesRow, type StepHealth, type Tokens, type UsageReport, type UsageRow, type WindowKind,
+  loadUsage, refreshUsage, setManualReset, usageNotReady, usageRefusal,
+  type DayTokens, type LinesRow, type UsageReport, type UsageRow, type WindowKind,
 } from "../../api-usage";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, TextField } from "../../ui";
+import { Button, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton } from "../../ui";
+import { LimitsCard } from "../metrics/limits";
+import {
+  RANGES, REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, dayLabel, headlineTokens, healthText,
+  offsetMinutes, PartialNotice, rangeStart, rowName, tokenText, type UsageNames, type UsageRange,
+} from "../metrics/usage-model";
 import { NextAccountsPanel } from "./account-choice";
 import "../project/projects.css";
 import "./usage.css";
 
-export const REMOVED_PROJECTS = "<removed>";
-export const REMOVED_LABEL = "Removed projects";
+export * from "../metrics/usage-model";
 
-const MINUTE = 60_000;
-const HOUR = 60 * MINUTE;
-const DAY = 24 * HOUR;
 const TICK_MS = 30_000;
 const NOT_READY = "This isn't ready in this build yet.";
-const API_KEY_ACCOUNT = "native_profile_codex_api_key";
-const COMPACT = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
-
-export type UsageRange = "today" | "7d" | "30d" | "all";
-
-/** The range switch's choices, shortest first. */
-export const RANGES: { value: UsageRange; label: string }[] = [
-  { value: "today", label: "Today" },
-  { value: "7d", label: "7 days" },
-  { value: "30d", label: "30 days" },
-  { value: "all", label: "All" },
-];
-
-/** Names shown in place of ids: projects, pools and accounts by id. */
-export interface UsageNames {
-  projects: Map<string, string>;
-  pools: Map<string, string>;
-  accounts: Map<string, string>;
-}
-
-/** Where a range starts: midnight today at the viewer's offset now, the one fixed offset the
- * engine cuts every day with, six or twenty-nine days before it so the range holds whole
- * engine days even across a daylight saving change, or null for all time. Inputs: the range
- * and now. Output: milliseconds since the epoch, or null. */
-export function rangeStart(range: UsageRange, now: Date): number | null {
-  if (range === "all") return null;
-  const shift = offsetMinutes(now) * MINUTE;
-  const today = Math.floor((now.getTime() + shift) / DAY) * DAY - shift;
-  return today - (range === "today" ? 0 : range === "7d" ? 6 : 29) * DAY;
-}
-
-/** A By day row's date as the engine cut it: the day's start moved by the same fixed offset
- * and read in UTC, so a day before a daylight saving change keeps its own date. Inputs: the
- * day's start in milliseconds and the offset in minutes east of UTC. Output: the label. */
-export function dayLabel(dayMs: number, offset: number): string {
-  return new Date(dayMs + offset * MINUTE).toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
-}
-
-/** The viewer's offset east of UTC in minutes, as the engine cuts local days. Input: now. */
-export function offsetMinutes(now: Date): number {
-  const west = now.getTimezoneOffset();
-  return west === 0 ? 0 : -west;
-}
-
-/** A token count in a few characters: 950, 1.2K, 3.4M. Input: the count. */
-export function compactCount(value: number): string {
-  return COMPACT.format(value);
-}
-
-/** The headline count usage shows and budgets spend (DEC-117 Q6): new input, cache writes and output, never cache re-reads. Input: the tokens. */
-export function headlineTokens(tokens: Tokens): number {
-  return tokens.input + tokens.output + tokens.cache_write;
-}
-
-/** The share of prompt tokens served from the provider's cache, as a whole percent.
- * Input: the tokens. Output: 0 to 100, or null when no prompt tokens were counted. */
-export function cacheShare(tokens: Tokens): number | null {
-  const prompt = tokens.input + tokens.cache_read + tokens.cache_write;
-  return prompt === 0 ? null : Math.round((tokens.cache_read * 100) / prompt);
-}
-
-/** An observed limit window as it stands now, as the engine reads it: the owner's manual
- * reset replaces the observed one, and a window whose reset passed counts as unused with
- * its next reset unknown. Inputs: the window, the manual reset and now. Output: the window,
- * or null when none was observed. */
-export function windowNow(observed: LimitWindow | null, overrideMs: number | null, nowMs: number): LimitWindow | null {
-  if (!observed) return null;
-  const resets = overrideMs ?? observed.resets_at_ms;
-  if (resets !== null && resets <= nowMs) return { used_percent: 0, resets_at_ms: null };
-  return { used_percent: observed.used_percent, resets_at_ms: resets };
-}
-
-/** How long until a window resets. Inputs: the reset time, null when unknown, and now.
- * Output: "Resets in 2 h 14 min", "Resets in 3 d 4 h" or "Next reset not known yet". */
-export function resetText(atMs: number | null, nowMs: number): string {
-  if (atMs === null) return "Next reset not known yet";
-  const minutes = Math.floor((atMs - nowMs) / MINUTE);
-  if (minutes < 1) return "Resets in under a minute";
-  const hours = Math.floor(minutes / 60);
-  if (hours < 1) return `Resets in ${minutes} min`;
-  if (hours < 24) return `Resets in ${hours} h ${minutes % 60} min`;
-  return `Resets in ${Math.floor(hours / 24)} d ${hours % 24} h`;
-}
-
-/** How long ago something happened. Inputs: the time and now. Output: "just now",
- * "5 min ago", "3 h ago" or "2 d ago". */
-export function agoText(atMs: number, nowMs: number): string {
-  const passed = Math.max(0, nowMs - atMs);
-  if (passed < MINUTE) return "just now";
-  if (passed < HOUR) return `${Math.floor(passed / MINUTE)} min ago`;
-  if (passed < DAY) return `${Math.floor(passed / HOUR)} h ago`;
-  return `${Math.floor(passed / DAY)} d ago`;
-}
-
-const STEP_WORDS: Record<StepHealth["step"], [string, string]> = {
-  poll: ["Checking account limits", "limits shown may be out of date"],
-  team: ["Counting agent tokens", "agent and research run token totals may be low"],
-  runs: ["Counting research run tokens", "research token totals may be low"],
-};
-
-/** One plain sentence for a usage step kind that panicked since the engine started: what
- * may be missing while it keeps failing, or when it worked again. Inputs: the step's health
- * and now. Output: the sentence. */
-export function healthText(health: StepHealth, nowMs: number): string {
-  const [what, missing] = STEP_WORDS[health.step];
-  const times = health.panics === 1 ? "once" : `${health.panics} times`;
-  const said = `${what} hit an internal error ${times} since the engine started, last ${agoText(health.last_ms, nowMs)}.`;
-  return health.recovered_ms === null
-    ? `${said} CrazyAgent keeps retrying; ${missing}.`
-    : `${said} It worked again ${agoText(health.recovered_ms, nowMs)}.`;
-}
-
-/** Where and when an account's limits were last read, and whether the last check failed.
- * Inputs: the limits and now. Output: one line, or "Not read yet". */
-export function readLine(limits: AccountLimits, nowMs: number): string {
-  if (limits.observed_ms === null || limits.source === null) return "Not read yet";
-  const from = limits.source === "poll" ? "Read from the provider" : "Read from a run's own record";
-  return `${from} ${agoText(limits.observed_ms, nowMs)}`;
-}
-
-/** What a window with no current reading says: not read when the last read failed, whose
- * cause the card's notice above gives, or not reported by the provider, as for an API-key
- * account, which has no such window. Input: the account's last failure. Output: the
- * window's state and its line. */
-export function missingWindow(failure: string | null): [string, string] {
-  return failure && failure !== API_KEY_ACCOUNT
-    ? ["Not read", "The last read failed, for the reason above."]
-    : ["Not reported", "The provider hasn't reported this window."];
-}
-
-/** An agent's name in the tables. Inputs: the engine's agent key and the project namer.
- * Output: "Agent 3", "Research harbor", "Master, Harbor Notes", "Onboarding" or the key. */
-export function agentLabel(key: string, project: (key: string) => string = (key) => key): string {
-  const team = /^team-(\d+)$/.exec(key);
-  if (team) return `Agent ${team[1]}`;
-  const research = /^research-(.+)$/.exec(key);
-  if (research) return `Research ${research[1]}`;
-  const master = /^master-(.+)$/.exec(key);
-  if (master) return `Master, ${project(master[1])}`;
-  if (key === "master") return "Master";
-  return key === "onboarding" ? "Onboarding" : key;
-}
-
-/** Names a project or account row, the empty key being runs tied to none. Inputs: the
- * names by key and the key. Output: the name, "Unattributed" or the key itself. */
-function rowName(names: Map<string, string>, key: string): string {
-  return key === "" ? "Unattributed" : names.get(key) ?? key;
-}
-
-/** Reads a manual reset typed as local date and time. Inputs: the field's value and now.
- * Output: the time in milliseconds, or the reason it can't be used. */
-export function manualReset(value: string, nowMs: number): { kind: "ok"; at: number } | { kind: "invalid"; reason: string } {
-  const at = new Date(value).getTime();
-  if (!value || !Number.isFinite(at)) return { kind: "invalid", reason: "Pick a date and time." };
-  if (at <= nowMs) return { kind: "invalid", reason: "Pick a time in the future." };
-  return { kind: "ok", at };
-}
-
-/** The plain line a reading shows when a scan left records out. Input: how many agent homes
- * held more records than one scan reads. Output: the line, or null when every home was read
- * whole. */
-export function partialLine(homes: number): string | null {
-  if (!(homes > 0)) return null;
-  return homes === 1
-    ? "Some usage may be missing: 1 agent home holds more records than one scan reads, so its least recently changed records are not counted."
-    : `Some usage may be missing: ${homes} agent homes hold more records than one scan reads, so their least recently changed records are not counted.`;
-}
-
-/** A warning that a reading is partial, shown only when a scan left records out. Input: how
- * many agent homes held more records than one scan reads. Output: the notice, or nothing. */
-export function PartialNotice({ homes }: { homes: number }) {
-  const line = partialLine(homes);
-  return line === null ? null : <Notice tone="warn">{line}</Notice>;
-}
 
 function Tile({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return <div className="usage-tile">
@@ -199,15 +26,6 @@ function Tile({ label, value, detail }: { label: string; value: string; detail?:
     <span className="usage-tile-value">{value}</span>
     {detail && <span className="muted small">{detail}</span>}
   </div>;
-}
-
-/** The tokens one row shows: the count, the count and the harness that also ran for it
- * without reporting usage, or only that harness when nothing was counted, never a bare zero.
- * Inputs: the token count and that harness, if any. Output: the text. */
-export function tokenText(total: number, notReportedBy?: string | null): string {
-  if (!notReportedBy) return compactCount(total);
-  if (total === 0) return `Usage not reported by ${notReportedBy}`;
-  return `${compactCount(total)} + usage not reported by ${notReportedBy}`;
 }
 
 function Totals({ report }: { report: UsageReport }) {
@@ -285,80 +103,6 @@ function DaysTable({ days, offset }: { days: DayTokens[]; offset: number }) {
       </tr>)}</tbody>
     </table></div>
   </Panel>;
-}
-
-function ResetEditor({ id, override, nowMs, pending, onSave }: {
-  id: string;
-  override: number | null;
-  nowMs: number;
-  pending: boolean;
-  onSave: (at: number | null) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [value, setValue] = useState("");
-  const [error, setError] = useState<string>();
-  if (!open) return <span className="row">
-    <Button size="small" icon="clock" disabled={pending} onClick={() => setOpen(true)}>{override === null ? "Set reset time" : "Change reset time"}</Button>
-    {override !== null && <Button size="small" pending={pending} pendingLabel="Clearing..." onClick={() => onSave(null)}>Use provider's time</Button>}
-  </span>;
-  const save = () => {
-    const reset = manualReset(value, nowMs);
-    setError(reset.kind === "invalid" ? reset.reason : undefined);
-    if (reset.kind === "ok") { onSave(reset.at); setOpen(false); }
-  };
-  return <form className="row" onSubmit={(event) => { event.preventDefault(); save(); }}>
-    <TextField id={id} type="datetime-local" label="Resets at" value={value} onValue={setValue} error={error} />
-    <Button type="submit" size="small" variant="primary" pending={pending} pendingLabel="Saving...">Save</Button>
-    <Button size="small" onClick={() => setOpen(false)}>Cancel</Button>
-  </form>;
-}
-
-function WindowLine({ limits, kind, nowMs, pending, onSetReset }: {
-  limits: AccountLimits;
-  kind: WindowKind;
-  nowMs: number;
-  pending: boolean;
-  onSetReset: (account: string, kind: WindowKind, at: number | null) => void;
-}) {
-  const override = kind === "five_hour" ? limits.five_hour_reset_override_ms : limits.weekly_reset_override_ms;
-  const current = windowNow(kind === "five_hour" ? limits.five_hour : limits.weekly, override, nowMs);
-  const label = kind === "five_hour" ? "5-hour" : "Weekly";
-  const [missing, why] = missingWindow(limits.failure);
-  const leftOut = kind === "five_hour" ? limits.five_hour_left_out_label : limits.weekly_left_out_label;
-  const failed = limits.failure !== null && limits.failure !== API_KEY_ACCOUNT;
-  if (!current && leftOut !== null && !failed) return <div className="usage-window">
-    <div className="row usage-window-head"><strong>{label}</strong></div>
-    <span className="muted small">{leftOut}</span>
-  </div>;
-  return <div className="usage-window">
-    <div className="row usage-window-head">
-      <strong>{label}</strong>
-      <span>{current ? `${Math.round(current.used_percent)}% used` : missing}</span>
-    </div>
-    {current && <meter className="usage-meter" min={0} max={100} low={70} high={90} optimum={0} value={current.used_percent} aria-label={`${label} limit used`} />}
-    <span className="muted small">{current ? resetText(current.resets_at_ms, nowMs) : why}{override !== null ? " (your time)" : ""}</span>
-    <ResetEditor id={`usage-reset-${limits.account}-${kind}`} override={override} nowMs={nowMs} pending={pending}
-      onSave={(at) => onSetReset(limits.account, kind, at)} />
-  </div>;
-}
-
-function LimitsCard({ limits, name, nowMs, busy, onSetReset }: {
-  limits: AccountLimits;
-  name: string;
-  nowMs: number;
-  busy: string | null;
-  onSetReset: (account: string, kind: WindowKind, at: number | null) => void;
-}) {
-  return <section className="usage-limits" aria-label={`${name} limits`}>
-    <div className="row usage-window-head">
-      <h3>{name}</h3>
-      {limits.plan && <span className="badge">{limits.plan}</span>}
-    </div>
-    <span className="muted small">{readLine(limits, nowMs)}</span>
-    {limits.failure && <Notice tone={limits.failure === API_KEY_ACCOUNT ? "info" : "warn"}>{pollFailure(limits.failure)}</Notice>}
-    <WindowLine limits={limits} kind="five_hour" nowMs={nowMs} pending={busy === `${limits.account}/five_hour`} onSetReset={onSetReset} />
-    <WindowLine limits={limits} kind="weekly" nowMs={nowMs} pending={busy === `${limits.account}/weekly`} onSetReset={onSetReset} />
-  </section>;
 }
 
 /** Settings, Usage as a pure view: the range switch, app-wide totals, each account's limits
