@@ -314,33 +314,21 @@ fn a_note_naming_a_path_outside_its_folder_is_refused_and_kept() {
     assert!(outside.join("kept").exists());
 }
 
-#[test]
-fn the_next_engine_start_sweeps_what_a_crash_left_behind() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let path = dir.path().join("engine.db");
-    let (secret, checked) = {
-        let super::super::OpenedDatabase { mut connection, .. } =
-            super::super::open_actor_database(&path, false, None).unwrap();
-        let id = server(&mut connection, dir.path(), "tools");
-        let secret = attach(&mut connection, dir.path(), &id, "API_TOKEN");
-        let checked = check_folder(dir.path(), &id);
-        let version = crate::storage::plugins::plugin_version(&connection, &id).unwrap();
-        execute(
-            &mut connection,
-            dir.path(),
-            Command::RemoveServer { id, version },
-        )
-        .unwrap();
-        assert!(secret_file(dir.path(), &secret).exists());
-        (secret, checked)
-    };
-
-    let super::super::OpenedDatabase { connection, .. } =
-        super::super::open_actor_database(&path, false, None).unwrap();
-    assert!(!secret_file(dir.path(), &secret).exists());
+#[tokio::test]
+async fn the_next_engine_start_sweeps_what_a_crash_left_behind() {
+    let mut case = Catalogued::new(&[], "");
+    let root = case.root.path().to_path_buf();
+    let id = server(&mut case.db, &root, "tools");
+    let secret = attach(&mut case.db, &root, &id, "API_TOKEN");
+    let checked = check_folder(&root, &id);
+    let version = crate::storage::plugins::plugin_version(&case.db, &id).unwrap();
+    execute(&mut case.db, &root, Command::RemoveServer { id, version }).unwrap();
+    assert!(secret_file(&root, &secret).exists());
+    let held = case.close();
+    let _open = started(held.path()).await;
+    assert!(!secret_file(held.path(), &secret).exists());
     assert!(!checked.exists());
-    assert!(notes(&connection).is_empty());
+    assert!(notes(&Connection::open(held.path().join("engine.db")).unwrap()).is_empty());
 }
 
 const DUMMY: &[u8] = b"dummy";
