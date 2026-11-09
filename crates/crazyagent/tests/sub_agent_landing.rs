@@ -749,13 +749,18 @@ fn a_worker_set_left_open_by_its_closed_lead_stays_open_and_listed_but_a_newer_o
 }
 
 /// A worker set whose work its closed lead holds, left open because a live close skipped
-/// it, lands with the lead's commit at the next read (fix/v21-team-4 F2).
+/// it, lands with the lead's commit at the next read, and a deeper worker's set with work
+/// nothing holds stays open and is offered to the owner (fix/v21-team-4 F2, r2).
 #[test]
 fn a_worker_set_its_closed_lead_holds_lands_at_the_next_read() {
     let team = Team::new();
+    team.lands("lead");
     let fix = team.worker(2, &team.lead, "fix");
+    let deep = team.worker(3, &fix, "deep");
     team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
     let worker_set = team.turn_end(&fix);
+    team.commit(&deep, "deep.txt", "deep\n", "Deep work");
+    let deep_set = team.turn_end(&deep);
     team.hand_merge(&team.lead, &fix);
     let lead_set = team.turn_end(&team.lead);
     let step = serde_json::json!({ "step": "reset", "target": team.view_head(&worker_set) });
@@ -784,6 +789,66 @@ fn a_worker_set_its_closed_lead_holds_lands_at_the_next_read() {
         ("accepted".to_owned(), Some(commit))
     );
     assert_eq!(team.pending_ref(&worker_set), "");
+    assert_eq!(team.state(&deep_set), ("pending".to_owned(), None));
+    assert!(team.owner_listed().contains(&deep_set));
+}
+
+/// An owner's Accept stopped after its branch moved and finished at the next start is not
+/// a live press: a worker set opened before it finished stays open and is offered to the
+/// owner (fix/v21-team-4 r2, sec F1).
+#[test]
+fn a_land_finished_after_a_restart_leaves_a_worker_set_open_and_offered() {
+    let team = Team::new();
+    team.lands("lead");
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    let old = team.git(&team.project, &["rev-parse", "refs/heads/main"]);
+    let head = team.view_head(&lead_set);
+    let AcceptOutcome::Landed { commit, .. } =
+        landing::accept_into(&team.db, &team.home, &lead_set, &head, None, "main").unwrap()
+    else {
+        panic!("the lead's accept conflicted");
+    };
+    let step = serde_json::json!({
+        "step": "land",
+        "reference": "refs/heads/main",
+        "old": old,
+        "new": commit,
+    });
+    team.db
+        .execute(
+            "UPDATE landing_change_sets
+             SET state='pending',landed=NULL,landed_on=NULL,made=0,intent=?1 WHERE id=?2",
+            params![step.to_string(), lead_set.as_str()],
+        )
+        .unwrap();
+    let pending = format!("refs/crazyagent/pending/{}", lead_set.as_str());
+    team.git(&team.project, &["update-ref", &pending, &head]);
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let fix_set = team.turn_end(&fix);
+    landing::reconcile(&team.db).unwrap();
+    assert_eq!(team.state(&lead_set), ("accepted".to_owned(), Some(commit)));
+    assert_eq!(team.state(&fix_set), ("pending".to_owned(), None));
+    assert!(team.owner_listed().contains(&fix_set));
+}
+
+/// A Discard of a lead's set by anyone but the owner leaves its worker's open set open and
+/// offered, since only the owner's own press discards the rest (fix/v21-team-4 r2, sec F1).
+#[test]
+fn a_discard_by_anyone_but_the_owner_leaves_a_worker_set_open_and_offered() {
+    let team = Team::new();
+    team.lands("lead");
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let fix_set = team.turn_end(&fix);
+    team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    let head = team.view_head(&lead_set);
+    let by = crazyagent::activity::MASTER_ACTOR;
+    landing::discard_as(&team.db, &lead_set, &head, now_ms(), by).unwrap();
+    assert_eq!(team.state(&fix_set), ("pending".to_owned(), None));
+    assert!(team.owner_listed().contains(&fix_set));
 }
 
 /// Merges a worker's branch into its lead's clone and keeps none of its work, as a lead
@@ -880,7 +945,8 @@ fn a_lead_accept_leaves_open_and_offers_a_worker_set_it_merged_without_the_work(
 }
 
 /// A lead's merge tool finds nothing to merge for a branch its clone already holds; when
-/// the clone holds it without the work the worker's set stays open (fix/v21-team-4 M1).
+/// the clone holds it without the work the worker's set stays open and the lead is told
+/// the work is absent (fix/v21-team-4 M1, r2 L2).
 #[cfg(target_os = "macos")]
 #[test]
 fn merge_of_a_branch_held_without_its_work_leaves_the_set_open() {
@@ -897,7 +963,7 @@ fn merge_of_a_branch_held_without_its_work_leaves_the_set_open() {
         };
         assert_eq!(
             landing::merge_sub_agent(&team.db, &team.id, 1, 2, &rights).unwrap(),
-            MergeOutcome::AlreadyMerged {
+            MergeOutcome::WorkAbsent {
                 branch: "crazyagent/lead--fix".into()
             },
             "ours {ours}"

@@ -371,13 +371,15 @@ pub struct TargetBranches {
 }
 
 /// What merging a sub-agent's branch into its lead's task branch did (DEC-104 K5b):
-/// merged as the commit named, already in the task branch, or conflicting on the listed
-/// files, with the merge undone and the branch left in the lead's clone to merge by hand.
+/// merged as the commit named, already in the task branch, in its history with the work
+/// absent and the open set left waiting for the owner, or conflicting on the listed files,
+/// with the merge undone and the branch left in the lead's clone to merge by hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MergeOutcome {
     Merged { commit: String, branch: String },
     AlreadyMerged { branch: String },
+    WorkAbsent { branch: String },
     Conflict { branch: String, files: Vec<String> },
 }
 
