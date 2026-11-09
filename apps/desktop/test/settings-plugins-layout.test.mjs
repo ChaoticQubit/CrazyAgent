@@ -90,10 +90,11 @@ test("N tools opens the server's own tool switches under its line and says it is
     await openSection(page, "MCP servers");
     const before = await page.evaluate("Fixture.count('.review .set-row')");
     await press(page, ".set-help button", "2 tools");
-    return { before, after: await page.evaluate("Fixture.count('.review .set-row')"), expanded: await page.evaluate("document.querySelector('.set-help button').getAttribute('aria-expanded')"), words: await page.evaluate("Fixture.wordsOf('.review .set-row .set-label')") };
+    return { before, after: await page.evaluate("Fixture.count('.review .set-row')"), expanded: await page.evaluate("document.querySelector('.set-help button').getAttribute('aria-expanded')"), words: await page.evaluate("Fixture.wordsOf('.review .set-row .set-label')"), deletes: await page.evaluate("Fixture.count('.review button[aria-label^=Delete]')") };
   });
   assert.deepEqual([seen.before, seen.after, seen.expanded], [0, 1, "true"]);
   assert.equal(seen.words, "echo");
+  assert.equal(seen.deletes, 0, "a server's own tools can't be deleted");
 });
 
 for (const [action, selector, command] of [
