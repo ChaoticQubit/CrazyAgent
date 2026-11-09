@@ -302,12 +302,11 @@ pub(super) fn subject(text: &str, roots: &[&Path]) -> String {
     subject
 }
 
-/// The message an Accept proposes from the commits the agent made itself above the
-/// point the set is measured from: the latest subject, then the earlier ones newest first
-/// as a list. Commits the engine made, merges and commits already on the landing branch
-/// are left out. Inputs: the agent repository, the record, the measured-from commit and
-/// the folders paths are shown relative to. Output: the message, empty when the agent
-/// made no commit, at most `PROPOSED_BYTES_MAX` bytes.
+/// The message an Accept proposes from the commits above the set's measured-from point: the
+/// latest subject, then earlier ones newest first as a list. Engine commits, merges and
+/// commits on the landing branch are left out; a lead's worker on Land on main lists the
+/// lead's unlanded commits too, which land in its squash. Inputs: the agent repository, the
+/// record, that commit and the display roots. Output: the message, up to `PROPOSED_BYTES_MAX`.
 fn proposed(
     repo: &Repo,
     record: &Record,
@@ -1882,10 +1881,10 @@ pub(super) fn start(
 }
 
 /// Records the commit a master's leased worktree holds as the base its change sets open
-/// above, as [`start`] does for a team agent's new worktree, unless a base is stored for it
-/// already, which then never moves past commits the master made. Inputs: the store, the
-/// owner checkout, the worktree on its lease branch and its git folder. Output: Ok once a
-/// base is stored.
+/// above, as [`start`] does for a team agent's new worktree, unless one is stored already,
+/// which never moves past commits the master made and is read without the repository hold,
+/// so a long holder never delays a master turn. Inputs: the store, the owner checkout, the
+/// worktree on its lease branch and its git folder. Output: Ok once a base is stored.
 pub(super) fn start_master(
     db: &Connection,
     repository: &Path,
@@ -1893,16 +1892,17 @@ pub(super) fn start_master(
     git_dir: &Path,
 ) -> Result<(), EngineError> {
     store::initialize(db)?;
+    let stored = super::subagent::path_text(worktree)?;
+    if store::base_of(db, stored)?.is_some() {
+        return Ok(());
+    }
     let _held = hold(repository);
-    if store::base_of(db, super::subagent::path_text(worktree)?)?.is_some() {
+    if store::base_of(db, stored)?.is_some() {
         return Ok(());
     }
     let head = open_agent(db, AgentKind::Master, repository, worktree, git_dir)?.head()?;
     set_base(db, repository, worktree, git_dir, &head)?;
-    assert_eq!(
-        store::base_of(db, super::subagent::path_text(worktree)?)?.as_deref(),
-        Some(head.as_str())
-    );
+    assert_eq!(store::base_of(db, stored)?.as_deref(), Some(head.as_str()));
     Ok(())
 }
 
@@ -2097,7 +2097,11 @@ pub(super) fn record(
         None => None,
     };
     let mut record = match open {
-        None if committed.is_none() && head == base => return Ok(None),
+        None if committed.is_none()
+            && (head == base || already_on_tip(&shared, &head, tip.as_deref())?) =>
+        {
+            return Ok(None);
+        }
         None => Record {
             id: new_id()?,
             project: workspace.project.clone(),
@@ -2168,6 +2172,16 @@ pub(super) fn record(
         agent.move_head(Some(&head), &commit, "CrazyAgent: turn end")?;
     }
     Ok(Some(record.id))
+}
+
+/// Says whether a commit is already on the branch a set would land on, so an agent that only
+/// fast-forwarded its worktree to it has nothing to land. Inputs: the owner repository, the
+/// commit and the landing tip, None while it cannot be read. Output: the answer.
+fn already_on_tip(owner: &Repo, commit: &str, tip: Option<&str>) -> Result<bool, EngineError> {
+    match tip {
+        Some(tip) => owner.test(&["merge-base", "--is-ancestor", commit, tip]),
+        None => Ok(false),
+    }
 }
 
 /// Notes that the agent of an updating change set was handed the work that resolves it,
