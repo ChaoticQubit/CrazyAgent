@@ -915,9 +915,11 @@ pub(super) const POINTER_MOVED_ON: &str = "changes_agent_busy";
 /// work: an index git cannot refresh (locked, mid-merge) refuses; git's two-tree
 /// read-tree moves its index and tracked files and refuses, changing nothing, when a path
 /// it would change was edited, staged or is in its way untracked; then HEAD moves only
-/// while it still holds `from` and must still be the agent's pointer after, else HEAD goes
-/// back and the files too when the agent's checkout holds `from`. A stop between the steps
-/// leaves a state an engine start can finish. Inputs: the worktree and both commits.
+/// while it still holds `from` and must still be the agent's pointer after. When HEAD did
+/// not move, the files go back unless the agent committed them meanwhile; when the pointer
+/// left, HEAD goes back and the files too when the agent's checkout holds `from`. A stop
+/// between the steps leaves a state an engine start can finish. Inputs: the worktree and
+/// both commits.
 /// Output: true once it holds `target`, false when it refused, [`POINTER_MOVED_ON`] when
 /// the pointer cannot go back, so the caller leaves the step stored and undoes nothing.
 pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
@@ -982,9 +984,19 @@ pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<
 
 /// Puts an agent worktree's index and files back from `target` to `from` after its reset
 /// did not hold, with the same two-tree read-tree, so an edit the agent made meanwhile is
-/// never overwritten: git refuses, writing nothing, and the refusal is logged. Inputs:
-/// the worktree and both commits. Output: none.
+/// never overwritten: git refuses, writing nothing, and the refusal is logged. An index
+/// equal to HEAD stays: the agent committed what the reset moved, and putting it back would
+/// stage a reversal of that commit. Inputs: the worktree and both commits. Output: none.
 fn files_back(agent: &Agent, from: &str, target: &str) {
+    let committed = agent.repo.exec(
+        &["diff-index", "--quiet", "--cached", "HEAD", "--"],
+        None,
+        &[],
+        4096,
+    );
+    if committed.is_ok_and(|committed| committed.code == 0) {
+        return;
+    }
     let back = agent
         .repo
         .exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096);
