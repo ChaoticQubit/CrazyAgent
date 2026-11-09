@@ -176,6 +176,7 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry, onNewPoo
         <Button variant="quiet" onClick={() => setPicked([])}>Clear selection</Button>
         {fromSelection.kind === "blocked" && <span className="small secondary" role="status">{fromSelection.reason}</span>}
       </div>}
+      <div className="account-table">
       <div className="list-head" aria-hidden="true"><span>Name</span><span>Provider</span><span>Sign-in method</span><span>Status</span><span>Pools</span></div>
       {shown.length === 0 ? <p className="item-row">No accounts match.
         <Button variant="quiet" onClick={() => { setSearch(""); setProvider(""); setStatus(""); }}>Clear filters</Button></p>
@@ -199,6 +200,7 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry, onNewPoo
             {menu}
           </div>;
         }} />}
+      </div>
     </SettingSection>
   </div>;
 }

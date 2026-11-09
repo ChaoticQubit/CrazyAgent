@@ -53,7 +53,7 @@ export function ProfileSettings() {
           <ProfileFields draft={draft} onDraft={setDraft} errors={errors} rows />
           <div className="set-body">
             {failure && <Notice tone="danger" alert>{failure}</Notice>}
-            <span><Button type="submit" variant="primary" disabled={!changed} pending={saving} pendingLabel="Saving...">Save changes</Button></span>
+            <span className="row"><Button type="submit" variant="primary" disabled={!changed} pending={saving} pendingLabel="Saving...">Save changes</Button></span>
           </div>
         </form>
       </SettingSection>}

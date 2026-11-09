@@ -311,6 +311,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .set-slot .pj-stepper { height: 28px; }
 .set-slot .pj-stepper button { width: 26px; height: 26px; }
 .set-row > .set-ctl .chips { justify-content: flex-end; }
+.set-row.wide > .set-ctl .chips { justify-content: flex-start; }
 .pj-console-actions { display: inline-flex; margin-left: auto; }
 dialog.drawer .set-row { grid-template-columns: minmax(0, 1fr) minmax(0, max-content); }
 @media (max-width: 1199px) {

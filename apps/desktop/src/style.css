@@ -315,3 +315,6 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .accounts-actions .account-line { grid-template-columns: 36px minmax(0, 1fr) 44px; }
 .accounts-actions:not(.accounts-selectable) .account-line { grid-template-columns: minmax(0, 1fr) 44px; }
 .accounts-actions .list-head { padding-right: calc(44px + var(--space-3)); }
+.accounts-selectable, .accounts-actions { min-width: 0; }
+.account-table { overflow-x: auto; }
+.account-table > .list-head, .account-table > .windowed { min-width: 804px; }
