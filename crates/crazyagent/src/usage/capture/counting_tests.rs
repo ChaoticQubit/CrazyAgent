@@ -870,3 +870,298 @@ fn a_total_an_older_build_stored_still_counts_only_the_growth() {
     );
     assert_eq!(scan_codex(&db, root.path()), plain(40, 10, 5));
 }
+
+const SONNET: &str = "claude-sonnet-4-5";
+const FAST_MODEL: &str = "claude-opus-5-5";
+
+fn priced_line(id: &str, model: &str, usage: serde_json::Value) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-11-09T02:00:00.000Z",
+            "message": {
+                "id": id,
+                "model": model,
+                "stop_reason": "end_turn",
+                "content": [],
+                "usage": usage
+            }
+        })
+    )
+}
+
+fn spent(db: &Connection) -> i64 {
+    db.query_row("SELECT SUM(cost_nanos) FROM usage_tokens", [], |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
+fn estimate(model: &str, charged: super::super::prices::Charged) -> i64 {
+    super::super::prices::table()
+        .cost_nanos(model, charged)
+        .unwrap()
+}
+
+fn cost_of_one(model: &str, usage: serde_json::Value) -> i64 {
+    let (root, db) = store();
+    append(
+        &transcript(root.path(), "s1"),
+        &priced_line("msg_a", model, usage),
+    );
+    scan_it(&db, root.path());
+    spent(&db)
+}
+
+#[test]
+fn a_counted_message_lands_with_its_estimated_cost() {
+    let (root, db) = store();
+    append(&transcript(root.path(), "s1"), &line("msg_a", 1000, 0));
+    scan_it(&db, root.path());
+    let cost: i64 = db
+        .query_row("SELECT cost_nanos FROM usage_tokens", [], |row| row.get(0))
+        .unwrap();
+    let priced = super::super::prices::table().cost_nanos(
+        MODEL,
+        super::super::prices::Charged {
+            tokens: expected(1000, 0),
+            prompt_tokens: 1000,
+            ..Default::default()
+        },
+    );
+    assert_eq!(Some(cost), priced);
+    assert!(cost > 0);
+}
+
+#[test]
+fn a_repeated_line_is_charged_only_for_its_growth() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(&file, &line("msg_a", 1000, 10));
+    append(&file, &line("msg_b", 1, 1));
+    scan_it(&db, root.path());
+    let first = spent(&db);
+    append(&file, &line("msg_a", 1000, 10));
+    scan_it(&db, root.path());
+    assert_eq!(first, spent(&db));
+}
+
+#[test]
+fn two_messages_in_one_read_add_their_costs() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(&file, &line("msg_a", 1000, 0));
+    append(&file, &line("msg_b", 3000, 0));
+    scan_it(&db, root.path());
+    let priced = |input: u64| {
+        estimate(
+            MODEL,
+            super::super::prices::Charged {
+                tokens: expected(input, 0),
+                prompt_tokens: input,
+                ..Default::default()
+            },
+        )
+    };
+    assert_eq!(spent(&db), priced(1000) + priced(3000));
+}
+
+#[test]
+fn an_unknown_model_keeps_its_tokens_and_has_no_cost() {
+    let (root, db) = store();
+    let text = line("msg_a", 1000, 0).replace(MODEL, "local-llama");
+    append(&transcript(root.path(), "s1"), &text);
+    scan_it(&db, root.path());
+    let row: (String, i64, i64) = db
+        .query_row(
+            "SELECT model,input,cost_nanos FROM usage_tokens",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("local-llama".to_owned(), 1000, 0));
+}
+
+#[test]
+fn a_message_charges_its_one_hour_cache_write() {
+    let cost = cost_of_one(
+        SONNET,
+        serde_json::json!({
+            "input_tokens": 0,
+            "output_tokens": 1,
+            "cache_creation_input_tokens": 2000,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 1500,
+                "ephemeral_5m_input_tokens": 500
+            }
+        }),
+    );
+    let priced = estimate(
+        SONNET,
+        super::super::prices::Charged {
+            tokens: Tokens {
+                output: 1,
+                cache_write: 2000,
+                ..Tokens::default()
+            },
+            prompt_tokens: 2000,
+            one_hour: 1500,
+            ..Default::default()
+        },
+    );
+    assert_eq!(cost, priced);
+}
+
+#[test]
+fn a_message_charges_its_web_searches() {
+    let cost = cost_of_one(
+        SONNET,
+        serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 1,
+            "server_tool_use": {"web_search_requests": 3}
+        }),
+    );
+    let priced = estimate(
+        SONNET,
+        super::super::prices::Charged {
+            tokens: expected(10, 1),
+            prompt_tokens: 10,
+            web_searches: 3,
+            ..Default::default()
+        },
+    );
+    assert_eq!(cost, priced);
+}
+
+#[test]
+fn a_repeated_message_charges_its_web_searches_once() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    let text = priced_line(
+        "msg_a",
+        SONNET,
+        serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 1,
+            "server_tool_use": {"web_search_requests": 3}
+        }),
+    );
+    append(&file, &text);
+    scan_it(&db, root.path());
+    let first = spent(&db);
+    append(&file, &text);
+    scan_it(&db, root.path());
+    assert_eq!(first, spent(&db));
+}
+
+#[test]
+fn a_fast_message_charges_the_fast_rate() {
+    let cost = cost_of_one(
+        FAST_MODEL,
+        serde_json::json!({"input_tokens": 1000, "output_tokens": 1, "speed": "fast"}),
+    );
+    let priced = estimate(
+        FAST_MODEL,
+        super::super::prices::Charged {
+            tokens: expected(1000, 1),
+            prompt_tokens: 1000,
+            fast: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(cost, priced);
+}
+
+#[test]
+fn the_whole_calls_prompt_picks_the_tier() {
+    let priced = |tokens: Tokens, prompt_tokens: u64| {
+        estimate(
+            SONNET,
+            super::super::prices::Charged {
+                tokens,
+                prompt_tokens,
+                ..Default::default()
+            },
+        )
+    };
+    assert_eq!(
+        [
+            cost_of_one(
+                SONNET,
+                serde_json::json!({
+                    "input_tokens": 10,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 250_000
+                }),
+            ),
+            cost_of_one(
+                SONNET,
+                serde_json::json!({
+                    "input_tokens": 10,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 250_000
+                }),
+            ),
+        ],
+        [
+            priced(
+                Tokens {
+                    input: 10,
+                    output: 1,
+                    cache_read: 250_000,
+                    ..Tokens::default()
+                },
+                250_010
+            ),
+            priced(
+                Tokens {
+                    input: 10,
+                    output: 1,
+                    cache_write: 250_000,
+                    ..Tokens::default()
+                },
+                250_010
+            ),
+        ]
+    );
+}
+
+#[test]
+fn growth_on_a_repeated_message_keeps_the_whole_calls_tier() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(
+        &file,
+        &priced_line(
+            "msg_a",
+            SONNET,
+            serde_json::json!({"input_tokens": 250_000, "output_tokens": 10}),
+        ),
+    );
+    scan_it(&db, root.path());
+    append(
+        &file,
+        &priced_line(
+            "msg_a",
+            SONNET,
+            serde_json::json!({"input_tokens": 250_000, "output_tokens": 30}),
+        ),
+    );
+    scan_it(&db, root.path());
+    let priced = |tokens: Tokens| {
+        estimate(
+            SONNET,
+            super::super::prices::Charged {
+                tokens,
+                prompt_tokens: 250_000,
+                ..Default::default()
+            },
+        )
+    };
+    assert_eq!(
+        spent(&db),
+        priced(expected(250_000, 10)) + priced(expected(0, 20))
+    );
+}

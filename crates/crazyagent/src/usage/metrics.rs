@@ -21,6 +21,8 @@ const NAMES_MAX: usize = 8;
 pub struct Bucket {
     pub start_ms: i64,
     pub tokens: Tokens,
+    #[serde(default)]
+    pub cost_nanos: i64,
 }
 
 /// One run: one agent session, with its tokens in the range, when they were last counted
@@ -39,6 +41,8 @@ pub struct RunRow {
     pub status: Option<String>,
     pub last_ms: i64,
     pub tokens: Tokens,
+    #[serde(default)]
+    pub cost_nanos: i64,
 }
 
 /// The tokens one project, account or harness used in the range, with how many agents and
@@ -56,6 +60,8 @@ pub struct GroupRow {
     pub more_projects: u64,
     #[serde(default)]
     pub merges: u64,
+    #[serde(default)]
+    pub cost_nanos: i64,
 }
 
 /// The tokens one agent used in the range, with the name clients show for it when the store
@@ -75,6 +81,17 @@ pub struct AgentRow {
     pub tokens: Tokens,
     #[serde(default)]
     pub turns: Option<u64>,
+    #[serde(default)]
+    pub cost_nanos: i64,
+}
+
+/// One model's tokens and estimated dollars over the range.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRow {
+    pub model: String,
+    pub tokens: Tokens,
+    pub cost_nanos: i64,
 }
 
 /// What the Metrics page counts besides the usage report: team tasks running now, waiting
@@ -101,6 +118,8 @@ pub struct Metrics {
     pub agents: Vec<AgentRow>,
     pub accounts: Vec<GroupRow>,
     pub harnesses: Vec<GroupRow>,
+    #[serde(default)]
+    pub models: Vec<ModelRow>,
 }
 
 /// The chart bar width for a range: two hours for up to a day, a day for up to eight days,
@@ -249,6 +268,7 @@ fn series(
                 Ok(Bucket {
                     start_ms: row.get(0)?,
                     tokens: tokens(row, 1)?,
+                    cost_nanos: 0,
                 })
             },
         )
@@ -364,6 +384,7 @@ fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<Run
                     status: None,
                     last_ms,
                     tokens: tokens(row, 5)?,
+                    cost_nanos: 0,
                 },
                 row.get(4)?,
                 seen.map_or(last_ms.saturating_add(HOUR_MS - 1), |_| last_ms),
@@ -423,6 +444,7 @@ fn groups(
                 projects: Vec::new(),
                 more_projects: 0,
                 merges: 0,
+                cost_nanos: 0,
             })
         })
         .map_err(storage)?
@@ -517,6 +539,7 @@ fn agents(
                 more_accounts: 0,
                 tokens: tokens(row, 2)?,
                 turns: None,
+                cost_nanos: 0,
             })
         })
         .map_err(storage)?
@@ -563,6 +586,16 @@ fn agents(
         });
     }
     Ok(rows)
+}
+
+/// Totals the range's dollars and the headline tokens that have no price. Inputs: the
+/// store, the project and the range start. Output: nanodollars and tokens.
+pub fn money_totals(
+    _db: &Connection,
+    _project: Option<&str>,
+    _since_ms: i64,
+) -> Result<(i64, u64), EngineError> {
+    Ok((0, 0))
 }
 
 /// Keeps the metrics within `REPORT_BYTES_MAX` encoded bytes so their reply fits one frame:
@@ -625,6 +658,7 @@ pub fn read(
         agents: agents(db, project, since_ms)?,
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,
+        models: Vec::new(),
     })?;
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);

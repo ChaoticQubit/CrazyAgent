@@ -466,3 +466,44 @@ fn a_cost_rounds_to_the_nearest_nanodollar() {
     };
     assert_eq!(prices.cost_nanos("half", charged(output)), Some(1));
 }
+
+#[test]
+fn a_write_with_no_rate_inside_a_tier_bills_at_the_tiers_input() {
+    let tokens = Tokens {
+        cache_write: 1000,
+        ..Tokens::default()
+    };
+    assert_eq!(
+        sample().cost_nanos("tiered-fast", charged(tokens)),
+        Some(2_000_000)
+    );
+}
+
+#[test]
+fn a_write_rate_follows_what_the_source_published() {
+    let prices = parse(
+        r#"{"as_of":"2026-11-08","source_sha256":"aa","models":{
+        "claude-old":{"input":4000000,"output":1,"cache_write":null,"cache_read":null,
+         "tier":{"threshold":10,"input":8000000,"output":1,"cache_write":null,"cache_read":null}},
+        "anthropic-old":{"input":4000000,"output":1,"cache_write":null,"cache_read":null},
+        "claude-tier":{"input":4000000,"output":1,"cache_write":null,"cache_read":null,
+         "tier":{"threshold":10,"input":8000000,"output":1,"cache_write":9000000,"cache_read":null}},
+        "other-old":{"input":4000000,"output":1,"cache_write":null,"cache_read":null,
+         "tier":{"threshold":10,"input":8000000,"output":1,"cache_write":9000000,"cache_read":null}}}}"#,
+    )
+    .unwrap();
+    let tokens = Tokens {
+        cache_write: 1000,
+        ..Tokens::default()
+    };
+    assert_eq!(
+        ["claude-old", "anthropic-old", "claude-tier", "other-old"]
+            .map(|model| prices.cost_nanos(model, charged(tokens))),
+        [
+            Some(5_000_000),
+            Some(5_000_000),
+            Some(9_000_000),
+            Some(8_000_000)
+        ]
+    );
+}

@@ -312,6 +312,7 @@ fn a_project_with_merges_and_no_tokens_in_the_range_has_its_row() {
         projects: vec!["gamma".to_owned()],
         more_projects: 0,
         merges: 2,
+        cost_nanos: 0,
     };
     let all = read(&db, None, MIDNIGHT, NOW).unwrap();
     assert_eq!(
@@ -1756,4 +1757,131 @@ fn removing_a_project_moves_its_turn_rows_to_the_removed_rows_with_their_counts(
             row("beta", "team-9", Some(2)),
         ]
     );
+}
+
+fn priced_rows(db: &Connection, rows: &str) {
+    db.execute_batch(&format!(
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos) VALUES {rows}"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn metrics_read_dollars_by_model_and_say_what_has_no_price() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','gpt-5',100,10,0,0,900),
+         (3600000,'agent','alpha','','a','team-1','codex','s2','local',50,5,0,0,0)",
+    );
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(
+        metrics
+            .models
+            .iter()
+            .map(|row| (row.model.as_str(), row.cost_nanos))
+            .collect::<Vec<_>>(),
+        vec![("gpt-5", 900), ("local", 0)]
+    );
+    assert_eq!(metrics.models[0].tokens.input, 100);
+    assert_eq!(metrics.series[0].cost_nanos, 900);
+    assert_eq!(metrics.harnesses[0].cost_nanos, 900);
+    assert_eq!(money_totals(&db, None, 0).unwrap(), (900, 55));
+}
+
+#[test]
+fn every_breakdown_carries_its_dollars() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','gpt-5',100,10,0,0,900)",
+    );
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(
+        [
+            metrics.series[0].cost_nanos,
+            metrics.runs[0].cost_nanos,
+            metrics.projects[0].cost_nanos,
+            metrics.agents[0].cost_nanos,
+            metrics.accounts[0].cost_nanos,
+            metrics.harnesses[0].cost_nanos,
+        ],
+        [900; 6]
+    );
+}
+
+#[test]
+fn models_sort_by_dollars_then_tokens_then_name() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','small',10,0,0,0,0),
+         (3600000,'agent','alpha','','a','team-1','codex','s2','b-big',100,0,0,0,0),
+         (3600000,'agent','alpha','','a','team-1','codex','s3','a-big',100,0,0,0,0),
+         (3600000,'agent','alpha','','a','team-1','codex','s4','priced',1,0,0,0,5)",
+    );
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(
+        metrics
+            .models
+            .iter()
+            .map(|row| row.model.as_str())
+            .collect::<Vec<_>>(),
+        ["priced", "a-big", "b-big", "small"]
+    );
+}
+
+#[test]
+fn models_keep_to_the_project_and_the_range() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','kept',1,0,0,0,5),
+         (3600000,'agent','beta','','a','team-1','codex','s2','other-project',1,0,0,0,5),
+         (0,'agent','alpha','','a','team-1','codex','s3','too-old',1,0,0,0,5)",
+    );
+    let alpha = ProjectId::new("alpha").unwrap();
+    let metrics = read(&db, Some(&alpha), 3_600_000, 7_200_000).unwrap();
+    assert_eq!(
+        metrics
+            .models
+            .iter()
+            .map(|row| row.model.as_str())
+            .collect::<Vec<_>>(),
+        ["kept"]
+    );
+}
+
+#[test]
+fn money_totals_keep_to_the_project_and_the_range_and_skip_cache_reads() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','paid',100,0,0,0,900),
+         (3600000,'agent','alpha','','a','team-1','codex','s2','free',10,20,1000,30,0),
+         (3600000,'agent','beta','','a','team-1','codex','s3','paid',1,0,0,0,7),
+         (0,'agent','alpha','','a','team-1','codex','s4','paid',1,0,0,0,11)",
+    );
+    assert_eq!(
+        [
+            money_totals(&db, Some("alpha"), 3_600_000).unwrap(),
+            money_totals(&db, None, 3_600_000).unwrap(),
+            money_totals(&db, Some("alpha"), 0).unwrap(),
+        ],
+        [(900, 60), (907, 60), (911, 60)]
+    );
+}
+
+#[test]
+fn model_rows_shrink_with_the_others_to_fit_one_reply() {
+    let row = ModelRow {
+        model: "m".repeat(crate::usage::report::REPORT_BYTES_MAX),
+        ..ModelRow::default()
+    };
+    let fitted = fit(Metrics {
+        models: vec![row; 2],
+        ..Metrics::default()
+    });
+    assert!(fitted.is_ok());
+    assert_eq!(fitted.unwrap().models.len(), 0);
 }
