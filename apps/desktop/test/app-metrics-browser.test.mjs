@@ -22,7 +22,10 @@ const LIMITS = {
   five_hour_reset_override_ms: null, weekly_reset_override_ms: null, five_hour_left_out_label: null, weekly_left_out_label: null,
 };
 const REPORT = { since_ms: NOW - 6 * DAY, total: none, runs: 0, projects: [], pools: [], accounts: [], agents: [], days: [], lines: [], agent_lines: [], limits: [LIMITS], partial_homes: 0 };
-const METRICS = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: [], runs: [], projects: [], agents: [], accounts: [], harnesses: [] };
+const SHIFT = -new Date(NOW).getTimezoneOffset() * 60_000;
+const TODAY = Math.floor((NOW + SHIFT) / DAY) * DAY - SHIFT;
+const SERIES = [{ start_ms: TODAY - 3 * DAY, tokens: { input: 900, output: 300, cache_read: 100, cache_write: 200 } }];
+const METRICS = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: SERIES, runs: [], projects: [], agents: [], accounts: [], harnesses: [] };
 const ANSWERS = {
   desktop_usage_report: REPORT, desktop_usage_metrics: METRICS, desktop_usage_refresh: null, desktop_usage_set_reset: null,
   desktop_list_accounts: { accounts: [{ id: "acct-a", name: "Pool A, Claude 1" }], next: null }, desktop_pool_summaries: [], desktop_account_ranking: [],
@@ -74,3 +77,95 @@ test("the Account limits panel does not overflow the window at 760 px", async ()
     assert.equal(await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
   });
 });
+
+/** Presses a key on the focused element with the real keyboard. Inputs: the page, the key's
+ * name and its code. Output: nothing. */
+async function key(page, name, code) {
+  for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: code, ...(name === "Enter" && type === "keyDown" ? { text: "\r" } : {}) });
+  await page.evaluate("Fixture.settle(120)");
+}
+
+const contrast = `(() => {
+  const luminance = (color) => {
+    const [r, g, b] = color.match(/[\\d.]+/g).slice(0, 3).map((part) => {
+      const value = Number(part) / 255;
+      return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const ratio = (a, b) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  const surface = luminance(getComputedStyle(document.querySelector(".mx-lead")).backgroundColor);
+  return ["in", "cw", "out"].map((name) => ratio(luminance(getComputedStyle(document.querySelector(".mx-chart ." + name)).fill), surface));
+})()`;
+
+for (const theme of ["light", "dark"]) {
+  test(`every chart series stands off the panel in ${theme}, and no two share a color`, async () => {
+    await withPage(async (page) => {
+      await open(page, theme);
+      const ratios = await page.evaluate(contrast);
+      assert.equal(ratios.length, 3);
+      for (const ratio of ratios) assert.ok(ratio >= 3, `series contrast ${ratio} in ${theme}`);
+      const fills = await page.evaluate(`["in", "cw", "out"].map((name) => getComputedStyle(document.querySelector(".mx-chart ." + name)).fill)`);
+      assert.equal(new Set(fills).size, 3, JSON.stringify(fills));
+    });
+  });
+}
+
+test("real keys walk the Range to All, and Enter opens the chart's table", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    await page.evaluate(`document.querySelector('[aria-label="Range"] [aria-checked="true"]').focus()`);
+    await key(page, "ArrowRight", 39);
+    await key(page, "ArrowRight", 39);
+    assert.equal(await page.evaluate(`document.querySelector('[aria-label="Range"] [aria-checked="true"]').textContent`), "All");
+    assert.equal((await page.evaluate(`Fixture.sentTo("desktop_usage_report")`)).at(-1).sinceMs, null);
+    await page.evaluate(`document.querySelector(".mx-lead details summary").focus()`);
+    await key(page, "Enter", 13);
+    assert.equal(await page.evaluate(`document.querySelector(".mx-lead details").open`), true);
+  });
+});
+
+test("the readout says the highest bar, and the bar under the real mouse", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    const readout = () => page.evaluate(`document.querySelector(".mx-readout").textContent`);
+    assert.match(await readout(), /^Highest, .*: 1\.4K$/);
+    const box = await page.evaluate(`Fixture.boxOf(".mx-chart .hit", null)`);
+    assert.ok(box, "the chart has a place to point at");
+    await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: box.x, y: box.y });
+    await page.evaluate("Fixture.settle(120)");
+    assert.doesNotMatch(await readout(), /^Highest/);
+  });
+});
+
+test("a pointer resting on a bar survives a shorter range: the page stays and the readout drops it", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    const target = await page.evaluate(`(() => {
+      const hits = [...document.querySelectorAll(".mx-chart .hit")];
+      const last = hits.at(-1);
+      last.scrollIntoView({ block: "center" });
+      const box = last.getBoundingClientRect();
+      return { count: hits.length, x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    })()`);
+    assert.equal(target.count, 7, "seven days draw seven bars");
+    await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y });
+    await page.evaluate("Fixture.settle(120)");
+    assert.match(await page.evaluate(`document.querySelector(".mx-readout").textContent`), /^[A-Z][a-z]{2} \d+: 0$/);
+    await page.evaluate(`document.querySelector('[aria-label="Range"] [aria-checked="true"]').focus()`);
+    await key(page, "ArrowLeft", 37);
+    assert.equal(await page.evaluate(`document.querySelector(".mx-lead") !== null`), true, "the page is still there");
+    assert.equal(await page.evaluate(`document.querySelectorAll(".mx-chart .hit").length`), 1);
+    assert.equal(await page.evaluate(`document.querySelector(".mx-readout").textContent`), "No tokens in this range");
+  });
+});
+
+for (const width of [1440, 760]) {
+  test(`the lead panel does not overflow at ${width} px`, async () => {
+    await withPage(async (page) => {
+      await open(page, "light", width);
+      assert.equal(await page.evaluate("document.querySelector('.mx-lead') !== null"), true);
+      assert.equal(await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
+    });
+  });
+}

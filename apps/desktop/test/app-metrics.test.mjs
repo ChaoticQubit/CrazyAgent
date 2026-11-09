@@ -57,7 +57,7 @@ const render = (patch = {}) => renderToStaticMarkup(createElement(view.MetricsPa
   onRange: forbidden, onBy: forbidden, onRetry: forbidden, ...patch,
 }));
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
-const tableText = (markup) => text(markup.slice(markup.indexOf("<table")));
+const tableText = (markup) => text(markup.slice(markup.lastIndexOf("<table")));
 
 test("the app Metrics page covers every project on the engine and filters by project", () => {
   const markup = renderToStaticMarkup(createElement(SessionContext.Provider, { value: SESSION }, createElement(appPage.AppMetrics, { projects: PROJECTS })));
@@ -69,9 +69,9 @@ test("the app Metrics page covers every project on the engine and filters by pro
 
 test("all projects shows the same tiles, and By project lists each project with its agents and runs first", () => {
   const markup = render();
-  assert.match(text(markup), /Tokens 2\.3K 1\.2K input, 800 cache write, 300 output/);
+  assert.match(text(markup), /Tokens 2\.3K Input 1\.2K Cache write 800 Output 300/);
   assert.match(text(markup), /2 projects · Updated 10 s ago · provider-reported usage per turn/);
-  assert.match(text(markup), /Tasks 6 done 1 waiting, 0 failed Merges 19 5 into main, 1 undone Lines /, "the same six tiles as the project tab");
+  assert.match(text(markup), /Tasks 6 done 1 waiting, 0 failed Merges 19 5 into main, 1 undone Lines /, "the project tab's tiles under the lead panel");
   assert.match(text(markup), /By project By agent By run By account By harness/);
   const table = tableText(markup);
   assert.match(table, /^ Project Tokens Input Cache write Output Cache read Agents Runs Merges Share of tokens /, "By project counts each project's merges, as the mockup does");
@@ -223,4 +223,73 @@ test("Check limits now stays reachable while loading and after a failed read, an
   assert.match(text(render({ usage: { kind: "error", code: "x", message: "y" } })), /Check limits now/);
   assert.match(text(render(withUsage({ limits: [limitsFor()] }))), /Check limits now/);
   assert.match(text(render({ filter: { ...FILTER, limits: { ...LIMITS, busy: "refresh" } } })), /Asking\.\.\./);
+});
+
+test("the lead panel shows Tokens with its mix beside the chart, and the chart has a table with the same numbers", () => {
+  const markup = render();
+  const lead = markup.slice(markup.indexOf('class="panel mx-lead"'));
+  const words = text(lead);
+  assert.match(words, /Tokens 2\.3K/);
+  assert.match(words, /Input 1\.2K Cache write 800 Output 300 Re-read from cache 4K/);
+  assert.match(lead, /aria-live="polite"/);
+  assert.match(lead, /role="img"/);
+  assert.match(lead, /<details class="mx-more"><summary>Show chart as a table<\/summary>/);
+  assert.match(text(lead.slice(lead.indexOf("<details"))), /Tokens Input Cache write Output Cache read/);
+});
+
+test("only unreported usage reads as not reported in the lead, never as zero", () => {
+  const none = tokens(0, 0, 0, 0);
+  assert.match(text(render(withUsage({ total: none, not_reported_by: ["Codex"] }))), /Tokens Not reported Usage not reported by Codex/);
+});
+
+test("usage some harness did not report stays under the Tokens", () => {
+  assert.match(text(render(withUsage({ not_reported_by: ["Codex"] }))), /Not in these totals: usage not reported by Codex\./);
+});
+
+test("the tiles under the lead are Re-read from cache, Runs, Tasks, Merges and Lines", () => {
+  const keys = [...render().matchAll(/mx-tile-key">([^<]*)</gu)].map((match) => match[1]);
+  assert.deepEqual(keys, ["Re-read from cache", "Runs", "Tasks", "Merges", "Lines"]);
+});
+
+test("the app page has All and the project tab does not", () => {
+  assert.match(text(render()), /Today 7 days 30 days All/);
+  assert.doesNotMatch(text(render({ filter: undefined, projectId: "alpha", by: "agent" })), /Today 7 days 30 days All/);
+});
+
+test("Account limits and its reset controls stay when only the metrics read failed (r1 L1)", () => {
+  const next = createElement("p", null, "Next accounts here");
+  const failed = { kind: "error", code: "usage_outcome_unknown", message: "" };
+  const markup = render({ ...withUsage({ limits: [limitsFor()] }), metrics: failed, filter: { ...FILTER, limits: { ...LIMITS, next } } });
+  const words = text(markup);
+  assert.match(words, /Account limits/);
+  assert.match(words, /Set reset time/);
+  assert.match(words, /Next accounts here/);
+  assert.match(words, /Try again/);
+  assert.equal(markup.split("Check limits now").length - 1, 1, "one Check limits now");
+  assert.doesNotMatch(text(render({ usage: failed })), /Account limits/, "no usage read, no limits to show");
+});
+
+test("Account limits stays while the metrics read loads or is not ready (r1 L1)", () => {
+  const notReady = { kind: "error", code: "usage_unavailable", message: "" };
+  for (const metrics of [{ kind: "loading" }, { kind: "not_ready" }, notReady]) {
+    const markup = render({ ...withUsage({ limits: [limitsFor()] }), metrics });
+    assert.match(text(markup), /Account limits/, JSON.stringify(metrics));
+    assert.match(text(markup), /Set reset time/, JSON.stringify(metrics));
+    assert.equal(markup.split("Check limits now").length - 1, 1, JSON.stringify(metrics));
+  }
+  assert.match(text(render({ ...withUsage({ limits: [limitsFor()] }), metrics: notReady })), /isn't ready yet/);
+});
+
+test("a refused Check limits says why on the failed-read page (r1 L2)", () => {
+  const failed = { kind: "error", code: "usage_outcome_unknown", message: "" };
+  const filter = { ...FILTER, limits: { ...LIMITS, failure: "The check failed." } };
+  assert.match(text(render({ usage: failed, filter })), /The check failed\./);
+  assert.match(text(render({ metrics: failed, filter })), /The check failed\./);
+});
+
+test("a picked project keeps the app page's notice and Account limits (r1 L3)", () => {
+  const words = text(render({ projectId: "alpha", ...withUsage({ limits: [limitsFor()] }) }));
+  assert.match(words, /These numbers still use the old counting\./);
+  assert.match(words, /Account limits/);
+  assert.match(words, /Set reset time/);
 });

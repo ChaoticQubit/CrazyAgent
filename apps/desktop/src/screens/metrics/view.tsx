@@ -3,25 +3,23 @@ import { listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
-import { loadMetrics, loadUsage, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type MetricsBucket, type Tokens, type UsageReport } from "../../api-usage";
+import { loadMetrics, loadUsage, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type Tokens, type UsageReport } from "../../api-usage";
 import { useLoad, type Loaded } from "../../state";
 import { LoadError, NotReady, Notice, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { HARNESS_NAMES } from "../team/coordination";
+import { barWords, chartBars, ChartSvg } from "./chart";
+import { LeadPanel } from "./lead";
 import { AccountLimitsPanel, CheckLimits, type LimitsControls } from "./limits";
-import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, healthText, offsetMinutes, PartialNotice, rangeStart, rowName, windowNow } from "./usage-model";
+import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, healthText, offsetMinutes, PartialNotice, rangeStart, RANGES, rowName, windowNow, type UsageRange } from "./usage-model";
 import "../project/projects.css";
 import "./metrics.css";
 
 const MINUTE = 60_000;
-const HOUR = 60 * MINUTE;
-const DAY = 24 * HOUR;
 const TICK_MS = 10_000;
 const RELOAD_TICKS = 3;
-const CHART = { width: 700, height: 200, left: 44, bottom: 22, top: 8, barMax: 54 };
-const BARS_MAX = 64;
 
-export type MetricsRange = "today" | "7d" | "30d";
+export type MetricsRange = UsageRange;
 
 export type MetricsBy = "project" | "agent" | "run" | "account" | "harness";
 
@@ -50,10 +48,6 @@ const RESULTS: Record<string, string> = {
   needs_pool: "Waiting",
 };
 
-function assert(condition: boolean, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
-
 /** Names shown in place of usage keys: agents by usage key and accounts by id. */
 export interface MetricsNames {
   agents: Map<string, string>;
@@ -76,34 +70,6 @@ interface BreakdownRow {
   project?: string;
   tokens: Tokens;
   extra: string[];
-}
-
-/** Every chart bar from the range start to now, a bar with no usage counted as empty, so the
- * time axis has no gaps. Inputs: the metrics, the range start and now. Output: the bars,
- * oldest first. */
-export function chartBars(metrics: Metrics, sinceMs: number, nowMs: number): MetricsBucket[] {
-  assert(metrics.bucket_ms > 0, "a chart bar spans time");
-  const counted = new Map(metrics.series.map((bar) => [bar.start_ms, bar.tokens]));
-  const bars: MetricsBucket[] = [];
-  for (let start = sinceMs; start <= nowMs && bars.length < BARS_MAX; start += metrics.bucket_ms) {
-    bars.push({ start_ms: start, tokens: counted.get(start) ?? { input: 0, output: 0, cache_read: 0, cache_write: 0 } });
-  }
-  return bars;
-}
-
-/** A chart bar's label: the hour for bars shorter than a day, else the date, both read at the
- * fixed offset the range was cut with. Inputs: its start, the bar width and the viewer's
- * offset east of UTC in minutes. Output: "06:00" or "Nov 1". */
-export function barLabel(startMs: number, bucketMs: number, offset: number): string {
-  const local = new Date(startMs + offset * MINUTE);
-  if (bucketMs >= DAY) return local.toLocaleDateString(undefined, { timeZone: "UTC", month: "short", day: "numeric" });
-  return `${String(local.getUTCHours()).padStart(2, "0")}:${String(local.getUTCMinutes()).padStart(2, "0")}`;
-}
-
-/** The words the chart names its bars by. Input: the bar width. Output: "two hours", "day"
- * or "five days". */
-function barWords(bucketMs: number): string {
-  return bucketMs < DAY ? "two hours" : bucketMs === DAY ? "day" : "five days";
 }
 
 /** When a reset comes, short: "in 40 min", "in 3 h", or its date a day or more away.
@@ -152,15 +118,15 @@ function Tile({ label, value, detail, quiet = false }: { label: string; value: s
   </div>;
 }
 
-function Tiles({ usage, metrics }: { usage: UsageReport; metrics: Metrics }) {
+function Tiles({ usage, metrics, lead = false }: { usage: UsageReport; metrics: Metrics; lead?: boolean }) {
   const total = usage.total;
   const share = cacheShare(total);
   const added = usage.lines.reduce((sum, row) => sum + row.added, 0);
   const removed = usage.lines.reduce((sum, row) => sum + row.removed, 0);
   const sets = usage.lines.reduce((sum, row) => sum + row.change_sets, 0);
   return <div className="mx-tiles">
-    <Tile label="Tokens" value={compactCount(headlineTokens(total))}
-      detail={`${compactCount(total.input)} input, ${compactCount(total.cache_write)} cache write, ${compactCount(total.output)} output`} />
+    {!lead && <Tile label="Tokens" value={compactCount(headlineTokens(total))}
+      detail={`${compactCount(total.input)} input, ${compactCount(total.cache_write)} cache write, ${compactCount(total.output)} output`} />}
     <Tile label="Re-read from cache" value={compactCount(total.cache_read)} quiet
       detail={share === null ? "Billed far lower, not in Tokens" : `${share}% of everything read; billed far lower, not in Tokens`} />
     <Tile label="Runs" value={String(usage.runs)} detail={`${metrics.running} running now`} />
@@ -171,39 +137,12 @@ function Tiles({ usage, metrics }: { usage: UsageReport; metrics: Metrics }) {
 }
 
 function Chart({ metrics, sinceMs, nowMs, offset, reread }: { metrics: Metrics; sinceMs: number; nowMs: number; offset: number; reread: number }) {
-  const bars = chartBars(metrics, sinceMs, nowMs);
-  const max = Math.max(1, ...bars.map((bar) => headlineTokens(bar.tokens))) * 1.1;
-  const { width, height, left, bottom, top, barMax } = CHART;
-  const slot = (width - left) / Math.max(1, bars.length);
-  const barWidth = Math.min(barMax, slot * 0.7);
-  const y = (value: number) => Math.round((height - bottom - (value / max) * (height - bottom - top)) * 10) / 10;
-  const parts: [keyof Tokens, string, string][] = [["input", "in", "input"], ["cache_write", "cw", "cache write"], ["output", "out", "output"]];
   return <Panel title="Tokens over time" actions={<span className="mx-legend">
     <span><i className="in" />Input</span><span><i className="cw" />Cache write</span><span><i className="out" />Output</span>
     <span className="muted">Re-read from cache: {compactCount(reread)}, not drawn</span>
   </span>}>
-    <svg className="mx-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Tokens per ${barWords(metrics.bucket_ms)}: input, cache write and output`}>
-      {[0, 0.5, 1].map((step) => <g key={step}>
-        <line className="gl" x1={left} x2={width} y1={y(step * max)} y2={y(step * max)} />
-        <text className="ax" x={left - 6} y={y(step * max) + 4} textAnchor="end">{step === 0 ? "0" : compactCount(Math.round(step * max))}</text>
-      </g>)}
-      {bars.map((bar, index) => {
-        const x = Math.round((left + index * slot + (slot - barWidth) / 2) * 10) / 10;
-        const label = barLabel(bar.start_ms, metrics.bucket_ms, offset);
-        let base = 0;
-        return <g key={bar.start_ms}>
-          {parts.map(([field, className, words]) => {
-            const value = bar.tokens[field];
-            const from = base;
-            base += value;
-            return <rect key={field} className={className} x={x} y={y(base)} width={barWidth} height={Math.max(0, Math.round((y(from) - y(base)) * 10) / 10)} rx={2}>
-              <title>{`${label}: ${compactCount(value)} ${words}`}</title>
-            </rect>;
-          })}
-          <text className="ax" x={x + barWidth / 2} y={height - 6} textAnchor="middle">{label}</text>
-        </g>;
-      })}
-    </svg>
+    <ChartSvg bars={chartBars(metrics, sinceMs, nowMs)} bucketMs={metrics.bucket_ms} offset={offset}
+      label={`Tokens per ${barWords(metrics.bucket_ms)}: input, cache write and output`} />
   </Panel>;
 }
 
@@ -357,6 +296,18 @@ function AppNotices({ usage, failure, nowMs }: { usage: UsageReport; failure: st
   </>;
 }
 
+/** What the app page keeps while its reads are incomplete: a refused action's words and, once
+ * the usage read holds, each account's limits and the next accounts. Without that read only
+ * Check limits now stays. Inputs: the usage read, the filter, the names and now. */
+function LimitsWhileReading({ usage, filter, names, nowMs }: { usage: Loaded<UsageReport>; filter: MetricsFilter; names: MetricsNames; nowMs: number }) {
+  return <>
+    {filter.limits.failure && <Notice tone="danger" alert>{filter.limits.failure}</Notice>}
+    {usage.kind === "ok"
+      ? <><AccountLimitsPanel limits={usage.value.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />{filter.limits.next}</>
+      : <CheckLimits busy={filter.limits.busy} onRefresh={filter.limits.onRefresh} />}
+  </>;
+}
+
 /** The Metrics page as a pure view: the range switch and what it covers, the tiles (tokens
  * with their three parts, cache re-reads apart, runs, tasks, merges and lines), the tokens chart and
  * the breakdown by agent, run, account or harness, each with its four token parts and its
@@ -381,7 +332,7 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   onBy: (by: MetricsBy) => void;
   onRetry: () => void;
 }) {
-  const ranges = <Segmented label="Range" value={range} options={METRIC_RANGES} onValue={onRange} />;
+  const ranges = <Segmented label="Range" value={range} options={filter ? RANGES : METRIC_RANGES} onValue={onRange} />;
   const covers = filter === undefined ? (projectId === null ? "All projects" : "This project only")
     : projectId === null ? `${filter.projects.length} projects` : displayText(filter.projects.find((project) => project.id === projectId)?.name ?? projectId);
   const tools = <div className="mx-tools">
@@ -392,20 +343,22 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
     </div> : ranges}
     <span className="mx-count">{covers} · {updatedText(updatedMs, nowMs)} · provider-reported usage per turn</span>
   </div>;
-  const check = filter && <CheckLimits busy={filter.limits.busy} onRefresh={filter.limits.onRefresh} />;
+  const kept = filter && <LimitsWhileReading usage={usage} filter={filter} names={names} nowMs={nowMs} />;
   const reads = [usage, metrics];
-  if (reads.some((read) => read.kind === "not_ready" || (read.kind === "error" && usageNotReady(read)))) return <NotReady what="Metrics" />;
+  if (reads.some((read) => read.kind === "not_ready" || (read.kind === "error" && usageNotReady(read)))) {
+    return filter && usage.kind === "ok" ? <div className="stack">{tools}<NotReady what="Metrics" />{kept}</div> : <NotReady what="Metrics" />;
+  }
   if (usage.kind === "error" || metrics.kind === "error") {
     const failed = usage.kind === "error" ? usage : metrics.kind === "error" ? metrics : null;
-    return <div className="stack">{tools}{check}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
+    return <div className="stack">{tools}{kept}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
   }
-  if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{tools}{check}<Skeleton shape="card" count={3} /></div>;
+  if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{tools}{kept}<Skeleton shape="card" count={3} /></div>;
   const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs, filter);
   if (filter) return <div className="stack mx-page">
     {tools}
     <AppNotices usage={usage.value} failure={filter.limits.failure} nowMs={nowMs} />
-    <Tiles usage={usage.value} metrics={metrics.value} />
-    <Chart metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} reread={usage.value.total.cache_read} />
+    <LeadPanel usage={usage.value} metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} />
+    <Tiles usage={usage.value} metrics={metrics.value} lead />
     <AccountLimitsPanel limits={usage.value.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />
     {filter.limits.next}
     <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={APP_BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} />
