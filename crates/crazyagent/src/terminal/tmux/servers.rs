@@ -303,8 +303,9 @@ impl Servers {
     /// The server an adopted teammate runs on while it listens: its lead's teammates' server,
     /// or its lead's own for a lead started without one (CA-SEC-002: never its own once a
     /// teammates' server it had ended, since the lead can tag a pane there with the
-    /// teammate's name); else none, forgetting a teammate whose server is gone. Takes the
-    /// teammate. Returns the server host or the failure to open one.
+    /// teammate's name). None answers as unknown; the teammate is kept while its lead's own
+    /// server listens, as one failed connect proves no end, and forgotten once both are gone.
+    /// Takes the teammate. Returns the server host or the failure to open one.
     fn member(&self, agent: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
         let lead = self
             .members
@@ -317,7 +318,12 @@ impl Servers {
         let server = match self.team_mates(&lead) {
             Ok(Some(mates)) => Some(mates),
             Ok(None) => self.own(&lead)?,
-            Err(problem) if problem.0 == TEAMMATES_SERVER_ENDED => None,
+            Err(problem) if problem.0 == TEAMMATES_SERVER_ENDED => {
+                if self.own(&lead)?.is_some() {
+                    return Ok(None);
+                }
+                None
+            }
             Err(problem) => return Err(problem),
         };
         if server.is_none()
