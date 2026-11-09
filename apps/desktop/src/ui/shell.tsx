@@ -44,7 +44,7 @@ export function Sidebar({ route, projects, profileName, engine, onRetry }: {
       <a className="nav-item" href={formatRoute({ name: "new-project", step: "basics" })} aria-current={current(route.name === "new-project")}>
         <Icon name="folder-plus" /><span className="name">New project</span>
       </a>
-      <a className="nav-item" href={formatRoute({ name: "settings", tab: "accounts" })} aria-current={current(route.name === "settings" && route.tab !== "profile")}>
+      <a className="nav-item" href={formatRoute({ name: "settings", tab: "accounts" })} aria-current={current(route.name === "settings")}>
         <Icon name="settings" /><span className="name">Settings</span>
       </a>
       <a className="nav-item" href={formatRoute({ name: "metrics" })} aria-current={current(route.name === "metrics")}>
@@ -54,11 +54,13 @@ export function Sidebar({ route, projects, profileName, engine, onRetry }: {
     <div className="sidebar-foot">
       <span className="avatar" aria-hidden="true">{Array.from(name)[0].toUpperCase()}</span>
       <span className="foot-text">
-        <a className="me" href={formatRoute({ name: "settings", tab: "profile" })} aria-current={current(route.name === "settings" && route.tab === "profile")}>{name}</a>
+        <span className="foot-name">
+          <a className="me" href={formatRoute({ name: "settings", tab: "profile" })}>{name}</a>
+          {engine !== "running" && engine !== "connecting" && <button type="button" className="btn quiet small foot-retry" onClick={onRetry}>Try again</button>}
+        </span>
         {engine === "running" ? <span className="engine-state running"><Icon name="server" size={13} />Engine running</span>
           : engine === "connecting" ? <span className="engine-state connecting"><Icon name="loader-circle" size={13} spin />Connecting...</span>
-          : <span className="row"><span className="engine-state down"><Icon name="wifi-off" size={13} />Engine not running</span>
-            <button type="button" className="btn quiet small" onClick={onRetry}>Try again</button></span>}
+          : <span className="engine-state down"><Icon name="wifi-off" size={13} />Engine not running</span>}
       </span>
     </div>
   </aside>;
