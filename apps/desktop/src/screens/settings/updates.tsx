@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { engineVersions, restartEngine, type EngineVersions, type Failure } from "../../api";
 import { checkForUpdate, installUpdate, linkCommandLineTool, loadUpdateSettings, restartApp, setUpdateChannel, type UpdateChannel, type UpdateSettings } from "../../api-updates";
-import { useAppSession, useLoad, type Loaded } from "../../state";
+import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, Icon, LoadError, NotReady, Segmented, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { blocking, CHECK_INTERVAL_MS, progressLabel, progressPercent, shouldAnnounce, updateMessage, updateStore, type UpdatePhase } from "./updates-state";
@@ -116,9 +116,10 @@ export function useEngineRestart(onDone: () => void): [EngineRestart, () => void
 
 /** Settings, Updates as a view of its state: this app's version and channel with the channel
  * switch, the engine's version with Restart engine when it differs, the check and install
- * status with progress, Restart, and Install command line tool. Inputs: the settings and
- * engine version reads, the update phase, the channel, engine restart and command line tool
- * states and the handlers. Output: the page. */
+ * status with progress, Restart, and Install command line tool. A channel pick stays on screen
+ * until a read moves the channel or its save is refused. Inputs: the settings and engine version
+ * reads, the update phase, the channel, engine restart and command line tool states and the
+ * handlers, the channel's giving the failure, empty once saved. Output: the page. */
 export function UpdatesView({ settings, engine, phase, channelBusy, channelProblem, cli, engineRestart, onChannel, onCheck, onInstall, onRestart, onLinkCli, onRestartEngine, onRetry }: {
   settings: Loaded<UpdateSettings>;
   engine: Loaded<EngineVersions>;
@@ -128,26 +129,33 @@ export function UpdatesView({ settings, engine, phase, channelBusy, channelProbl
   channelBusy: boolean;
   channelProblem: string;
   cli: CliState;
-  onChannel: (channel: UpdateChannel) => void;
+  onChannel: (channel: UpdateChannel) => Promise<string>;
   onCheck: () => void;
   onInstall: () => void;
   onRestart: () => void;
   onLinkCli: () => void;
   onRetry: () => void;
 }) {
+  const [held, holdChannel] = useHeld<UpdateChannel | null>(settings.kind === "ok" ? settings.value.channel : null);
   if (settings.kind === "loading") return <Skeleton shape="line" count={3} />;
   if (settings.kind === "not_ready") return <NotReady what="Updates" />;
   if (settings.kind === "error") return <LoadError message={settings.code === "unknown" ? settings.message : updateMessage(settings.code)} onRetry={onRetry} />;
-  const { current_version, channel } = settings.value;
+  const { current_version } = settings.value;
+  const channel = held ?? settings.value.channel;
   const busy = blocking(phase);
+  const pickChannel = (next: UpdateChannel) => {
+    if (channelBusy || next === channel) return;
+    const settled = holdChannel(next);
+    void onChannel(next).then(settled);
+  };
   return <div className="pj pj-stack">
     <section className="pj-stack-s in-panel" aria-label="Version and channel">
       <h2 className="row"><Icon name="shield-check" size={16} />CrazyAgent {displayText(current_version)}</h2>
       <EngineVersionLine versions={engine} restart={engineRestart} onRestart={onRestartEngine} installing={busy} />
       <p className="pj-secondary">Stable gets tested releases. Dev gets every change as soon as it's merged.</p>
-      {busy || channelBusy
+      {busy
         ? <p>Channel: {channel === "dev" ? "Dev" : "Stable"}</p>
-        : <Segmented label="Update channel" value={channel} options={CHANNELS} onValue={onChannel} />}
+        : <Segmented label="Update channel" value={channel} options={CHANNELS} onValue={pickChannel} />}
       {channelProblem && <p className="pj-error" role="alert">{channelProblem}</p>}
     </section>
     <section className="pj-stack-s in-panel" aria-label="Updates">
@@ -221,17 +229,21 @@ export function UpdatesSettings() {
     else updateStore.dispatch({ kind: "install_failed", code: result.kind === "error" ? result.code : "unknown" });
   };
 
-  const switchChannel = async (channel: UpdateChannel) => {
-    if (channelBusy || settings.kind !== "ok" || settings.value.channel === channel) return;
+  const switchChannel = async (channel: UpdateChannel): Promise<string> => {
     setChannelBusy(true);
     setChannelProblem("");
     const result = await setUpdateChannel(channel);
     setChannelBusy(false);
-    if (result.kind !== "ok") { setChannelProblem(failure(result, "Changing the channel")); return; }
+    if (result.kind !== "ok") {
+      const problem = failure(result, "Changing the channel");
+      setChannelProblem(problem);
+      return problem;
+    }
     updateStore.dispatch({ kind: "channel_changed" });
     reload();
     session.showToast(channel === "dev" ? "You'll get Dev updates." : "You'll get Stable updates.");
     void check();
+    return "";
   };
 
   const restart = async () => {
@@ -250,6 +262,6 @@ export function UpdatesSettings() {
 
   return <UpdatesView settings={settings} engine={engine} phase={phase} channelBusy={channelBusy} channelProblem={channelProblem} cli={cli} onRetry={reload}
     engineRestart={engineRestart} onRestartEngine={restartEngineNow}
-    onChannel={(channel) => void switchChannel(channel)} onCheck={() => void check()} onInstall={() => void install()}
+    onChannel={switchChannel} onCheck={() => void check()} onInstall={() => void install()}
     onRestart={() => void restart()} onLinkCli={() => void linkCli()} />;
 }

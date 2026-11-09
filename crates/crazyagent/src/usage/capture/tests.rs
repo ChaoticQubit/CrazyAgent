@@ -1656,3 +1656,26 @@ fn claude_transcript_tool_calls_count_only_for_an_agent_launched_without_hooks()
         "the agent with hooks counts its calls through them"
     );
 }
+
+/// SECAUDIT usage/capture/progress-message-id-unbounded: a message id in an agent-written
+/// record is only ever compared, so a huge one is not kept whole in the shared database.
+#[test]
+fn a_huge_message_id_is_not_kept_whole_in_a_record_s_progress() {
+    let (_directory, db) = store();
+    let who = attribution(RunKind::Agent, None);
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s1.jsonl");
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(
+        &record,
+        claude_assistant(&"a".repeat(3 * 1024 * 1024), 1, 0, 0, 0, "end_turn"),
+    )
+    .unwrap();
+    scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    let length: i64 = db
+        .query_row("SELECT length(progress) FROM usage_files", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(length < 1024, "{length}");
+}

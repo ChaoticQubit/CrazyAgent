@@ -262,6 +262,7 @@ fn refusal(code: &str, moved: &[String]) -> String {
         "changes_target_invalid" => "that branch is not a local branch of the project.".to_owned(),
         "changes_branch_moved" | "changes_stale" => "the branch moved meanwhile. Merge again.".to_owned(),
         "changes_agent_busy" => "the harness is still writing. Merge again once it reports done.".to_owned(),
+        crate::landing::WORKER_OPEN => crate::landing::WORKER_OPEN_TEXT.to_owned(),
         other => format!("the change set could not land ({}).", bound_text(other, 120)),
     }
 }

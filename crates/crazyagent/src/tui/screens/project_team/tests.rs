@@ -2619,7 +2619,7 @@ fn g_turns_ask_before_merge_on_and_off() {
     assert_eq!(
         view.notice,
         Some(Notice::plain(
-            "The master's merge tool now waits for your Accept. At Full access, a master change set that merges a harness in can still land by itself."
+            "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
         ))
     );
     let mut asking = team();

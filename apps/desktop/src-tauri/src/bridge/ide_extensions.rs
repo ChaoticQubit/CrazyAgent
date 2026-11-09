@@ -5,7 +5,7 @@ use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
-fn extensions_error(error: EngineError) -> BridgeError {
+pub(super) fn extensions_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }

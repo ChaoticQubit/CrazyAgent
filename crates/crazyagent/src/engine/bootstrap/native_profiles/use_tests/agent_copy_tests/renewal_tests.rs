@@ -366,15 +366,18 @@ fn one_renewal_runs_at_a_time_per_account() {
         "native_profile_renewal_busy"
     );
     let waiter = std::thread::spawn(move || {
-        let started = Instant::now();
         let held = second.hold_renewal(Duration::from_secs(20)).map(drop);
-        (started.elapsed(), held)
+        (Instant::now(), held)
     });
     std::thread::sleep(Duration::from_millis(400));
+    let released = Instant::now();
     drop(held);
-    let (waited, held) = waiter.join().unwrap();
+    let (taken, held) = waiter.join().unwrap();
     assert!(held.is_ok());
-    assert!(waited >= Duration::from_millis(400), "{waited:?}");
+    assert!(
+        taken >= released,
+        "the waiter took the lock before its release"
+    );
     drop(first);
 }
 

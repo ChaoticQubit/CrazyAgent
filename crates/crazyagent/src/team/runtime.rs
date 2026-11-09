@@ -7398,7 +7398,7 @@ impl TeamRuntime {
                 let worker = &self.workers[&id];
                 let (access, toolchains) = (Some(worker.access), worker.toolchains.clone());
                 let network = Some(worker.network);
-                let per_turn = worker.managed && !worker.live;
+                let per_turn = worker.managed && !worker.live && !worker.kept_session;
                 let pane = pane.map(|record| PaneRecord {
                     access,
                     toolchains,

@@ -9,6 +9,7 @@ const appPage = await import("../src/screens/metrics/index.tsx");
 const router = await import("../src/ui/router.ts");
 const shell = await import("../src/ui/shell.tsx");
 const app = await import("../src/app.tsx");
+const { SessionContext } = await import("../src/state.ts");
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -46,17 +47,20 @@ const metrics = {
   ],
 };
 const names = { agents: new Map([["team-8", "Juniper"]]), accounts: new Map([["acct-a", "Pool A, Claude 1"]]) };
+const LIMITS = { pools: new Map(), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
+const FILTER = { projects: PROJECTS, onProject: forbidden, limits: LIMITS };
+const SESSION = { projects: { kind: "loading" }, noteResult: (result) => result, showToast() {} };
 const render = (patch = {}) => renderToStaticMarkup(createElement(view.MetricsPage, {
   projectId: null, usage: { kind: "ok", value: usage }, metrics: { kind: "ok", value: metrics }, adoption: null,
   range: "today", by: "project", names, sinceMs: SINCE, nowMs: NOW, updatedMs: NOW - 10_000, offset: 0,
-  filter: { projects: PROJECTS, onProject: forbidden },
+  filter: FILTER,
   onRange: forbidden, onBy: forbidden, onRetry: forbidden, ...patch,
 }));
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
-const tableText = (markup) => text(markup.slice(markup.indexOf("<table")));
+const tableText = (markup) => text(markup.slice(markup.lastIndexOf("<table")));
 
 test("the app Metrics page covers every project on the engine and filters by project", () => {
-  const markup = renderToStaticMarkup(createElement(appPage.AppMetrics, { projects: PROJECTS }));
+  const markup = renderToStaticMarkup(createElement(SessionContext.Provider, { value: SESSION }, createElement(appPage.AppMetrics, { projects: PROJECTS })));
   assert.match(markup, /<h1>Metrics<\/h1><p>Every project on this engine in one place\.<\/p>/);
   assert.match(markup, /<label for="mx-project" class="visually-hidden">Project<\/label><select id="mx-project"/);
   assert.deepEqual([...markup.matchAll(/<option value="([^"]*)"[^>]*>([^<]*)</gu)].map((match) => [match[1], match[2]]), [["", "All projects"], ["alpha", "Alpha"], ["beta", "Beta"]]);
@@ -65,9 +69,9 @@ test("the app Metrics page covers every project on the engine and filters by pro
 
 test("all projects shows the same tiles, and By project lists each project with its agents and runs first", () => {
   const markup = render();
-  assert.match(text(markup), /Tokens 2\.3K 1\.2K input, 800 cache write, 300 output/);
+  assert.match(text(markup), /Tokens 2\.3K Input 1\.2K Cache write 800 Output 300/);
   assert.match(text(markup), /2 projects · Updated 10 s ago · provider-reported usage per turn/);
-  assert.match(text(markup), /Tasks 6 done 1 waiting, 0 failed Merges 19 5 into main, 1 undone Lines /, "the same six tiles as the project tab");
+  assert.match(text(markup), /Tasks 6 done 1 waiting, 0 failed Merges 19 5 into main, 1 undone Lines /, "the project tab's tiles under the lead panel");
   assert.match(text(markup), /By project By agent By run By account By harness/);
   const table = tableText(markup);
   assert.match(table, /^ Project Tokens Input Cache write Output Cache read Agents Runs Merges Share of tokens /, "By project counts each project's merges, as the mockup does");
@@ -102,13 +106,13 @@ test("a picked project shows its name, stays picked and drops the Project column
   assert.match(tableText(markup), /^ Agent Tokens Input Cache write Output Cache read Harness Account Share of tokens /);
 });
 
-test("the sidebar's App section opens Metrics at #/metrics, below the main items", () => {
+test("the sidebar's App section opens Metrics at #/metrics, last of its links", () => {
   assert.deepEqual(router.parseRoute("#/metrics"), { name: "metrics" });
   assert.equal(router.formatRoute({ name: "metrics" }), "#/metrics");
   assert.deepEqual(router.parseRoute("#/metrics/extra"), { name: "home" });
   const sidebar = (route) => renderToStaticMarkup(createElement(shell.Sidebar, { route, projects: PROJECTS, profileName: "Sam", engine: "running", onRetry: forbidden }));
   const markup = sidebar({ name: "metrics" });
-  assert.match(markup, /<\/nav><nav class="nav app-nav" aria-label="App"><a class="nav-item" href="#\/metrics" aria-current="page"><svg[\s\S]*?<\/svg><span class="name">Metrics<\/span><\/a><\/nav><div class="sidebar-foot">/);
+  assert.match(markup, /<\/nav><nav class="nav app-nav" aria-label="App">[\s\S]*<a class="nav-item" href="#\/metrics" aria-current="page"><svg[\s\S]*?<\/svg><span class="name">Metrics<\/span><\/a><\/nav><div class="sidebar-foot">/);
   assert.doesNotMatch(sidebar({ name: "home" }), /href="#\/metrics" aria-current/);
 });
 
@@ -158,4 +162,134 @@ test("across all projects By project and By agent total the Tokens tile, an Othe
     assert.match(shown(by), /Total 2\.3K 1\.2K 800 300 4K/, by);
   }
   assert.doesNotMatch(tableText(render()), /Other, not listed/);
+});
+
+const DAY = 24 * HOUR;
+const limitsFor = (patch = {}) => ({
+  account: "acct-a", plan: "Max", source: "poll", observed_ms: NOW - 2 * MINUTE, failure: null,
+  five_hour: { used_percent: 84, resets_at_ms: NOW + 2 * HOUR }, weekly: { used_percent: 12, resets_at_ms: NOW + 3 * DAY },
+  five_hour_reset_override_ms: null, weekly_reset_override_ms: null, five_hour_left_out_label: null, weekly_left_out_label: null, ...patch,
+});
+const withUsage = (patch) => ({ usage: { kind: "ok", value: { ...usage, ...patch } } });
+
+test("the app page says the numbers still use the old counting and what it counts", () => {
+  const words = text(render());
+  assert.match(words, /These numbers still use the old counting\. The recount comes in the next update, and you will see old and new side by side once\./);
+  assert.match(words, /Tokens your agents used and each account's limits\. Counts come from each run's own record; limits are checked every 10 minutes\./);
+});
+
+test("the project tab keeps its own page: no old-counting notice and no Account limits", () => {
+  const words = text(render({ filter: undefined, projectId: "alpha", by: "agent" }));
+  assert.doesNotMatch(words, /old counting/);
+  assert.doesNotMatch(words, /Account limits/);
+  assert.doesNotMatch(words, /Check limits now/);
+});
+
+test("Account limits has Check limits now, a meter and the clock time of each reset", () => {
+  const markup = render(withUsage({ limits: [limitsFor()] }));
+  assert.match(markup, /<h2>Account limits<\/h2><button[^>]*>[\s\S]*?Check limits now/);
+  assert.match(markup, /<meter class="usage-meter"/);
+  const words = text(markup);
+  assert.match(words, /Pool A, Claude 1/);
+  assert.match(words, /5-hour 84% used Near limit/);
+  assert.match(words, /Resets at (?:[A-Z][a-z]{2} )?\d\d:\d\d, in 2 h 0 min/);
+  assert.match(words, /Weekly 12% used Resets at [A-Z][a-z]{2} \d\d:\d\d, in 3 d 0 h/);
+  assert.match(words, /Set reset time/);
+});
+
+test("a window reads as near its limit from 80 percent", async () => {
+  const limits = await import("../src/screens/metrics/limits.tsx");
+  assert.equal(limits.nearLimit(79.9), false);
+  assert.equal(limits.nearLimit(80), true);
+  assert.equal(limits.resetAtText(null, NOW), "Next reset not known yet");
+});
+
+test("a failed action, an internal error and a partial reading all show on the app page", () => {
+  const health = [{ step: "poll", panics: 2, last_ms: NOW - 5 * MINUTE, recovered_ms: null }];
+  const words = text(render({ ...withUsage({ health, partial_homes: 1 }), filter: { ...FILTER, limits: { ...LIMITS, failure: "The check failed." } } }));
+  assert.match(words, /The check failed\./);
+  assert.match(words, /Checking account limits hit an internal error 2 times/);
+  assert.match(words, /Some usage may be missing: 1 agent home/);
+});
+
+test("no limits read yet says so, and the next accounts panel follows Account limits", () => {
+  const next = createElement("p", null, "Next accounts here");
+  const words = text(render({ filter: { ...FILTER, limits: { ...LIMITS, next } } }));
+  assert.match(words, /No limits read yet\. Signed-in Claude and ChatGPT accounts show here after their first check\. Next accounts here/);
+});
+
+test("Check limits now stays reachable while loading and after a failed read, and shows when it is asking", () => {
+  assert.match(text(render({ usage: { kind: "loading" } })), /Check limits now/);
+  assert.match(text(render({ usage: { kind: "error", code: "x", message: "y" } })), /Check limits now/);
+  assert.match(text(render(withUsage({ limits: [limitsFor()] }))), /Check limits now/);
+  assert.match(text(render({ filter: { ...FILTER, limits: { ...LIMITS, busy: "refresh" } } })), /Asking\.\.\./);
+});
+
+test("the lead panel shows Tokens with its mix beside the chart, and the chart has a table with the same numbers", () => {
+  const markup = render();
+  const lead = markup.slice(markup.indexOf('class="panel mx-lead"'));
+  const words = text(lead);
+  assert.match(words, /Tokens 2\.3K/);
+  assert.match(words, /Input 1\.2K Cache write 800 Output 300 Re-read from cache 4K/);
+  assert.match(lead, /aria-live="polite"/);
+  assert.match(lead, /role="img"/);
+  assert.match(lead, /<details class="mx-more"><summary>Show chart as a table<\/summary>/);
+  assert.match(text(lead.slice(lead.indexOf("<details"))), /Tokens Input Cache write Output Cache read/);
+});
+
+test("only unreported usage reads as not reported in the lead, never as zero", () => {
+  const none = tokens(0, 0, 0, 0);
+  assert.match(text(render(withUsage({ total: none, not_reported_by: ["Codex"] }))), /Tokens Not reported Usage not reported by Codex/);
+});
+
+test("usage some harness did not report stays under the Tokens", () => {
+  assert.match(text(render(withUsage({ not_reported_by: ["Codex"] }))), /Not in these totals: usage not reported by Codex\./);
+});
+
+test("the tiles under the lead are Re-read from cache, Runs, Tasks, Merges and Lines", () => {
+  const keys = [...render().matchAll(/mx-tile-key">([^<]*)</gu)].map((match) => match[1]);
+  assert.deepEqual(keys, ["Re-read from cache", "Runs", "Tasks", "Merges", "Lines"]);
+});
+
+test("the app page has All and the project tab does not", () => {
+  assert.match(text(render()), /Today 7 days 30 days All/);
+  assert.doesNotMatch(text(render({ filter: undefined, projectId: "alpha", by: "agent" })), /Today 7 days 30 days All/);
+});
+
+test("Account limits and its reset controls stay when only the metrics read failed (r1 L1)", () => {
+  const next = createElement("p", null, "Next accounts here");
+  const failed = { kind: "error", code: "usage_outcome_unknown", message: "" };
+  const markup = render({ ...withUsage({ limits: [limitsFor()] }), metrics: failed, filter: { ...FILTER, limits: { ...LIMITS, next } } });
+  const words = text(markup);
+  assert.match(words, /Account limits/);
+  assert.match(words, /Set reset time/);
+  assert.match(words, /Next accounts here/);
+  assert.match(words, /Try again/);
+  assert.equal(markup.split("Check limits now").length - 1, 1, "one Check limits now");
+  assert.doesNotMatch(text(render({ usage: failed })), /Account limits/, "no usage read, no limits to show");
+});
+
+test("Account limits stays while the metrics read loads or is not ready (r1 L1)", () => {
+  const notReady = { kind: "error", code: "usage_unavailable", message: "" };
+  for (const metrics of [{ kind: "loading" }, { kind: "not_ready" }, notReady]) {
+    const markup = render({ ...withUsage({ limits: [limitsFor()] }), metrics });
+    assert.match(text(markup), /Account limits/, JSON.stringify(metrics));
+    assert.match(text(markup), /Set reset time/, JSON.stringify(metrics));
+    assert.equal(markup.split("Check limits now").length - 1, 1, JSON.stringify(metrics));
+  }
+  assert.match(text(render({ ...withUsage({ limits: [limitsFor()] }), metrics: notReady })), /isn't ready yet/);
+});
+
+test("a refused Check limits says why on the failed-read page (r1 L2)", () => {
+  const failed = { kind: "error", code: "usage_outcome_unknown", message: "" };
+  const filter = { ...FILTER, limits: { ...LIMITS, failure: "The check failed." } };
+  assert.match(text(render({ usage: failed, filter })), /The check failed\./);
+  assert.match(text(render({ metrics: failed, filter })), /The check failed\./);
+});
+
+test("a picked project keeps the app page's notice and Account limits (r1 L3)", () => {
+  const words = text(render({ projectId: "alpha", ...withUsage({ limits: [limitsFor()] }) }));
+  assert.match(words, /These numbers still use the old counting\./);
+  assert.match(words, /Account limits/);
+  assert.match(words, /Set reset time/);
 });

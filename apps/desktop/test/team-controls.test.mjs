@@ -178,7 +178,7 @@ test("two saves from one view both name the version that view read, so the secon
   const source = readFileSync(new URL("../src/screens/team/controls.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /setSaved|Math\.max/, "no version from an earlier save is ever named with values the view did not read");
   assert.match(source, /const saved: Limits = \{ turn: status\.turn_limit_secs \?\? null, session: status\.session_limit_secs \?\? null, idle: status\.idle_stop_secs \?\? null \};/, "the limits a change starts from are read from the shown status");
-  assert.match(source, /const shown = shownChoice\(limits, saved, sameLimits\);/, "a held change shows only while the status still holds what it replaced");
+  assert.match(source, /const \[shown, holdLimits\] = useHeld\(saved, sameLimits\);/, "a held change shows only while the status still holds what it replaced");
   assert.match(source, /const result = await send\(settingsVersion\(status\)\);/, "every save names the version of the status the view read");
 });
 
@@ -202,12 +202,10 @@ test("each team setting sends the version it read, and a stale save says so and 
     "setTeamTimeLimits(projectId, next.turn, next.session, next.idle, version)",
     "setOnHarnessSwitch(projectId, mode, version)",
     'showFinishedAgents(projectId, choice === "show", version)',
-  ]) assert.ok(source.includes(`await save((version) => ${call}`), call);
+  ]) assert.ok(source.includes(`run(() => save((version) => ${call}`) || source.includes(`run(() => teamSave(status, (version) => ${call}`), call);
   assert.match(source, /const result = await send\(settingsVersion\(status\)\);\s*return savedStale\(result\) \? TEAM_SETTINGS_STALE : changeNote\(result, missing\);/);
-  for (const handler of ["toggle", "limit", "chooseSwitch", "view"]) {
-    const body = source.slice(source.indexOf(`async function ${handler}(`), source.indexOf("\n  }\n", source.indexOf(`async function ${handler}(`)));
-    assert.match(body, /setNote\(message\);\s*reload\(\);$/, `${handler} reads the team again after every save, stale or not`);
-  }
+  const saving = source.slice(source.indexOf("export function useChange("), source.indexOf("\n  }\n", source.indexOf("export function useChange(")));
+  assert.match(saving, /setNote\(message\);\s*reload\(\);$/, "every save reads the team again, stale or not");
   assert.equal(controls.TEAM_SETTINGS_STALE, "Team settings changed since the controls read them, so your change was not saved. The controls now show the saved settings; make your change again.");
   const api = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
   const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");

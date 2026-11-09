@@ -313,6 +313,52 @@ export function sharedLoad<T>(key: string | null, fresh: boolean, read: () => Pr
   return started;
 }
 
+/** A choice the owner saved on a control and the read value it replaced. */
+export interface Held<T> {
+  choice: T;
+  from: T;
+}
+
+/** What a control keeps after a save: the choice once the engine applied it, so the control
+ * never flips back to the old value while the reload is on its way, and nothing after a refused
+ * or unconfirmed save, so the read value shows again. Inputs: the held choice and the save's
+ * note, empty when the engine applied it. Output: the choice to keep, or null. */
+export function afterSave<T>(held: Held<T>, note: string): Held<T> | null {
+  return note === "" ? held : null;
+}
+
+/** The value a control shows: the held choice while the read still holds the value it replaced,
+ * otherwise the read value, once a reload or another window moved it. Inputs: the held choice or
+ * null, the read value and how two values compare. Output: the value. */
+export function shownChoice<T>(held: Held<T> | null, current: T, same: (a: T, b: T) => boolean = Object.is): T {
+  return held !== null && same(held.from, current) ? held.choice : current;
+}
+
+/** Whether two plain values read the same, for a held setting made of several fields. Inputs: the
+ * two values. Output: true when they do. */
+export function sameJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Starts holding a picked value and gives the call that settles it with the save's note. */
+export type Hold<T> = (choice: T) => (note: string) => void;
+
+/** Keeps a control on the owner's pick from the moment of the pick until a read moves the value
+ * it replaced, or until its save is refused: without this a control falls back to the old read
+ * value after its save, and a native select cannot be picked back to the value it already shows.
+ * Inputs: the value read and how two values compare. Output: the value to show and `hold`. */
+export function useHeld<T>(current: T, same: (a: T, b: T) => boolean = Object.is): [T, Hold<T>] {
+  const [held, setHeld] = useState<Held<T> | null>(null);
+  const moved = held !== null && !same(held.from, current);
+  useEffect(() => { if (moved) setHeld(null); }, [moved]);
+  const hold: Hold<T> = (choice) => {
+    const kept = { choice, from: current };
+    setHeld(kept);
+    return (note) => setHeld((now) => now === kept ? afterSave(kept, note) : now);
+  };
+  return [shownChoice(held, current, same), hold];
+}
+
 /** Loads one engine read for a screen and reloads it when the session revision or the given
  * keys change. A read given a cache name first shows its last good reply from an earlier mount,
  * then refreshes in the background; a failed refresh shows its error as an uncached read does.

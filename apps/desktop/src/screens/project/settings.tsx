@@ -20,7 +20,7 @@ import { changeOutcome } from "./research";
 import { RemoveDialogView, deleteReady } from "./remove-dialog";
 import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
-import { SessionContext, useLoad } from "../../state";
+import { SessionContext, useHeld, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { PluginsAndSkills } from "../settings/plugins";
 import { TEAM_SETTINGS_STALE, changeNote, settingsVersion } from "../team/controls";
@@ -178,21 +178,24 @@ export function applyMode(status: Pick<TeamStatus, "apply_harness_switch">): Swi
  * status read. Output: the select with the last change's note, or nothing before the team
  * status is read. */
 export function ApplySwitch({ data }: { data: Pick<ProjectData, "id" | "team" | "reloadTeam"> }) {
-  const [chosen, setChosen] = useState<SwitchApply | null>(null);
+  const [saving, setSaving] = useState(false);
   const [note, setNote] = useState("");
   const status = data.team.result?.kind === "ok" ? data.team.result.value : null;
+  const [shown, hold] = useHeld<SwitchApply | null>(status === null ? null : applyMode(status));
   if (status === null) return null;
   const choose = async (mode: SwitchApply) => {
-    setChosen(mode);
+    const settled = hold(mode);
+    setSaving(true);
     const result = await setApplyHarnessSwitch(data.id, mode, settingsVersion(status));
     const message = savedStale(result) ? TEAM_SETTINGS_STALE : changeNote(result, "the Apply a master harness change setting");
-    setChosen(null);
+    setSaving(false);
+    settled(message);
     setNote(message);
     data.reloadTeam();
   };
   return <>
-    <Select id="ps-apply-switch" label="Apply a master harness change" value={chosen ?? applyMode(status)} options={APPLY_OPTIONS}
-      onValue={(value) => { if (chosen === null && (value === "when_idle" || value === "next_start")) void choose(value); }}
+    <Select id="ps-apply-switch" label="Apply a master harness change" value={shown ?? applyMode(status)} options={APPLY_OPTIONS}
+      onValue={(value) => { if (!saving && (value === "when_idle" || value === "next_start")) void choose(value); }}
       helper="When the master is idle switches the running master once it finishes its turn and an account of the pool can run the new harness. At the next start keeps it on its harness until it starts again." />
     {note && <p className="pj-note warn" role="status">{displayText(note)}</p>}
   </>;

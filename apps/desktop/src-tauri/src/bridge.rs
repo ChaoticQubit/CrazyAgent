@@ -60,6 +60,9 @@ pub use queue::BridgeQueue;
 const PAGE_SIZE: u8 = 16;
 const PROJECTION_BYTES_MAX: usize = 65_536;
 
+/// The engine's code for a reply this app could not read.
+const ENGINE_VERSION_MISMATCH: &str = "engine_version_mismatch";
+
 #[derive(Debug, Serialize)]
 pub struct BridgeError {
     pub code: &'static str,
@@ -86,11 +89,7 @@ pub type Unlocked<T> =
 /// at zero, and one attention request when a new notification arrived.
 /// Takes the main window, the unseen count and whether one is new.
 /// Returns a plain failure where the platform has no app badge.
-pub fn attention(
-    window: &tauri::WebviewWindow,
-    unseen: u32,
-    alert: bool,
-) -> Result<(), BridgeError> {
+pub fn attention(window: &tauri::Window, unseen: u32, alert: bool) -> Result<(), BridgeError> {
     window
         .set_badge_count((unseen > 0).then_some(i64::from(unseen)))
         .map_err(|_| failure("attention_unavailable"))?;
@@ -111,16 +110,31 @@ fn failure(code: &'static str) -> BridgeError {
 }
 
 /// A bridge failure that keeps the engine code behind it, so the window names it after its
-/// own sentence instead of hiding it. Inputs: the bridge code and the raw engine code.
+/// own sentence instead of hiding it. An engine version mismatch stays that code, so the
+/// window shows its restart sentence. Inputs: the bridge code and the raw engine code.
 /// Output: the error; the cause is the engine code made plain by `plain_code`, absent when
 /// it equals the bridge code.
 fn caused(code: &'static str, engine: &str) -> BridgeError {
+    if engine == ENGINE_VERSION_MISMATCH {
+        return failure(ENGINE_VERSION_MISMATCH);
+    }
     let cause = crazyagent::protocol::plain_code(engine);
     BridgeError {
         code,
         cause: (cause != code).then(|| cause.to_owned()),
         account: None,
     }
+}
+
+/// A bridge failure on a route that shows no engine cause. An engine version mismatch stays
+/// that code, so the window shows its restart sentence. Inputs: the bridge code and the raw
+/// engine code. Output: the error.
+fn uncaused(code: &'static str, engine: &str) -> BridgeError {
+    failure(if engine == ENGINE_VERSION_MISMATCH {
+        ENGINE_VERSION_MISMATCH
+    } else {
+        code
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -384,7 +398,7 @@ impl NativeBridge {
             controller
                 .reattach_configured(client)
                 .await
-                .map_err(|_| failure("owner_reconnect_failed"))?
+                .map_err(|error| uncaused("owner_reconnect_failed", &error.0))?
         } else {
             let (ordinary, controller) =
                 OwnerController::attach_configured(client, OwnerClientKind::Desktop)
@@ -1306,6 +1320,42 @@ fn cut_projects(mut items: Vec<ProjectRow>, more: bool) -> Result<ProjectList, B
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_bridge_error_function_keeps_an_engine_version_mismatch() {
+        const CODE: &str = "engine_version_mismatch";
+        let engine = || crazyagent::engine::EngineError(CODE.to_owned());
+        let mapped = [
+            ("changes", changes::changes_error(engine())),
+            ("usage", usage::usage_error(engine())),
+            ("agents", agents::agent_error(engine())),
+            ("process", process::process_error(engine())),
+            ("questions", questions::questions_error(engine())),
+            ("recovery", recovery::recovery_error(engine())),
+            ("cleanup", cleanup::cleanup_error(engine())),
+            ("ide reveal", ide_reveal::ide_error(engine())),
+            ("ide extensions", ide_extensions::extensions_error(engine())),
+            ("ide tab", ide::ide_error(engine())),
+            ("notify", notify::notify_error(engine())),
+            ("native auth", native_auth::auth_error(engine())),
+            ("account profile", account_profile::profile_error(engine())),
+            ("accounts", accounts::account_error(engine())),
+            ("plugins", plugins::plugin_failure(engine())),
+            ("team", team::read_failure(CODE)),
+            ("project setup", project_setup::read_failure(CODE)),
+            (
+                "intake and github",
+                intake::known(CODE, &[], "intake_failed"),
+            ),
+            ("harness catalog", caused("owner_read_failed", CODE)),
+        ];
+        let dropped: Vec<&str> = mapped
+            .iter()
+            .filter(|(_, error)| error.code != CODE || error.cause.is_some())
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(dropped, Vec::<&str>::new());
+    }
 
     #[test]
     fn a_project_list_stops_at_its_bound_says_so_and_fits_the_worst_rows() {

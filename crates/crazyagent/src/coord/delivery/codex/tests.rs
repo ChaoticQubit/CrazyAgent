@@ -74,3 +74,34 @@ fn a_turn_id_is_kept_only_when_it_is_short_plain_text() {
         assert_eq!(turn_id(id), None, "{id:?}");
     }
 }
+
+/// SECAUDIT codex-bridge-oversized-server-ping-panics-team-runtime: a ping larger than a
+/// control frame may be is refused as a broken bridge, with no panic in the engine.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_oversized_ping_from_the_socket_is_refused_without_a_panic() {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = base.join("p");
+    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = crate::spawn_gate::accept_unix_std(&listener).unwrap();
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request);
+        stream
+            .write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+            .unwrap();
+        let mut frame = vec![0x89, 0x7f];
+        frame.extend_from_slice(&1_048_577u64.to_be_bytes());
+        frame.resize(frame.len() + 1_048_577, 0);
+        let _ = stream.write_all(&frame);
+        let mut rest = Vec::new();
+        let _ = stream.read_to_end(&mut rest);
+    });
+    let answer = super::wire::deliver(&socket, "dummy", true);
+    assert!(answer.is_err(), "{answer:?}");
+    server.join().unwrap();
+}

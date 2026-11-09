@@ -8,7 +8,7 @@ export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.r
 export const BRIDGE = fileURLToPath(new URL("../../src-tauri/src/bridge", import.meta.url));
 
 const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
-const NATIVE_PARAM = /State<|AppHandle|Channel<|WebviewWindow/;
+const NATIVE_PARAM = /State<|AppHandle|Channel<|\bWebview\b/;
 const QUEUE_CALL = /^state\.0\.\w+\([^;]*\)\s*\.await$/;
 const IMPL_TYPES = ["NativeBridge", "BridgeQueue"];
 const BRIDGE_FILES_MAX = 256;
@@ -91,7 +91,7 @@ export function commandArgs(source) {
 export function commands(source) {
   const custom = commandArgs(source);
   const found = [];
-  const head = /#\[tauri::command\]\s*(?:pub\s+)?(?:async\s+)?fn\s+(desktop_\w+)\s*\(/g;
+  const head = /#\[tauri::command\]\s*(?:pub\s+)?(?:async\s+)?fn\s+(desktop_\w+)\s*(?:<[^>]*>)?\(/g;
   for (let match = head.exec(source); match; match = head.exec(source)) {
     let index = head.lastIndex;
     let depth = 1;
@@ -216,10 +216,10 @@ function resolve(name, body, impls) {
  * `{ route }` or `{ skip }`; throws when a routed call does not match its type's impl block. */
 export function plan(command, impls = bridgeMethods()) {
   assert.ok(IMPL_TYPES.every((type) => impls?.get(type) instanceof Map), "plan reads the bridge's impl blocks");
-  const prefix = ["main_window(&window)?;", "terminal_window(&window)?;", "terminal_window_for(&window, &id)?;"].find((guard) => command.body.startsWith(guard));
+  const prefix = ["main_window(&webview)?;", "terminal_window(&webview)?;", "terminal_window_for(&webview, &id)?;"].find((guard) => command.body.startsWith(guard));
   if (prefix === undefined) return { skip: "no window check" };
-  const args = command.params.filter((param) => param.name !== "window" && !/^State<'_, NativeState>$/.test(param.type));
-  if (!command.params.some((param) => param.name === "window")) return { skip: "no window parameter" };
+  const args = command.params.filter((param) => param.name !== "webview" && !/^State<'_, NativeState>$/.test(param.type));
+  if (!command.params.some((param) => param.name === "webview")) return { skip: "no window parameter" };
   if (args.some((param) => NATIVE_PARAM.test(param.type))) return { skip: "native parameter" };
   let body = command.body.slice(prefix.length).replace("ensure_default_engine().await?;", "").replace(/\s+/g, " ").trim();
   const queued = QUEUE_CALL.test(body);

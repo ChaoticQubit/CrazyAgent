@@ -1454,3 +1454,59 @@ async fn a_start_stops_waiting_once_stop_all_began() {
         "ide_server_stopped"
     );
 }
+
+/// A project's IDE stays refused until the last Delete everything holding it ends, and the
+/// open then goes on to its next check.
+#[tokio::test]
+async fn a_projects_ide_stays_refused_until_its_last_delete_hold_ends() {
+    let folder = scratch();
+    let servers = servers_in(folder.path(), Duration::from_secs(60));
+    let held = project("held");
+    let open = || servers.open(&held, folder.path(), folder.path(), false);
+    let first = servers.hold_for_delete(&held).await;
+    let second = servers.hold_for_delete(&held).await;
+    drop(first);
+    assert_eq!(open().await.unwrap_err().0, "ide_project_deleting");
+    drop(second);
+    assert_eq!(open().await.unwrap_err().0, "ide_build_invalid");
+}
+
+/// A hold that lands while an open is still starting waits for that open and stops what it
+/// started, and the next open is refused.
+#[tokio::test]
+async fn a_delete_hold_landing_on_a_starting_open_stops_what_it_started() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let starting = project("starting");
+    let recorded = data.path().join("ide").join("starting").join(GROUP);
+    let build = cached_build();
+    let opening = servers.open(&starting, checkout.path(), &build, false);
+    let holding = async {
+        let deadline = Instant::now() + START_LIMIT;
+        let group = loop {
+            if let Some((group, _)) = recorded_group(&recorded) {
+                break group.as_raw_nonzero().get();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the launch never recorded its group"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        (group, servers.hold_for_delete(&starting).await)
+    };
+    let (opened, (group, hold)) = tokio::join!(opening, holding);
+    assert!(opened.is_ok(), "{opened:?}");
+    gone(group).await;
+    assert_eq!(
+        servers
+            .open(&starting, checkout.path(), &build, false)
+            .await
+            .unwrap_err()
+            .0,
+        "ide_project_deleting"
+    );
+    drop(hold);
+    servers.stop_all().await;
+}

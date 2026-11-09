@@ -65,7 +65,7 @@ test("the panel shows the app strategy, the pool's own strategy and each member'
 });
 
 test("every scheduling refusal reads as a sentence", () => {
-  for (const code of ["account_rank_invalid", "account_reserve_invalid", "account_schedule_invalid", "account_schedule_full", "connection_not_found", "pool_not_found"]) {
+  for (const code of ["account_rank_invalid", "account_reserve_invalid", "account_schedule_invalid", "account_schedule_full", "connection_not_found", "pool_not_found", "project_not_found"]) {
     assert.doesNotMatch(plainError(code), /Something went wrong/, code);
   }
 });

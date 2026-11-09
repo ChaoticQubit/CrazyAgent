@@ -1,7 +1,9 @@
 use super::*;
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
-use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
+use crate::engine::owner::{
+    OwnerClientKind, OwnerMutation, OwnerOperation, OwnerRequest, OwnerResponse, OwnerResult,
+};
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
@@ -124,6 +126,23 @@ impl Engine {
 
     async fn stop(mut self) {
         self.service.take().unwrap().shutdown().await.unwrap();
+    }
+
+    /// Stops this engine and starts a new one on the same data folder, as a restart does.
+    async fn restart(&mut self) {
+        self.service.take().unwrap().shutdown().await.unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            self.root.path(),
+            "e.sock",
+            &self.root.path().join("global.toml"),
+            &self.root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        self.service = Some(service);
+        self._stop = stop;
     }
 }
 

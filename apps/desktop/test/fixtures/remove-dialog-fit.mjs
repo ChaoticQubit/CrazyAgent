@@ -51,8 +51,9 @@ function seen(node, dialog) {
 
 /** Measures the open dialog, its body and its top choice, rounded to whole pixels. Output: the
  * window height, the dialog's, its body's and its folder and loss lists' visible and full
- * heights and scroll offsets, the top choice's edges against the dialog's visible edges, and
- * whether the loss list and the Delete everything button are wholly in view. */
+ * heights and scroll offsets, the top choice's edges against the dialog's visible edges,
+ * whether the loss list, the name box and the Delete everything button are wholly in view, and
+ * the folder list's tab index. */
 export function fit() {
   const dialog = document.querySelector("dialog[open]");
   const remove = [...dialog.querySelectorAll("button")].find((button) => button.textContent.trim() === "Delete everything");
@@ -65,5 +66,43 @@ export function fit() {
     window: innerHeight, dialog: box(dialog), body: box(body), details: details ? box(details) : null,
     cardTop: Math.round(card.top - frame.top), cardBottom: Math.round(card.bottom - frame.top), frame: Math.round(frame.height),
     losses: seen(dialog.querySelector("[aria-label='What would be lost']"), dialog), remove: seen(remove, dialog),
+    name: seen(dialog.querySelector("input[aria-label='Type the project name']"), dialog), detailsTab: details?.tabIndex ?? null,
   };
+}
+
+/** How the folder list sits in the open dialog. Output: the heading's words and whether it is in
+ * view, how many folder rows show whole, the tallest row in pixels, and whether the list starts
+ * below its heading and ends above the loss list. */
+export function folders() {
+  const dialog = document.querySelector("dialog[open]");
+  const list = dialog.querySelector(".pj-remove-details");
+  const heading = dialog.querySelector(".pj-remove-trash .pj-label");
+  const losses = dialog.querySelector("[aria-label='What would be lost']");
+  const box = list.getBoundingClientRect();
+  const rows = [...list.children].map((row) => row.getBoundingClientRect());
+  return {
+    heading: heading.textContent, headingSeen: seen(heading, dialog),
+    whole: rows.filter((row) => row.top >= box.top - 0.5 && row.bottom <= box.bottom + 0.5).length,
+    tallest: Math.round(Math.max(...rows.map((row) => row.height))),
+    belowHeading: box.top >= heading.getBoundingClientRect().bottom - 0.5,
+    aboveLosses: losses === null || box.bottom <= losses.getBoundingClientRect().top + 0.5,
+  };
+}
+
+/** How each loss line sits in the open dialog. Output: for each line its height in pixels, whether
+ * the words saying what is lost are wholly inside it, its text and its hover text. */
+export function lossFit() {
+  const list = document.querySelector("dialog[open] [aria-label='What would be lost']");
+  return [...list.children].map((line) => {
+    const box = line.getBoundingClientRect();
+    const what = line.querySelector(".pj-remove-what")?.getBoundingClientRect();
+    return { height: Math.round(box.height), words: what !== undefined && what.left >= box.left - 0.5 && what.right <= box.right + 0.5, text: line.textContent, title: line.title };
+  });
+}
+
+/** Where the keyboard is in the folder list. Output: whether the list has the focus and how far
+ * it has scrolled, in pixels. */
+export function listState() {
+  const list = document.querySelector("dialog[open] .pj-remove-details");
+  return { focused: document.activeElement === list, top: Math.round(list.scrollTop) };
 }

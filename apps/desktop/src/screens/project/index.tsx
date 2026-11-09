@@ -6,7 +6,7 @@ import { loadQuestionCounts, pendingByProject } from "../../api-questions";
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { ConfirmDialog, Menu, formatRoute, shortcutKey, type IconName } from "../../ui";
 import { displayText } from "../conversation";
-import { HEARTBEAT_MS, closeIde, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
+import { HEARTBEAT_MS, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
 import { MetricsView } from "../metrics/view";
@@ -14,7 +14,7 @@ import { WaitingChanges } from "../changes/waiting";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
 import { IdeExtensionConfirm } from "./ide-extensions";
-import { IDE_POLL_MS, IdeTab, IdeUnavailable } from "./ide";
+import { IDE_POLL_MS, IdeTab, IdeUnavailable, useCloseIde } from "./ide";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { ProjectHead, useProjectHead, type HeadMeta } from "./head";
@@ -228,6 +228,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const { data, toast, session } = useProject(projectId, navigate, name);
   const [ide, setIde] = useState<Result<IdeView>>();
   const [busy, setBusy] = useState(false);
+  const [ideHideProblem, setIdeHideProblem] = useState<string | null>(null);
   const view = ide?.kind === "ok" ? ide.value : undefined;
   const failure = ide !== undefined && ide.kind !== "ok" ? ide : undefined;
   const fetching = ideFetching(view);
@@ -239,7 +240,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const [importMoves, setImportMoves] = useState(0);
   const select = (next: TabId) => navigate(`/projects/${encodeURIComponent(projectId)}/${next}`);
 
-  useEffect(() => () => void closeIde(projectId), [projectId]);
+  useCloseIde(projectId, data.notify);
 
   useEffect(() => {
     let live = true;
@@ -298,6 +299,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <RecoveryBanner key={projectId} project={projectId} />
     <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />
+    {ideHideProblem && <p className="ide-problem" role="alert">{ideHideProblem}</p>}
     {active !== review && <WaitingChanges projectId={projectId} place={review} />}
     <ImportMoveBanner projectId={projectId} version={importMoves} />
     <InstructionImportPrompt projectId={projectId} name={data.name ? displayText(data.name) : projectId} onMoved={() => setImportMoves((count) => count + 1)} />
@@ -311,7 +313,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "metrics" && <MetricsView key={data.id} projectId={data.id} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
-      {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={(value) => setIde({ kind: "ok", value })} />}
+      {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={(value) => setIde({ kind: "ok", value })} onHideProblem={setIdeHideProblem} />}
     </div>
     {replaces && <IdeConfirm data={data} />}
     {replaces && <IdeExtensionConfirm data={data} />}

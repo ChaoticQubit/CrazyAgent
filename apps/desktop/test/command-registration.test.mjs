@@ -19,13 +19,13 @@ test("every command the window invokes is registered in all four native places",
   const build = read("src-tauri/build.rs");
   const lib = read("src-tauri/src/lib.rs");
   const allowed = JSON.parse(read("src-tauri/capabilities/main-window.json")).permissions;
-  const handler = lib.slice(lib.indexOf("generate_handler!["));
+  const handler = lib.slice(lib.indexOf("native_commands! {"));
   const commands = invokedCommands();
   assert.ok(commands.length > 0);
   for (const command of commands) {
     assert.ok(build.includes(`"${command}"`), `${command} missing from build.rs`);
     assert.ok(allowed.includes(`allow-${command.replaceAll("_", "-")}`), `${command} missing from main-window.json`);
-    assert.match(lib, new RegExp(`#\\[tauri::command\\]\\s*(?:async )?fn ${command}\\(`), `${command} has no tauri command`);
+    assert.match(lib, new RegExp(`#\\[tauri::command\\]\\s*(?:async )?fn ${command}(?:<[^>]*>)?\\(`), `${command} has no tauri command`);
     assert.match(handler, new RegExp(`\\b${command},`), `${command} missing from invoke_handler`);
   }
 });

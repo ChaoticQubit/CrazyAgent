@@ -4,7 +4,7 @@ use crazyagent::engine::owner::{IDE_CODES, OwnerClient};
 use crazyagent::ide::bridge::reveal::RevealFocus;
 use std::sync::Arc;
 
-fn ide_error(error: EngineError) -> BridgeError {
+pub(super) fn ide_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }

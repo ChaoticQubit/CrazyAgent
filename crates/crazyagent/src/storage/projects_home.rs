@@ -416,7 +416,60 @@ pub(super) fn delete_settle(db: &Connection, exchange: Option<u64>) -> Result<()
     Ok(())
 }
 
+/// Finishes at engine start the engine files a delete recorded and never removed, on a thread
+/// of its own so no owner job waits on a folder, and clears through the job the live path
+/// uses: the record's names only, at most `DELETE_FILES_PER_START` a start. Inputs: the
+/// connection, the database path and the storage queue. Output: Ok once the thread started,
+/// or at once with nothing recorded.
+pub(super) fn delete_files_finish(
+    db: &Connection,
+    path: &Path,
+    jobs: mpsc::Sender<Job>,
+) -> Result<(), EngineError> {
+    let mut query = db
+        .prepare("SELECT name, inode FROM projects_delete_files ORDER BY name LIMIT ?1")
+        .map_err(error)?;
+    let files = query
+        .query_map([DELETE_FILES_PER_START], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    if files.is_empty() {
+        return Ok(());
+    }
+    let path = path.to_path_buf();
+    std::thread::Builder::new()
+        .name("crazyagent-delete-files".into())
+        .spawn(move || {
+            let done = home::remove_engine_files(&path, &files);
+            let (reply, answer) = oneshot::channel();
+            let cleared = jobs
+                .blocking_send(Job::DeleteFilesClear(done, reply))
+                .is_ok()
+                && matches!(answer.blocking_recv(), Ok(Ok(())));
+            if !cleared {
+                eprintln!("project_delete_files_not_cleared cause=storage_unavailable");
+            }
+        })
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Clears the record of engine files that are finished, the last step of a delete. Inputs:
+/// the connection and the finished names. Output: Ok once none of them is recorded.
+pub(super) fn delete_files_clear(db: &Connection, names: &[String]) -> Result<(), EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    for name in names {
+        tx.execute("DELETE FROM projects_delete_files WHERE name=?1", [name])
+            .map_err(error)?;
+    }
+    tx.commit().map_err(error)
+}
+
 const DELETE_ROWS_MAX: i64 = 100_000;
+const DELETE_FILES_PER_START: i64 = 1024;
 
 /// Plans a Delete everything before the owner transport moves anything: the owner's grant
 /// and revision, the project, its exact name and [`delete_check`] are checked, then Stop all
@@ -518,14 +571,7 @@ pub(super) fn move_plan(
     if pending_move(&tx)?.is_some() {
         return Err(error("home_move_in_progress"));
     }
-    let deleting: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects_delete_pending)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if deleting {
+    if delete_planned(&tx)? {
         return Err(error("home_move_delete_in_progress"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
@@ -805,6 +851,18 @@ pub(super) fn settle_pending(
     Ok(changed)
 }
 
+/// Whether a Delete everything is planned and not yet forgotten. It keeps the projects home
+/// where the plan saw it, since the plan trashes folders from that home. Input: the
+/// connection. Output: true while any plan is recorded.
+fn delete_planned(db: &Connection) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects_delete_pending)",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
 fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcome, EngineError> {
     match home::check_home(Path::new(picked), &engine_root(path)?) {
         Ok(canonical) => {
@@ -945,7 +1003,15 @@ pub(super) fn execute(
         | HomeAction::MoveHome {
             path: picked,
             move_projects: false,
-        } => switch_home(tx, path, picked),
+        } => {
+            if pending_move(tx)?.is_some() {
+                return rejected("home_move_in_progress");
+            }
+            if delete_planned(tx)? {
+                return rejected("home_move_delete_in_progress");
+            }
+            switch_home(tx, path, picked)
+        }
         HomeAction::MoveHome {
             move_projects: true,
             ..

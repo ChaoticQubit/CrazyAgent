@@ -77,7 +77,7 @@ fn parameters(command: &str) -> Vec<String> {
 
 #[test]
 fn the_window_passes_only_ids_versions_and_the_choice() {
-    let window = ["window: WebviewWindow,", "state: State<'_, NativeState>,"];
+    let window = ["webview: Webview,", "state: State<'_, NativeState>,"];
     assert_eq!(
         parameters("desktop_answer_question"),
         [

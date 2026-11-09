@@ -1460,3 +1460,51 @@ async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desk
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_native_auth_a_recheck_that_reads_the_end_leaves_the_open_drawer_its_final_view() {
+    run_case(|fixture| async move {
+        let running = sleeping_login(&fixture).await;
+        let mut bridge = fixture.bridge().await;
+        let drawer = inspect(&mut bridge, "connection-z").await;
+        bridge
+            .start_native_auth(&drawer.ticket, NativeAuthMethod::ClaudeOfficial)
+            .await
+            .unwrap();
+        login_pid(&running).await;
+        let cancelling =
+            serde_json::to_value(bridge.cancel_native_auth(&drawer.ticket).await.unwrap()).unwrap();
+        let mut phase = NativeAuthPhase::Cancelling;
+        for _ in 0..120 {
+            phase = fixture.owner_fact(&cancelling).await.fact.phase;
+            if phase == NativeAuthPhase::Cancelled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(phase, NativeAuthPhase::Cancelled);
+        OwnerController::attach(
+            &fixture.root.path().join("s"),
+            OwnerClientKind::Tui,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .add_account(claude_draft("Added after the cancel"), None)
+        .await
+        .unwrap();
+        let current = inspect(&mut bridge, "connection-z").await;
+        assert_ne!(current.source_hash, drawer.source_hash);
+        let last = bridge
+            .read_native_auth(&current.ticket)
+            .await
+            .map(|view| serde_json::to_value(view).unwrap()["phase"].clone())
+            .map_err(|error| error.code);
+        assert_eq!(
+            last,
+            Ok(Value::from("cancelled")),
+            "a recheck that read the end leaves the drawer's next read its final view"
+        );
+    })
+    .await;
+}

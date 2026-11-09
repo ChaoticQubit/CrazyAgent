@@ -4185,6 +4185,195 @@ fn lead_merge_lands_a_linked_sub_agent_change_set() {
     assert_eq!(state, ("accepted".to_owned(), Some(landed)));
 }
 
+/// Starts one agent of a linked team in its own worktree of the owner's repository, as the
+/// runtime records one. Takes the fixture, the store, the git home, the project, the agent,
+/// its lead and how `worktree add` checks it out. Returns its worktree.
+fn linked_agent(
+    fixture: &Fixture,
+    db: &Connection,
+    home: &Path,
+    project: &Path,
+    agent: i64,
+    lead: Option<i64>,
+    checkout: &[&str],
+) -> PathBuf {
+    let worktree = project
+        .join(".crazyagent/worktrees")
+        .join(format!("agent-{agent}"));
+    let mut arguments = vec!["worktree", "add", "-q"];
+    arguments.extend_from_slice(checkout);
+    arguments.extend([worktree.to_str().unwrap(), "HEAD"]);
+    git_in(home, project, &arguments);
+    team_agent(fixture, agent, "codex", "idle", lead);
+    let git_dir = project
+        .join(".git/worktrees")
+        .join(format!("agent-{agent}"));
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            params![
+                agent,
+                PROJECT,
+                project.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+                git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    crate::landing::record_worktree_start(db, project, &worktree, &git_dir).unwrap();
+    worktree
+}
+
+/// Ends one turn of a linked agent that wrote one file. Takes the store, the project, the
+/// agent, its worktree and the file. Returns the change set its turn left.
+fn linked_turn(
+    db: &Connection,
+    project: &Path,
+    agent: i64,
+    worktree: &Path,
+    file: &str,
+) -> crate::landing::ChangeSetId {
+    std::fs::write(worktree.join(file), "work\n").unwrap();
+    crate::landing::record_turn_end(
+        db,
+        &crate::landing::Workspace {
+            project: ProjectId::new(PROJECT).unwrap(),
+            agent: crate::landing::ChangeAgent {
+                kind: crate::landing::AgentKind::Sub,
+                id: agent.to_string(),
+                label: format!("Agent {agent}"),
+            },
+            repository: project.to_path_buf(),
+            worktree: worktree.to_path_buf(),
+            git_dir: project
+                .join(".git/worktrees")
+                .join(format!("agent-{agent}")),
+        },
+        &crate::landing::TurnEnd {
+            outcome: crate::landing::TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Do it".into(),
+        },
+    )
+    .unwrap()
+    .expect("the file is work for review")
+}
+
+/// A lead's merge of a worker is refused while that worker's own worker holds an open set,
+/// with one plain sentence: nothing lands and both sets stay open, since a merge is no
+/// press by the owner (HB-S4-LANDED r2).
+#[test]
+fn lead_merge_is_refused_while_its_worker_has_an_open_worker_of_its_own() {
+    const DEEP: i64 = 53;
+    let mut fixture = Fixture::new();
+    let (home, project) = owner_repository(&fixture);
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let lead = project
+        .join(".crazyagent/worktrees")
+        .join(format!("agent-{LEAD}"));
+    let branch = crate::landing::claim_task_branch(&db, &project, &lead, "lead").unwrap();
+    linked_agent(&fixture, &db, &home, &project, LEAD, None, &["-b", &branch]);
+    let worker = linked_agent(
+        &fixture,
+        &db,
+        &home,
+        &project,
+        WORKER,
+        Some(LEAD),
+        &["--detach"],
+    );
+    let deep = linked_agent(
+        &fixture,
+        &db,
+        &home,
+        &project,
+        DEEP,
+        Some(WORKER),
+        &["--detach"],
+    );
+    let sets = [
+        linked_turn(&db, &project, WORKER, &worker, "fix.txt"),
+        linked_turn(&db, &project, DEEP, &deep, "deep.txt"),
+    ];
+    let start = git_in(&home, &project, &["rev-parse", &branch]);
+    let access = ModelAccess::default();
+    let agents = fixture.base.join("team/agents");
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        Call::Merge {
+            agent: WORKER.to_string(),
+        },
+    );
+    assert!(error, "{answer}");
+    assert_eq!(
+        answer,
+        format!("Not accepted: {}", crate::landing::WORKER_OPEN_TEXT)
+    );
+    assert_eq!(git_in(&home, &project, &["rev-parse", &branch]), start);
+    for set in &sets {
+        let state: String = fixture
+            .connection
+            .query_row(
+                "SELECT state FROM landing_change_sets WHERE id=?1",
+                [set.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "pending");
+    }
+}
+
+/// The master's merge of a lead is refused while a worker of that lead holds an open set,
+/// with one plain sentence: nothing lands and both sets stay open. Once the worker's set
+/// closes the same merge lands the lead (HB-S4-LANDED r2).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_merge_of_a_lead_is_refused_while_its_worker_holds_an_open_set() {
+    use crate::landing::ChangeState;
+    let mut fixture = Fixture::new();
+    let (repo, _remote) = project_repo(&fixture);
+    let start = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    let (lead, lead_set) = finished_harness(&fixture, &repo, "docs-writer", "docs", "one\ntwo\n");
+    let (worker, worker_set) = finished_harness(&fixture, &repo, "fixer", "fix", "one\nfixed\n");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            params![lead, worker],
+        )
+        .unwrap();
+    let merge = |fixture: &mut Fixture| {
+        as_master(fixture, tool::MERGE_TOOL, json!({"agent": "@docs-writer"}))
+    };
+    assert_eq!(
+        merge(&mut fixture),
+        (
+            format!("Not merged into main: {}", crate::landing::WORKER_OPEN_TEXT),
+            true
+        )
+    );
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
+    assert_eq!(set_state(&fixture, &lead_set), ChangeState::Pending);
+    assert_eq!(set_state(&fixture, &worker_set), ChangeState::Pending);
+
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let head = crate::landing::change_set(&db, &worker_set)
+        .unwrap()
+        .unwrap()
+        .1
+        .head;
+    let now_ms = u64::try_from(crate::team::now_ms()).unwrap();
+    crate::landing::discard(&db, &worker_set, &head, now_ms).unwrap();
+    let (said, refused) = merge(&mut fixture);
+    assert!(!refused, "{said}");
+    assert_ne!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
+    assert_eq!(set_state(&fixture, &lead_set), ChangeState::Accepted);
+}
+
 #[test]
 fn a_live_master_remembers_and_recalls_memories_quoted_with_who_saved_them() {
     use crate::memory::library::{LibraryAction, MemoryOrigin};
@@ -4921,4 +5110,42 @@ fn log_activity_switched_off_is_refused_from_the_mailbox_and_logs_nothing() {
         .filter(|item| item.kind.agent_logged())
         .count();
     assert_eq!(logged, 0, "a switched-off call logs nothing");
+}
+
+/// SECAUDIT team-recall-newline-expansion-panics-runtime: notes full of line feeds grow when
+/// recall quotes them, and the reply still fits instead of panicking the shared runtime.
+#[test]
+fn recall_of_notes_full_of_line_feeds_fits_the_reply_without_a_panic() {
+    let mut fixture = Fixture::new();
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "INSERT INTO projects(id,body) VALUES ('{PROJECT}','{{}}');"
+        ))
+        .unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    for n in 0..6 {
+        let saved = memory_answer(
+            &mut fixture.connection,
+            &project,
+            "Dummy agent",
+            Call::Remember {
+                text: format!("{n}{}z", "\n".repeat(1990)),
+                scope: tool::MemoryReach::Project,
+            },
+        );
+        assert!(matches!(saved, Some(Ok((_, false)))), "{saved:?}");
+    }
+    let (text, failed) = memory_answer(
+        &mut fixture.connection,
+        &project,
+        "Dummy agent",
+        Call::Recall {
+            query: String::new(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!failed, "{text}");
+    assert!(text.len() <= tool::REPLY_TEXT_MAX, "{}", text.len());
 }

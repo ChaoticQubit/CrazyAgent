@@ -199,7 +199,7 @@ test("Access and merging words the merge choice as the mockup does, with its two
   const cards = (html) => [...row(html, MERGE).matchAll(/<label class="radio-card">([\s\S]*?)<\/label>/g)].map((card) => ({ checked: /checked=""/.test(card[1]), text: plain(card[1]) }));
   const merges = settingsHtml({ master_lands: "merges" });
   assert.deepEqual(cards(merges), [
-    { checked: true, text: "Master resolves conflicts and merges into main itself Default Of the master's own change sets, only one that merges in another open change set lands on main by itself, with everything in that set. The others wait for your Accept." },
+    { checked: true, text: "Master resolves conflicts and merges into main itself Default A master change set lands on main by itself only when all it holds is the fix of a real conflict with another open change set, and Ask me before merging is off. Anything else in the set makes all of it wait for your Accept." },
     { checked: false, text: "Master resolves conflicts, then waits for my accept The resolved change set waits in Changes until you accept it." },
   ]);
   assert.deepEqual(cards(settingsHtml({ master_lands: "waits" })).map((card) => card.checked), [false, true]);
@@ -207,7 +207,7 @@ test("Access and merging words the merge choice as the mockup does, with its two
   assert.match(plain(row(settingsHtml(), MERGE)), /Only at Full access\./, "below Full access the engine sends no merge choice");
   assert.deepEqual(cards(settingsHtml()).map((card) => card.text), cards(merges).map((card) => card.text), "below Full access the row shows the same two choices");
   assert.equal([...row(settingsHtml(), MERGE).matchAll(/<input type="radio"[^>]*disabled=""/g)].length, 2, "below Full access both choices are locked");
-  assert.match(plain(row(merges, ASK)), /On stops the master's merge tool: each finished harness's work waits in Changes for your Accept\. At Full access, a master change set that merges it in can still land by itself\./);
+  assert.match(plain(row(merges, ASK)), /On stops the master merging by itself: each finished harness's work waits in Changes for your Accept, and so does a master change set that fixes a conflict\./);
   const restart = row(merges, RESTART);
   assert.match(plain(restart), /Always/);
   assert.doesNotMatch(restart, /<(button|select|input|textarea)/, "the restart line has no control while it has no setting");

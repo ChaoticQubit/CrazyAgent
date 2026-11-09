@@ -8,7 +8,7 @@ import {
   processTextError, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionMode,
   type InstructionSettings, type InstructionView, type SavedText, type SkillEntry, type EditDelivery,
 } from "../api-process";
-import { useAppSession, useLoad, type Loaded } from "../state";
+import { sameJson, useAppSession, useHeld, useLoad, type Loaded } from "../state";
 import { Button, ConfirmDialog, Dialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
 import { navigate } from "../ui/router";
 import { displayText } from "./conversation";
@@ -40,7 +40,7 @@ const TASK_STEPS = [
   "Master writes the task and picks an agent.",
   "Agent reads instructions, asks the graph, works on its branch.",
   "Reviewer checks the change set.",
-  "The master merges it, or it waits for your accept when Ask me before merging is on. At Full access a master change set that merges in another can also land by itself.",
+  "The master merges it, or it waits for your accept when Ask me before merging is on. With Ask off, at Full access a master change set that only fixes conflicts can also land by itself.",
 ];
 
 /** How many lines a text shows, a final line break adding none. Input: the text. Output: the
@@ -223,19 +223,25 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
 /** A project's agent settings as a pure view: which of the app and project instructions its
  * agents get and whether headless Claude runs keep their transcript, each saved on its own
  * change. Settings that could not be read say why and show the defaults, so a change replaces
- * them. Inputs: the read, whether a save runs, the last save failure and the save action. */
+ * them. A pick stays on screen until a read moves the setting or its save is refused. Inputs: the
+ * read, whether a save runs, the last save failure and the save action, which gives the failure,
+ * empty once saved. */
 export function AgentSettingsView({ settings, busy, failure, onSave }: {
   settings: Loaded<InstructionView>;
   busy: boolean;
   failure: string;
-  onSave: (settings: InstructionSettings) => void;
+  onSave: (settings: InstructionSettings) => Promise<string>;
 }) {
+  const [current, hold] = useHeld<InstructionSettings>(settings.kind === "ok" ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS, sameJson);
   if (settings.kind === "loading") return <Skeleton shape="card" count={1} />;
   if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
-  const current = settings.kind === "ok" ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS;
   const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[0];
   const delivery = EDIT_DELIVERIES.find((option) => option.value === current.edits) ?? EDIT_DELIVERIES[0];
-  const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
+  const save = (next: InstructionSettings) => {
+    if (busy) return;
+    const settled = hold(next);
+    void onSave(next).then(settled);
+  };
   return <Panel title="Delivery" padded={false}>
     {(settings.kind === "error" || failure) && <div className="pr-del-notes">
       {settings.kind === "error" && <Notice tone="danger" alert>{processMessage(settings)}</Notice>}
@@ -274,7 +280,7 @@ export function AgentSettings({ projectId, onSaved }: { projectId: string; onSav
   const [settings, reload] = useLoad(() => loadInstructionSettings(projectId), [projectId]);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
-  const store = async (next: InstructionSettings) => {
+  const store = async (next: InstructionSettings): Promise<string> => {
     setFailure("");
     setBusy(true);
     const result = session.noteResult(await saveInstructionSettings(projectId, next, settingsSaveVersion(settings)));
@@ -286,8 +292,9 @@ export function AgentSettings({ projectId, onSaved }: { projectId: string; onSav
     const after = afterSettingsSave(result);
     if (after.reload) reload();
     setFailure(after.failure);
+    return after.failure;
   };
-  return <AgentSettingsView settings={settings} busy={busy} failure={failure} onSave={(next) => void store(next)} />;
+  return <AgentSettingsView settings={settings} busy={busy} failure={failure} onSave={store} />;
 }
 
 /** One agent's grounding and skill counts: graphify, ctx_*, then every skill its project

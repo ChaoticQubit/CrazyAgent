@@ -389,3 +389,72 @@ async fn delete_everything_stops_the_projects_ide_server_before_any_folder_moves
     );
     open.service.shutdown().await.unwrap();
 }
+
+/// An IDE opened while Delete everything waits for the project's agents is refused, so no
+/// server runs inside folders on their way to the Trash. The project opens again once the
+/// delete has ended, here refused by a read-only home.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ide_opened_while_delete_everything_waits_is_refused_until_the_delete_ends() {
+    use crate::engine::owner::{OwnerResponse, OwnerResult};
+    use crate::ide::server::tests::gone;
+
+    let mut open = open_ide("ca-idewait-").await;
+    let home = std::fs::canonicalize(open.home.path()).unwrap();
+    let database = open._root.path().join("engine.db");
+    let write = |sql: &str| {
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap();
+    };
+    write(
+        "INSERT INTO team_paused_projects(project,since_ms) VALUES ('ide-stop',1);
+         INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+         VALUES (7,'ide-stop','sub','codex',1,'working',0,0);",
+    );
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let client = open.controller.shared_client().unwrap();
+    let (project, group) = (open.project.clone(), open.group);
+    let folder = open
+        .controller
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .project_folder();
+    let exclude = folder.join(".git/info/exclude");
+    std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    let _ = std::fs::remove_file(&exclude);
+    let deleting = open
+        .controller
+        .delete_project(project.clone(), "IDE stop".into(), 3);
+    let opening = async {
+        gone(group).await;
+        let reopened = client.ide_tab_open(project.clone()).await;
+        let wrote = exclude.exists();
+        write("UPDATE team_agents SET status='stopped' WHERE id=7");
+        (reopened, wrote)
+    };
+    let (deleted, (reopened, wrote)) = tokio::join!(deleting, opening);
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let after = client.ide_tab_open(project.clone()).await;
+    open.service.shutdown().await.unwrap();
+    assert_eq!(
+        reopened.map(|server| server.url).map_err(|e| e.0),
+        Err("ide_project_deleting".to_owned())
+    );
+    assert!(
+        !wrote,
+        "a refused open writes nothing to the project folder"
+    );
+    assert!(
+        matches!(
+            &deleted,
+            Ok(OwnerResponse::Applied { operation })
+                if operation.result == OwnerResult::Rejected { code: "home_trash_failed".into() }
+        ),
+        "{deleted:?}"
+    );
+    assert!(after.is_ok(), "{after:?}");
+}

@@ -8,7 +8,7 @@ use crazyagent::protocol::ProjectId;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-fn process_error(error: EngineError) -> BridgeError {
+pub(super) fn process_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }

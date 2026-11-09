@@ -81,6 +81,16 @@ enum Reply {
     },
 }
 
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Finished { .. } => Some("cleanup.finished"),
+        Action::Removal { .. } => Some("cleanup.removal"),
+        _ => None,
+    }
+}
+
 fn unknown() -> EngineError {
     failure("cleanup_outcome_unknown")
 }
@@ -133,6 +143,7 @@ impl OwnerClient {
 
     async fn cleanup_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(CLEANUP_TIMEOUT), async {
+            let read = read_kind(&action);
             let frame = encode_frame(&Envelope { cleanup: action })
                 .map_err(|_| failure("cleanup_request_bounds"))?;
             self.root.verify()?;
@@ -159,7 +170,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("cleanup_unavailable"))?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }

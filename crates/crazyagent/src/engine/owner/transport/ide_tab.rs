@@ -38,6 +38,7 @@ pub const IDE_TAB_CODES: &[&str] = &[
     "ide_path_unreadable",
     "ide_platform_unqualified",
     "ide_port_unavailable",
+    "ide_project_deleting",
     "ide_project_folder_invalid",
     "ide_project_invalid",
     "ide_project_unknown",
@@ -122,6 +123,15 @@ enum Reply {
     Rejected { code: String },
 }
 
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::State => Some("ide_tab.state"),
+        _ => None,
+    }
+}
+
 fn unknown() -> EngineError {
     failure("ide_tab_outcome_unknown")
 }
@@ -175,6 +185,7 @@ impl OwnerClient {
 
     async fn ide_tab_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(IDE_TAB_TIMEOUT), async {
+            let read = read_kind(&action);
             let frame = encode_frame(&Envelope { ide_tab: action })
                 .map_err(|_| failure("ide_tab_request_bounds"))?;
             self.root.verify()?;
@@ -196,7 +207,9 @@ impl OwnerClient {
             stream.write_all(&packet).await.map_err(unavailable)?;
             stream.write_all(&frame).await.map_err(unavailable)?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
@@ -301,6 +314,9 @@ async fn open(
 ) -> Result<Reply, EngineError> {
     if unqualified().is_some() {
         return Err(failure("ide_platform_unqualified"));
+    }
+    if authority.ide_servers.deleting(&project) {
+        return Err(failure("ide_project_deleting"));
     }
     let (build, written, folder, hooks) = tokio::task::spawn_blocking({
         let project = project.clone();

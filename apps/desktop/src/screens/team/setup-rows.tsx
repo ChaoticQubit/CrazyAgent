@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { listMcpServers, type HarnessEntry, type McpServerView } from "../../api";
-import { failureCopy, loadAgentPolicy, type AgentAccess, type PolicyView, type PoolChoice, type StoredSetup } from "../../api-projects";
-import { useLoad } from "../../state";
+import { failureCopy, loadAgentPolicy, loadSetup, type AgentAccess, type PolicyView, type PoolChoice, type StoredSetup } from "../../api-projects";
+import { useHeld, useLoad } from "../../state";
 import { Button, ConfirmDialog, Icon, Segmented, Select, Switch, type SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { ACCESS_LEVELS, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, accessLabel, confirmFirst, policyOf } from "../project/access";
@@ -228,28 +228,36 @@ export function McpServersSetting({ projectId }: { projectId: string }) {
 }
 
 /** The master's account as a select of the project's pools, any account of the chosen pool,
- * saved in place through project Settings' own pool save. Inputs: the project data and the
- * select's id. Output: the row. */
+ * saved in place through project Settings' own pool save. While a pick is held the page's reads
+ * are older than the last save, so a new pick starts from the held pool and reads the project
+ * details again. Inputs: the project data and the select's id. Output: the row. */
 export function AccountSetting({ data, id }: { data: TeamProject; id: string }) {
-  const [held, setHeld] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const listed = valueOf(data.pools) ?? [];
   const pools = data.assigned && !listed.some((choice) => choice.pool.id === data.assigned?.pool.id) ? [data.assigned, ...listed] : listed;
   const current = data.assigned?.pool.id ?? "";
+  const [shown, hold] = useHeld(current);
+
+  async function save(value: string): Promise<string> {
+    const fresh = shown === current ? null : await loadSetup(data.id);
+    if (fresh !== null && fresh.kind !== "ok") return failureCopy(fresh.kind === "error" ? fresh.code : "unknown");
+    const assigned = pools.find((choice) => choice.pool.id === shown) ?? null;
+    return savePool({ ...data, assigned }, valueOf(fresh ?? data.setup), value === "" ? null : value);
+  }
 
   async function choose(value: string) {
-    if (busy || value === current) return;
-    setHeld(value);
+    if (busy || value === shown) return;
+    const settled = hold(value);
     setBusy(true);
-    const error = await savePool(data, valueOf(data.setup), value === "" ? null : value);
+    const error = await save(value);
     setBusy(false);
-    setHeld(null);
+    settled(error);
     setNote(error);
   }
 
   return <SettingRow label="Account">
-    <Select id={id} label="Account" value={held ?? current} options={accountOptions(pools)} onValue={(value) => void choose(value)}
+    <Select id={id} label="Account" value={shown} options={accountOptions(pools)} onValue={(value) => void choose(value)}
       helper="From the project's pool; fails over to the next account." />
     <RowNote note={note} />
   </SettingRow>;

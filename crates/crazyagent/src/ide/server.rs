@@ -85,6 +85,28 @@ pub struct Servers {
     slots: Mutex<HashMap<ProjectId, Arc<Slot>>>,
     launches: AtomicU64,
     closed: AtomicBool,
+    deleting: Mutex<HashMap<ProjectId, usize>>,
+}
+
+/// Keeps a project's IDE refused while its Delete everything runs. Made by
+/// [`Servers::hold_for_delete`]; dropping it ends the refusal, on every way out of the delete.
+pub struct DeleteHold<'a> {
+    servers: &'a Servers,
+    project: ProjectId,
+}
+
+impl Drop for DeleteHold<'_> {
+    fn drop(&mut self) {
+        let mut deleting = locked(&self.servers.deleting);
+        let holds = deleting
+            .get_mut(&self.project)
+            .expect("a live hold is counted");
+        assert!(*holds > 0);
+        *holds -= 1;
+        if *holds == 0 {
+            deleting.remove(&self.project);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -158,6 +180,7 @@ impl Servers {
             slots: Mutex::default(),
             launches: AtomicU64::new(0),
             closed: AtomicBool::new(false),
+            deleting: Mutex::default(),
         }
     }
 
@@ -218,7 +241,8 @@ impl Servers {
     /// limit, and is never handed back to a later open. Inputs: the project, its canonical
     /// folder, the canonical root of a verified build and whether the owner lets the IDE run
     /// the project's git hooks in that folder ([`super::git::shim_text`]). Output: where the
-    /// IDE is reached, or a plain refusal.
+    /// IDE is reached, or a plain refusal, `ide_project_deleting` while a
+    /// [`Servers::hold_for_delete`] lives.
     pub async fn open(
         &self,
         project: &ProjectId,
@@ -233,6 +257,9 @@ impl Servers {
         let _start = slot.start.lock().await;
         if self.closed.load(Ordering::SeqCst) {
             return Err(failure("ide_servers_closed"));
+        }
+        if self.deleting(project) {
+            return Err(failure("ide_project_deleting"));
         }
         if let Some(info) = reuse(&slot).await {
             return Ok(info);
@@ -370,6 +397,27 @@ impl Servers {
             finish(running).await;
         }
         stopped
+    }
+
+    /// Whether a Delete everything holds this project's IDE refused. Asked before an open does
+    /// any work, so a refused open writes nothing; [`Servers::open`] asks again under the
+    /// start lock. Input: the project. Output: true while a hold lives.
+    pub fn deleting(&self, project: &ProjectId) -> bool {
+        locked(&self.deleting).contains_key(project)
+    }
+
+    /// Stops a project's server for Delete everything and refuses its opens while the returned
+    /// hold lives, so no server runs inside folders on their way to the Trash. The hold counts
+    /// before the stop waits for the start lock, so an open already starting is stopped here
+    /// and a later one is refused. Input: the project. Output: the hold.
+    pub async fn hold_for_delete(&self, project: &ProjectId) -> DeleteHold<'_> {
+        *locked(&self.deleting).entry(project.clone()).or_default() += 1;
+        let hold = DeleteHold {
+            servers: self,
+            project: project.clone(),
+        };
+        self.stop(project).await;
+        hold
     }
 
     /// Stops every server, as the engine stops, and refuses later opens. Every group gets

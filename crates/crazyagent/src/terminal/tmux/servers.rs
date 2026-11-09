@@ -301,9 +301,12 @@ impl Servers {
     }
 
     /// The server an adopted teammate runs on while it listens: its lead's teammates' server,
-    /// or its lead's own for a lead started without one; else none, forgetting a teammate
-    /// whose lead's servers are gone. Takes the teammate. Returns the server host or the
-    /// failure to open one.
+    /// or its lead's own for a lead started without one (CA-SEC-002: never its own once a
+    /// teammates' server it had ended, since the lead can tag a pane there with the
+    /// teammate's name); else none, forgetting a teammate whose servers are all gone. Takes
+    /// the teammate. Returns the server host, `terminal_agent_unknown` while its teammates'
+    /// server is gone and its lead's own listens, as one failed connect proves no end, or
+    /// the failure to open one.
     fn member(&self, agent: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
         let lead = self
             .members
@@ -313,9 +316,16 @@ impl Servers {
         let Some(lead) = lead else {
             return Ok(None);
         };
-        let server = match self.mates(&lead)? {
-            Some(mates) => Some(mates),
-            None => self.own(&lead)?,
+        let server = match self.team_mates(&lead) {
+            Ok(Some(mates)) => Some(mates),
+            Ok(None) => self.own(&lead)?,
+            Err(problem) if problem.0 == TEAMMATES_SERVER_ENDED => {
+                if self.own(&lead)?.is_some() {
+                    return Err(failure("terminal_agent_unknown"));
+                }
+                None
+            }
+            Err(problem) => return Err(problem),
         };
         if server.is_none()
             && let Ok(mut members) = self.members.lock()
@@ -464,14 +474,16 @@ impl Host for Servers {
         }
         let mut ended = false;
         for lead in self.leads_listening() {
-            let servers = [self.mates(&lead), self.own(&lead)];
-            for server in servers
-                .into_iter()
-                .filter_map(|server| server.ok().flatten())
+            let server = match self.team_mates(&lead) {
+                Ok(Some(mates)) => Some(mates),
+                Ok(None) => self.own(&lead).ok().flatten(),
+                Err(_) => None,
+            };
+            if let Some(server) = server
+                && server.holds(agent)
+                && server.kill(agent).is_ok()
             {
-                if server.holds(agent) && server.kill(agent).is_ok() {
-                    ended = true;
-                }
+                ended = true;
             }
         }
         if ended {

@@ -1,0 +1,171 @@
+import "./load-source.mjs";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { bundle, withPage } from "./browser.mjs";
+
+const fixture = await bundle(new URL("./fixtures/app-metrics-page.mjs", import.meta.url).pathname);
+const CSS = [
+  readFileSync(new URL("../src/ui/tokens.css", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/style.css", import.meta.url), "utf8").replace(/@import[^;]*;/g, ""),
+  readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/screens/settings/usage.css", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/screens/metrics/metrics.css", import.meta.url), "utf8"),
+].join("\n");
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+const NOW = Date.now();
+const none = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+const windowOf = (used_percent, hours) => ({ used_percent, resets_at_ms: NOW + hours * HOUR });
+const LIMITS = {
+  account: "acct-a", plan: "Max", source: "poll", observed_ms: NOW - 120_000, failure: null, five_hour: windowOf(84, 2), weekly: windowOf(12, 72),
+  five_hour_reset_override_ms: null, weekly_reset_override_ms: null, five_hour_left_out_label: null, weekly_left_out_label: null,
+};
+const REPORT = { since_ms: NOW - 6 * DAY, total: none, runs: 0, projects: [], pools: [], accounts: [], agents: [], days: [], lines: [], agent_lines: [], limits: [LIMITS], partial_homes: 0 };
+const SHIFT = -new Date(NOW).getTimezoneOffset() * 60_000;
+const TODAY = Math.floor((NOW + SHIFT) / DAY) * DAY - SHIFT;
+const SERIES = [{ start_ms: TODAY - 3 * DAY, tokens: { input: 900, output: 300, cache_read: 100, cache_write: 200 } }];
+const METRICS = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: SERIES, runs: [], projects: [], agents: [], accounts: [], harnesses: [] };
+const ANSWERS = {
+  desktop_usage_report: REPORT, desktop_usage_metrics: METRICS, desktop_usage_refresh: null, desktop_usage_set_reset: null,
+  desktop_list_accounts: { accounts: [{ id: "acct-a", name: "Pool A, Claude 1" }], next: null }, desktop_pool_summaries: [], desktop_account_ranking: [],
+};
+
+/** Opens the app Metrics page in Chrome. Inputs: the page, the theme and the window width.
+ * Output: nothing. */
+async function open(page, theme = "light", width = 1440) {
+  await page.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+  await page.evaluate(fixture);
+  await page.evaluate(`document.documentElement.setAttribute("data-theme", ${JSON.stringify(theme)})`);
+  await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, ${JSON.stringify(ANSWERS)})`);
+}
+
+/** Clicks an element with the real mouse. Inputs: the page, its selector and its words.
+ * Output: nothing. */
+async function clickOn(page, selector, words = null) {
+  const box = await page.evaluate(`Fixture.boxOf(${JSON.stringify(selector)}, ${JSON.stringify(words)})`);
+  assert.ok(box, `nothing to click at ${selector} ${words}`);
+  for (const type of ["mousePressed", "mouseReleased"]) {
+    await page.send("Input.dispatchMouseEvent", { type, x: box.x, y: box.y, button: "left", clickCount: 1 });
+  }
+  await page.evaluate("Fixture.settle(120)");
+}
+
+test("Check limits now and a reset time work with a real mouse, and the page reads again", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    const reads = await page.evaluate(`Fixture.sentTo("desktop_usage_report").length`);
+    await clickOn(page, "button", "Check limits now");
+    assert.equal(await page.evaluate(`Fixture.sentTo("desktop_usage_refresh").length`), 1);
+    assert.ok(await page.evaluate(`Fixture.sentTo("desktop_usage_report").length`) > reads, "the page reads again after the check");
+    assert.deepEqual(await page.evaluate("Fixture.shownToasts()"), ["Checking limits now. They update here within a minute."]);
+    await clickOn(page, "section.usage-limits button", "Set reset time");
+    await page.evaluate(`Fixture.setField("usage-reset-acct-a-five_hour", "2099-01-02T03:04")`);
+    await clickOn(page, "section.usage-limits button", "Save");
+    const saved = await page.evaluate(`Fixture.sentTo("desktop_usage_set_reset")`);
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].account, "acct-a");
+    assert.equal(saved[0].windowKind, "five_hour");
+    assert.deepEqual(await page.evaluate("Fixture.shownToasts()"), ["Checking limits now. They update here within a minute.", "Reset time saved."]);
+  });
+});
+
+test("the Account limits panel does not overflow the window at 760 px", async () => {
+  await withPage(async (page) => {
+    await open(page, "light", 760);
+    assert.equal(await page.evaluate("document.querySelector('section.usage-limits') !== null"), true);
+    assert.equal(await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
+  });
+});
+
+/** Presses a key on the focused element with the real keyboard. Inputs: the page, the key's
+ * name and its code. Output: nothing. */
+async function key(page, name, code) {
+  for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: code, ...(name === "Enter" && type === "keyDown" ? { text: "\r" } : {}) });
+  await page.evaluate("Fixture.settle(120)");
+}
+
+const contrast = `(() => {
+  const luminance = (color) => {
+    const [r, g, b] = color.match(/[\\d.]+/g).slice(0, 3).map((part) => {
+      const value = Number(part) / 255;
+      return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const ratio = (a, b) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  const surface = luminance(getComputedStyle(document.querySelector(".mx-lead")).backgroundColor);
+  return ["in", "cw", "out"].map((name) => ratio(luminance(getComputedStyle(document.querySelector(".mx-chart ." + name)).fill), surface));
+})()`;
+
+for (const theme of ["light", "dark"]) {
+  test(`every chart series stands off the panel in ${theme}, and no two share a color`, async () => {
+    await withPage(async (page) => {
+      await open(page, theme);
+      const ratios = await page.evaluate(contrast);
+      assert.equal(ratios.length, 3);
+      for (const ratio of ratios) assert.ok(ratio >= 3, `series contrast ${ratio} in ${theme}`);
+      const fills = await page.evaluate(`["in", "cw", "out"].map((name) => getComputedStyle(document.querySelector(".mx-chart ." + name)).fill)`);
+      assert.equal(new Set(fills).size, 3, JSON.stringify(fills));
+    });
+  });
+}
+
+test("real keys walk the Range to All, and Enter opens the chart's table", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    await page.evaluate(`document.querySelector('[aria-label="Range"] [aria-checked="true"]').focus()`);
+    await key(page, "ArrowRight", 39);
+    await key(page, "ArrowRight", 39);
+    assert.equal(await page.evaluate(`document.querySelector('[aria-label="Range"] [aria-checked="true"]').textContent`), "All");
+    assert.equal((await page.evaluate(`Fixture.sentTo("desktop_usage_report")`)).at(-1).sinceMs, null);
+    await page.evaluate(`document.querySelector(".mx-lead details summary").focus()`);
+    await key(page, "Enter", 13);
+    assert.equal(await page.evaluate(`document.querySelector(".mx-lead details").open`), true);
+  });
+});
+
+test("the readout says the highest bar, and the bar under the real mouse", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    const readout = () => page.evaluate(`document.querySelector(".mx-readout").textContent`);
+    assert.match(await readout(), /^Highest, .*: 1\.4K$/);
+    const box = await page.evaluate(`Fixture.boxOf(".mx-chart .hit", null)`);
+    assert.ok(box, "the chart has a place to point at");
+    await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: box.x, y: box.y });
+    await page.evaluate("Fixture.settle(120)");
+    assert.doesNotMatch(await readout(), /^Highest/);
+  });
+});
+
+test("a pointer resting on a bar survives a shorter range: the page stays and the readout drops it", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    const target = await page.evaluate(`(() => {
+      const hits = [...document.querySelectorAll(".mx-chart .hit")];
+      const last = hits.at(-1);
+      last.scrollIntoView({ block: "center" });
+      const box = last.getBoundingClientRect();
+      return { count: hits.length, x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    })()`);
+    assert.equal(target.count, 7, "seven days draw seven bars");
+    await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y });
+    await page.evaluate("Fixture.settle(120)");
+    assert.match(await page.evaluate(`document.querySelector(".mx-readout").textContent`), /^[A-Z][a-z]{2} \d+: 0$/);
+    await page.evaluate(`document.querySelector('[aria-label="Range"] [aria-checked="true"]').focus()`);
+    await key(page, "ArrowLeft", 37);
+    assert.equal(await page.evaluate(`document.querySelector(".mx-lead") !== null`), true, "the page is still there");
+    assert.equal(await page.evaluate(`document.querySelectorAll(".mx-chart .hit").length`), 1);
+    assert.equal(await page.evaluate(`document.querySelector(".mx-readout").textContent`), "No tokens in this range");
+  });
+});
+
+for (const width of [1440, 760]) {
+  test(`the lead panel does not overflow at ${width} px`, async () => {
+    await withPage(async (page) => {
+      await open(page, "light", width);
+      assert.equal(await page.evaluate("document.querySelector('.mx-lead') !== null"), true);
+      assert.equal(await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
+    });
+  });
+}

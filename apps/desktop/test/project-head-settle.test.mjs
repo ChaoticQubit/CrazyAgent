@@ -37,6 +37,34 @@ test("the meta line is drawn under the description and hidden once the head take
   assert.deepEqual([after.head, after.meta], ["pj-head scrolled", false], `the scrolled head hides the meta line: ${JSON.stringify(after)}`);
 });
 
+for (const [label, reduced] of [["with motion", false], ["with motion reduced", true]]) {
+  test(`a page just taller than the window keeps the head's scrolled form ${label}`, async () => {
+    for (const over of [10, 20]) {
+      const seen = await withPage(async ({ evaluate, send }) => {
+        await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 600, deviceScaleFactor: 1, mobile: false });
+        await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: reduced ? "reduce" : "no-preference" }] });
+        await evaluate(fixture);
+        const range = await evaluate(`Fixture.mountShort(${over})`);
+        const duration = await evaluate(`getComputedStyle(document.documentElement).getPropertyValue("--dur-base").trim()`);
+        const rest = await evaluate("Fixture.state()");
+        await evaluate(`document.querySelector('.main').scrollTop = ${over}`);
+        await evaluate("Fixture.frames(20)");
+        const after = await evaluate("Fixture.state()");
+        await evaluate("new Promise((done) => setTimeout(done, 500))");
+        return { range, duration, rest, after, later: await evaluate("Fixture.state()") };
+      });
+      const shown = `${over} px: ${JSON.stringify(seen)}`;
+      assert.equal(seen.range, over, `the page is that much taller: ${shown}`);
+      assert.equal(seen.duration, reduced ? "0ms" : "180ms", `the page runs in this motion setting: ${shown}`);
+      assert.ok(seen.after.height < seen.rest.height, `the head gives up height: ${shown}`);
+      assert.equal(seen.after.head, "pj-head scrolled", `the head takes its scrolled form: ${shown}`);
+      assert.equal(seen.later.head, "pj-head scrolled", `the head does not snap back: ${shown}`);
+      assert.ok(seen.later.top > 2, `the browser did not pull the page back to the top: ${shown}`);
+      assert.equal(seen.later.room, Math.ceil(seen.rest.height - seen.later.height), `the room is what the head gave up: ${shown}`);
+    }
+  });
+}
+
 /** Reads the tab strip of a project page in a window of a given width at the app's default
  * height. Input: the window's width. Output: the strip's values. */
 function tabRow(width) {

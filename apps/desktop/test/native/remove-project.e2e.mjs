@@ -14,6 +14,7 @@ import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, sta
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const HDIUTIL = "/usr/bin/hdiutil";
 const SQLITE = "/usr/bin/sqlite3";
+const CHFLAGS = "/usr/bin/chflags";
 const KEEP = "Remove from dashboard (keep files)";
 const DELETE = "Delete everything";
 const run = { generation: 10 };
@@ -234,6 +235,37 @@ test("Delete everything lists the loss, waits for the typed name, then moves the
   assert.ok(!existsSync(folder), "the folder is gone from the projects folder");
   const volumeTrash = join(realpathSync(run.volume), ".Trashes", String(process.getuid()));
   assert.ok(readdirSync(volumeTrash).some((entry) => entry.startsWith(basename(folder))), "the folder is in the test volume's Trash");
+});
+
+test("a repository that cannot move leaves the project folder in the volume's Trash, keeps the project and says so", { timeout: 300000 }, async () => {
+  const name = "Half Moved";
+  const { id, folder } = await made(name);
+  const repository = join(run.projects, "half-moved-lib");
+  mkdirSync(repository, { mode: 0o700 });
+  writeFileSync(join(repository, "notes.md"), "stays where it is\n");
+  execFileSync(SQLITE, [run.database, `UPDATE projects SET body=json_set(body,'$.spec.repositories',json_array('${repository}')) WHERE id='${id}'`]);
+  execFileSync(CHFLAGS, ["uchg", repository]);
+  try {
+    await onPage("partial", async (page, me) => {
+      await openRemove(page, me, id, name);
+      await me.click(DELETE, "dialog[open] input[type=radio]");
+      await me.waitFor("both folders and the name box", (text) => text.includes(folder) && text.includes(repository) && text.includes("Type"));
+      await me.type("dialog[open] input[aria-label='Type the project name']", name);
+      for (const deadline = Date.now() + STEP_MS; !(await dialog(page)).deleteEnabled; await pause(POLL_MS)) {
+        assert.ok(Date.now() < deadline, "Delete never enabled after the exact name");
+      }
+      await me.click(DELETE, "dialog[open] button");
+      await me.waitFor("the partial move's refusal", (text) => text.includes("Some of its folders are in the Trash and the rest couldn't be moved."), 90000);
+      await me.capture("delete-partial");
+    });
+  } finally {
+    execFileSync(CHFLAGS, ["nouchg", repository]);
+  }
+  assert.equal(await listed(id), true, "a partial move keeps the project's records");
+  assert.ok(!existsSync(folder), "the project folder moved first");
+  assert.equal(readFileSync(join(repository, "notes.md"), "utf8"), "stays where it is\n", "the folder that could not move is untouched");
+  const volumeTrash = join(realpathSync(run.volume), ".Trashes", String(process.getuid()));
+  assert.ok(readdirSync(volumeTrash).some((entry) => entry.startsWith(basename(folder))), "the project folder is in the test volume's Trash");
 });
 
 test("with agents running and a change set open, Delete everything at the app's smallest window shows the whole loss list while its Delete button is in view", { timeout: 300000 }, async () => {

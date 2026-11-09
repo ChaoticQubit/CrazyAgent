@@ -45,6 +45,7 @@ const COPY: Record<string, string> = {
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
+  project_not_found: "This project no longer exists.",
   account_rank_invalid: "Use a rank from 1 to 999, or leave it empty.",
   account_reserve_invalid: "Use a reserve from 0 to 99 percent.",
   account_schedule_invalid: "Use a rank from 1 to 999 and a reserve from 0 to 99 percent.",
@@ -1325,8 +1326,8 @@ export function focusTerminalWindow(id: string, target: "main" | number): Promis
   return call<void>("desktop_focus_terminal_window", { id, target: String(target) });
 }
 
-/** Closes a removed project's terminal wall windows. Input: the project id. Output:
- * nothing, not ready, or a plain error. */
+/** Closes a removed project's terminal wall windows, for the main window or a wall window of
+ * that project. Input: the project id. Output: nothing, not ready, or a plain error. */
 export function closeProjectWalls(id: string): Promise<Result<void>> {
   return call<void>("desktop_close_project_walls", { id });
 }

@@ -128,6 +128,99 @@ pub(super) fn changed_paths(repo: &Repo, from: &str, to: &str) -> Result<Vec<Str
         .collect()
 }
 
+/// One path's change: its bytes, then the mode and object id it had and has, the id all
+/// zeros on the side where the path does not exist.
+pub(super) struct PathMove {
+    pub(super) path: Vec<u8>,
+    pub(super) old: (String, String),
+    pub(super) new: (String, String),
+}
+
+/// Reads git's `--raw -z` records into their moves, in git's order. Input: the output,
+/// whose records may have blank separators between commits. Output: the moves.
+fn path_moves(printed: &[u8]) -> Result<Vec<PathMove>, EngineError> {
+    let mut moves = Vec::new();
+    let mut fields = printed.split(|byte| *byte == 0);
+    while let Some(field) = fields.next() {
+        let record = field.trim_ascii_start();
+        if !record.starts_with(b":") {
+            continue;
+        }
+        let parts: Vec<&str> = text(&record[1..])?.split(' ').collect();
+        let [old_mode, new_mode, old_object, new_object, _] = parts.as_slice() else {
+            return Err(failure("changes_git_failed"));
+        };
+        let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
+        assert!(is_object_id(old_object));
+        assert!(is_object_id(new_object));
+        moves.push(PathMove {
+            path: path.to_vec(),
+            old: ((*old_mode).to_owned(), (*old_object).to_owned()),
+            new: ((*new_mode).to_owned(), (*new_object).to_owned()),
+        });
+    }
+    Ok(moves)
+}
+
+/// The moves a change makes on the paths it changes, each side of a rename apart. Inputs:
+/// the repository and the two tree-ish ids. Output: the moves.
+pub(super) fn changed_moves(
+    repo: &Repo,
+    from: &str,
+    to: &str,
+) -> Result<Vec<PathMove>, EngineError> {
+    path_moves(&repo.run(&[
+        "diff-tree",
+        "-r",
+        "-z",
+        "--raw",
+        "--no-renames",
+        "--no-abbrev",
+        from,
+        to,
+    ])?)
+}
+
+/// The moves of the newest `commits_max` commits after `from` along `tip`'s first parents,
+/// newest first, each side of a rename apart and a merge as what it brought onto that
+/// line, so what only a side branch held counts for nothing. Inputs: the repository, both
+/// ends and the bound. Output: the moves, None when they run past the output bound.
+pub(super) fn moves_on_line(
+    repo: &Repo,
+    from: &str,
+    tip: &str,
+    commits_max: usize,
+) -> Result<Option<Vec<PathMove>>, EngineError> {
+    assert!(commits_max > 0);
+    let range = format!("{from}..{tip}");
+    let count = format!("--max-count={commits_max}");
+    let output = repo.exec(
+        &[
+            "log",
+            "--format=",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--no-abbrev",
+            "--first-parent",
+            "--diff-merges=first-parent",
+            "--no-show-signature",
+            &count,
+            &range,
+        ],
+        None,
+        &[],
+        OUTPUT_BYTES_MAX,
+    )?;
+    if output.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if output.overflow {
+        return Ok(None);
+    }
+    path_moves(&output.stdout).map(Some)
+}
+
 /// Counts the lines a change adds and removes, with renames found.
 /// Inputs: the repository and the two commits. Output: the counts.
 pub(super) fn stats(repo: &Repo, base: &str, head: &str) -> Result<Stats, EngineError> {

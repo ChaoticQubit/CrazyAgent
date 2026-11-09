@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
 const UNKNOWN: &str = "owner_outcome_unknown_reconcile_same_identity";
 const UNSETTLED: [&str; 2] = [UNKNOWN, "owner_actor_stopped_outcome_unknown"];
+const SETTLE_TRIES: usize = 3;
+const SETTLE_GAP: Duration = Duration::from_millis(50);
 static EXCHANGES: AtomicU64 = AtomicU64::new(1);
 
 enum Step {
@@ -15,7 +17,7 @@ enum Step {
     Record(HomeEffect),
     Staged(Result<Staged, String>),
     Size(u64),
-    Deleted(Result<(DeletePlan, Vec<i64>), String>),
+    Deleted(Result<(PathBuf, Vec<crate::projects_home::RecordedFile>), String>),
 }
 
 enum Work {
@@ -43,7 +45,10 @@ impl Work {
             }
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::New(plan) => Step::Staged(plan.run()),
-            Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| (plan, research))),
+            Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| {
+                let files = plan.engine_files(&research);
+                (plan.database, files)
+            })),
         }
     }
 }
@@ -87,8 +92,9 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// move then sends a settle job for this exchange's pending move: one whose
 /// record did not finish it (a stale grant, a slow barrier, a failed record)
 /// is finished from disk, and one whose disk work never ran is forgotten. A Delete
-/// everything stops the project's IDE server before its wait and moves, and then
-/// sends a settle job that forgets its plan, so projects home moves may go again.
+/// everything stops the project's IDE server before its wait and moves, and forgets
+/// its plan before its reply, trying again when that fails, so the reply means projects
+/// home moves may go again; a plan the reply could not reach is forgotten after it.
 /// The exchange number is unique within the engine process; engine start finishes
 /// any move and forgets any delete plan left by an earlier process before serving.
 pub(super) async fn serve(
@@ -144,9 +150,12 @@ pub(super) async fn serve(
             match admitted {
                 Ok(Ok(())) => {
                     #[cfg(unix)]
-                    if let Work::Delete(plan, _) = &work {
-                        authority.ide_servers.stop(&plan.project).await;
-                    }
+                    let _ide_refused = match &work {
+                        Work::Delete(plan, _) => {
+                            Some(authority.ide_servers.hold_for_delete(&plan.project).await)
+                        }
+                        _ => None,
+                    };
                     let interrupted = work.interrupted();
                     let step = tokio::task::spawn_blocking(move || work.run())
                         .await
@@ -165,7 +174,7 @@ pub(super) async fn serve(
         _ => None,
     };
     let deleted = match &step {
-        Ok(Step::Deleted(Ok((plan, research)))) => Some((plan.clone(), research.clone())),
+        Ok(Step::Deleted(Ok(files))) => Some(files.clone()),
         _ => None,
     };
     let answer = async {
@@ -186,16 +195,29 @@ pub(super) async fn serve(
             Ok(OwnerReply { response: OwnerResponse::Applied { operation }, .. })
                 if operation.result == OwnerResult::Applied && !operation.historical_replay
         );
+        let forgotten = deleting && settle_delete(engine, exchange).await;
         (
             write_owner_reply(stream, result, id, mutation).await,
             removed,
+            forgotten,
         )
     };
     let answered = tokio::time::timeout_at(deadline, answer).await;
-    if let (Ok((_, true)), Some((plan, research))) = (&answered, deleted) {
-        let _ = tokio::task::spawn_blocking(move || plan.remove_engine_files(&research)).await;
+    if let (Ok((_, true, _)), Some((database, files))) = (&answered, deleted) {
+        let done = tokio::task::spawn_blocking(move || {
+            crate::projects_home::remove_engine_files(&database, &files)
+        })
+        .await
+        .unwrap_or_default();
+        if let Err(e) = engine
+            .owner_job(|reply| Job::DeleteFilesClear(done, reply))
+            .await
+        {
+            eprintln!("project_delete_files_not_cleared cause={}", e.0);
+        }
     }
-    let answered = answered.map(|(written, _)| written);
+    let forgotten = matches!(&answered, Ok((_, _, true)));
+    let answered = answered.map(|(written, _, _)| written);
     if moving
         && let Err(e) = engine
             .owner_job(|reply| Job::HomeMoveSettle(exchange, ran, reply))
@@ -203,14 +225,29 @@ pub(super) async fn serve(
     {
         eprintln!("projects_home_move_not_settled cause={}", e.0);
     }
-    if deleting
-        && let Err(e) = engine
-            .owner_job(|reply| Job::DeleteSettle(exchange, reply))
-            .await
-    {
-        eprintln!("project_delete_not_settled cause={}", e.0);
+    if deleting && !forgotten {
+        settle_delete(engine, exchange).await;
     }
     answered.map_err(|_| failure(UNKNOWN))?
+}
+
+/// Forgets a Delete everything's plan, trying again after a full queue or a SQLite failure,
+/// since a plan left behind refuses every projects home move until the engine restarts.
+/// Inputs: the engine and the exchange. Output: whether the plan is gone.
+async fn settle_delete(engine: &Arc<Engine>, exchange: u64) -> bool {
+    for attempt in 0..SETTLE_TRIES {
+        if attempt > 0 {
+            tokio::time::sleep(SETTLE_GAP).await;
+        }
+        match engine
+            .owner_job(|reply| Job::DeleteSettle(exchange, reply))
+            .await
+        {
+            Ok(()) => return true,
+            Err(e) => eprintln!("project_delete_not_settled cause={}", e.0),
+        }
+    }
+    false
 }
 
 async fn plan(
@@ -426,7 +463,8 @@ async fn finish(
         Step::Deleted(outcome) => OwnerResponse::Applied {
             operation: engine
                 .owner_job(|reply| {
-                    Job::DeleteRecord(a.clone(), Box::new(request), outcome.map(|_| ()), reply)
+                    let files = outcome.map(|(_, files)| files);
+                    Job::DeleteRecord(a.clone(), Box::new(request), files, reply)
                 })
                 .await?,
         },

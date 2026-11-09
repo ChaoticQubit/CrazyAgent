@@ -5,14 +5,14 @@ use std::os::unix::fs::PermissionsExt;
 
 const OWNER_WAIT_MS: u64 = 5000;
 
-struct Fixture {
-    root: tempfile::TempDir,
+pub(super) struct Fixture {
+    pub(super) root: tempfile::TempDir,
     service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
 }
 
 impl Fixture {
-    async fn start() -> Self {
+    pub(super) async fn start() -> Self {
         Self::start_with("").await
     }
 
@@ -46,7 +46,7 @@ impl Fixture {
         }
     }
 
-    async fn client(&self) -> OwnerClient {
+    pub(super) async fn client(&self) -> OwnerClient {
         OwnerClient::discover(
             self.root.path(),
             OwnerClientKind::Tui,
@@ -57,7 +57,7 @@ impl Fixture {
         .0
     }
 
-    async fn stop(mut self) {
+    pub(super) async fn stop(mut self) {
         tokio::time::timeout(Duration::from_secs(10), self.service.shutdown())
             .await
             .unwrap()

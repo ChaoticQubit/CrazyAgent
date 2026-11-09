@@ -17717,6 +17717,115 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
     }
 }
 
+/// Wiring test of engine mechanics, not Claude Code: the pane a native lead on a signed-in
+/// account reports ready is kept, so its own team calls are named as the lead and the
+/// teammate in its server registers and shows in the team status. The panes are real tmux
+/// panes; the report stands in for a start whose account hand-over macOS keeps in a keychain.
+#[cfg(target_os = "macos")]
+#[test]
+fn wiring_a_kept_native_lead_s_ready_pane_names_its_calls_and_registers_its_teammates() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    let agent = AgentId::team(lead).unwrap();
+    let record = fixture.pane(&host, lead);
+    let own = host
+        .panes(&agent)
+        .unwrap()
+        .into_iter()
+        .find(|listed| listed.pid == record.pid)
+        .unwrap()
+        .id;
+    let member = teammate_split(&fixture, &own);
+    let config = agent_home(&fixture.base.join("team"), lead)
+        .join("teams")
+        .join("session-1");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.json"),
+        format!(
+            r#"{{"members":[{{"name":"team-lead","tmuxPaneId":"leader"}},{{"name":"greeter","tmuxPaneId":"{member}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let worker = between_turns(&project, AgentRole::Sub, true, true);
+    assert!(worker.managed && worker.kept_session && !worker.live);
+    team.workers.insert(lead, worker);
+
+    team.apply(
+        lead,
+        Report::Ready {
+            group: record.pid,
+            pane: Some(record.clone()),
+        },
+    )
+    .unwrap();
+    team.watch_teammates().unwrap();
+
+    let shown: Vec<Option<String>> = fixture
+        .status()
+        .agents
+        .into_iter()
+        .filter(|row| row.parent == Some(lead))
+        .map(|row| row.pane)
+        .collect();
+    let named = team_caller(
+        &fixture.connection,
+        Some(host.as_ref()),
+        &project,
+        (lead, "Lead"),
+        Some((own.as_str(), record.pid)),
+    );
+    assert_eq!(
+        (fixture.recorded(lead), named, shown),
+        (true, Some((lead, "Lead".to_owned())), vec![Some(member)]),
+        "(pane row kept, the lead's call named, teammates in the status)"
+    );
+    host.kill(&agent).unwrap();
+}
+
+/// Wiring test of engine mechanics: a managed agent that starts its harness for each turn
+/// keeps no pane record, so a later engine neither leaves its pane running nor refuses to
+/// take it over, and its session record stays with recovery.
+#[test]
+fn wiring_a_per_turn_agent_s_ready_pane_stays_with_recovery() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let agent = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let record = fixture.pane(&host, agent);
+    let worker = between_turns(&project, AgentRole::Sub, true, false);
+    assert!(worker.managed && !worker.kept_session && !worker.live);
+    team.workers.insert(agent, worker);
+
+    team.apply(
+        agent,
+        Report::Ready {
+            group: record.pid,
+            pane: Some(record.clone()),
+        },
+    )
+    .unwrap();
+
+    assert!(!fixture.recorded(agent), "a per-turn pane is never kept");
+    assert!(
+        crate::recovery::sessions(&fixture.connection, Some(agent))
+            .unwrap()
+            .contains_key(&agent),
+        "its session record stays with recovery"
+    );
+    host.kill(&AgentId::team(agent).unwrap()).unwrap();
+}
+
 /// Wiring test of engine mechanics, not Claude Code: a native lead's first order without
 /// the signed-in account starts no pane, closes the turn it was given and names why.
 #[test]
@@ -21757,8 +21866,8 @@ exec /usr/bin/perl -e 'open(my $out, ">", "$ARGV[0].part") or die; print $out "$
 "#;
 
 /// Starts a native lead on its own server as the lead's worker does, with a stand-in Claude
-/// Code that writes a process id to `left.pid` in the lead's folder, then ends the lead
-/// through `end`. Inputs: the stand-in and the ending, given the session, the host and the
+/// Code that writes a process id to `left.pid` in the lead's folder or its teammates' config
+/// home, then ends the lead through `end`. Inputs: the stand-in and the ending, given the session, the host and the
 /// lead. Output: the ending's outcome and whether that process still ran after it; the
 /// process is killed before this returns.
 #[cfg(target_os = "macos")]
@@ -21819,6 +21928,7 @@ fn ended_native_lead<T>(
         scratch: mates_socket.parent().unwrap().to_path_buf(),
     };
     let home = agent_home(&runtime.state, id);
+    let teammate_wrote = crate::launch_context::mates_home(&home).join("left.pid");
     let context = runtime
         .context(&project, id, AgentRole::Sub, true, Layout::Linked)
         .unwrap();
@@ -21831,9 +21941,11 @@ fn ended_native_lead<T>(
     let written = plan.working_dir.join("left.pid");
     let deadline = Instant::now() + WAIT;
     let pid = loop {
-        let read = std::fs::read_to_string(&written)
-            .ok()
-            .and_then(|text| text.trim().parse::<i32>().ok());
+        let read = [&written, &teammate_wrote].iter().find_map(|path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+        });
         match read {
             Some(pid) => break pid,
             None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
@@ -21882,6 +21994,25 @@ fn a_left_native_lead_s_end_is_not_confirmed_while_a_process_it_started_on_its_o
         "the lead's own process outlived the end: {ended:?}"
     );
     assert_eq!(ended, Ok(false));
+}
+
+/// T23-R1-F2: the status column a project's delete waits on is written after the lead's stop
+/// returns, so that stop must already have ended the lead's running native teammate, a real
+/// process in a pane of the teammates' own server.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_stop_has_ended_its_running_teammate_when_it_returns() {
+    let script = SPLITTING_CLAUDE.replace(
+        "  exec /bin/sleep 300\n  ;;",
+        "  echo $$ > \"$CLAUDE_CONFIG_DIR/left.pid\"\n  exec /bin/sleep 300\n  ;;",
+    );
+    assert_ne!(script, SPLITTING_CLAUDE, "the teammate records its own id");
+    let (stopped, running) = ended_native_lead(&script, |session, _, _| session.stop());
+    assert!(
+        !running,
+        "the teammate outlived its lead's stop: {stopped:?}"
+    );
+    assert!(matches!(stopped, Ok(None)), "{stopped:?}");
 }
 
 /// A native lead's stop that leaves nothing it started running is confirmed by a listing of

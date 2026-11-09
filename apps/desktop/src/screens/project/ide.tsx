@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Failure } from "../../api";
-import { HEARTBEAT_MS, bounds, desktopPlatform, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, openFailure, openIde, placeIde, sameBounds, touchIde } from "../../api-ide";
+import { HEARTBEAT_MS, IDE_NOT_CLOSED, IDE_NOT_HIDDEN, IDE_NOT_PLACED, bounds, closeIde, desktopPlatform, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, openFailure, openIde, placeIde, sameBounds, touchIde } from "../../api-ide";
 import type { IdeBounds, IdeTabState, IdeView } from "../../api-ide";
 import { Button, useOverlayShown } from "../../ui";
 import "./ide.css";
@@ -37,13 +37,26 @@ export function IdeUnavailable({ view, failure, busy = false, onAction }: { view
   </div>;
 }
 
+/** Closes the project's IDE when its page closes, and tells the owner when that failed. A build
+ * with no IDE has nothing to close and says nothing. Inputs: the project and the toast the page
+ * tells the owner through. Output: none. */
+export function useCloseIde(projectId: string, notify: (line: string) => void) {
+  useEffect(() => () => {
+    void closeIde(projectId).then((result) => {
+      if (result.kind === "error") notify(IDE_NOT_CLOSED);
+    });
+  }, [projectId]);
+}
+
 /** The project's IDE tab: the build state until the IDE is ready, then the IDE itself in a
  * native webview over the panel. The webview follows the panel's bounds, hides when the tab
  * is left or a dialog, drawer or menu opens over the page, and the engine hears every minute
  * that the owner still uses it. Every state it reads goes to `onView`, so the page swaps
- * Context and Changes back when the build fails.
- * Inputs: the project id and the view handler. Output: the tab. */
-export function IdeTab({ projectId, onView }: { projectId: string; onView: (view: IdeView) => void }) {
+ * Context and Changes back when the build fails. A failed move shows on the tab; a failed hide
+ * goes to the page, whose line stays outside the box the IDE webview may still cover.
+ * Inputs: the project id, the view handler and the hide's problem, null once it worked. Output:
+ * the tab. */
+export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string; onView: (view: IdeView) => void; onHideProblem: (line: string | null) => void }) {
   const panel = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<IdeTabState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -78,12 +91,23 @@ export function IdeTab({ projectId, onView }: { projectId: string; onView: (view
     let shown = false;
     let last: IdeBounds | null = null;
     let frame = 0;
+    let misplaced = false;
+    const hide = () => void hideIde(projectId).then((result) => onHideProblem(result.kind === "ok" ? null : IDE_NOT_HIDDEN));
     const place = () => {
       if (!shown) return;
-      const box = bounds(element.getBoundingClientRect());
+      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
       if (!box || sameBounds(box, last)) return;
       last = box;
-      void placeIde(projectId, box);
+      void placeIde(projectId, box).then((result) => {
+        if (!live) return;
+        if (result.kind !== "ok") {
+          misplaced = true;
+          setProblem(IDE_NOT_PLACED);
+        } else if (misplaced) {
+          misplaced = false;
+          setProblem(null);
+        }
+      });
     };
     const follow = () => {
       if (!live || !shown) {
@@ -94,11 +118,11 @@ export function IdeTab({ projectId, onView }: { projectId: string; onView: (view
       frame = window.requestAnimationFrame(follow);
     };
     const open = async () => {
-      const box = bounds(element.getBoundingClientRect());
+      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
       if (!box) return;
       const result = await openIde(projectId, box);
       if (!live) {
-        if (result.kind === "ok") void hideIde(projectId);
+        if (result.kind === "ok") hide();
         return;
       }
       if (result.kind === "error" && result.code === "ide_open_cancelled") return;
@@ -109,6 +133,7 @@ export function IdeTab({ projectId, onView }: { projectId: string; onView: (view
       shown = true;
       last = null;
       setProblem(null);
+      onHideProblem(null);
       if (frame === 0) follow();
     };
     void open();
@@ -121,7 +146,7 @@ export function IdeTab({ projectId, onView }: { projectId: string; onView: (view
       live = false;
       window.cancelAnimationFrame(frame);
       window.clearInterval(beat);
-      void hideIde(projectId);
+      hide();
     };
   }, [projectId, ready, covered]);
 

@@ -67,7 +67,7 @@ fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     }
 }
 
-const WALL_COMMANDS: [&str; 11] = [
+const WALL_COMMANDS: [&str; 12] = [
     "desktop_terminal_attach",
     "desktop_terminal_input",
     "desktop_terminal_prompt",
@@ -79,19 +79,21 @@ const WALL_COMMANDS: [&str; 11] = [
     "desktop_terminals_per_window",
     "desktop_extend_terminal_windows",
     "desktop_focus_terminal_window",
+    "desktop_close_project_walls",
 ];
 
-const PROJECT_WALL_COMMANDS: [&str; 6] = [
+const PROJECT_WALL_COMMANDS: [&str; 7] = [
     "desktop_team_graph",
     "desktop_team_stop_agent",
     "desktop_team_stop_teammate",
     "desktop_terminals_per_window",
     "desktop_extend_terminal_windows",
     "desktop_focus_terminal_window",
+    "desktop_close_project_walls",
 ];
 
-const WALL_GUARD: &str = "terminal_window(&window)?;";
-const PROJECT_WALL_GUARD: &str = "terminal_window_for(&window, &id)?;";
+const WALL_GUARD: &str = "terminal_window(&webview)?;";
+const PROJECT_WALL_GUARD: &str = "terminal_window_for(&webview, &id)?;";
 
 /// Every `#[tauri::command]` in lib.rs with its name and body. Takes nothing. Returns the
 /// pairs in source order.
@@ -103,7 +105,7 @@ fn command_bodies() -> Vec<(&'static str, &'static str)> {
             let name = body
                 .split("fn ")
                 .nth(1)
-                .and_then(|rest| rest.split('(').next())
+                .and_then(|rest| rest.split(['(', '<']).next())
                 .unwrap();
             (name, body)
         })
@@ -137,7 +139,11 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
         .collect();
     assert_eq!(granted, allowed);
     let main = read(include_str!("../capabilities/main-window.json"));
-    assert_eq!(main["windows"], json!(["main"]));
+    assert!(
+        main.get("windows").is_none(),
+        "the capability names the main webview alone, so no child webview of the window matches it"
+    );
+    assert_eq!(main["webviews"], json!(["main"]));
     let conf = read(include_str!("../tauri.conf.json"));
     assert_eq!(
         conf["app"]["security"]["capabilities"],
@@ -155,7 +161,7 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
     for (name, body) in &commands {
         assert_ne!(
             wall_guarded(body),
-            body.contains("main_window(&window)?;"),
+            body.contains("main_window(&webview)?;"),
             "{name} has exactly one of the two window guards"
         );
     }
@@ -192,10 +198,10 @@ fn a_wall_window_opens_at_its_named_address_and_moves_only_through_wall_focus() 
         .find(|(name, _)| *name == "desktop_focus_terminal_window")
         .map_or("", |(_, body)| *body);
     assert!(
-        focus.contains("bridge::terminal::wall_focus(window.label(), &project, &target)?"),
+        focus.contains("bridge::terminal::wall_focus(webview.label(), &project, &target)?"),
         "{focus}"
     );
-    assert!(!focus.contains("main_window(&window)?;"), "{focus}");
+    assert!(!focus.contains("main_window(&webview)?;"), "{focus}");
     let bindings = include_str!("../src/lib.rs");
     assert!(
         bindings.contains("bridge::terminal::wall_url(project, page, name)"),
@@ -225,8 +231,7 @@ fn closing_main_or_removing_a_project_closes_the_wall_windows() {
         .unwrap_or_default();
     assert!(close.contains("app: AppHandle"), "{close}");
     assert!(
-        close.contains("main_window(&window)?;")
-            && close.contains("close_walls(&app, Some(&project))"),
+        close.contains(PROJECT_WALL_GUARD) && close.contains("close_walls(&app, Some(&project))"),
         "{close}"
     );
     let build = include_str!("../build.rs");

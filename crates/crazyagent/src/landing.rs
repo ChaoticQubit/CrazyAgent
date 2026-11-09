@@ -408,7 +408,7 @@ fn unavailable() -> EngineError {
 /// changed, with its sub-agent for the goal; a failure is logged by its plain code, so the
 /// action itself never fails on it. A Discarded set closed outside the app says so, and
 /// ChangesReady is a discarded set brought back. Inputs: the store, the change set, the
-/// kind of event (Accepted, Conflict, Discarded, SentBack or ChangesReady) and who acted.
+/// kind of event (Conflict, Discarded, SentBack or ChangesReady) and who acted.
 #[cfg(unix)]
 fn note_change(
     db: &Connection,
@@ -420,7 +420,6 @@ fn note_change(
     let label = &record.agent.label;
     let line = &record.prompt_line;
     let text = match kind {
-        ActivityKind::Accepted => crate::activity::accepted_text(by, &named(db, record)),
         ActivityKind::Conflict => {
             format!("The changes of {label} conflict with the branch they land on: {line}")
         }
@@ -435,6 +434,32 @@ fn note_change(
         _ => unreachable!("note_change takes a change set action"),
     };
     note_text(db, record, kind, by, &text);
+}
+
+/// Records an Accept in its project's activity, naming the agents whose sets it closed.
+/// Inputs: the store, the accepted change set, who acted and the agents' labels. Output:
+/// none.
+#[cfg(unix)]
+fn note_accepted(db: &Connection, record: &store::Record, by: &str, closed: &[String]) {
+    let mut text = crate::activity::accepted_text(by, &named(db, record));
+    text.push_str(&closed_words(closed));
+    note_text(
+        db,
+        record,
+        crate::activity::ActivityKind::Accepted,
+        by,
+        &text,
+    );
+}
+
+/// The words a landing's activity row ends with when it closed other sets. Input: the
+/// labels of their agents. Output: the words, empty when it closed none.
+#[cfg(unix)]
+fn closed_words(closed: &[String]) -> String {
+    if closed.is_empty() {
+        return String::new();
+    }
+    format!(". It closed the changes of {}", closed.join(", "))
 }
 
 /// The words an activity row names a change set by, with its number once it has one; a
@@ -502,12 +527,29 @@ fn note_text(
     crate::activity::note(db, &record.project, &item, at);
 }
 
-/// Records an owner action on a stored change set, as [`note_change`] does, once the
-/// action is done. Inputs: the store, the change set and the kind of event.
+/// Records that the engine closed a change set whose branch already took every file it
+/// changes, with no owner action behind it (HB-S4). Inputs: the store and the closed set.
 #[cfg(unix)]
-fn noted(db: &Connection, id: &ChangeSetId, kind: crate::activity::ActivityKind) {
+fn note_taken(db: &Connection, record: &store::Record) {
+    let text = format!(
+        "Closed the changes of {}: the branch they land on already took every file they change. {}",
+        record.agent.label, record.prompt_line
+    );
+    note_text(
+        db,
+        record,
+        crate::activity::ActivityKind::Discarded,
+        crate::activity::ENGINE_ACTOR,
+        &text,
+    );
+}
+
+/// Records an action on a stored change set, as [`note_change`] does, once the action is
+/// done. Inputs: the store, the change set, the kind of event and who acted.
+#[cfg(unix)]
+fn noted(db: &Connection, id: &ChangeSetId, kind: crate::activity::ActivityKind, by: &str) {
     match store::load(db, id) {
-        Ok(record) => note_change(db, &record, kind, crate::activity::OWNER_ACTOR),
+        Ok(record) => note_change(db, &record, kind, by),
         Err(error) => eprintln!(
             "activity_record_failed kind={} cause={}",
             kind.name(),
@@ -1046,8 +1088,9 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
 
 /// Lists one project's change sets as the owner's Changes and the master's brief show
 /// them: as [`list`], without the sets of a lead's workers while the owner's Lands setting
-/// is Lead, since that lead merges them (F3). Inputs: the store and the project. Output:
-/// the change sets.
+/// is Lead, since that lead merges them (F3), but with a worker's open set whose lead's
+/// copy was removed outside the app, since no lead will. Inputs: the store and the project.
+/// Output: the change sets.
 pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
     let sets = list(db, project)?;
     assert!(sets.len() <= LIST_MAX);
@@ -1055,7 +1098,13 @@ pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetV
     if subagent::leads_merge(db, project)? {
         let mut kept = Vec::with_capacity(sets.len());
         for set in sets {
-            if !subagent::is_lead_worker(db, project, &set.agent)? {
+            let open = matches!(
+                set.state,
+                ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
+            );
+            if !subagent::is_lead_worker(db, project, &set.agent)?
+                || (open && subagent::lead_copy_removed(db, project, &set.agent)?)
+            {
                 kept.push(set);
             }
         }
@@ -1277,6 +1326,14 @@ pub fn accept_into(
     )
 }
 
+/// The refusal of a land the owner did not press while a worker below the set's agent
+/// holds an open change set (HB-S4-LANDED).
+pub const WORKER_OPEN: &str = "changes_worker_open";
+
+/// What the agent refused with [`WORKER_OPEN`] reads, after "Not merged" or "Not accepted".
+pub const WORKER_OPEN_TEXT: &str =
+    "a worker's work under that agent is still open. Land that work first, then merge again.";
+
 /// Lands a change set on a chosen local branch as [`accept_into`] does, for an Accept the
 /// owner did not make: the project's activity names who accepted it, the master or the
 /// engine. Inputs: as [`accept_into`], plus who accepts. Output: the landed commit and
@@ -1316,20 +1373,20 @@ pub fn accept_into_as(
     }
 }
 
-/// Lands the change set the project's master made, such as its fix of a conflicted set, the
-/// way an Accept does, when `team::master_lands` says Merges at that moment: one squash
-/// commit on the Land on branch, every open set of the project the master's head holds
-/// closed with it, and one MergedIntoMain activity row naming them. Any other set, a set
-/// that is not pending, or Waits leaves everything as it was. Inputs: the store, the
-/// owner's home and the change set. Output: the outcome of the land, or None when nothing
-/// was tried.
+/// Lands the change set the project's master made the way an Accept does, when it holds
+/// nothing but fixes of real conflicts with other open sets, `team::master_lands` says
+/// Merges and "Ask me before merging" is off at that moment: one squash commit on the Land
+/// on branch, every open set of the project the master's head holds closed with it, and
+/// one MergedIntoMain activity row naming them. Anything else leaves everything as it was.
+/// Inputs: the store, the owner's home and the change set. Output: the outcome of the
+/// land, or None when nothing was tried.
 pub fn land_master_set(
     db: &Connection,
     owner_home: &Path,
     id: &ChangeSetId,
 ) -> Result<Option<AcceptOutcome>, EngineError> {
     #[cfg(unix)]
-    return owner::land_master(db, owner_home, id);
+    return owner::land_master(db, owner_home, id, &|_| false);
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id);
@@ -1397,12 +1454,25 @@ pub fn discard(
     expected_head: &str,
     now_ms: u64,
 ) -> Result<u64, EngineError> {
+    discard_as(db, id, expected_head, now_ms, crate::activity::OWNER_ACTOR)
+}
+
+/// Discards a change set as [`discard`] does, recording who did it in the project's
+/// activity. Inputs: the store, the change set, the head that was reviewed, the time now
+/// and the actor. Output: the restorable-until time.
+pub fn discard_as(
+    db: &Connection,
+    id: &ChangeSetId,
+    expected_head: &str,
+    now_ms: u64,
+    by: &str,
+) -> Result<u64, EngineError> {
     #[cfg(unix)]
     return flow::discard(db, id, expected_head, now_ms)
-        .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded));
+        .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded, by));
     #[cfg(not(unix))]
     {
-        let _ = (db, id, expected_head, now_ms);
+        let _ = (db, id, expected_head, now_ms, by);
         Err(unavailable())
     }
 }
@@ -1412,8 +1482,14 @@ pub fn discard(
 /// pending.
 pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return flow::restore(db, id, now_ms)
-        .inspect(|()| noted(db, id, crate::activity::ActivityKind::ChangesReady));
+    return flow::restore(db, id, now_ms).inspect(|()| {
+        noted(
+            db,
+            id,
+            crate::activity::ActivityKind::ChangesReady,
+            crate::activity::OWNER_ACTOR,
+        )
+    });
     #[cfg(not(unix))]
     {
         let _ = (db, id, now_ms);
@@ -1465,8 +1541,14 @@ pub fn sweep_regenerations(db: &Connection) -> Result<usize, EngineError> {
 /// for the resolve task. Inputs: the store and the change set. Output: Ok once merged.
 pub fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return owner::update(db, id)
-        .inspect(|()| noted(db, id, crate::activity::ActivityKind::SentBack));
+    return owner::update(db, id).inspect(|()| {
+        noted(
+            db,
+            id,
+            crate::activity::ActivityKind::SentBack,
+            crate::activity::OWNER_ACTOR,
+        )
+    });
     #[cfg(not(unix))]
     {
         let _ = (db, id);
