@@ -37,13 +37,13 @@ export async function doublePress(page, selector, wanted = null) {
 }
 
 /** Walks focus with real Tab keys from the last Settings list link. Inputs: the page and the
- * number of keys. Output: each focused control's name. */
-export async function tabWalk(page, keys) {
+ * number of keys and whether to read the name or the id. Output: each focused control's. */
+export async function tabWalk(page, keys, part = "name") {
   await page.evaluate("[...document.querySelectorAll('.settings-nav a')].at(-1).focus()");
   const seen = [];
   for (let at = 0; at < keys; at += 1) {
     for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
-    seen.push((await page.evaluate("Fixture.focused()")).name);
+    seen.push((await page.evaluate("Fixture.focused()"))[part]);
   }
   return seen;
 }

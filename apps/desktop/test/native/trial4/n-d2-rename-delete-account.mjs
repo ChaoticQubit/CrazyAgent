@@ -28,7 +28,7 @@ export const checks = [{
       const confirm = confirmVerdict({ title: (await texts(`${CONFIRM} h2`))[0], body: (await texts(`${CONFIRM} .dialog-body`))[0] ?? "", wants: [renamed, "removed from CrazyAgent"] });
       await click(`//dialog[@open]//button[normalize-space(.)="Delete account"]`);
       await kit.until(async () => !(await rowNames()).includes(renamed), kit.UI_MS, `OP-44: ${renamed} is still listed after Delete account`);
-      const after = listTotal((await texts("main .toolbar .count"))[0]);
+      const after = listTotal((await texts("main .set-bar .count"))[0]);
       await kit.screen();
       if (after !== before - 1) throw new Error(`OP-44: the account count went from ${before} to ${after} after Delete account`);
       return `renamed ${account.name} to ${renamed} and the row showed it; deleted after ${confirm}; the count went from ${before} to ${after}`;
