@@ -502,12 +502,29 @@ fn note_text(
     crate::activity::note(db, &record.project, &item, at);
 }
 
-/// Records an owner action on a stored change set, as [`note_change`] does, once the
-/// action is done. Inputs: the store, the change set and the kind of event.
+/// Records that the engine closed a change set whose branch already took every file it
+/// changes, with no owner action behind it (HB-S4). Inputs: the store and the closed set.
 #[cfg(unix)]
-fn noted(db: &Connection, id: &ChangeSetId, kind: crate::activity::ActivityKind) {
+fn note_taken(db: &Connection, record: &store::Record) {
+    let text = format!(
+        "Closed the changes of {}: the branch they land on already took every file they change. {}",
+        record.agent.label, record.prompt_line
+    );
+    note_text(
+        db,
+        record,
+        crate::activity::ActivityKind::Discarded,
+        crate::activity::ENGINE_ACTOR,
+        &text,
+    );
+}
+
+/// Records an action on a stored change set, as [`note_change`] does, once the action is
+/// done. Inputs: the store, the change set, the kind of event and who acted.
+#[cfg(unix)]
+fn noted(db: &Connection, id: &ChangeSetId, kind: crate::activity::ActivityKind, by: &str) {
     match store::load(db, id) {
-        Ok(record) => note_change(db, &record, kind, crate::activity::OWNER_ACTOR),
+        Ok(record) => note_change(db, &record, kind, by),
         Err(error) => eprintln!(
             "activity_record_failed kind={} cause={}",
             kind.name(),
@@ -1397,12 +1414,25 @@ pub fn discard(
     expected_head: &str,
     now_ms: u64,
 ) -> Result<u64, EngineError> {
+    discard_as(db, id, expected_head, now_ms, crate::activity::OWNER_ACTOR)
+}
+
+/// Discards a change set as [`discard`] does, recording who did it in the project's
+/// activity. Inputs: the store, the change set, the head that was reviewed, the time now
+/// and the actor. Output: the restorable-until time.
+pub fn discard_as(
+    db: &Connection,
+    id: &ChangeSetId,
+    expected_head: &str,
+    now_ms: u64,
+    by: &str,
+) -> Result<u64, EngineError> {
     #[cfg(unix)]
     return flow::discard(db, id, expected_head, now_ms)
-        .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded));
+        .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded, by));
     #[cfg(not(unix))]
     {
-        let _ = (db, id, expected_head, now_ms);
+        let _ = (db, id, expected_head, now_ms, by);
         Err(unavailable())
     }
 }
@@ -1412,8 +1442,14 @@ pub fn discard(
 /// pending.
 pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return flow::restore(db, id, now_ms)
-        .inspect(|()| noted(db, id, crate::activity::ActivityKind::ChangesReady));
+    return flow::restore(db, id, now_ms).inspect(|()| {
+        noted(
+            db,
+            id,
+            crate::activity::ActivityKind::ChangesReady,
+            crate::activity::OWNER_ACTOR,
+        )
+    });
     #[cfg(not(unix))]
     {
         let _ = (db, id, now_ms);
@@ -1465,8 +1501,14 @@ pub fn sweep_regenerations(db: &Connection) -> Result<usize, EngineError> {
 /// for the resolve task. Inputs: the store and the change set. Output: Ok once merged.
 pub fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return owner::update(db, id)
-        .inspect(|()| noted(db, id, crate::activity::ActivityKind::SentBack));
+    return owner::update(db, id).inspect(|()| {
+        noted(
+            db,
+            id,
+            crate::activity::ActivityKind::SentBack,
+            crate::activity::OWNER_ACTOR,
+        )
+    });
     #[cfg(not(unix))]
     {
         let _ = (db, id);

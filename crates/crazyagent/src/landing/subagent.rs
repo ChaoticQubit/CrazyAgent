@@ -328,6 +328,41 @@ pub(super) fn leads_merge(db: &Connection, project: &ProjectId) -> Result<bool, 
     Ok(crate::team::nesting(db, project)?.lands == crate::team::ChildLanding::Lead)
 }
 
+/// Tells whether a worker below a change set's agent, sub-agent or teammate, down to the
+/// levels the engine follows, holds an open change set under either Lands setting: closing
+/// the set unasked would hide that work and leave it to [`close_orphaned`] (HB-S4). Inputs:
+/// the store and the open change set. Output: the answer, false for an agent that leads no
+/// workers or where the engine keeps no team tables.
+pub(super) fn has_open_worker(
+    db: &Connection,
+    record: &store::Record,
+) -> Result<bool, EngineError> {
+    assert!(record.is_open());
+    if record.agent.kind != super::AgentKind::Sub || !team_kept(db)? {
+        return Ok(false);
+    }
+    let Ok(lead) = record.agent.id.parse::<i64>() else {
+        return Ok(false);
+    };
+    db.query_row(
+        "WITH RECURSIVE workers(id,level) AS (
+            SELECT id,1 FROM team_agents
+             WHERE project=?1 AND parent=?2 AND role IN ('sub','teammate')
+            UNION
+            SELECT a.id,w.level+1 FROM team_agents a JOIN workers w ON a.parent=w.id
+             WHERE a.project=?1 AND a.role IN ('sub','teammate') AND w.level<?3
+         )
+         SELECT EXISTS(
+            SELECT 1 FROM landing_change_sets s JOIN workers w ON s.agent_id=CAST(w.id AS TEXT)
+             WHERE s.project=?1 AND s.agent_kind='sub'
+               AND s.state IN ('pending','conflict','updating')
+         )",
+        params![record.project.as_str(), lead, i64::from(WORKER_LEVELS_MAX)],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
+}
+
 /// Tells whether the store holds the team tables the engine keeps beside change sets.
 /// Input: the store. Output: the answer.
 fn team_kept(db: &Connection) -> Result<bool, EngineError> {

@@ -2043,6 +2043,7 @@ pub(super) fn record(
             made: false,
             undone: None,
             landed_on: None,
+            restored: false,
             files: 0,
             added: 0,
             removed: 0,
@@ -2388,6 +2389,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
         )?;
         record.state = ChangeState::Pending;
         record.restorable_until_ms = None;
+        record.restored = true;
         record.updated_ms = now;
         store::save(db, &record)?;
         logged_claims(crate::coord::restore_set(db, id.as_str()).map(drop));
@@ -2410,6 +2412,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     )?;
     record.state = ChangeState::Pending;
     record.restorable_until_ms = None;
+    record.restored = true;
     record.updated_ms = now;
     record.intent = Some(Intent::Reset {
         from: Some(current.clone()),

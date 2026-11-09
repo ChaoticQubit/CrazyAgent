@@ -36,7 +36,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     outside INTEGER NOT NULL DEFAULT 0 CHECK(outside IN (0,1)),
     made INTEGER NOT NULL DEFAULT 0 CHECK(made IN (0,1)),
     undone TEXT,
-    landed_on TEXT
+    landed_on TEXT,
+    restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
@@ -64,8 +65,9 @@ const NUMBER_PASS_MAX: i64 = 10_000;
 
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
-    restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone,landed_on";
-const ADDED_COLUMNS: [(&str, &str); 6] = [
+    restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone,landed_on,\
+    restored";
+const ADDED_COLUMNS: [(&str, &str); 7] = [
     ("message", "message TEXT NOT NULL DEFAULT ''"),
     (
         "waiting",
@@ -81,6 +83,10 @@ const ADDED_COLUMNS: [(&str, &str); 6] = [
     ),
     ("undone", "undone TEXT"),
     ("landed_on", "landed_on TEXT"),
+    (
+        "restored",
+        "restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1))",
+    ),
 ];
 
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
@@ -144,6 +150,7 @@ pub(super) struct Record {
     pub(super) made: bool,
     pub(super) undone: Option<String>,
     pub(super) landed_on: Option<String>,
+    pub(super) restored: bool,
 }
 
 impl Record {
@@ -331,6 +338,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         made: row.get::<_, bool>(27)?,
         undone: row.get(28)?,
         landed_on: row.get(29)?,
+        restored: row.get::<_, bool>(30)?,
     })
 }
 
@@ -371,7 +379,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
     db.execute(
         &format!(
             "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30) \
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31) \
              ON CONFLICT(id) DO UPDATE SET {updates}"
         ),
         params![
@@ -405,6 +413,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
             record.made,
             record.undone,
             record.landed_on,
+            record.restored,
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {
