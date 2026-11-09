@@ -876,8 +876,8 @@ pub(super) fn open_of(
     }
 }
 
-/// Reads the other change sets of a project accepted with no commit of their own and not
-/// undone yet: a master's merge closes the sets its head holds that way, and an Accept of
+/// Reads the other change sets of a project accepted with no commit of their own: a
+/// master's merge closes the sets its head holds that way, and an Accept of
 /// work the branch already held records whatever commit was the tip. Inputs: the store, the
 /// project and the set being undone. Output: the sets.
 pub(super) fn closed_without_commit(
@@ -887,7 +887,7 @@ pub(super) fn closed_without_commit(
 ) -> Result<Vec<Record>, EngineError> {
     let closed = collect(
         db,
-        "project=?1 AND id<>?2 AND state='accepted' AND made=0 AND undone IS NULL",
+        "project=?1 AND id<>?2 AND state='accepted' AND made=0",
         [project.as_str(), maker.as_str()],
     )?;
     assert!(closed.iter().all(|record| record.id != *maker));
