@@ -1697,7 +1697,9 @@ fn a_message_id_is_kept_up_to_its_bound_and_tokens_count_past_it() {
         std::fs::create_dir_all(record.parent().unwrap()).unwrap();
         let line = claude_assistant(&"a".repeat(length), 5, 0, 0, 0, "end_turn");
         std::fs::write(&record, format!("{line}{line}")).unwrap();
-        scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+        for _ in 0..2 {
+            scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+        }
         let input: i64 = db
             .query_row("SELECT SUM(input) FROM usage_tokens", [], |row| row.get(0))
             .unwrap();

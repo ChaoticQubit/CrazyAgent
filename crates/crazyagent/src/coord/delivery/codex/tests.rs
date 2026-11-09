@@ -88,7 +88,7 @@ fn an_oversized_ping_from_the_socket_is_refused_without_a_panic() {
     let socket = base.join("p");
     let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     let server = std::thread::spawn(move || {
-        let mut stream = crate::spawn_gate::accept_unix_std(&listener).unwrap();
+        let mut stream = accepted(&listener);
         let mut request = [0u8; 4096];
         let _ = stream.read(&mut request);
         stream
@@ -119,7 +119,7 @@ fn ping_of(length: usize) -> (Result<Option<String>, &'static str>, Option<Vec<u
     let socket = base.join("p");
     let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     let server = std::thread::spawn(move || {
-        let mut stream = crate::spawn_gate::accept_unix_std(&listener).unwrap();
+        let mut stream = accepted(&listener);
         let mut request = [0u8; 4096];
         let _ = stream.read(&mut request);
         stream
@@ -171,4 +171,26 @@ fn a_ping_at_the_control_limit_is_answered_and_one_byte_more_is_refused() {
         (Err("codex_bridge_closed"), Some(vec![b'p'; 125]))
     );
     assert_eq!(ping_of(126), (Err("codex_bridge_reply_too_large"), None));
+}
+
+/// Takes the one connection a peer makes, polling a non-blocking listener so the spawn gate
+/// is never held across a wait: a spawn queued behind a held gate would stop the peer's own
+/// connect. Takes the listener. Returns the stream, blocking again.
+#[cfg(target_os = "macos")]
+fn accepted(listener: &std::os::unix::net::UnixListener) -> std::os::unix::net::UnixStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match crate::spawn_gate::accept_unix_std(listener) {
+            Ok(stream) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(std::time::Instant::now() < deadline, "no connection came");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
 }
