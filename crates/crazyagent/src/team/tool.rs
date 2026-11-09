@@ -1558,8 +1558,9 @@ pub fn call_digest(bytes: &[u8]) -> [u8; CALL_DIGEST_BYTES] {
     sha2::Sha256::digest(bytes).into()
 }
 
-/// Answers one call in the mailbox: the answer is written beside it under a part name and
-/// renamed into place, so the server never reads half an answer. Takes the mailbox, the
+/// Answers one call in the mailbox: the answer is written beside it under a part name no
+/// agent of a shared mailbox can make, and renamed into place, so the server never reads
+/// half an answer. Takes the mailbox, the
 /// call id `take_calls` returned, the text, bounded to `REPLY_TEXT_MAX`, and whether it is
 /// an error. Returns the I/O failure; a planted part file, or a link at the mailbox or the
 /// master's temporary folder, makes the answer fail, never land elsewhere.
@@ -1572,7 +1573,7 @@ pub fn answer_call(mailbox: &Path, id: &str, text: &str, error: bool) -> std::io
     let bytes = serde_json::to_vec(&reply).map_err(std::io::Error::other)?;
     assert!(bytes.len() as u64 <= REPLY_BYTES_MAX);
     let mailbox = Mailbox::open_for_engine(mailbox)?;
-    let part = format!("{id}{PART_SUFFIX}");
+    let part = format!("{id}{ANSWER_PART_SUFFIX}");
     let written = mailbox
         .create(&part)
         .and_then(|mut file| file.write_all(&bytes));

@@ -769,6 +769,7 @@ pub struct ProjectSandbox {
     fixed: Vec<PathBuf>,
     shared: Vec<PathBuf>,
     teammates: bool,
+    answers: Option<PathBuf>,
     setup: Option<TeammatesSetup>,
 }
 
@@ -842,6 +843,7 @@ impl ProjectSandbox {
             fixed: Vec::new(),
             shared: Vec::new(),
             teammates: false,
+            answers: None,
             setup: None,
         })
     }
@@ -1437,6 +1439,8 @@ impl ProjectSandbox {
                 .iter()
                 .map(|scratch| scratch.join(toolchains::GIT_FOLDER)),
         );
+        let answers = mailbox.clone();
+        teammates.answers = Some(answers.clone());
         teammates.fixed = vec![home.clone(), self.agent_tmp.clone(), mailbox];
         teammates.fixed.extend(shared.iter().cloned());
         teammates.shared = shared;
@@ -1444,12 +1448,30 @@ impl ProjectSandbox {
         if teammates.writes(&home) {
             return Err(invalid("a teammates' writable root holds the lead's home"));
         }
-        let lead = self
+        let mut lead = self
             .allow_tmux_server(own, tmux)?
             .reach_unix_socket(callers)?
             .reach_unix_socket(mates)?
             .shut_unix_socket(&binding)?;
+        lead.answers = Some(answers);
         Ok((lead, teammates))
+    }
+
+    /// The writes no agent of a native team may make to the engine's answers in the tool
+    /// mailbox the team shares, a reply or the part file it is written under, in any spelling
+    /// the volume folds together. An agent may still remove a reply, as its tool server does
+    /// once it has read one. Output: the rule text, empty for any other profile.
+    fn answers_denies(&self) -> String {
+        let Some(mailbox) = &self.answers else {
+            return String::new();
+        };
+        let rule = format!(
+            "(regex #\"^{}/[^/]+({}|{})$\")",
+            seatbelt_pattern(mailbox),
+            any_case(crate::team::tool::REPLY_SUFFIX),
+            any_case(crate::team::tool::ANSWER_PART_SUFFIX),
+        );
+        format!("(deny file-write* {rule})\n(allow file-write-unlink {rule})\n")
     }
 
     /// The writes a native lead's teammates may not make in the lead's worktree (OP-9,
@@ -1847,6 +1869,8 @@ impl ProjectSandbox {
         }
         let teammates = self.teammates_denies();
         text.push_str(&teammates);
+        let answers = self.answers_denies();
+        text.push_str(&answers);
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
@@ -1866,6 +1890,9 @@ impl ProjectSandbox {
         last.extend(self.shared.iter().map(|folder| shared_denies(folder)));
         if !teammates.is_empty() {
             last.push(teammates);
+        }
+        if !answers.is_empty() {
+            last.push(answers);
         }
         assert!(
             denies_follow_write_allows(&text, &last),
