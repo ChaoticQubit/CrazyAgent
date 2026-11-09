@@ -12029,6 +12029,7 @@ fn an_agent_the_owner_stopped_wakes_only_by_the_owner() {
             &fixture.setup,
             member,
             "Finish the page.",
+            crate::team::StoppedBy::Master,
             now_ms()
         )
         .unwrap(),
@@ -20022,9 +20023,17 @@ fn a_stop_by_the_master_or_a_lead_fails_the_held_task_and_leaves_the_agent_wakea
         std::fs::remove_file(worktree_of(&fixture, lead).join("hold")).unwrap();
         let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
         let tx = connection.transaction().unwrap();
-        crate::team::admit_wake(&tx, &fixture.access, &fixture.setup, lead, WOKEN, now_ms())
-            .unwrap()
-            .unwrap();
+        crate::team::admit_wake(
+            &tx,
+            &fixture.access,
+            &fixture.setup,
+            lead,
+            WOKEN,
+            by,
+            now_ms(),
+        )
+        .unwrap()
+        .unwrap();
         tx.commit().unwrap();
         fixture.until(&mut team, "the woken harness finishes its new task", |f| {
             task_of(f, WOKEN).0 == "done"

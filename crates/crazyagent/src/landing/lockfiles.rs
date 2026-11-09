@@ -153,15 +153,15 @@ fn runtime_of(db: &Connection) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Tells whether a set may still be regenerated: Pending with no intent, of an agent the
-/// owner has not stopped, in a project whose team is not paused (OS-8). Inputs: the store
+/// Tells whether a set may still be regenerated: Pending with no intent, of an agent no
+/// stop holds, in a project whose team is not paused (OS-8). Inputs: the store
 /// and the set. Output: the answer.
 fn current(db: &Connection, record: &Record) -> Result<bool, EngineError> {
     if record.state != ChangeState::Pending || record.intent.is_some() {
         return Ok(false);
     }
     let stopped = match record.agent.id.parse::<i64>() {
-        Ok(agent) if record.agent.kind == AgentKind::Sub => crate::team::owner_stopped(db, agent)?,
+        Ok(agent) if record.agent.kind == AgentKind::Sub => crate::team::stopped(db, agent)?,
         _ => false,
     };
     Ok(!stopped && !crate::team::paused(db, &record.project)?)

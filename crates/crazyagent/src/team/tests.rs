@@ -4381,17 +4381,50 @@ fn a_stop_keeps_the_highest_standing_of_who_made_it() {
         Err("team_stop_master")
     );
     for by in [StoppedBy::Lead, StoppedBy::Master] {
-        agent_stop(&connection, &project, 7, by, 1).unwrap().unwrap();
+        agent_stop(&connection, &project, 7, by, 1)
+            .unwrap()
+            .unwrap();
         assert_eq!(recorded(), 2, "{by:?} stops the agent and its worker");
         assert!(!owner_stopped(&connection, 7).unwrap(), "{by:?}");
         assert!(!owner_stopped(&connection, 9).unwrap(), "{by:?}");
     }
+    assert_eq!(
+        stop_of(&connection, 7).unwrap(),
+        Some((StoppedBy::Master, 1)),
+        "the master's stop rises over the lead's"
+    );
+    agent_stop(&connection, &project, 7, StoppedBy::Lead, 2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stop_of(&connection, 7).unwrap(),
+        Some((StoppedBy::Master, 1)),
+        "a lead's later stop does not lower the master's"
+    );
     owner_stop(&connection, &project, 7, 2).unwrap();
     assert!(owner_stopped(&connection, 7).unwrap());
     assert!(owner_stopped(&connection, 9).unwrap());
     agent_stop(&connection, &project, 7, StoppedBy::Master, 3)
         .unwrap()
         .unwrap();
+    assert!(owner_stopped(&connection, 7).unwrap());
+}
+
+/// A stop recorded before stops named their maker was the owner's own, so an engine DB from
+/// then keeps it locked to the owner once it gains the column.
+#[test]
+fn a_stop_recorded_before_makers_were_kept_stays_the_owners() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE team_owner_stops (
+                agent INTEGER PRIMARY KEY, project TEXT NOT NULL, stopped_ms INTEGER NOT NULL
+             );
+             INSERT INTO team_owner_stops(agent,project,stopped_ms) VALUES (7,'team-stop',1);",
+        )
+        .unwrap();
+    initialize(&connection).unwrap();
     assert!(owner_stopped(&connection, 7).unwrap());
 }
 

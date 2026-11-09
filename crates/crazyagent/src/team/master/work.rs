@@ -5,9 +5,9 @@ use crate::coord::{
     Transfer, Work,
 };
 use crate::engine::EngineError;
-use crate::protocol::{Outcome, ProjectId};
+use crate::protocol::ProjectId;
 use crate::team::tool::{self, Handover, Update};
-use crate::team::{AgentStatus, TeamAction, bound_text, now_ms};
+use crate::team::{AgentStatus, StoppedBy, bound_text, now_ms};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -425,6 +425,7 @@ pub(super) fn update_work(
             &shown,
             WAKE_TASK,
             true,
+            StoppedBy::Master,
         )?
     } else {
         super::lead_wake(&tx, answering, agent, &shown, WAKE_TASK)?
@@ -438,16 +439,18 @@ pub(super) fn update_work(
 
 /// Words a refused wake as the refused message it is, since `update_work` then stores
 /// nothing and the caller must not wait for it (review N2). Takes the wake's refusal, which
-/// starts "Not woken: " or names the owner's stop. Returns it starting "Not sent: ".
+/// starts "Not woken: " or names whose stop holds the agent. Returns it starting "Not sent: ".
 fn not_sent(refusal: &str) -> String {
+    let lowered = |start: &str, word: &str| {
+        refusal
+            .strip_prefix(start)
+            .map(|rest| format!("{word}{rest}"))
+    };
     let reason = refusal
         .strip_prefix("Not woken: ")
         .map(str::to_owned)
-        .or_else(|| {
-            refusal
-                .strip_prefix("The owner ")
-                .map(|rest| format!("the owner {rest}"))
-        })
+        .or_else(|| lowered("The owner ", "the owner "))
+        .or_else(|| lowered("The master ", "the master "))
         .unwrap_or_else(|| refusal.to_owned());
     format!("Not sent: {reason}")
 }
@@ -788,10 +791,11 @@ fn unmerged_for_finish(
     Ok(unmerged)
 }
 
-/// Stops an agent for the `stop` tool through the owner's own stop (S4), so only the owner
-/// wakes it again: the master may stop any sub-agent, a lead only its own workers, and no
-/// agent itself. Takes the database, what the answers need, the caller, whether it is the
-/// master and the name. Returns the sentence and whether it is a refusal.
+/// Stops an agent for the `stop` tool, recording who stopped it (HB-S5-B): the master may
+/// stop any sub-agent, a lead only its own workers, and no agent itself. Its unfinished
+/// tasks fail, and its maker or anyone above can wake it. Takes the database, what the
+/// answers need, the caller, whether it is the master and the name. Returns the sentence
+/// and whether it is a refusal.
 pub(super) fn stop(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -826,28 +830,29 @@ pub(super) fn stop(
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(state)?;
-    let outcome = crate::team::execute(
-        &tx,
-        answering.access,
-        &TeamAction::StopAgent {
-            project_id: project.clone(),
-            agent: target,
+    let by = if master {
+        StoppedBy::Master
+    } else {
+        StoppedBy::Lead
+    };
+    Ok(
+        match crate::team::agent_stop(&tx, project, target, by, now_ms())? {
+            Ok(()) => {
+                tx.commit().map_err(state)?;
+                (
+                    format!(
+                        "Stopping {label}. Its unfinished tasks fail, and you can wake it again."
+                    ),
+                    false,
+                )
+            }
+            Err("team_stop_master") => (
+                "Not stopped: the master stops only when the owner stops it.".to_owned(),
+                true,
+            ),
+            Err(_) => (format!("Not stopped: {label} could not be stopped."), true),
         },
-    )?;
-    Ok(match outcome {
-        Outcome::Applied => {
-            tx.commit().map_err(state)?;
-            (
-                format!("Stopping {label}. Only the owner can wake it again."),
-                false,
-            )
-        }
-        Outcome::Rejected { code } if code == "team_stop_master" => (
-            "Not stopped: the master stops only when the owner stops it.".to_owned(),
-            true,
-        ),
-        _ => (format!("Not stopped: {label} could not be stopped."), true),
-    })
+    )
 }
 
 /// Merges one of a lead's own workers for the `merge` tool (N2, DEC-104 K5b): in the

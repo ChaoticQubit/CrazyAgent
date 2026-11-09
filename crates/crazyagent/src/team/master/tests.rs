@@ -2413,7 +2413,9 @@ fn a_lead_stops_only_its_own_workers_and_wakes_the_one_it_stopped() {
             json!({"agent": worker.to_string()})
         ),
         (
-            format!("Stopping {worker_label}. Its unfinished tasks fail, and you can wake it again."),
+            format!(
+                "Stopping {worker_label}. Its unfinished tasks fail, and you can wake it again."
+            ),
             false
         )
     );
@@ -2424,7 +2426,9 @@ fn a_lead_stops_only_its_own_workers_and_wakes_the_one_it_stopped() {
             json!({"agent": other.to_string()})
         ),
         (
-            format!("Stopping {other_label}. Its unfinished tasks fail, and you can wake it again."),
+            format!(
+                "Stopping {other_label}. Its unfinished tasks fail, and you can wake it again."
+            ),
             false
         )
     );
@@ -2454,7 +2458,9 @@ fn a_lead_stops_only_its_own_workers_and_wakes_the_one_it_stopped() {
         json!({"to": worker.to_string(), "text": "Go on."}),
     );
     assert!(
-        !refused && said.starts_with("Sent #") && said.contains(&format!(". Waking {worker_label}:")),
+        !refused
+            && said.starts_with("Sent #")
+            && said.contains(&format!(". Waking {worker_label}:")),
         "{said}"
     );
     assert_eq!(pinned(&fixture, worker).len(), 1);
@@ -2491,7 +2497,9 @@ fn a_worker_the_master_stopped_wakes_for_the_master_and_not_for_its_lead() {
     assert_eq!(
         as_sub(&mut fixture, lead, tool::UPDATE_WORK_TOOL, go_on.clone()),
         (
-            format!("Not sent: the master stopped {label}. Only the master or the owner can wake it."),
+            format!(
+                "Not sent: the master stopped {label}. Only the master or the owner can wake it."
+            ),
             true
         )
     );
