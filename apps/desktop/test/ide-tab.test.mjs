@@ -115,8 +115,8 @@ test("the IDE tab follows its panel, hides with the tab, closes with the project
   assert.match(source, /touchIde\(/);
   const index = read("src/screens/project/index.tsx");
   assert.match(index, /useCloseIde\(projectId, data\.notify\)/, "leaving the project closes its IDE webview");
-  assert.deepEqual(client.bounds({ left: 10.4, top: 80.6, width: 900.2, height: 600.7 }), { x: 10, y: 81, width: 900, height: 601 });
-  assert.equal(client.bounds({ left: 0, top: 0, width: 0, height: 300 }), null, "a hidden panel has no bounds");
+  assert.deepEqual(client.bounds({ left: 10.4, top: 80.6, width: 900.2, height: 600.7 }, 838), { x: 10, y: 81, width: 900, height: 601, viewport: 838 }, "the native side needs the page's own height to place the panel in the window");
+  assert.equal(client.bounds({ left: 0, top: 0, width: 0, height: 300 }, 838), null, "a hidden panel has no bounds");
 });
 
 test("no native command or main-window lookup goes through the WebviewWindow type that Tauri refuses while the IDE webview is in the window", () => {
@@ -202,17 +202,17 @@ const command = (lib, name) => {
 };
 
 test("the IDE webview follows its panel through any layout shift or scroll, and the tab fills the space left", () => {
-  const box = { x: 0, y: 120, width: 900, height: 600 };
+  const box = { x: 0, y: 120, width: 900, height: 600, viewport: 838 };
   assert.equal(client.sameBounds(box, { ...box }), true);
   assert.equal(client.sameBounds(box, null), false, "the first measure always places");
-  for (const moved of [{ ...box, y: 168 }, { ...box, x: 1 }, { ...box, width: 899 }, { ...box, height: 640 }]) {
+  for (const moved of [{ ...box, y: 168 }, { ...box, x: 1 }, { ...box, width: 899 }, { ...box, height: 640 }, { ...box, viewport: 870 }]) {
     assert.equal(client.sameBounds(box, moved), false, JSON.stringify(moved));
   }
   const tab = read("src/screens/project/ide.tsx");
   assert.match(tab, /window\.requestAnimationFrame\(follow\)/, "the panel's box is compared every frame while shown, so a banner or a scroll that moves it without a resize moves the IDE too");
   assert.match(tab, /window\.cancelAnimationFrame\(frame\)/, "hiding the tab stops following");
   assert.match(tab, /if \(!box \|\| sameBounds\(box, last\)\) return;/, "the window hears only a box that changed");
-  assert.match(tab, /const place = \(\) => \{\s*if \(!shown\) return;\s*const box = bounds\(element\.getBoundingClientRect\(\)\);/, "nothing is measured before the IDE shows");
+  assert.match(tab, /const place = \(\) => \{\s*if \(!shown\) return;\s*const box = bounds\(element\.getBoundingClientRect\(\), window\.innerHeight\);/, "nothing is measured before the IDE shows");
   assert.match(tab, /if \(!live \|\| !shown\) \{\s*frame = 0;\s*return;\s*\}/, "the loop runs only while the IDE is shown");
   assert.match(tab, /if \(frame === 0\) follow\(\);/, "the loop starts once the IDE shows, never twice");
   const css = read("src/screens/project/ide.css");

@@ -4336,7 +4336,7 @@ mod tests {
         let project = json!({ "projectId": "project-one" });
         let placed = json!({
             "projectId": "project-one",
-            "bounds": { "x": 0.0, "y": 80.0, "width": 900.0, "height": 600.0 },
+            "bounds": { "x": 0.0, "y": 80.0, "width": 900.0, "height": 600.0, "viewport": 720.0 },
         });
         let calls = [
             ("desktop_ide_place", &placed),

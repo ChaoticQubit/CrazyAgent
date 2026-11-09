@@ -33,7 +33,8 @@ fn refused(code: &'static str) -> BridgeError {
     }
 }
 
-/// The panel the IDE webview covers, in the main window's logical pixels.
+/// The panel the IDE webview covers, in the page's logical pixels, and the height of the page's
+/// view.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bounds {
@@ -41,22 +42,36 @@ pub struct Bounds {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    pub viewport: f64,
 }
 
 impl Bounds {
     /// Checks the panel the window sent: finite, inside a sane screen and at least one
     /// pixel each way. Input: the bounds. Output: them, or `ide_bounds_invalid`.
     pub fn checked(self) -> Result<Self, BridgeError> {
-        let spans = [self.x, self.y, self.width, self.height];
+        let spans = [self.x, self.y, self.width, self.height, self.viewport];
         let sane = spans
             .iter()
             .all(|span| span.is_finite() && (0.0..=SPAN_MAX).contains(span))
             && self.width >= 1.0
-            && self.height >= 1.0;
+            && self.height >= 1.0
+            && self.viewport >= 1.0;
         if !sane {
             return Err(refused("ide_bounds_invalid"));
         }
         Ok(self)
+    }
+
+    fn below_inset(self, _content_height: f64) -> Self {
+        self
+    }
+
+    /// Counts the panel from the top of the window's content view, where a child webview is
+    /// placed, not from the top of the page. Input: the window. Output: the bounds to place.
+    fn in_window<R: Runtime>(self, window: &Window<R>) -> Result<Self, BridgeError> {
+        let scale = window.scale_factor().map_err(failed)?;
+        let content = window.inner_size().map_err(failed)?;
+        Ok(self.below_inset(content.to_logical::<f64>(scale).height))
     }
 
     fn rect(self) -> Rect {
@@ -371,6 +386,7 @@ pub fn show(
     bounds: Bounds,
     ticket: u64,
 ) -> Result<(), BridgeError> {
+    let bounds = bounds.in_window(window)?;
     let mut held = views.lock();
     if !held.admit(project, ticket) {
         return Err(refused("ide_open_cancelled"));
@@ -464,6 +480,7 @@ pub fn place<R: Runtime>(
         .get(project.as_str())
         .and_then(|loaded| app.get_webview(&loaded.label))
     {
+        let bounds = bounds.in_window(&webview.window())?;
         webview.set_bounds(bounds.rect()).map_err(failed)?;
     }
     Ok(())
@@ -629,12 +646,39 @@ mod tests {
     }
 
     #[test]
+    fn a_panel_is_counted_from_the_content_view_and_not_from_the_page() {
+        let panel = Bounds {
+            x: 244.0,
+            y: 144.0,
+            width: 1012.0,
+            height: 678.0,
+            viewport: 838.0,
+        };
+        assert_eq!(
+            panel.below_inset(870.0),
+            Bounds { y: 176.0, ..panel },
+            "the page starts 32 below the top of a content view that reaches under the title bar"
+        );
+        assert_eq!(
+            panel.below_inset(838.0),
+            panel,
+            "a page that fills the content view is already counted from its top"
+        );
+        assert_eq!(
+            panel.below_inset(800.0),
+            panel,
+            "a page caught mid-resize taller than the content view moves nothing"
+        );
+    }
+
+    #[test]
     fn panel_bounds_must_be_finite_on_screen_and_visible() {
         let fine = Bounds {
             x: 0.0,
             y: 81.0,
             width: 900.0,
             height: 601.0,
+            viewport: 720.0,
         };
         assert_eq!(fine.checked().map_err(|error| error.code), Ok(fine));
         for bad in [
@@ -654,6 +698,14 @@ mod tests {
             },
             Bounds {
                 x: SPAN_MAX + 1.0,
+                ..fine
+            },
+            Bounds {
+                viewport: 0.0,
+                ..fine
+            },
+            Bounds {
+                viewport: f64::NAN,
                 ..fine
             },
         ] {
