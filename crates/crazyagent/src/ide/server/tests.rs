@@ -1537,3 +1537,36 @@ async fn a_delete_hold_landing_on_a_starting_open_stops_what_it_started() {
     drop(hold);
     servers.stop_all().await;
 }
+
+/// A timed-out open is dropped while its blocking work runs on, and that work writes the
+/// project's settings. The work keeps the start lock until it ends, so a retry waits for it
+/// instead of writing beside it, and the work never runs without the lock (ide-8 r1 sec F1).
+#[tokio::test]
+async fn a_dropped_open_keeps_the_start_lock_until_its_blocking_work_ends() {
+    let start = Arc::new(tokio::sync::Mutex::new(()));
+    let held = Arc::clone(&start).lock_owned().await;
+    let (entered, running) = tokio::sync::oneshot::channel();
+    let (finish, done) = std::sync::mpsc::channel::<()>();
+    let open = tokio::spawn(async move {
+        let mut held = Some(held);
+        holding_start(&mut held, move || {
+            entered.send(()).unwrap();
+            done.recv().unwrap();
+        })
+        .await
+    });
+    running.await.unwrap();
+    open.abort();
+    assert!(open.await.unwrap_err().is_cancelled());
+    assert!(
+        start.try_lock().is_err(),
+        "a retry must wait for the work a dropped open left running"
+    );
+    finish.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(GONE_WAIT, start.lock()).await.is_ok(),
+        "the lock is free once the work has ended"
+    );
+    let unlocked = tokio::spawn(async { holding_start(&mut None, || ()).await });
+    assert!(unlocked.await.unwrap_err().is_panic());
+}

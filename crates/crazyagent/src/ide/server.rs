@@ -111,7 +111,7 @@ impl Drop for DeleteHold<'_> {
 
 #[derive(Default)]
 struct Slot {
-    start: tokio::sync::Mutex<()>,
+    start: Arc<tokio::sync::Mutex<()>>,
     state: Mutex<Option<Running>>,
 }
 
@@ -254,7 +254,7 @@ impl Servers {
             return Err(failure("ide_platform_unqualified"));
         }
         let slot = self.slot(project)?;
-        let _start = slot.start.lock().await;
+        let mut start = Some(Arc::clone(&slot.start).lock_owned().await);
         if self.closed.load(Ordering::SeqCst) {
             return Err(failure("ide_servers_closed"));
         }
@@ -309,7 +309,8 @@ impl Servers {
                 root,
                 socket: &self.socket,
             };
-            let mut command = command_off_thread(launch, &info, output, project_hooks).await?;
+            let mut command =
+                command_off_thread(launch, &info, output, project_hooks, &mut start).await?;
             self.prepare_extensions(&build, &folder).await?;
             self.spawn(project, &slot, &info, &mut command)
         }
@@ -747,13 +748,14 @@ struct Launch<'a> {
 
 /// [`command`] on a blocking thread, so its git lookup, which runs xcrun on a Mac without the
 /// Command Line Tools and retries at every start until one succeeds, never holds an async
-/// worker. Inputs: as [`command`]. Output: its command, or `ide_state_unavailable` when the
-/// thread died.
+/// worker. Inputs: as [`command`], and the start lock [`holding_start`] keeps with the thread.
+/// Output: its command, or `ide_state_unavailable` when the thread died.
 async fn command_off_thread(
     launch: Launch<'_>,
     info: &ServerInfo,
     output: PipeWriter,
     project_hooks: bool,
+    start: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Command, EngineError> {
     let project = launch.project.clone();
     let (build, folder, root, socket) = (
@@ -763,7 +765,7 @@ async fn command_off_thread(
         launch.socket.to_path_buf(),
     );
     let info = info.clone();
-    tokio::task::spawn_blocking(move || {
+    holding_start(start, move || {
         let launch = Launch {
             project: &project,
             build: &build,
@@ -773,8 +775,19 @@ async fn command_off_thread(
         };
         command(launch, &info, output, project_hooks)
     })
-    .await
-    .map_err(|_| failure("ide_state_unavailable"))?
+    .await?
+}
+
+/// Runs blocking work while the project's start lock is held. Inputs: the held lock and the
+/// work. Output: what the work returned, or `ide_state_unavailable` when its thread died.
+async fn holding_start<T: Send + 'static>(
+    start: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, EngineError> {
+    assert!(start.is_some(), "blocking work runs under the start lock");
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| failure("ide_state_unavailable"))
 }
 
 /// The server's command line, IDE-1 verdict 3, under the Seatbelt profile installed for
