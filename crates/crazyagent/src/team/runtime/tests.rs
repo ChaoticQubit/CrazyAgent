@@ -19891,6 +19891,45 @@ fn a_lead_with_a_queued_child_task_stays_when_an_idle_agent_makes_room() {
     team.shutdown().unwrap();
 }
 
+/// Records a task not yet started that names an agent as its lead. Takes the fixture, the
+/// task's project, its status and the lead.
+#[cfg(target_os = "macos")]
+fn waiting_child(fixture: &Fixture, project: &str, status: &str, lead: i64) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms,parent) VALUES (?1,'master','codex',0,'Write the child page.',?2,?3,?4)",
+            params![project, status, now_ms(), lead],
+        )
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_with_a_child_task_in_needs_pool_stays_when_an_idle_agent_makes_room() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    waiting_child(&fixture, PROJECT, "needs_pool", older);
+    only_newer_stops(&fixture, &mut team, older, newer, &BTreeSet::new());
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_child_task_of_another_project_does_not_hold_its_lead_when_room_is_made() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    waiting_child(&fixture, "other-project", "queued", older);
+    team.stop_idle_for(
+        &fixture.setup.project_id,
+        "codex",
+        |_: &Worker| true,
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    assert!(team.workers[&older].stopping);
+    assert!(!team.workers[&newer].stopping);
+    team.shutdown().unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn one_idle_agent_stops_at_a_time_to_make_room() {
