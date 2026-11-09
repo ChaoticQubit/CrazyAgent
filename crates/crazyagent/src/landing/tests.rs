@@ -8759,6 +8759,7 @@ fn an_agent_edit_inside_the_reset_an_engine_start_finishes_survives() {
     stopped.intent = Some(store::Intent::Reset {
         from: Some(head.clone()),
         target: case.tip(),
+        earlier: None,
     });
     store::save(&case.db, &stopped).unwrap();
     let runs = edit_inside_resets(&case);

@@ -413,6 +413,7 @@ fn regenerated(
     now.intent = Some(Intent::Reset {
         from: Some(before.head.clone()),
         target: commit.clone(),
+        earlier: Some(super::store::Earlier::of(&before)),
     });
     store::save(db, &now)?;
     flow::set_engine_ref(&owner, &repository, &pending_ref(&now.id), Some(&commit))?;

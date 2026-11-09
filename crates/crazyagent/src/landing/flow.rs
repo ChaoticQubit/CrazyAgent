@@ -472,6 +472,23 @@ impl Agent {
         Ok(commit)
     }
 
+    /// Tells whether the agent's own pointer holds a commit or work built on it, whichever
+    /// branch HEAD names now: its branch, or HEAD itself for a detached agent. A commit the
+    /// repository no longer holds counts as no. Input: the commit. Output: the answer.
+    pub(super) fn built_on(&self, target: &str) -> Result<bool, EngineError> {
+        let pointer = match &self.pointer {
+            Pointer::Detached => "HEAD".to_owned(),
+            Pointer::Branch(branch) => format!("refs/heads/{branch}"),
+        };
+        let Some(commit) = self.repo.commit_of(&pointer)? else {
+            return Ok(false);
+        };
+        Ok(self.repo.commit_of(target)?.is_some()
+            && self
+                .repo
+                .test(&["merge-base", "--is-ancestor", target, &commit])?)
+    }
+
     /// Moves HEAD from `old`, when given, to `new`. A detached HEAD is rewritten by the
     /// engine under git's own `HEAD.lock` with no reflog; the master's lease branch is
     /// moved by its name in the shared repository with no dereference, after its reflog
@@ -884,14 +901,19 @@ fn run_planted(planted: &std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>>, agent: &
     }
 }
 
+/// The refusal [`reset_agent`] gives when the agent's pointer moved on from a reset it
+/// reached. The owner reads it as the agent still writing, which it is.
+pub(super) const POINTER_MOVED_ON: &str = "changes_agent_busy";
+
 /// Moves an agent worktree from the commit it holds to another, never over the agent's
 /// work: an index git cannot refresh (locked, mid-merge) refuses; git's two-tree
 /// read-tree moves its index and tracked files and refuses, changing nothing, when a path
 /// it would change was edited, staged or is in its way untracked; then HEAD moves only
-/// while it still holds `from` and must still be the agent's pointer after, else HEAD and
-/// the files go back. A stop between the steps leaves a state an engine start can finish.
-/// Inputs: the worktree and both commits. Output: true once it holds `target`, false when
-/// it refused.
+/// while it still holds `from` and must still be the agent's pointer after, else HEAD goes
+/// back and the files too when the agent's checkout holds `from`. A stop between the steps
+/// leaves a state an engine start can finish. Inputs: the worktree and both commits.
+/// Output: true once it holds `target`, false when it refused, [`POINTER_MOVED_ON`] when
+/// the pointer cannot go back, so the caller leaves the step stored and undoes nothing.
 pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
     assert!(is_object_id(from) && is_object_id(target));
     #[cfg(test)]
@@ -929,11 +951,25 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
             .is_err()
         {
             eprintln!("landing_reset_pointer_not_put_back");
+            return Err(failure(POINTER_MOVED_ON));
         }
-        files_back(agent, from, target);
+        if agent.repo.commit_of("HEAD").ok().flatten().as_deref() == Some(from) {
+            files_back(agent, from, target);
+        }
         return Ok(false);
     }
     Ok(true)
+}
+
+/// As [`reset_agent`], for a caller with nobody left to refuse: a pointer that moved on
+/// from the reset counts as done, because the agent built on what the reset reached.
+/// Inputs: the worktree and both commits. Output: true once it holds `target` or moved on
+/// from it, false when it refused.
+pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
+    match reset_agent(agent, from, target) {
+        Err(moved) if moved.0 == POINTER_MOVED_ON => Ok(true),
+        other => other,
+    }
 }
 
 /// Puts an agent worktree's index and files back from `target` to `from` after its reset
@@ -989,9 +1025,10 @@ pub(super) fn reset_if_quiet(
     record.intent = Some(Intent::Reset {
         from: Some(expected.to_owned()),
         target: target.to_owned(),
+        earlier: None,
     });
     store::save(db, record)?;
-    let start = if reset_agent(&agent, expected, target)? {
+    let start = if reset_settling(&agent, expected, target)? {
         target
     } else {
         expected
@@ -2422,6 +2459,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     record.intent = Some(Intent::Reset {
         from: Some(current.clone()),
         target: record.head.clone(),
+        earlier: Some(store::Earlier::of(&before)),
     });
     store::save(db, &record)?;
     if !reset_agent(&agent, &current, &record.head)? {
