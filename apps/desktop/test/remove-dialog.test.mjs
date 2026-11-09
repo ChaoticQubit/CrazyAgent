@@ -162,3 +162,94 @@ test("at the smallest window a project with many agents, losses and folders keep
   assert.ok(fit.details.scroll > fit.details.client, `the folder list is what scrolls: ${seen}`);
   assert.equal(fit.detailsTab, 0, `the keyboard reaches the folder list: ${seen}`);
 });
+
+const paths = (count) => Array.from({ length: count }, (_, index) => `/Users/owner/CrazyAgent/trash-me/part-${index}`);
+const fourLines = (patch = {}) => preview({
+  name: "Trash Me", running: ["Builder 2"], open_change_sets: 1, folders: paths(2),
+  losses: [{ id: 3, label: "Tester 3", code: "cleanup_worktree_dirty" }, { id: 4, label: "Tester 4", code: "cleanup_commits_unlanded" }], ...patch,
+});
+const SMALLEST = [[760, 560], [760, 528]];
+
+async function measured(fixture, shown, [width, height]) {
+  const { withPage } = await import("./browser.mjs");
+  return withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(${JSON.stringify(shown)})`);
+    await evaluate("Fixture.frames()");
+    assert.equal(await evaluate("Fixture.focusName()"), true, "the name box is shown");
+    await evaluate("Fixture.frames()");
+    return { fit: await evaluate("Fixture.fit()"), folders: await evaluate("Fixture.folders()"), lines: await evaluate("Fixture.lossFit()") };
+  });
+}
+
+test("Delete everything says how many folders go to the Trash, and at the smallest windows at least two of them show whole above four loss lines", async () => {
+  const { bundle } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/remove-dialog-fit.mjs", import.meta.url).pathname);
+  assert.match(view({ preview: preview(), choice: "everything" }), /Moves to the Trash \(1 folder\)/);
+  for (const size of SMALLEST) {
+    for (const count of [2, 40]) {
+      const { fit, folders } = await measured(fixture, fourLines({ folders: paths(count) }), size);
+      const seen = `${size.join("x")} ${count} folders: ${JSON.stringify({ fit, folders })}`;
+      assert.equal(folders.heading, `Moves to the Trash (${count} folders)`, seen);
+      assert.equal(folders.headingSeen, true, `the count is in view: ${seen}`);
+      assert.ok(folders.whole >= 2, `two folders show whole: ${seen}`);
+      assert.ok(fit.dialog.scroll <= fit.dialog.client, `the frame does not scroll: ${seen}`);
+      assert.equal(fit.remove, true, `the Delete everything button is in view: ${seen}`);
+    }
+  }
+});
+
+test("long names keep every loss line and folder row on one line, keep the words saying what is lost in view and leave the dialog its fit", async () => {
+  const { bundle } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/remove-dialog-fit.mjs", import.meta.url).pathname);
+  const unbroken = "x".repeat(128);
+  const spaced = "word ".repeat(26).trim();
+  const longPath = `/Users/owner/CrazyAgent/${"p".repeat(200)}`;
+  for (const size of SMALLEST) {
+    const short = await measured(fixture, fourLines(), size);
+    for (const [label, name] of [[unbroken, "Trash Me"], [spaced, "Trash Me"], ["Builder 2", "n".repeat(64)]]) {
+      const long = fourLines({ name, running: [label], folders: [longPath, ...paths(1)],
+        losses: [{ id: 3, label, code: "cleanup_worktree_dirty" }, { id: 4, label, code: "cleanup_commits_unlanded" }] });
+      const { fit, folders, lines } = await measured(fixture, long, size);
+      const seen = `${size.join("x")} ${label.slice(0, 8)} ${name.slice(0, 8)}: ${JSON.stringify({ fit, folders, lines })}`;
+      for (const [index, line] of lines.entries()) {
+        assert.equal(line.height, short.lines[index].height, `a loss line stays one line: ${seen}`);
+        assert.equal(line.words, true, `what is lost stays in view: ${seen}`);
+        assert.equal(line.title, line.text, `the hover text has the whole line: ${seen}`);
+      }
+      assert.ok(lines[0].text.startsWith(`${label} is running`), `the line keeps the whole name for a screen reader: ${seen}`);
+      assert.equal(folders.tallest, short.folders.tallest, `a folder row stays one line: ${seen}`);
+      assert.ok(folders.belowHeading && folders.aboveLosses, `the list sits clear of its neighbours: ${seen}`);
+      assert.ok(folders.whole >= 1, `a folder shows whole: ${seen}`);
+      assert.ok(fit.dialog.scroll <= fit.dialog.client, `the frame does not scroll: ${seen}`);
+      assert.equal(fit.name, true, `the name box is in view: ${seen}`);
+      assert.equal(fit.remove, true, `the Delete everything button is in view: ${seen}`);
+    }
+  }
+});
+
+test("the keyboard goes from the name box to the folder list and scrolls it with real key presses", async () => {
+  const { bundle, withPage } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/remove-dialog-fit.mjs", import.meta.url).pathname);
+  const seen = await withPage(async ({ evaluate, send }) => {
+    const press = async (key, code, modifiers = 0) => {
+      for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key, code: key, windowsVirtualKeyCode: code, modifiers });
+    };
+    await send("Emulation.setDeviceMetricsOverride", { width: 760, height: 560, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(${JSON.stringify(fourLines({ folders: paths(40) }))})`);
+    await evaluate("Fixture.frames()");
+    assert.equal(await evaluate("Fixture.focusName()"), true, "the name box is shown");
+    await press("Tab", 9, 8);
+    const reached = await evaluate("Fixture.listState()");
+    await press("ArrowDown", 40);
+    await press("ArrowDown", 40);
+    await press("PageDown", 34);
+    await evaluate("new Promise((done) => setTimeout(done, 400))");
+    return { reached, scrolled: await evaluate("Fixture.listState()") };
+  });
+  assert.deepEqual(seen.reached, { focused: true, top: 0 }, "Shift+Tab from the name box lands on the list");
+  assert.equal(seen.scrolled.focused, true, "the list keeps the focus");
+  assert.ok(seen.scrolled.top > 0, `the keys scrolled the list: ${JSON.stringify(seen)}`);
+});
