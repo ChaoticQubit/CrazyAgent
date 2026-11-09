@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { bundle, withPage } from "./browser.mjs";
 
+const { dayLabel, offsetMinutes } = await import("../src/screens/metrics/usage-model.tsx");
+
 const fixture = await bundle(new URL("./fixtures/app-metrics-page.mjs", import.meta.url).pathname);
 const CSS = [
   readFileSync(new URL("../src/ui/tokens.css", import.meta.url), "utf8"),
@@ -15,17 +17,18 @@ const CSS = [
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const NOW = Date.now();
-const none = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
 const windowOf = (used_percent, hours) => ({ used_percent, resets_at_ms: NOW + hours * HOUR });
 const LIMITS = {
   account: "acct-a", plan: "Max", source: "poll", observed_ms: NOW - 120_000, failure: null, five_hour: windowOf(84, 2), weekly: windowOf(12, 72),
   five_hour_reset_override_ms: null, weekly_reset_override_ms: null, five_hour_left_out_label: null, weekly_left_out_label: null,
 };
-const REPORT = { since_ms: NOW - 6 * DAY, total: none, runs: 0, projects: [], pools: [], accounts: [], agents: [], days: [], lines: [], agent_lines: [], limits: [LIMITS], partial_homes: 0 };
+const USED = { input: 900, output: 300, cache_read: 100, cache_write: 200 };
+const DAYS = Array.from({ length: 30 }, (_, index) => ({ day_ms: NOW - (29 - index) * DAY, tokens: USED }));
+const REPORT = { since_ms: NOW - 6 * DAY, total: USED, runs: 1, projects: [], pools: [], accounts: [], agents: [], days: DAYS, lines: [], agent_lines: [], limits: [LIMITS], partial_homes: 0 };
 const SHIFT = -new Date(NOW).getTimezoneOffset() * 60_000;
 const TODAY = Math.floor((NOW + SHIFT) / DAY) * DAY - SHIFT;
 const SERIES = [{ start_ms: TODAY - 3 * DAY, tokens: { input: 900, output: 300, cache_read: 100, cache_write: 200 } }];
-const METRICS = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: SERIES, runs: [], projects: [], agents: [], accounts: [], harnesses: [] };
+const METRICS = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: SERIES, runs: [], projects: [{ key: "alpha", tokens: USED, agents: 1, runs: 1, projects: ["alpha"], merges: 0 }], agents: [], accounts: [], harnesses: [] };
 const ANSWERS = {
   desktop_usage_report: REPORT, desktop_usage_metrics: METRICS, desktop_usage_refresh: null, desktop_usage_set_reset: null,
   desktop_list_accounts: { accounts: [{ id: "acct-a", name: "Pool A, Claude 1" }], next: null }, desktop_pool_summaries: [], desktop_account_ranking: [],
@@ -33,11 +36,11 @@ const ANSWERS = {
 
 /** Opens the app Metrics page in Chrome. Inputs: the page, the theme and the window width.
  * Output: nothing. */
-async function open(page, theme = "light", width = 1440) {
+async function open(page, theme = "light", width = 1440, answers = ANSWERS) {
   await page.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
   await page.evaluate(fixture);
   await page.evaluate(`document.documentElement.setAttribute("data-theme", ${JSON.stringify(theme)})`);
-  await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, ${JSON.stringify(ANSWERS)})`);
+  await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, ${JSON.stringify(answers)})`);
 }
 
 /** Clicks an element with the real mouse. Inputs: the page, its selector and its words.
@@ -85,7 +88,7 @@ async function key(page, name, code) {
   await page.evaluate("Fixture.settle(120)");
 }
 
-const contrast = `(() => {
+const ratioHelpers = `
   const luminance = (color) => {
     const [r, g, b] = color.match(/[\\d.]+/g).slice(0, 3).map((part) => {
       const value = Number(part) / 255;
@@ -94,6 +97,10 @@ const contrast = `(() => {
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
   };
   const ratio = (a, b) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+`;
+
+const contrast = `(() => {
+  ${ratioHelpers}
   const surface = luminance(getComputedStyle(document.querySelector(".mx-lead")).backgroundColor);
   return ["in", "cw", "out"].map((name) => ratio(luminance(getComputedStyle(document.querySelector(".mx-chart ." + name)).fill), surface));
 })()`;
@@ -169,3 +176,51 @@ for (const width of [1440, 760]) {
     });
   });
 }
+
+test("Enter opens a panel's All columns and a real click shows every day", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    await page.evaluate(`document.querySelector(".mx-panels details summary").focus()`);
+    await key(page, "Enter", 13);
+    assert.equal(await page.evaluate(`document.querySelector(".mx-panels details").open`), true);
+    const newest = dayLabel(DAYS.at(-1).day_ms, offsetMinutes(new Date(NOW)));
+    const firstDay = () => page.evaluate(`document.querySelector(".mx-days tbody th").textContent`);
+    assert.equal(await firstDay(), newest);
+    await clickOn(page, "button", "Show all 30 days");
+    assert.equal(await page.evaluate(`document.querySelectorAll(".mx-days tbody tr").length`), 30);
+    assert.equal(await firstDay(), newest);
+    await clickOn(page, "button", "Show last 7 days");
+    assert.equal(await page.evaluate(`document.querySelectorAll(".mx-days tbody tr").length`), 7);
+  });
+});
+
+for (const theme of ["light", "dark"]) {
+  test(`the panels' bars and words are readable in ${theme}`, async () => {
+    await withPage(async (page) => {
+      await open(page, theme);
+      const seen = await page.evaluate(`(() => {
+        ${ratioHelpers}
+        const row = document.querySelector(".mx-panels .mx-row");
+        const panel = getComputedStyle(row.closest(".panel")).backgroundColor;
+        const against = (selector) => ratio(luminance(getComputedStyle(row.querySelector(selector)).color), luminance(panel));
+        return { bar: getComputedStyle(row.querySelector(".mx-bar i")).backgroundColor, panel, name: against(".mx-row-name"), side: against(".mx-row-side") };
+      })()`);
+      assert.notEqual(seen.bar, seen.panel, JSON.stringify(seen));
+      assert.ok(seen.name >= 4.5, JSON.stringify(seen));
+      assert.ok(seen.side >= 4.5, JSON.stringify(seen));
+    });
+  });
+}
+
+test("words about usage not reported leave every row's name its width at 1100 px", async () => {
+  await withPage(async (page) => {
+    const silent = (key, tokens) => ({ key, tokens, runs: 2, last_ms: NOW - HOUR, not_reported_by: "Gemini CLI" });
+    const accounts = [silent("acct-a", USED), silent("acct-z", { input: 0, output: 0, cache_read: 0, cache_write: 0 })];
+    await open(page, "light", 1100, { ...ANSWERS, desktop_usage_report: { ...REPORT, accounts } });
+    await page.evaluate(`document.body.style.paddingLeft = "220px"`);
+    const widths = await page.evaluate(`[...document.querySelectorAll('[aria-label="By account"] .mx-row-name')].map((name) => name.getBoundingClientRect().width)`);
+    assert.equal(widths.length, 2);
+    for (const width of widths) assert.ok(width >= 60, `a name is ${width} px wide`);
+    assert.equal(await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
+  });
+});

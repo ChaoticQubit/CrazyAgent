@@ -3,15 +3,16 @@ import { listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
-import { loadMetrics, loadUsage, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type Tokens, type UsageReport } from "../../api-usage";
+import { loadMetrics, loadUsage, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type Tokens, type UsageReport, type UsageRow } from "../../api-usage";
 import { useLoad, type Loaded } from "../../state";
-import { LoadError, NotReady, Notice, Panel, Segmented, Select, Skeleton } from "../../ui";
+import { EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { HARNESS_NAMES } from "../team/coordination";
 import { barWords, chartBars, ChartSvg } from "./chart";
 import { LeadPanel } from "./lead";
 import { AccountLimitsPanel, CheckLimits, type LimitsControls } from "./limits";
-import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, healthText, offsetMinutes, PartialNotice, rangeStart, RANGES, rowName, windowNow, type UsageRange } from "./usage-model";
+import { DaysPanel, LinesPanel, TokenPanel, type BreakdownRow } from "./panels";
+import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, healthText, offsetMinutes, PartialNotice, rangeStart, RANGES, rowName, tokenText, windowNow, type UsageRange } from "./usage-model";
 import "../project/projects.css";
 import "./metrics.css";
 
@@ -21,7 +22,7 @@ const RELOAD_TICKS = 3;
 
 export type MetricsRange = UsageRange;
 
-export type MetricsBy = "project" | "agent" | "run" | "account" | "harness";
+export type MetricsBy = "project" | "agent" | "run" | "account" | "pool" | "harness";
 
 /** The range switch's choices, shortest first. */
 export const METRIC_RANGES: { value: MetricsRange; label: string }[] = [
@@ -37,7 +38,14 @@ const BREAKDOWNS: { value: MetricsBy; label: string }[] = [
   { value: "harness", label: "By harness" },
 ];
 
-const APP_BREAKDOWNS: { value: MetricsBy; label: string }[] = [{ value: "project", label: "By project" }, ...BREAKDOWNS];
+const APP_PANELS: { by: MetricsBy; title: string }[] = [
+  { by: "project", title: "By project" },
+  { by: "agent", title: "By agent" },
+  { by: "run", title: "By run" },
+  { by: "account", title: "By account" },
+  { by: "pool", title: "By pool" },
+  { by: "harness", title: "By harness" },
+];
 
 const RESULTS: Record<string, string> = {
   running: "Working",
@@ -60,16 +68,6 @@ export interface MetricsFilter {
   projects: { id: string; name: string }[];
   onProject: (id: string | null) => void;
   limits: LimitsControls;
-}
-
-/** One breakdown row: its name, its project when the breakdown spans projects, its tokens and
- * the cells of the breakdown's own columns. */
-interface BreakdownRow {
-  key: string;
-  name: string;
-  project?: string;
-  tokens: Tokens;
-  extra: string[];
 }
 
 /** When a reset comes, short: "in 40 min", "in 3 h", or its date a day or more away.
@@ -146,6 +144,13 @@ function Chart({ metrics, sinceMs, nowMs, offset, reread }: { metrics: Metrics; 
   </Panel>;
 }
 
+/** A project's name on the app page, the empty key being runs tied to no project. Inputs: the
+ * filter, if any, and the project id. Output: the name. */
+function projectLabel(filter: MetricsFilter | undefined, id: string): string {
+  if (id === "") return "Unattributed";
+  return id === REMOVED_PROJECTS ? REMOVED_LABEL : displayText(filter?.projects.find((project) => project.id === id)?.name ?? id);
+}
+
 /** The breakdown's rows and own columns for one choice. The app page (with a filter) adds By
  * project, names each agent's harnesses and accounts and each account's and harness's
  * projects, and shows a Project column on agents and runs across every project; the project
@@ -153,7 +158,7 @@ function Chart({ metrics, sinceMs, nowMs, offset, reread }: { metrics: Metrics; 
  * names, now and the filter. Output: the first column's head, the own columns' heads, the
  * rows and whether a Project column shows. */
 function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageReport, metrics: Metrics, adoption: Adoption | null, names: MetricsNames, nowMs: number, filter: MetricsFilter | undefined): { head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean } {
-  const projectName = (id: string) => id === REMOVED_PROJECTS ? REMOVED_LABEL : displayText(filter?.projects.find((project) => project.id === id)?.name ?? id);
+  const projectName = (id: string) => projectLabel(filter, id);
   const agent = (key: string, label?: string | null) => names.agents.get(key) ?? (label ? displayText(label) : agentLabel(key, projectName));
   const account = (key: string) => key === "" ? "Unattributed" : names.accounts.get(key) ?? key;
   const harness = (key: string) => HARNESS_NAMES[key as keyof typeof HARNESS_NAMES] ?? key;
@@ -165,6 +170,15 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
     return {
       head: "Project", extra: ["Agents", "Runs", "Merges"], projectColumn,
       rows: metrics.projects.map((row) => ({ key: row.key, name: projectName(row.key), tokens: row.tokens, extra: [String(row.agents), String(row.runs), String(row.merges)] })),
+    };
+  }
+  if (by === "pool") {
+    return {
+      head: "Pool", extra: ["Runs", "Last used"], projectColumn,
+      rows: usage.pools.map((row) => ({
+        key: row.key, name: filter?.limits.pools.get(row.key) ?? row.key, tokens: row.tokens,
+        notReportedBy: row.not_reported_by, extra: [String(row.runs), agoText(row.last_ms, nowMs)],
+      })),
     };
   }
   if (by === "run") {
@@ -206,7 +220,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
     return {
       head: "Agent", extra: ["Harness", "Account"], projectColumn,
       rows: metrics.agents.map((row) => ({
-        key: `${row.project}/${row.agent}`, name: agent(row.agent, row.label), project: projectColumn ? projectName(row.project) : undefined, tokens: row.tokens,
+        key: `${row.project}/${row.agent}`, usageKey: row.agent, name: agent(row.agent, row.label), project: projectColumn ? projectName(row.project) : undefined, tokens: row.tokens,
         extra: [listed(row.harnesses, row.more_harnesses, harness), listed(row.accounts, row.more_accounts, account)],
       })),
     };
@@ -227,12 +241,57 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
   };
 }
 
+type BreakdownParts = ReturnType<typeof breakdownRows>;
+
+/** Whether two token counts match in every part. Inputs: the two counts. Output: the answer. */
+function sameTokens(one: Tokens, other: Tokens): boolean {
+  return one.input === other.input && one.output === other.output && one.cache_read === other.cache_read && one.cache_write === other.cache_write;
+}
+
+/** Adds what only the usage read knows to the app page's rows: when each was last used, its
+ * runs when asked, and which harness ran for it without reporting usage. An agent's usage row
+ * adds up every project, so its Runs and Last used stay blank unless it is plainly that row's
+ * alone: no other row has the key and the tokens match. A usage row the metrics read has no
+ * row for stays listed when its harness reported nothing. Inputs: the table, the usage rows,
+ * whether to add Runs, the namer and now. Output: the table with its added columns. */
+function withUsage(table: BreakdownParts, used: UsageRow[], runs: boolean, name: (key: string) => string, nowMs: number): BreakdownParts {
+  const byKey = new Map(used.map((row) => [row.key, row]));
+  const keyOf = (row: BreakdownRow) => row.usageKey ?? row.key;
+  const rowsOfKey = new Map<string, number>();
+  for (const row of table.rows) rowsOfKey.set(keyOf(row), (rowsOfKey.get(keyOf(row)) ?? 0) + 1);
+  const isAlone = (row: BreakdownRow, match: UsageRow) => row.usageKey === undefined || (rowsOfKey.get(row.usageKey) === 1 && sameTokens(match.tokens, row.tokens));
+  const cells = (row: UsageRow | undefined) => [...(runs ? [row ? String(row.runs) : ""] : []), row ? agoText(row.last_ms, nowMs) : ""];
+  const kept = table.rows.map((row) => {
+    const match = byKey.get(keyOf(row));
+    return { ...row, notReportedBy: match?.not_reported_by, extra: [...row.extra, ...cells(match && isAlone(row, match) ? match : undefined)] };
+  });
+  const listed = new Set(table.rows.map(keyOf));
+  const added = used.filter((row) => row.not_reported_by && !listed.has(row.key)).map((row) => ({
+    key: row.key, name: name(row.key), tokens: row.tokens, notReportedBy: row.not_reported_by,
+    extra: [...table.extra.map(() => ""), ...cells(row)],
+  }));
+  const columns = [...table.extra, ...(runs ? ["Runs"] : []), "Last used"];
+  return { ...table, extra: columns, rows: [...kept, ...added] };
+}
+
+/** One app page panel's table: its breakdown with what only the usage read knows. Inputs: the
+ * choice, the project, the reads, the names, now and the filter. Output: the table's parts. */
+function appRows(by: MetricsBy, projectId: string | null, usage: UsageReport, metrics: Metrics, names: MetricsNames, nowMs: number, filter: MetricsFilter): BreakdownParts {
+  const table = breakdownRows(by, projectId, usage, metrics, null, names, nowMs, filter);
+  const project = (key: string) => projectLabel(filter, key);
+  if (by === "project") return withUsage(table, usage.projects, false, project, nowMs);
+  if (by === "agent") return withUsage(table, usage.agents, true, (key) => agentLabel(key, project), nowMs);
+  if (by === "account") return withUsage(table, usage.accounts, true, (key) => rowName(names.accounts, key), nowMs);
+  return table;
+}
+
 /** The breakdown table: each listed row with its four token parts, its own columns and its
  * share of tokens, then an Other row for what a capped list leaves out of the range, then the
  * Total, which is the Tokens tile's total. Every share is out of that total. Across all
- * projects each row also names its project. Inputs: the choice, its switch, the heads, the
- * rows, whether to show the project column and the range total. */
-function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { by: MetricsBy; control: ReactNode; head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean; total: Tokens }) {
+ * projects each row also names its project. A row whose harness reported nothing says so in
+ * place of its token counts. Inputs: the choice, the heads, the rows, whether to show the
+ * project column and the range total. */
+function BreakdownTable({ by, head, extra, rows, projectColumn, total }: { by: MetricsBy; head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean; total: Tokens }) {
   const left = (field: keyof Tokens) => Math.max(0, total[field] - rows.reduce((sum, row) => sum + row.tokens[field], 0));
   const other: Tokens = { input: left("input"), output: left("output"), cache_read: left("cache_read"), cache_write: left("cache_write") };
   const unlisted = other.input + other.output + other.cache_read + other.cache_write > 0;
@@ -246,41 +305,46 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { b
     <td className="num">{compactCount(tokens.output)}</td>
     <td className="num muted">{compactCount(tokens.cache_read)}</td>
   </>;
-  return <Panel title="Breakdown" padded={false} actions={control}>
-    <div className="pj-table-wrap mx-table-wrap"><table className="pj-table mx-table" data-by={by}>
-      <thead><tr>
-        <th scope="col">{head}</th>{projectColumn && <th scope="col">Project</th>}<th scope="col" className="num">Tokens</th><th scope="col" className="num">Input</th>
-        <th scope="col" className="num">Cache write</th><th scope="col" className="num">Output</th><th scope="col" className="num muted">Cache read</th>
-        {extra.map((column) => <th scope="col" key={column}>{column}</th>)}<th scope="col">Share of tokens</th>
-      </tr></thead>
-      <tbody>
-        {rows.map((row) => <tr key={row.key}>
-          <th scope="row">{row.name}</th>
-          {projectColumn && <td>{row.project}</td>}
-          <td className="num mx-headline">{compactCount(headlineTokens(row.tokens))}</td>
-          {cells(row.tokens)}
-          {row.extra.map((value, index) => <td key={extra[index]}>{value}</td>)}
-          {bar(row.tokens)}
-        </tr>)}
-        {unlisted && <tr className="mx-other">
-          <th scope="row" className="muted">Other, not listed</th>
-          {projectColumn && <td />}
-          <td className="num mx-headline">{compactCount(headlineTokens(other))}</td>
-          {cells(other)}
-          {extra.map((column) => <td key={column} />)}
-          {bar(other)}
-        </tr>}
-        <tr className="mx-total">
-          <th scope="row">Total</th>
-          {projectColumn && <td />}
-          <td className="num mx-headline">{compactCount(headline)}</td>
-          {cells(total)}
-          {extra.map((column) => <td key={column} />)}
-          <td className="mono small muted">{share === null ? "" : `cache read ${share}% of all read`}</td>
-        </tr>
-      </tbody>
-    </table></div>
-  </Panel>;
+  return <div className="pj-table-wrap mx-table-wrap"><table className="pj-table mx-table" data-by={by}>
+    <thead><tr>
+      <th scope="col">{head}</th>{projectColumn && <th scope="col">Project</th>}<th scope="col" className="num">Tokens</th><th scope="col" className="num">Input</th>
+      <th scope="col" className="num">Cache write</th><th scope="col" className="num">Output</th><th scope="col" className="num muted">Cache read</th>
+      {extra.map((column) => <th scope="col" key={column}>{column}</th>)}<th scope="col">Share of tokens</th>
+    </tr></thead>
+    <tbody>
+      {rows.map((row) => <tr key={row.key}>
+        <th scope="row">{row.name}</th>
+        {projectColumn && <td>{row.project}</td>}
+        {row.notReportedBy && headlineTokens(row.tokens) === 0
+          ? <td colSpan={5}>{tokenText(0, row.notReportedBy)}</td>
+          : <><td className="num mx-headline">{tokenText(headlineTokens(row.tokens), row.notReportedBy)}</td>{cells(row.tokens)}</>}
+        {row.extra.map((value, index) => <td key={extra[index]}>{value}</td>)}
+        {bar(row.tokens)}
+      </tr>)}
+      {unlisted && <tr className="mx-other">
+        <th scope="row" className="muted">Other, not listed</th>
+        {projectColumn && <td />}
+        <td className="num mx-headline">{compactCount(headlineTokens(other))}</td>
+        {cells(other)}
+        {extra.map((column) => <td key={column} />)}
+        {bar(other)}
+      </tr>}
+      <tr className="mx-total">
+        <th scope="row">Total</th>
+        {projectColumn && <td />}
+        <td className="num mx-headline">{compactCount(headline)}</td>
+        {cells(total)}
+        {extra.map((column) => <td key={column} />)}
+        <td className="mono small muted">{share === null ? "" : `cache read ${share}% of all read`}</td>
+      </tr>
+    </tbody>
+  </table></div>;
+}
+
+/** The project tab's breakdown: its table in a panel, with the switch that picks it. Inputs:
+ * the switch and the table's parts. */
+function Breakdown({ control, ...parts }: BreakdownParts & { by: MetricsBy; control: ReactNode; total: Tokens }) {
+  return <Panel title="Breakdown" padded={false} actions={control}><BreakdownTable {...parts} /></Panel>;
 }
 
 /** The app page's words above its numbers: what it counts, that the counting is the old one,
@@ -353,7 +417,7 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
     return <div className="stack">{tools}{kept}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
   }
   if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{tools}{kept}<Skeleton shape="card" count={3} /></div>;
-  const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs, filter);
+  const empty = headlineTokens(usage.value.total) === 0 && usage.value.lines.length === 0 && (usage.value.not_reported_by ?? []).length === 0;
   if (filter) return <div className="stack mx-page">
     {tools}
     <AppNotices usage={usage.value} failure={filter.limits.failure} nowMs={nowMs} />
@@ -361,13 +425,23 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
     <Tiles usage={usage.value} metrics={metrics.value} lead />
     <AccountLimitsPanel limits={usage.value.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />
     {filter.limits.next}
-    <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={APP_BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} />
+    {empty ? <EmptyState icon="trending-up" title="No usage in this range" compact>Runs show up here a few seconds after an agent works.</EmptyState> : <>
+      <div className="mx-panels">
+        {APP_PANELS.map(({ by: choice, title }) => {
+          const parts = appRows(choice, projectId, usage.value, metrics.value, names, nowMs, filter);
+          return <TokenPanel key={choice} title={title} rows={parts.rows}><BreakdownTable by={choice} {...parts} total={usage.value.total} /></TokenPanel>;
+        })}
+        <LinesPanel rows={usage.value.lines} name={(key) => projectLabel(filter, key)} />
+      </div>
+      <DaysPanel days={usage.value.days} offset={offset} />
+    </>}
   </div>;
+  const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs, undefined);
   return <div className="stack mx-page">
     {tools}
     <Tiles usage={usage.value} metrics={metrics.value} />
     <Chart metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} reread={usage.value.total.cache_read} />
-    <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={filter ? APP_BREAKDOWNS : BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} />
+    <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} />
   </div>;
 }
 
@@ -391,10 +465,10 @@ async function teamStatuses(ids: string[]): Promise<Result<[string, TeamStatus][
  * metrics for the chosen range, 7 days at first, every 30 seconds, and its agents' names. The
  * project tab (no filter) also reads its tool counts and its team status for names with their
  * harness, and starts By agent; the app page (with a filter) takes agent names from the metrics
- * read and starts By project. Inputs: the project id or null, and the app page's filter. */
+ * read. Inputs: the project id or null, and the app page's filter. */
 export function MetricsView({ projectId, filter }: { projectId: string | null; filter?: MetricsFilter }) {
   const [range, setRange] = useState<MetricsRange>("7d");
-  const [by, setBy] = useState<MetricsBy>(filter ? "project" : "agent");
+  const [by, setBy] = useState<MetricsBy>("agent");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [ticks, setTicks] = useState(0);
   const [updatedMs, setUpdatedMs] = useState<number | null>(null);
