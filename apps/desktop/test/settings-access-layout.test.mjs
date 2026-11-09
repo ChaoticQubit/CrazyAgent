@@ -116,7 +116,7 @@ test("the head stays in view while a long list scrolls down", async () => {
     return { scrolled: list.scrollTop, listTop: list.getBoundingClientRect().top, headTop: document.querySelector(".list-head").getBoundingClientRect().top };
   })()`), 1180);
   assert.equal(seen.scrolled, 400, JSON.stringify(seen));
-  assert.ok(seen.headTop <= seen.listTop + 1, JSON.stringify(seen));
+  assert.ok(Math.abs(seen.headTop - seen.listTop) <= 1, JSON.stringify(seen));
 });
 
 test("a row given focus is not left under the head", async () => {
