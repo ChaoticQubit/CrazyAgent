@@ -287,11 +287,11 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 }
 
 /// Applies one owner scheduling change inside the engine transaction when the schedule is
-/// still at the version the owner's screen showed. Removing a row needs no known pool or
-/// connection, so a row whose target is gone can still be deleted. Takes the transaction,
-/// the current model access, the change and that version. Returns Applied, or a rejection
-/// for a row kept for an unknown pool or connection, a value out of range, a full table or
-/// `stale_revision`.
+/// still at the version the owner's screen showed. Removing a row needs no known pool,
+/// connection or project, so a row whose target is gone can still be deleted. Takes the
+/// transaction, the current model access, the change and that version. Returns Applied, or
+/// a rejection for a row kept for an unknown pool, connection or project, a value out of
+/// range, a full table or `stale_revision`.
 pub fn apply(
     tx: &Transaction<'_>,
     access: &ModelAccess,
@@ -306,6 +306,9 @@ pub fn apply(
         ScheduleChange::PoolStrategy { pool, strategy } => (strategy.is_some()
             && !access.pools.iter().any(|known| &known.id == pool))
         .then_some("pool_not_found"),
+        ScheduleChange::ProjectStrategy { project, strategy } => (strategy.is_some()
+            && !project_known(tx, project.as_str())?)
+        .then_some("project_not_found"),
         ScheduleChange::Account { connection, plan } => (*plan != AccountPlan::default()
             && !access
                 .connections
@@ -439,6 +442,18 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, EngineError
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
             [name],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Whether a project is still registered. Takes the store and the project id. Returns the
+/// answer or any SQLite failure.
+fn project_known(connection: &Connection, project: &str) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project],
             |row| row.get(0),
         )
         .map_err(error)
@@ -628,8 +643,9 @@ pub fn load_page(
 }
 
 /// Deletes the pool strategies and account plans whose pool or connection the model access
-/// no longer holds, as after the owner removed one, so no row outlives its target.
-/// Takes the engine transaction and the new model access. Returns any SQLite failure.
+/// no longer holds, as after the owner removed one, so no row outlives its target, and
+/// moves the schedule's version once when a row went. Takes the engine transaction and the
+/// new model access. Returns any SQLite failure.
 pub fn forget_removed(tx: &Transaction<'_>, access: &ModelAccess) -> Result<(), EngineError> {
     if !table_exists(tx, "account_strategies")? || !table_exists(tx, "account_plans")? {
         return Ok(());
@@ -640,6 +656,7 @@ pub fn forget_removed(tx: &Transaction<'_>, access: &ModelAccess) -> Result<(), 
         .iter()
         .map(|connection| connection.id.as_str())
         .collect();
+    let mut removed = 0;
     for (stored, delete, known) in [
         (
             "SELECT id FROM account_strategies WHERE scope='pool'",
@@ -660,22 +677,45 @@ pub fn forget_removed(tx: &Transaction<'_>, access: &ModelAccess) -> Result<(), 
             .collect::<Result<_, _>>()
             .map_err(error)?;
         for id in ids.iter().filter(|id| !known.contains(id.as_str())) {
-            tx.execute(delete, [id]).map_err(error)?;
+            removed += tx.execute(delete, [id]).map_err(error)?;
         }
+    }
+    if removed > 0 {
+        move_version_after_removal(tx)?;
     }
     Ok(())
 }
 
-/// Deletes the strategy override of a project being removed, so no row outlives it.
-/// Takes the engine transaction and the project id. Returns any SQLite failure.
+/// Deletes the strategy override of a project being removed, so no row outlives it, and
+/// moves the schedule's version when there was one. Takes the engine transaction and the
+/// project id. Returns any SQLite failure.
 pub fn forget_project(tx: &Transaction<'_>, project: &str) -> Result<(), EngineError> {
-    if table_exists(tx, "account_strategies")? {
-        tx.execute(
-            "DELETE FROM account_strategies WHERE scope='project' AND id=?1",
-            [project],
-        )
-        .map_err(error)?;
+    if table_exists(tx, "account_strategies")?
+        && tx
+            .execute(
+                "DELETE FROM account_strategies WHERE scope='project' AND id=?1",
+                [project],
+            )
+            .map_err(error)?
+            > 0
+    {
+        move_version_after_removal(tx)?;
     }
+    Ok(())
+}
+
+/// Moves the schedule's version after a removal deleted rows, so a screen still showing
+/// them reads the schedule again and a save from it is refused as stale. Takes the engine
+/// transaction. Returns any SQLite failure.
+fn move_version_after_removal(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let item = versioned::account_schedule_item();
+    let version = versioned::current(tx, &item)?.version;
+    let moved = versioned::owner_write(tx, &item, version)?;
+    assert_eq!(
+        moved.ok(),
+        Some(version + 1),
+        "the version was read in this transaction"
+    );
     Ok(())
 }
 

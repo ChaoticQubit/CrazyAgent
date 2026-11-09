@@ -2,6 +2,7 @@
 
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
+use crazyagent::protocol::{ProjectId, ProjectSpec, StoredProject};
 use crazyagent::scheduling::{ScheduleChange, Strategy};
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::os::unix::fs::PermissionsExt;
@@ -167,12 +168,37 @@ fn owner_setup_commands_use_the_local_main_window_acl() {
     }
 }
 
+/// Registers projects in the engine's store, because the bridge only makes projects with
+/// ids of its own and a project override needs its project. Inputs: the engine root and the
+/// ids. Output: none.
+fn register_projects(root: &Path, ids: impl Iterator<Item = String>) {
+    let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    let tx = connection.transaction().unwrap();
+    for id in ids {
+        let stored = StoredProject {
+            project_id: ProjectId::new(id.clone()).unwrap(),
+            spec: ProjectSpec {
+                name: "Registered".into(),
+                repositories: vec![],
+            },
+        };
+        tx.execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            [id, serde_json::to_string(&stored).unwrap()],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+}
+
 async fn large_schedule(root: &Path) -> Result<(), String> {
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
     bridge.connect().await.map_err(|e| e.code.to_owned())?;
     let project = |n: u64| {
         crazyagent::protocol::CredentialRef::new(format!("{n:04}{}", "p".repeat(120))).unwrap()
     };
+    register_projects(root, (0..600).map(|n| project(n).as_str().to_owned()));
     let start = bridge
         .account_schedule()
         .await

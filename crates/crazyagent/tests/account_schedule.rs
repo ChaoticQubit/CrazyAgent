@@ -179,6 +179,7 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
         reserve_percent: 10,
         pin: Some(Pin::UseLast),
     };
+    create_project(&mut controller, "project-a").await;
     for change in [
         ScheduleChange::AppStrategy {
             strategy: Strategy::ManualRank,
@@ -288,6 +289,9 @@ async fn a_schedule_larger_than_one_reply_takes_changes_and_is_read_whole() {
     };
     assert!(serde_json::to_vec(&stored).unwrap().len() > crazyagent::protocol::FRAME_BYTES_MAX);
     for n in 0..overrides {
+        create_project(&mut controller, project(n).as_str()).await;
+    }
+    for n in 0..overrides {
         let change = ScheduleChange::ProjectStrategy {
             project: project(n),
             strategy: Some(Strategy::Balanced),
@@ -372,10 +376,10 @@ async fn a_removed_pool_connection_or_project_takes_its_schedule_row_with_it() {
                 connection: reference("claude-a"),
                 plan,
             }],
-            version: 4,
+            version: 7,
             ..Schedule::default()
         },
-        "only the connection that stays keeps its plan, at the version of the four changes"
+        "only the connection that stays keeps its plan, at the version of the four changes and the three removals"
     );
     drop(controller);
     case.close().await;
