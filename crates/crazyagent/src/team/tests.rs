@@ -4539,6 +4539,14 @@ fn stop_agent_on_teammate_records_an_owner_stop_and_stop_teammate_marks_its_pane
 /// RSF2-L2: clearing one agent's owner stop takes a stored agent id; id 0, which no
 /// agent row has, trips the assertion before any row is touched.
 #[test]
+#[should_panic(expected = "the owner stops through owner_stop")]
+fn the_owner_never_stops_through_agent_stop() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-stop").unwrap();
+    let _ = agent_stop(&connection, &project, 7, StoppedBy::Owner, 1);
+}
+
+#[test]
 #[should_panic(expected = "owner_start_alone_needs_a_stored_agent")]
 fn owner_start_alone_refuses_an_agent_id_no_row_can_have() {
     let (_directory, connection) = database();

@@ -20671,6 +20671,23 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
     team.shutdown().unwrap();
 }
 
+#[test]
+#[should_panic(expected = "the owner wakes through WakeAgent")]
+fn the_owner_never_wakes_through_admit_wake() {
+    let fixture = Fixture::new(1);
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    let _ = crate::team::admit_wake(
+        &tx,
+        &fixture.access,
+        &fixture.setup,
+        1,
+        "Go on.",
+        crate::team::StoppedBy::Owner,
+        now_ms(),
+    );
+}
+
 /// A wake admitted after one stop and still queued dies at a later stop, whoever makes it:
 /// the task fails, the agent stays stopped and the stop stands at its new time (HB-S5-B).
 #[test]

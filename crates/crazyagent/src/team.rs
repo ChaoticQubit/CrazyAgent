@@ -4180,9 +4180,9 @@ pub(crate) fn owner_stop(
 }
 
 /// Records a stop of a sub-agent and of every agent it leads, down its whole lead tree. A
-/// stop already there keeps the higher standing of its maker and this one. Takes a
-/// connection, the project, the agent, who stopped it and the time. Returns any SQLite
-/// failure.
+/// stop already there keeps the higher standing of its maker and this one and takes this
+/// one's time, so a wake queued before this stop fails. Takes a connection, the project, the
+/// agent, who stopped it and the time. Returns any SQLite failure.
 fn record_stop(
     connection: &Connection,
     project: &ProjectId,
@@ -4200,9 +4200,10 @@ fn record_stop(
              )
              INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by)
              SELECT id, ?2, ?3, ?5 FROM led WHERE true
-             ON CONFLICT(agent) DO UPDATE SET stopped_by=excluded.stopped_by
-             WHERE excluded.stopped_by='owner'
-             OR (excluded.stopped_by='master' AND team_owner_stops.stopped_by='lead')",
+             ON CONFLICT(agent) DO UPDATE SET stopped_ms=excluded.stopped_ms,
+             stopped_by=CASE WHEN excluded.stopped_by='owner'
+             OR (excluded.stopped_by='master' AND team_owner_stops.stopped_by='lead')
+             THEN excluded.stopped_by ELSE team_owner_stops.stopped_by END",
             params![agent, project.as_str(), now, DEPTH_WALK_MAX, by.name()],
         )
         .map_err(error)?;

@@ -838,13 +838,19 @@ pub(super) fn stop(
     Ok(
         match crate::team::agent_stop(&tx, project, target, by, now_ms())? {
             Ok(()) => {
-                tx.commit().map_err(state)?;
-                (
-                    format!(
+                let said = match crate::team::stop_of(&tx, target)?.map(|stop| stop.0) {
+                    Some(StoppedBy::Owner) => {
+                        format!("The owner stopped {label} already. Only the owner can wake it.")
+                    }
+                    Some(StoppedBy::Master) if by == StoppedBy::Lead => format!(
+                        "The master stopped {label} already. Only the master or the owner can wake it."
+                    ),
+                    _ => format!(
                         "Stopping {label}. Its unfinished tasks fail, and you can wake it again."
                     ),
-                    false,
-                )
+                };
+                tx.commit().map_err(state)?;
+                (said, false)
             }
             Err("team_stop_master") => (
                 "Not stopped: the master stops only when the owner stops it.".to_owned(),
