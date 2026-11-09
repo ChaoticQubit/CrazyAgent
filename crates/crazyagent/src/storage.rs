@@ -190,10 +190,11 @@ pub(crate) enum Job {
         oneshot::Sender<Result<projects_home::DeletePlanned, EngineError>>,
     ),
     DeleteSettle(u64, oneshot::Sender<Result<(), EngineError>>),
+    DeleteFilesClear(Vec<String>, oneshot::Sender<Result<(), EngineError>>),
     DeleteRecord(
         Admission,
         Box<OwnerRequest>,
-        Result<(), String>,
+        Result<Vec<crate::projects_home::RecordedFile>, String>,
         oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
     SetupPlan(
@@ -278,6 +279,7 @@ impl Storage {
         mut sources: Option<settings::SettingsSources>,
     ) -> Result<(Self, EffectiveConfig), EngineError> {
         let (sender, mut receiver) = mpsc::channel(config.settings.queue_capacity);
+        let delete_files_jobs = (!readonly).then(|| sender.clone());
         let path = path.to_path_buf();
         let (ready_send, ready_receive) = oneshot::channel();
         std::thread::Builder::new()
@@ -320,6 +322,12 @@ impl Storage {
                     }
                     if let Err(e) = projects_home::delete_settle(&connection, None) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
+                    }
+                    if let Some(jobs) = delete_files_jobs
+                        && let Err(e) =
+                            projects_home::delete_files_finish(&connection, &path, jobs)
+                    {
+                        eprintln!("project_delete_files_not_cleared cause={}", e.0);
                     }
                     home_watch.restart(&connection);
                 }
@@ -637,6 +645,14 @@ impl Storage {
                                 Err(error("project_setup_readonly"))
                             } else {
                                 projects_home::delete_settle(&connection, Some(exchange))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::DeleteFilesClear(names, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::delete_files_clear(&connection, &names)
                             };
                             let _ = reply.send(result);
                         }
@@ -2191,7 +2207,7 @@ fn owner_apply(
 enum Effect<'a> {
     Home(&'a crate::projects_home::HomeEffect),
     NewProject(&'a Result<crate::project_setup::Staged, String>),
-    Delete(&'a Result<(), String>),
+    Delete(&'a Result<Vec<crate::projects_home::RecordedFile>, String>),
 }
 
 /// Checks what a Delete everything of a project would take and whether it may go, for the

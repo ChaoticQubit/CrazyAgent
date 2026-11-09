@@ -741,7 +741,7 @@ fn unclaim(db: &Connection, project: &ProjectId, agents: &[i64]) -> Result<(), E
 /// socket name and server pid (rv-audit TTDL F2, OP-9b, PLC c PC-L1), making its read-only
 /// folders writable first, such as a module cache a toolchain left. Inputs: the team state
 /// folder and the agent. Output: Ok once all are gone.
-fn remove_agent_files(team: &Path, id: i64) -> Result<(), EngineError> {
+pub(crate) fn remove_agent_files(team: &Path, id: i64) -> Result<(), EngineError> {
     remove_tree(&agent_folder(team, id))?;
     for file in [
         profile(team, id),
@@ -767,7 +767,7 @@ fn gone(result: std::io::Result<()>) -> Result<(), EngineError> {
 /// Deletes a folder and everything in it without following a link, making its read-only
 /// folders writable first when a plain delete stops on one. Input: the folder. Output: Ok
 /// once nothing has its name.
-fn remove_tree(folder: &Path) -> Result<(), EngineError> {
+pub(crate) fn remove_tree(folder: &Path) -> Result<(), EngineError> {
     if std::fs::remove_dir_all(folder).is_err() {
         writable(folder);
         gone(std::fs::remove_dir_all(folder))?;

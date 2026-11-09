@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS projects_home_move (
 );
 CREATE TABLE IF NOT EXISTS projects_delete_pending (
     exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
+);
+CREATE TABLE IF NOT EXISTS projects_delete_files (
+    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64),
+    inode INTEGER NOT NULL
 )";
 
 /// The owner's projects home folder and whether the engine is watching it.
@@ -746,50 +750,126 @@ impl DeletePlan {
         Ok(())
     }
 
-    /// Deletes the engine's own folders of a deleted project once its records are gone: each
-    /// agent's state folder and sandbox profile, and each research run of its jobs. A folder
-    /// left behind is logged as `project_files_left` and never undoes the removal. Input: the
-    /// project's research jobs. Output: none.
-    pub fn remove_engine_files(&self, research: &[i64]) {
+    /// Names the engine's own files of this deleted project for the record its row removal
+    /// writes: each agent and each research run of its jobs, with the identity of the folder
+    /// that holds it. A folder that is no real run, or that is not there, is left out. Input:
+    /// the project's research jobs. Output: the records.
+    pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
         let Some(root) = self.database.parent() else {
-            return;
+            return Vec::new();
         };
-        let team = root.join("team");
-        let mut left = Vec::new();
-        for agent in &self.agents {
-            left.push(team.join("agents").join(format!("agent-{agent}")));
-            left.push(team.join("profiles").join(format!("agent-{agent}.sb")));
-        }
-        let runs = root.join("research").join("agents");
-        if let Ok(entries) = std::fs::read_dir(&runs) {
+        let mut names: Vec<String> = self
+            .agents
+            .iter()
+            .map(|agent| format!("agent-{agent}"))
+            .collect();
+        if let Ok(entries) = std::fs::read_dir(root.join("research").join("agents")) {
             for entry in entries.flatten().take(RESEARCH_RUNS_MAX) {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
+                let Ok(name) = entry.file_name().into_string() else {
+                    continue;
+                };
                 if research
                     .iter()
                     .any(|job| name.starts_with(&format!("job-{job}-")))
                 {
-                    left.push(entry.path());
+                    names.push(name);
                 }
             }
         }
-        for path in left {
-            let gone = match std::fs::symlink_metadata(&path) {
-                Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                    std::fs::remove_dir_all(&path)
-                }
-                Ok(_) => std::fs::remove_file(&path),
-                Err(problem) => Err(problem),
-            };
-            if gone.is_err() {
-                eprintln!(
-                    "project_files_left project={} kind=engine_folder",
-                    self.project.as_str()
-                );
-            }
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let inode = folder_inode(&engine_file(&name)?.folder(root, &name))?;
+                Some((name, inode))
+            })
+            .collect()
+    }
+}
+
+/// One engine file a delete recorded: its exact name and the identity of the folder that held
+/// it when the project's rows were dropped.
+pub type RecordedFile = (String, i64);
+
+/// One engine file a delete's record can name.
+enum EngineFile {
+    Agent(i64),
+    Run,
+}
+
+impl EngineFile {
+    /// Gives the folder a recorded name holds. Inputs: the engine root and the exact name.
+    /// Output: the path under the team or research state.
+    fn folder(&self, root: &Path, name: &str) -> PathBuf {
+        match self {
+            Self::Agent(_) => root.join("team").join("agents").join(name),
+            Self::Run => root.join("research").join("agents").join(name),
         }
     }
+}
+
+/// Reads a recorded name as an engine file, exact shapes only: `agent-<id>`, or
+/// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling.
+/// Input: the name. Output: what it names, or None for anything else.
+fn engine_file(name: &str) -> Option<EngineFile> {
+    if let Some(id) = name.strip_prefix("agent-") {
+        return plain_number(id).map(EngineFile::Agent);
+    }
+    let parts: Vec<&str> = name.strip_prefix("job-")?.split('-').collect();
+    (matches!(parts.len(), 2 | 3) && parts.iter().all(|part| plain_number(part).is_some()))
+        .then_some(EngineFile::Run)
+}
+
+fn plain_number(text: &str) -> Option<i64> {
+    text.parse::<i64>()
+        .ok()
+        .filter(|number| *number >= 0 && number.to_string() == text)
+}
+
+/// Gives the number that ties a record to the folder it was written for: the inode alone,
+/// since macOS renumbers a volume across reboots, or the creation time on Windows, which has
+/// no inode in stable Rust. Input: the folder. Output: the number, or None when it is unread.
+fn folder_inode(folder: &Path) -> Option<i64> {
+    let metadata = std::fs::symlink_metadata(folder).ok()?;
+    #[cfg(unix)]
+    let number = std::os::unix::fs::MetadataExt::ino(&metadata);
+    #[cfg(windows)]
+    let number = std::os::windows::fs::MetadataExt::creation_time(&metadata);
+    i64::try_from(number).ok()
+}
+
+/// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles and
+/// teammates' records, or a research run's folder. Only the folder the record was written for
+/// goes: under any other identity it stays, logged as `project_files_kept`, and the record is
+/// finished. A name that is no engine file removes nothing. A file left behind is logged as
+/// `project_files_left` and keeps its record. Inputs: the engine database path and the
+/// records. Output: the names that are finished.
+pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<String> {
+    let Some(root) = database.parent() else {
+        return Vec::new();
+    };
+    let mut done = Vec::with_capacity(files.len());
+    for (name, inode) in files {
+        let removed = match engine_file(name) {
+            None => Ok(()),
+            Some(file) => {
+                let folder = file.folder(root, name);
+                if folder_inode(&folder) != Some(*inode) {
+                    eprintln!("project_files_kept name={name} kind=engine_folder");
+                    Ok(())
+                } else if let EngineFile::Agent(id) = file {
+                    crate::team::cleanup::remove_agent_files(&root.join("team"), id)
+                } else {
+                    crate::team::cleanup::remove_tree(&folder)
+                }
+            }
+        };
+        if removed.is_ok() {
+            done.push(name.clone());
+        } else {
+            eprintln!("project_files_left name={name} kind=engine_folder");
+        }
+    }
+    done
 }
 
 /// The sentence shown after the owner removes a project from CrazyAgent.
