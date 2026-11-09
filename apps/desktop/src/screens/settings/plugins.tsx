@@ -136,10 +136,12 @@ export function pluginSwitch(item: { scope: PluginScope; enabled: boolean; on_he
   return { checked: item.enabled, label: item.scope.kind === "global" ? "On for every project" : "On", project: false };
 }
 
-/** Whether a project has its own switch for an item from global settings. Inputs: the item
- * and the project id, if any. Output: the answer, always false outside a project. */
+/** Whether a project has switched off an item from global settings. The engine sends on_here
+ * as true or false for every global item read with a project, and off is the only change a
+ * project can make. Inputs: the item and the project id, if any. Output: the answer, always
+ * false outside a project. */
 export function pluginChanged(item: { scope: PluginScope; on_here: boolean | null }, projectId?: string): boolean {
-  return Boolean(projectId) && item.scope.kind === "global" && item.on_here !== null;
+  return Boolean(projectId) && item.scope.kind === "global" && item.on_here === false;
 }
 
 /** Says that agents do not get a stored skill the engine refuses now, and why.
@@ -427,8 +429,8 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
       </>}>
         <Switch id={`server-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(server, next)}
           disabledReason={on.project && !server.enabled ? "Turned off for every project in Settings." : undefined} />
-        {command && <Button aria-label={`${check} ${server.name}`} pending={checking} pendingLabel="Checking..." disabled={busy === server.id} onClick={() => onCheck(server)}>{check}</Button>}
-        {waiting && <Button variant="primary" icon="shield-check" aria-label={`Approve ${server.name}`} pending={busy === server.id} pendingLabel="Approving..." disabled={checking} onClick={() => onApprove(server)}>Approve</Button>}
+        {command && <Button aria-label={`${check} ${server.name}`} pending={checking} pendingLabel="Checking..." disabled={busy !== null} onClick={() => onCheck(server)}>{check}</Button>}
+        {waiting && <Button variant="primary" icon="shield-check" aria-label={`Approve ${server.name}`} pending={busy === server.id} pendingLabel="Approving..." disabled={busy !== null} onClick={() => onApprove(server)}>Approve</Button>}
         {!on.project && <Button aria-label={`Secrets for ${server.name}`} onClick={() => onSecrets(server)}>Secrets</Button>}
         {!on.project && <Button variant="quiet" aria-label={`Remove ${server.name}`} onClick={() => onRemove(server)}>Remove</Button>}
       </SettingLine>
