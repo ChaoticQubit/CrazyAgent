@@ -1706,6 +1706,53 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     case.stop().await;
 }
 
+/// CA-SEC-005: input sent on an open Sandboxed terminal after its capability was revoked
+/// never reaches the shell. The terminal closes as revoked at that input rather than at the
+/// next periodic grant check, and its pane ends. The idle wait before the revoke lets the
+/// periodic check's first tick, which fires at once, pass while the grant is still live.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn input_after_its_capability_was_revoked_never_reaches_the_terminal() {
+    use crate::terminal::TerminalRequest;
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let marker = case
+        .root
+        .path()
+        .join("projects")
+        .join("alpha")
+        .join("typed-after-revoke");
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+    );
+    let (mut stream, name) = open_terminal(&socket, ide, &body).await;
+    let host = case.runtime.terminal().unwrap();
+    output_until(&mut stream, None).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    revoke(&case.runtime, &alpha).unwrap();
+    control(
+        &mut stream,
+        &TerminalRequest::Input {
+            bytes: format!("/usr/bin/touch '{}'\r", marker.display()).into_bytes(),
+        },
+    )
+    .await;
+    assert_eq!(
+        closing(&mut stream).await,
+        json!({ "kind": "closed", "reason": "ide_capability_revoked" })
+    );
+    assert!(!host.alive().unwrap().contains(&name));
+    assert!(
+        !marker.exists(),
+        "the shell ran input sent after the capability was revoked"
+    );
+    case.stop().await;
+}
+
 /// Where no sandbox is qualified for the Sandboxed terminal, the call is refused before
 /// any pane starts.
 #[cfg(target_os = "linux")]
