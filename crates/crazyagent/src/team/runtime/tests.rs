@@ -19872,17 +19872,33 @@ fn an_agent_with_a_queued_pinned_task_stays_when_an_idle_agent_makes_room() {
 #[test]
 fn one_idle_agent_stops_at_a_time_to_make_room() {
     let (fixture, mut team, older, newer) = idle_pair();
-    for _ in 0..2 {
-        team.stop_idle_for(
-            &fixture.setup.project_id,
-            "codex",
-            |_: &Worker| true,
-            &BTreeSet::new(),
-        )
-        .unwrap();
-    }
+    team.stop_idle_for(
+        &fixture.setup.project_id,
+        "codex",
+        |_: &Worker| true,
+        &BTreeSet::new(),
+    )
+    .unwrap();
     assert!(team.workers[&older].stopping);
     assert!(!team.workers[&newer].stopping);
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn no_idle_agent_stops_while_another_is_stopping() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    let stopping = team.workers.get_mut(&newer).unwrap();
+    stopping.stopping = true;
+    let _ = stopping.orders.send(Order::Stop);
+    team.stop_idle_for(
+        &fixture.setup.project_id,
+        "codex",
+        |_: &Worker| true,
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    assert!(!team.workers[&older].stopping);
     team.shutdown().unwrap();
 }
 

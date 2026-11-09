@@ -4900,14 +4900,19 @@ impl TeamRuntime {
                     }
                 }
                 (None, None) => {
-                    if self.live(project, AgentRole::Sub, Some(&harness))
-                        >= usize::from(slot.agents)
+                    let slot_full = self.live(project, AgentRole::Sub, Some(&harness))
+                        >= usize::from(slot.agents);
+                    let cap_full = self.capped(project, parent, harness_cap);
+                    if slot_full
+                        || cap_full
                         || self.live(project, AgentRole::Sub, None) >= subs_max
                         || self.panes(project) >= PANES_PER_PROJECT_MAX
-                        || self.capped(project, parent, harness_cap)
                     {
                         if !reuse {
-                            let counted = |w: &Worker| w.harness == harness && w.parent == parent;
+                            let counted = |w: &Worker| {
+                                (!slot_full || w.harness == harness)
+                                    && (!cap_full || w.parent == parent)
+                            };
                             self.stop_idle_for(project, &harness, counted, &reserved)?;
                         }
                         continue;
@@ -5212,11 +5217,11 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Makes room at a limit for a task that may not reuse an idle agent: stops one idle
-    /// sub-agent the full limits count, one at a time. A live agent, one with agents of its
-    /// own, one reserved for recovery and a kept lead with work around it stay. Takes the
-    /// project, the harness, which agents the full limits count and the reserved agents.
-    /// Returns any SQLite failure.
+    /// Makes room at a full limit for a task that may not reuse an idle agent: stops one idle
+    /// sub-agent the limits count, the task's harness first, none while another is stopping.
+    /// A live agent, one with agents of its own, one reserved for recovery, one a queued task
+    /// is pinned to and a kept lead with work stay. Takes the project, the harness, which
+    /// agents the full limits count and the reserved agents. Returns any SQLite failure.
     fn stop_idle_for(
         &mut self,
         project: &ProjectId,
@@ -5228,13 +5233,12 @@ impl TeamRuntime {
         if self.workers.values().any(|w| sub(w) && w.stopping) {
             return Ok(());
         }
-        let idle: Vec<i64> = self
+        let mut idle: Vec<i64> = self
             .workers
             .iter()
             .filter(|(id, w)| {
                 sub(w)
                     && counted(w)
-                    && w.harness == harness
                     && w.busy.is_none()
                     && w.own_turn.is_none()
                     && !w.live
@@ -5243,9 +5247,9 @@ impl TeamRuntime {
             })
             .map(|(id, _)| *id)
             .collect();
-        assert!(idle.len() <= self.workers.len());
+        idle.sort_by_key(|id| self.workers[id].harness != harness);
         for id in idle {
-            if self.workers[&id].kept_session && self.lead_waits(id)? {
+            if (self.workers[&id].kept_session && self.lead_waits(id)?) || self.pinned_work(id)? {
                 continue;
             }
             let worker = self.workers.get_mut(&id).expect("worker exists");
@@ -5254,6 +5258,19 @@ impl TeamRuntime {
             return Ok(());
         }
         Ok(())
+    }
+
+    /// Whether a queued task waits for this agent by its pin. Takes the agent. Returns the
+    /// answer, or any SQLite failure.
+    fn pinned_work(&self, id: i64) -> Result<bool, EngineError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+                               WHERE p.agent=?1 AND t.status='queued')",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(error)
     }
 
     /// Whether a kept native lead still has work around it that idle time must not end: a
