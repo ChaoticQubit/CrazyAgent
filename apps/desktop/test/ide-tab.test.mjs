@@ -155,6 +155,32 @@ test("a refused place, hide or close reaches the owner instead of vanishing", as
   assert.equal(clean.alert, null);
 });
 
+test("the tab sends one place at a time, so the last box it measured is the last one placed", async () => {
+  const { bundle, withPage } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/ide-tab-failures.mjs", import.meta.url).pathname);
+  await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount([], [], true)`);
+    assert.equal(await evaluate(`Fixture.called("desktop_ide_place")`), true, "the opened IDE is placed");
+    const [first] = await evaluate("Fixture.placed()");
+    await evaluate("Fixture.moveTo(10)");
+    await evaluate("Fixture.moveTo(20)");
+    assert.equal((await evaluate("Fixture.placed()")).length, 1, "a place waits for the one before it");
+    await evaluate("Fixture.answerPlace()");
+    const sent = await evaluate("Fixture.placed()");
+    assert.equal(sent.length, 2, "the newest box goes next and the one it replaced is never sent");
+    assert.equal(sent[1].y, first.y + 20, "the box sent is the last one measured");
+    await evaluate("Fixture.answerPlace()");
+    assert.equal((await evaluate("Fixture.placed()")).length, 2, "nothing is left to place");
+  });
+});
+
+test("a place reads the window's size before it takes the views lock, as an open does", () => {
+  const ide = read("src-tauri/src/ide.rs");
+  const place = ide.slice(ide.indexOf("pub fn place<R: Runtime>"), ide.indexOf("pub fn hide<R: Runtime>"));
+  assert.ok(place.includes("in_window(") && place.indexOf("in_window(") < place.indexOf("views.lock()"), place);
+});
+
 test("an open dialog, drawer or menu hides the IDE webview until the last one closes", async () => {
   const overlay = await import("../src/ui/overlay.tsx");
   assert.equal(overlay.overlayShown(), false);

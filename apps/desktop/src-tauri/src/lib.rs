@@ -3457,7 +3457,7 @@ async fn desktop_ide_place<R: Runtime>(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
-    ide::place(&app, &views, &project, bounds.checked()?)
+    ide::place(&app, &webview.window(), &views, &project, bounds.checked()?)
 }
 
 #[tauri::command]

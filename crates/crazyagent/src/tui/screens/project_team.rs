@@ -2422,7 +2422,7 @@ impl TeamView {
                         "Catch up with main is on for agents started from now on: they may git merge crazyagent/main."
                     }
                     CatchUpMain::Off => {
-                        "Catch up with main is off for agents started from now on: their git merge of main is refused."
+                        "Catch up with main is off for agents started from now on: the git the app writes for an agent refuses git merge crazyagent/main, except a master at Full access. It is a guide, not a lock: landed work can still come in another way."
                     }
                 };
                 (

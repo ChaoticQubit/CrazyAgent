@@ -27,8 +27,8 @@ export function sceneRead(state, answers, failure, command) {
 }
 
 /** Mounts a real settings element in the app's shell against a fake engine. Inputs: the
- * element, the engine's answer function and the theme. Output: nothing. */
-export async function mountTab(element, answer, theme) {
+ * element, the engine's answer function, the theme and what the session adds. Output: nothing. */
+export async function mountTab(element, answer, theme, sessionParts = {}) {
   sent = [];
   window.__TAURI_INTERNALS__ = {
     plugins: {},
@@ -43,7 +43,7 @@ export async function mountTab(element, answer, theme) {
   document.body.style.margin = "0";
   document.body.innerHTML = PAGE;
   const root = createRoot(document.getElementById("mount"));
-  const session = { noteResult: (result) => result, showToast: () => {} };
+  const session = { noteResult: (result) => result, showToast: () => {}, ...sessionParts };
   await act(async () => { root.render(createElement(SessionContext.Provider, { value: session }, element)); });
   await settle(60);
 }
@@ -75,7 +75,7 @@ export function sections() {
       actions: [...group.querySelectorAll(".set-head button, .set-head a")].map(words), left: box.left, right: box.right, top: box.top,
       rows: [...group.querySelectorAll(".set-row")].map((row) => {
         const label = row.querySelector(".set-label");
-        const named = label.querySelector("a, button");
+        const named = label.querySelector("a, button, .mono");
         return {
           label: named ? words(named) : firstText(label).trim(), words: words(label), mark: words(row.querySelector(".set-changed")) || null, help: words(row.querySelector(".set-help")),
           labelRight: label.getBoundingClientRect().right, labelSpills: label.scrollWidth > label.clientWidth, controlLeft: row.querySelector(".set-ctl").getBoundingClientRect().left,

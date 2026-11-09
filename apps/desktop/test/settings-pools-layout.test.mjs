@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { bundle } from "./browser.mjs";
-import { CONTRAST_MIN, press, tabRunner, tabWalk } from "./settings-tab-steps.mjs";
+import { doublePress, CONTRAST_MIN, press, tabRunner, tabWalk } from "./settings-tab-steps.mjs";
 
 const fixture = await bundle(new URL("./fixtures/settings-pools-layout.mjs", import.meta.url).pathname);
 const onPools = tabRunner(fixture);
@@ -224,6 +224,41 @@ test("Delete pool asks first, and a refused delete shows under the title", async
   assert.ok(seen.commands.includes("desktop_inspect_model_access"), JSON.stringify(seen.commands));
   assert.match(seen.alert.words, /engine_failed/);
   assert.equal(seen.alert.belowTop, true, JSON.stringify(seen.alert));
+});
+
+const READY = "Get ready for agents";
+const INSPECT = "desktop_inspect_model_access";
+
+/** Reads a pool's Get ready button. Inputs: the page and the pool's name. Output: its visible
+ * words and whether it is disabled. */
+const readyState = (page, pool) => page.evaluate(`(() => {
+  const found = document.querySelector('button[aria-label="${READY}: ${pool}"]');
+  return { words: found?.textContent, disabled: found?.disabled };
+})()`);
+
+test("a double press on Get ready for agents runs once and shows it is working", async () => {
+  const seen = await onPools({ hold: INSPECT }, async (page) => {
+    await doublePress(page, `button[aria-label="${READY}: Main pool"]`);
+    return { commands: await page.evaluate("Fixture.commands()"), button: await readyState(page, "Main pool") };
+  });
+  assert.equal(seen.commands.filter((command) => command === INSPECT).length, 1, JSON.stringify(seen.commands));
+  assert.deepEqual(seen.button, { words: "Getting ready...", disabled: true });
+});
+
+test("while one pool gets ready, another pool's Get ready waits and keeps its word", async () => {
+  const other = await onPools({ hold: INSPECT, pools: "keyed" }, async (page) => {
+    await press(page, `button[aria-label="${READY}: Main pool"]`);
+    return readyState(page, "Spare");
+  });
+  assert.deepEqual(other, { words: READY, disabled: true });
+});
+
+test("when the run ends Get ready for agents can be pressed again", async () => {
+  const button = await onPools({}, async (page) => {
+    await press(page, `button[aria-label="${READY}: Main pool"]`);
+    return readyState(page, "Main pool");
+  });
+  assert.deepEqual(button, { words: READY, disabled: false });
 });
 
 test("Get ready for agents reaches the engine and says which account is not ready", async () => {

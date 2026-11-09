@@ -24,14 +24,26 @@ export async function press(page, selector, wanted = null) {
   await page.evaluate("Fixture.settle(80)");
 }
 
+/** Presses an element twice with the real mouse, with nothing waited for between the presses,
+ * as a double click does. Inputs: the page, the selector and its words, if more than one
+ * element matches. */
+export async function doublePress(page, selector, wanted = null) {
+  const at = await page.evaluate(`Fixture.boxOf(${JSON.stringify(selector)}, ${JSON.stringify(wanted)})`);
+  assert.notEqual(at, null, `${selector} ${wanted ?? ""} is on the page`);
+  for (const clickCount of [1, 2]) {
+    for (const type of ["mousePressed", "mouseReleased"]) await page.send("Input.dispatchMouseEvent", { type, x: at.x, y: at.y, button: "left", clickCount });
+  }
+  await page.evaluate("Fixture.settle(80)");
+}
+
 /** Walks focus with real Tab keys from the last Settings list link. Inputs: the page and the
- * number of keys. Output: each focused control's name. */
-export async function tabWalk(page, keys) {
+ * number of keys and whether to read the name or the id. Output: each focused control's. */
+export async function tabWalk(page, keys, part = "name") {
   await page.evaluate("[...document.querySelectorAll('.settings-nav a')].at(-1).focus()");
   const seen = [];
   for (let at = 0; at < keys; at += 1) {
     for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
-    seen.push((await page.evaluate("Fixture.focused()")).name);
+    seen.push((await page.evaluate("Fixture.focused()"))[part]);
   }
   return seen;
 }

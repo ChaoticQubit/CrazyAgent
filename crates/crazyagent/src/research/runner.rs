@@ -2368,6 +2368,14 @@ const TOOLS_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 #[cfg(unix)]
 const TOOLS_ROOT: &str = "/Library/Developer/CommandLineTools";
 
+#[cfg(all(test, unix))]
+thread_local! {
+    /// How many times this thread asked for [`sandboxed_git`], so a row can show an async path
+    /// leaves that lookup, which can run xcrun, to a blocking thread.
+    pub(crate) static SANDBOXED_GIT_LOOKUPS: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// The git for commands that run inside an agent's sandbox: the agent's own git script and
 /// the engine's setup steps under the agent profile. On a Mac that is the Command Line Tools
 /// git whenever it is installed, since a toolchain git elsewhere, such as Xcode's, runs under
@@ -2375,6 +2383,8 @@ const TOOLS_ROOT: &str = "/Library/Developer/CommandLineTools";
 /// outside any sandbox keeps the selected toolchain's [`setup_git`]. Returns the path.
 #[cfg(unix)]
 pub(crate) fn sandboxed_git() -> &'static Path {
+    #[cfg(test)]
+    SANDBOXED_GIT_LOOKUPS.set(SANDBOXED_GIT_LOOKUPS.get() + 1);
     if cfg!(target_os = "macos") && agent_git_problem_at(Path::new(TOOLS_ROOT)).is_none() {
         Path::new(TOOLS_GIT)
     } else {
