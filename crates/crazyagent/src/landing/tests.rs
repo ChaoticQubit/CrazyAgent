@@ -10202,6 +10202,72 @@ fn undoing_a_commit_leaves_a_set_accepted_below_it_on_the_same_file() {
     );
 }
 
+/// LAND-4 L1: a set marked undone keeps the commit that first reverted it, so a later undo
+/// of an older commit on the same file does not rewrite it.
+#[test]
+fn undoing_a_second_commit_keeps_the_first_undo_of_a_set() {
+    let case = Case::new();
+    keeps_activity(&case);
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let same = case.turn(TurnOutcome::Succeeded).unwrap();
+    let landed = |number: usize, text: &str| {
+        let other = numbered_agent(&case, number);
+        record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir)
+            .unwrap();
+        write(&other.worktree.join("README"), text);
+        let id = turn_of(&case, &other, "Change the README");
+        assert!(matches!(
+            case.accept(&id).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+        id
+    };
+    let older = landed(3, "one\ntwo\nthree\nfour\n");
+    let newer = landed(4, "one\ntwo\nthree\nfour\nfive\n");
+    assert!(matches!(
+        case.accept(&same).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    let AcceptOutcome::Landed { commit: first, .. } =
+        undo_landing(&case.db, &case.home, &newer).unwrap()
+    else {
+        panic!("the first undo conflicted");
+    };
+    assert_eq!(
+        store::load(&case.db, &same).unwrap().undone.as_deref(),
+        Some(first.as_str())
+    );
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &older).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        store::load(&case.db, &same).unwrap().undone.as_deref(),
+        Some(first.as_str()),
+        "the later undo rewrote the first one"
+    );
+}
+
+/// LAND-4 L1: a set whose recorded commit the repository no longer holds sits above nothing,
+/// so an undo leaves it Accepted, as a landed commit that is gone counts as not landed.
+#[test]
+fn undoing_a_commit_leaves_a_set_whose_recorded_commit_is_gone() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted_above(&case, &[]);
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET landed=?1 WHERE id=?2",
+            ["0123456789abcdef0123456789abcdef01234567", same.as_str()],
+        )
+        .unwrap();
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &maker).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(store::load(&case.db, &same).unwrap().undone, None);
+}
+
 /// LAND-4 L1: an undo moves one branch. A set accepted with no commit at a commit only
 /// another branch holds still has its change there, so it keeps its Accept.
 #[test]
