@@ -45,16 +45,17 @@ function masterOptions(harnesses: HarnessEntry[] | null, master: string): { valu
  * or null, the team shown, whether a save runs, its note and the save. */
 function useTeam(data: TeamProject | undefined) {
   const setup: StoredSetup | null = valueOf(data?.setup);
-  const [held, setHeld] = useState<{ team: TeamDraft; revision: number | null } | null>(null);
+  const [held, setHeld] = useState<{ team: TeamDraft; revision: number | null; read: TeamProject["setup"] } | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const team: TeamDraft | null = setup ? (held !== null && held.revision === setup.revision ? held.team : setup.team) : null;
+  const settling = held !== null && held.read === data?.setup;
 
   async function save(next: TeamDraft) {
     if (!data || !setup || busy) return;
     const harnesses = valueOf(data.harnesses);
     if (!teamValid(next, harnesses)) return setNote(teamProblem(next, harnesses));
-    setHeld({ team: next, revision: setup.revision });
+    setHeld({ team: next, revision: setup.revision, read: data.setup });
     setBusy(true);
     const message = await saveTeam(data, setup, next);
     setBusy(false);
@@ -62,7 +63,7 @@ function useTeam(data: TeamProject | undefined) {
     setNote(message);
   }
 
-  return { setup, team, busy, note, save };
+  return { setup, team, busy: busy || settling, note, save };
 }
 
 function TeamState({ data }: { data: TeamProject | undefined }) {
@@ -230,7 +231,8 @@ export function McpServersSetting({ projectId }: { projectId: string }) {
 /** The master's account as a select of the project's pools, any account of the chosen pool,
  * saved in place through project Settings' own pool save. While a pick is held the page's reads
  * are older than the last save, so a new pick starts from the held pool and reads the project
- * details again. Inputs: the project data and the select's id. Output: the row. */
+ * details again. No pool takes every agent off the pool at once, so it asks first. Inputs:
+ * the project data and the select's id. Output: the row. */
 export function AccountSetting({ data, id }: { data: TeamProject; id: string }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
@@ -238,6 +240,7 @@ export function AccountSetting({ data, id }: { data: TeamProject; id: string }) 
   const pools = data.assigned && !listed.some((choice) => choice.pool.id === data.assigned?.pool.id) ? [data.assigned, ...listed] : listed;
   const current = data.assigned?.pool.id ?? "";
   const [shown, hold] = useHeld(current);
+  const [asking, setAsking] = useState(false);
 
   async function save(value: string): Promise<string> {
     const fresh = shown === current ? null : await loadSetup(data.id);
@@ -257,8 +260,10 @@ export function AccountSetting({ data, id }: { data: TeamProject; id: string }) 
   }
 
   return <SettingRow label="Account">
-    <Select id={id} label="Account" value={shown} options={accountOptions(pools)} onValue={(value) => void choose(value)}
+    <Select id={id} label="Account" value={shown} options={accountOptions(pools)} onValue={(value) => { if (value === "") setAsking(true); else void choose(value); }}
       helper="From the project's pool; fails over to the next account." />
     <RowNote note={note} />
+    <ConfirmDialog open={asking} title="Use no pool for this project?" confirmLabel="Use no pool" cancelLabel="Keep this pool"
+      onConfirm={() => { setAsking(false); void choose(""); }} onCancel={() => setAsking(false)}>{NO_POOL.note}</ConfirmDialog>
   </SettingRow>;
 }
