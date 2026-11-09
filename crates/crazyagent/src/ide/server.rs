@@ -778,16 +778,24 @@ async fn command_off_thread(
     .await?
 }
 
-/// Runs blocking work while the project's start lock is held. Inputs: the held lock and the
+/// Runs blocking work with the project's start lock moved onto its thread, so when the open
+/// is dropped by its timeout and the thread runs on, a retry waits for the leftover instead
+/// of writing beside it. Inputs: the held lock, handed back when the work returns, and the
 /// work. Output: what the work returned, or `ide_state_unavailable` when its thread died.
 async fn holding_start<T: Send + 'static>(
     start: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, EngineError> {
-    assert!(start.is_some(), "blocking work runs under the start lock");
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|_| failure("ide_state_unavailable"))
+    let held = start.take();
+    assert!(held.is_some(), "blocking work runs under the start lock");
+    let (held, made) = tokio::task::spawn_blocking(move || {
+        let made = work();
+        (held, made)
+    })
+    .await
+    .map_err(|_| failure("ide_state_unavailable"))?;
+    *start = held;
+    Ok(made)
 }
 
 /// The server's command line, IDE-1 verdict 3, under the Seatbelt profile installed for
