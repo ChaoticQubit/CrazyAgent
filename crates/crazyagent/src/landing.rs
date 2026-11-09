@@ -1063,8 +1063,9 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
 
 /// Lists one project's change sets as the owner's Changes and the master's brief show
 /// them: as [`list`], without the sets of a lead's workers while the owner's Lands setting
-/// is Lead, since that lead merges them (F3). Inputs: the store and the project. Output:
-/// the change sets.
+/// is Lead, since that lead merges them (F3), but with a worker's open set whose lead's
+/// copy was removed outside the app, since no lead will. Inputs: the store and the project.
+/// Output: the change sets.
 pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
     let sets = list(db, project)?;
     assert!(sets.len() <= LIST_MAX);
@@ -1072,7 +1073,13 @@ pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetV
     if subagent::leads_merge(db, project)? {
         let mut kept = Vec::with_capacity(sets.len());
         for set in sets {
-            if !subagent::is_lead_worker(db, project, &set.agent)? {
+            let open = matches!(
+                set.state,
+                ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
+            );
+            if !subagent::is_lead_worker(db, project, &set.agent)?
+                || (open && subagent::lead_copy_removed(db, project, &set.agent)?)
+            {
                 kept.push(set);
             }
         }
