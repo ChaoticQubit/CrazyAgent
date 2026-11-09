@@ -19,10 +19,10 @@ const USAGE_MS = 60000;
 const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const TASK = "Write fruit.md with one line about apples.";
-const HEAD = ["Name", "Tokens", "Input", "Cache write", "Output", "Cache read", "Runs", "Last used"];
+const HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Merges", "Last used", "Share of tokens"];
 const COMPACT = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
 
-/** What Settings, Usage shows for runs that each counted the stand-in's one token line:
+/** What Metrics shows for runs that each counted the stand-in's one token line:
  * 1,200 new input, no cache write, 300 output and 8,000 re-read from cache per run, in the
  * page's compact form. Input: the number of runs. Output: { tile, reread, parts, merged },
  * merged being the totals that would wrongly add the re-reads in. */
@@ -30,7 +30,7 @@ function expected(runs) {
   assert.ok(Number.isSafeInteger(runs) && runs > 0, `runs counted: ${runs}`);
   const k = (count) => COMPACT.format(count * runs);
   return {
-    tile: ["Tokens", k(1500), `${k(1200)} input, 0 cache write, ${k(300)} output`],
+    tile: [k(1500), `Input ${k(1200)}`, "Cache write 0", `Output ${k(300)}`, `Re-read from cache ${k(8000)}`],
     reread: ["Re-read from cache", k(8000), "87% of everything read; billed far lower, not in Tokens"],
     parts: [k(1500), k(1200), "0", k(300), k(8000)],
     merged: [k(9500), k(9200)],
@@ -236,19 +236,21 @@ async function handOff(me, page, project, runtime) {
   }
 }
 
-/** Reads what Settings, Usage shows: the Tokens and Re-read from cache tiles' lines and the
- * By project table's header and first row, each cell's text in screen order. Input: the
+/** Reads what Metrics shows: the lead panel's Tokens and mix, the Re-read from cache tile's
+ * lines and the By project table's header and first row, each cell's text in screen order. Input: the
  * page. Output: { tile, reread, head, row }, each null while it is missing. */
 function usageShown(page) {
   return page.evaluate(`(() => {
     const words = (node) => (node.innerText ?? "").replace(/\\s+/g, " ").trim();
-    const tiled = (label) => [...document.querySelectorAll(".usage-tile")].find((node) => words(node.firstElementChild ?? node) === label);
-    const tile = tiled("Tokens");
-    const reread = tiled("Re-read from cache");
+    const value = document.querySelector(".mx-lead-value");
+    const mix = [...document.querySelectorAll(".mx-mix div")].map(words);
+    const reread = [...document.querySelectorAll(".mx-tile")].find((node) => words(node.firstElementChild ?? node) === "Re-read from cache");
     const panel = [...document.querySelectorAll("section.panel > .panel-head > h2")].find((title) => words(title) === "By project")?.closest("section.panel");
-    const table = panel?.querySelector("table") ?? null;
+    const details = panel?.querySelector("details") ?? null;
+    if (details) details.open = true;
+    const table = details?.querySelector("table") ?? null;
     return {
-      tile: tile ? [...tile.children].map(words) : null,
+      tile: value ? [words(value), ...mix] : null,
       reread: reread ? [...reread.children].map(words) : null,
       head: table ? [...table.querySelectorAll("thead th")].map(words) : null,
       row: table?.querySelector("tbody tr") ? [...table.querySelector("tbody tr").children].map(words) : null,
@@ -256,10 +258,10 @@ function usageShown(page) {
   })()`);
 }
 
-test("Settings, Usage shows the Tokens headline with its three parts and the cache re-reads on their own tile, and the By project table shows all four parts with the headline first (OS-7)", { timeout: 600000 }, async (t) => {
+test("Metrics shows the Tokens headline with its three parts and the cache re-reads on their own tile, and the By project table shows all four parts with the headline first (OS-7)", { timeout: 600000 }, async (t) => {
   await onEngine(t, "ca-cache-line-", async ({ project, runtime, me, page, site }) => {
     assert.equal(await handOff(me, page, project, runtime), "done", "the Codex sub-agent finished the task");
-    await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/settings/usage` });
+    await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/metrics` });
     let shown = null;
     let counted = null;
     let want = null;
@@ -272,12 +274,12 @@ test("Settings, Usage shows the Tokens headline with its three parts and the cac
       await page.send("Page.reload", { ignoreCache: true });
     }
     await me.capture("usage-cache-line");
-    assert.deepEqual(shown.tile, want.tile, "the Tokens tile shows the headline and its input, cache write and output");
+    assert.deepEqual(shown.tile, want.tile, "the lead panel shows the headline and its input, cache write, output and re-reads");
     assert.deepEqual(shown.reread, want.reread, "the cache re-reads have their own tile with their share, never added into Tokens");
     assert.deepEqual(shown.head, HEAD, "the By project table shows Tokens, then Input, Cache write, Output and Cache read");
     assert.ok(shown.row !== null, "the By project table has the project's row");
     assert.deepEqual(shown.row.slice(1, 6), want.parts, `the project's row shows the headline and all four parts: ${JSON.stringify(shown.row)}`);
-    assert.equal(shown.row[6], String(counted.runs), `the project's row counts every run: ${JSON.stringify(shown.row)}`);
+    assert.equal(shown.row[7], String(counted.runs), `the project's row counts every run: ${JSON.stringify(shown.row)}`);
     const words = await me.seen();
     assert.ok(want.merged.every((total) => !words.includes(total)), `no total adds the cache re-reads into the tokens: ${JSON.stringify(want.merged)}`);
   });

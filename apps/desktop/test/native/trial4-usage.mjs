@@ -8,7 +8,7 @@ const RESETS = /^Resets in (?:under a minute|\d+ min|\d+ h \d+ min|\d+ d \d+ h)(
 /** The sentence the Usage card shows for an API-key Codex account, which has no windows. */
 export const API_KEY_READING = "An API-key account has no 5-hour or weekly window.";
 
-/** Says whether Settings, Usage shows every account's 5-hour and weekly use with a meter and
+/** Says whether Metrics shows every account's 5-hour and weekly use with a meter and
  * the time each window resets (OP-17); an API-key account's card saying it has no windows is
  * a valid reading, though not when every account is one. Input: the limit cards in screen
  * order, each { notice, windows: [{ label, used, meter, reset }] } as the page shows them.
@@ -16,7 +16,7 @@ export const API_KEY_READING = "An API-key account has no 5-hour or weekly windo
  * no name is logged. */
 export function limitsVerdict(cards) {
   assert(Array.isArray(cards), "the limit cards are a list");
-  if (cards.length === 0) throw new Error("Settings, Usage shows no account limits");
+  if (cards.length === 0) throw new Error("Metrics shows no account limits");
   const keyed = cards.filter((card) => card.notice === API_KEY_READING).length;
   if (keyed === cards.length) throw new Error(`not exercised: every one of the ${cards.length} accounts is an API-key account`);
   cards.forEach((card, at) => {

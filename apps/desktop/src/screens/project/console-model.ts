@@ -29,7 +29,7 @@ export const CONSOLE_COMMANDS: readonly ConsoleCommand[] = [
   { name: "clear", help: "Clear this view; the conversation stays", action: { kind: "clear" } },
   { name: "agents", help: "Open the Agents tab", action: { kind: "navigate", target: "agents" } },
   { name: "changes", help: "Open the Changes tab", action: { kind: "navigate", target: "changes" } },
-  { name: "usage", help: "Open Usage in Settings", action: { kind: "navigate", target: "usage" } },
+  { name: "usage", help: "Open Metrics", action: { kind: "navigate", target: "usage" } },
   { name: "process", help: "Open the project's Process tab", action: { kind: "navigate", target: "process" } },
   { name: "stop", help: "Stop the master's turn", action: { kind: "stop" } },
 ];
@@ -87,7 +87,7 @@ export function helpLines(commands: readonly ConsoleCommand[] = CONSOLE_COMMANDS
 
 /** The page a navigating command opens. Inputs: the target and the project id. Output: the route. */
 export function commandRoute(target: ConsoleTarget, projectId: string): Route {
-  if (target === "usage") return { name: "settings", tab: "usage" };
+  if (target === "usage") return { name: "metrics" };
   return { name: "project", id: projectId, tab: target };
 }
 
