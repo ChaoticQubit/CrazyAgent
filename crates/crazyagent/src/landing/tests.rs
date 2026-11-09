@@ -9287,20 +9287,31 @@ fn a_master_land_that_took_the_sets_binary_closes_the_set() {
 #[test]
 fn a_master_land_at_a_path_the_set_never_had_leaves_the_set_open() {
     let case = Case::new();
+    let long: String = (1..=12).map(|number| format!("line {number}\n")).collect();
+    case.owner_commit("LONG", &long, "Owner adds a long file");
+    case.agent(&["merge", "-q", "--ff-only", "main"]);
     let (sub, sub_head, master) = conflicted_set_changing(
         &case,
-        |case| case.edit("README", AGENT_FOURTH_LINE),
+        |case| case.edit("LONG", &format!("{long}from the agent\n")),
         |case| {
-            case.owner(&["mv", "README", "RENAMED"]);
+            case.owner(&["mv", "LONG", "RENAMED"]);
             case.owner_commit(
                 "RENAMED",
-                "one\ntwo\nthree\nfour from the owner\n",
+                &format!("{long}from the owner\n"),
                 "Owner renames and edits",
             );
         },
     );
-    master_resolves(&case, &master, &sub_head, &[("RENAMED", BOTH_FOURTH_LINES)]);
-    let fix = turn_of(&case, &master, "Resolve the renamed README");
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[(
+            "RENAMED",
+            &format!("{long}from the owner\nfrom the agent\n"),
+        )],
+    );
+    let fix = turn_of(&case, &master, "Resolve the renamed file");
     master_fix_lands(&case, &fix);
     set_stayed_open(&case, &sub, "the conflicted path was never the set's");
 }
