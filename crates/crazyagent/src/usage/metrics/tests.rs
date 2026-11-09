@@ -1815,7 +1815,7 @@ fn models_sort_by_dollars_then_tokens_then_name() {
     let (_directory, db) = database();
     priced_rows(
         &db,
-        "(3600000,'agent','alpha','','a','team-1','codex','s1','small',10,0,0,0,0),
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','a-small',10,0,0,0,0),
          (3600000,'agent','alpha','','a','team-1','codex','s2','b-big',100,0,0,0,0),
          (3600000,'agent','alpha','','a','team-1','codex','s3','a-big',100,0,0,0,0),
          (3600000,'agent','alpha','','a','team-1','codex','s4','priced',1,0,0,0,5)",
@@ -1827,7 +1827,7 @@ fn models_sort_by_dollars_then_tokens_then_name() {
             .iter()
             .map(|row| row.model.as_str())
             .collect::<Vec<_>>(),
-        ["priced", "a-big", "b-big", "small"]
+        ["priced", "a-big", "b-big", "a-small"]
     );
 }
 
