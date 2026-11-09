@@ -24,8 +24,8 @@ function called() {
 
 function registered() {
   const lib = read("src-tauri/src/lib.rs");
-  const handler = lib.slice(lib.indexOf("generate_handler!["));
-  const list = [...handler.slice(0, handler.indexOf("])")).matchAll(/\b(desktop_[a-z_]+)\b/g)].map((match) => match[1]);
+  const handler = lib.slice(lib.indexOf("native_commands! {"));
+  const list = [...handler.slice(0, handler.indexOf("\n}")).matchAll(/\b(desktop_[a-z_]+)\b/g)].map((match) => match[1]);
   return { lib, list };
 }
 
@@ -39,7 +39,7 @@ test("every command any window file calls, through invoke or call, is registered
     assert.ok(list.includes(command), `${command} missing from invoke_handler`);
     assert.ok(build.includes(`"${command}"`), `${command} missing from build.rs`);
     assert.ok(allowed.includes(`allow-${command.replaceAll("_", "-")}`), `${command} missing from main-window.json`);
-    assert.match(lib, new RegExp(`#\\[tauri::command\\]\\s*(?:async )?fn ${command}\\(`), `${command} has no tauri command`);
+    assert.match(lib, new RegExp(`#\\[tauri::command\\]\\s*(?:async )?fn ${command}(?:<[^>]*>)?\\(`), `${command} has no tauri command`);
   }
 });
 

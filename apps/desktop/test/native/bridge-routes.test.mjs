@@ -32,12 +32,12 @@ impl BridgeQueue {
 function filesCommand(body) {
   const [command] = commands(`#[tauri::command]
 async fn desktop_project_files(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     query: String,
 ) -> Result<Vec<String>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     ${body}
 }
 `);
@@ -89,11 +89,11 @@ ${reads}
 
 #[tauri::command]
 async fn desktop_team_time_limits(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     limits: Limits,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let Limits { turn_secs, idle_secs } = limits;
     lock(&state).await?.team_time_limits(turn_secs, idle_secs).await
 }

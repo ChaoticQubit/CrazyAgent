@@ -84,7 +84,7 @@ fn the_window_names_only_the_project_and_the_question() {
     assert_eq!(
         parameters("desktop_notify_question"),
         [
-            "window: WebviewWindow,",
+            "webview: Webview,",
             "state: State<'_, NativeState>,",
             "notices: State<'_, Notices>,",
             "project_id: String,",

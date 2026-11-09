@@ -371,10 +371,12 @@ fn listed(text: &str, open: &str, close: &str) -> Vec<String> {
 }
 
 fn command_function(lib: &str, command: &str) -> bool {
-    lib.match_indices(&format!("fn {command}(")).any(|(at, _)| {
+    let head = format!("fn {command}");
+    lib.match_indices(&head).any(|(at, _)| {
+        let next = lib[at + head.len()..].chars().next();
         let before = lib[..at].trim_end();
         let before = before.strip_suffix("async").unwrap_or(before).trim_end();
-        before.ends_with("#[tauri::command]")
+        matches!(next, Some('(' | '<')) && before.ends_with("#[tauri::command]")
     })
 }
 
@@ -387,7 +389,7 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
     assert_eq!(unique.len(), build.len(), "build.rs lists a command twice");
 
     let lib = desktop_source("src/lib.rs");
-    let handler = listed(&lib, "generate_handler![", "]")
+    let handler = listed(&lib, "native_commands! {", "}")
         .into_iter()
         .collect::<BTreeSet<_>>();
     assert_eq!(
