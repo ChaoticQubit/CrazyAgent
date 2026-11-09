@@ -21,8 +21,9 @@ export interface BreakdownRow {
 }
 
 /** A bar's width against the largest row. Inputs: the value and the largest value. Output: a
- * CSS width, never so thin it disappears. */
+ * CSS width, never so thin it disappears, and none at all for nothing. */
 function barWidth(value: number, top: number): string {
+  if (value === 0) return "0%";
   return `${Math.max(BAR_PERCENT_MIN, Math.round((value * 100) / top))}%`;
 }
 
