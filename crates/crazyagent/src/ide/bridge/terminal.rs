@@ -192,7 +192,6 @@ fn prepare(root: &Path, project: &ProjectId) -> Result<InteractiveCommand, Engin
         arguments: &[],
         incoming: &incoming,
         extra_reads: &place.extra_reads,
-        git_config: "",
     })
     .map_err(|error| match error {
         SandboxError::Unavailable(_) => failure("ide_terminal_unavailable"),

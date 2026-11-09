@@ -821,7 +821,10 @@ async fn holding_start<T: Send + 'static>(
 /// the project's hooks run in `root` only when `project_hooks` is on, and git's search stops
 /// at `root`'s agents root, and at its older one while an engine-made worktree of
 /// `project` stays there ([`super::workspace::older_agents`]); a `root` holding a `:` is
-/// refused. Inputs: the launch, the server's info, the output pipe and the hooks switch.
+/// refused. Every git of the server reads the engine's own user-level config in the IDE
+/// folder, written here with the owner's name and email ([`super::git::write_global`]), since
+/// the profile denies the one in the owner's home. Inputs: the launch, the server's info, the
+/// output pipe and the hooks switch.
 fn command(
     launch: Launch<'_>,
     info: &ServerInfo,
@@ -846,6 +849,9 @@ fn command(
     let written = settings::write(folder, &home, data, project_hooks.then_some(root))?;
     let older_agents = super::workspace::older_agents(data, project, root)?;
     let ceiling = super::git::ceiling(root, older_agents)?;
+    let owner_home = std::env::var_os("HOME");
+    super::git::write_global(folder, root, owner_home.as_deref().map(Path::new))?;
+    let git_config = folder.join(super::git::GLOBAL_CONFIG);
     let tmp = crate::sandbox::toolchains::make_tmp(&home)
         .map_err(|_| failure("ide_state_unavailable"))?;
     let (user_data, extensions) = (settings::user_data_folder(&home), folder.join(EXTENSIONS));
@@ -864,6 +870,7 @@ fn command(
             info.capability_path.as_path(),
             info.workspace.as_path(),
             written.locked.as_path(),
+            git_config.as_path(),
         ],
         locked: &[machine.as_path()],
     };
@@ -893,6 +900,7 @@ fn command(
             socket,
             &written.locked,
             &ceiling,
+            &git_config,
         ))
         .env("TMPDIR", &tmp)
         .stdin(Stdio::null())

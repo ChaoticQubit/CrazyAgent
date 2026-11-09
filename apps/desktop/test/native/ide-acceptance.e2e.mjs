@@ -590,6 +590,46 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(await page.evaluate(`document.querySelectorAll(".terminal-initial-hint").length`), 0, "the terminal shows no AI hint");
       });
 
+      await t.test("git answers in the Sandboxed terminal, and with the owner's name in the IDE shell", async () => {
+        const choose = async (names) => {
+          for (let step = 0; step < 2; step += 1) {
+            await pause(SETTLE_MS);
+            const listed = (await page.evaluate(ide.rows)) ?? [];
+            const name = names.find((wanted) => listed.some((label) => label.startsWith(wanted)));
+            if (name) await ide.pick(name);
+          }
+          await pause(SETTLE_MS * 2);
+        };
+        const answers = async (file, owned) => {
+          await keys.text(`{ git --version; git config user.name; git config user.email; echo finished; } > ${file} 2>&1`);
+          await keys.key("Enter");
+          const path = join(repo, file);
+          for (const deadline = Date.now() + STEP_MS; !existsSync(path) || !readFileSync(path, "utf8").includes("finished"); await pause(POLL_MS)) {
+            if (Date.now() > deadline) {
+              await me.capture(`no-git-answer-${file}`);
+              assert.fail(`no git answer in ${file}`);
+            }
+          }
+          const said = readFileSync(path, "utf8");
+          const lines = said.split("
+");
+          assert.ok(lines.some((line) => line.startsWith("git version ")), `${file}: ${said}`);
+          if (owned) {
+            assert.ok(lines.includes(OWNER_NAME), `${file}: ${said}`);
+            assert.ok(lines.includes(OWNER_EMAIL), `${file}: ${said}`);
+          }
+          assert.doesNotMatch(said, /fatal|unable to access/, `${file}: ${said}`);
+        };
+        await keys.key("Escape");
+        await ide.run("Terminal: Create New Terminal");
+        await choose([FOLDER]);
+        await answers("sandboxed-terminal-git.txt", false);
+        await ide.run("Terminal: Create New Terminal (With Profile)");
+        await choose(["IDE shell", FOLDER]);
+        await me.capture("ide-shell");
+        await answers("ide-shell-git.txt", true);
+      });
+
       await t.test("nothing the workbench asked for left the machine, and the agent host never started", async () => {
         const outside = [...requests].filter(([, url]) => {
           const address = new URL(url);

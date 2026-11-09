@@ -366,6 +366,7 @@ fn server_env_holds_only_allowlisted_names() {
         ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
         ("GIT_CONFIG_VALUE_0", "/private/tmp/evil-monitor"),
         ("GIT_CEILING_DIRECTORIES", "/private/tmp/forged-ceiling"),
+        ("GIT_CONFIG_GLOBAL", "/private/tmp/forged-config"),
     ];
     let source = given
         .iter()
@@ -374,7 +375,8 @@ fn server_env_holds_only_allowlisted_names() {
     let socket = Path::new("/private/tmp/data/engine/owner.sock");
     let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
     let ceiling = std::ffi::OsStr::new("/private/tmp/project/.crazyagent/worktrees");
-    let built = env::server_env(source, capability, socket, locked, ceiling);
+    let git_config = Path::new("/private/tmp/ide/project/gitconfig");
+    let built = env::server_env(source, capability, socket, locked, ceiling, git_config);
     assert!(built.len() <= env::ENV_MAX);
     let mut command = Command::new("/usr/bin/env");
     command
@@ -406,6 +408,8 @@ fn server_env_holds_only_allowlisted_names() {
         "/private/tmp/project/.crazyagent/worktrees",
     ));
     expected.extend(crate::ide::git::CONFIG_ENV);
+    expected.push(("GIT_CONFIG_GLOBAL", "/private/tmp/ide/project/gitconfig"));
+    expected.push(("GIT_CONFIG_NOSYSTEM", "1"));
     expected.sort();
     assert_eq!(seen, expected);
     assert!(seen.contains(&("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules")));
@@ -415,6 +419,8 @@ fn server_env_holds_only_allowlisted_names() {
             || *name == env::SOCKET_VARIABLE
             || *name == crate::ide::settings::LOCKED_VARIABLE
             || *name == crate::ide::git::CEILING_VARIABLE
+            || *name == "GIT_CONFIG_GLOBAL"
+            || *name == "GIT_CONFIG_NOSYSTEM"
             || crate::ide::git::CONFIG_ENV
                 .iter()
                 .any(|(fixed, _)| name == fixed)
@@ -1135,7 +1141,12 @@ fn owner_repository(root: &Path) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    assert!(crate::spawn_gate::output(&mut init).unwrap().status.success());
+    assert!(
+        crate::spawn_gate::output(&mut init)
+            .unwrap()
+            .status
+            .success()
+    );
     fs::write(root.join("a.txt"), "owner\n").unwrap();
 }
 

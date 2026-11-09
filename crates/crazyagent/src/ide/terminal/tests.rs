@@ -67,12 +67,11 @@ fn quoted(path: &std::path::Path) -> String {
     format!("'{text}'")
 }
 
-/// A commit in a Sandboxed IDE terminal carries the owner's name and email, from the
-/// user-level git config the engine writes in the terminal's own home, since that home is
-/// not the owner's and holds none of the owner's config.
+/// Git answers in a Sandboxed IDE terminal, whose home is its own, so no config the sandbox
+/// denies stands in its way as the owner's home does for the IDE server's git.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_commit_in_the_sandboxed_terminal_carries_the_owners_name_and_email() {
+fn the_sandboxed_terminals_git_answers_in_the_project() {
     let case = Case::new();
     let mut init = std::process::Command::new(crate::research::runner::setup_git());
     init.args(["init", "-q"])
@@ -83,11 +82,14 @@ fn a_commit_in_the_sandboxed_terminal_carries_the_owners_name_and_email() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    assert!(crate::spawn_gate::output(&mut init).unwrap().status.success());
-    let identity = ("Dana Owner".to_owned(), "dana@example.invalid".to_owned());
-    let config = crate::ide::git::global_text(Some(&identity));
+    assert!(
+        crate::spawn_gate::output(&mut init)
+            .unwrap()
+            .status
+            .success()
+    );
     let script = format!(
-        "{git} add README && {git} commit -q -m first && {git} log -1 --format='%an <%ae>'",
+        "{git} --version && {git} status --porcelain",
         git = quoted(crate::research::runner::sandboxed_git())
     );
     let project = ProjectId::new(PROJECT).unwrap();
@@ -101,7 +103,6 @@ fn a_commit_in_the_sandboxed_terminal_carries_the_owners_name_and_email() {
         arguments: &shell_arguments,
         incoming: &[],
         extra_reads: &[],
-        git_config: &config,
     };
     let mut command = ide_shell::command(&launch).unwrap();
     command
@@ -111,9 +112,9 @@ fn a_commit_in_the_sandboxed_terminal_carries_the_owners_name_and_email() {
     let output = crate::spawn_gate::output(&mut command).unwrap();
     let said = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(output.status.success(), "{said}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "Dana Owner <dana@example.invalid>",
+    assert!(!said.contains("unable to access"), "{said}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("git version "),
         "{said}"
     );
 }
@@ -186,7 +187,6 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         arguments: &shell_arguments,
         incoming: &incoming,
         extra_reads: &[],
-        git_config: "",
     };
     let mut command = ide_shell::command(&launch).unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
@@ -278,7 +278,6 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         arguments: &shell_arguments,
         incoming: &[],
         extra_reads: &[],
-        git_config: "",
     };
     match ide_shell::command(&launch) {
         Err(crate::sandbox::SandboxError::Unavailable(reason)) => {
