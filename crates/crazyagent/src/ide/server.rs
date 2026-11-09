@@ -49,6 +49,9 @@ const EXTENSIONS: &str = "extensions";
 const LAUNCHER: &str = "bin/codium-server";
 const SERVER_MAIN: &str = "out/server-main.js";
 const PROJECTS_MAX: usize = 256;
+/// How long in all the engine's stop waits for start locks. A blocking call left by a
+/// timed-out open can hold one for as long as its lookup hangs.
+const STOP_LEFTOVER_WAIT: Duration = Duration::from_secs(10);
 const GROUP_BYTES_MAX: u64 = 256;
 const READY_POLL: Duration = Duration::from_millis(100);
 const CONNECT_TIME: Duration = Duration::from_millis(500);
