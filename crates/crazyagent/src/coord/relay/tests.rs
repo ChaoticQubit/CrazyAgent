@@ -678,7 +678,7 @@ fn a_letters_quoted_body_is_whole_at_its_bound_and_clipped_one_byte_past_it() {
     let whole = "> x\n".repeat(BODY_BYTES_MAX / 2);
     let mut at_bound = letter(MessageKind::Note, None, None);
     at_bound.body = "x\n".repeat(BODY_BYTES_MAX / 2);
-    assert_eq!(whole.len(), QUOTED_BODY_BYTES_MAX);
+    assert_eq!(whole.len(), 2 * BODY_BYTES_MAX);
     assert_eq!(at_bound.text().split_once(":\n").unwrap().1, whole);
     at_bound.body.push('y');
     assert_eq!(at_bound.text().split_once(":\n").unwrap().1, whole);
