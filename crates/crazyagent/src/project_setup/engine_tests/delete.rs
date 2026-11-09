@@ -780,14 +780,66 @@ async fn an_engine_start_finishes_the_files_a_delete_recorded() {
 #[tokio::test]
 async fn an_engine_start_keeps_every_engine_file_no_record_names_exactly() {
     let mut engine = Engine::start().await;
-    let made = engine_files(engine.root.path(), 77, "job-88-1");
-    for name in ["../agents/agent-77", "job-88-1/home", "agent-077", "job-88"] {
-        record(&engine, name, 0);
+    let root = engine.root.path().to_path_buf();
+    let made = engine_files(&root, 77, "job-88-1");
+    let reached = [
+        ("../agents/agent-77", made[0].clone()),
+        ("job-88-1/home", made[1].join("home")),
+        (
+            "agent-077",
+            root.join("team").join("agents").join("agent-077"),
+        ),
+        (
+            "job-88",
+            root.join("research").join("agents").join("job-88"),
+        ),
+    ];
+    for (name, folder) in &reached {
+        std::fs::create_dir_all(folder).unwrap();
+        record(&engine, name, inode(folder));
     }
     engine.restart().await;
     settled(&engine).await;
-    for path in &made {
+    for path in made.iter().chain(reached.iter().map(|(_, folder)| folder)) {
         assert!(path.exists(), "{} stays", path.display());
+    }
+    engine.stop().await;
+}
+
+/// A removal that stops on one of an agent's small files leaves its folder, so the record
+/// still matches it and the next start finishes every file.
+#[tokio::test]
+async fn a_start_stopped_by_one_file_keeps_the_folder_so_the_next_start_finishes() {
+    let mut engine = Engine::start().await;
+    let root = engine.root.path().to_path_buf();
+    let made = engine_files(&root, 9, "job-41-1");
+    let planted = root
+        .join("team")
+        .join("profiles")
+        .join("agent-9-teammates-server.pid");
+    std::fs::remove_file(&planted).unwrap();
+    std::fs::create_dir(&planted).unwrap();
+    record(&engine, "agent-9", inode(&made[0]));
+    record(&engine, "job-41-1", inode(&made[1]));
+    engine.restart().await;
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while recorded(&engine) != 1 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        recorded(&engine),
+        1,
+        "only the stopped removal keeps its record"
+    );
+    assert!(
+        made[0].exists(),
+        "the folder goes last, so a retry still matches"
+    );
+    std::fs::remove_dir(&planted).unwrap();
+    engine.restart().await;
+    settled(&engine).await;
+    for path in &made {
+        assert!(!path.exists(), "{} goes", path.display());
     }
     engine.stop().await;
 }
