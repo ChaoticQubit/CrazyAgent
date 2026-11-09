@@ -2714,8 +2714,8 @@ fn working_list_stops_at_its_bound_and_fits_one_reply_beside_a_full_unseen_list(
         .unwrap();
     }
 
-    let view = app(&fixture.connection)
-        .expect("both full lists fit one reply at the longest legal ids");
+    let view =
+        app(&fixture.connection).expect("both full lists fit one reply at the longest legal ids");
 
     assert_eq!(view.working.len() as i64, WORKING_PROJECTS_MAX);
     assert_eq!(view.projects.len() as i64, UNSEEN_PROJECTS_MAX);
