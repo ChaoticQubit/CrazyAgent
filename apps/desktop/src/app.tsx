@@ -15,7 +15,7 @@ import { AppMetrics } from "./screens/metrics";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
-import { alertRoute, freshAlerts, unseenByProject } from "./screens/team/wake";
+import { alertRoute, freshAlerts, unseenByProject, workingByProject } from "./screens/team/wake";
 import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
 import { blocking, updateStore } from "./screens/settings/updates-state";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route } from "./ui";
@@ -144,7 +144,7 @@ export function Screen({ route, session, alerts }: { route: Route; session: Sess
  * launch skeleton, the first-run Welcome page while the profile is empty, or the shell with the
  * routed screen. Settings, Updates opens on its own in place of all but the shell. Inputs: the
  * session and the current route. */
-export function AppView({ session, route, alerts }: { session: Session; route: Route; alerts?: Map<string, number> }) {
+export function AppView({ session, route, alerts, working }: { session: Session; route: Route; alerts?: Map<string, number>; working?: ReadonlyMap<string, number> }) {
   const updates = route.name === "settings" && route.tab === "updates";
   if (session.engine === "down") return updates ? <UpdatesAlone session={session} /> : <EngineDown onRetry={session.retry} />;
   if (session.engine === "outdated") return updates ? <UpdatesAlone session={session} /> : <EngineOutdated onRetry={session.retry} />;
@@ -160,7 +160,7 @@ export function AppView({ session, route, alerts }: { session: Session; route: R
   const toastOpen = session.toastOpen;
   const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => {
     const unseen = alerts?.get(project.id) ?? 0;
-    return { id: project.id, name: displayText(project.name), flag: unseen > 0 ? String(unseen) : undefined };
+    return { id: project.id, name: displayText(project.name), flag: unseen > 0 ? String(unseen) : undefined, working: working?.get(project.id) };
   }) : undefined;
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} onOpen={toastOpen ? () => navigate(toastOpen) : undefined} />}
@@ -203,6 +203,15 @@ function useShortcuts() {
 
 export const ALERT_READ_MS = 10_000;
 
+const NONE_WORKING: ReadonlyMap<string, number> = new Map();
+
+/** What the sidebar shows from the team alert read: each project's flag count and its agents
+ * at work. */
+export interface TeamAlerts {
+  alerts: Map<string, number>;
+  working: ReadonlyMap<string, number>;
+}
+
 /** Watches the owner's team notifications and pending questions while the engine runs: every
  * 10 s it reads them, shows a new notification as a toast, with Open to the Agents tab's
  * Questions for you drawer on an urgent question or an agent waiting in its terminal, keeps
@@ -210,13 +219,18 @@ export const ALERT_READ_MS = 10_000;
  * attention when a notification is new; a Normal question only counts toward the badge. The
  * same counts read drives the question notification watch, so the counts are read once per
  * look. Inputs: whether the engine runs and the toast action. Output: what each project's
- * sidebar flag counts. */
-function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): Map<string, number> {
+ * sidebar flag counts and how many agents each has at work, none when a read fails or the
+ * engine stops. */
+export function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): TeamAlerts {
   const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
+  const [working, setWorking] = useState<ReadonlyMap<string, number>>(NONE_WORKING);
   const toast = useRef(showToast);
   toast.current = showToast;
   useEffect(() => {
-    if (!running) return;
+    if (!running) {
+      setWorking(NONE_WORKING);
+      return;
+    }
     let live = true;
     let last: number | null = null;
     let shown = 0;
@@ -232,9 +246,12 @@ function useTeamAlerts(running: boolean, showToast: (message: string, open?: Rou
         const flags = withPendingQuestions(unseenByProject(result.value), unseenQuestionAlerts(result.value.projects), pending);
         const total = [...flags.values()].reduce((sum, count) => sum + count, 0);
         setCounts(flags);
+        setWorking(workingByProject(result.value));
         if (next.fresh[0]) toast.current(displayText(next.fresh[0].text), alertRoute(next.fresh[0]));
         if (next.fresh.length > 0 || total !== shown) void teamAttention(total, next.fresh.length > 0);
         shown = total;
+      } else {
+        setWorking(NONE_WORKING);
       }
       if (questions.kind === "ok") await watch.look(questions.value);
       if (live && (result.kind !== "not_ready" || questions.kind !== "not_ready")) timer = window.setTimeout(read, ALERT_READ_MS);
@@ -246,7 +263,7 @@ function useTeamAlerts(running: boolean, showToast: (message: string, open?: Rou
       watch.stop();
     };
   }, [running]);
-  return counts;
+  return { alerts: counts, working };
 }
 
 export const IDE_FOCUS_POLL_MS = 1_000;
@@ -287,7 +304,7 @@ export function App() {
   const route = useRoute();
   useShortcuts();
   useUpdateWatch(session.showToast);
-  const alerts = useTeamAlerts(session.engine === "running", session.showToast);
+  const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
-  return <AppView session={session} route={route} alerts={alerts} />;
+  return <AppView session={session} route={route} alerts={alerts} working={working} />;
 }

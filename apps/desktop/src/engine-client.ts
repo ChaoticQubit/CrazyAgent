@@ -1109,6 +1109,7 @@ export interface AppTeamEvents {
   notifications: TeamNotification[];
   unseen: number;
   projects: { project_id: string; unseen: number; questions?: number }[];
+  working?: { project_id: string; agents: number }[];
 }
 
 export interface TeamPlanStep {
