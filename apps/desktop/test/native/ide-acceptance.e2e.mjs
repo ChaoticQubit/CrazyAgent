@@ -88,6 +88,8 @@ function ownerRepo(folder, remote, url) {
   git(remote, "init", "-q", "--bare", "-b", "main");
   git(folder, "remote", "add", "origin", url);
   git(folder, "push", "-q", "-u", "origin", "main");
+  git(folder, "config", "--unset", "user.name");
+  git(folder, "config", "--unset", "user.email");
   return git(folder, "rev-parse", "HEAD");
 }
 
@@ -321,6 +323,7 @@ connections = [
 ]
 pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
 `, { mode: 0o600 });
+  writeFileSync(join(home, ".gitconfig"), `[user]\n\tname = ${OWNER_NAME}\n\temail = ${OWNER_EMAIL}\n`);
   const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
   const log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
   let generation = 0;

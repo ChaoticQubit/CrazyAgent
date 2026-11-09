@@ -67,6 +67,57 @@ fn quoted(path: &std::path::Path) -> String {
     format!("'{text}'")
 }
 
+/// A commit in a Sandboxed IDE terminal carries the owner's name and email, from the
+/// user-level git config the engine writes in the terminal's own home, since that home is
+/// not the owner's and holds none of the owner's config.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_commit_in_the_sandboxed_terminal_carries_the_owners_name_and_email() {
+    let case = Case::new();
+    let mut init = std::process::Command::new(crate::research::runner::setup_git());
+    init.args(["init", "-q"])
+        .current_dir(&case.folder)
+        .env_clear()
+        .env("HOME", &case.folder)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    assert!(crate::spawn_gate::output(&mut init).unwrap().status.success());
+    let identity = ("Dana Owner".to_owned(), "dana@example.invalid".to_owned());
+    let config = crate::ide::git::global_text(Some(&identity));
+    let script = format!(
+        "{git} add README && {git} commit -q -m first && {git} log -1 --format='%an <%ae>'",
+        git = quoted(crate::research::runner::sandboxed_git())
+    );
+    let project = ProjectId::new(PROJECT).unwrap();
+    let shell_arguments = arguments(&["-c", &script]);
+    let launch = ide_shell::Launch {
+        root: &case.root,
+        project: &project,
+        folder: &case.folder,
+        cwd: &case.folder,
+        shell: std::path::Path::new("/bin/sh"),
+        arguments: &shell_arguments,
+        incoming: &[],
+        extra_reads: &[],
+        git_config: &config,
+    };
+    let mut command = ide_shell::command(&launch).unwrap();
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{said}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "Dana Owner <dana@example.invalid>",
+        "{said}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
@@ -135,6 +186,7 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         arguments: &shell_arguments,
         incoming: &incoming,
         extra_reads: &[],
+        git_config: "",
     };
     let mut command = ide_shell::command(&launch).unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
@@ -226,6 +278,7 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         arguments: &shell_arguments,
         incoming: &[],
         extra_reads: &[],
+        git_config: "",
     };
     match ide_shell::command(&launch) {
         Err(crate::sandbox::SandboxError::Unavailable(reason)) => {

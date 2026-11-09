@@ -98,6 +98,28 @@ pub fn ceiling(root: &Path, older_agents: bool) -> Result<OsString, EngineError>
     Ok(value)
 }
 
+/// The file in a project's IDE folder that every git of its IDE server reads as its user-level
+/// config, written by the engine before each open.
+pub const GLOBAL_CONFIG: &str = "gitconfig";
+
+/// The text of the user-level git config an IDE git reads. Input: the owner's name and email,
+/// if git has them. Output: the text.
+pub fn global_text(identity: Option<&(String, String)>) -> String {
+    let _ = identity;
+    String::new()
+}
+
+/// Writes a project's [`GLOBAL_CONFIG`]. Inputs: the project's IDE folder, its repository and
+/// the owner's home. Output: Ok, or `ide_settings_unwritable`.
+pub fn write_global(
+    folder: &Path,
+    repository: &Path,
+    owner_home: Option<&Path>,
+) -> Result<(), EngineError> {
+    let _ = (folder, repository, owner_home);
+    Ok(())
+}
+
 /// The workspace keys that keep the IDE's git to the repository at each section's root: no
 /// submodule detection, and no scan for repositories below a section or around an open
 /// file. Output: the keys and their values, for the generated workspace file.
