@@ -4366,7 +4366,8 @@ fn the_master_merge_of_a_lead_is_refused_while_its_worker_holds_an_open_set() {
         .unwrap()
         .1
         .head;
-    crate::landing::discard(&db, &worker_set, &head, crate::team::now_ms()).unwrap();
+    let now_ms = u64::try_from(crate::team::now_ms()).unwrap();
+    crate::landing::discard(&db, &worker_set, &head, now_ms).unwrap();
     let (said, refused) = merge(&mut fixture);
     assert!(!refused, "{said}");
     assert_ne!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
