@@ -1570,3 +1570,73 @@ async fn a_dropped_open_keeps_the_start_lock_until_its_blocking_work_ends() {
     let unlocked = tokio::spawn(async { holding_start(&mut None, || ()).await });
     assert!(unlocked.await.unwrap_err().is_panic());
 }
+
+/// A blocking call that never returns holds its project's start lock. The engine's stop waits
+/// [`STOP_LEFTOVER_WAIT`] in all for such locks, however many there are, so the shutdown
+/// steps after it still run (ide-8 r2, rv-code L1 and sec F1).
+#[tokio::test]
+async fn stop_all_goes_on_past_leftovers_that_hold_their_start_locks() {
+    let data = scratch();
+    let servers = servers_in(data.path(), Duration::from_secs(60));
+    let mut held = Vec::new();
+    for name in ["hung-one", "hung-two"] {
+        let slot = servers.slot(&project(name)).unwrap();
+        held.push(Arc::clone(&slot.start).lock_owned().await);
+    }
+    let limit = STOP_LEFTOVER_WAIT + STOP_LEFTOVER_WAIT / 2;
+    assert!(
+        tokio::time::timeout(limit, servers.stop_all())
+            .await
+            .is_ok(),
+        "the engine's stop must go on past a hung leftover"
+    );
+    assert_eq!(held.len(), 2);
+}
+
+/// Only the guard keeps the lock of an open that was dropped, so a full table must still keep
+/// that slot: otherwise the project's retry gets a new lock and writes beside the leftover
+/// (ide-8 r2, sec F2).
+#[tokio::test]
+async fn a_full_table_keeps_the_slot_a_leftover_still_holds() {
+    let data = scratch();
+    let servers = servers_in(data.path(), Duration::from_secs(60));
+    let leftover = project("leftover");
+    let slot = servers.slot(&leftover).unwrap();
+    let held = Arc::clone(&slot.start).lock_owned().await;
+    drop(slot);
+    for index in 1..PROJECTS_MAX {
+        servers.slot(&project(&format!("filler-{index}"))).unwrap();
+    }
+    servers.slot(&project("one-more")).unwrap();
+    let retry = servers.slot(&leftover).unwrap();
+    assert!(
+        Arc::ptr_eq(&retry.start, tokio::sync::OwnedMutexGuard::mutex(&held)),
+        "a retry must wait on the leftover's lock"
+    );
+}
+
+/// A recorded server behind a start lock that stays held must still end with the engine. Its
+/// group goes, and its record, token and group file are removed once the wait runs out, so a
+/// leftover cannot make an IDE server outlive the engine (ide-10 r1, rv-code L1 and sec F1).
+#[tokio::test]
+async fn stop_all_ends_a_recorded_server_behind_a_held_start_lock() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let id = project("behind-lock");
+    servers
+        .open(&id, checkout.path(), &cached_build(), false)
+        .await
+        .unwrap();
+    let group = servers.group(&id).unwrap();
+    let folder = servers.project_folder(&id).unwrap();
+    assert!(folder.join(token::FILE).is_file());
+    assert!(folder.join(GROUP).is_file());
+    let held = servers.slot(&id).unwrap().start.clone().lock_owned().await;
+    servers.stop_all().await;
+    gone(group).await;
+    assert_eq!(servers.group(&id), None, "the server stays on record");
+    assert!(!folder.join(token::FILE).exists(), "token left behind");
+    assert!(!folder.join(GROUP).exists(), "group file left behind");
+    drop(held);
+}

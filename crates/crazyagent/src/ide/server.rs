@@ -49,6 +49,9 @@ const EXTENSIONS: &str = "extensions";
 const LAUNCHER: &str = "bin/codium-server";
 const SERVER_MAIN: &str = "out/server-main.js";
 const PROJECTS_MAX: usize = 256;
+/// How long in all the engine's stop waits for start locks. A blocking call left by a
+/// timed-out open can hold one for as long as its lookup hangs.
+const STOP_LEFTOVER_WAIT: Duration = Duration::from_secs(10);
 const GROUP_BYTES_MAX: u64 = 256;
 const READY_POLL: Duration = Duration::from_millis(100);
 const CONNECT_TIME: Duration = Duration::from_millis(500);
@@ -416,7 +419,9 @@ impl Servers {
 
     /// Stops every server, as the engine stops, and refuses later opens. Every group gets
     /// SIGTERM at once, so a launch still starting fails at once instead of holding the
-    /// stop back. Output: none; each server is gone or its lingering group was logged.
+    /// stop back. The wait for start locks shares one cap, so a blocking call left hung by
+    /// a timed-out open cannot hold up the engine's stop.
+    /// Output: none; each server is gone or its lingering group was logged.
     pub async fn stop_all(&self) {
         self.closed.store(true, Ordering::SeqCst);
         let slots: Vec<Arc<Slot>> = locked(&self.slots).values().cloned().collect();
@@ -427,8 +432,9 @@ impl Servers {
                 let _ = rustix::process::kill_process_group(running.group, Signal::TERM);
             }
         }
+        let deadline = tokio::time::Instant::now() + STOP_LEFTOVER_WAIT;
         for slot in slots {
-            let _start = slot.start.lock().await;
+            let _start = tokio::time::timeout_at(deadline, slot.start.lock()).await;
             let running = locked(&slot.state).take();
             if let Some(running) = running {
                 finish(running).await;
@@ -452,7 +458,11 @@ impl Servers {
             return Ok(slot.clone());
         }
         if slots.len() >= PROJECTS_MAX {
-            slots.retain(|_, slot| Arc::strong_count(slot) > 1 || locked(&slot.state).is_some());
+            slots.retain(|_, slot| {
+                Arc::strong_count(slot) > 1
+                    || Arc::strong_count(&slot.start) > 1
+                    || locked(&slot.state).is_some()
+            });
             if slots.len() >= PROJECTS_MAX {
                 return Err(failure("ide_servers_full"));
             }

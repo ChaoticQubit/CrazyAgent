@@ -6809,6 +6809,7 @@ fn badge(fixture: &Fixture, agent: i64) -> bool {
 #[test]
 fn with_next_message_an_edit_reaches_a_running_agent_once_in_its_next_task() {
     let fixture = Fixture::new(1);
+    reuse_idle_on(&fixture);
     let host = fixture.host();
     let mut team = edit_runtime(
         &fixture,
@@ -6856,6 +6857,7 @@ fn with_next_message_an_edit_reaches_a_running_agent_once_in_its_next_task() {
 #[test]
 fn with_restart_the_agent_restarts_at_its_next_idle_with_the_new_text() {
     let fixture = Fixture::new(1);
+    reuse_idle_on(&fixture);
     let host = fixture.host();
     let counting = RESUMING_CLAUDE.replacen(
         "#!/bin/sh\n",
@@ -6924,6 +6926,7 @@ fn with_restart_the_agent_restarts_at_its_next_idle_with_the_new_text() {
 #[test]
 fn with_badge_nothing_is_sent_and_the_status_shows_instructions_changed() {
     let fixture = Fixture::new(1);
+    reuse_idle_on(&fixture);
     let host = fixture.host();
     let mut team = edit_runtime(
         &fixture,
@@ -7688,13 +7691,25 @@ fn switching_runtime(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
 /// `claude_access`. Takes the fixture, host and the Claude Code script. Returns the runtime.
 #[cfg(target_os = "macos")]
 fn claude_runtime(fixture: &Fixture, host: &Arc<dyn Host>, script: &str) -> TeamRuntime {
+    two_harness_runtime(fixture, host, RESUMING_CODEX, script)
+}
+
+/// A live runtime with the given Codex and Claude Code stand-ins and `claude_access`. Takes
+/// the fixture, the host and the two scripts. Returns the runtime.
+#[cfg(target_os = "macos")]
+fn two_harness_runtime(
+    fixture: &Fixture,
+    host: &Arc<dyn Host>,
+    codex_script: &str,
+    claude_script: &str,
+) -> TeamRuntime {
     let bin = fixture.base.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let codex = bin.join("codex");
-    std::fs::write(&codex, RESUMING_CODEX).unwrap();
+    std::fs::write(&codex, codex_script).unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
     let claude = bin.join("claude");
-    std::fs::write(&claude, script).unwrap();
+    std::fs::write(&claude, claude_script).unwrap();
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
     let access = claude_access(fixture);
     TeamRuntime::open(
@@ -8842,6 +8857,7 @@ fn a_tools_on_sub_agent_s_task_turn_carries_the_task_start_reminder_only_while_i
     approve_skills(&fixture, &["meal-tips"]);
     let host = fixture.host();
     let mut team = live_runtime(&fixture, &host, &recording_codex());
+    reuse_idle_on(&fixture);
     owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
     fixture.until(&mut team, "the first task is done", |f| {
         task_of(f, "Write page.md").0 == "done"
@@ -11878,6 +11894,7 @@ fn a_signed_in_master_starts_each_turn_fresh_so_its_briefing_is_not_repeated() {
 #[test]
 fn the_owners_wake_without_a_conversation_hands_the_last_result_to_the_next_task() {
     let fixture = Fixture::new(1);
+    reuse_idle_on(&fixture);
     let host = fixture.host();
     let agents = Arc::new(Agents::open(&fixture.base).unwrap());
     let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default())
@@ -17449,6 +17466,8 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
     )
     .unwrap()
     .unwrap();
+    crate::team::set_reuse_idle(&tx, &fixture.setup.project_id, crate::team::ReuseIdle::On)
+        .unwrap();
     tx.commit().unwrap();
     (team, lead, task)
 }
@@ -19486,6 +19505,486 @@ fn worker_results_go_to_the_lead_not_the_master() {
     team.shutdown().unwrap();
 }
 
+#[cfg(target_os = "macos")]
+fn handle_of(fixture: &Fixture, agent: i64) -> Option<String> {
+    crate::team::names::name(&fixture.connection, agent)
+        .unwrap()
+        .and_then(|name| name.handle)
+}
+
+/// Sets the owner's "Reuse idle agents" setting. Takes the fixture and the mode.
+#[cfg(target_os = "macos")]
+fn reuse_idle(fixture: &Fixture, mode: crate::team::ReuseIdle) {
+    owner(
+        fixture,
+        &[crate::team::TeamAction::ReuseIdle {
+            project_id: fixture.setup.project_id.clone(),
+            mode,
+        }],
+    );
+}
+
+/// Turns the owner's "Reuse idle agents" setting on, for a row about an idle agent taking
+/// the next task. Takes the fixture.
+#[cfg(target_os = "macos")]
+fn reuse_idle_on(fixture: &Fixture) {
+    reuse_idle(fixture, crate::team::ReuseIdle::On);
+}
+
+/// Hands off one task and waits until it is done and its agent idle. Takes the fixture,
+/// the team and the prompt. Returns the agent that ran it.
+#[cfg(target_os = "macos")]
+fn done_and_idle(fixture: &Fixture, team: &mut TeamRuntime, prompt: &str) -> i64 {
+    done_and_idle_on(fixture, team, "codex", prompt)
+}
+
+/// Hands off one task to a harness and waits until it is done and its agent idle. Takes
+/// the fixture, the team, the harness and the prompt. Returns the agent that ran it.
+#[cfg(target_os = "macos")]
+fn done_and_idle_on(fixture: &Fixture, team: &mut TeamRuntime, harness: &str, prompt: &str) -> i64 {
+    owner(
+        fixture,
+        &[crate::team::TeamAction::Delegate {
+            project_id: fixture.setup.project_id.clone(),
+            harness: Some(harness.into()),
+            prompt: prompt.into(),
+        }],
+    );
+    fixture.until(team, "the task is done", |f| task_of(f, prompt).0 == "done");
+    let agent = task_and_agent(fixture, prompt).1.unwrap();
+    fixture.until(team, "its agent is idle", |f| {
+        f.agent_status(agent).0 == AgentStatus::Idle
+    });
+    agent
+}
+
+/// A team of Codex and Claude Code stand-ins whose plan has the given slots. Takes the most
+/// sub-agents the project runs and each harness's agents. Returns the fixture, whose access
+/// holds an account for each harness, and the runtime.
+#[cfg(target_os = "macos")]
+fn mixed_team(subs: u8, codex: u8, claude: u8) -> (Fixture, TeamRuntime) {
+    let mut fixture = Fixture::new(subs);
+    fixture.setup.team.sub_harnesses = vec![
+        HarnessSlot {
+            harness: "codex".into(),
+            agents: codex,
+            tools: false,
+        },
+        HarnessSlot {
+            harness: "claude-code".into(),
+            agents: claude,
+            tools: false,
+        },
+    ];
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    let host = fixture.host();
+    let team = two_harness_runtime(&fixture, &host, LEAD_CODEX, RESUMING_CLAUDE);
+    fixture.access = claude_access(&fixture);
+    (fixture, team)
+}
+
+/// A team of two idle Codex sub-agents. Returns the fixture, the runtime and the two agents,
+/// the older first.
+#[cfg(target_os = "macos")]
+fn idle_pair() -> (Fixture, TeamRuntime, i64, i64) {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let older = done_and_idle(&fixture, &mut team, "Write a.md");
+    let newer = done_and_idle(&fixture, &mut team, "Write b.md");
+    (fixture, team, older, newer)
+}
+
+/// Makes room once over every idle agent and checks that a guard kept the older of a pair:
+/// only the newer stops. Takes the fixture, the team, the two agents and the reserved agents.
+#[cfg(target_os = "macos")]
+fn only_newer_stops(
+    fixture: &Fixture,
+    team: &mut TeamRuntime,
+    older: i64,
+    newer: i64,
+    reserved: &BTreeSet<i64>,
+) {
+    team.stop_idle_for(
+        &fixture.setup.project_id,
+        "codex",
+        |_: &Worker| true,
+        reserved,
+    )
+    .unwrap();
+    assert!(!team.workers[&older].stopping, "the guard keeps it");
+    assert!(team.workers[&newer].stopping, "the other agent makes room");
+}
+
+/// Starts a lead, has it spawn one worker and waits until both are idle. Takes the fixture,
+/// the team, the lead's task and the worker's task. Returns the lead and its worker.
+#[cfg(target_os = "macos")]
+fn lead_and_idle_worker(
+    fixture: &Fixture,
+    team: &mut TeamRuntime,
+    lead_task: &str,
+    worker_task: &str,
+) -> (i64, i64) {
+    let lead = done_and_idle(fixture, team, lead_task);
+    lead_spawns(fixture, lead, worker_task);
+    fixture.until(team, "the worker's task is done", |f| {
+        task_of(f, worker_task).0 == "done"
+    });
+    let worker = task_and_agent(fixture, worker_task).1.unwrap();
+    fixture.until(team, "the lead and its worker are idle", |f| {
+        f.agent_status(lead).0 == AgentStatus::Idle && f.agent_status(worker).0 == AgentStatus::Idle
+    });
+    (lead, worker)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn with_reuse_idle_off_a_new_task_starts_a_new_agent_and_the_idle_one_keeps_its_handle() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    assert_eq!(fixture.status().reuse_idle, crate::team::ReuseIdle::Off);
+    let first = done_and_idle(&fixture, &mut team, "Write a.md");
+    let handle = handle_of(&fixture, first);
+    let second = done_and_idle(&fixture, &mut team, "Write b.md");
+    assert_ne!(first, second, "a new task starts a new agent");
+    assert_eq!(handle_of(&fixture, first), handle);
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn with_reuse_idle_on_an_idle_agent_takes_the_next_task() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::ReuseIdle {
+            project_id: fixture.setup.project_id.clone(),
+            mode: crate::team::ReuseIdle::On,
+        }],
+    );
+    assert_eq!(fixture.status().reuse_idle, crate::team::ReuseIdle::On);
+    let first = done_and_idle(&fixture, &mut team, "Write a.md");
+    let second = done_and_idle(&fixture, &mut team, "Write b.md");
+    assert_eq!(first, second, "the idle agent takes it");
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn with_reuse_idle_off_at_the_limit_the_idle_agent_stops_and_a_new_one_starts() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    let first = done_and_idle(&fixture, &mut team, "Write a.md");
+    let second = done_and_idle(&fixture, &mut team, "Write b.md");
+    assert_ne!(first, second, "a new task starts a new agent");
+    assert_eq!(fixture.agent_status(first).0, AgentStatus::Stopped);
+    team.shutdown().unwrap();
+}
+
+/// At a full total limit or Max harnesses per project a task of another harness makes room
+/// (DEC-119 addendum): one idle agent stops and the task starts, rather than waiting behind
+/// idle agents for the idle limit to end them.
+#[cfg(target_os = "macos")]
+#[test]
+fn at_a_full_limit_a_task_of_another_harness_stops_one_idle_agent() {
+    for (subs, harness_cap) in [(2, None), (3, Some(2))] {
+        let (fixture, mut team) = mixed_team(subs, subs, subs);
+        if let Some(cap) = harness_cap {
+            fixture
+                .connection
+                .execute(
+                    "INSERT INTO team_caps(project,harnesses) VALUES (?1,?2)",
+                    params![PROJECT, cap],
+                )
+                .unwrap();
+        }
+        let first = done_and_idle_on(&fixture, &mut team, "claude-code", "Write a.md");
+        let second = done_and_idle_on(&fixture, &mut team, "claude-code", "Write b.md");
+        let fresh = done_and_idle_on(&fixture, &mut team, "codex", "Write c.md");
+        assert!(fresh != first && fresh != second);
+        assert_eq!(fixture.agent_status(first).0, AgentStatus::Stopped);
+        assert_eq!(fixture.agent_status(second).0, AgentStatus::Idle);
+        team.shutdown().unwrap();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn at_a_full_limit_an_idle_agent_of_the_tasks_own_harness_stops_first() {
+    let (fixture, mut team) = mixed_team(2, 2, 2);
+    let claude = done_and_idle_on(&fixture, &mut team, "claude-code", "Write a.md");
+    let codex = done_and_idle_on(&fixture, &mut team, "codex", "Write b.md");
+    let fresh = done_and_idle_on(&fixture, &mut team, "codex", "Write c.md");
+    assert_ne!(fresh, codex);
+    assert_eq!(fixture.agent_status(codex).0, AgentStatus::Stopped);
+    assert_eq!(fixture.agent_status(claude).0, AgentStatus::Idle);
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn at_a_full_harness_slot_an_idle_agent_of_another_harness_stays() {
+    let (fixture, mut team) = mixed_team(3, 1, 2);
+    let busy = busy_harness(&fixture, &mut team);
+    let claude = done_and_idle_on(&fixture, &mut team, "claude-code", "Write a.md");
+    reuse_idle(&fixture, crate::team::ReuseIdle::Off);
+    owner(&fixture, &[hand_off(&fixture, "Write b.md")]);
+    idle_ticks(&mut team);
+    assert_eq!(fixture.agent_status(claude).0, AgentStatus::Idle);
+    assert_eq!(fixture.agent_status(busy).0, AgentStatus::Working);
+    assert_eq!(task_of(&fixture, "Write b.md").0, "queued");
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn at_a_full_limit_a_busy_agent_keeps_running_and_the_idle_one_stops() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let busy = busy_harness(&fixture, &mut team);
+    reuse_idle(&fixture, crate::team::ReuseIdle::Off);
+    let idle = done_and_idle(&fixture, &mut team, "Write b.md");
+    let fresh = done_and_idle(&fixture, &mut team, "Write c.md");
+    assert!(fresh != busy && fresh != idle);
+    assert_eq!(fixture.agent_status(idle).0, AgentStatus::Stopped);
+    assert_eq!(fixture.agent_status(busy).0, AgentStatus::Working);
+    assert_eq!(task_of(&fixture, HELD_TASK).0, "running");
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn at_a_leads_own_cap_only_its_own_idle_worker_stops() {
+    let fixture = Fixture::new(5);
+    committed_project(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let (_, other) = lead_and_idle_worker(&fixture, &mut team, "Lead one.", "Worker one.");
+    let (lead, own) = lead_and_idle_worker(&fixture, &mut team, "Lead two.", "Worker two.");
+    lead_spawns(&fixture, lead, "Worker three.");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_caps(project,teammates) VALUES (?1,1)",
+            [PROJECT],
+        )
+        .unwrap();
+    fixture.until(&mut team, "the lead's next task is done", |f| {
+        task_of(f, "Worker three.").0 == "done"
+    });
+    let fresh = task_and_agent(&fixture, "Worker three.").1.unwrap();
+    assert_ne!(fresh, own);
+    assert_eq!(parent_of(&fixture, fresh), Some(lead));
+    assert_eq!(fixture.agent_status(own).0, AgentStatus::Stopped);
+    assert_eq!(fixture.agent_status(other).0, AgentStatus::Idle);
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_agent_stays_when_an_idle_agent_makes_room() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    team.workers.get_mut(&older).unwrap().live = true;
+    only_newer_stops(&fixture, &mut team, older, newer, &BTreeSet::new());
+    team.workers.get_mut(&older).unwrap().live = false;
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_on_its_own_turn_stays_when_an_idle_agent_makes_room() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    team.workers.get_mut(&older).unwrap().own_turn = Some(1);
+    only_newer_stops(&fixture, &mut team, older, newer, &BTreeSet::new());
+    team.workers.get_mut(&older).unwrap().own_turn = None;
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_reserved_for_recovery_stays_when_an_idle_agent_makes_room() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    only_newer_stops(&fixture, &mut team, older, newer, &BTreeSet::from([older]));
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_with_agents_of_its_own_stays_when_an_idle_agent_makes_room() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    team.workers.get_mut(&newer).unwrap().parent = Some(older);
+    only_newer_stops(&fixture, &mut team, older, newer, &BTreeSet::new());
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_kept_lead_with_a_working_teammate_stays_when_an_idle_agent_makes_room() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    team.workers.get_mut(&older).unwrap().kept_session = true;
+    let teammate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![teammate, older],
+        )
+        .unwrap();
+    only_newer_stops(&fixture, &mut team, older, newer, &BTreeSet::new());
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_with_a_queued_pinned_task_stays_when_an_idle_agent_makes_room() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Go on.','queued',?2)",
+            params![PROJECT, now_ms()],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+            params![task, PROJECT, older],
+        )
+        .unwrap();
+    only_newer_stops(&fixture, &mut team, older, newer, &BTreeSet::new());
+    team.shutdown().unwrap();
+}
+
+/// A lead whose own child task is queued stays at a full limit (DEC-119 addendum): stopping
+/// it for that child would leave the child's result with nobody to deliver it to. The other
+/// idle agent makes room and the child runs under its lead.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_with_a_queued_child_task_stays_when_an_idle_agent_makes_room() {
+    let fixture = Fixture::new(2);
+    committed_project(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = done_and_idle(&fixture, &mut team, "Write a.md");
+    let other = done_and_idle(&fixture, &mut team, "Write b.md");
+    lead_spawns(&fixture, lead, "Write the child page.");
+    fixture.until(&mut team, "the child task is done", |f| {
+        task_of(f, "Write the child page.").0 == "done"
+    });
+    let child = task_and_agent(&fixture, "Write the child page.").1.unwrap();
+    assert_eq!(parent_of(&fixture, child), Some(lead));
+    assert_eq!(fixture.agent_status(lead).0, AgentStatus::Idle);
+    assert_eq!(fixture.agent_status(other).0, AgentStatus::Stopped);
+    team.shutdown().unwrap();
+}
+
+/// Records a task not yet started that names an agent as its lead. Takes the fixture, the
+/// task's project, its status and the lead.
+#[cfg(target_os = "macos")]
+fn waiting_child(fixture: &Fixture, project: &str, status: &str, lead: i64) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms,parent) VALUES (?1,'master','codex',0,'Write the child page.',?2,?3,?4)",
+            params![project, status, now_ms(), lead],
+        )
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_with_a_child_task_in_needs_pool_stays_when_an_idle_agent_makes_room() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    waiting_child(&fixture, PROJECT, "needs_pool", older);
+    only_newer_stops(&fixture, &mut team, older, newer, &BTreeSet::new());
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_child_task_of_another_project_does_not_hold_its_lead_when_room_is_made() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    waiting_child(&fixture, "other-project", "queued", older);
+    team.stop_idle_for(
+        &fixture.setup.project_id,
+        "codex",
+        |_: &Worker| true,
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    assert!(team.workers[&older].stopping);
+    assert!(!team.workers[&newer].stopping);
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn one_idle_agent_stops_at_a_time_to_make_room() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    team.stop_idle_for(
+        &fixture.setup.project_id,
+        "codex",
+        |_: &Worker| true,
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    assert!(team.workers[&older].stopping);
+    assert!(!team.workers[&newer].stopping);
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn no_idle_agent_stops_while_another_is_stopping() {
+    let (fixture, mut team, older, newer) = idle_pair();
+    let stopping = team.workers.get_mut(&newer).unwrap();
+    stopping.stopping = true;
+    let _ = stopping.orders.send(Order::Stop);
+    team.stop_idle_for(
+        &fixture.setup.project_id,
+        "codex",
+        |_: &Worker| true,
+        &BTreeSet::new(),
+    )
+    .unwrap();
+    assert!(!team.workers[&older].stopping);
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_the_owner_keeps_warm_still_takes_the_next_task() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::KeepWarm {
+            project_id: fixture.setup.project_id.clone(),
+            on: true,
+            version: crate::team::settings_version(&fixture.connection, &fixture.setup.project_id)
+                .unwrap(),
+        }],
+    );
+    let first = done_and_idle(&fixture, &mut team, "Write a.md");
+    let second = done_and_idle(&fixture, &mut team, "Write b.md");
+    assert_eq!(first, second, "the warm agent takes it");
+    team.shutdown().unwrap();
+}
+
 /// An idle worker takes only its own lead's next task (N1): the lead's second task goes to
 /// its idle worker rather than to the idle lead, and a master task the busy lead cannot take
 /// goes to a fresh sub-agent of the master while that worker sits idle.
@@ -19496,6 +19995,7 @@ fn idle_worker_reused_only_within_its_lead() {
     let home = committed_project(&fixture);
     let host = fixture.host();
     let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    reuse_idle_on(&fixture);
     let (lead, _, _, worker) = lead_with_worker(&fixture, &mut team, &home);
     let idle = |f: &Fixture, agent: i64| f.agent_status(agent).0 == AgentStatus::Idle;
     fixture.until(&mut team, "the lead and its worker are idle", |f| {
@@ -19885,6 +20385,7 @@ const HELD_TASK: &str = "Plan the next release.";
 /// harness.
 #[cfg(target_os = "macos")]
 fn busy_harness(fixture: &Fixture, team: &mut TeamRuntime) -> i64 {
+    reuse_idle_on(fixture);
     let lead = idle_sub_agent(fixture, team);
     std::fs::write(worktree_of(fixture, lead).join("hold"), "").unwrap();
     owner(fixture, &[hand_off(fixture, HELD_TASK)]);
@@ -21582,6 +22083,7 @@ fn a_task_passes_an_idle_agent_past_its_session_and_goes_to_another_idle_agent_a
     let fixture = Fixture::new(2);
     let host = fixture.host();
     let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    reuse_idle_on(&fixture);
     owner(
         &fixture,
         &[

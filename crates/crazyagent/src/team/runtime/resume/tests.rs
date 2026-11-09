@@ -1078,6 +1078,13 @@ done
         fixture
             .connection
             .execute(
+                "INSERT INTO team_reuse_idle(project,mode) VALUES (?1,'on')",
+                [PROJECT],
+            )
+            .unwrap();
+        fixture
+            .connection
+            .execute(
                 "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'owner','codex',0,'then write the index','queued',2)",
                 [PROJECT],
             )

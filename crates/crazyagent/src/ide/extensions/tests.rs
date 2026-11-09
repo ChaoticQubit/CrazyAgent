@@ -578,3 +578,44 @@ fn an_approval_needs_the_ide_ask_and_a_decline_or_dismissal_drops_it() {
     assert_eq!(kept[0].id, "acme.tool1", "a project keeps its newest asks");
     assert!(server.seen().is_empty(), "an ask never reaches the network");
 }
+
+/// The ids a product file gives the Chat view: its default chat extension and every extension
+/// holding the `defaultChatParticipant` proposal, in lower case. Input: the parsed file.
+/// Output: the set of ids.
+fn chat_ids(product: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let chat = product["defaultChatAgent"]["chatExtensionId"]
+        .as_str()
+        .unwrap()
+        .to_lowercase();
+    let granted = product["extensionEnabledApiProposals"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, proposals)| {
+            proposals
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|proposal| proposal == "defaultChatParticipant")
+        })
+        .map(|(id, _)| id.to_lowercase());
+    std::iter::once(chat).chain(granted).collect()
+}
+
+/// [`AI_LOCKED`] is one literal, so the pinned build's product file has to agree with it: the
+/// only id it gives the Chat view is that one, and a product naming another id or granting
+/// the proposal to another id fails this check (IDE-7-L1).
+#[test]
+fn ai_locked_is_the_only_chat_extension_of_the_pinned_product() {
+    let path = crate::ide::server::tests::cached_build().join("product.json");
+    let product: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let locked = std::collections::BTreeSet::from([AI_LOCKED.to_owned()]);
+    assert_eq!(chat_ids(&product), locked);
+    let mut named = product.clone();
+    named["defaultChatAgent"]["chatExtensionId"] = serde_json::json!("Other.chat");
+    assert_ne!(chat_ids(&named), locked);
+    let mut granted = product.clone();
+    granted["extensionEnabledApiProposals"]["Other.chat"] =
+        serde_json::json!(["defaultChatParticipant"]);
+    assert_ne!(chat_ids(&granted), locked);
+}

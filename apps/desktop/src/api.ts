@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterLands, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -1339,6 +1339,13 @@ export function closeProjectWalls(id: string): Promise<Result<void>> {
  * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
 export function setCatchUpMain(id: string, mode: CatchUpMain): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_catch_up_main", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets the project's "Reuse idle agents" setting: off starts a new agent for each new task, on
+ * the current branch; on lets an idle agent of the same lead take it, on the history it already has.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setReuseIdle(id: string, mode: ReuseIdle): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_reuse_idle", { id, mode, generation: nextGeneration() });
 }
 
 /** Sets the most files one new top-level folder, a folder the owner's branch does not have,
