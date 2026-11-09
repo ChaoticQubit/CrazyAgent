@@ -217,7 +217,7 @@ test("Settings, Pack, Projects folder and GitHub draw their Lucide icons", () =>
   assert.ok(picked.includes(`${svg("check", 15)}Use this folder</button>`), picked);
   assert.ok(picked.includes(`${svg("folder-input", 15)}Move my projects there</button>`), picked);
   const account = html(GitHubAccountView, { status: { signed_in: true, login: "mira", method: "device", waiting: false, problem: null }, busy: false, problem: "", onSignOut: forbidden });
-  assert.ok(account.includes(`<h2 class="row">${svg("git-branch", 16)}GitHub account</h2>`), account);
+  assert.ok(account.includes(`${svg("log-out", 15)}Sign out of GitHub</button>`), account);
 });
 
 test("Move my projects waits for a size and names why a folder could not be measured", () => {

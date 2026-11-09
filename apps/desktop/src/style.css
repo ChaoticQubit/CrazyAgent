@@ -315,4 +315,3 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .accounts-actions .account-line { grid-template-columns: 36px minmax(0, 1fr) 44px; }
 .accounts-actions:not(.accounts-selectable) .account-line { grid-template-columns: minmax(0, 1fr) 44px; }
 .accounts-actions .list-head { padding-right: calc(44px + var(--space-3)); }
-.toolbar.selection { padding: var(--space-2) 0; }

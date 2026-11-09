@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { listAccounts, poolSummaries, removeAccount, POOL_MEMBER_MAX, type AccountView, type PoolSummary, type Result } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
-  Button, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton, StatusBadge, WindowedList,
+  Button, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, ProviderMark, SearchField, Select, SettingSection, Skeleton, StatusBadge, WindowedList,
   navigate, type IconName,
 } from "../../ui";
 import { AccountDrawer, andList, poolEffect } from "./account-drawer";
@@ -121,8 +121,8 @@ export function poolFromSelection(selected: readonly string[]): { kind: "ready" 
   return { kind: "ready" };
 }
 
-/** The account list as a pure view: toolbar with search, filters, count and Add account,
- * then windowed rows with a checkbox and an actions menu each; selected accounts can start a
+/** The account list as a pure view: a section with search, filters and count, then windowed
+ * rows with a checkbox and an actions menu each; selected accounts can start a
  * new pool, be deleted, or have their running sign-ins cancelled.
  * Inputs: the accounts and pools reads, the add, open, new pool, retry, row action and
  * selection handlers, and the accounts selected at first. */
@@ -160,23 +160,22 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry, onNewPoo
   const selectable = Boolean(onNewPool || onDeleteSelected);
   const classes = [selectable ? "accounts-selectable" : "", onAction ? "accounts-actions" : ""].filter(Boolean).join(" ");
   return <div className={classes || undefined}>
-    <div className="toolbar">
-      <SearchField label="Search accounts" value={search} onValue={setSearch} />
-      <Select id="account-provider" label="Provider" hideLabel value={provider} onValue={setProvider}
-        options={[{ value: "", label: "All providers" }, ...providers.map(([value, label]) => ({ value, label }))]} />
-      <Select id="account-status" label="Status" hideLabel value={status} onValue={setStatus} options={STATUS_OPTIONS} />
-      <span className="count" aria-live="polite">{accountCount(shown.length, accounts.value.length)}</span>
-      <Button variant="primary" icon="plus" onClick={onAdd}>Add account</Button>
-    </div>
-    {selectable && selected.length > 0 && <div className="toolbar selection" role="group" aria-label="Selected accounts">
-      <span className="count" aria-live="polite">{selected.length} selected</span>
-      {onNewPool && <Button icon="layers" disabled={fromSelection.kind !== "ready"} onClick={() => onNewPool(selected)}>New pool from selected</Button>}
-      {onCancelSelected && running.length > 0 && <Button icon="x" onClick={() => onCancelSelected(running)}>Cancel sign-in</Button>}
-      {onDeleteSelected && <Button variant="danger-text" icon="trash" onClick={() => onDeleteSelected(chosen)}>Delete selected</Button>}
-      <Button variant="quiet" onClick={() => setPicked([])}>Clear selection</Button>
-      {fromSelection.kind === "blocked" && <span className="small secondary" role="status">{fromSelection.reason}</span>}
-    </div>}
-    <Panel padded={false}>
+    <SettingSection title="Your accounts">
+      <div className="set-bar">
+        <SearchField label="Search accounts" value={search} onValue={setSearch} />
+        <Select id="account-provider" label="Provider" hideLabel value={provider} onValue={setProvider}
+          options={[{ value: "", label: "All providers" }, ...providers.map(([value, label]) => ({ value, label }))]} />
+        <Select id="account-status" label="Status" hideLabel value={status} onValue={setStatus} options={STATUS_OPTIONS} />
+        <span className="count" aria-live="polite">{accountCount(shown.length, accounts.value.length)}</span>
+      </div>
+      {selectable && selected.length > 0 && <div className="set-bar" role="group" aria-label="Selected accounts">
+        <span className="count" aria-live="polite">{selected.length} selected</span>
+        {onNewPool && <Button icon="layers" disabled={fromSelection.kind !== "ready"} onClick={() => onNewPool(selected)}>New pool from selected</Button>}
+        {onCancelSelected && running.length > 0 && <Button icon="x" onClick={() => onCancelSelected(running)}>Cancel sign-in</Button>}
+        {onDeleteSelected && <Button variant="danger-text" icon="trash" onClick={() => onDeleteSelected(chosen)}>Delete selected</Button>}
+        <Button variant="quiet" onClick={() => setPicked([])}>Clear selection</Button>
+        {fromSelection.kind === "blocked" && <span className="small secondary" role="status">{fromSelection.reason}</span>}
+      </div>}
       <div className="list-head" aria-hidden="true"><span>Name</span><span>Provider</span><span>Sign-in method</span><span>Status</span><span>Pools</span></div>
       {shown.length === 0 ? <p className="item-row">No accounts match.
         <Button variant="quiet" onClick={() => { setSearch(""); setProvider(""); setStatus(""); }}>Clear filters</Button></p>
@@ -200,7 +199,7 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry, onNewPoo
             {menu}
           </div>;
         }} />}
-    </Panel>
+    </SettingSection>
   </div>;
 }
 
@@ -277,7 +276,12 @@ export function Accounts({ adding, signingIn }: { adding: boolean; signingIn?: s
   };
 
   const dialog = deleting && deleting.length > 0 ? deleteDialog(deleting, known) : undefined;
-  return <>
+  const listed = accounts.kind === "ok" && accounts.value.length > 0;
+  return <div className="stack">
+    <div className="settings-top">
+      <div><h2>Accounts</h2><p>ChatGPT, Claude, API key and local model accounts your agents can use.</p></div>
+      {listed && <Button variant="primary" icon="plus" onClick={() => setAdd(true)}>Add account</Button>}
+    </div>
     {problem && <Notice tone="danger" alert><span className="grow">{problem}</span></Notice>}
     <AccountsView accounts={accounts} pools={pools} onAdd={() => setAdd(true)} onOpen={(account) => setOpened({ account, signIn: false })} onRetry={reload}
       onNewPool={(ids) => { startPoolWith(ids); navigate({ name: "settings", tab: "pools", action: "new" }); }}
@@ -292,5 +296,5 @@ export function Accounts({ adding, signingIn }: { adding: boolean; signingIn?: s
       title={dialog?.title ?? "Delete accounts?"} confirmLabel={dialog?.confirmLabel ?? "Delete"}>
       {dialog && <span className="stack-small">{dialog.lines.map((line) => <span key={line}>{line}</span>)}</span>}
     </ConfirmDialog>
-  </>;
+  </div>;
 }
