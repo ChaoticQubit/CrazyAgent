@@ -1,0 +1,99 @@
+import "./load-source.mjs";
+import assert from "node:assert/strict";
+import test from "node:test";
+import { bundle, withPage } from "./browser.mjs";
+
+const fixture = await bundle(new URL("./fixtures/settings-frame.mjs", import.meta.url).pathname);
+const settings = await import("../src/screens/settings/index.tsx");
+const router = await import("../src/ui/router.ts");
+const CONTRAST_MIN = 4.5;
+
+/** Runs a check on a mounted frame. Inputs: the tab, the window width, the check and the theme.
+ * Output: the check's value. */
+function onFrame(tab, width, check, theme = "light") {
+  return withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width, height: 800, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.mount(${JSON.stringify(tab)}, ${JSON.stringify(theme)})`);
+    return check(page);
+  });
+}
+
+test("a grouped list replaces the tab row: Access, Agents and App in the approved order", async () => {
+  const shown = await onFrame("pools", 1180, ({ evaluate }) => evaluate("Fixture.structure()"));
+  assert.deepEqual(shown.groups, [
+    { name: "Access", links: ["Accounts", "Pools", "GitHub", "Profile"] },
+    { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Pack", "Memory"] },
+    { name: "App", links: ["Projects folder", "Sandbox", "Team alerts", "Updates", "Usage"] },
+  ]);
+  assert.deepEqual(shown.current, ["Pools"]);
+  assert.equal(shown.tabs, 0, "no tab roles are left");
+  assert.equal(shown.heading, "Settings");
+});
+
+test("the list refuses a section left out, repeated or unknown, and names every section today", () => {
+  const { SETTINGS_TABS } = router;
+  const every = SETTINGS_TABS.slice(0, -1);
+  const list = (ids) => [{ title: "One", items: ids.map((id) => ({ id, label: id })) }];
+  const refused = /must name every section once/;
+  assert.doesNotThrow(() => settings.assertEverySection(settings.SETTINGS_GROUPS, SETTINGS_TABS));
+  assert.throws(() => settings.assertEverySection(list(every), SETTINGS_TABS), refused);
+  assert.throws(() => settings.assertEverySection(list([...every, every[0]]), SETTINGS_TABS), refused);
+  assert.throws(() => settings.assertEverySection(list([...every, "nope"]), SETTINGS_TABS), refused);
+});
+
+test("the list stands left of the panel at the default size and stays in view while the panel scrolls", async () => {
+  const shown = await onFrame("memory", 1180, async ({ evaluate }) => {
+    const before = await evaluate("Fixture.layout()");
+    await evaluate("document.querySelector('.main').scrollTop = 900");
+    await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
+    return { before, after: await evaluate("Fixture.layout()") };
+  });
+  assert.ok(shown.before.navRight <= shown.before.panelLeft, JSON.stringify(shown));
+  assert.ok(shown.after.navTop >= 0 && shown.after.navTop <= 40, JSON.stringify(shown));
+  assert.ok(shown.after.panelTop < 0, `the panel did scroll: ${JSON.stringify(shown)}`);
+});
+
+test("at the 760 minimum the list stands above the panel and nothing scrolls sideways", async () => {
+  const shown = await onFrame("memory", 760, ({ evaluate }) => evaluate("Fixture.layout()"));
+  assert.ok(shown.panelTop > shown.navTop, JSON.stringify(shown));
+  assert.equal(shown.sideways, false, JSON.stringify(shown));
+});
+
+test("real Tab keys walk every Settings link in list order with a visible ring, then enter the panel", async () => {
+  const walked = await onFrame("accounts", 1180, async ({ evaluate, send }) => {
+    const seen = [];
+    for (let at = 0; at < 16; at += 1) {
+      for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+      seen.push(await evaluate("Fixture.focused()"));
+    }
+    return seen;
+  });
+  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "GitHub", "Profile", "Harnesses", "Plugins and skills", "Process", "Pack", "Memory",
+    "Projects folder", "Sandbox", "Team alerts", "Updates", "Usage", "In the panel"]);
+  assert.deepEqual([...new Set(walked.slice(1, 15).map((item) => item.outline))], ["solid"]);
+});
+
+test("a real Enter on a focused link opens that section's address", async () => {
+  const hash = await onFrame("accounts", 1180, async ({ evaluate, send }) => {
+    await evaluate(`document.querySelector('.settings-nav a[href="#/settings/sandbox"]').focus()`);
+    await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+    await evaluate("new Promise((done) => setTimeout(done, 50))");
+    return evaluate("location.hash");
+  });
+  assert.equal(hash, "#/settings/sandbox");
+});
+
+for (const theme of ["light", "dark"]) {
+  test(`the list's titles and links read at 4.5 to 1 in ${theme}`, async () => {
+    const seen = await onFrame("pools", 1180, async ({ evaluate }) => {
+      const ratios = {};
+      for (const selector of [".settings-nav-title", ".settings-nav-item:not([aria-current])", ".settings-nav-item[aria-current]"]) {
+        ratios[selector] = await evaluate(`Fixture.contrast(${JSON.stringify(selector)})`);
+      }
+      return ratios;
+    }, theme);
+    for (const [selector, ratio] of Object.entries(seen)) assert.ok(ratio >= CONTRAST_MIN, `${selector}: ${ratio}`);
+  });
+}

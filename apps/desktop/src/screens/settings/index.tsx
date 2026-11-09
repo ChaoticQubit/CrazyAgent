@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { PageHeader, Tabs, formatRoute, type IconName, type SettingsTab } from "../../ui";
 import type { SettingsAction } from "../../ui/router";
 import { Accounts } from "./accounts";
@@ -14,6 +15,7 @@ import { SandboxSettingsTab } from "./sandbox";
 import { TeamAlertsSettings } from "./team-alerts";
 import { UpdatesSettings } from "./updates";
 import { UsageSettings } from "./usage";
+import "./settings.css";
 
 const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "accounts", label: "Accounts", icon: "key-round" },
@@ -32,28 +34,34 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "updates", label: "Updates", icon: "refresh-cw" },
 ];
 
-/** Settings: the header, the tabs and the selected tab's panel.
- * Inputs: the tab, optional action ("add" opens Add account, "new" opens a new pool,
- * "sign_in" opens the sign-in of the given account) and the skill whose detail is open. */
-export function Settings({ tab, action, account, skill }: { tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string }) {
+/** The Settings page's frame: the title, the section list and the open section. Inputs: the
+ * open section and its panel. Output: the frame. */
+export function SettingsFrame({ tab, children }: { tab: SettingsTab; children: ReactNode }) {
   return <>
     <PageHeader title="Settings" />
     <Tabs label="Settings sections" current={tab} tabs={TABS.map((item) => ({ ...item, href: formatRoute({ name: "settings", tab: item.id }) }))} />
-    <div role="tabpanel" aria-labelledby={`tab-${tab}`}>
-      {tab === "accounts" ? <Accounts adding={action === "add"} signingIn={action === "sign_in" ? account : undefined} />
-        : tab === "pools" ? <Pools creating={action === "new"} />
-        : tab === "harnesses" ? <Harnesses />
-        : tab === "plugins" ? <PluginsAndSkills skill={skill} />
-        : tab === "process" ? <ProcessSettings />
-        : tab === "pack" ? <PackSettings />
-        : tab === "home" ? <ProjectsHomeSettings />
-        : tab === "github" ? <GitHubSettings />
-        : tab === "sandbox" ? <SandboxSettingsTab />
-        : tab === "memory" ? <MemorySettings />
-        : tab === "usage" ? <UsageSettings />
-        : tab === "alerts" ? <TeamAlertsSettings />
-        : tab === "updates" ? <UpdatesSettings />
-        : <ProfileSettings />}
-    </div>
+    <div role="tabpanel" aria-labelledby={`tab-${tab}`}>{children}</div>
   </>;
+}
+
+/** Settings: the frame around the selected section's panel.
+ * Inputs: the tab, optional action ("add" opens Add account, "new" opens a new pool,
+ * "sign_in" opens the sign-in of the given account) and the skill whose detail is open. */
+export function Settings({ tab, action, account, skill }: { tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string }) {
+  return <SettingsFrame tab={tab}>
+    {tab === "accounts" ? <Accounts adding={action === "add"} signingIn={action === "sign_in" ? account : undefined} />
+      : tab === "pools" ? <Pools creating={action === "new"} />
+      : tab === "harnesses" ? <Harnesses />
+      : tab === "plugins" ? <PluginsAndSkills skill={skill} />
+      : tab === "process" ? <ProcessSettings />
+      : tab === "pack" ? <PackSettings />
+      : tab === "home" ? <ProjectsHomeSettings />
+      : tab === "github" ? <GitHubSettings />
+      : tab === "sandbox" ? <SandboxSettingsTab />
+      : tab === "memory" ? <MemorySettings />
+      : tab === "usage" ? <UsageSettings />
+      : tab === "alerts" ? <TeamAlertsSettings />
+      : tab === "updates" ? <UpdatesSettings />
+      : <ProfileSettings />}
+  </SettingsFrame>;
 }
