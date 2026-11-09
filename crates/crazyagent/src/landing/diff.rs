@@ -2,7 +2,7 @@ use super::git::{LISTING_BYTES_MAX, OUTPUT_BYTES_MAX, Repo, failure, is_object_i
 use super::{ChangeDiff, ChangedFile, FileKind, FileMark, FileStatus};
 use crate::engine::EngineError;
 use crate::ide::agent_config;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -126,6 +126,88 @@ pub(super) fn changed_paths(repo: &Repo, from: &str, to: &str) -> Result<Vec<Str
         .filter(|path| !path.is_empty())
         .map(|path| text(path).map(str::to_owned))
         .collect()
+}
+
+/// A path as a change leaves it: its bytes, its new mode and its new object id, which is
+/// all zeros for a deletion.
+pub(super) type PathState = (Vec<u8>, String, String);
+
+/// Reads git's `--raw -z` records into the states they leave. Input: the output, whose
+/// records may have blank separators between commits. Output: the states.
+fn path_states(printed: &[u8]) -> Result<BTreeSet<PathState>, EngineError> {
+    let mut states = BTreeSet::new();
+    let mut fields = printed.split(|byte| *byte == 0);
+    while let Some(field) = fields.next() {
+        let record = field.trim_ascii_start();
+        if !record.starts_with(b":") {
+            continue;
+        }
+        let parts: Vec<&str> = text(record)?.split(' ').collect();
+        let [_, mode, _, object, _] = parts.as_slice() else {
+            return Err(failure("changes_git_failed"));
+        };
+        let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
+        assert!(is_object_id(object));
+        states.insert((path.to_vec(), (*mode).to_owned(), (*object).to_owned()));
+    }
+    Ok(states)
+}
+
+/// The states a change leaves on the paths it changes, each side of a rename apart.
+/// Inputs: the repository and the two tree-ish ids. Output: the states.
+pub(super) fn changed_states(
+    repo: &Repo,
+    from: &str,
+    to: &str,
+) -> Result<BTreeSet<PathState>, EngineError> {
+    path_states(&repo.run(&[
+        "diff-tree",
+        "-r",
+        "-z",
+        "--raw",
+        "--no-renames",
+        "--no-abbrev",
+        from,
+        to,
+    ])?)
+}
+
+/// Every state the newest `commits_max` commits after `from` up to `tip` left, each side
+/// of a rename apart, merges adding none of their own. Inputs: the repository, both ends
+/// and the bound. Output: the states, None when they run past the output bound.
+pub(super) fn states_since(
+    repo: &Repo,
+    from: &str,
+    tip: &str,
+    commits_max: usize,
+) -> Result<Option<BTreeSet<PathState>>, EngineError> {
+    assert!(commits_max > 0);
+    let range = format!("{from}..{tip}");
+    let count = format!("--max-count={commits_max}");
+    let output = repo.exec(
+        &[
+            "log",
+            "--format=",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--no-abbrev",
+            "--diff-merges=off",
+            "--no-show-signature",
+            &count,
+            &range,
+        ],
+        None,
+        &[],
+        OUTPUT_BYTES_MAX,
+    )?;
+    if output.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if output.overflow {
+        return Ok(None);
+    }
+    path_states(&output.stdout).map(Some)
 }
 
 /// Counts the lines a change adds and removes, with renames found.

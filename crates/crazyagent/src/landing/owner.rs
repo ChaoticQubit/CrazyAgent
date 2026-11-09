@@ -1852,9 +1852,15 @@ pub(super) fn landing_tip(
     }
 }
 
+/// The most paths a change set may change and still be judged taken by its branch.
+const TAKEN_PATHS_MAX: usize = 4096;
+/// The most commits of a branch read to judge a change set taken by it.
+const TAKEN_COMMITS_MAX: usize = 2048;
+
 /// What judging one open change set against the owner's branch tip found.
 enum Judged {
     Landed,
+    Taken,
     Removed,
     Open(Shown),
 }
@@ -1915,6 +1921,9 @@ fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Ju
     }
     let (tree, conflicts) = merge(owner, &from, tip, &record.head)?;
     if !conflicts.is_empty() {
+        if !record.restored && taken_by(owner, &from, tip, &record.head)? {
+            return Ok(Judged::Taken);
+        }
         return whole(&from);
     }
     if tree == owner.tree_of(tip)? {
@@ -2000,6 +2009,37 @@ fn close_removed(db: &Connection, record: &mut Record) -> Result<(), EngineError
     Ok(())
 }
 
+/// Says whether the tip's newest `TAKEN_COMMITS_MAX` commits since `from` took every path
+/// the change set changes at the set's own version, so its merge conflicts only because
+/// the tip moved on from work it already took, as after a port (HB-S4). A change of more
+/// than `TAKEN_PATHS_MAX` paths, or a history too long to read, stays open for the owner.
+/// Inputs: the repository, where the work is measured from, the tip and the set's head.
+/// Output: the answer.
+fn taken_by(owner: &Repo, from: &str, tip: &str, head: &str) -> Result<bool, EngineError> {
+    assert!(super::git::is_object_id(from));
+    assert!(super::git::is_object_id(tip));
+    assert_ne!(from, tip);
+    let wanted = diff::changed_states(owner, from, head)?;
+    if wanted.is_empty() || wanted.len() > TAKEN_PATHS_MAX {
+        return Ok(false);
+    }
+    let history = diff::states_since(owner, from, tip, TAKEN_COMMITS_MAX)?;
+    Ok(history.is_some_and(|history| wanted.is_subset(&history)))
+}
+
+/// Closes a change set the branch it lands on already took (HB-S4) as a discard the owner
+/// can undo within the restore window, since matching files is a judgement a Restore must
+/// be able to overrule, and says so in the project's activity. The caller holds [`hold`]
+/// on its repository. Inputs: the store and the open change set. Output: Ok once closed.
+fn close_taken(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
+    assert!(record.is_open() && record.intent.is_none());
+    assert!(!record.restored);
+    flow::discard_closing(db, record, flow::now_ms()?)?;
+    assert_eq!(record.state, ChangeState::Discarded);
+    super::note_taken(db, record);
+    Ok(())
+}
+
 /// Notices what the owner did outside the app to one open change set. The caller holds
 /// [`hold`] on its repository. A gone agent copy closes it as removed outside; against the
 /// tip it lands on (DEC-107), its lead's branch for a lead's worker while Lands is Lead,
@@ -2041,6 +2081,10 @@ fn observe_one(
     match judged(db, owner, &record, tip, present)? {
         Judged::Removed => {
             close_removed(db, &mut record)?;
+            Ok(None)
+        }
+        Judged::Taken => {
+            close_taken(db, &mut record)?;
             Ok(None)
         }
         Judged::Landed => {

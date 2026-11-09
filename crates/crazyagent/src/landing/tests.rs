@@ -6923,8 +6923,10 @@ fn a_change_set_the_owner_brought_back_stays_open_though_main_took_it() {
     let (case, id, _) = taken_case();
     take_and_move_on(&case);
     case.observe();
-    assert_eq!(case.view(&id).state, ChangeState::Discarded);
-    restore(&case.db, &id, NOW_MS).unwrap();
+    let closed = case.view(&id);
+    assert_eq!(closed.state, ChangeState::Discarded);
+    let inside_window = closed.restorable_until_ms.unwrap() - 1;
+    restore(&case.db, &id, inside_window).unwrap();
     case.observe();
     let view = case.view(&id);
     assert_eq!(
@@ -6943,7 +6945,11 @@ fn a_change_set_main_took_only_in_part_stays_open_with_its_whole_change() {
     take_and_move_on(&case);
     case.observe();
     let view = case.view(&id);
-    assert_eq!((view.state, view.files), (ChangeState::Pending, 2), "{view:?}");
+    assert_eq!(
+        (view.state, view.files),
+        (ChangeState::Pending, 2),
+        "{view:?}"
+    );
 }
 
 #[test]
@@ -6971,14 +6977,7 @@ fn a_deletion_main_took_and_moved_on_from_closes_too() {
 #[test]
 fn a_discard_by_the_master_is_recorded_as_the_master_s() {
     let (case, id, head) = taken_case();
-    super::discard_as(
-        &case.db,
-        &id,
-        &head,
-        NOW_MS,
-        crate::activity::MASTER_ACTOR,
-    )
-    .unwrap();
+    super::discard_as(&case.db, &id, &head, NOW_MS, crate::activity::MASTER_ACTOR).unwrap();
     assert_eq!(case.view(&id).state, ChangeState::Discarded);
     let actors: Vec<String> = set_rows(&case, &id)
         .into_iter()
