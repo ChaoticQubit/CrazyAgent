@@ -5220,7 +5220,7 @@ impl TeamRuntime {
     /// Makes room at a full limit for a task that may not reuse an idle agent: stops one idle
     /// sub-agent the limits count, the task's harness first, none while another is stopping.
     /// A live agent, one with agents of its own, one reserved for recovery, one a queued task
-    /// is pinned to and a kept lead with work stay. Takes the project, the harness, which
+    /// waits for and a kept lead with work stay. Takes the project, the harness, which
     /// agents the full limits count and the reserved agents. Returns any SQLite failure.
     fn stop_idle_for(
         &mut self,
@@ -5249,7 +5249,7 @@ impl TeamRuntime {
             .collect();
         idle.sort_by_key(|id| self.workers[id].harness != harness);
         for id in idle {
-            if (self.workers[&id].kept_session && self.lead_waits(id)?) || self.pinned_work(id)? {
+            if (self.workers[&id].kept_session && self.lead_waits(id)?) || self.queued_work(id)? {
                 continue;
             }
             let worker = self.workers.get_mut(&id).expect("worker exists");
@@ -5260,13 +5260,15 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Whether a queued task waits for this agent by its pin. Takes the agent. Returns the
-    /// answer, or any SQLite failure.
-    fn pinned_work(&self, id: i64) -> Result<bool, EngineError> {
+    /// Whether a queued task waits for this agent: one pinned to it, or one naming it as its
+    /// lead, whose result only a running lead receives. Takes the agent. Returns the answer,
+    /// or any SQLite failure.
+    fn queued_work(&self, id: i64) -> Result<bool, EngineError> {
         self.connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
-                               WHERE p.agent=?1 AND t.status='queued')",
+                "SELECT EXISTS(SELECT 1 FROM team_tasks t
+                               LEFT JOIN team_task_pins p ON p.task=t.id
+                               WHERE t.status='queued' AND (t.parent=?1 OR p.agent=?1))",
                 [id],
                 |row| row.get(0),
             )
