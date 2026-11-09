@@ -174,10 +174,11 @@ export function questionsTitle(read: InboxState): string {
  * waiting on the owner in their own terminal, each with Open terminal, which opens the agent
  * in the Agents tab's one terminal panel. The drawer's title names it. Opened from a toast,
  * the keyboard starts on the first question (most urgent first) or the first agent waiting in
- * its terminal, once that row is read. That happens once: a drawer that opens with the row
- * already read starts on it through data-autofocus, and later reads leave the keyboard where
- * the owner put it. Inputs: the project id, the inbox read the toolbar counts from with its
- * reload, the open action and the row kind to focus. Output: the section. */
+ * its terminal, once that row is read. That happens once and never takes the keyboard off a
+ * field the owner is using in the drawer: a drawer that opens with the row already read starts
+ * on it through data-autofocus, and later reads leave the keyboard where the owner put it.
+ * Inputs: the project id, the inbox read the toolbar counts from with its reload, the open
+ * action and the row kind to focus. Output: the section. */
 export function QuestionsPanel({ projectId, read, reload, onOpen, focus = null }: {
   projectId: string;
   read: InboxState;
@@ -190,8 +191,7 @@ export function QuestionsPanel({ projectId, read, reload, onOpen, focus = null }
   useEffect(() => {
     if (focus === null || focused.current || target.current === null) return;
     focused.current = true;
-    const drawer = target.current.closest("dialog");
-    if (drawer === null || drawer.open) target.current.focus();
+    if (!document.activeElement?.matches("input, textarea, select")) target.current.focus();
   });
   const shown = read.shown;
   if (shown === undefined) return <section className="tg-events" aria-busy="true" aria-label="Questions for you"><Skeleton shape="card" /></section>;
