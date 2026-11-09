@@ -34,13 +34,25 @@ pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_tokens (
     agent TEXT NOT NULL,
     harness TEXT NOT NULL,
     session TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
     input INTEGER NOT NULL,
     output INTEGER NOT NULL,
     cache_read INTEGER NOT NULL,
     cache_write INTEGER NOT NULL,
-    PRIMARY KEY (hour_ms, kind, project, pool, account, agent, harness, session)
+    cost_nanos INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour_ms, kind, project, pool, account, agent, harness, session, model)
 );
 CREATE INDEX IF NOT EXISTS usage_tokens_hour ON usage_tokens(hour_ms);
+CREATE TABLE IF NOT EXISTS usage_messages (
+    id TEXT PRIMARY KEY,
+    input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    cache_read INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    web INTEGER NOT NULL DEFAULT 0,
+    last_ms INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS usage_messages_last ON usage_messages(last_ms);
 CREATE TABLE IF NOT EXISTS usage_seen (
     project TEXT NOT NULL,
     agent TEXT NOT NULL,
@@ -195,7 +207,9 @@ struct Progress {
     identity: (u64, u64),
     offset: u64,
     skipping: bool,
+    #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
     counted: Tokens,
     total: Tokens,
 }
@@ -880,7 +894,17 @@ fn scan(
             params![key, serde_json::to_string(&progress).map_err(storage)?],
         )
         .map_err(storage)?;
-        add_tokens(&tx, now_ms, attribution, &session, growth)?;
+        add_tokens(
+            &tx,
+            now_ms,
+            attribution,
+            &session,
+            "",
+            Added {
+                tokens: growth,
+                cost_nanos: 0,
+            },
+        )?;
         added = added.plus(growth);
         limits = limits.or(observed);
     }
@@ -909,27 +933,79 @@ fn text(value: Option<&str>) -> &str {
     value.unwrap_or("")
 }
 
-/// Step 9 of the engine database, not written yet. Input: the open upgrade transaction.
-/// Output: done.
-pub(crate) fn migrate_counts(_tx: &Connection) -> Result<(), EngineError> {
-    Ok(())
+/// Step 9 of the engine database: usage rows gain the model and their estimated dollars, the
+/// spellings of one harness become one row, and the message a transcript was counting moves
+/// to `usage_messages`. A store already in the new shape only gets what it lacks.
+/// Input: the open upgrade transaction. Output: done, or `usage_unavailable`.
+pub(crate) fn migrate_counts(tx: &Connection) -> Result<(), EngineError> {
+    let shaped: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_tokens') WHERE name='model')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if !shaped {
+        tx.execute_batch(&format!(
+            "ALTER TABLE usage_tokens RENAME TO usage_tokens_old;
+             DROP INDEX IF EXISTS usage_tokens_hour;
+             {SCHEMA}
+             INSERT INTO usage_tokens (hour_ms,kind,project,pool,account,agent,harness,session,
+                input,output,cache_read,cache_write)
+             SELECT hour_ms,kind,project,pool,account,agent,
+                CASE harness WHEN 'claude' THEN 'claude-code' ELSE harness END,session,
+                MIN(SUM(input),{max}),MIN(SUM(output),{max}),
+                MIN(SUM(cache_read),{max}),MIN(SUM(cache_write),{max})
+             FROM usage_tokens_old GROUP BY 1,2,3,4,5,6,7,8;
+             DROP TABLE usage_tokens_old;",
+            max = ROW_TOKENS_MAX
+        ))
+        .map_err(storage)?;
+    }
+    tx.execute_batch(SCHEMA).map_err(storage)?;
+    tx.execute_batch(
+        "INSERT INTO usage_messages (id,input,output,cache_read,cache_write,last_ms)
+         SELECT 'claude:'||json_extract(progress,'$.message'),
+            json_extract(progress,'$.counted.input'),json_extract(progress,'$.counted.output'),
+            json_extract(progress,'$.counted.cache_read'),json_extract(progress,'$.counted.cache_write'),
+            CAST(strftime('%s','now') AS INTEGER)*1000
+         FROM usage_files WHERE json_type(progress,'$.message')='text'
+         ON CONFLICT(id) DO UPDATE SET input=MAX(input,excluded.input),
+            output=MAX(output,excluded.output),cache_read=MAX(cache_read,excluded.cache_read),
+            cache_write=MAX(cache_write,excluded.cache_write);
+         UPDATE usage_files SET progress=json_remove(progress,'$.message','$.counted')
+         WHERE json_type(progress,'$.counted') IS NOT NULL;",
+    )
+    .map_err(storage)
+}
+
+/// One model's growth in one write: its tokens and estimated dollars.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Added {
+    pub(super) tokens: Tokens,
+    pub(super) cost_nanos: i64,
 }
 
 /// Adds a session's new tokens to the usage hour that holds `now_ms`, after recording
 /// `now_ms` as when that run was last counted. Inputs: the store, the time, the
-/// attribution, the session and the tokens. Output: done, or `usage_unavailable`.
+/// attribution, the session, the model and what it added. Output: done, or
+/// `usage_unavailable`.
 fn add_tokens(
     tx: &Connection,
     now_ms: i64,
     attribution: &Attribution,
     session: &str,
-    growth: Tokens,
+    model: &str,
+    added: Added,
 ) -> Result<(), EngineError> {
-    if growth.is_empty() {
+    if added.tokens.is_empty() {
         return Ok(());
     }
     let hour_ms = now_ms - now_ms.rem_euclid(HOUR_MS);
     let project = text(attribution.project.as_ref().map(ProjectId::as_str));
+    let pool = text(attribution.pool.as_ref().map(CredentialRef::as_str));
+    let account = text(attribution.account.as_ref().map(CredentialRef::as_str));
+    let harness = crate::harnesses::canonical(&attribution.harness);
     tx.execute(
         "INSERT INTO usage_seen (project,agent,session,last_ms) VALUES (?1,?2,?3,?4)
          ON CONFLICT(project,agent,session) DO UPDATE SET last_ms=MAX(last_ms,excluded.last_ms)",
@@ -937,26 +1013,29 @@ fn add_tokens(
     )
     .map_err(storage)?;
     tx.execute(
-        "INSERT INTO usage_tokens (hour_ms,kind,project,pool,account,agent,harness,session,\
-            input,output,cache_read,cache_write)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
-         ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session) DO UPDATE SET
-            input=MIN(input+excluded.input,?13),output=MIN(output+excluded.output,?13),
-            cache_read=MIN(cache_read+excluded.cache_read,?13),
-            cache_write=MIN(cache_write+excluded.cache_write,?13)",
+        "INSERT INTO usage_tokens (hour_ms,kind,project,pool,account,agent,harness,session,model,\
+            input,output,cache_read,cache_write,cost_nanos)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+         ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session,model) DO UPDATE SET
+            input=MIN(input+excluded.input,?15),output=MIN(output+excluded.output,?15),
+            cache_read=MIN(cache_read+excluded.cache_read,?15),
+            cache_write=MIN(cache_write+excluded.cache_write,?15),
+            cost_nanos=MIN(cost_nanos+excluded.cost_nanos,?15)",
         params![
             hour_ms,
             attribution.kind.name(),
             project,
-            text(attribution.pool.as_ref().map(CredentialRef::as_str)),
-            text(attribution.account.as_ref().map(CredentialRef::as_str)),
+            pool,
+            account,
             attribution.agent,
-            crate::harnesses::canonical(&attribution.harness),
+            harness,
             session,
-            clamp(growth.input),
-            clamp(growth.output),
-            clamp(growth.cache_read),
-            clamp(growth.cache_write),
+            model,
+            clamp(added.tokens.input),
+            clamp(added.tokens.output),
+            clamp(added.tokens.cache_read),
+            clamp(added.tokens.cache_write),
+            added.cost_nanos.max(0),
             ROW_TOKENS_MAX,
         ],
     )
@@ -979,7 +1058,17 @@ pub fn count_reported(
     if session.is_empty() || session.len() > NAME_BYTES_MAX {
         return Err(failure("usage_attribution_invalid"));
     }
-    add_tokens(db, now_ms, attribution, session, tokens)
+    add_tokens(
+        db,
+        now_ms,
+        attribution,
+        session,
+        "",
+        Added {
+            tokens,
+            cost_nanos: 0,
+        },
+    )
 }
 
 /// Counts one finished turn whose home is about to be removed, such as an engine-driven

@@ -44,7 +44,13 @@ fn rows(db: &Connection) -> Vec<(String, String, i64, i64, i64)> {
     )
     .unwrap()
     .query_map([], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        ))
     })
     .unwrap()
     .collect::<Result<_, _>>()
@@ -87,7 +93,10 @@ fn step_moves_the_message_in_flight_so_its_next_line_adds_only_growth() {
     let progress: String = db
         .query_row("SELECT progress FROM usage_files", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(serde_json::from_str::<Progress>(&progress).unwrap().offset, 9);
+    assert_eq!(
+        serde_json::from_str::<Progress>(&progress).unwrap().offset,
+        9
+    );
 }
 
 #[test]

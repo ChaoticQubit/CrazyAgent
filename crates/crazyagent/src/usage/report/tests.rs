@@ -423,7 +423,7 @@ fn token_sums_past_the_integer_range_still_report_saturated() {
     ] {
         db.execute(
             &format!(
-                "INSERT INTO usage_tokens VALUES
+                "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write) VALUES
                  (?1,'agent','alpha','pool-a','claude-a','team-1','claude-code','s1',{input},1,0,0)"
             ),
             params![hour_ms],
@@ -798,7 +798,7 @@ pub(crate) fn fill_past_one_frame(db: &Connection, now_ms: i64) {
         )
         .unwrap();
         db.execute(
-            "INSERT INTO usage_tokens VALUES
+            "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write) VALUES
              (?1,'agent',?2,?3,?4,?5,'claude-code','s',?6,?6,?6,?6)",
             params![
                 now_ms - index as i64 * DAY,
