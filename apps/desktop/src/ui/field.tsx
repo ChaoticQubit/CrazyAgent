@@ -141,8 +141,9 @@ export function addChip(values: string[], text: string, max: number, maxLength: 
 
 /** Chips for a short list (tech stack): removable chips, a text entry that adds on Enter or
  * comma, and catalog suggestions shown as quick-add chips. Inputs: id, label, values,
- * change handler, suggestions, max count and length, helper. */
-export function ChipInput({ id, label, values, onValues, suggestions = [], max = 12, maxLength = 40, helper }: {
+ * change handler, suggestions, max count and length, helper and whether a label elsewhere on
+ * the page already names it. */
+export function ChipInput({ id, label, values, onValues, suggestions = [], max = 12, maxLength = 40, helper, labelOutside = false }: {
   id: string;
   label: string;
   values: string[];
@@ -151,6 +152,7 @@ export function ChipInput({ id, label, values, onValues, suggestions = [], max =
   max?: number;
   maxLength?: number;
   helper?: ReactNode;
+  labelOutside?: boolean;
 }) {
   const [text, setText] = useState("");
   const [error, setError] = useState("");
@@ -165,7 +167,7 @@ export function ChipInput({ id, label, values, onValues, suggestions = [], max =
   const open = suggestions.filter((item) => !values.some((value) => value.toLowerCase() === item.toLowerCase()) &&
     item.toLowerCase().includes(text.trim().toLowerCase())).slice(0, 12);
   return <div className="field chip-input">
-    <label htmlFor={id}>{label}</label>
+    {!labelOutside && <label htmlFor={id}>{label}</label>}
     {values.length > 0 && <ul className="chips plain-list" aria-label={`${label} chosen`}>
       {values.map((value) => <li key={value} className="chip">{value}
         <button type="button" aria-label={`Remove ${value}`} onClick={() => onValues(values.filter((item) => item !== value))}><Icon name="x" size={12} /></button>
