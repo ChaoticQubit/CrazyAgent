@@ -307,7 +307,7 @@ pub(super) fn execute(
             tx.commit().map_err(error)?;
             #[cfg(unix)]
             if let Some((kind, name)) = left {
-                settle_removed(db, kind, name);
+                settle_removed(db, config.settings.model_access.as_ref(), kind, name);
             }
             Ok(ResultValue::Removed(Box::new(connection)))
         }
@@ -331,14 +331,20 @@ fn account_files(auth: &ModelAuthentication) -> Option<(&'static str, &str)> {
 }
 
 /// Deletes a removed account's files straight after its removal commits; what cannot go
-/// now stays noted for the next start. Inputs: the connection, the kind and the reference.
+/// now stays noted for the next start. Inputs: the connection, the catalog left after the
+/// removal, the kind and the reference.
 #[cfg(unix)]
-fn settle_removed(db: &Connection, kind: &str, name: &str) {
+fn settle_removed(
+    db: &Connection,
+    catalog: Option<&crate::config::ModelAccess>,
+    kind: &str,
+    name: &str,
+) {
     let settled = db
         .path()
         .and_then(|path| std::path::Path::new(path).parent())
         .ok_or_else(|| error("account_file_root_unknown"))
-        .and_then(|root| super::trash::settle(db, root, kind, name));
+        .and_then(|root| super::trash::settle(db, root, catalog, kind, name));
     if let Err(problem) = settled {
         eprintln!("file_trash_not_removed kind={kind} cause={}", problem.0);
     }

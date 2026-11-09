@@ -160,7 +160,7 @@ fn a_server_removed_with_no_settle_leaves_notes_the_sweep_deletes() {
     expected.sort();
     assert_eq!(notes(&connection), expected);
 
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(!secret_file(root, &first).exists());
     assert!(!secret_file(root, &second).exists());
     assert!(!checked.exists());
@@ -201,7 +201,7 @@ fn a_check_folder_moved_aside_before_a_crash_is_swept_and_other_folders_stay() {
         Err(EngineError("plugin_check_folder_invalid".into()))
     );
 
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(!moved.exists(), "a moved folder a crash left is swept");
     assert!(live.exists(), "a live server's check folder stays");
     assert!(
@@ -235,7 +235,7 @@ fn replaced_and_detached_secrets_are_swept_and_the_attached_one_stays() {
     expected.sort();
     assert_eq!(notes(&connection), expected);
 
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(!secret_file(root, &replaced).exists());
     assert!(!secret_file(root, &detached).exists());
     assert!(secret_file(root, &kept).exists());
@@ -256,7 +256,7 @@ fn a_noted_name_a_live_record_still_holds_is_forgotten_and_kept_on_disk() {
     put(&connection, MCP_CHECKS, &id).unwrap();
     put(&connection, ACCOUNT_KEY, "lab-key-live").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(secret_file(root, &live).exists());
     assert!(checked.join("project").join("written-by-check").exists());
     assert!(held.exists());
@@ -274,7 +274,7 @@ fn a_removed_account_key_is_swept_and_a_saved_account_keeps_its_key() {
     put(&connection, ACCOUNT_KEY, "lab-key-removed").unwrap();
     put(&connection, ACCOUNT_KEY, "lab-key-missing").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(!removed.exists());
     assert!(held.exists());
     assert!(notes(&connection).is_empty());
@@ -288,7 +288,7 @@ fn a_key_in_an_unsafe_folder_stays_noted_for_the_next_start() {
     let stuck = key_file(&folder, "lab-key-stuck");
     put(&connection, ACCOUNT_KEY, "lab-key-stuck").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 1);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 1);
     assert!(stuck.exists());
     assert_eq!(
         notes(&connection),
@@ -296,7 +296,7 @@ fn a_key_in_an_unsafe_folder_stays_noted_for_the_next_start() {
     );
 
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(!stuck.exists());
 }
 
@@ -310,7 +310,7 @@ fn a_note_naming_a_path_outside_its_folder_is_refused_and_kept() {
     put(&connection, MCP_CHECKS, "../outside").unwrap();
     put(&connection, ACCOUNT_KEY, ".hidden").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 2);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 2);
     assert!(outside.join("kept").exists());
 }
 
@@ -413,7 +413,7 @@ fn a_removed_native_account_loses_its_sign_in_files_and_keeps_the_rest_of_its_sl
     let slot = slot(root, "lab-profile");
     put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     for file in &slot.files {
         assert!(!file.exists(), "{}", file.display());
     }
@@ -432,7 +432,7 @@ fn a_removed_api_key_accounts_generated_home_goes_whole_and_a_sibling_stays() {
     let sibling = generated(root, "lab-other");
     put(&connection, GENERATED_HOME, "lab-key").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(!removed.exists());
     assert!(sibling.join(".backboard/keys.json").exists());
     assert!(notes(&connection).is_empty());
@@ -450,7 +450,7 @@ fn a_sign_in_file_that_is_a_link_goes_and_its_target_stays() {
     std::os::unix::fs::symlink(&outside, &slot.files[0]).unwrap();
     put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(std::fs::symlink_metadata(&slot.files[0]).is_err());
     assert_eq!(std::fs::read(&outside).unwrap(), DUMMY);
 }
@@ -469,7 +469,7 @@ fn a_keychains_folder_that_is_a_link_is_not_followed_and_stays_noted() {
     std::os::unix::fs::symlink(&outside, &keychains).unwrap();
     put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 1);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 1);
     assert!(outside.join("login.keychain-db").exists());
     assert_eq!(
         notes(&connection),
@@ -493,7 +493,7 @@ fn a_generated_home_that_is_a_link_is_not_followed_and_stays_noted() {
     .unwrap();
     put(&connection, GENERATED_HOME, "lab-key").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 1);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 1);
     assert!(outside.join(".backboard/keys.json").exists());
 }
 
@@ -509,7 +509,7 @@ fn a_generated_home_past_its_bound_loses_its_key_and_stays_noted() {
             private_file(&home.join(format!(".backboard/extra-{index}")));
         }
         put(&connection, GENERATED_HOME, name).unwrap();
-        sweep(&connection, root).unwrap();
+        sweep(&connection, root, None).unwrap();
         assert!(!home.join(".backboard/keys.json").exists(), "{name}");
         assert_eq!(home.exists(), kept, "{name}");
     }
@@ -526,7 +526,7 @@ fn an_api_key_account_added_again_before_the_sweep_keeps_its_generated_home() {
     put(&connection, GENERATED_HOME, "lab-key").unwrap();
     saved_account(&connection, "lab-again", "lab-key");
 
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(home.join(".backboard/keys.json").exists());
     assert!(notes(&connection).is_empty());
 }
@@ -540,7 +540,7 @@ fn a_slot_another_account_still_names_is_not_touched() {
     put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
     saved_account(&connection, "lab-other", "lab-profile");
 
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     for file in &slot.files {
         assert!(file.exists(), "{}", file.display());
     }
@@ -557,10 +557,10 @@ fn a_profile_in_use_stays_noted_and_loses_its_sign_in_once_free() {
     rustix::fs::flock(&lease, rustix::fs::FlockOperation::NonBlockingLockShared).unwrap();
     put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 1);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 1);
     assert!(slot.files[0].exists());
     drop(lease);
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(!slot.files[0].exists());
 }
 
@@ -578,10 +578,10 @@ fn a_profile_being_renewed_stays_noted_and_loses_its_sign_in_once_free() {
     .unwrap();
     put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
 
-    assert_eq!(sweep(&connection, root).unwrap(), 1);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 1);
     assert!(slot.files[0].exists());
     drop(renewal);
-    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
     assert!(!slot.files[0].exists());
 }
 

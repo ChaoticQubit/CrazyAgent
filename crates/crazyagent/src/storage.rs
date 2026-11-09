@@ -299,10 +299,19 @@ impl Storage {
                 };
                 let mut custody = Some(custody);
                 let mut config = config;
-                if !readonly
-                    && let Err(e) =
-                        settings::recover(&mut connection, &mut config, sources.as_ref())
-                {
+                let recovered = if readonly {
+                    Ok(())
+                } else {
+                    settings::recover(&mut connection, &mut config, sources.as_ref()).and_then(
+                        |()| {
+                            trash::sweep_at_start(
+                                &connection,
+                                config.settings.model_access.as_ref(),
+                            )
+                        },
+                    )
+                };
+                if let Err(e) = recovered {
                     drop(connection);
                     drop(custody.take());
                     drop(lock);
@@ -990,7 +999,6 @@ fn open_actor_database(
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
-        trash::sweep(&connection, &canonical_root)?;
     }
     assert!(connection.is_autocommit());
     assert_eq!(

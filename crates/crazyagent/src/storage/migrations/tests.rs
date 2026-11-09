@@ -826,7 +826,7 @@ fn an_upgrade_sweeps_plugins_left_by_projects_that_are_gone() {
         "the orphaned skill folder is queued for the sweep"
     );
 
-    crate::storage::trash::sweep(&db, root.path()).unwrap();
+    crate::storage::trash::sweep(&db, root.path(), None).unwrap();
     assert!(
         !ghost_folder.exists(),
         "the orphaned skill folder is reclaimed"
