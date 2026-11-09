@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useLayoutEffect, type ReactNode } from "react";
 import { PageHeader, formatRoute, type SettingsTab } from "../../ui";
 import { SETTINGS_TABS, type SettingsAction } from "../../ui/router";
 import { Accounts } from "./accounts";
@@ -48,9 +48,13 @@ export function assertEverySection(groups: SettingsGroup[], tabs: readonly Setti
 assertEverySection(SETTINGS_GROUPS, SETTINGS_TABS);
 
 /** The Settings page's frame as the approved design draws it: the title, then the sections
- * listed in groups beside the open section. A narrow window puts the list above it. Inputs:
- * the open section and its panel. Output: the frame. */
+ * listed in groups beside the open section. A narrow window puts the list above it, and a
+ * newly opened section starts at its top. Inputs: the open section and its panel. Output: the
+ * frame. */
 export function SettingsFrame({ tab, children }: { tab: SettingsTab; children: ReactNode }) {
+  useLayoutEffect(() => {
+    document.getElementById("main")?.scrollTo({ top: 0, behavior: "instant" });
+  }, [tab]);
   return <>
     <PageHeader title="Settings" />
     <div className="settings-split">

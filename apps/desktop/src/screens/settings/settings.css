@@ -7,4 +7,4 @@
 .settings-nav-item:hover { background: var(--surface-2); color: var(--text); }
 .settings-nav-item[aria-current="page"] { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
 .settings-content { flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
-@media (max-width: 980px) { .settings-nav { position: static; flex: 1 1 100%; width: auto; } }
+@media (max-width: 1070px) { .settings-nav { position: static; flex: 1 1 100%; width: auto; } }
