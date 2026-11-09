@@ -94,30 +94,6 @@ fn keep(
     }
 }
 
-/// The refusals a store call answers when the store stayed busy past its own wait, as it
-/// can on a loaded machine, and how often a racing test asks again before failing.
-const BUSY_CODES: [&str; 4] = [
-    "process_unavailable",
-    "process_save_unavailable",
-    "instruction_settings_unavailable",
-    "instruction_settings_save_unavailable",
-];
-const BUSY_TRIES: usize = 20;
-
-/// Runs one store call of a racing test until the store takes it, asking again each time
-/// the call is refused only because the store stayed busy; such a refusal changes nothing,
-/// so the race still ends only in the answers the test checks. Input: the call. Output:
-/// its first answer that is not a busy refusal; it fails after `BUSY_TRIES` of them.
-fn when_free<T>(mut call: impl FnMut() -> Result<T, EngineError>) -> Result<T, EngineError> {
-    for _ in 0..BUSY_TRIES {
-        match call() {
-            Err(problem) if BUSY_CODES.contains(&problem.0.as_str()) => {}
-            answer => return answer,
-        }
-    }
-    panic!("the store stayed busy through {BUSY_TRIES} tries");
-}
-
 fn answered(answer: Answer) -> String {
     match answer {
         Answer::Text(text) => text,
@@ -434,7 +410,7 @@ fn stale_process_text_save_is_refused() {
                 let (root, start) = (&root, &start);
                 threads.spawn(move || {
                     start.wait();
-                    when_free(|| save(root, None, &format!("Racer {index}.\n"), 2)).unwrap()
+                    save(root, None, &format!("Racer {index}.\n"), 2).unwrap()
                 })
             })
             .collect();
@@ -697,14 +673,12 @@ fn saves_at_once_land_only_on_the_version_they_read() {
                     start.wait();
                     let mut landed = 0_u64;
                     for _ in 0..100 {
-                        let read = when_free(|| instruction_settings(root, project, None)).unwrap();
-                        match when_free(|| {
-                            instruction_settings(
-                                root,
-                                project,
-                                Some((settings, Some(read.version))),
-                            )
-                        }) {
+                        let read = instruction_settings(root, project, None).unwrap();
+                        match instruction_settings(
+                            root,
+                            project,
+                            Some((settings, Some(read.version))),
+                        ) {
                             Ok(saved) => {
                                 assert_eq!(
                                     saved,
