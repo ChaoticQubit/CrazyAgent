@@ -33,12 +33,12 @@ export function SettingSection({ title, about, actions, changed = false, childre
 
 /** One line of a settings section: the label, with a "changed" mark when the value differs from
  * its default and any help under it, on the left and the control on the right. Inputs: the
- * label, the help, whether it changed, the id of the one control the label names, whether the
- * row stacks and the control. Output: the row. */
-export function SettingLine({ label, help, changed = false, htmlFor, wide = false, children }: {
-  label: string; help?: ReactNode; changed?: boolean; htmlFor?: string; wide?: boolean; children: ReactNode;
+ * label, what it draws when that is more than its words, the help, whether it changed, the id
+ * of the one control the label names, whether the row stacks and the control. Output: the row. */
+export function SettingLine({ label, shown, help, changed = false, htmlFor, wide = false, children }: {
+  label: string; shown?: ReactNode; help?: ReactNode; changed?: boolean; htmlFor?: string; wide?: boolean; children: ReactNode;
 }) {
-  const words = <>{label}{changed && <span className="set-changed">changed</span>}</>;
+  const words = <>{shown ?? label}{changed && <span className="set-changed">changed</span>}</>;
   return <SettingRow label={label} wide={wide}>
     {htmlFor ? <label className="set-label" htmlFor={htmlFor}>{words}</label> : <span className="set-label">{words}</span>}
     {help && <span className="set-help">{help}</span>}

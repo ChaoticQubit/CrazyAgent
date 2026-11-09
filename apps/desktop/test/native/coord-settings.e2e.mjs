@@ -18,11 +18,10 @@ const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 const TOOL = "inspect_work";
 const SECTIONS = '[role=radiogroup][aria-label="Plugins and skills"] [role=radio]';
-const MENUS = "button[aria-haspopup=menu]";
 const EVERY = "On for every project";
 const HERE = "On in this project";
 const SWITCHES = `[...document.querySelectorAll('[role=switch][id^="tool-"]')]`;
-const ROWS = `${SWITCHES}.map((button) => [button.closest(".item-row")?.querySelector(".mono")?.innerText.trim() ?? null,
+const ROWS = `${SWITCHES}.map((button) => [button.closest(".set-row")?.querySelector(".set-label .mono")?.innerText.trim() ?? null,
   button.getAttribute("aria-checked"), document.getElementById(button.getAttribute("aria-labelledby"))?.innerText.trim() ?? null])`;
 const HARNESSES = ["claude-code", "codex", "rcli"];
 const DEFAULT_COUNTED = ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"];
@@ -154,7 +153,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
 /** Clicks the switch of the tool row that names a tool, as the owner does. Inputs: the page,
  * the owner and the tool. Output: none. */
 async function flip(page, me, tool) {
-  const id = await page.evaluate(`${SWITCHES}.find((button) => button.closest(".item-row")?.querySelector(".mono")?.innerText.trim() === ${JSON.stringify(tool)})?.id ?? null`);
+  const id = await page.evaluate(`${SWITCHES}.find((button) => button.closest(".set-row")?.querySelector(".set-label .mono")?.innerText.trim() === ${JSON.stringify(tool)})?.id ?? null`);
   assert.ok(id, `no switch for ${tool} on the page`);
   await me.follow(`[id=${JSON.stringify(id)}]`);
 }
@@ -210,8 +209,7 @@ test("a built-in tool off for every project and on in one project keeps both, De
   await until(`${TOOL} still shown off for every project`, [TOOL, "false", EVERY], () => row(TOOL));
   assert.deepEqual(await held(null, null, TOOL), ["off", null], "the project's switch leaves the every-project switch Off");
 
-  await me.click(`More for ${TOOL}`, MENUS);
-  await me.click("Delete", "[role=menuitem]");
+  await me.follow(`button[aria-label=${JSON.stringify(`Delete ${TOOL}`)}]`);
   await until(`${TOOL} deleted for every project in the engine`, ["hidden", null], () => held(null, null, TOOL));
   await until(`${TOOL} gone from the switches`, null, () => row(TOOL));
   await me.waitFor("the deleted count", (text) => text.includes("1 deleted. Restore defaults brings it back."));
@@ -231,8 +229,7 @@ test("a built-in tool off for every project and on in one project keeps both, De
   await open("#/settings/plugins", "the global Plugins and skills sections", (text) => ["Skills", "MCP servers", "Hooks", "Tools"].every((word) => text.includes(word)));
   await me.click("MCP servers", SECTIONS);
   await me.waitFor("the fixture server", (text) => text.includes("fixture"));
-  await me.click("More for fixture", MENUS);
-  await me.click("Check", "[role=menuitem]");
+  await me.follow('button[aria-label="Check fixture"]');
   await me.waitFor("the check's answer", (text) => text.includes("fixture answered with 2 tools."));
   await me.click("2 tools", "button");
   await until("the fixture's checked tools shown on for every project", [["echo", "true", EVERY], ["anonymous", "true", EVERY]], () => page.evaluate(ROWS));
