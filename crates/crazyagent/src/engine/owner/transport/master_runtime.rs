@@ -1430,7 +1430,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn the_note_after_a_master_land_names_the_whole_change_set() {
+    fn the_note_after_a_master_land_calls_it_a_conflict_fix() {
         use crate::landing::AcceptOutcome;
         let landed = master_land_words(&AcceptOutcome::Landed {
             commit: "c0".into(),
@@ -1438,7 +1438,7 @@ mod tests {
         });
         assert_eq!(
             landed,
-            "The master merged its change set into main itself, with everything in that set, as this project's setting lets it at Full access. Activity lists the merge."
+            "The master merged its conflict fix into main itself, as this project's setting lets it at Full access. Activity lists the merge."
         );
         let conflict = master_land_words(&AcceptOutcome::Conflict {
             files: vec!["README".into(), "NOTES".into()],
