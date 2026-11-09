@@ -32,6 +32,8 @@ let coordSaved = null;
 let policy = POLICY;
 let saveAnswer = null;
 let render = null;
+let poolAssigned = "pool-a";
+const poolRecord = (id) => ({ kind: "pool", pool: { id, projects: poolAssigned === id ? ["alpha"] : [] } });
 
 /** Answers the app's engine calls as a quick engine does: the reads these screens make, the
  * team read with the coordination settings saved since, an agent access save that the policy
@@ -45,6 +47,7 @@ function engine(status) {
   coordSaved = null;
   policy = POLICY;
   saveAnswer = null;
+  poolAssigned = "pool-a";
   window.__TAURI_INTERNALS__ = {
     plugins: {},
     transformCallback: () => 0,
@@ -69,7 +72,15 @@ function engine(status) {
         coordSaved = { ...args.settings };
         return RECEIPT;
       }
-      if (saveAnswer !== null && command.startsWith("desktop_team_")) return saveAnswer;
+      if (saveAnswer !== null) {
+        if (command.startsWith("desktop_team_") || command === "desktop_update_project_setup") return saveAnswer;
+        if (command === "desktop_open_project") return { fresh: true, project_id: "alpha" };
+        if (command === "desktop_model_access_page") return { writable: true, ticket: "ticket", has_more: false, items: [poolRecord("pool-a"), poolRecord("pool-b")] };
+        if (command === "desktop_edit_model_access") {
+          poolAssigned = Object.values(args).find((value) => value?.kind === "assign_project_pool").pool;
+          return saveAnswer;
+        }
+      }
       throw `Command ${command} not found`;
     },
   };

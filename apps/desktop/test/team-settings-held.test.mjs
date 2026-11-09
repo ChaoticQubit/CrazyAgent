@@ -4,6 +4,7 @@ import test from "node:test";
 import { bundle, withPage } from "./browser.mjs";
 
 const fixture = await bundle(new URL("./fixtures/team-settings-layout.mjs", import.meta.url).pathname);
+const appFixture = await bundle(new URL("./fixtures/app-settings-held.mjs", import.meta.url).pathname);
 
 const harness = (name, role) => ({ harness: name, role, agents_max: 2, tools: true, live: 0, delegation: null, delegation_label: null, runnable: true });
 const STATUS = {
@@ -25,14 +26,14 @@ const ROWS = [
   "Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget",
 ];
 
-/** Opens Agent settings over the fake engine with every team save given one answer, and runs
- * the steps. Inputs: the answer and the steps, which get the page's handles. Output: what the
- * steps return. */
-function onSettings(answer, steps) {
+/** Opens Agent settings or the master's settings over the fake engine with every team save given
+ * one answer, and runs the steps. Inputs: the answer, the steps, which get the page's handles,
+ * and "page" or "drawer". Output: what the steps return. */
+function onSettings(answer, steps, view = "page") {
   return withPage(async (page) => {
     await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await page.evaluate(fixture);
-    assert.equal(await page.evaluate(`Fixture.mount("", "page", ${JSON.stringify(STATUS)})`), true, "Agent settings mount");
+    assert.equal(await page.evaluate(`Fixture.mount("", ${JSON.stringify(view)}, ${JSON.stringify(STATUS)})`), true, "the settings mount");
     await page.evaluate(`Fixture.answerSaves(${JSON.stringify(answer)})`);
     return steps(page);
   });
@@ -79,6 +80,37 @@ test("a refused save shows the saved value again, on a select and on a segmented
     limit: await page.evaluate(`Fixture.pickOther("Each task may run")`),
   }));
   for (const [row, value] of Object.entries(seen)) assert.equal(value.shown, value.before, `${row} goes back to the saved value`);
+});
+
+test("the master's settings keep the Account and Apply a master harness change picks while the reads after their saves run", { timeout: 120_000 }, async () => {
+  const seen = await onSettings(APPLIED, async (page) => ({
+    apply: await page.evaluate(`Fixture.pickOther("Apply a master harness change")`),
+    account: await page.evaluate(`Fixture.pickOther("Account")`),
+  }), "drawer");
+  for (const [row, value] of Object.entries(seen)) assert.equal(value.shown, value.picked, `${row} holds the pick`);
+});
+
+const APP_SELECTS = [["schedule", "schedule-app", "balanced"], ["schedule", "schedule-pool-main", "manual_rank"], ["project", "project-account-order", "balanced"], ["memory", "memory-agent-writes", "ask"]];
+
+test("the app's own settings selects keep the pick while their reads run, and go back after a refused save", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(appFixture);
+    const rows = [];
+    for (const [view, id, value] of APP_SELECTS) {
+      await page.evaluate(`Fixture.mount(${JSON.stringify(view)}, false)`);
+      const applied = await page.evaluate(`Fixture.pick(${JSON.stringify(id)}, ${JSON.stringify(value)})`);
+      await page.evaluate(`Fixture.mount(${JSON.stringify(view)}, true)`);
+      const refused = await page.evaluate(`Fixture.pick(${JSON.stringify(id)}, ${JSON.stringify(value)})`);
+      rows.push({ id, value, applied, refused });
+    }
+    return rows;
+  });
+  for (const { id, value, applied, refused } of seen) {
+    assert.equal(applied.asked, 1, `${id} asked the engine`);
+    assert.equal(applied.shown, value, `${id} holds the pick`);
+    assert.equal(refused.shown, refused.before, `${id} goes back after a refused save`);
+  }
 });
 
 test("a held pick lets go once a read moves the value, so a later read back to the old value shows", { timeout: 120_000 }, async () => {

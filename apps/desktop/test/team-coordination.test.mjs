@@ -7,6 +7,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const coord = await import("../src/screens/team/coordination.tsx");
 
+test("Overlapping edits lists every engine choice in the mockup's order, then an unknown value as it is", async () => {
+  const { OVERLAP_CHOICES } = await import("../src/engine-client.ts");
+  const values = (current) => coord.overlapOptions(current).map((option) => option.value);
+  assert.deepEqual(values("warn"), ["warn", "wait", "block", "off"]);
+  assert.deepEqual([...values("warn")].sort(), [...OVERLAP_CHOICES].sort(), "no engine choice drops from the list");
+  assert.deepEqual(values("later"), ["warn", "wait", "block", "off", "later"], "a value this app does not know stays selectable");
+});
+
 test("an engine that sends no coordination shows the plan defaults, native only for Claude Code", () => {
   const view = coord.coordination({ coordination: undefined });
   assert.deepEqual(view.settings, coord.COORD_DEFAULTS);
