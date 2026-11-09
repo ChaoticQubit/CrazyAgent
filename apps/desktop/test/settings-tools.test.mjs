@@ -25,10 +25,10 @@ test("each tool that is not deleted has one switch, labelled for every project o
   assert.doesNotMatch(text(here), /On for every project/);
 });
 
-test("Delete is offered only in a built-in tool's menu", () => {
+test("Delete is offered only on a built-in tool's line", () => {
   const markup = render([tool(), mcp()]);
-  assert.match(markup, /More for start_work/);
-  assert.doesNotMatch(markup, /More for read_file/);
+  assert.match(markup, /aria-label="Delete start_work"/);
+  assert.doesNotMatch(markup, /aria-label="Delete read_file"/);
 });
 
 test("deleted tools are counted with Restore defaults; Restore shows while anything is stored here", () => {
