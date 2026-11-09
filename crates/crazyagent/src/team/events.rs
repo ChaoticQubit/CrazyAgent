@@ -34,7 +34,9 @@ pub const STATUS_AGENTS_MAX: i64 = super::STATUS_AGENTS_MAX;
 pub const VIEW_NOTIFICATIONS_MAX: i64 = 20;
 pub const APP_NOTIFICATIONS_MAX: i64 = 50;
 pub const UNSEEN_PROJECTS_MAX: i64 = 200;
-pub const WORKING_PROJECTS_MAX: i64 = 200;
+/// The projects the working list names. At this bound it and a full unseen list still fit one
+/// reply at the longest legal project id, so a decoration cannot fail the whole read.
+pub const WORKING_PROJECTS_MAX: i64 = 100;
 pub const HOUR_MS: i64 = 3_600_000;
 pub const SCAN_EVERY: Duration = Duration::from_secs(2);
 pub(crate) const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
