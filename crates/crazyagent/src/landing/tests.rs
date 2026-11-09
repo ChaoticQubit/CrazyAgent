@@ -10252,7 +10252,7 @@ fn undoing_a_commit_costs_the_same_git_runs_for_any_number_of_sets_below_it() {
         let record = store::load(&case.db, &already).unwrap();
         for copy in 0..copies {
             let mut below = record.clone();
-            below.id = ChangeSetId::new(&format!("{copy:032x}")).unwrap();
+            below.id = ChangeSetId::new(format!("{copy:032x}")).unwrap();
             store::save(&case.db, &below).unwrap();
         }
         let later = readme_landed_by(&case, 3, "zero\none\ntwo\nthree\nfour\n");
