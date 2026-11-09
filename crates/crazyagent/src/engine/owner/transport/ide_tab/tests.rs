@@ -444,7 +444,10 @@ async fn an_ide_opened_while_delete_everything_waits_is_refused_until_the_delete
         reopened.map(|server| server.url).map_err(|e| e.0),
         Err("ide_project_deleting".to_owned())
     );
-    assert!(!wrote, "a refused open writes nothing to the project folder");
+    assert!(
+        !wrote,
+        "a refused open writes nothing to the project folder"
+    );
     assert!(
         matches!(
             &deleted,

@@ -1488,7 +1488,10 @@ async fn a_delete_hold_landing_on_a_starting_open_stops_what_it_started() {
             if let Some((group, _)) = recorded_group(&recorded) {
                 break group.as_raw_nonzero().get();
             }
-            assert!(Instant::now() < deadline, "the launch never recorded its group");
+            assert!(
+                Instant::now() < deadline,
+                "the launch never recorded its group"
+            );
             tokio::time::sleep(Duration::from_millis(5)).await;
         };
         (group, servers.hold_for_delete(&starting).await)
