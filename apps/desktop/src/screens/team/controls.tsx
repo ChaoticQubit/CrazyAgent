@@ -1,10 +1,11 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { useContext, useEffect, useState, type ReactNode } from "react";
 import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { IconName, SelectOption } from "../../ui";
+import { SettingFind, SettingRow, settingMatches } from "../../ui/setting";
 import { afterSave, shownChoice, useHeld } from "../../state";
 import { displayText } from "../conversation";
 import { savedStale } from "../project/settings";
@@ -187,7 +188,7 @@ export function settingsVersion(status: Pick<TeamStatus, "settings_version">): n
   return status.settings_version ?? 0;
 }
 
-export { afterSave, shownChoice };
+export { afterSave, shownChoice, SettingRow };
 
 type Limits = { turn: number | null; session: number | null; idle: number | null };
 
@@ -261,19 +262,13 @@ function findWords(query: string): string {
   return query.trim().toLowerCase();
 }
 
-function matches(label: string, words: string): boolean {
-  return words === "" || label.toLowerCase().includes(words);
-}
-
 /** The groups and rows Find a setting keeps: every row whose label holds the typed words, any
  * case, in each group that holds one. Input: the typed words. Output: the groups with their
  * kept rows, in order; every group and row for blank words. */
 export function matchingGroups(query: string): { id: SettingGroupId; rows: string[] }[] {
   const words = findWords(query);
-  return SETTING_GROUPS.map((group) => ({ id: group.id, rows: group.rows.filter((row) => matches(row, words)) })).filter((group) => group.rows.length > 0);
+  return SETTING_GROUPS.map((group) => ({ id: group.id, rows: group.rows.filter((row) => settingMatches(row, words)) })).filter((group) => group.rows.length > 0);
 }
-
-const SettingFind = createContext("");
 
 /** One group of settings drawn as the mockup's panel: its icon, heading and purpose line over its
  * rows, hidden while Find a setting keeps none of its rows. Inputs: the group, the id prefix of
@@ -282,19 +277,11 @@ export function SettingGroup({ group, prefix, level = 2, children }: { group: Se
   const words = useContext(SettingFind);
   const id = `${prefix}-${group.id}`;
   const Heading = level === 2 ? "h2" : "h3";
-  return <section className="set-group" id={id} aria-labelledby={`${id}-title`} hidden={!group.rows.some((row) => matches(row, words))}>
+  return <section className="set-group" id={id} aria-labelledby={`${id}-title`} hidden={!group.rows.some((row) => settingMatches(row, words))}>
     <div className="set-head"><span className="set-icon" aria-hidden="true"><Icon name={group.icon} size={16} /></span>
       <div><Heading id={`${id}-title`} tabIndex={-1}>{group.title}</Heading>{group.about && <p>{group.about}</p>}</div></div>
     {children}
   </section>;
-}
-
-/** One setting row: its label with any help under it on the left and its control on the
- * right, or all stacked for a wide row; hidden while Find a setting does not match its label.
- * Inputs: the label, whether it is wide and the row's parts. Output: the row. */
-export function SettingRow({ label, wide = false, children }: { label: string; wide?: boolean; children: ReactNode }) {
-  const words = useContext(SettingFind);
-  return <div className={wide ? "set-row wide" : "set-row"} data-setting={label} hidden={!matches(label, words)}>{children}</div>;
 }
 
 /** Saves one team setting with the settings version of the team read the controls show, so a
@@ -603,7 +590,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
             <span className="tg-terminal-note">On stops the master merging by itself: each finished harness's work waits in Changes for your Accept, and so does a master change set that fixes a conflict.</span>
           </SettingRow>
-          <h3 className="set-sub" hidden={!access.rows.slice(3).some((row) => matches(row, words))}>Branches</h3>
+          <h3 className="set-sub" hidden={!access.rows.slice(3).some((row) => settingMatches(row, words))}>Branches</h3>
           <SettingRow label="Agent branches">
             <span className="set-label" aria-hidden="true">Agent branches</span>
             <Segmented label="Agent branches" value={branchMode} onValue={(choice) => { if (!busy) void branches(choice); }}
@@ -668,7 +655,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
             <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
           </SettingRow>
-          <h3 className="set-sub" hidden={!PER_HARNESS_ROWS.some((row) => matches(row, words))}>Per harness</h3>
+          <h3 className="set-sub" hidden={!PER_HARNESS_ROWS.some((row) => settingMatches(row, words))}>Per harness</h3>
           <PerHarnessControls projectId={projectId} status={status} reload={reload} />
         </SettingGroup>
         <SettingGroup group={limitsGroup} prefix={prefix}>

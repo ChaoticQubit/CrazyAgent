@@ -287,6 +287,12 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .set-row > .segmented, .set-row > .set-ctl, .set-row > .field > .select { grid-column: 2; grid-row: 1; justify-self: end; align-self: center; }
 .set-row:not(.wide):has(> .tg-terminal-note:not(.set-ctl), > .field > .helper) > :is(.segmented, .set-ctl), .set-row:not(.wide):has(> .field > .helper) > .field > .select { grid-row: 1 / span 2; }
 .set-row > .field > .select { width: auto; max-width: 100%; }
+.set-row > .set-help { color: var(--text-2); font-size: 12px; line-height: 16px; }
+.set-row:not(.wide):has(> .set-help) > .set-ctl { grid-row: 1 / span 2; }
+.set-line-ctl { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
+.set-row.wide > .set-line-ctl { display: block; }
+.set-changed { display: inline-flex; align-items: center; gap: var(--space-1); margin-left: var(--space-2); color: var(--accent-text); font: 500 11px/16px var(--mono); }
+.set-changed::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .set-row.wide { row-gap: 6px; }
 .set-row.wide > *, .set-row.wide > .field > * { grid-column: 1 / -1; grid-row: auto; justify-self: stretch; }
 .set-row.wide > .segmented { justify-self: start; }
