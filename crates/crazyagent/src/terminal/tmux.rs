@@ -674,26 +674,10 @@ impl Tmux {
     /// Reads whether bracketed paste is on in one tmux target. Takes the control client and
     /// the target. Returns the answer.
     fn paste_on(control: &Control, target: &str) -> Result<bool, HostError> {
-        Ok(Self::pane_format(control, target, "#{bracket_paste_flag}")? == b"1")
-    }
-
-    /// Reads one format of the pane a target names: the active pane of a window, or the pane
-    /// of a `%N` id. Listed, because `display-message` takes a missing target for none and
-    /// answers for the control client's window, another agent's. Takes the control client,
-    /// the target and the format. Returns the text, or `terminal_agent_unknown`.
-    fn pane_format(control: &Control, target: &str, format: &str) -> Result<Vec<u8>, HostError> {
-        let filter = if pane_id_valid(target) {
-            format!("#{{==:#{{pane_id}},{target}}}")
-        } else {
-            "#{pane_active}".to_owned()
-        };
-        control
-            .ask(&format!(
-                "list-panes -t {target} -f '{filter}' -F '{format}{FORMAT_END}'"
-            ))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| failure("terminal_agent_unknown"))
+        let lines = control.ask(&format!(
+            "display-message -p -t {target} '#{{bracket_paste_flag}}{FORMAT_END}'"
+        ))?;
+        Ok(lines.first().is_some_and(|line| line.as_slice() == b"1"))
     }
 }
 
@@ -1942,9 +1926,12 @@ impl Host for Tmux {
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
         let control = self.live_control()?;
         let target = self.agent_target(&control, agent)?;
-        let activity = Self::pane_format(&control, &target, "#{window_activity}")?;
-        let activity = std::str::from_utf8(&activity)
-            .ok()
+        let lines = control.ask(&format!(
+            "display-message -p -t {target} '#{{window_activity}}{FORMAT_END}'"
+        ))?;
+        let activity = lines
+            .first()
+            .and_then(|line| std::str::from_utf8(line).ok())
             .and_then(|text| text.trim().parse::<u64>().ok())
             .ok_or_else(|| failure("terminal_command_failed"))?;
         let now = SystemTime::now()
