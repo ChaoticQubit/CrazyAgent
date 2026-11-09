@@ -102,7 +102,7 @@ export async function readyAdded(previous: string[], members: string[], accounts
 }
 
 /** The pool list as a pure view, one line per pool with its actions on the right. Inputs: the
- * pools read and the new, edit, delete, retry and set-up actions. */
+ * pools read, the new, edit, delete, retry and set-up actions, and the pool being set up. */
 export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry, onPrepare, preparing = null }: {
   pools: Loaded<PoolSummary[]>;
   onNew: () => void;
