@@ -1675,6 +1675,7 @@ impl ProjectSandbox {
         text.push_str("(allow signal (target same-sandbox))\n");
         text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow sysctl-read)\n");
+        text.push_str("(deny sysctl-read (sysctl-name-prefix \"kern.procargs\"))\n");
         text.push_str("(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n");
         text.push_str("(allow ipc-posix-sem)\n");
         text.push_str(
