@@ -520,6 +520,33 @@ async fn the_hooks_switch_reaches_the_git_shim_through_open() {
     servers.stop_all().await;
 }
 
+/// `open` leaves the git lookup, which runs xcrun on a Mac without the Command Line Tools,
+/// to a blocking thread: the test's single async thread never makes it, and the shim it
+/// feeds still names the same git (FZ7-R1-L1).
+#[tokio::test]
+async fn open_looks_up_the_ides_git_off_the_async_thread() {
+    let checkout = scratch();
+    let data = scratch();
+    let build = cached_build();
+    let project = project("lookup");
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    crate::research::runner::SANDBOXED_GIT_LOOKUPS.set(0);
+    servers.open(&project, &root, &build, false).await.unwrap();
+    assert_eq!(
+        crate::research::runner::SANDBOXED_GIT_LOOKUPS.get(),
+        0,
+        "the async thread looked up git itself"
+    );
+    let folder = servers.project_folder(&project).unwrap();
+    let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
+    assert_eq!(
+        fs::read_to_string(&shim).unwrap(),
+        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+    );
+    servers.stop_all().await;
+}
+
 #[tokio::test]
 async fn idle_server_stops_after_the_idle_limit() {
     let checkout = scratch();
