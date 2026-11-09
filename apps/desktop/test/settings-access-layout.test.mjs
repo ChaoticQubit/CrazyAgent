@@ -44,7 +44,7 @@ test("Your accounts holds the search, the filters, the count and every account",
   assert.equal(seen.search, 1);
   assert.equal(seen.selects, 2);
   assert.equal(seen.tally, "3 accounts");
-  assert.equal(seen.head, "Name Provider Sign-in method Status Pools");
+  assert.equal(seen.head, "NameProviderSign-in methodStatusPools");
   assert.equal(seen.rows, 3);
   assert.equal(seen.old, 0);
 });
