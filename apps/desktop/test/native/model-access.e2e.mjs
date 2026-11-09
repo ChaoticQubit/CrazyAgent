@@ -18,7 +18,7 @@ async function listed(names, count) {
 
 async function pools(rows) {
   await until(async () => !(await shown("#pool-name")) &&
-    same([await texts("main .pool-row .name"), await texts("main .pool-row .mono")], [rows.map(([name]) => name), rows.map(([, members]) => members)]),
+    same([await texts("main .set-row .set-label"), (await texts("main .set-row .set-help")).map((help) => help.match(/\d+ of 15/)?.[0])], [rows.map(([name]) => name), rows.map(([, members]) => members)]),
   30000, `the pool list did not show exactly ${JSON.stringify(rows)}`);
 }
 
@@ -117,7 +117,7 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
   });
 
   it("edits the pool: renames it and takes one account out", async () => {
-    await menu(`More for ${POOL}`, "Edit pool");
+    await click(`button[aria-label=${JSON.stringify(`Edit pool ${POOL}`)}]`);
     await until(() => shown("#pool-name"), 15000, "the pool editor did not open");
     await type("#pool-name", POOL_RENAMED);
     await click(`label=${COMPATIBLE}`);
@@ -148,16 +148,16 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
     await until(() => says("main .empty-state h2", "No pools yet"), 15000, "the emptied pool still showed");
   });
 
-  it("deletes a pool from its menu, keeping its account, then the last account, leaving the engine empty", async () => {
+  it("deletes a pool from its row, keeping its account, then the last account, leaving the engine empty", async () => {
     await click("button=New pool");
     await type("#pool-name", POOL);
     await click(`label=${COMPATIBLE}`);
     await click("button=Save pool");
     await toast(`${POOL} saved.`);
     await pools([[POOL, "1 of 15"]]);
-    await menu(`More for ${POOL}`, "Delete pool");
+    await click(`button[aria-label=${JSON.stringify(`Delete pool ${POOL}`)}]`);
     await until(() => says("dialog[open] p", "Its accounts stay in your list. Only the pool goes away."), 15000, "the pool delete question did not open");
-    await click("button=Delete pool");
+    await click('//dialog[@open]//button[normalize-space(.)="Delete pool"]');
     await toast(`${POOL} deleted.`);
     await until(() => says("main .empty-state h2", "No pools yet"), 15000, "the pool was not deleted");
     const kept = await observeModelAccess();

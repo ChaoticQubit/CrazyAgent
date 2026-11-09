@@ -7,7 +7,7 @@ const CONFIRM = "dialog.dialog[open]";
 
 /** The pool names Settings, Pools lists now. Output: the names. */
 function poolNames() {
-  return texts(".pool-row button.name");
+  return texts(".set-row .set-label");
 }
 
 /** Opens the trial project's Settings, Pool section and waits for its pool cards. Input: the kit. */
@@ -71,7 +71,7 @@ export const checks = [{
       noLoop(await assignPool(kit, NO_POOL));
       await kit.screen();
       await kit.go("#/settings/pools");
-      await menu(`More for ${pool}`, "Delete pool");
+      await click(`button[aria-label=${JSON.stringify(`Delete pool ${pool}`)}]`);
       await kit.until(() => shown(CONFIRM), kit.UI_MS, `Delete pool on ${pool} never asked to confirm`);
       const poolConfirm = await confirmNames([pool, "Only the pool goes away"]);
       await click("//dialog[@open]//button[normalize-space(.)=\"Delete pool\"]");

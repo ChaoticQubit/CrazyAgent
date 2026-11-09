@@ -464,6 +464,59 @@ fn copilot_chat_is_refused_at_ask_and_approval_and_an_old_pin_no_longer_counts()
     );
 }
 
+/// A pin of Copilot Chat an older engine saved is gone once the policy loads, and only that
+/// pin: the listing and the allowed setting keep every other extension (DEC-098).
+#[test]
+fn an_old_pin_of_copilot_chat_is_dropped_when_the_policy_loads() {
+    let root = root();
+    let project = project();
+    let pin = |id: &str| Approved {
+        id: id.to_owned(),
+        version: "1.0.0".to_owned(),
+        sha256: sha256(id.as_bytes()),
+        approved_ms: NOW,
+    };
+    let old = Policy {
+        approved: vec![pin(AI_LOCKED), pin(ID)],
+        ..Policy::default()
+    };
+    save(root.path(), &old).unwrap();
+    assert_eq!(
+        listing(root.path(), &project, NOW).unwrap().approved,
+        [Update {
+            id: ID.to_owned(),
+            version: "1.0.0".to_owned(),
+        }]
+    );
+    let allowed = allowed(root.path());
+    assert!(allowed.get(AI_LOCKED).is_none(), "{allowed:?}");
+    assert!(allowed.get(ID).is_some(), "{allowed:?}");
+}
+
+/// An update of Copilot Chat that an earlier check left waiting is gone once the policy
+/// loads, and only that update, so the owner is never offered it (DEC-098).
+#[test]
+fn a_pending_update_of_copilot_chat_is_dropped_when_the_policy_loads() {
+    let root = root();
+    let project = project();
+    let waiting = |id: &str| Update {
+        id: id.to_owned(),
+        version: "1.1.0".to_owned(),
+    };
+    let old = Policy {
+        updates: vec![waiting(AI_LOCKED), waiting(ID)],
+        ..Policy::default()
+    };
+    save(root.path(), &old).unwrap();
+    let shown = listing(root.path(), &project, NOW).unwrap();
+    let ids: Vec<&str> = shown
+        .updates
+        .iter()
+        .map(|update| update.id.as_str())
+        .collect();
+    assert_eq!(ids, [ID]);
+}
+
 #[test]
 fn an_approval_needs_the_ide_ask_and_a_decline_or_dismissal_drops_it() {
     let root = root();

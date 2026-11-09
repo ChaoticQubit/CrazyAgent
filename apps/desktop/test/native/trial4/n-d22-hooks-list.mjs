@@ -5,7 +5,7 @@ import { hooksVerdict } from "../trial4-context.mjs";
 const FAILED = "//section[@role=\"alert\"][.//p[normalize-space(.)=\"Couldn't load hooks.\"]]";
 const RETRY = `${FAILED}//button[normalize-space(.)="Try again"]`;
 const EMPTY = "//*[normalize-space(.)=\"No hooks yet\"]";
-const PLUGIN = "main .rows .item-row .title";
+const PLUGIN = "main .set-row .set-label";
 
 /** Whether the Hooks list shows hooks or says it has none. Output: a boolean. */
 async function listed() {
