@@ -1369,3 +1369,37 @@ fn a_message_of_short_lines_stays_within_the_bound_once_quoted() {
     assert_eq!(carried, [message]);
     assert!(text.len() <= bound, "{}", text.len());
 }
+
+/// SECAUDIT coord-delivery-raw-body-forges-owner-line: a quoted message that fills its room
+/// exactly goes whole, and one byte more is cut within the bound.
+#[test]
+fn a_quoted_message_is_whole_at_its_room_and_cut_one_byte_past_it() {
+    let bound = 1024;
+    for (extra, cut) in [(0, false), (1, true)] {
+        let fixture = Fixture::new();
+        let master = fixture.agent("master", "claude-code", "idle", None);
+        let sub = fixture.agent("sub", "claude-code", "idle", None);
+        let next = fixture.send(Party::Agent(sub), master, MessageKind::Note, "x", 1) + 1;
+        let label = crate::team::events::label(&fixture.db, sub).unwrap();
+        let head = format!("[crazyagent msg {next}] from {label}: note, it takes no reply: ");
+        let tail = "b".repeat(bound - head.len() - "a\n> ".len() + extra);
+        let sent = fixture.send(
+            Party::Agent(sub),
+            master,
+            MessageKind::Note,
+            &format!("a\n{tail}"),
+            2,
+        );
+        assert_eq!(sent, next);
+        let waiting = crate::coord::pending(&fixture.db, master, PENDING_MAX).unwrap();
+        let (text, carried) = lines(&fixture.db, &waiting[1..], bound).unwrap();
+        assert_eq!(carried, [sent]);
+        assert_eq!(text.ends_with(CUT), cut, "{text}");
+        if cut {
+            assert!(text.len() <= bound, "{}", text.len());
+        } else {
+            assert_eq!(text, format!("{head}a\n> {tail}"));
+            assert_eq!(text.len(), bound);
+        }
+    }
+}
