@@ -10,7 +10,7 @@ import { afterSave, shownChoice, useHeld } from "../../state";
 import { displayText } from "../conversation";
 import { savedStale } from "../project/settings";
 import { CoordinationControls, PerHarnessControls, ToolsControls } from "./coordination";
-import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, type TeamProject } from "./setup-rows";
+import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, useTeam, type TeamProject } from "./setup-rows";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
 export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
@@ -439,6 +439,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   data?: TeamProject;
   group?: SettingGroupId | null;
 }) {
+  const harnessRows = useTeam(data);
   const [masterBranch, setMasterBranchText] = useState<string | null>(null);
   const [landOn, setLandOnText] = useState<string | null>(null);
   const [graceText, setGraceText] = useState<string | null>(null);
@@ -543,9 +544,9 @@ export function TeamControls({ projectId, status, reload, data, group }: {
       <div className="set-groups">
         {words !== "" && kept.length === 0 && <p className="pj-muted" role="status">No setting matches "{find.trim()}".</p>}
         <SettingGroup group={model} prefix={prefix}>
-          <MasterHarnessSetting data={data} label="Master harness" id={`${prefix}-master-harness`}
+          <MasterHarnessSetting rows={harnessRows} data={data} label="Master harness" id={`${prefix}-master-harness`}
             helper="The master plans, hands out tasks and merges. A change reaches the running master as Apply a master harness change says." />
-          <SubHarnessesSetting data={data} prefix={`${prefix}-slots`} />
+          <SubHarnessesSetting rows={harnessRows} data={data} prefix={`${prefix}-slots`} />
           <SettingRow label="Keep sub-agents ready">
             <Switch id={`tg-warm-${projectId}`} label={`Keep ${status.min_agents} ${status.min_agents === 1 ? "sub-agent" : "sub-agents"} ready`} checked={checked}
               onChecked={(on) => void toggle(on)} disabledReason={busy ? "Saving the last change." : status.min_agents < 1 ? "The team plan keeps no sub-agents ready." : undefined} />

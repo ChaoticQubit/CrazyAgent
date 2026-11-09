@@ -1,5 +1,5 @@
 import { act, createElement, useState } from "react";
-import { AccountSetting, SubHarnessesSetting } from "../../src/screens/team/setup-rows.tsx";
+import { AccountSetting, SubHarnessesSetting, useTeam } from "../../src/screens/team/setup-rows.tsx";
 import { mountTab, settle } from "./settings-tab.mjs";
 
 export * from "./settings-tab.mjs";
@@ -23,8 +23,9 @@ const project = () => ({
 
 function Host() {
   const [data, set] = useState(project);
+  const rows = useTeam(data);
   setData = set;
-  return createElement("div", null, createElement(SubHarnessesSetting, { data, prefix: "team" }), createElement(AccountSetting, { data, id: "account" }));
+  return createElement("div", null, createElement(SubHarnessesSetting, { rows, data, prefix: "team" }), createElement(AccountSetting, { data, id: "account" }));
 }
 
 /** Answers one engine command: a setup save, and each step of a pool assignment, with the pool

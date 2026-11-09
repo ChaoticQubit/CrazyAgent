@@ -39,31 +39,41 @@ function masterOptions(harnesses: HarnessEntry[] | null, master: string): { valu
   return choices.some((choice) => choice.value === shown) ? choices : [{ value: shown, label: harnessName(harnesses, shown) || "Pick a harness", disabled: false }, ...choices];
 }
 
-/** The saved team a row shows and the call that saves a change to it through project Settings'
- * own team save: the change is checked as Settings checks it, and the row keeps showing it until
- * the setup is read again at a newer revision. Input: the project data. Output: the stored setup
- * or null, the team shown, whether a save runs, its note and the save. */
-function useTeam(data: TeamProject | undefined) {
+/** The saved team a page's harness rows show and the save for a change to it, through project
+ * Settings' own checks and team save. A page holds one, so a save from any row holds them all and
+ * shows the change until the setup is read again. Input: the project data. Output: the team shown
+ * or null, whether a save runs or waits for its read, and the save, which gives the row's note. */
+export function useTeam(data: TeamProject | undefined) {
   const setup: StoredSetup | null = valueOf(data?.setup);
   const [held, setHeld] = useState<{ team: TeamDraft; revision: number | null; read: TeamProject["setup"] } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
   const team: TeamDraft | null = setup ? (held !== null && held.revision === setup.revision ? held.team : setup.team) : null;
   const settling = held !== null && held.read === data?.setup;
 
-  async function save(next: TeamDraft) {
-    if (!data || !setup || busy) return;
+  async function save(next: TeamDraft): Promise<string> {
+    if (!data || !setup || busy) return "";
     const harnesses = valueOf(data.harnesses);
-    if (!teamValid(next, harnesses)) return setNote(teamProblem(next, harnesses));
+    if (!teamValid(next, harnesses)) return teamProblem(next, harnesses);
     setHeld({ team: next, revision: setup.revision, read: data.setup });
     setBusy(true);
     const message = await saveTeam(data, setup, next);
     setBusy(false);
     if (message !== "") setHeld(null);
-    setNote(message);
+    return message;
   }
 
-  return { setup, team, busy: busy || settling, note, save };
+  return { team, busy: busy || settling, save };
+}
+
+/** What a page's harness rows share. */
+export type TeamRows = ReturnType<typeof useTeam>;
+
+/** One row's save with its own note, so a refusal shows under the row that asked. Input: the
+ * page's shared rows. Output: the note and the save. */
+function useRowNote(rows: TeamRows) {
+  const [note, setNote] = useState("");
+  const save = async (next: TeamDraft) => setNote(await rows.save(next));
+  return { note, save };
 }
 
 function TeamState({ data }: { data: TeamProject | undefined }) {
@@ -78,10 +88,12 @@ function RowNote({ note }: { note: string }) {
 }
 
 /** The master's harness as a select of the harness catalog, saved in place through project
- * Settings' team save, on Agent settings and in the master's settings. Inputs: the project
- * data, the row's label, the select's id and an optional help line. Output: the row. */
-export function MasterHarnessSetting({ data, label, id, helper }: { data: TeamProject | undefined; label: string; id: string; helper?: string }) {
-  const { team, busy, note, save } = useTeam(data);
+ * Settings' team save, on Agent settings and in the master's settings. Inputs: the page's
+ * shared rows, the project data, the row's label, the select's id and an optional help line.
+ * Output: the row. */
+export function MasterHarnessSetting({ rows, data, label, id, helper }: { rows: TeamRows; data: TeamProject | undefined; label: string; id: string; helper?: string }) {
+  const { team, busy } = rows;
+  const { note, save } = useRowNote(rows);
   const harnesses = valueOf(data?.harnesses);
   if (team === null) return <SettingRow label={label}><span className="set-label">{label}</span><TeamState data={data} /></SettingRow>;
   const shown = entry(harnesses, team.master)?.id ?? team.master;
@@ -100,9 +112,10 @@ export function MasterHarnessSetting({ data, label, id, helper }: { data: TeamPr
 
 /** Each sub-agent harness of the saved team with how many agents it may run at once and its
  * Tools switch, changed in place and saved through project Settings' team save. Inputs: the
- * project data and the id prefix of its switches. Output: the row. */
-export function SubHarnessesSetting({ data, prefix }: { data: TeamProject | undefined; prefix: string }) {
-  const { team, busy, note, save } = useTeam(data);
+ * page's shared rows, the project data and the id prefix of its switches. Output: the row. */
+export function SubHarnessesSetting({ rows, data, prefix }: { rows: TeamRows; data: TeamProject | undefined; prefix: string }) {
+  const { team, busy } = rows;
+  const { note, save } = useRowNote(rows);
   const harnesses = valueOf(data?.harnesses);
   const label = "Sub-agent harnesses";
   if (team === null) return <SettingRow label={label} wide><span className="set-label">{label}</span><TeamState data={data} /></SettingRow>;
