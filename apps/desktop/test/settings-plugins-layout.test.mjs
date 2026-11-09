@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { bundle } from "./browser.mjs";
-import { CONTRAST_MIN, press, tabRunner, tabWalk } from "./settings-tab-steps.mjs";
+import { CONTRAST_MIN, doublePress, press, tabRunner, tabWalk } from "./settings-tab-steps.mjs";
 
 const fixture = await bundle(new URL("./fixtures/settings-plugins-layout.mjs", import.meta.url).pathname);
 const onPlugins = tabRunner(fixture);
@@ -190,6 +190,70 @@ test("Delete on a tool reaches the engine and a refusal shows in the section", a
   });
   assert.ok(seen.commands.includes("desktop_set_tool_switch"), JSON.stringify(seen.commands));
   assert.match(seen.alert.words, /engine_failed/);
+});
+
+/** Reads one button by its name. Inputs: the page and the name. Output: its visible words and
+ * whether it is disabled. */
+const buttonState = (page, name) => page.evaluate(`(() => {
+  const found = document.querySelector('button[aria-label="${name}"]');
+  return { words: found?.textContent, disabled: found?.disabled };
+})()`);
+
+test("a double press on Check runs one check and shows it is working", async () => {
+  const seen = await onPlugins({ hold: "desktop_check_mcp_server" }, async (page) => {
+    await openSection(page, "MCP servers");
+    await doublePress(page, 'button[aria-label="Check github"]');
+    return { commands: await sent(page), button: await buttonState(page, "Check github") };
+  });
+  assert.equal(seen.commands.filter((command) => command === "desktop_check_mcp_server").length, 1, JSON.stringify(seen.commands));
+  assert.deepEqual(seen.button, { words: "Checking...", disabled: true });
+});
+
+test("while a waiting server is checked, Approve waits and keeps its own word", async () => {
+  const seen = await onPlugins({ hold: "desktop_check_mcp_server" }, async (page) => {
+    await openSection(page, "MCP servers");
+    await press(page, 'button[aria-label="Check waiting"]');
+    return { check: await buttonState(page, "Check waiting"), approve: await buttonState(page, "Approve waiting") };
+  });
+  assert.deepEqual(seen.check, { words: "Checking...", disabled: true });
+  assert.deepEqual(seen.approve, { words: "Approve", disabled: true });
+});
+
+test("while a server is approved, its Check waits and keeps its own word", async () => {
+  const seen = await onPlugins({ hold: "desktop_approve_mcp_server" }, async (page) => {
+    await openSection(page, "MCP servers");
+    await press(page, 'button[aria-label="Approve waiting"]');
+    return { check: await buttonState(page, "Check waiting"), approve: await buttonState(page, "Approve waiting") };
+  });
+  assert.deepEqual(seen.approve, { words: "Approving...", disabled: true });
+  assert.deepEqual(seen.check, { words: "Check", disabled: true });
+});
+
+test("a broken server's Check again is named with the words it shows", async () => {
+  const [section] = await onPlugins({}, async (page) => { await openSection(page, "MCP servers"); return read(page); });
+  const broken = section.rows.find((row) => row.label === "broken");
+  assert.equal(broken.buttons.includes("Check again broken"), true, JSON.stringify(broken.buttons));
+  assert.equal(broken.visible.includes("Check again"), true, JSON.stringify(broken.visible));
+  assert.equal(section.rows.find((row) => row.label === "github").buttons.includes("Check github"), true);
+});
+
+for (const [name, key] of [["Skills", "skills"], ["MCP servers", "servers"], ["Hooks", "hooks"], ["Tools", "tools"]]) {
+  test(`in a project a ${name} line with its own switch is marked changed and the next line is not`, async () => {
+    const [section] = await onPlugins({ project: "app", [key]: "here" }, async (page) => { await openSection(page, name); return read(page); });
+    assert.deepEqual(section.rows.map((row) => row.mark), ["changed", null]);
+  });
+}
+
+for (const [name, key] of [["Skills", "skills"], ["MCP servers", "servers"], ["Hooks", "hooks"]]) {
+  test(`on the every-project page a ${name} line's project switch is not marked`, async () => {
+    const [section] = await onPlugins({ [key]: "here" }, async (page) => { await openSection(page, name); return read(page); });
+    assert.deepEqual(section.rows.map((row) => row.mark), [null, null]);
+  });
+}
+
+test("on the every-project page a tool line is marked changed only when its switch is not on", async () => {
+  const [section] = await onPlugins({}, async (page) => { await openSection(page, "Tools"); return read(page); });
+  assert.deepEqual(section.rows.map((row) => [row.label, row.mark]), [["start_work", null], ["graphify", "changed"]]);
 });
 
 test("a project shows no title, no Import my skills and no Remove, with its own switch words", async () => {
