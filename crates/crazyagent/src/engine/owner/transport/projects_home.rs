@@ -123,6 +123,8 @@ pub(super) async fn serve(
             mutation: OwnerMutation::DeleteProject { .. }
         }
     );
+    #[cfg(unix)]
+    let mut _ide_refused = None;
     let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
             let admitted = tokio::time::timeout_at(deadline, async {
@@ -148,7 +150,8 @@ pub(super) async fn serve(
                 Ok(Ok(())) => {
                     #[cfg(unix)]
                     if let Work::Delete(plan, _) = &work {
-                        authority.ide_servers.stop(&plan.project).await;
+                        _ide_refused =
+                            Some(authority.ide_servers.hold_for_delete(&plan.project).await);
                     }
                     let interrupted = work.interrupted();
                     let step = tokio::task::spawn_blocking(move || work.run())
