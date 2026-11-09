@@ -25,7 +25,6 @@ export function chartBars(metrics: Metrics, sinceMs: number, nowMs: number): Met
   for (let start = start_ms; start <= nowMs && bars.length < BARS_MAX; start += metrics.bucket_ms) {
     bars.push({ start_ms: start, tokens: counted.get(start) ?? { input: 0, output: 0, cache_read: 0, cache_write: 0 } });
   }
-  assert(bars.length <= BARS_MAX, "the chart draws a bounded number of bars");
   return bars;
 }
 
