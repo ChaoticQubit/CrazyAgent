@@ -12,7 +12,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const PAGE = '<div class="shell"><nav class="sidebar"></nav><main class="main" id="main" tabindex="-1"><div class="page" id="mount"></div></main></div>';
 const FAILURE = { code: "engine_failed" };
 const member = (index, kind = "chatgpt") => ({ id: `acct-${index}`, kind, provider: "chatgpt", status: "signed_in", status_label: "Signed in" });
-const account = (index) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT", method: "subscription", status: "signed_in", status_label: "Signed in" });
+const account = (index) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT", method: "subscription", method_label: "Subscription", url: null, model: null, status: "signed_in", status_label: "Signed in" });
 const MAIN = { id: "pool-main", name: "Main pool", summary: "3 ChatGPT", members: [member(0, "api_key"), member(1), member(2)], project_count: 2 };
 const SPARE = { id: "pool-spare", name: "Spare", summary: "1 ChatGPT", members: [member(3)], project_count: 0 };
 const FULL = { ...MAIN, members: Array.from({ length: 15 }, (_, index) => member(index)) };

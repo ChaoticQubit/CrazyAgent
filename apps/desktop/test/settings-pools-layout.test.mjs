@@ -240,9 +240,9 @@ test("Account choice stays below a list of pools and only there", async () => {
 test("Delete pool asks first, and a refused delete shows under the title", async () => {
   const seen = await onPools({}, async (page) => {
     await press(page, 'button[aria-label="Delete pool Spare"]');
-    const asking = await page.evaluate("document.querySelector('[role=dialog]')?.innerText ?? ''");
+    const asking = await page.evaluate("document.querySelector('dialog[open]')?.innerText ?? ''");
     const before = await page.evaluate("Fixture.commands()");
-    await press(page, "[role=dialog] button", "Delete pool");
+    await press(page, "dialog[open] button", "Delete pool");
     return { asking, before, alert: await page.evaluate("Fixture.alert()"), commands: await page.evaluate("Fixture.commands()") };
   });
   assert.match(seen.asking, /Delete Spare\?/);
