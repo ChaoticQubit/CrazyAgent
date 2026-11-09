@@ -67,7 +67,7 @@ fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     }
 }
 
-const WALL_COMMANDS: [&str; 11] = [
+const WALL_COMMANDS: [&str; 12] = [
     "desktop_terminal_attach",
     "desktop_terminal_input",
     "desktop_terminal_prompt",
@@ -79,15 +79,17 @@ const WALL_COMMANDS: [&str; 11] = [
     "desktop_terminals_per_window",
     "desktop_extend_terminal_windows",
     "desktop_focus_terminal_window",
+    "desktop_close_project_walls",
 ];
 
-const PROJECT_WALL_COMMANDS: [&str; 6] = [
+const PROJECT_WALL_COMMANDS: [&str; 7] = [
     "desktop_team_graph",
     "desktop_team_stop_agent",
     "desktop_team_stop_teammate",
     "desktop_terminals_per_window",
     "desktop_extend_terminal_windows",
     "desktop_focus_terminal_window",
+    "desktop_close_project_walls",
 ];
 
 const WALL_GUARD: &str = "terminal_window(&webview)?;";
@@ -229,8 +231,7 @@ fn closing_main_or_removing_a_project_closes_the_wall_windows() {
         .unwrap_or_default();
     assert!(close.contains("app: AppHandle"), "{close}");
     assert!(
-        close.contains("main_window(&webview)?;")
-            && close.contains("close_walls(&app, Some(&project))"),
+        close.contains(PROJECT_WALL_GUARD) && close.contains("close_walls(&app, Some(&project))"),
         "{close}"
     );
     let build = include_str!("../build.rs");

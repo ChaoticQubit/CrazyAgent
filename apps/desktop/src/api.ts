@@ -1325,8 +1325,8 @@ export function focusTerminalWindow(id: string, target: "main" | number): Promis
   return call<void>("desktop_focus_terminal_window", { id, target: String(target) });
 }
 
-/** Closes a removed project's terminal wall windows. Input: the project id. Output:
- * nothing, not ready, or a plain error. */
+/** Closes a removed project's terminal wall windows, for the main window or a wall window of
+ * that project. Input: the project id. Output: nothing, not ready, or a plain error. */
 export function closeProjectWalls(id: string): Promise<Result<void>> {
   return call<void>("desktop_close_project_walls", { id });
 }
