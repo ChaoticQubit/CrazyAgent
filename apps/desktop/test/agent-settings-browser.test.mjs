@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { bundle, withPage } from "./browser.mjs";
+import { press } from "./settings-tab-steps.mjs";
 
 const fixture = await bundle(new URL("./fixtures/team-settings-layout.mjs", import.meta.url).pathname);
 
@@ -205,4 +206,61 @@ test("Master settings opens its drawer with the master's four groups, and Close 
   assert.deepEqual(seen.open, { title: "Master settings", groups: MASTER.map(([title]) => title) });
   assert.equal(seen.closed, true);
   assert.equal(seen.after, null, "Close shuts the drawer");
+});
+
+test("Esc on the No pool question closes only the question, and the focus goes back to the select", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1024, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "button", ${JSON.stringify(STATUS)})`);
+    await press(page, "button", "Master settings");
+    await press(page, "dialog.drawer h2");
+    await page.evaluate(`Fixture.markFocus("master-set-alpha-account")`);
+    await page.evaluate(`Fixture.pickOther("Account", "")`);
+    const asked = await page.evaluate(`document.querySelector("dialog.dialog[open] h2")?.textContent ?? null`);
+    for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await page.evaluate("Fixture.settle(50)");
+    return {
+      asked,
+      question: await page.evaluate(`document.querySelector("dialog.dialog[open]") !== null`),
+      drawer: await page.evaluate("Fixture.shown().drawer?.title ?? null"),
+      focus: await page.evaluate("Fixture.markedHasFocus()"),
+      sent: await page.evaluate(`Fixture.sentTo("desktop_edit_model_access")`),
+    };
+  });
+  assert.equal(seen.asked, "Use no pool for this project?");
+  assert.equal(seen.question, false, "Esc closes the question");
+  assert.equal(seen.drawer, "Master settings", "Master settings stays open");
+  assert.equal(seen.focus, true, "the focus goes back to the select that asked");
+  assert.deepEqual(seen.sent.args, [], "saying no changes nothing");
+});
+
+test("a master harness save holds the sub-agent rows until the read, so a quick change there sends no second save", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`);
+    await page.evaluate(`Fixture.answerSaves({ outcome: "applied", pending: false, rejection: null })`);
+    const picked = await page.evaluate(`Fixture.pickOther("Master harness", "claude")`);
+    const held = await page.evaluate(`document.querySelector('button[aria-label="More Codex agents"]').disabled`);
+    const clicked = await page.evaluate(`Fixture.click('button[aria-label="More Codex agents"]', "+")`);
+    await page.evaluate("Fixture.settle(120)");
+    return { picked, held, clicked, sent: await page.evaluate(`Fixture.sentTo("desktop_update_project_setup")`) };
+  });
+  assert.equal(seen.picked.shown, "claude", "the master row shows the change");
+  assert.equal(seen.clicked, true, "the sub-agent stepper is there to press");
+  assert.equal(seen.held, true, "the sub-agent row waits for the read too");
+  assert.equal(seen.sent.args.length, 1, "one save, so the engine refuses none as stale");
+});
+
+test("a refused master harness save says why under that row only", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.mount(${JSON.stringify(CSS)}, "page", ${JSON.stringify(STATUS)})`);
+    await page.evaluate(`Fixture.answerSaves({ outcome: "rejected", pending: false, rejection: "stale_revision" })`);
+    await page.evaluate(`Fixture.pickOther("Master harness", "claude")`);
+    return page.evaluate(`["Master harness", "Sub-agent harnesses"].map((row) => document.querySelectorAll('[data-setting="' + row + '"] [role="alert"]').length)`);
+  });
+  assert.deepEqual(seen, [1, 0]);
 });

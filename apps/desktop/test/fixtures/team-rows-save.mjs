@@ -14,6 +14,7 @@ const SETUP = {
 const APPLIED = { pending: false, outcome: "applied", rejection: null };
 const REFUSED = { pending: false, outcome: "rejected", rejection: "stale_revision" };
 let setData = null;
+let assigned = [];
 
 const project = () => ({
   id: "chores", name: "Chores", now: 0, setup: { kind: "ok", value: SETUP }, harnesses: { kind: "ok", value: HARNESSES }, pools: { kind: "ok", value: POOLS },
@@ -26,17 +27,32 @@ function Host() {
   return createElement("div", null, createElement(SubHarnessesSetting, { data, prefix: "team" }), createElement(AccountSetting, { data, id: "account" }));
 }
 
-/** Answers one engine command. Inputs: the scene and the command. Output: the receipt. */
-function answer(scene, command) {
+/** Answers one engine command: a setup save, and each step of a pool assignment, with the pool
+ * records showing the last pool assigned. Inputs: the scene, the command and its arguments.
+ * Output: the answer. */
+function answer(scene, command, args) {
   if (command === "desktop_update_project_setup") return scene.refused ? REFUSED : APPLIED;
+  if (command === "desktop_open_project") return { fresh: true, project_id: "chores" };
+  if (command === "desktop_model_access_page") return { writable: true, ticket: "ticket", has_more: false, items: POOLS.map(({ pool }) => ({ kind: "pool", pool: { id: pool.id, projects: assigned.at(-1) === pool.id ? ["chores"] : [] } })) };
+  if (command === "desktop_edit_model_access") {
+    assigned.push(args.edit.pool);
+    return APPLIED;
+  }
   throw `Command ${command} not found`;
+}
+
+/** The pools the engine was told to give the project, in order. Output: their ids, null for
+ * no pool. */
+export function assignedPools() {
+  return [...assigned];
 }
 
 /** Mounts the team rows with project data that only changes when `landRead` is called, as a
  * reload that has not landed yet. Inputs: the scene, saying whether saves are refused, and the
  * theme. Output: nothing. */
 export async function mount(scene = {}, theme = "light") {
-  await mountTab(createElement(Host), (command) => answer(scene, command), theme);
+  assigned = [];
+  await mountTab(createElement(Host), (command, args) => answer(scene, command, args), theme);
 }
 
 /** Lands the project read the save asked for, one revision on. Output: nothing. */

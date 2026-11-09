@@ -5,6 +5,8 @@ import * as agents from "../../src/screens/project/agents.tsx";
 import * as team from "../../src/screens/team/controls.tsx";
 import * as coordination from "../../src/screens/team/coordination.tsx";
 
+export { boxOf } from "./settings-tab.mjs";
+
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 let root = null;
 const PAGE = '<div class="shell"><nav class="sidebar"></nav><main class="main"><div class="page"><div class="pj" id="mount"></div></div></main></div>';

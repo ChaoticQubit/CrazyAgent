@@ -6,7 +6,7 @@ import { press, tabRunner } from "./settings-tab-steps.mjs";
 const fixture = await bundle(new URL("./fixtures/team-rows-save.mjs", import.meta.url).pathname);
 const onRows = tabRunner(fixture);
 const SAVE = "desktop_update_project_setup";
-const ASSIGN = "desktop_open_project";
+const ASSIGN = "desktop_edit_model_access";
 const MORE = 'button[aria-label="More Codex agents"]';
 const DIALOG = "dialog[open]";
 const sent = async (page, name) => (await page.evaluate("Fixture.commands()")).filter((command) => command === name).length;
@@ -73,7 +73,8 @@ test("Use no pool takes the project off its pool", async () => {
   await onRows({}, async (page) => {
     await page.evaluate('Fixture.choose("account", "")');
     await press(page, `${DIALOG} button`, "Use no pool");
-    assert.equal(await sent(page, ASSIGN), 1);
+    assert.deepEqual(await page.evaluate("Fixture.assignedPools()"), [null]);
+    assert.equal((await state(page)).alert, null);
   });
 });
 
@@ -81,6 +82,6 @@ test("picking another pool does not ask", async () => {
   await onRows({}, async (page) => {
     await page.evaluate('Fixture.choose("account", "pool-b")');
     assert.equal(await page.evaluate(`document.querySelector("${DIALOG}") === null`), true);
-    assert.equal(await sent(page, ASSIGN), 1);
+    assert.deepEqual(await page.evaluate("Fixture.assignedPools()"), ["pool-b"]);
   });
 });
