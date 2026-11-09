@@ -153,6 +153,7 @@ const NOT_OPEN: &[&str] = &[
     "ide_connection_closed",
     "ide_events_busy",
     "ide_events_lagged",
+    "ide_extension_ai_locked",
     "ide_extension_ask_missing",
     "ide_extension_decide_outcome_unknown",
     "ide_extension_request_outcome_unknown",
