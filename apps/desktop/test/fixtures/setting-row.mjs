@@ -26,19 +26,23 @@ export function mount(width, theme = "light") {
     h(SettingLine, { label: "Plain", help: "Help under the label." }, h("button", { id: "plain", type: "button" }, "Edit")),
     h(SettingLine, { label: "Changed", changed: true }, h("button", { id: "marked", type: "button" }, "Edit")),
     h(SettingLine, { label: "Pool name", htmlFor: "named" }, h("input", { id: "named", className: "input" })),
-    h(SettingLine, { label: "Wide", help: "Under.", wide: true }, h("textarea", { id: "wide", className: "textarea" })))));
+    h(SettingLine, { label: "Wide", help: "Under.", wide: true }, h("textarea", { id: "wide", className: "textarea", style: { width: "200px" } })))));
 }
 
 const rect = (selector) => document.querySelector(selector)?.getBoundingClientRect() ?? null;
 
-/** Reads the rows. Output: each row's label, help and control edges and its changed marks. */
+/** Reads the rows. Output: each row's label, help and control edges, the control's and the
+ * row's vertical middles, where the control's first child starts and its changed marks. */
 export function rows() {
   return [...document.querySelectorAll(".set-row")].map((row) => {
+    const box = row.getBoundingClientRect();
     const label = row.querySelector(".set-label").getBoundingClientRect();
-    const control = row.querySelector(".set-ctl").getBoundingClientRect();
+    const holder = row.querySelector(".set-ctl");
+    const control = holder.getBoundingClientRect();
     const help = row.querySelector(".set-help")?.getBoundingClientRect();
     return {
       label: label.left, labelBottom: label.bottom, control: control.left, controlTop: control.top, right: control.right,
+      controlMiddle: control.top + control.height / 2, rowMiddle: box.top + box.height / 2, childLeft: holder.firstElementChild.getBoundingClientRect().left,
       help: help?.top ?? null, helpRight: help?.right ?? null, marks: [...row.querySelectorAll(".set-changed")].map((mark) => mark.textContent),
     };
   });

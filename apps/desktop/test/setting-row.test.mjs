@@ -26,6 +26,7 @@ test("a row keeps its label and help on the left and its control on the right", 
   assert.notEqual(plain.help, null, "the help is shown");
   assert.ok(plain.help >= plain.labelBottom - 1, JSON.stringify(plain));
   assert.ok(plain.helpRight <= plain.control, JSON.stringify(plain));
+  assert.ok(Math.abs(plain.controlMiddle - plain.rowMiddle) <= 1, JSON.stringify(plain));
 });
 
 test("only a row whose value differs from its default carries the changed mark", async () => {
@@ -36,6 +37,7 @@ test("only a row whose value differs from its default carries the changed mark",
 test("a wide row stacks its control under the label at the label's left edge", async () => {
   const wide = (await onSection(WIDTH_PX, rows))[3];
   assert.ok(Math.abs(wide.control - wide.label) <= 1, JSON.stringify(wide));
+  assert.ok(Math.abs(wide.childLeft - wide.label) <= 1, JSON.stringify(wide));
   assert.ok(wide.controlTop >= wide.labelBottom - 1, JSON.stringify(wide));
 });
 
