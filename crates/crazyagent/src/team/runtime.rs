@@ -4906,7 +4906,6 @@ impl TeamRuntime {
                     }
                     match self.wake(stored, pinned, &harness, slot.tools, &account, None)? {
                         Ok((agent, resumed)) => {
-                            super::owner_start_alone(&self.connection, project, pinned)?;
                             woken_fresh = !resumed;
                             agent
                         }
