@@ -86,11 +86,7 @@ pub type Unlocked<T> =
 /// at zero, and one attention request when a new notification arrived.
 /// Takes the main window, the unseen count and whether one is new.
 /// Returns a plain failure where the platform has no app badge.
-pub fn attention(
-    window: &tauri::WebviewWindow,
-    unseen: u32,
-    alert: bool,
-) -> Result<(), BridgeError> {
+pub fn attention(window: &tauri::Window, unseen: u32, alert: bool) -> Result<(), BridgeError> {
     window
         .set_badge_count((unseen > 0).then_some(i64::from(unseen)))
         .map_err(|_| failure("attention_unavailable"))?;

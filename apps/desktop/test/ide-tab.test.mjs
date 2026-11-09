@@ -114,9 +114,43 @@ test("the IDE tab follows its panel, hides with the tab, closes with the project
   assert.match(source, /hideIde\(/);
   assert.match(source, /touchIde\(/);
   const index = read("src/screens/project/index.tsx");
-  assert.match(index, /closeIde\(projectId\)/, "leaving the project closes its IDE webview");
-  assert.deepEqual(client.bounds({ left: 10.4, top: 80.6, width: 900.2, height: 600.7 }), { x: 10, y: 81, width: 900, height: 601 });
-  assert.equal(client.bounds({ left: 0, top: 0, width: 0, height: 300 }), null, "a hidden panel has no bounds");
+  assert.match(index, /useCloseIde\(projectId, data\.notify\)/, "leaving the project closes its IDE webview");
+  assert.deepEqual(client.bounds({ left: 10.4, top: 80.6, width: 900.2, height: 600.7 }, 838), { x: 10, y: 81, width: 900, height: 601, viewport: 838 }, "the native side needs the page's own height to place the panel in the window");
+  assert.equal(client.bounds({ left: 0, top: 0, width: 0, height: 300 }, 838), null, "a hidden panel has no bounds");
+});
+
+test("no native command or main-window lookup goes through the WebviewWindow type that Tauri refuses while the IDE webview is in the window", () => {
+  const native = read("src-tauri/src/lib.rs");
+  const app = native.slice(0, native.indexOf("mod tests {"));
+  assert.equal(app.match(/\.invoke_handler\(/g).length, 1, "a second handler would replace the gated one");
+  assert.match(app, /\.invoke_handler\(native_handler\(\)\)/, "the app registers the gated handler");
+  assert.equal(app.match(/generate_handler!/g).length, 1, "the one command list is the gated one");
+  assert.match(app, /admit_pages::<tauri::Wry>\(tauri::generate_handler!/, "the page check wraps the generated handler");
+  assert.doesNotMatch(native, /\bWebviewWindow\b/, "each command takes the calling Webview, which Tauri never refuses");
+  for (const path of ["src-tauri/src/lib.rs", "src-tauri/src/bridge/notify.rs"]) {
+    assert.doesNotMatch(read(path), /get_webview_window\("main"\)/, `${path} finds the main window while the IDE is loaded`);
+  }
+});
+
+test("a refused place, hide or close reaches the owner instead of vanishing", async () => {
+  const { bundle, withPage } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/ide-tab-failures.mjs", import.meta.url).pathname);
+  const opened = (refused, then) => withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(${JSON.stringify(refused)})`);
+    assert.equal(await evaluate(`Fixture.called("desktop_ide_place")`), true, "the opened IDE is placed");
+    await evaluate("Fixture.frames()");
+    return then(evaluate);
+  });
+  const left = (evaluate) => evaluate(`Fixture.leave()`).then(() => evaluate("Fixture.frames()")).then(() => evaluate("Fixture.seen()"));
+  assert.match(await opened(["desktop_ide_place"], (evaluate) => evaluate("Fixture.seen()")).then((seen) => seen.alert), /couldn't move to fit/, "a failed place shows on the tab");
+  assert.ok((await opened(["desktop_ide_hide"], left)).reported.some((line) => /^hide: .*couldn't be hidden/.test(line)), "a failed hide reaches the page");
+  assert.ok((await opened(["desktop_ide_close"], left)).reported.some((line) => /^close: .*didn't close/.test(line)), "a failed close reaches the owner");
+  const page = read("src/screens/project/index.tsx");
+  assert.ok(page.indexOf("{ideHideProblem &&") >= 0 && page.indexOf("{ideHideProblem &&") < page.indexOf('className="pj-tab-panel"'), "a failed hide shows above the tab panel, outside the box the IDE may still cover");
+  const clean = await opened([], left);
+  assert.ok(clean.reported.length > 0 && clean.reported.every((line) => line === "hide: null"), `calls that work tell the owner nothing: ${JSON.stringify(clean.reported)}`);
+  assert.equal(clean.alert, null);
 });
 
 test("an open dialog, drawer or menu hides the IDE webview until the last one closes", async () => {
@@ -147,7 +181,7 @@ test("an open the tab gave up on is refused quietly instead of showing a problem
   const lib = read("src-tauri/src/lib.rs");
   const open = lib.slice(lib.indexOf("async fn desktop_ide_open"), lib.indexOf("async fn desktop_ide_place"));
   assert.ok(open.indexOf("views.begin(&project)") >= 0 && open.indexOf("views.begin(&project)") < open.indexOf("ide_open(project"), "the ticket is taken before the engine call");
-  assert.match(open, /ide::show\(&app, &window, &views, &project, workbench, bounds, ticket\)/);
+  assert.match(open, /ide::show\(\s*&app,\s*&webview\.window\(\),\s*&views,\s*&project,\s*workbench,\s*bounds,\s*ticket,?\s*\)/);
 });
 
 test("the TUI focus poll reaches the engine only while a project's IDE webview is loaded", () => {
@@ -158,27 +192,27 @@ test("the TUI focus poll reaches the engine only while a project's IDE webview i
   assert.match(focus, /views: State<'_, ide::IdeViews>/);
   assert.match(focus, /if !views\.any_loaded\(\) \{\s*return Ok\(None\);\s*\}/, "with no IDE loaded no reveal can mark a focus");
   assert.ok(focus.indexOf("views.any_loaded()") < focus.indexOf("ide_focus()"), "the engine is not asked, and its bridge lock not taken, before the check");
-  assert.ok(focus.indexOf("main_window(&window)?") < focus.indexOf("views.any_loaded()"), "only the main window may ask");
+  assert.ok(focus.indexOf("main_window(&webview)?") < focus.indexOf("views.any_loaded()"), "only the main window may ask");
 });
 
 const command = (lib, name) => {
-  const start = lib.indexOf(`async fn ${name}(`);
+  const start = lib.search(new RegExp(`async fn ${name}(<R: Runtime>)?\\(`));
   assert.ok(start >= 0, `${name} exists`);
   return lib.slice(start, lib.indexOf("#[tauri::command]", start));
 };
 
 test("the IDE webview follows its panel through any layout shift or scroll, and the tab fills the space left", () => {
-  const box = { x: 0, y: 120, width: 900, height: 600 };
+  const box = { x: 0, y: 120, width: 900, height: 600, viewport: 838 };
   assert.equal(client.sameBounds(box, { ...box }), true);
   assert.equal(client.sameBounds(box, null), false, "the first measure always places");
-  for (const moved of [{ ...box, y: 168 }, { ...box, x: 1 }, { ...box, width: 899 }, { ...box, height: 640 }]) {
+  for (const moved of [{ ...box, y: 168 }, { ...box, x: 1 }, { ...box, width: 899 }, { ...box, height: 640 }, { ...box, viewport: 870 }]) {
     assert.equal(client.sameBounds(box, moved), false, JSON.stringify(moved));
   }
   const tab = read("src/screens/project/ide.tsx");
   assert.match(tab, /window\.requestAnimationFrame\(follow\)/, "the panel's box is compared every frame while shown, so a banner or a scroll that moves it without a resize moves the IDE too");
   assert.match(tab, /window\.cancelAnimationFrame\(frame\)/, "hiding the tab stops following");
   assert.match(tab, /if \(!box \|\| sameBounds\(box, last\)\) return;/, "the window hears only a box that changed");
-  assert.match(tab, /const place = \(\) => \{\s*if \(!shown\) return;\s*const box = bounds\(element\.getBoundingClientRect\(\)\);/, "nothing is measured before the IDE shows");
+  assert.match(tab, /const place = \(\) => \{\s*if \(!shown\) return;\s*const box = bounds\(element\.getBoundingClientRect\(\), window\.innerHeight\);/, "nothing is measured before the IDE shows");
   assert.match(tab, /if \(!live \|\| !shown\) \{\s*frame = 0;\s*return;\s*\}/, "the loop runs only while the IDE is shown");
   assert.match(tab, /if \(frame === 0\) follow\(\);/, "the loop starts once the IDE shows, never twice");
   const css = read("src/screens/project/ide.css");

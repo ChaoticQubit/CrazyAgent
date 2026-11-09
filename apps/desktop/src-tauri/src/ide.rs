@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::webview::{NewWindowResponse, WebviewBuilder};
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Rect, Url, WebviewUrl, WebviewWindow,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Rect, Runtime, Url, WebviewUrl, Window,
 };
 
 /// The script every IDE webview runs before the workbench loads: it drops the control
@@ -33,7 +33,8 @@ fn refused(code: &'static str) -> BridgeError {
     }
 }
 
-/// The panel the IDE webview covers, in the main window's logical pixels.
+/// The panel the IDE webview covers, in the page's logical pixels, and the height of the page's
+/// view.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bounds {
@@ -41,22 +42,44 @@ pub struct Bounds {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    pub viewport: f64,
 }
 
 impl Bounds {
     /// Checks the panel the window sent: finite, inside a sane screen and at least one
     /// pixel each way. Input: the bounds. Output: them, or `ide_bounds_invalid`.
     pub fn checked(self) -> Result<Self, BridgeError> {
-        let spans = [self.x, self.y, self.width, self.height];
+        let spans = [self.x, self.y, self.width, self.height, self.viewport];
         let sane = spans
             .iter()
             .all(|span| span.is_finite() && (0.0..=SPAN_MAX).contains(span))
             && self.width >= 1.0
-            && self.height >= 1.0;
+            && self.height >= 1.0
+            && self.viewport >= 1.0;
         if !sane {
             return Err(refused("ide_bounds_invalid"));
         }
         Ok(self)
+    }
+
+    /// Moves a panel counted from the top of the page to one counted from the top of the
+    /// window's content view. On macOS that view reaches under the title bar and the page starts
+    /// below it, so they differ by how much shorter the page is. A page read mid-resize that is
+    /// taller than the view moves nothing. Input: the content view's height in logical pixels.
+    /// Output: the moved bounds.
+    fn below_inset(self, content_height: f64) -> Self {
+        Self {
+            y: self.y + (content_height - self.viewport).max(0.0),
+            ..self
+        }
+    }
+
+    /// Counts the panel from the top of the window's content view, where a child webview is
+    /// placed, not from the top of the page. Input: the window. Output: the bounds to place.
+    fn in_window<R: Runtime>(self, window: &Window<R>) -> Result<Self, BridgeError> {
+        let scale = window.scale_factor().map_err(failed)?;
+        let content = window.inner_size().map_err(failed)?;
+        Ok(self.below_inset(content.to_logical::<f64>(scale).height))
     }
 
     fn rect(self) -> Rect {
@@ -349,7 +372,7 @@ fn ide_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )
 }
 
-fn restore_menu(app: &AppHandle) -> Result<(), BridgeError> {
+fn restore_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(), BridgeError> {
     app.set_menu(Menu::default(app).map_err(failed)?)
         .map_err(failed)?;
     Ok(())
@@ -364,13 +387,14 @@ fn restore_menu(app: &AppHandle) -> Result<(), BridgeError> {
 /// newer open came while the engine opened it.
 pub fn show(
     app: &AppHandle,
-    window: &WebviewWindow,
+    window: &Window,
     views: &IdeViews,
     project: &ProjectId,
     workbench: Workbench,
     bounds: Bounds,
     ticket: u64,
 ) -> Result<(), BridgeError> {
+    let bounds = bounds.in_window(window)?;
     let mut held = views.lock();
     if !held.admit(project, ticket) {
         return Err(refused("ide_open_cancelled"));
@@ -419,8 +443,6 @@ pub fn show(
                     NewWindowResponse::Deny
                 });
             let webview = window
-                .as_ref()
-                .window()
                 .add_child(
                     builder,
                     LogicalPosition::new(bounds.x, bounds.y),
@@ -443,14 +465,16 @@ pub fn show(
         webview.hide().map_err(failed)?;
         return Err(failed(error));
     }
+    #[cfg(feature = "native-webdriver")]
+    crate::ide_probe::ask_once(webview.clone());
     webview.set_focus().map_err(failed)?;
     Ok(())
 }
 
 /// Moves the shown IDE webview over its panel after the panel moved or resized. Inputs: the
 /// app, the views, the project and the panel. Output: Ok, also when that IDE is not shown.
-pub fn place(
-    app: &AppHandle,
+pub fn place<R: Runtime>(
+    app: &AppHandle<R>,
     views: &IdeViews,
     project: &ProjectId,
     bounds: Bounds,
@@ -464,6 +488,7 @@ pub fn place(
         .get(project.as_str())
         .and_then(|loaded| app.get_webview(&loaded.label))
     {
+        let bounds = bounds.in_window(&webview.window())?;
         webview.set_bounds(bounds.rect()).map_err(failed)?;
     }
     Ok(())
@@ -472,7 +497,11 @@ pub fn place(
 /// Hides a project's IDE webview when its tab is left or an overlay covers it, keeping it
 /// loaded, stops an open of it still waiting for the engine, and gives the app its own menu
 /// back. Inputs: the app, the views and the project. Output: Ok.
-pub fn hide(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<(), BridgeError> {
+pub fn hide<R: Runtime>(
+    app: &AppHandle<R>,
+    views: &IdeViews,
+    project: &ProjectId,
+) -> Result<(), BridgeError> {
     let mut held = views.lock();
     held.cancel(project);
     if held.shown.as_deref() != Some(project.as_str()) {
@@ -492,7 +521,11 @@ pub fn hide(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<()
 /// Closes a project's IDE webview when the project page closes, stops an open of it still
 /// waiting for the engine, and gives the app its own menu back if that IDE was shown.
 /// Inputs: the app, the views and the project. Output: Ok.
-pub fn close(app: &AppHandle, views: &IdeViews, project: &ProjectId) -> Result<(), BridgeError> {
+pub fn close<R: Runtime>(
+    app: &AppHandle<R>,
+    views: &IdeViews,
+    project: &ProjectId,
+) -> Result<(), BridgeError> {
     let mut held = views.lock();
     held.cancel(project);
     let shown = held.shown.as_deref() == Some(project.as_str());
@@ -621,12 +654,39 @@ mod tests {
     }
 
     #[test]
+    fn a_panel_is_counted_from_the_content_view_and_not_from_the_page() {
+        let panel = Bounds {
+            x: 244.0,
+            y: 144.0,
+            width: 1012.0,
+            height: 678.0,
+            viewport: 838.0,
+        };
+        assert_eq!(
+            panel.below_inset(870.0),
+            Bounds { y: 176.0, ..panel },
+            "the page starts 32 below the top of a content view that reaches under the title bar"
+        );
+        assert_eq!(
+            panel.below_inset(838.0),
+            panel,
+            "a page that fills the content view is already counted from its top"
+        );
+        assert_eq!(
+            panel.below_inset(800.0),
+            panel,
+            "a page caught mid-resize taller than the content view moves nothing"
+        );
+    }
+
+    #[test]
     fn panel_bounds_must_be_finite_on_screen_and_visible() {
         let fine = Bounds {
             x: 0.0,
             y: 81.0,
             width: 900.0,
             height: 601.0,
+            viewport: 720.0,
         };
         assert_eq!(fine.checked().map_err(|error| error.code), Ok(fine));
         for bad in [
@@ -646,6 +706,14 @@ mod tests {
             },
             Bounds {
                 x: SPAN_MAX + 1.0,
+                ..fine
+            },
+            Bounds {
+                viewport: 0.0,
+                ..fine
+            },
+            Bounds {
+                viewport: f64::NAN,
                 ..fine
             },
         ] {

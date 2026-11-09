@@ -287,7 +287,7 @@ pub fn performed<R: tauri::Runtime>(app: &tauri::AppHandle<R>, performed: &Actio
     if !app.state::<Notices>().clicked(id) {
         return;
     }
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();

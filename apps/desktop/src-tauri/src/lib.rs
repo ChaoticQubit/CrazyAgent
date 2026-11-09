@@ -3,6 +3,8 @@ pub mod ide;
 mod updates;
 
 #[cfg(feature = "native-webdriver")]
+mod ide_probe;
+#[cfg(feature = "native-webdriver")]
 mod native_refresh_observation;
 
 use bridge::intake::FolderSize;
@@ -53,8 +55,8 @@ use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
-use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
+use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 use updates::{AvailableUpdate, InstallOutcome, UpdateProgress, UpdateSettings, UpdateState};
@@ -63,8 +65,8 @@ pub struct NativeState(BridgeQueue);
 
 pub struct TerminalState(Arc<Terminals>);
 
-fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
-    if window.label() != "main" {
+fn main_window<R: Runtime>(webview: &Webview<R>) -> Result<(), BridgeError> {
+    if webview.label() != "main" {
         return Err(BridgeError {
             code: "window_denied",
             cause: None,
@@ -76,9 +78,9 @@ fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
 
 /// Admits the main window and the terminal wall windows to the terminal, graph, stop and
 /// Terminals per window commands; any other window gets `window_denied`. Takes the calling
-/// window. Returns unit or the refusal.
-fn terminal_window(window: &WebviewWindow) -> Result<(), BridgeError> {
-    if !bridge::terminal::window_label_valid(window.label()) {
+/// page. Returns unit or the refusal.
+fn terminal_window(webview: &Webview) -> Result<(), BridgeError> {
+    if !bridge::terminal::window_label_valid(webview.label()) {
         return Err(engine_failure("window_denied"));
     }
     Ok(())
@@ -86,11 +88,11 @@ fn terminal_window(window: &WebviewWindow) -> Result<(), BridgeError> {
 
 /// Admits the main window to one project's terminal, graph, stop and setting commands, and a
 /// terminal wall window only for the project its label was made for; any other window or
-/// project gets `window_denied`. Takes the calling window and the project id. Returns unit or
+/// project gets `window_denied`. Takes the calling page and the project id. Returns unit or
 /// the refusal.
-fn terminal_window_for(window: &WebviewWindow, id: &str) -> Result<(), BridgeError> {
-    terminal_window(window)?;
-    let label = window.label();
+fn terminal_window_for(webview: &Webview, id: &str) -> Result<(), BridgeError> {
+    terminal_window(webview)?;
+    let label = webview.label();
     let admitted = label == "main"
         || ProjectId::new(id).is_ok_and(|project| bridge::terminal::window_admits(label, &project));
     if !admitted {
@@ -222,10 +224,10 @@ async fn ensure_default_engine() -> Result<(), BridgeError> {
 
 #[tauri::command]
 async fn desktop_connect(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<ConnectionStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let mut bridge = lock(&state).await?;
     ensure_default_engine().await?;
     bridge.connect().await
@@ -240,8 +242,8 @@ pub struct EngineVersions {
 }
 
 #[tauri::command]
-async fn desktop_engine_versions(window: WebviewWindow) -> Result<EngineVersions, BridgeError> {
-    main_window(&window)?;
+async fn desktop_engine_versions(webview: Webview) -> Result<EngineVersions, BridgeError> {
+    main_window(&webview)?;
     let (layout, _) = default_engine()?;
     let check = crazyagent::service::check_engine(
         layout.root(),
@@ -268,11 +270,11 @@ async fn desktop_engine_versions(window: WebviewWindow) -> Result<EngineVersions
 /// `busy` while an update check or install holds the update lock, and holds it itself.
 #[tauri::command]
 async fn desktop_restart_engine(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     update: State<'_, UpdateState>,
 ) -> Result<ConnectionStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
         return Err(engine_failure("engine_restart_unavailable"));
     }
@@ -286,20 +288,20 @@ async fn desktop_restart_engine(
 
 #[tauri::command]
 async fn desktop_status(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<ConnectionStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     Ok(read(&state).await?.status())
 }
 
 #[tauri::command]
 async fn desktop_harness_catalog(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     check: Option<bool>,
 ) -> Result<Vec<HarnessEntry>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state)
         .await?
         .harness_catalog(check.unwrap_or(false))
@@ -308,112 +310,112 @@ async fn desktop_harness_catalog(
 
 #[tauri::command]
 async fn desktop_baselines(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     next: bool,
 ) -> Result<BaselinePage, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.baselines(next).await
 }
 
 #[tauri::command]
 async fn desktop_inspect_baseline(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<BaselineDetail, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.inspect(&id).await
 }
 
 #[tauri::command]
 async fn desktop_approve_baseline(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
 ) -> Result<ActionReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.approve(&ticket).await
 }
 
 #[tauri::command]
 async fn desktop_revoke_baseline(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
 ) -> Result<ActionReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.revoke(&ticket).await
 }
 
 #[tauri::command]
 async fn desktop_reconcile(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<ActionReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.reconcile().await
 }
 
 #[tauri::command]
 async fn desktop_retry(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<ActionReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.retry().await
 }
 
 #[tauri::command]
 async fn desktop_projects(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     next: bool,
 ) -> Result<ProjectPage, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.projects(next).await
 }
 
 #[tauri::command]
 async fn desktop_project_list(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<ProjectList, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.project_list().await
 }
 
 #[tauri::command]
 async fn desktop_create_project(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     spec: ProjectSpec,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.create_project(spec, generation).await
 }
 
 #[tauri::command]
 async fn desktop_project_catalog(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     pool: Option<String>,
     research: Vec<ResearchKind>,
 ) -> Result<ProjectCatalog, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.project_catalog(pool, research).await
 }
 
 #[tauri::command]
 async fn desktop_setup_project(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     spec: ProjectSpec,
     setup: ProjectSetup,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .setup_project(spec, setup, generation)
@@ -422,54 +424,54 @@ async fn desktop_setup_project(
 
 #[tauri::command]
 async fn desktop_project_setup(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<Option<StoredSetup>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.project_setup(&id).await
 }
 
 #[tauri::command]
 async fn desktop_research_jobs(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<bridge::project_setup::ResearchJobs, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.research_jobs(&id).await
 }
 
 #[tauri::command]
 async fn desktop_project_activity(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     limit: usize,
 ) -> Result<bridge::project_setup::ProjectActivity, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.project_activity(&id, limit).await
 }
 
 #[tauri::command]
 async fn desktop_project_context(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<ProjectContext, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.project_context(&id).await
 }
 
 #[tauri::command]
 async fn desktop_project_context_item(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     path: String,
     offset: u64,
 ) -> Result<ContextChunk, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .project_context_item(&id, path, offset)
@@ -478,14 +480,14 @@ async fn desktop_project_context_item(
 
 #[tauri::command]
 async fn desktop_save_research_to_memory(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     research: ResearchKind,
     section: Option<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .save_research_to_memory(&id, research, section, generation)
@@ -494,13 +496,13 @@ async fn desktop_save_research_to_memory(
 
 #[tauri::command]
 async fn desktop_add_project_documents(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     documents: Vec<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .add_project_documents(&id, documents, generation)
@@ -509,12 +511,12 @@ async fn desktop_add_project_documents(
 
 #[tauri::command]
 async fn desktop_project_memories(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     after: Option<String>,
 ) -> Result<Vec<MemoryItem>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state)
         .await?
         .project_memories(&id, after.as_deref())
@@ -523,12 +525,12 @@ async fn desktop_project_memories(
 
 #[tauri::command]
 async fn desktop_ide_asks(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     views: State<'_, ide::IdeViews>,
     id: String,
 ) -> Result<Vec<IdeAskItem>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     if !views.any_loaded() {
         return Ok(Vec::new());
     }
@@ -537,7 +539,7 @@ async fn desktop_ide_asks(
 
 #[tauri::command]
 async fn desktop_review_memory(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     memory: String,
@@ -545,7 +547,7 @@ async fn desktop_review_memory(
     decision: ReviewDecision,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .review_memory(&id, &memory, version, decision, generation)
@@ -554,13 +556,13 @@ async fn desktop_review_memory(
 
 #[tauri::command]
 async fn desktop_memories(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project: Option<String>,
     search: Option<String>,
     before: Option<u64>,
 ) -> Result<MemoryList, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .memories(project.as_deref(), search.as_deref(), before)
@@ -569,33 +571,33 @@ async fn desktop_memories(
 
 #[tauri::command]
 async fn desktop_memory(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<Option<MemoryNote>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.memory(&id).await
 }
 
 #[tauri::command]
 async fn desktop_approved_memories(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project: String,
 ) -> Result<ApprovedMemories, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.approved_memories(&project).await
 }
 
 #[tauri::command]
 async fn desktop_add_memory(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project: Option<String>,
     text: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .add_memory(project.as_deref(), text, generation)
@@ -604,13 +606,13 @@ async fn desktop_add_memory(
 
 #[tauri::command]
 async fn desktop_import_memory(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project: String,
     folder: String,
     generation: u64,
 ) -> Result<MemoryImport, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .import_memory(&project, &folder, generation)
@@ -619,14 +621,14 @@ async fn desktop_import_memory(
 
 #[tauri::command]
 async fn desktop_promote_memory(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project: String,
     memory: String,
     version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .promote_memory(&project, &memory, version, generation)
@@ -635,34 +637,34 @@ async fn desktop_promote_memory(
 
 #[tauri::command]
 async fn desktop_delete_memory(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.delete_memory(&id, generation).await
 }
 
 #[tauri::command]
 async fn desktop_approve_memory(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.approve_memory(&id, generation).await
 }
 
 #[tauri::command]
 async fn desktop_set_agent_memory_writes(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     writes: crazyagent::memory::library::AgentWrites,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_agent_memory_writes(writes, generation)
@@ -671,14 +673,14 @@ async fn desktop_set_agent_memory_writes(
 
 #[tauri::command]
 async fn desktop_forget_memory(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project: String,
     memory: String,
     version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .forget_memory(&project, &memory, version, generation)
@@ -687,14 +689,14 @@ async fn desktop_forget_memory(
 
 #[tauri::command]
 async fn desktop_save_selection_to_memory(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     path: String,
     text: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .save_selection_to_memory(&id, path, text, generation)
@@ -703,14 +705,14 @@ async fn desktop_save_selection_to_memory(
 
 #[tauri::command]
 async fn desktop_remember_research(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project: String,
     research: ResearchKind,
     section: Option<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .remember_research(&project, research, section, generation)
@@ -719,44 +721,44 @@ async fn desktop_remember_research(
 
 #[tauri::command]
 async fn desktop_project_read_paths(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<crazyagent::project_setup::ReadPaths, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.project_read_paths(&id).await
 }
 
 #[tauri::command]
 async fn desktop_project_hidden_paths(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<Vec<String>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.project_hidden_paths(&id).await
 }
 
 #[tauri::command]
 async fn desktop_project_agent_policy(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<crazyagent::sandbox::policy::PolicyView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.project_agent_policy(&id).await
 }
 
 #[tauri::command]
 async fn desktop_set_project_agent_policy(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     version: u64,
     policy: crazyagent::sandbox::policy::AgentPolicy,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_project_agent_policy(&id, version, policy, generation)
@@ -765,25 +767,25 @@ async fn desktop_set_project_agent_policy(
 
 #[tauri::command]
 async fn desktop_project_files(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     query: String,
 ) -> Result<Vec<String>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     state.0.project_files(&id, &query).await
 }
 
 #[tauri::command]
 async fn desktop_set_project_read_paths(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     version: u64,
     paths: Vec<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_project_read_paths(&id, version, paths, generation)
@@ -792,13 +794,13 @@ async fn desktop_set_project_read_paths(
 
 #[tauri::command]
 async fn desktop_set_project_hidden_paths(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     paths: Vec<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_project_hidden_paths(&id, paths, generation)
@@ -807,13 +809,13 @@ async fn desktop_set_project_hidden_paths(
 
 #[tauri::command]
 async fn desktop_delete_project_context(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     path: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .delete_project_context(&id, path, generation)
@@ -822,24 +824,24 @@ async fn desktop_delete_project_context(
 
 #[tauri::command]
 async fn desktop_team_status(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<TeamStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.team_status(&id).await
 }
 
 #[tauri::command]
 async fn desktop_team_agent_messages(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     agent: i64,
     before: Option<crazyagent::team::agent_messages::Cursor>,
     limit: Option<u16>,
 ) -> Result<crazyagent::team::agent_messages::AgentMessages, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state)
         .await?
         .team_agent_messages(&id, agent, before, limit)
@@ -848,13 +850,13 @@ async fn desktop_team_agent_messages(
 
 #[tauri::command]
 async fn desktop_team_message_settings(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     settings: crazyagent::team::agent_messages::MessageSettings,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_message_settings(&id, settings, generation)
@@ -863,13 +865,13 @@ async fn desktop_team_message_settings(
 
 #[tauri::command]
 async fn desktop_team_message(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     text: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_message(&id, text, generation)
@@ -878,14 +880,14 @@ async fn desktop_team_message(
 
 #[tauri::command]
 async fn desktop_team_delegate(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     harness: Option<String>,
     prompt: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_delegate(&id, harness, prompt, generation)
@@ -894,26 +896,26 @@ async fn desktop_team_delegate(
 
 #[tauri::command]
 async fn desktop_team_cancel(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     task: Option<i64>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.team_cancel(&id, task, generation).await
 }
 
 #[tauri::command]
 async fn desktop_team_keep_warm(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     on: bool,
     version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_keep_warm(&id, on, version, generation)
@@ -964,14 +966,14 @@ impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for TeamTimeLimits {
 /// settings: seconds from the listed choices, or none for no limit. Output: the receipt.
 #[tauri::command]
 async fn desktop_team_time_limits(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     limits: TeamTimeLimits,
     version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let TeamTimeLimits {
         turn_secs,
         session_secs,
@@ -985,14 +987,14 @@ async fn desktop_team_time_limits(
 
 #[tauri::command]
 async fn desktop_team_on_harness_switch(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     mode: String,
     version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_on_harness_switch(&id, &mode, version, generation)
@@ -1001,14 +1003,14 @@ async fn desktop_team_on_harness_switch(
 
 #[tauri::command]
 async fn desktop_team_apply_harness_switch(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     mode: String,
     version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_apply_harness_switch(&id, &mode, version, generation)
@@ -1017,13 +1019,13 @@ async fn desktop_team_apply_harness_switch(
 
 #[tauri::command]
 async fn desktop_team_sub_agent_depth(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     depth: u8,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_sub_agent_depth(&id, depth, generation)
@@ -1032,13 +1034,13 @@ async fn desktop_team_sub_agent_depth(
 
 #[tauri::command]
 async fn desktop_team_child_landing(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     mode: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_child_landing(&id, &mode, generation)
@@ -1047,13 +1049,13 @@ async fn desktop_team_child_landing(
 
 #[tauri::command]
 async fn desktop_team_master_branch(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     branch: Option<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_master_branch(&id, branch, generation)
@@ -1062,13 +1064,13 @@ async fn desktop_team_master_branch(
 
 #[tauri::command]
 async fn desktop_team_land_on(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     branch: Option<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_land_on(&id, branch, generation)
@@ -1077,13 +1079,13 @@ async fn desktop_team_land_on(
 
 #[tauri::command]
 async fn desktop_team_background(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     choice: crazyagent::team::BackgroundAtEnd,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_background(&id, choice, generation)
@@ -1092,13 +1094,13 @@ async fn desktop_team_background(
 
 #[tauri::command]
 async fn desktop_team_ask_before_merge(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     on: bool,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_ask_before_merge(&id, on, generation)
@@ -1107,13 +1109,13 @@ async fn desktop_team_ask_before_merge(
 
 #[tauri::command]
 async fn desktop_team_master_lands(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     mode: crazyagent::team::MasterLands,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_master_lands(&id, mode, generation)
@@ -1122,13 +1124,13 @@ async fn desktop_team_master_lands(
 
 #[tauri::command]
 async fn desktop_team_reask_empty_reply(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     on: bool,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_reask_empty_reply(&id, on, generation)
@@ -1137,13 +1139,13 @@ async fn desktop_team_reask_empty_reply(
 
 #[tauri::command]
 async fn desktop_team_catch_up_main(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     mode: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_catch_up_main(&id, &mode, generation)
@@ -1152,13 +1154,13 @@ async fn desktop_team_catch_up_main(
 
 #[tauri::command]
 async fn desktop_team_new_folder_limit(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     files: u32,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_new_folder_limit(&id, files, generation)
@@ -1167,13 +1169,13 @@ async fn desktop_team_new_folder_limit(
 
 #[tauri::command]
 async fn desktop_team_coordination(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     settings: CoordSettings,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_coordination(&id, settings, generation)
@@ -1182,14 +1184,14 @@ async fn desktop_team_coordination(
 
 #[tauri::command]
 async fn desktop_team_harness_mode(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     harness: HarnessKind,
     mode: SubagentMode,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_harness_mode(&id, harness, mode, generation)
@@ -1198,14 +1200,14 @@ async fn desktop_team_harness_mode(
 
 #[tauri::command]
 async fn desktop_team_harness_delivery(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     harness: HarnessKind,
     delivery: Delivery,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_harness_delivery(&id, harness, delivery, generation)
@@ -1214,13 +1216,13 @@ async fn desktop_team_harness_delivery(
 
 #[tauri::command]
 async fn desktop_team_agent_branches(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     mode: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_agent_branches(&id, &mode, generation)
@@ -1229,14 +1231,14 @@ async fn desktop_team_agent_branches(
 
 #[tauri::command]
 async fn desktop_team_finished_agents(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     show: bool,
     version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_finished_agents(&id, show, version, generation)
@@ -1245,14 +1247,14 @@ async fn desktop_team_finished_agents(
 
 #[tauri::command]
 async fn desktop_team_live_master(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     on: bool,
     version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_live_master(&id, on, version, generation)
@@ -1261,13 +1263,13 @@ async fn desktop_team_live_master(
 
 #[tauri::command]
 async fn desktop_team_pause(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     paused: bool,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_pause(&id, paused, generation)
@@ -1276,14 +1278,14 @@ async fn desktop_team_pause(
 
 #[tauri::command]
 async fn desktop_team_hand_off(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     reply: i64,
     step: u8,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_hand_off(&id, reply, step, generation)
@@ -1292,23 +1294,23 @@ async fn desktop_team_hand_off(
 
 #[tauri::command]
 async fn desktop_team_events(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<crazyagent::team::events::AppEvents, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.team_events().await
 }
 
 #[tauri::command]
 async fn desktop_team_wake_rule(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     target: crazyagent::team::events::RuleTarget,
     rule: Option<crazyagent::team::events::WakeRule>,
     version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_wake_rule(target, rule, version, generation)
@@ -1317,14 +1319,14 @@ async fn desktop_team_wake_rule(
 
 #[tauri::command]
 async fn desktop_team_rename(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     agent: i64,
     handle: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_rename(&id, agent, handle, generation)
@@ -1333,13 +1335,13 @@ async fn desktop_team_rename(
 
 #[tauri::command]
 async fn desktop_team_stop_agent(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     agent: i64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    terminal_window_for(&window, &id)?;
+    terminal_window_for(&webview, &id)?;
     lock(&state)
         .await?
         .team_stop_agent(&id, agent, generation)
@@ -1348,14 +1350,14 @@ async fn desktop_team_stop_agent(
 
 #[tauri::command]
 async fn desktop_coord_send(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     agent: i64,
     text: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .coord_send(&id, agent, text, generation)
@@ -1364,14 +1366,14 @@ async fn desktop_coord_send(
 
 #[tauri::command]
 async fn desktop_team_stop_teammate(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     agent: i64,
     pane: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    terminal_window_for(&window, &id)?;
+    terminal_window_for(&webview, &id)?;
     lock(&state)
         .await?
         .team_stop_teammate(&id, agent, pane, generation)
@@ -1380,13 +1382,13 @@ async fn desktop_team_stop_teammate(
 
 #[tauri::command]
 async fn desktop_team_max_harnesses(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     max: Option<u8>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_max_harnesses(&id, max, generation)
@@ -1395,13 +1397,13 @@ async fn desktop_team_max_harnesses(
 
 #[tauri::command]
 async fn desktop_team_max_teammates(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     max: Option<u8>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_max_teammates(&id, max, generation)
@@ -1410,13 +1412,13 @@ async fn desktop_team_max_teammates(
 
 #[tauri::command]
 async fn desktop_team_token_budget(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     tokens: Option<u64>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_token_budget(&id, tokens, generation)
@@ -1425,13 +1427,13 @@ async fn desktop_team_token_budget(
 
 #[tauri::command]
 async fn desktop_team_spread_accounts(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     on: bool,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_spread_accounts(&id, on, generation)
@@ -1440,13 +1442,13 @@ async fn desktop_team_spread_accounts(
 
 #[tauri::command]
 async fn desktop_team_wake_agent(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     agent: i64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_wake_agent(&id, agent, generation)
@@ -1455,36 +1457,36 @@ async fn desktop_team_wake_agent(
 
 #[tauri::command]
 async fn desktop_team_seen(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     upto: i64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.team_seen(&id, upto, generation).await
 }
 
 #[tauri::command]
 async fn desktop_coord_questions(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<crazyagent::team::questions::Inbox, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.coord_questions(&id).await
 }
 
 #[tauri::command]
 async fn desktop_coord_answer(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     message: i64,
     text: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .coord_answer(&id, message, text, generation)
@@ -1493,27 +1495,27 @@ async fn desktop_coord_answer(
 
 #[tauri::command]
 async fn desktop_team_attention(
-    window: WebviewWindow,
+    webview: Webview,
     unseen: u32,
     alert: bool,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
-    bridge::attention(&window, unseen, alert)
+    main_window(&webview)?;
+    bridge::attention(&webview.window(), unseen, alert)
 }
 
 #[tauri::command]
 async fn desktop_team_graph(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<TeamGraph, BridgeError> {
-    terminal_window_for(&window, &id)?;
+    terminal_window_for(&webview, &id)?;
     read(&state).await?.team_graph(&id).await
 }
 
 #[tauri::command]
 async fn desktop_terminal_attach(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     terminals: State<'_, TerminalState>,
     agent: String,
@@ -1521,66 +1523,66 @@ async fn desktop_terminal_attach(
     id: Option<String>,
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, BridgeError> {
-    terminal_window(&window)?;
+    terminal_window(&webview)?;
     let agent = bridge::terminal::agent(&agent)?;
     let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
-    if window.label() != "main" {
+    if webview.label() != "main" {
         let id = id.ok_or_else(|| engine_failure("window_denied"))?;
-        terminal_window_for(&window, &id)?;
+        terminal_window_for(&webview, &id)?;
         let graph = read(&state).await?.team_graph(&id).await?;
         if !bridge::terminal::graph_shows(&graph, &agent) {
             return Err(engine_failure("window_denied"));
         }
     }
-    let room = terminals.0.room(window.label(), &agent)?;
+    let room = terminals.0.room(webview.label(), &agent)?;
     let session = lock(&state).await?.open_terminal(agent, pane).await?;
     room.attach(session, output)
 }
 
 #[tauri::command]
 async fn desktop_terminal_input(
-    window: WebviewWindow,
+    webview: Webview,
     terminals: State<'_, TerminalState>,
     agent: String,
     bytes: Vec<u8>,
 ) -> Result<(), BridgeError> {
-    terminal_window(&window)?;
+    terminal_window(&webview)?;
     let agent = bridge::terminal::agent(&agent)?;
     terminals
         .0
-        .send(window.label(), &agent, TerminalRequest::Input { bytes })
+        .send(webview.label(), &agent, TerminalRequest::Input { bytes })
         .await
 }
 
 #[tauri::command]
 async fn desktop_terminal_prompt(
-    window: WebviewWindow,
+    webview: Webview,
     terminals: State<'_, TerminalState>,
     agent: String,
     text: String,
 ) -> Result<(), BridgeError> {
-    terminal_window(&window)?;
+    terminal_window(&webview)?;
     let agent = bridge::terminal::agent(&agent)?;
     terminals
         .0
-        .send(window.label(), &agent, TerminalRequest::Prompt { text })
+        .send(webview.label(), &agent, TerminalRequest::Prompt { text })
         .await
 }
 
 #[tauri::command]
 async fn desktop_terminal_resize(
-    window: WebviewWindow,
+    webview: Webview,
     terminals: State<'_, TerminalState>,
     agent: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), BridgeError> {
-    terminal_window(&window)?;
+    terminal_window(&webview)?;
     let agent = bridge::terminal::agent(&agent)?;
     terminals
         .0
         .send(
-            window.label(),
+            webview.label(),
             &agent,
             TerminalRequest::Resize { cols, rows },
         )
@@ -1589,25 +1591,25 @@ async fn desktop_terminal_resize(
 
 #[tauri::command]
 fn desktop_terminal_detach(
-    window: WebviewWindow,
+    webview: Webview,
     terminals: State<'_, TerminalState>,
     agent: String,
     serial: u64,
 ) -> Result<(), BridgeError> {
-    terminal_window(&window)?;
+    terminal_window(&webview)?;
     let agent = bridge::terminal::agent(&agent)?;
-    terminals.0.detach(window.label(), &agent, serial)
+    terminals.0.detach(webview.label(), &agent, serial)
 }
 
 #[tauri::command]
 async fn desktop_team_terminals_per_window(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     per_window: TerminalsPerWindow,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .team_terminals_per_window(&id, per_window, generation)
@@ -1616,24 +1618,24 @@ async fn desktop_team_terminals_per_window(
 
 #[tauri::command]
 async fn desktop_terminals_per_window(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<TerminalsPerWindow, BridgeError> {
-    terminal_window_for(&window, &id)?;
+    terminal_window_for(&webview, &id)?;
     read(&state).await?.terminals_per_window(&id).await
 }
 
 #[tauri::command]
 async fn desktop_open_terminal_windows(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     id: String,
     name: String,
     count: usize,
     focus: bool,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
     open_walls(&app, &project, &wall_name(&name), count, focus)
 }
@@ -1644,17 +1646,18 @@ async fn desktop_open_terminal_windows(
 /// the windows its team needs. Output: unit or the `open_walls` failure.
 #[tauri::command]
 async fn desktop_extend_terminal_windows(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     id: String,
     count: usize,
 ) -> Result<(), BridgeError> {
-    terminal_window_for(&window, &id)?;
-    if window.label() == "main" {
+    terminal_window_for(&webview, &id)?;
+    if webview.label() == "main" {
         return Err(engine_failure("window_denied"));
     }
     let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
-    let title = window
+    let title = webview
+        .window()
         .title()
         .map_err(|_| engine_failure("terminal_window_failed"))?;
     let name = wall_name(&bridge::terminal::wall_title_name(&title));
@@ -1668,24 +1671,24 @@ async fn desktop_extend_terminal_windows(
 /// `terminal_window_failed` when that window is not open or does not come forward.
 #[tauri::command]
 fn desktop_focus_terminal_window(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     id: String,
     target: String,
 ) -> Result<(), BridgeError> {
-    terminal_window_for(&window, &id)?;
+    terminal_window_for(&webview, &id)?;
     let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
     let failed = || engine_failure("terminal_window_failed");
-    match bridge::terminal::wall_focus(window.label(), &project, &target)? {
+    match bridge::terminal::wall_focus(webview.label(), &project, &target)? {
         bridge::terminal::WallFocus::Main { hash } => {
             assert!(
                 hash.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"-_.:/#".contains(&b))
             );
-            let main = app.get_webview_window("main").ok_or_else(failed)?;
+            let main = app.get_webview("main").ok_or_else(failed)?;
             main.eval(format!("window.location.hash = \"{hash}\";"))
                 .map_err(|_| failed())?;
-            main.set_focus().map_err(|_| failed())
+            main.window().set_focus().map_err(|_| failed())
         }
         bridge::terminal::WallFocus::Wall { label } => app
             .get_webview_window(&label)
@@ -1700,11 +1703,11 @@ fn desktop_focus_terminal_window(
 /// from any window but main, or `invalid_project`.
 #[tauri::command]
 fn desktop_close_project_walls(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     id: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
     close_walls(&app, Some(&project));
     Ok(())
@@ -1861,7 +1864,7 @@ fn build_wall(
 
 #[tauri::command]
 async fn desktop_update_project_setup(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     setup: ProjectSetup,
@@ -1869,7 +1872,7 @@ async fn desktop_update_project_setup(
     revision: Option<u64>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .update_project_setup(&id, setup, name, revision, generation)
@@ -1878,13 +1881,13 @@ async fn desktop_update_project_setup(
 
 #[tauri::command]
 async fn desktop_remove_project(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     generation: u64,
     delete_name: Option<String>,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .remove_project(&id, generation, delete_name)
@@ -1893,24 +1896,24 @@ async fn desktop_remove_project(
 
 #[tauri::command]
 async fn desktop_project_removal(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<crazyagent::team::cleanup::RemovalPreview, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.removal_preview(id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_cancel_research(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     job: i64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .cancel_research(&id, job, generation)
@@ -1919,13 +1922,13 @@ async fn desktop_cancel_research(
 
 #[tauri::command]
 async fn desktop_retry_research(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     job: i64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .retry_research(&id, job, generation)
@@ -1934,43 +1937,43 @@ async fn desktop_retry_research(
 
 #[tauri::command]
 async fn desktop_plan_roadmap(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.plan_roadmap(&id, generation).await
 }
 
 #[tauri::command]
 async fn desktop_research_log(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     job: i64,
 ) -> Result<ResearchLog, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.research_log(&id, job).await
 }
 
 #[tauri::command]
 async fn desktop_projects_home(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<ProjectsHome, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.projects_home().await
 }
 
 #[tauri::command]
 async fn desktop_set_projects_home(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     path: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_projects_home(path, generation)
@@ -1979,12 +1982,12 @@ async fn desktop_set_projects_home(
 
 #[tauri::command]
 async fn desktop_move_projects_home(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     path: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .move_projects_home(path, generation)
@@ -1993,33 +1996,33 @@ async fn desktop_move_projects_home(
 
 #[tauri::command]
 async fn desktop_found_projects(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Vec<FoundProject>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.found_projects().await
 }
 
 #[tauri::command]
 async fn desktop_folder_size(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     path: String,
 ) -> Result<FolderSize, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.folder_size(path).await
 }
 
 #[tauri::command]
 async fn desktop_add_existing_folder(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     source: String,
     mode: AddMode,
     overrides: Vec<AddOverride>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .add_existing_folder(source, mode, overrides, generation)
@@ -2028,13 +2031,13 @@ async fn desktop_add_existing_folder(
 
 #[tauri::command]
 async fn desktop_start_onboarding(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     path: String,
     pool: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .start_onboarding(path, pool, generation)
@@ -2043,117 +2046,117 @@ async fn desktop_start_onboarding(
 
 #[tauri::command]
 async fn desktop_onboarding(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<OnboardingView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.onboarding(&id).await
 }
 
 #[tauri::command]
 async fn desktop_github_status(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<GitHubStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.github_status()?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_github_sign_in(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<GitHubDeviceCode, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.github_sign_in()?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_github_token(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     token: String,
 ) -> Result<GitHubStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.github_token(token)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_github_use_cli(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<GitHubStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.github_use_cli()?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_github_sign_out(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<GitHubStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.github_sign_out()?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_github_repos(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     page: u32,
 ) -> Result<GitHubRepoPage, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.github_repos(page)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_clone_repo(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     full_name: String,
 ) -> Result<CloneReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.clone_repo(full_name)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_setup_status(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<SetupStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.setup_status().await
 }
 
 #[tauri::command]
 async fn desktop_run_setup(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     pack: Vec<String>,
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.run_setup(pack, generation).await
 }
 
 #[tauri::command]
 async fn desktop_set_pack_entry(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     on: bool,
     version: u64,
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_pack_entry(id, on, version, generation)
@@ -2162,13 +2165,13 @@ async fn desktop_set_pack_entry(
 
 #[tauri::command]
 async fn desktop_remove_pack_entry(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     version: u64,
     generation: u64,
 ) -> Result<SetupStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .remove_pack_entry(id, version, generation)
@@ -2177,33 +2180,33 @@ async fn desktop_remove_pack_entry(
 
 #[tauri::command]
 async fn desktop_open_project(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<ProjectDetail, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.open_project(&id).await
 }
 
 #[tauri::command]
 async fn desktop_history(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     next: bool,
 ) -> Result<HistoryPage, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.history(next).await
 }
 
 #[tauri::command]
 async fn desktop_send_message(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     text: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .send_message(&ticket, &text, generation)
@@ -2212,23 +2215,23 @@ async fn desktop_send_message(
 
 #[tauri::command]
 async fn desktop_master_state(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
 ) -> Result<bridge::master::MasterState, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.master_state(&ticket).await
 }
 
 #[tauri::command]
 async fn desktop_master_turns(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     session_id: String,
     cursor: Option<crazyagent::master_session::MasterCursor>,
 ) -> Result<bridge::master::MasterTurns, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .master_turns(&ticket, &session_id, cursor)
@@ -2237,12 +2240,12 @@ async fn desktop_master_turns(
 
 #[tauri::command]
 async fn desktop_open_master(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .open_default_master(&ticket, generation)
@@ -2251,13 +2254,13 @@ async fn desktop_open_master(
 
 #[tauri::command]
 async fn desktop_close_master(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     session_id: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .close_master(&ticket, &session_id, generation)
@@ -2266,23 +2269,23 @@ async fn desktop_close_master(
 
 #[tauri::command]
 async fn desktop_master_sessions(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
 ) -> Result<bridge::master::MasterSessions, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.master_sessions(&ticket).await
 }
 
 #[tauri::command]
 async fn desktop_master_inputs(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     session_id: String,
     cursors: Vec<String>,
 ) -> Result<bridge::master::MasterInputs, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .master_inputs(&ticket, &session_id, &cursors)
@@ -2291,13 +2294,13 @@ async fn desktop_master_inputs(
 
 #[tauri::command]
 async fn desktop_master_session_turns(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     session_id: String,
     cursor: Option<crazyagent::master_session::MasterCursor>,
 ) -> Result<bridge::master::MasterTurns, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .session_turns(&ticket, &session_id, cursor)
@@ -2306,13 +2309,13 @@ async fn desktop_master_session_turns(
 
 #[tauri::command]
 async fn desktop_new_master_session(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     cancel_running: bool,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .new_master_session(&ticket, cancel_running, generation)
@@ -2321,14 +2324,14 @@ async fn desktop_new_master_session(
 
 #[tauri::command]
 async fn desktop_resume_master_session(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     session_id: String,
     cancel_running: bool,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .resume_master_session(&ticket, &session_id, cancel_running, generation)
@@ -2337,13 +2340,13 @@ async fn desktop_resume_master_session(
 
 #[tauri::command]
 async fn desktop_delete_master_session(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     session_id: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .delete_master_session(&ticket, &session_id, generation)
@@ -2352,14 +2355,14 @@ async fn desktop_delete_master_session(
 
 #[tauri::command]
 async fn desktop_cancel_master_turn(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     session: String,
     turn: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .cancel_master_turn(&ticket, &session, &turn, generation)
@@ -2368,14 +2371,14 @@ async fn desktop_cancel_master_turn(
 
 #[tauri::command]
 async fn desktop_submit_master(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     session_id: String,
     text: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .submit_master(&ticket, &session_id, &text, generation)
@@ -2384,13 +2387,13 @@ async fn desktop_submit_master(
 
 #[tauri::command]
 async fn desktop_replace_brief(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     text: String,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .replace_brief(&ticket, &text, generation)
@@ -2399,48 +2402,48 @@ async fn desktop_replace_brief(
 
 #[tauri::command]
 async fn desktop_pending_intent(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Option<PendingIntent>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.pending_intent()
 }
 
 #[tauri::command]
 async fn desktop_reconcile_intent(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.reconcile_intent().await
 }
 
 #[tauri::command]
 async fn desktop_retry_intent(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.retry_intent().await
 }
 
 #[tauri::command]
 async fn desktop_drop_intent(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<ConnectionStatus, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.drop_intent()
 }
 
 #[tauri::command]
 async fn desktop_prepare_managed_account(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     provider: String,
     label: String,
 ) -> Result<ManagedAccountPlan, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .prepare_managed_account(&provider, &label)
@@ -2449,14 +2452,14 @@ async fn desktop_prepare_managed_account(
 
 #[tauri::command]
 async fn desktop_prepare_configured_account(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     provider: String,
     label: String,
     endpoint: String,
     model: String,
 ) -> Result<ConfiguredAccountPlan, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .prepare_configured_account(&provider, &label, &endpoint, &model)
@@ -2465,23 +2468,23 @@ async fn desktop_prepare_configured_account(
 
 #[tauri::command]
 async fn desktop_account_auth_capabilities(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
 ) -> Result<AccountAuthCapabilitiesReply, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.account_auth_capabilities(&ticket).await
 }
 
 #[tauri::command]
 async fn desktop_configure_account_profile(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     secret: Option<String>,
     generation: u64,
 ) -> Result<AccountProfileView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let secret = secret
         .map(|value| AccountSecret::new(value.into_bytes()))
         .transpose()
@@ -2506,30 +2509,30 @@ async fn desktop_configure_account_profile(
 
 #[tauri::command]
 async fn desktop_read_account_profile(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<AccountProfileView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.read_account_profile().await
 }
 
 #[tauri::command]
 async fn desktop_owner_profile(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Option<OwnerProfile>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.owner_profile().await
 }
 
 #[tauri::command]
 async fn desktop_save_owner_profile(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     profile: OwnerProfile,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .save_owner_profile(profile, generation)
@@ -2538,21 +2541,21 @@ async fn desktop_save_owner_profile(
 
 #[tauri::command]
 async fn desktop_sandbox_settings(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<SandboxSettings, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.sandbox_settings().await
 }
 
 #[tauri::command]
 async fn desktop_set_sandbox_settings(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     settings: SandboxSettings,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_sandbox_settings(settings, generation)
@@ -2561,40 +2564,40 @@ async fn desktop_set_sandbox_settings(
 
 #[tauri::command]
 async fn desktop_pool_summaries(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Vec<PoolSummary>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.pool_summaries().await
 }
 
 #[tauri::command]
 async fn desktop_account_schedule(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Schedule, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.account_schedule().await
 }
 
 #[tauri::command]
 async fn desktop_account_ranking(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Vec<PoolRanking>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.account_ranking().await
 }
 
 #[tauri::command]
 async fn desktop_set_account_schedule(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     change: ScheduleChange,
     version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_account_schedule(change, version, generation)
@@ -2603,148 +2606,148 @@ async fn desktop_set_account_schedule(
 
 #[tauri::command]
 async fn desktop_account_catalog(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Vec<ProviderEntry>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.account_catalog().await
 }
 
 #[tauri::command]
 async fn desktop_list_accounts(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     after: Option<String>,
     limit: u16,
 ) -> Result<AccountPage, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.list_accounts(after, limit).await
 }
 
 #[tauri::command]
 async fn desktop_add_account(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     draft: AccountDraft,
     key: Option<String>,
 ) -> Result<AccountView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.add_account(draft, key).await
 }
 
 #[tauri::command]
 async fn desktop_rename_account(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     name: String,
 ) -> Result<AccountView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.rename_account(&id, name).await
 }
 
 #[tauri::command]
 async fn desktop_remove_account(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.remove_account(&id).await
 }
 
 #[tauri::command]
 async fn desktop_check_account(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<AccountCheck, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.check_account(&id).await
 }
 
 #[tauri::command]
 async fn desktop_local_models(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     url: String,
 ) -> Result<Vec<String>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.local_models(url).await
 }
 
 #[tauri::command]
 async fn desktop_plugin_skills(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
 ) -> Result<Vec<SkillView>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.plugin_skills(project_id).await
 }
 
 #[tauri::command]
 async fn desktop_plugin_servers(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
 ) -> Result<Vec<ServerView>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.plugin_servers(project_id).await
 }
 
 #[tauri::command]
 async fn desktop_plugin_hooks(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
 ) -> Result<Vec<HookView>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     read(&state).await?.plugin_hooks(project_id).await
 }
 
 #[tauri::command]
 async fn desktop_add_hooks(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     scope: Scope,
     folder: String,
 ) -> Result<Vec<HookView>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.add_hooks(scope, folder).await
 }
 
 #[tauri::command]
 async fn desktop_set_hook_enabled(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     enabled: bool,
 ) -> Result<HookView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.set_hook_enabled(id, enabled).await
 }
 
 #[tauri::command]
 async fn desktop_add_skill(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     scope: Scope,
     folder: String,
 ) -> Result<SkillView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.add_skill(scope, folder).await
 }
 
 #[tauri::command]
 async fn desktop_set_skill_enabled(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     enabled: bool,
     version: u64,
 ) -> Result<SkillView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_skill_enabled(id, enabled, version)
@@ -2753,58 +2756,58 @@ async fn desktop_set_skill_enabled(
 
 #[tauri::command]
 async fn desktop_skill_detail(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     project_id: Option<String>,
 ) -> Result<crazyagent::skills::SkillDetail, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.skill_detail(id, project_id).await
 }
 
 #[tauri::command]
 async fn desktop_skill_import_scan(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<crazyagent::skills::import::ImportList, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = read(&state).await?.skill_import_scan()?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_import_skill(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     folder: String,
     replace: Option<String>,
 ) -> Result<crazyagent::skills::import::Imported, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = read(&state).await?.import_skill(folder, replace)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_remove_skill(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     version: u64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.remove_skill(id, version).await
 }
 
 #[tauri::command]
 async fn desktop_add_mcp_server(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     scope: Scope,
     name: String,
     spec: ServerSpec,
     secrets: Vec<(String, String)>,
 ) -> Result<ServerView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = read(&state)
         .await?
         .add_mcp_server(scope, name, spec, secrets)?;
@@ -2813,13 +2816,13 @@ async fn desktop_add_mcp_server(
 
 #[tauri::command]
 async fn desktop_update_mcp_server(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     spec: ServerSpec,
     version: u64,
 ) -> Result<ServerView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .update_mcp_server(id, spec, version)
@@ -2828,24 +2831,24 @@ async fn desktop_update_mcp_server(
 
 #[tauri::command]
 async fn desktop_approve_mcp_server(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     spec: ServerSpec,
 ) -> Result<ServerView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.approve_mcp_server(id, spec).await
 }
 
 #[tauri::command]
 async fn desktop_set_mcp_server_enabled(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     enabled: bool,
     version: u64,
 ) -> Result<ServerView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_mcp_server_enabled(id, enabled, version)
@@ -2854,25 +2857,25 @@ async fn desktop_set_mcp_server_enabled(
 
 #[tauri::command]
 async fn desktop_remove_mcp_server(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     version: u64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.remove_mcp_server(id, version).await
 }
 
 #[tauri::command]
 async fn desktop_switch_plugin(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
     id: String,
     on: bool,
     version: u64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .switch_plugin(project_id, id, on, version)
@@ -2881,56 +2884,56 @@ async fn desktop_switch_plugin(
 
 #[tauri::command]
 async fn desktop_set_mcp_secret(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     name: String,
     value: String,
 ) -> Result<ServerView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.set_mcp_secret(id, name, value).await
 }
 
 #[tauri::command]
 async fn desktop_remove_mcp_secret(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     name: String,
 ) -> Result<ServerView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.remove_mcp_secret(id, name).await
 }
 
 #[tauri::command]
 async fn desktop_check_mcp_server(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<ServerView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.check_mcp_server(id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_project_plugins(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<EffectivePlugins, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.project_plugins(project_id).await
 }
 
 #[tauri::command]
 async fn desktop_tool_switches(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
     server_id: Option<String>,
 ) -> Result<Vec<ToolView>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .tool_switches(project_id, server_id)
@@ -2939,14 +2942,14 @@ async fn desktop_tool_switches(
 
 #[tauri::command]
 async fn desktop_set_tool_switch(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
     server_id: Option<String>,
     tool: String,
     value: Switch,
 ) -> Result<Vec<ToolView>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .set_tool_switch(project_id, server_id, tool, value)
@@ -2955,12 +2958,12 @@ async fn desktop_set_tool_switch(
 
 #[tauri::command]
 async fn desktop_restore_tool_switches(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
     server_id: Option<String>,
 ) -> Result<Vec<ToolView>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .restore_tool_switches(project_id, server_id)
@@ -2969,43 +2972,43 @@ async fn desktop_restore_tool_switches(
 
 #[tauri::command]
 async fn desktop_agents(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
 ) -> Result<Vec<AgentView>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.agents(project_id).await
 }
 
 #[tauri::command]
 async fn desktop_stop_agent(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<AgentView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.stop_agent(id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_account_use(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     account_id: String,
 ) -> Result<AccountUse, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.account_use(account_id).await
 }
 
 #[tauri::command]
 async fn desktop_release_account(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     account_id: String,
     generation: u64,
 ) -> Result<AccountUse, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let stop = lock(&state)
         .await?
         .stop_account_agents(account_id.clone())?;
@@ -3017,35 +3020,35 @@ async fn desktop_release_account(
 
 #[tauri::command]
 async fn desktop_interrupt_agent(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.interrupt_agent(id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_restart_agent(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<AgentView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.restart_agent(id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_usage_report(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
     since_ms: Option<i64>,
     offset_minutes: i32,
 ) -> Result<UsageReport, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .usage_report(project_id, since_ms, offset_minutes)?;
@@ -3054,39 +3057,40 @@ async fn desktop_usage_report(
 
 #[tauri::command]
 async fn desktop_usage_metrics(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
     since_ms: i64,
 ) -> Result<Metrics, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.usage_metrics(project_id, since_ms)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_usage_refresh(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.usage_refresh()?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_ide_focus(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     views: State<'_, ide::IdeViews>,
 ) -> Result<Option<crazyagent::ide::bridge::reveal::RevealFocus>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     if !views.any_loaded() {
         return Ok(None);
     }
     let call = lock(&state).await?.ide_focus()?;
     let focus = call.await?;
     if focus.is_some() {
+        let window = webview.window();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
@@ -3095,13 +3099,13 @@ async fn desktop_ide_focus(
 
 #[tauri::command]
 async fn desktop_usage_set_reset(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     account: String,
     window_kind: String,
     at_ms: Option<i64>,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .usage_set_reset(account, window_kind, at_ms)?;
@@ -3110,12 +3114,12 @@ async fn desktop_usage_set_reset(
 
 #[tauri::command]
 async fn desktop_ide_extension_asks(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     views: State<'_, ide::IdeViews>,
     project_id: String,
 ) -> Result<Vec<AskView>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     if !views.any_loaded() {
         return Ok(Vec::new());
     }
@@ -3125,13 +3129,13 @@ async fn desktop_ide_extension_asks(
 
 #[tauri::command]
 async fn desktop_ide_extension_approve(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
     id: String,
     version: String,
 ) -> Result<Approved, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .ide_extension_approve(project_id, id, version)?;
@@ -3140,13 +3144,13 @@ async fn desktop_ide_extension_approve(
 
 #[tauri::command]
 async fn desktop_ide_extension_decline(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
     id: String,
     version: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .ide_extension_decline(project_id, id, version)?;
@@ -3155,23 +3159,23 @@ async fn desktop_ide_extension_decline(
 
 #[tauri::command]
 async fn desktop_finished_agents(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<Vec<FinishedAgent>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.finished_agents(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_remove_finished_agents(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
     agents: Vec<i64>,
 ) -> Result<crazyagent::team::cleanup::Removal, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .remove_finished_agents(project_id, agents)?;
@@ -3180,38 +3184,38 @@ async fn desktop_remove_finished_agents(
 
 #[tauri::command]
 async fn desktop_changes(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<Vec<ChangeSetView>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.change_sets(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_change_diff(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     head: String,
     page: u16,
 ) -> Result<ChangeDiff, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.change_diff(id, head, page)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_accept_change(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     expected_head: String,
     message: Option<String>,
     target: Option<String>,
 ) -> Result<AcceptOutcome, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .accept_change(id, expected_head, message, target)?;
@@ -3220,56 +3224,56 @@ async fn desktop_accept_change(
 
 #[tauri::command]
 async fn desktop_change_branches(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<TargetBranches, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.change_branches(id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_discard_change(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     expected_head: String,
 ) -> Result<u64, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.discard_change(id, expected_head)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_restore_change(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.restore_change(id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_undo_change(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<crazyagent::landing::AcceptOutcome, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.undo_change(id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_update_change(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.update_change(id)?;
     call.await
 }
@@ -3279,15 +3283,15 @@ async fn desktop_update_change(
 /// and the project's name; the window names only the project and the question.
 #[tauri::command]
 async fn desktop_notify_question(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     notices: State<'_, Notices>,
     project_id: String,
     question_id: u64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     bridge::notify::available()?;
-    if window.is_focused().unwrap_or(false) {
+    if webview.window().is_focused().unwrap_or(false) {
         return Ok(());
     }
     let call = read(&state)
@@ -3300,47 +3304,47 @@ async fn desktop_notify_question(
     let Some(id) = notices.claim(question.id, question.project.as_str())? else {
         return Ok(());
     };
-    bridge::notify::show(tauri::Manager::app_handle(&window), id, &notice)
+    bridge::notify::show(tauri::Manager::app_handle(&webview), id, &notice)
         .inspect_err(|_| notices.release(question.id, id))
 }
 
 #[tauri::command]
 async fn desktop_notification_target(
-    window: WebviewWindow,
+    webview: Webview,
     notices: State<'_, Notices>,
 ) -> Result<Option<String>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     Ok(notices.take())
 }
 
 #[tauri::command]
-async fn desktop_system_notifications(window: WebviewWindow) -> Result<&'static str, BridgeError> {
-    main_window(&window)?;
+async fn desktop_system_notifications(webview: Webview) -> Result<&'static str, BridgeError> {
+    main_window(&webview)?;
     Ok(bridge::notify::support())
 }
 
 #[tauri::command]
 async fn desktop_questions(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
     after: Option<u64>,
 ) -> Result<QuestionPage, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = read(&state).await?.questions(project_id, after)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_answer_question(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: u64,
     version: u64,
     option: Option<u8>,
     text: Option<String>,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .answer_question(id, version, option, text)?;
@@ -3349,47 +3353,47 @@ async fn desktop_answer_question(
 
 #[tauri::command]
 async fn desktop_dismiss_question(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: u64,
     version: u64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.dismiss_question(id, version)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_question_counts(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Vec<QuestionCount>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = read(&state).await?.question_counts()?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_process_text(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
 ) -> Result<crazyagent::engine::owner::ProcessText, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.process_text(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_save_process_text(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: Option<String>,
     text: String,
     version: u64,
     opened: Option<u64>,
 ) -> Result<crazyagent::engine::owner::SavedText, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .save_process_text(project_id, text, version, opened)?;
@@ -3398,25 +3402,25 @@ async fn desktop_save_process_text(
 
 #[tauri::command]
 async fn desktop_ide_state(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     retry: bool,
 ) -> Result<bridge::ide::IdeView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = read(&state).await?.ide_state(retry)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_ide_open(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     state: State<'_, NativeState>,
     views: State<'_, ide::IdeViews>,
     project_id: String,
     bounds: ide::Bounds,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
     let bounds = bounds.checked()?;
     let (ticket, turn) = views.begin(&project);
@@ -3426,42 +3430,50 @@ async fn desktop_ide_open(
         call.await?
     };
     let workbench = ide::workbench(&opened)?;
-    ide::show(&app, &window, &views, &project, workbench, bounds, ticket)
+    ide::show(
+        &app,
+        &webview.window(),
+        &views,
+        &project,
+        workbench,
+        bounds,
+        ticket,
+    )
 }
 
 #[tauri::command]
-async fn desktop_ide_place(
-    window: WebviewWindow,
-    app: AppHandle,
+async fn desktop_ide_place<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
     views: State<'_, ide::IdeViews>,
     project_id: String,
     bounds: ide::Bounds,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
     ide::place(&app, &views, &project, bounds.checked()?)
 }
 
 #[tauri::command]
-async fn desktop_ide_hide(
-    window: WebviewWindow,
-    app: AppHandle,
+async fn desktop_ide_hide<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
     views: State<'_, ide::IdeViews>,
     project_id: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     ide::hide(&app, &views, &bridge::ide::ide_project(&project_id)?)
 }
 
 #[tauri::command]
-async fn desktop_ide_close(
-    window: WebviewWindow,
-    app: AppHandle,
+async fn desktop_ide_close<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
     state: State<'_, NativeState>,
     views: State<'_, ide::IdeViews>,
     project_id: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
     let closing = views.closing(&project);
     ide::close(&app, &views, &project)?;
@@ -3479,12 +3491,12 @@ async fn desktop_ide_close(
 
 #[tauri::command]
 async fn desktop_ide_touch(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     views: State<'_, ide::IdeViews>,
     project_id: String,
 ) -> Result<bool, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
     if !views.loaded(&project) {
         return Ok(false);
@@ -3495,10 +3507,10 @@ async fn desktop_ide_touch(
 
 #[tauri::command]
 async fn desktop_import_instructions_file(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Option<String>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let path = match bridge::picker::choose(bridge::picker::INSTRUCTIONS_SCRIPT).await? {
         Pick::Canceled => return Ok(None),
         Pick::Paths(mut paths) => {
@@ -3512,33 +3524,33 @@ async fn desktop_import_instructions_file(
 
 #[tauri::command]
 async fn desktop_instruction_import(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<Vec<crazyagent::engine::owner::ImportFile>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.instruction_import(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_confirm_instruction_import(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<Vec<crazyagent::engine::owner::ImportFile>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.confirm_instruction_import(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_uncommitted_instruction_import(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<crazyagent::engine::owner::UncommittedImport, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .uncommitted_instruction_import(project_id)?;
@@ -3547,92 +3559,92 @@ async fn desktop_uncommitted_instruction_import(
 
 #[tauri::command]
 async fn desktop_commit_instruction_import(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<crazyagent::engine::owner::ImportCommit, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.commit_instruction_import(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_agent_instructions(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
     agent: Option<i64>,
 ) -> Result<crazyagent::engine::owner::AgentInstructions, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.agent_instructions(project_id, agent)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_recovery_banner(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<crazyagent::engine::owner::RecoveryBanner, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.recovery_banner(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_instruction_settings(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<crazyagent::engine::owner::InstructionView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.instruction_settings(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_retry_recovery(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     agent: i64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.retry_recovery(agent)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_dismiss_recovery(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     action_kind: crazyagent::ledger::ActionKind,
     id: i64,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.dismiss_recovery(action_kind, id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_adoption(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<crazyagent::engine::owner::Adoption, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.adoption(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_save_instruction_settings(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
     settings: crazyagent::engine::owner::InstructionSettings,
     version: Option<u64>,
 ) -> Result<crazyagent::engine::owner::InstructionView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state)
         .await?
         .save_instruction_settings(project_id, settings, version)?;
@@ -3641,31 +3653,31 @@ async fn desktop_save_instruction_settings(
 
 #[tauri::command]
 async fn desktop_default_process(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<String, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.default_process()?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_process_given(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     project_id: String,
 ) -> Result<String, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let call = lock(&state).await?.given_text(project_id)?;
     call.await
 }
 
 #[tauri::command]
 async fn desktop_pick_folder(
-    window: WebviewWindow,
+    webview: Webview,
     purpose: FolderPurpose,
 ) -> Result<Option<String>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     #[cfg(all(unix, feature = "native-webdriver"))]
     if let Some(picked) = bridge::trial_pick::take(purpose)? {
         return Ok(Some(picked));
@@ -3680,8 +3692,8 @@ async fn desktop_pick_folder(
 }
 
 #[tauri::command]
-async fn desktop_pick_documents(window: WebviewWindow) -> Result<Vec<String>, BridgeError> {
-    main_window(&window)?;
+async fn desktop_pick_documents(webview: Webview) -> Result<Vec<String>, BridgeError> {
+    main_window(&webview)?;
     Ok(
         match bridge::picker::choose(bridge::picker::DOCUMENTS_SCRIPT).await? {
             Pick::Canceled => Vec::new(),
@@ -3691,40 +3703,40 @@ async fn desktop_pick_documents(window: WebviewWindow) -> Result<Vec<String>, Br
 }
 
 #[tauri::command]
-async fn desktop_open_link(window: WebviewWindow, url: String) -> Result<(), BridgeError> {
-    main_window(&window)?;
+async fn desktop_open_link(webview: Webview, url: String) -> Result<(), BridgeError> {
+    main_window(&webview)?;
     bridge::open::open_link(&url).await
 }
 
 #[tauri::command]
 async fn desktop_reveal_project_folder(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.reveal_project_folder(&id).await
 }
 
 #[tauri::command]
 async fn desktop_open_context_item(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     id: String,
     path: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.open_context_item(&id, &path).await
 }
 
 #[tauri::command]
 async fn desktop_model_access_page(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     collection: ModelAccessCollection,
     next: bool,
 ) -> Result<ModelAccessPage, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .model_access_page(collection, next)
@@ -3733,12 +3745,12 @@ async fn desktop_model_access_page(
 
 #[tauri::command]
 async fn desktop_inspect_model_access(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     collection: ModelAccessCollection,
     id: String,
 ) -> Result<ModelAccessDetail, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .inspect_model_access(collection, &id)
@@ -3747,13 +3759,13 @@ async fn desktop_inspect_model_access(
 
 #[tauri::command]
 async fn desktop_edit_model_access(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     edit: ModelAccessEdit,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state)
         .await?
         .edit_model_access(&ticket, edit, generation)
@@ -3762,52 +3774,52 @@ async fn desktop_edit_model_access(
 
 #[tauri::command]
 async fn desktop_start_native_auth(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     method: NativeAuthMethod,
 ) -> Result<NativeAuthView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.start_native_auth(&ticket, method).await
 }
 
 #[tauri::command]
 async fn desktop_read_native_auth(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
 ) -> Result<NativeAuthView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.read_native_auth(&ticket).await
 }
 
 #[tauri::command]
 async fn desktop_cancel_native_auth(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
 ) -> Result<NativeAuthView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.cancel_native_auth(&ticket).await
 }
 
 #[tauri::command]
 async fn desktop_clear_native_auth(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<bool, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.clear_native_auth().await
 }
 
 #[tauri::command]
 async fn desktop_submit_claude_auth_code(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
     code: String,
 ) -> Result<(), BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     let secret = NativeBridge::claude_auth_secret(code)?;
     let mut bridge = state.0.enter_owned().await?;
     tauri::async_runtime::spawn(
@@ -3823,11 +3835,11 @@ async fn desktop_submit_claude_auth_code(
 
 #[tauri::command]
 async fn desktop_logout_native_auth(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, NativeState>,
     ticket: String,
 ) -> Result<NativeAuthView, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     lock(&state).await?.logout_native_auth(&ticket).await
 }
 
@@ -3849,55 +3861,353 @@ pub fn desktop_socket(
 
 #[tauri::command]
 fn desktop_update_settings(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
 ) -> Result<UpdateSettings, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     updates::settings(&app)
 }
 
 #[tauri::command]
 fn desktop_set_update_channel(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     state: State<'_, UpdateState>,
     channel: String,
 ) -> Result<UpdateSettings, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     updates::set_channel(&app, &state, &channel)
 }
 
 #[tauri::command]
 async fn desktop_check_update(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     state: State<'_, UpdateState>,
 ) -> Result<Option<AvailableUpdate>, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     updates::check(&app, &state).await
 }
 
 #[tauri::command]
 async fn desktop_install_update(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, UpdateState>,
     progress: Channel<UpdateProgress>,
 ) -> Result<InstallOutcome, BridgeError> {
-    main_window(&window)?;
+    main_window(&webview)?;
     updates::install(&state, progress).await
 }
 
 #[tauri::command]
-fn desktop_restart_app(window: WebviewWindow, app: AppHandle) -> Result<(), BridgeError> {
-    main_window(&window)?;
+fn desktop_restart_app(webview: Webview, app: AppHandle) -> Result<(), BridgeError> {
+    main_window(&webview)?;
     app.request_restart();
     Ok(())
 }
 
 #[tauri::command]
-async fn desktop_link_cli(window: WebviewWindow) -> Result<String, BridgeError> {
-    main_window(&window)?;
+async fn desktop_link_cli(webview: Webview) -> Result<String, BridgeError> {
+    main_window(&webview)?;
     updates::link_cli().await
+}
+
+/// Puts one check behind Tauri's capability check and in front of every native command. The
+/// capability check refuses the real IDE page first, because its address is not a local one.
+/// Any page that passes it reaches a command only under the main or a terminal wall label, and
+/// any other label gets `window_denied` before its arguments are read. Input: the generated
+/// handler. Output: the handler to register.
+fn admit_pages<R: Runtime>(
+    handler: impl Fn(Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
+    move |invoke| {
+        if bridge::terminal::window_label_valid(invoke.message.webview_ref().label()) {
+            return handler(invoke);
+        }
+        invoke.resolver.reject(engine_failure("window_denied"));
+        true
+    }
+}
+
+/// Declares the native commands once: their names for whoever must walk them and their
+/// handler behind the page check. Input: the command functions. Output: `NATIVE_COMMANDS`
+/// and `native_handler`.
+macro_rules! native_commands {
+    ($($command:ident,)+) => {
+        #[cfg(test)]
+        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+];
+
+        fn native_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
+            admit_pages::<tauri::Wry>(tauri::generate_handler![$($command,)+])
+        }
+    };
+}
+
+native_commands! {
+    desktop_connect,
+    desktop_status,
+    desktop_harness_catalog,
+    desktop_baselines,
+    desktop_inspect_baseline,
+    desktop_approve_baseline,
+    desktop_revoke_baseline,
+    desktop_reconcile,
+    desktop_retry,
+    desktop_projects,
+    desktop_project_list,
+    desktop_create_project,
+    desktop_project_catalog,
+    desktop_setup_project,
+    desktop_project_setup,
+    desktop_research_jobs,
+    desktop_project_activity,
+    desktop_project_context,
+    desktop_project_context_item,
+    desktop_save_research_to_memory,
+    desktop_add_project_documents,
+    desktop_delete_project_context,
+    desktop_project_read_paths,
+    desktop_project_hidden_paths,
+    desktop_project_files,
+    desktop_set_project_read_paths,
+    desktop_set_project_hidden_paths,
+    desktop_project_agent_policy,
+    desktop_set_project_agent_policy,
+    desktop_team_status,
+    desktop_team_agent_messages,
+    desktop_team_message_settings,
+    desktop_team_message,
+    desktop_team_delegate,
+    desktop_team_cancel,
+    desktop_team_keep_warm,
+    desktop_team_time_limits,
+    desktop_team_on_harness_switch,
+    desktop_team_apply_harness_switch,
+    desktop_team_sub_agent_depth,
+    desktop_team_child_landing,
+    desktop_team_finished_agents,
+    desktop_team_agent_branches,
+    desktop_team_master_branch,
+    desktop_team_land_on,
+    desktop_team_background,
+    desktop_team_ask_before_merge,
+    desktop_team_master_lands,
+    desktop_team_reask_empty_reply,
+    desktop_team_catch_up_main,
+    desktop_team_new_folder_limit,
+    desktop_team_coordination,
+    desktop_team_harness_mode,
+    desktop_team_harness_delivery,
+    desktop_team_live_master,
+    desktop_team_pause,
+    desktop_team_hand_off,
+    desktop_team_rename,
+    desktop_team_wake_agent,
+    desktop_team_stop_agent,
+    desktop_coord_send,
+    desktop_team_stop_teammate,
+    desktop_team_max_harnesses,
+    desktop_team_max_teammates,
+    desktop_team_token_budget,
+    desktop_team_spread_accounts,
+    desktop_team_graph,
+    desktop_team_events,
+    desktop_team_wake_rule,
+    desktop_team_seen,
+    desktop_coord_questions,
+    desktop_coord_answer,
+    desktop_team_attention,
+    desktop_terminal_attach,
+    desktop_terminal_input,
+    desktop_terminal_prompt,
+    desktop_terminal_resize,
+    desktop_terminal_detach,
+    desktop_team_terminals_per_window,
+    desktop_terminals_per_window,
+    desktop_open_terminal_windows,
+    desktop_extend_terminal_windows,
+    desktop_focus_terminal_window,
+    desktop_close_project_walls,
+    desktop_update_project_setup,
+    desktop_remove_project,
+    desktop_cancel_research,
+    desktop_retry_research,
+    desktop_plan_roadmap,
+    desktop_research_log,
+    desktop_projects_home,
+    desktop_set_projects_home,
+    desktop_move_projects_home,
+    desktop_found_projects,
+    desktop_folder_size,
+    desktop_add_existing_folder,
+    desktop_start_onboarding,
+    desktop_onboarding,
+    desktop_github_status,
+    desktop_github_sign_in,
+    desktop_github_token,
+    desktop_github_use_cli,
+    desktop_github_sign_out,
+    desktop_github_repos,
+    desktop_clone_repo,
+    desktop_setup_status,
+    desktop_run_setup,
+    desktop_set_pack_entry,
+    desktop_remove_pack_entry,
+    desktop_project_memories,
+    desktop_ide_asks,
+    desktop_review_memory,
+    desktop_memories,
+    desktop_memory,
+    desktop_approved_memories,
+    desktop_add_memory,
+    desktop_import_memory,
+    desktop_promote_memory,
+    desktop_delete_memory,
+    desktop_approve_memory,
+    desktop_set_agent_memory_writes,
+    desktop_forget_memory,
+    desktop_remember_research,
+    desktop_save_selection_to_memory,
+    desktop_open_project,
+    desktop_history,
+    desktop_send_message,
+    desktop_replace_brief,
+    desktop_master_state,
+    desktop_master_turns,
+    desktop_open_master,
+    desktop_submit_master,
+    desktop_close_master,
+    desktop_master_sessions,
+    desktop_master_session_turns,
+    desktop_master_inputs,
+    desktop_new_master_session,
+    desktop_resume_master_session,
+    desktop_delete_master_session,
+    desktop_cancel_master_turn,
+    desktop_pending_intent,
+    desktop_reconcile_intent,
+    desktop_retry_intent,
+    desktop_drop_intent,
+    desktop_prepare_managed_account,
+    desktop_prepare_configured_account,
+    desktop_account_auth_capabilities,
+    desktop_configure_account_profile,
+    desktop_read_account_profile,
+    desktop_model_access_page,
+    desktop_inspect_model_access,
+    desktop_edit_model_access,
+    desktop_start_native_auth,
+    desktop_read_native_auth,
+    desktop_cancel_native_auth,
+    desktop_clear_native_auth,
+    desktop_logout_native_auth,
+    desktop_submit_claude_auth_code,
+    desktop_owner_profile,
+    desktop_save_owner_profile,
+    desktop_sandbox_settings,
+    desktop_set_sandbox_settings,
+    desktop_pool_summaries,
+    desktop_account_schedule,
+    desktop_account_ranking,
+    desktop_set_account_schedule,
+    desktop_account_catalog,
+    desktop_list_accounts,
+    desktop_add_account,
+    desktop_rename_account,
+    desktop_remove_account,
+    desktop_check_account,
+    desktop_local_models,
+    desktop_plugin_skills,
+    desktop_plugin_servers,
+    desktop_plugin_hooks,
+    desktop_add_hooks,
+    desktop_set_hook_enabled,
+    desktop_add_skill,
+    desktop_set_skill_enabled,
+    desktop_remove_skill,
+    desktop_skill_detail,
+    desktop_skill_import_scan,
+    desktop_import_skill,
+    desktop_add_mcp_server,
+    desktop_update_mcp_server,
+    desktop_approve_mcp_server,
+    desktop_set_mcp_server_enabled,
+    desktop_remove_mcp_server,
+    desktop_switch_plugin,
+    desktop_set_mcp_secret,
+    desktop_remove_mcp_secret,
+    desktop_check_mcp_server,
+    desktop_project_plugins,
+    desktop_tool_switches,
+    desktop_set_tool_switch,
+    desktop_restore_tool_switches,
+    desktop_agents,
+    desktop_stop_agent,
+    desktop_account_use,
+    desktop_release_account,
+    desktop_interrupt_agent,
+    desktop_restart_agent,
+    desktop_changes,
+    desktop_change_diff,
+    desktop_accept_change,
+    desktop_change_branches,
+    desktop_discard_change,
+    desktop_restore_change,
+    desktop_undo_change,
+    desktop_update_change,
+    desktop_questions,
+    desktop_answer_question,
+    desktop_dismiss_question,
+    desktop_question_counts,
+    desktop_notify_question,
+    desktop_notification_target,
+    desktop_system_notifications,
+    desktop_process_text,
+    desktop_save_process_text,
+    desktop_import_instructions_file,
+    desktop_instruction_import,
+    desktop_confirm_instruction_import,
+    desktop_uncommitted_instruction_import,
+    desktop_commit_instruction_import,
+    desktop_default_process,
+    desktop_process_given,
+    desktop_agent_instructions,
+    desktop_recovery_banner,
+    desktop_retry_recovery,
+    desktop_dismiss_recovery,
+    desktop_ide_state,
+    desktop_ide_open,
+    desktop_ide_place,
+    desktop_ide_hide,
+    desktop_ide_close,
+    desktop_ide_touch,
+    desktop_instruction_settings,
+    desktop_save_instruction_settings,
+    desktop_adoption,
+    desktop_usage_report,
+    desktop_usage_metrics,
+    desktop_usage_refresh,
+    desktop_usage_set_reset,
+    desktop_ide_extension_asks,
+    desktop_ide_extension_approve,
+    desktop_ide_extension_decline,
+    desktop_finished_agents,
+    desktop_remove_finished_agents,
+    desktop_project_removal,
+    desktop_pick_folder,
+    desktop_pick_documents,
+    desktop_open_link,
+    desktop_reveal_project_folder,
+    desktop_open_context_item,
+    desktop_engine_versions,
+    desktop_restart_engine,
+    desktop_ide_focus,
+    desktop_update_settings,
+    desktop_set_update_channel,
+    desktop_check_update,
+    desktop_install_update,
+    desktop_restart_app,
+    desktop_link_cli,
 }
 
 pub fn run() {
@@ -3913,272 +4223,7 @@ pub fn run() {
         .manage(Notices::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![
-            desktop_connect,
-            desktop_status,
-            desktop_harness_catalog,
-            desktop_baselines,
-            desktop_inspect_baseline,
-            desktop_approve_baseline,
-            desktop_revoke_baseline,
-            desktop_reconcile,
-            desktop_retry,
-            desktop_projects,
-            desktop_project_list,
-            desktop_create_project,
-            desktop_project_catalog,
-            desktop_setup_project,
-            desktop_project_setup,
-            desktop_research_jobs,
-            desktop_project_activity,
-            desktop_project_context,
-            desktop_project_context_item,
-            desktop_save_research_to_memory,
-            desktop_add_project_documents,
-            desktop_delete_project_context,
-            desktop_project_read_paths,
-            desktop_project_hidden_paths,
-            desktop_project_files,
-            desktop_set_project_read_paths,
-            desktop_set_project_hidden_paths,
-            desktop_project_agent_policy,
-            desktop_set_project_agent_policy,
-            desktop_team_status,
-            desktop_team_agent_messages,
-            desktop_team_message_settings,
-            desktop_team_message,
-            desktop_team_delegate,
-            desktop_team_cancel,
-            desktop_team_keep_warm,
-            desktop_team_time_limits,
-            desktop_team_on_harness_switch,
-            desktop_team_apply_harness_switch,
-            desktop_team_sub_agent_depth,
-            desktop_team_child_landing,
-            desktop_team_finished_agents,
-            desktop_team_agent_branches,
-            desktop_team_master_branch,
-            desktop_team_land_on,
-            desktop_team_background,
-            desktop_team_ask_before_merge,
-            desktop_team_master_lands,
-            desktop_team_reask_empty_reply,
-            desktop_team_catch_up_main,
-            desktop_team_new_folder_limit,
-            desktop_team_coordination,
-            desktop_team_harness_mode,
-            desktop_team_harness_delivery,
-            desktop_team_live_master,
-            desktop_team_pause,
-            desktop_team_hand_off,
-            desktop_team_rename,
-            desktop_team_wake_agent,
-            desktop_team_stop_agent,
-            desktop_coord_send,
-            desktop_team_stop_teammate,
-            desktop_team_max_harnesses,
-            desktop_team_max_teammates,
-            desktop_team_token_budget,
-            desktop_team_spread_accounts,
-            desktop_team_graph,
-            desktop_team_events,
-            desktop_team_wake_rule,
-            desktop_team_seen,
-            desktop_coord_questions,
-            desktop_coord_answer,
-            desktop_team_attention,
-            desktop_terminal_attach,
-            desktop_terminal_input,
-            desktop_terminal_prompt,
-            desktop_terminal_resize,
-            desktop_terminal_detach,
-            desktop_team_terminals_per_window,
-            desktop_terminals_per_window,
-            desktop_open_terminal_windows,
-            desktop_extend_terminal_windows,
-            desktop_focus_terminal_window,
-            desktop_close_project_walls,
-            desktop_update_project_setup,
-            desktop_remove_project,
-            desktop_cancel_research,
-            desktop_retry_research,
-            desktop_plan_roadmap,
-            desktop_research_log,
-            desktop_projects_home,
-            desktop_set_projects_home,
-            desktop_move_projects_home,
-            desktop_found_projects,
-            desktop_folder_size,
-            desktop_add_existing_folder,
-            desktop_start_onboarding,
-            desktop_onboarding,
-            desktop_github_status,
-            desktop_github_sign_in,
-            desktop_github_token,
-            desktop_github_use_cli,
-            desktop_github_sign_out,
-            desktop_github_repos,
-            desktop_clone_repo,
-            desktop_setup_status,
-            desktop_run_setup,
-            desktop_set_pack_entry,
-            desktop_remove_pack_entry,
-            desktop_project_memories,
-            desktop_ide_asks,
-            desktop_review_memory,
-            desktop_memories,
-            desktop_memory,
-            desktop_approved_memories,
-            desktop_add_memory,
-            desktop_import_memory,
-            desktop_promote_memory,
-            desktop_delete_memory,
-            desktop_approve_memory,
-            desktop_set_agent_memory_writes,
-            desktop_forget_memory,
-            desktop_remember_research,
-            desktop_save_selection_to_memory,
-            desktop_open_project,
-            desktop_history,
-            desktop_send_message,
-            desktop_replace_brief,
-            desktop_master_state,
-            desktop_master_turns,
-            desktop_open_master,
-            desktop_submit_master,
-            desktop_close_master,
-            desktop_master_sessions,
-            desktop_master_session_turns,
-            desktop_master_inputs,
-            desktop_new_master_session,
-            desktop_resume_master_session,
-            desktop_delete_master_session,
-            desktop_cancel_master_turn,
-            desktop_pending_intent,
-            desktop_reconcile_intent,
-            desktop_retry_intent,
-            desktop_drop_intent,
-            desktop_prepare_managed_account,
-            desktop_prepare_configured_account,
-            desktop_account_auth_capabilities,
-            desktop_configure_account_profile,
-            desktop_read_account_profile,
-            desktop_model_access_page,
-            desktop_inspect_model_access,
-            desktop_edit_model_access,
-            desktop_start_native_auth,
-            desktop_read_native_auth,
-            desktop_cancel_native_auth,
-            desktop_clear_native_auth,
-            desktop_logout_native_auth,
-            desktop_submit_claude_auth_code,
-            desktop_owner_profile,
-            desktop_save_owner_profile,
-            desktop_sandbox_settings,
-            desktop_set_sandbox_settings,
-            desktop_pool_summaries,
-            desktop_account_schedule,
-            desktop_account_ranking,
-            desktop_set_account_schedule,
-            desktop_account_catalog,
-            desktop_list_accounts,
-            desktop_add_account,
-            desktop_rename_account,
-            desktop_remove_account,
-            desktop_check_account,
-            desktop_local_models,
-            desktop_plugin_skills,
-            desktop_plugin_servers,
-            desktop_plugin_hooks,
-            desktop_add_hooks,
-            desktop_set_hook_enabled,
-            desktop_add_skill,
-            desktop_set_skill_enabled,
-            desktop_remove_skill,
-            desktop_skill_detail,
-            desktop_skill_import_scan,
-            desktop_import_skill,
-            desktop_add_mcp_server,
-            desktop_update_mcp_server,
-            desktop_approve_mcp_server,
-            desktop_set_mcp_server_enabled,
-            desktop_remove_mcp_server,
-            desktop_switch_plugin,
-            desktop_set_mcp_secret,
-            desktop_remove_mcp_secret,
-            desktop_check_mcp_server,
-            desktop_project_plugins,
-            desktop_tool_switches,
-            desktop_set_tool_switch,
-            desktop_restore_tool_switches,
-            desktop_agents,
-            desktop_stop_agent,
-            desktop_account_use,
-            desktop_release_account,
-            desktop_interrupt_agent,
-            desktop_restart_agent,
-            desktop_changes,
-            desktop_change_diff,
-            desktop_accept_change,
-            desktop_change_branches,
-            desktop_discard_change,
-            desktop_restore_change,
-            desktop_undo_change,
-            desktop_update_change,
-            desktop_questions,
-            desktop_answer_question,
-            desktop_dismiss_question,
-            desktop_question_counts,
-            desktop_notify_question,
-            desktop_notification_target,
-            desktop_system_notifications,
-            desktop_process_text,
-            desktop_save_process_text,
-            desktop_import_instructions_file,
-            desktop_instruction_import,
-            desktop_confirm_instruction_import,
-            desktop_uncommitted_instruction_import,
-            desktop_commit_instruction_import,
-            desktop_default_process,
-            desktop_process_given,
-            desktop_agent_instructions,
-            desktop_recovery_banner,
-            desktop_retry_recovery,
-            desktop_dismiss_recovery,
-            desktop_ide_state,
-            desktop_ide_open,
-            desktop_ide_place,
-            desktop_ide_hide,
-            desktop_ide_close,
-            desktop_ide_touch,
-            desktop_instruction_settings,
-            desktop_save_instruction_settings,
-            desktop_adoption,
-            desktop_usage_report,
-            desktop_usage_metrics,
-            desktop_usage_refresh,
-            desktop_usage_set_reset,
-            desktop_ide_extension_asks,
-            desktop_ide_extension_approve,
-            desktop_ide_extension_decline,
-            desktop_finished_agents,
-            desktop_remove_finished_agents,
-            desktop_project_removal,
-            desktop_pick_folder,
-            desktop_pick_documents,
-            desktop_open_link,
-            desktop_reveal_project_folder,
-            desktop_open_context_item,
-            desktop_engine_versions,
-            desktop_restart_engine,
-            desktop_ide_focus,
-            desktop_update_settings,
-            desktop_set_update_channel,
-            desktop_check_update,
-            desktop_install_update,
-            desktop_restart_app,
-            desktop_link_cli,
-        ])
+        .invoke_handler(native_handler())
         .setup(|app| {
             let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("CrazyAgent")
@@ -4227,4 +4272,153 @@ pub fn run() {
     builder
         .run(tauri::generate_context!())
         .expect("native desktop exited with an error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use tauri::ipc::{CallbackFn, InvokeBody};
+    use tauri::test::{
+        INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder, mock_context, noop_assets,
+    };
+    use tauri::webview::{InvokeRequest, WebviewBuilder};
+    use tauri::{LogicalPosition, LogicalSize, Webview};
+
+    struct Page(Webview<MockRuntime>);
+
+    impl AsRef<Webview<MockRuntime>> for Page {
+        fn as_ref(&self) -> &Webview<MockRuntime> {
+            &self.0
+        }
+    }
+
+    fn ask(page: &Webview<MockRuntime>, command: &str, args: Value) -> Result<(), Value> {
+        get_ipc_response(
+            &Page(page.clone()),
+            InvokeRequest {
+                cmd: command.into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: InvokeBody::Json(args),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|_| ())
+    }
+
+    #[test]
+    fn the_app_page_keeps_its_commands_and_the_ide_page_gets_none_once_the_ide_is_in_the_window() {
+        let app = mock_builder()
+            .manage(NativeState(BridgeQueue::new(NativeBridge::new(None))))
+            .manage(ide::IdeViews::default())
+            .invoke_handler(admit_pages(tauri::generate_handler![
+                desktop_ide_place,
+                desktop_ide_hide,
+                desktop_ide_close,
+            ]))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let main = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .unwrap();
+        let ide_page = main
+            .as_ref()
+            .window()
+            .add_child(
+                WebviewBuilder::new("ide-70-1", WebviewUrl::default()),
+                LogicalPosition::new(0, 0),
+                LogicalSize::new(400, 300),
+            )
+            .unwrap();
+        let project = json!({ "projectId": "project-one" });
+        let placed = json!({
+            "projectId": "project-one",
+            "bounds": { "x": 0.0, "y": 80.0, "width": 900.0, "height": 600.0, "viewport": 720.0 },
+        });
+        let calls = [
+            ("desktop_ide_place", &placed),
+            ("desktop_ide_hide", &project),
+            ("desktop_ide_close", &project),
+        ];
+        for (command, args) in calls {
+            assert_eq!(
+                ask(main.as_ref(), command, args.clone()),
+                Ok(()),
+                "{command} from the app page",
+            );
+            let refused = ask(&ide_page, command, args.clone()).unwrap_err();
+            assert_eq!(
+                refused["code"], "window_denied",
+                "{command} from the IDE page",
+            );
+        }
+    }
+
+    #[test]
+    fn every_native_command_refuses_any_page_the_app_did_not_make() {
+        let reached = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let spy = {
+            let reached = Arc::clone(&reached);
+            move |invoke: Invoke<MockRuntime>| {
+                reached
+                    .lock()
+                    .unwrap()
+                    .push(invoke.message.command().to_owned());
+                invoke.resolver.resolve(());
+                true
+            }
+        };
+        let app = mock_builder()
+            .invoke_handler(admit_pages(spy))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let page = |label: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
+                .build()
+                .unwrap()
+        };
+        let main = page("main");
+        let wall = page("terminals-0123456789abcdef-1");
+        let ide_page = main
+            .as_ref()
+            .window()
+            .add_child(
+                WebviewBuilder::new("ide-70-1", WebviewUrl::default()),
+                LogicalPosition::new(0, 0),
+                LogicalSize::new(400, 300),
+            )
+            .unwrap();
+        let strangers: Vec<Webview<MockRuntime>> = ["stranger", "Main", "terminals-zz-1"]
+            .map(|label| page(label).as_ref().clone())
+            .into_iter()
+            .chain([ide_page])
+            .collect();
+        assert!(NATIVE_COMMANDS.contains(&"desktop_connect"));
+        assert!(NATIVE_COMMANDS.contains(&"desktop_ide_hide"));
+        let added_later = ["desktop_a_command_added_later"];
+        for command in NATIVE_COMMANDS.iter().chain(&added_later) {
+            for stranger in &strangers {
+                let refused = ask(stranger, command, json!({})).unwrap_err();
+                assert_eq!(
+                    refused["code"],
+                    "window_denied",
+                    "{command} from {}",
+                    stranger.label(),
+                );
+            }
+        }
+        assert_eq!(
+            *reached.lock().unwrap(),
+            Vec::<String>::new(),
+            "no command ran for a page the app did not make",
+        );
+        for command in NATIVE_COMMANDS {
+            assert_eq!(ask(main.as_ref(), command, json!({})), Ok(()), "{command}");
+            assert_eq!(ask(wall.as_ref(), command, json!({})), Ok(()), "{command}");
+        }
+        assert_eq!(reached.lock().unwrap().len(), NATIVE_COMMANDS.len() * 2);
+    }
 }
