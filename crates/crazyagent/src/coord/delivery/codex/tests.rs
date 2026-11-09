@@ -88,7 +88,7 @@ fn an_oversized_ping_from_the_socket_is_refused_without_a_panic() {
     let socket = base.join("p");
     let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = crate::spawn_gate::accept_unix_std(&listener).unwrap();
+        let mut stream = crate::spawn_gate::accept_unix_std(&listener).unwrap();
         let mut request = [0u8; 4096];
         let _ = stream.read(&mut request);
         stream
