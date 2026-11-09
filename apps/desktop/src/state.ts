@@ -12,10 +12,10 @@ export type ThemeChoice = "system" | "light" | "dark";
 export type ProjectRow = ProjectPage["items"][number];
 
 const THEME_KEY = "crazyagent.theme";
-const TERMINAL_INPUT_KEY = "crazyagent.master-input";
+const TERMINAL_INPUT_KEY = "crazyagent.terminal-input";
 
 /** Reads where the owner types to every agent's terminal, as kept in this app (not in the
- * engine), under the key of the old Master input so a saved choice survives the rename.
+ * engine). The old Master input key is ignored on purpose: a live trial left Both in it.
  * Output: the choice; the default when storage is unavailable or holds something else. */
 export function readTerminalInput(): InputChoice {
   try {
