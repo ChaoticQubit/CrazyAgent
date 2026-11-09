@@ -909,6 +909,12 @@ fn text(value: Option<&str>) -> &str {
     value.unwrap_or("")
 }
 
+/// Step 9 of the engine database, not written yet. Input: the open upgrade transaction.
+/// Output: done.
+pub(crate) fn migrate_counts(_tx: &Connection) -> Result<(), EngineError> {
+    Ok(())
+}
+
 /// Adds a session's new tokens to the usage hour that holds `now_ms`, after recording
 /// `now_ms` as when that run was last counted. Inputs: the store, the time, the
 /// attribution, the session and the tokens. Output: done, or `usage_unavailable`.
@@ -1165,3 +1171,6 @@ fn clamp(count: u64) -> i64 {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod migration_tests;
