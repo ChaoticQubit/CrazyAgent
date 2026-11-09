@@ -52,6 +52,19 @@ pub(crate) fn database() -> (tempfile::TempDir, Connection) {
     (directory, connection)
 }
 
+/// Registers a project the way setup does, so a project's override has a target. Inputs: the
+/// store and the project id. Output: none.
+fn known_project(connection: &Connection, id: &str) {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+        )
+        .unwrap();
+    connection
+        .execute("INSERT INTO projects (id, body) VALUES (?1, '{}')", [id])
+        .unwrap();
+}
+
 fn change(connection: &mut Connection, access: &ModelAccess, change: ScheduleChange) -> Outcome {
     let tx = connection.transaction().unwrap();
     let version = load(&tx).unwrap().version;
@@ -148,6 +161,7 @@ fn owner_choices_are_stored_read_back_and_cleared() {
     let (_directory, mut connection) = database();
     let access = access(&["a", "b"]);
     assert_eq!(load(&connection).unwrap(), Schedule::default());
+    known_project(&connection, "project-a");
     for edit in [
         ScheduleChange::AppStrategy {
             strategy: Strategy::Balanced,
@@ -202,6 +216,92 @@ fn owner_choices_are_stored_read_back_and_cleared() {
     let cleared = load(&connection).unwrap();
     assert!(cleared.accounts.is_empty() && cleared.pools.is_empty());
     assert_eq!(cleared.projects.len(), 1);
+}
+
+#[test]
+fn a_strategy_for_a_project_that_does_not_exist_is_refused_and_can_still_be_cleared() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a"]);
+    known_project(&connection, "another-project");
+    let edit = |strategy| ScheduleChange::ProjectStrategy {
+        project: reference("project-gone"),
+        strategy,
+    };
+    assert_eq!(
+        change(&mut connection, &access, edit(Some(Strategy::Balanced))),
+        Outcome::Rejected {
+            code: "project_not_found".into()
+        }
+    );
+    assert_eq!(load(&connection).unwrap(), Schedule::default());
+    assert_eq!(
+        change(&mut connection, &access, edit(None)),
+        Outcome::Applied
+    );
+}
+
+#[test]
+fn removing_a_project_with_an_override_moves_the_schedule_version_once() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a"]);
+    known_project(&connection, "project-a");
+    change(
+        &mut connection,
+        &access,
+        ScheduleChange::ProjectStrategy {
+            project: reference("project-a"),
+            strategy: Some(Strategy::Balanced),
+        },
+    );
+    let version = |connection: &Connection| load(connection).unwrap().version;
+    let forget = |connection: &mut Connection| {
+        let tx = connection.transaction().unwrap();
+        forget_project(&tx, "project-a").unwrap();
+        tx.commit().unwrap();
+    };
+    let before = version(&connection);
+    forget(&mut connection);
+    assert_eq!(version(&connection), before + 1);
+    forget(&mut connection);
+    assert_eq!(version(&connection), before + 1);
+}
+
+#[test]
+fn removing_a_pool_or_connection_moves_the_schedule_version_once_and_no_removal_leaves_it() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a", "b"]);
+    for edit in [
+        ScheduleChange::PoolStrategy {
+            pool: reference("pool-a"),
+            strategy: Some(Strategy::Balanced),
+        },
+        ScheduleChange::Account {
+            connection: reference("b"),
+            plan: AccountPlan {
+                rank: Some(1),
+                ..AccountPlan::default()
+            },
+        },
+    ] {
+        assert_eq!(change(&mut connection, &access, edit), Outcome::Applied);
+    }
+    let remove = |connection: &mut Connection, access: &ModelAccess| {
+        let tx = connection.transaction().unwrap();
+        forget_removed(&tx, access).unwrap();
+        tx.commit().unwrap();
+    };
+    let before = load(&connection).unwrap().version;
+    remove(&mut connection, &access);
+    assert_eq!(load(&connection).unwrap().version, before);
+    let mut fewer = access.clone();
+    fewer.pools.clear();
+    fewer.connections.retain(|known| known.id.as_str() == "a");
+    remove(&mut connection, &fewer);
+    let after = load(&connection).unwrap();
+    assert_eq!((after.pools.len(), after.accounts.len()), (0, 0));
+    assert_eq!(after.version, before + 1);
+    remove(&mut connection, &fewer);
+    assert_eq!(load(&connection).unwrap().version, before + 1);
 }
 
 #[test]
@@ -694,6 +794,7 @@ fn manual_rank_follows_the_owner_and_balanced_takes_the_least_used_weekly_window
         ordered(&read(&connection, &access), &list),
         ["b", "c", "a", "d"]
     );
+    known_project(&connection, "project-a");
     change(
         &mut connection,
         &access,

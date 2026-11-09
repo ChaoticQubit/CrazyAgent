@@ -1550,6 +1550,7 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
         );
         for code in [
             "account_not_found",
+            "project_not_found",
             "model_access_read_only",
             "model_access_edit_bounds",
         ] {
