@@ -2,7 +2,7 @@ use super::git::{LISTING_BYTES_MAX, OUTPUT_BYTES_MAX, Repo, failure, is_object_i
 use super::{ChangeDiff, ChangedFile, FileKind, FileMark, FileStatus};
 use crate::engine::EngineError;
 use crate::ide::agent_config;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -128,39 +128,48 @@ pub(super) fn changed_paths(repo: &Repo, from: &str, to: &str) -> Result<Vec<Str
         .collect()
 }
 
-/// A path as a change leaves it: its bytes, its new mode and its new object id, which is
-/// all zeros for a deletion.
-pub(super) type PathState = (Vec<u8>, String, String);
+/// One path's change: its bytes, then the mode and object id it had and has, the id all
+/// zeros on the side where the path does not exist.
+pub(super) struct PathMove {
+    pub(super) path: Vec<u8>,
+    pub(super) old: (String, String),
+    pub(super) new: (String, String),
+}
 
-/// Reads git's `--raw -z` records into the states they leave. Input: the output, whose
-/// records may have blank separators between commits. Output: the states.
-fn path_states(printed: &[u8]) -> Result<BTreeSet<PathState>, EngineError> {
-    let mut states = BTreeSet::new();
+/// Reads git's `--raw -z` records into their moves, in git's order. Input: the output,
+/// whose records may have blank separators between commits. Output: the moves.
+fn path_moves(printed: &[u8]) -> Result<Vec<PathMove>, EngineError> {
+    let mut moves = Vec::new();
     let mut fields = printed.split(|byte| *byte == 0);
     while let Some(field) = fields.next() {
         let record = field.trim_ascii_start();
         if !record.starts_with(b":") {
             continue;
         }
-        let parts: Vec<&str> = text(record)?.split(' ').collect();
-        let [_, mode, _, object, _] = parts.as_slice() else {
+        let parts: Vec<&str> = text(&record[1..])?.split(' ').collect();
+        let [old_mode, new_mode, old_object, new_object, _] = parts.as_slice() else {
             return Err(failure("changes_git_failed"));
         };
         let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
-        assert!(is_object_id(object));
-        states.insert((path.to_vec(), (*mode).to_owned(), (*object).to_owned()));
+        assert!(is_object_id(old_object));
+        assert!(is_object_id(new_object));
+        moves.push(PathMove {
+            path: path.to_vec(),
+            old: ((*old_mode).to_owned(), (*old_object).to_owned()),
+            new: ((*new_mode).to_owned(), (*new_object).to_owned()),
+        });
     }
-    Ok(states)
+    Ok(moves)
 }
 
-/// The states a change leaves on the paths it changes, each side of a rename apart.
-/// Inputs: the repository and the two tree-ish ids. Output: the states.
-pub(super) fn changed_states(
+/// The moves a change makes on the paths it changes, each side of a rename apart. Inputs:
+/// the repository and the two tree-ish ids. Output: the moves.
+pub(super) fn changed_moves(
     repo: &Repo,
     from: &str,
     to: &str,
-) -> Result<BTreeSet<PathState>, EngineError> {
-    path_states(&repo.run(&[
+) -> Result<Vec<PathMove>, EngineError> {
+    path_moves(&repo.run(&[
         "diff-tree",
         "-r",
         "-z",
@@ -172,15 +181,16 @@ pub(super) fn changed_states(
     ])?)
 }
 
-/// Every state the newest `commits_max` commits after `from` up to `tip` left, each side
-/// of a rename apart, merges adding none of their own. Inputs: the repository, both ends
-/// and the bound. Output: the states, None when they run past the output bound.
-pub(super) fn states_since(
+/// The moves of the newest `commits_max` commits after `from` along `tip`'s first parents,
+/// newest first, each side of a rename apart and a merge as what it brought onto that
+/// line, so what only a side branch held counts for nothing. Inputs: the repository, both
+/// ends and the bound. Output: the moves, None when they run past the output bound.
+pub(super) fn moves_on_line(
     repo: &Repo,
     from: &str,
     tip: &str,
     commits_max: usize,
-) -> Result<Option<BTreeSet<PathState>>, EngineError> {
+) -> Result<Option<Vec<PathMove>>, EngineError> {
     assert!(commits_max > 0);
     let range = format!("{from}..{tip}");
     let count = format!("--max-count={commits_max}");
@@ -192,7 +202,8 @@ pub(super) fn states_since(
             "-z",
             "--no-renames",
             "--no-abbrev",
-            "--diff-merges=off",
+            "--first-parent",
+            "--diff-merges=first-parent",
             "--no-show-signature",
             &count,
             &range,
@@ -207,7 +218,7 @@ pub(super) fn states_since(
     if output.overflow {
         return Ok(None);
     }
-    path_states(&output.stdout).map(Some)
+    path_moves(&output.stdout).map(Some)
 }
 
 /// Counts the lines a change adds and removes, with renames found.

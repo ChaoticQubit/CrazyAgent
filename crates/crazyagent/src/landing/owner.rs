@@ -1860,7 +1860,7 @@ const TAKEN_COMMITS_MAX: usize = 2048;
 /// What judging one open change set against the owner's branch tip found.
 enum Judged {
     Landed,
-    Taken,
+    Taken(Shown),
     Removed,
     Open(Shown),
 }
@@ -1895,15 +1895,15 @@ fn copy_gone(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 /// change shown, measured as [`measured_from`] says (DEC-107). Inputs: the store, the
 /// owner repository, the change set and the tip. Output: the judgement.
 fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
-    let whole = |from: &str| -> Result<Judged, EngineError> {
+    let whole = |from: &str| -> Result<Shown, EngineError> {
         let stats = diff::stats(owner, from, &record.head)?;
-        Ok(Judged::Open(Shown {
+        Ok(Shown {
             range: (from.to_owned(), record.head.clone()),
             counts: (stats.files, stats.added, stats.removed),
-        }))
+        })
     };
     if owner.tree_of(&record.base)? == owner.tree_of(&record.head)? {
-        return whole(&record.base);
+        return whole(&record.base).map(Judged::Open);
     }
     if owner.test(&["merge-base", "--is-ancestor", &record.head, tip])? {
         return Ok(Judged::Landed);
@@ -1913,18 +1913,20 @@ fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Ju
         if owner.tree_of(tip)? == owner.tree_of(&record.head)? {
             return Ok(Judged::Landed);
         }
-        return whole(&from);
+        return whole(&from).map(Judged::Open);
     }
     let paths = merge_paths(owner, &from, tip, &record.head)?;
     if uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
-        return whole(&from);
+        return whole(&from).map(Judged::Open);
     }
     let (tree, conflicts) = merge(owner, &from, tip, &record.head)?;
     if !conflicts.is_empty() {
-        if !record.restored && taken_by(owner, &from, tip, &record.head)? {
-            return Ok(Judged::Taken);
-        }
-        return whole(&from);
+        let shown = whole(&from)?;
+        return if !record.restored && taken_by(owner, &from, tip, &record.head)? {
+            Ok(Judged::Taken(shown))
+        } else {
+            Ok(Judged::Open(shown))
+        };
     }
     if tree == owner.tree_of(tip)? {
         return Ok(Judged::Landed);
@@ -2009,35 +2011,78 @@ fn close_removed(db: &Connection, record: &mut Record) -> Result<(), EngineError
     Ok(())
 }
 
-/// Says whether the tip's newest `TAKEN_COMMITS_MAX` commits since `from` took every path
-/// the change set changes at the set's own version, so its merge conflicts only because
-/// the tip moved on from work it already took, as after a port (HB-S4). A change of more
-/// than `TAKEN_PATHS_MAX` paths, or a history too long to read, stays open for the owner.
-/// Inputs: the repository, where the work is measured from, the tip and the set's head.
-/// Output: the answer.
+/// Says whether the tip's own line of the newest `TAKEN_COMMITS_MAX` commits since `from`
+/// took every path the change set changes at the set's own version, so its merge conflicts
+/// only because the tip moved on from work it already took, as after a port (HB-S4). A
+/// change of more than `TAKEN_PATHS_MAX` paths, or a line too long to read, stays open.
+/// Inputs: the repository, the measured start, the tip and the head. Output: the answer.
 fn taken_by(owner: &Repo, from: &str, tip: &str, head: &str) -> Result<bool, EngineError> {
     assert!(super::git::is_object_id(from));
     assert!(super::git::is_object_id(tip));
     assert_ne!(from, tip);
-    let wanted = diff::changed_states(owner, from, head)?;
+    let wanted = diff::changed_moves(owner, from, head)?;
     if wanted.is_empty() || wanted.len() > TAKEN_PATHS_MAX {
         return Ok(false);
     }
-    let history = diff::states_since(owner, from, tip, TAKEN_COMMITS_MAX)?;
-    Ok(history.is_some_and(|history| wanted.is_subset(&history)))
+    let line = diff::moves_on_line(owner, from, tip, TAKEN_COMMITS_MAX)?;
+    Ok(line.is_some_and(|line| line_took(&wanted, &line)))
+}
+
+/// Says whether a line of commits took every wanted move. Reading newest first, the first
+/// commit to set a wanted path to the set's version takes it and the first to set it back
+/// to the version the set started from is a revert, so any path left undecided or reverted
+/// keeps the set open. Inputs: the wanted moves and the line, newest first. Output: the answer.
+fn line_took(wanted: &[diff::PathMove], line: &[diff::PathMove]) -> bool {
+    assert!(!wanted.is_empty());
+    let mut waiting: BTreeMap<&[u8], &diff::PathMove> = wanted
+        .iter()
+        .map(|one| (one.path.as_slice(), one))
+        .collect();
+    assert_eq!(waiting.len(), wanted.len());
+    for step in line {
+        let Some(want) = waiting.get(step.path.as_slice()) else {
+            continue;
+        };
+        assert_ne!(want.old, want.new);
+        if step.new == want.old {
+            return false;
+        }
+        if step.new == want.new {
+            waiting.remove(step.path.as_slice());
+        }
+    }
+    waiting.is_empty()
 }
 
 /// Closes a change set the branch it lands on already took (HB-S4) as a discard the owner
-/// can undo within the restore window, since matching files is a judgement a Restore must
-/// be able to overrule, and says so in the project's activity. The caller holds [`hold`]
-/// on its repository. Inputs: the store and the open change set. Output: Ok once closed.
+/// can undo within the restore window, alone, since its workers' sets are not on that
+/// branch, and says so in the project's activity, even when a later step of the close
+/// failed. The caller holds [`hold`] on its repository. Inputs: the store and the open
+/// change set. Output: Ok once closed.
 fn close_taken(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     assert!(record.is_open() && record.intent.is_none());
     assert!(!record.restored);
-    flow::discard_closing(db, record, flow::now_ms()?)?;
-    assert_eq!(record.state, ChangeState::Discarded);
-    super::note_taken(db, record);
-    Ok(())
+    let closed = flow::discard_held(db, record, flow::now_ms()?);
+    if !record.is_open() {
+        assert_eq!(record.state, ChangeState::Discarded);
+        super::note_taken(db, record);
+    }
+    closed.map(drop)
+}
+
+/// Keeps one open change set's counts on what the tip does not yet hold. Inputs: the store,
+/// the change set and how it was judged. Output: the two trees its diff shows.
+fn show(
+    db: &Connection,
+    record: &mut Record,
+    shown: Shown,
+) -> Result<Option<(String, String)>, EngineError> {
+    assert!(record.is_open());
+    if (record.files, record.added, record.removed) != shown.counts {
+        (record.files, record.added, record.removed) = shown.counts;
+        store::save(db, record)?;
+    }
+    Ok(Some(shown.range))
 }
 
 /// Notices what the owner did outside the app to one open change set. The caller holds
@@ -2083,7 +2128,10 @@ fn observe_one(
             close_removed(db, &mut record)?;
             Ok(None)
         }
-        Judged::Taken => {
+        Judged::Taken(shown) if super::subagent::has_open_worker(db, &record)? => {
+            show(db, &mut record, shown)
+        }
+        Judged::Taken(_) => {
             close_taken(db, &mut record)?;
             Ok(None)
         }
@@ -2097,14 +2145,7 @@ fn observe_one(
             assert!(!record.is_open());
             Ok(None)
         }
-        Judged::Open(shown) => {
-            let (files, added, removed) = shown.counts;
-            if (record.files, record.added, record.removed) != shown.counts {
-                (record.files, record.added, record.removed) = (files, added, removed);
-                store::save(db, &record)?;
-            }
-            Ok(Some(shown.range))
-        }
+        Judged::Open(shown) => show(db, &mut record, shown),
     }
 }
 

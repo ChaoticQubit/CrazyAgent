@@ -2185,20 +2185,8 @@ pub(super) fn discard(
     if !record.is_open() || record.head != expected_head || record.intent.is_some() {
         return Err(failure("changes_stale"));
     }
-    discard_closing(db, &mut record, now)
-}
-
-/// Discards one open change set as [`discard_held`] does and closes a lead's workers' open
-/// sets with it (DEC-107); a worker set that cannot close is logged by its plain code and
-/// never fails the discard. The caller holds [`hold`] on its repository. Inputs: the store,
-/// the change set and the time now. Output: the time it stays restorable until.
-pub(super) fn discard_closing(
-    db: &Connection,
-    record: &mut Record,
-    now: u64,
-) -> Result<u64, EngineError> {
-    let until = discard_held(db, record, now)?;
-    if let Err(error) = super::subagent::close_with_lead(db, record) {
+    let until = discard_held(db, &mut record, now)?;
+    if let Err(error) = super::subagent::close_with_lead(db, &record) {
         eprintln!(
             "landing_settle_failed cause={}",
             crate::protocol::plain_code(&error.0)
