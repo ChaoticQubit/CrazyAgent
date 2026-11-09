@@ -240,7 +240,7 @@ test("the read still running keeps the top line and draws no sections", async ()
 
 test("real Tab keys walk the seeds, the field, then the skill link, past the waiting Save", async () => {
   const walked = await onProcess({}, (page) => tabWalk(page, 4));
-  assert.deepEqual(walked, ["Import from file", "Use the CrazyAgent default process", "Use tdd for every change.", "tdd"]);
+  assert.deepEqual(walked, ["Import from file", "Use the CrazyAgent default process", "Use tdd for every change.", "Skill tdd: Test first."]);
 });
 
 for (const theme of ["light", "dark"]) {
