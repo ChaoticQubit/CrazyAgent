@@ -299,28 +299,21 @@ impl Servers {
             let _ = token::remove(&folder);
             return Err(failure("ide_folder_unsafe"));
         };
-        let started = match output::start(&folder.join(LOG), &token)
-            .map_err(|_| failure("ide_state_unavailable"))
-            .and_then(|output| {
-                command(
-                    Launch {
-                        project,
-                        build: &build,
-                        folder: &folder,
-                        root,
-                        socket: &self.socket,
-                    },
-                    &info,
-                    output,
-                    project_hooks,
-                )
-            }) {
-            Ok(mut command) => match self.prepare_extensions(&build, &folder).await {
-                Ok(()) => self.spawn(project, &slot, &info, &mut command),
-                Err(error) => Err(error),
-            },
-            Err(error) => Err(error),
-        };
+        let started = async {
+            let output = output::start(&folder.join(LOG), &token)
+                .map_err(|_| failure("ide_state_unavailable"))?;
+            let launch = Launch {
+                project,
+                build: &build,
+                folder: &folder,
+                root,
+                socket: &self.socket,
+            };
+            let mut command = command_off_thread(launch, &info, output, project_hooks).await?;
+            self.prepare_extensions(&build, &folder).await?;
+            self.spawn(project, &slot, &info, &mut command)
+        }
+        .await;
         let child = started.inspect_err(|_| {
             let _ = token::remove(&folder);
         })?;
@@ -750,6 +743,38 @@ struct Launch<'a> {
     folder: &'a Path,
     root: &'a Path,
     socket: &'a Path,
+}
+
+/// [`command`] on a blocking thread, so its git lookup, which runs xcrun on a Mac without the
+/// Command Line Tools and retries at every start until one succeeds, never holds an async
+/// worker. Inputs: as [`command`]. Output: its command, or `ide_state_unavailable` when the
+/// thread died.
+async fn command_off_thread(
+    launch: Launch<'_>,
+    info: &ServerInfo,
+    output: PipeWriter,
+    project_hooks: bool,
+) -> Result<Command, EngineError> {
+    let project = launch.project.clone();
+    let (build, folder, root, socket) = (
+        launch.build.to_path_buf(),
+        launch.folder.to_path_buf(),
+        launch.root.to_path_buf(),
+        launch.socket.to_path_buf(),
+    );
+    let info = info.clone();
+    tokio::task::spawn_blocking(move || {
+        let launch = Launch {
+            project: &project,
+            build: &build,
+            folder: &folder,
+            root: &root,
+            socket: &socket,
+        };
+        command(launch, &info, output, project_hooks)
+    })
+    .await
+    .map_err(|_| failure("ide_state_unavailable"))?
 }
 
 /// The server's command line, IDE-1 verdict 3, under the Seatbelt profile installed for
