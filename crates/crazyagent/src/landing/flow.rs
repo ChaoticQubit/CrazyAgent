@@ -858,6 +858,12 @@ pub(super) static BEFORE_RESET: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
 pub(super) static AFTER_READ_TREE: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Test seam (RK-R2-S1): edits [`reset_agent`] makes right after HEAD moved and before it
+/// reads HEAD again, the way an agent can write in that window.
+#[cfg(test)]
+pub(super) static AFTER_HEAD_MOVE: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// Runs the edit a test planted in `planted` for this agent's git folder, if any. Inputs:
 /// the planted edits and the agent. Output: none.
 #[cfg(test)]
@@ -914,6 +920,8 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
         files_back(agent, from, target);
         return Ok(false);
     }
+    #[cfg(test)]
+    run_planted(&AFTER_HEAD_MOVE, agent);
     if agent.head().is_err() {
         eprintln!("landing_reset_head_left_its_pointer");
         if agent
