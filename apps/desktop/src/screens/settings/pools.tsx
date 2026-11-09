@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { projectsUsing } from "../../api-projects";
 import { deletePool, listAccounts, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountView, type PoolBase, type PoolMember, type PoolSummary, type Result } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
-  Button, CapacityMeter, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton,
+  Button, CapacityMeter, ConfirmDialog, EmptyState, LoadError, Notice, NotReady, SearchField, Select, SettingLine, SettingSection, Skeleton,
   StatusBadge, TextField, WindowedList, navigate, Checkbox,
 } from "../../ui";
 import { AccountChoice } from "./account-choice";
@@ -101,8 +101,8 @@ export async function readyAdded(previous: string[], members: string[], accounts
   return setupNote(await readyEach(setupTargets(previous, members, accounts), note));
 }
 
-/** The pool list as a pure view. Inputs: the pools read and the new, edit, delete and retry
- * actions. */
+/** The pool list as a pure view, one line per pool with its actions on the right. Inputs: the
+ * pools read and the new, edit, delete, retry and set-up actions. */
 export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry, onPrepare }: {
   pools: Loaded<PoolSummary[]>;
   onNew: () => void;
@@ -118,24 +118,53 @@ export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry, onPrepare }
     action={<Button variant="primary" icon="plus" onClick={onNew}>New pool</Button>}>
     A pool groups up to 15 accounts for your projects to use.
   </EmptyState>;
-  return <div className="stack-small">
-    <div className="toolbar"><span className="count">{pools.value.length} {pools.value.length === 1 ? "pool" : "pools"}</span>
-      <Button variant="primary" icon="plus" onClick={onNew}>New pool</Button></div>
-    <Panel padded={false}><div className="rows">
-      {pools.value.map((pool) => <div className="pool-row" key={pool.id}>
-        <button type="button" className="name ellipsis" onClick={() => onEdit(pool)}>{pool.name}</button>
-        <span className="secondary ellipsis">{pool.summary}</span>
-        <span className="mono">{pool.members.length} of {POOL_MEMBER_MAX}</span>
-        <span className="secondary">{poolReadiness(pool.members)}</span>
-        <span className="secondary">{poolUse(pool.project_count)}</span>
-        <Menu label={`More for ${pool.name}`} items={[
-          { label: "Edit pool", icon: "pencil", onSelect: () => onEdit(pool) },
-          ...(onPrepare && keyedMembers(pool).length > 0 ? [{ label: "Get ready for agents", icon: "refresh-cw" as const, onSelect: () => onPrepare(pool) }] : []),
-          { label: "Delete pool", icon: "trash", danger: true, onSelect: () => onDelete(pool) },
-        ]} />
-      </div>)}
-    </div></Panel>
-  </div>;
+  return <SettingSection title="Your pools" about={`${pools.value.length} ${pools.value.length === 1 ? "pool" : "pools"}`}>
+    {pools.value.map((pool) => <SettingLine key={pool.id} label={pool.name}
+      help={`${pool.summary}. ${pool.members.length} of ${POOL_MEMBER_MAX}, ${poolReadiness(pool.members)}. ${poolUse(pool.project_count)}.`}>
+      {onPrepare && keyedMembers(pool).length > 0 && <Button icon="refresh-cw" aria-label={`Get ready for agents: ${pool.name}`} onClick={() => onPrepare(pool)}>Get ready for agents</Button>}
+      <Button aria-label={`Edit pool ${pool.name}`} onClick={() => onEdit(pool)}>Edit pool</Button>
+      <Button variant="quiet" aria-label={`Delete pool ${pool.name}`} onClick={() => onDelete(pool)}>Delete pool</Button>
+    </SettingLine>)}
+  </SettingSection>;
+}
+
+/** The body of All accounts for each state of the read: loading, not ready, failed, no accounts
+ * at all, nothing shown, or the windowed lines. Inputs: the read, the accounts shown, whether
+ * Selected only has nothing to show and the line for one account. Output: the list. */
+function AccountList({ accounts, shown, noneSelected, line }: {
+  accounts: Loaded<AccountView[]>;
+  shown: AccountView[];
+  noneSelected: boolean;
+  line: (account: AccountView) => ReactNode;
+}) {
+  if (accounts.kind === "loading") return <div className="set-body"><Skeleton shape="row" count={6} /></div>;
+  if (accounts.kind === "not_ready") return <div className="set-body"><NotReady what="Accounts" compact /></div>;
+  if (accounts.kind === "error") return <div className="set-body"><Notice tone="danger">Couldn't load accounts.</Notice></div>;
+  if (accounts.value.length === 0) return <div className="set-body"><EmptyState compact icon="key-round" title="No accounts yet"
+    action={<a className="btn" href="#/settings/accounts?action=add">Add account</a>}>Add an account first, then put it in a pool.</EmptyState></div>;
+  if (shown.length === 0) return <p className="set-body secondary">{noneSelected ? "No accounts selected yet." : "No accounts match."}</p>;
+  return <WindowedList label="All accounts" count={shown.length} viewport={440} renderRow={(index) => line(shown[index]!)} />;
+}
+
+/** The members of the pool being edited. Inputs: the member ids, the accounts by id, the saved
+ * members by id and the remove action. Output: the list. */
+function MemberLines({ members, byId, known, onRemove }: {
+  members: string[];
+  byId: Map<string, AccountView>;
+  known: Map<string, PoolMember>;
+  onRemove: (id: string) => void;
+}) {
+  return <ul className="plain-list">{members.map((id) => {
+    const account = byId.get(id);
+    const member = known.get(id);
+    const label = account?.name ?? member?.provider ?? "Account";
+    return <li className="member" key={id}>
+      <span className="grow pick-words"><span className="ellipsis">{label}</span>
+        {account && <span className="small secondary ellipsis">{account.provider_name}</span>}</span>
+      <StatusBadge word={account?.status_label ?? member?.status_label ?? ""} />
+      <Button variant="quiet" size="small" aria-label={`Remove ${label}`} onClick={() => onRemove(id)}>Remove</Button>
+    </li>;
+  })}</ul>;
 }
 
 /** The accounts the pool editor's left list shows: the search and provider filters, then only
@@ -157,7 +186,8 @@ export function PoolEditorView({ pool, accounts, initialMembers = [], onSave, on
   onCancel: () => void;
 }) {
   const [name, setName] = useState(pool?.name ?? "");
-  const [members, setMembers] = useState<string[]>(pool?.members.map((member) => member.id) ?? initialMembers.slice(0, POOL_MEMBER_MAX));
+  const opened = pool?.members.map((member) => member.id) ?? initialMembers.slice(0, POOL_MEMBER_MAX);
+  const [members, setMembers] = useState<string[]>(opened);
   const [selectedOnly, setSelectedOnly] = useState(false);
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState("");
@@ -174,6 +204,7 @@ export function PoolEditorView({ pool, accounts, initialMembers = [], onSave, on
   const shown = editorAccounts(all, search, provider, members, selectedOnly);
   const providers = [...new Map(all.map((account) => [account.provider, account.provider_name])).entries()];
   const note = notSignedInNote(members, status);
+  const membersChanged = members.length !== opened.length || members.some((id, index) => id !== opened[index]);
 
   const toggle = (id: string) => {
     const next = toggleMember(members, id);
@@ -197,55 +228,45 @@ export function PoolEditorView({ pool, accounts, initialMembers = [], onSave, on
     setSaveError(result.kind === "not_ready" ? "Saving pools isn't ready yet in this build." : `Couldn't save this pool. ${result.message}`);
   };
 
+  const accountLine = (account: AccountView) => {
+    const checked = members.includes(account.id);
+    const refused = blocked === account.id;
+    return <label className={`pick${refused ? " blocked" : ""}`} title={full && !checked ? POOL_FULL : undefined}>
+      <span className="pick-words"><span className="ellipsis">{account.name}</span>
+        <span className="small secondary ellipsis">{refused ? POOL_FULL : `${account.provider_name}. ${account.status_label}.`}</span></span>
+      <input type="checkbox" checked={checked} aria-disabled={(full && !checked) || undefined} onChange={() => toggle(account.id)} />
+    </label>;
+  };
+
   return <form className="stack" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-    <span><Button variant="quiet" icon="arrow-left" onClick={onCancel}>Back to pools</Button></span>
-    <h2>{pool ? `Edit ${pool.name}` : "New pool"}</h2>
-    <TextField id="pool-name" label="Pool name" value={name} onValue={setName} maxLength={60} error={nameError} />
-    <div className="pool-editor">
-      <Panel title="All accounts" padded={false}>
-        <div className="toolbar panel-body">
+    <div className="settings-top">
+      <div><h2>{pool ? `Edit ${pool.name}` : "New pool"}</h2><p>Pick the accounts this pool can use. A pool holds up to {POOL_MEMBER_MAX} accounts.</p></div>
+      <Button icon="arrow-left" onClick={onCancel}>Back to pools</Button>
+    </div>
+    <SettingSection title="Details">
+      <SettingLine label="Pool name" help="Shown on each project's pool picker." htmlFor="pool-name" changed={name !== (pool?.name ?? "")}>
+        <TextField id="pool-name" label="Pool name" labelOutside value={name} onValue={setName} maxLength={60} error={nameError} />
+      </SettingLine>
+    </SettingSection>
+    <div className="settings-two">
+      <SettingSection title="All accounts">
+        <div className="set-bar">
           <SearchField label="Search accounts" value={search} onValue={setSearch} />
           <Select id="pool-provider" label="Provider" hideLabel value={provider} onValue={setProvider}
             options={[{ value: "", label: "All providers" }, ...providers.map(([value, label]) => ({ value, label }))]} />
           <Checkbox label="Selected only" checked={selectedOnly} onChecked={setSelectedOnly} />
         </div>
-        {accounts.kind === "loading" ? <Skeleton shape="row" count={6} /> : accounts.kind === "not_ready" ? <NotReady what="Accounts" compact />
-          : accounts.kind === "error" ? <Notice tone="danger">Couldn't load accounts.</Notice>
-          : all.length === 0 ? <EmptyState compact icon="key-round" title="No accounts yet"
-            action={<a className="btn" href="#/settings/accounts?action=add">Add account</a>}>Add an account first, then put it in a pool.</EmptyState>
-          : shown.length === 0 ? <p className="item-row secondary">{selectedOnly && members.length === 0 ? "No accounts selected yet." : "No accounts match."}</p>
-          : <WindowedList label="All accounts" count={shown.length} viewport={440} renderRow={(index) => {
-            const account = shown[index]!;
-            const checked = members.includes(account.id);
-            const unavailable = full && !checked;
-            return <label className={`pick${blocked === account.id ? " blocked" : ""}`} title={unavailable ? POOL_FULL : undefined}>
-              <input type="checkbox" checked={checked} aria-disabled={unavailable || undefined} onChange={() => toggle(account.id)} />
-              <ProviderMark provider={account.provider} name={account.provider_name} />
-              <span className="stack-small"><span className="ellipsis">{account.name}</span>
-                {blocked === account.id && <span className="small">{POOL_FULL}</span>}</span>
-              <StatusBadge word={account.status_label} />
-            </label>;
-          }} />}
-      </Panel>
-      <Panel title="In this pool">
-        <div className="stack-small">
+        <AccountList accounts={accounts} shown={shown} noneSelected={selectedOnly && members.length === 0} line={accountLine} />
+      </SettingSection>
+      <SettingSection title="In this pool" changed={membersChanged}>
+        <div className="set-body">
           <CapacityMeter count={members.length} />
           {full && <Notice id="pool-full-notice" alert={blocked !== undefined}>{POOL_FULL}</Notice>}
           {note && <Notice tone="info">{note}</Notice>}
-          {members.length === 0 ? <p className="secondary">No accounts yet. Check accounts on the left to add them.</p>
-            : <ul className="plain-list">{members.map((id) => {
-              const account = byId.get(id);
-              const member = known.get(id);
-              const label = account?.name ?? member?.provider ?? "Account";
-              return <li className="member" key={id}>
-                <ProviderMark provider={account?.provider ?? member?.provider ?? ""} name={account?.provider_name ?? member?.provider ?? ""} />
-                <span className="grow ellipsis">{label}</span>
-                <StatusBadge word={account?.status_label ?? member?.status_label ?? ""} />
-                <Button iconOnly={`Remove ${label}`} icon="x" size="small" onClick={() => toggle(id)} />
-              </li>;
-            })}</ul>}
+          {members.length === 0 && <p className="secondary">No accounts yet. Check accounts on the left to add them.</p>}
         </div>
-      </Panel>
+        {members.length > 0 && <MemberLines members={members} byId={byId} known={known} onRemove={toggle} />}
+      </SettingSection>
     </div>
     {saveError && <Notice tone="danger" alert>{saveError}</Notice>}
     <div className="row">
@@ -325,6 +346,10 @@ export function Pools({ creating }: { creating: boolean }) {
   const copy = deleting && deleteCopy(deleting, users);
 
   return <div className="stack">
+    <div className="settings-top">
+      <div><h2>Pools</h2><p>A pool is a group of accounts for a project. When one account runs out, agents move to the next one in the pool.</p></div>
+      {pools.kind === "ok" && pools.value.length > 0 && <Button variant="primary" icon="plus" onClick={() => setEditing({})}>New pool</Button>}
+    </div>
     {refusal && <Notice tone="danger" alert><span className="grow">{refusal}</span></Notice>}
     <PoolsView pools={pools} onNew={() => setEditing({})} onEdit={(pool) => setEditing({ id: pool.id, opened: { name: pool.name, members: pool.members.map((member) => member.id) } })}
       onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} />

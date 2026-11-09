@@ -88,7 +88,7 @@ fn an_oversized_ping_from_the_socket_is_refused_without_a_panic() {
     let socket = base.join("p");
     let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     let server = std::thread::spawn(move || {
-        let mut stream = crate::spawn_gate::accept_unix_std(&listener).unwrap();
+        let mut stream = accepted(&listener);
         let mut request = [0u8; 4096];
         let _ = stream.read(&mut request);
         stream
@@ -102,6 +102,95 @@ fn an_oversized_ping_from_the_socket_is_refused_without_a_panic() {
         let _ = stream.read_to_end(&mut rest);
     });
     let answer = super::wire::deliver(&socket, "dummy", true);
-    assert!(answer.is_err(), "{answer:?}");
+    assert_eq!(answer, Err("codex_bridge_reply_too_large"));
     server.join().unwrap();
+}
+
+/// Serves one bridge socket that answers the upgrade and sends a ping of `length` bytes.
+/// Takes the length. Returns what `deliver` answered and the payload of the pong the
+/// server read back, none when no pong came.
+#[cfg(target_os = "macos")]
+fn ping_of(length: usize) -> (Result<Option<String>, &'static str>, Option<Vec<u8>>) {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = base.join("p");
+    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut stream = accepted(&listener);
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request);
+        stream
+            .write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+            .unwrap();
+        let mut ping = vec![0x89];
+        if length < 126 {
+            ping.push(u8::try_from(length).unwrap());
+        } else {
+            ping.push(0x7e);
+            ping.extend(u16::try_from(length).unwrap().to_be_bytes());
+        }
+        ping.resize(ping.len() + length, b'p');
+        let _ = stream.write_all(&ping);
+        loop {
+            let mut head = [0u8; 2];
+            stream.read_exact(&mut head).ok()?;
+            let size = match head[1] & 0x7f {
+                126 => {
+                    let mut wide = [0u8; 2];
+                    stream.read_exact(&mut wide).ok()?;
+                    usize::from(u16::from_be_bytes(wide))
+                }
+                short => usize::from(short),
+            };
+            let mut mask = [0u8; 4];
+            stream.read_exact(&mut mask).ok()?;
+            let mut payload = vec![0u8; size];
+            stream.read_exact(&mut payload).ok()?;
+            if head[0] & 0x0f == 0xa {
+                for (at, byte) in payload.iter_mut().enumerate() {
+                    *byte ^= mask[at % 4];
+                }
+                return Some(payload);
+            }
+        }
+    });
+    let answer = super::wire::deliver(&socket, "dummy", true);
+    (answer, server.join().unwrap())
+}
+
+/// SECAUDIT codex-bridge-oversized-server-ping-panics-team-runtime: a ping at the control
+/// frame limit is answered with the same payload, and one byte more is refused by name.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_ping_at_the_control_limit_is_answered_and_one_byte_more_is_refused() {
+    assert_eq!(
+        ping_of(125),
+        (Err("codex_bridge_closed"), Some(vec![b'p'; 125]))
+    );
+    assert_eq!(ping_of(126), (Err("codex_bridge_reply_too_large"), None));
+}
+
+/// Takes the one connection a peer makes, polling a non-blocking listener so the spawn gate
+/// is never held across a wait: a spawn queued behind a held gate would stop the peer's own
+/// connect. Takes the listener. Returns the stream, blocking again.
+#[cfg(target_os = "macos")]
+fn accepted(listener: &std::os::unix::net::UnixListener) -> std::os::unix::net::UnixStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match crate::spawn_gate::accept_unix_std(listener) {
+            Ok(stream) => {
+                stream.set_nonblocking(false).unwrap();
+                return stream;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(std::time::Instant::now() < deadline, "no connection came");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
 }

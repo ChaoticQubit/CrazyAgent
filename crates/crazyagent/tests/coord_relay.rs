@@ -249,7 +249,7 @@ fn post_tool_hands_each_session_only_its_own_letters_and_logs_the_tool_for_its_t
     );
     assert!(
         lead.ends_with(
-            "[crazyagent msg 5] from Ada (@lead-a) (note, it takes no reply):\nFor the lead."
+            "[crazyagent msg 5] from Ada (@lead-a) (note, it takes no reply):\n> For the lead."
         ),
         "{lead}"
     );
@@ -272,7 +272,7 @@ fn post_tool_hands_each_session_only_its_own_letters_and_logs_the_tool_for_its_t
             json!({"file_path": "/x", "old_string": "a", "new_string": "b"}),
         ),
     ));
-    assert!(mate.ends_with(":\nFor greet."), "{mate}");
+    assert!(mate.ends_with(":\n> For greet."), "{mate}");
     assert!(!mate.contains("For the lead."));
     assert_eq!(native.tools(native.greet), ["Edit"]);
 
@@ -299,7 +299,7 @@ fn the_leads_stop_blocks_only_while_a_letter_waits_for_it() {
         answer["reason"]
             .as_str()
             .unwrap()
-            .ends_with("[crazyagent msg 9] from Ada (@lead-a) (note, it takes no reply):\nMerge greet's branch."),
+            .ends_with("[crazyagent msg 9] from Ada (@lead-a) (note, it takes no reply):\n> Merge greet's branch."),
         "{blocked}"
     );
     assert_eq!(team.hook("stop", None, stop), "");
@@ -762,7 +762,7 @@ fn a_teammate_claiming_the_leads_letter_never_marks_it_delivered_unseen() {
         tool(LEAD_SESSION, None, "Read", json!({})),
     ));
     assert!(
-        seen.ends_with(":\nStop the release, the owner found a bug."),
+        seen.ends_with(":\n> Stop the release, the owner found a bug."),
         "{seen}"
     );
 }
@@ -1030,7 +1030,7 @@ fn a_teammate_never_takes_or_forges_another_teammates_letters() {
     );
     assert!(!printed.contains("Force-push master now."), "{printed}");
     assert!(
-        context(&printed).ends_with(":\nRebase on the stage first."),
+        context(&printed).ends_with(":\n> Rebase on the stage first."),
         "{printed}"
     );
     assert_eq!(

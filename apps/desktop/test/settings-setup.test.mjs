@@ -29,14 +29,15 @@ const setup = (extra = {}) => ({ dependencies: [], pack, running: false, ...extr
 const packProps = (status, extra = {}) => ({ status, busy: null, problem: "", skills: [], onSwitch: forbidden, onAsk: forbidden, onRetry: forbidden, onInstallTools: forbidden, ...extra });
 
 const rowOf = (markup, id) => {
-  const start = markup.indexOf(`<strong>${id}</strong>`);
+  const start = markup.indexOf(`data-setting="${id}"`);
   assert.ok(start >= 0, `${id} is listed`);
-  return markup.slice(start, markup.indexOf("</li>", start));
+  const next = markup.indexOf("data-setting=", start + 1);
+  return markup.slice(start, next < 0 ? undefined : next);
 };
 
 test("Settings, Pack lists the pack by group with a switch, Remove or Install on each entry", () => {
   const markup = html(PackSettingsView, packProps(ok(setup())));
-  assert.match(markup, /<h2>Code graph<\/h2>[\s\S]*<h2>Workflow skills<\/h2>[\s\S]*<h2>Context plugins<\/h2>[\s\S]*<h2>Optional<\/h2>/);
+  assert.match(markup, /<h3[^>]*>Code graph[\s\S]*<h3[^>]*>Workflow skills[\s\S]*<h3[^>]*>Context plugins[\s\S]*<h3[^>]*>Optional/);
   assert.doesNotMatch(markup, /Always on/);
   const graph = rowOf(markup, "Graphify skill for agents");
   assert.match(graph, /role="switch"[^>]*aria-checked="true"/);
@@ -80,10 +81,10 @@ const tool = (name, state) => ({ name, label: name, state });
 const tools = (tmux, uv, graphify) => [tool("tmux", tmux), tool("uv", uv), tool("graphify", graphify)];
 const present = { state: "found", version: "3.5a" };
 
-test("Settings, Pack lists tmux, uv and graphify first and offers Install tools while one is missing", () => {
+test("Settings, Pack lists tmux, uv and graphify after the pack and offers Install tools while one is missing", () => {
   const skipped = html(PackSettingsView, packProps(ok(setup({ dependencies: tools(present, { state: "missing" }, { state: "failed", reason: "Checksum didn't match." }) }))));
-  assert.match(skipped, /<h2[^>]*>[\s\S]*Tools<\/h2>[\s\S]*<h2>Code graph<\/h2>/);
-  assert.match(rowOf(skipped, "tmux"), /Found[\s\S]*Version 3\.5a on this Mac\./);
+  assert.match(skipped, /<h3[^>]*>Code graph[\s\S]*<h3[^>]*>Tools<\/h3>/);
+  assert.match(rowOf(skipped, "tmux"), /Version 3\.5a on this Mac\.[\s\S]*Found/);
   assert.match(rowOf(skipped, "uv"), /Not installed/);
   assert.match(rowOf(skipped, "graphify"), /Checksum didn&#x27;t match\./);
   assert.match(skipped, /<button type="button" class="btn primary small"[^>]*>(<svg[\s\S]*?<\/svg>)?Install tools<\/button>/);
@@ -208,8 +209,8 @@ test("Settings, GitHub shows the account with Sign out, or the three sign-in way
 test("Settings, Pack, Projects folder and GitHub draw their Lucide icons", () => {
   const svg = (name, size) => html(Icon, { name, size });
   const markup = html(PackSettingsView, packProps(ok(setup())));
-  assert.ok(markup.includes(`${svg("blocks", 14)}<strong>superpowers</strong>`), markup);
-  assert.ok(markup.includes(`${svg("server", 14)}<strong>headroom</strong>`), markup);
+  assert.ok(markup.includes(`${svg("blocks", 14)}superpowers<`), markup);
+  assert.ok(markup.includes(`${svg("server", 14)}headroom<`), markup);
   assert.ok(markup.includes(svg("circle-check", 12)), "On carries its status icon");
   assert.ok(markup.includes(svg("power-off", 12)), "Off carries its status icon");
   const base = { busy: false, problem: "", onChoose: forbidden, onUse: forbidden, onMove: forbidden, onCancel: forbidden, onRetry: forbidden };

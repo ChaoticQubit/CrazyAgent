@@ -159,7 +159,7 @@ fn delivered_letters_say_which_take_a_reply_and_which_take_a_note() {
     let text = deliver(&folder, LEAD_TAG).unwrap();
     assert_eq!(
         text,
-        "CrazyAgent team messages for you (2). Answer a question or work for you with update_work kind reply and its id in reply_to. A note takes no reply; to answer one, send kind note with to.\n\n[crazyagent msg 1] from Ada (note, it takes no reply):\nOverlap on calc.py.\n\n[crazyagent msg 2] from Ada (work for you):\nWrite the docs."
+        "CrazyAgent team messages for you (2). Answer a question or work for you with update_work kind reply and its id in reply_to. A note takes no reply; to answer one, send kind note with to.\n\n[crazyagent msg 1] from Ada (note, it takes no reply):\n> Overlap on calc.py.\n\n[crazyagent msg 2] from Ada (work for you):\n> Write the docs."
     );
     for stem in [&note, &prompt] {
         assert!(root.path().join(format!("{stem}{SHOWN}")).is_file());

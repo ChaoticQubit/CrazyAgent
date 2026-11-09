@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { getSandboxSettings, saveSandboxSettings, type LinuxSockets, type SandboxSettings } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, LoadError, NotReady, Notice, Panel, RadioCard, Skeleton } from "../../ui";
+import { Button, LoadError, NotReady, Notice, RadioCard, SettingLine, SettingSection, Skeleton } from "../../ui";
+import "../project/projects.css";
 
 /** The Linux limited-network sockets options in the order Settings lists them, each with its
  * title and the plain sentence naming what it allows and what it risks. */
@@ -23,9 +24,18 @@ export const LINUX_SOCKETS: { value: LinuxSockets; title: string; detail: string
   },
 ];
 
-/** Settings, Sandbox as a view of its state: the Linux limited-network sockets choice with Save
- * changes, enabled only after a change. Inputs: the settings read, the picked option, a saving
- * flag, the last problem and the handlers. Output: the panel. */
+/** The option an owner has until they pick another: the engine's `LinuxSockets` default. */
+export const LINUX_SOCKETS_DEFAULT: LinuxSockets = "tcp_only";
+
+const SANDBOX_TOP = <div className="settings-top"><div>
+  <h2>Sandbox</h2>
+  <p>What agents can reach while they work.</p>
+</div></div>;
+
+/** Settings, Sandbox as a view of its state: the title in every state, then the Linux
+ * limited-network sockets choice, marked when it is away from the default, with Save changes,
+ * enabled only after a change. Inputs: the settings read, the picked option, a saving flag, the
+ * last problem and the handlers. Output: the tab. */
 export function SandboxSettingsView({ settings, picked, saving, problem, onPick, onSave, onRetry }: {
   settings: Loaded<SandboxSettings>;
   picked: LinuxSockets | null;
@@ -35,27 +45,34 @@ export function SandboxSettingsView({ settings, picked, saving, problem, onPick,
   onSave: () => void;
   onRetry: () => void;
 }) {
-  if (settings.kind === "loading") return <Skeleton shape="line" count={4} />;
-  if (settings.kind === "not_ready") return <NotReady what="The sandbox settings" />;
-  if (settings.kind === "error") return <LoadError message={`Couldn't load the sandbox settings. ${settings.message}`} onRetry={onRetry} />;
+  if (settings.kind === "loading") return <>{SANDBOX_TOP}<Skeleton shape="line" count={4} /></>;
+  if (settings.kind === "not_ready") return <>{SANDBOX_TOP}<NotReady what="The sandbox settings" /></>;
+  if (settings.kind === "error") return <>{SANDBOX_TOP}<LoadError message={`Couldn't load the sandbox settings. ${settings.message}`} onRetry={onRetry} /></>;
   const chosen = picked ?? settings.value.linux_sockets;
   const changed = chosen !== settings.value.linux_sockets;
   function submit(event: FormEvent) {
     event.preventDefault();
     if (changed && !saving) onSave();
   }
-  return <Panel title="Linux limited-network sockets">
-    <form className="form" aria-label="Linux limited-network sockets" noValidate onSubmit={submit}>
-      <p className="helper">How an agent limited to its model reaches the network when CrazyAgent runs on Linux. Landlock limits TCP by port only.</p>
-      <fieldset className="field" disabled={saving}>
-        <legend className="field-label">Linux limited-network sockets</legend>
-        {LINUX_SOCKETS.map((option) => <RadioCard key={option.value} name="linux-sockets" value={option.value} checked={chosen === option.value}
-          onChecked={(value) => onPick(value as LinuxSockets)} title={option.title} details={[option.detail]} />)}
-      </fieldset>
-      {problem && <Notice tone="danger" alert>{problem}</Notice>}
-      <span><Button type="submit" variant="primary" disabled={!changed} pending={saving} pendingLabel="Saving...">Save changes</Button></span>
+  return <>
+    {SANDBOX_TOP}
+    <form className="pj set-groups" aria-label="Linux limited-network sockets" noValidate onSubmit={submit}>
+      <SettingSection title="Network">
+        <SettingLine wide label="Linux limited-network sockets" changed={chosen !== LINUX_SOCKETS_DEFAULT}
+          help="How an agent limited to its model reaches the network when CrazyAgent runs on Linux. Landlock limits TCP by port only.">
+          <fieldset className="field" disabled={saving}>
+            <legend className="visually-hidden">Linux limited-network sockets</legend>
+            {LINUX_SOCKETS.map((option) => <RadioCard key={option.value} name="linux-sockets" value={option.value} checked={chosen === option.value}
+              onChecked={(value) => onPick(value as LinuxSockets)} title={option.title} details={[option.detail]} />)}
+          </fieldset>
+        </SettingLine>
+        <div className="set-body">
+          {problem && <Notice tone="danger" alert>{problem}</Notice>}
+          <span><Button type="submit" variant="primary" disabled={!changed} pending={saving} pendingLabel="Saving...">Save changes</Button></span>
+        </div>
+      </SettingSection>
     </form>
-  </Panel>;
+  </>;
 }
 
 /** Settings, Sandbox: reads the owner's sandbox settings and saves the picked Linux

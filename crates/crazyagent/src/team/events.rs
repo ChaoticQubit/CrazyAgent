@@ -1869,6 +1869,25 @@ pub(super) fn agent_text(text: &str) -> String {
     quoted
 }
 
+/// Writes text with every line opened by `> `, so no line of it can start as the owner, the
+/// engine or any other speaker, whichever break opens it. Keeps the square brackets
+/// `agent_text` rewrites, since agents pass each other code. Takes the text. Returns it.
+pub(crate) fn quoted_lines(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + QUOTE.len());
+    for line in text.split_inclusive(line_break) {
+        quoted.push_str(QUOTE);
+        quoted.push_str(line);
+    }
+    quoted
+}
+
+/// Writes text that follows an engine head on its first line: that line as written and
+/// every later one through `quoted_lines`. Takes the text. Returns it.
+pub(crate) fn quoted_after_first_line(text: &str) -> String {
+    let first = text.split_inclusive(line_break).next().unwrap_or_default();
+    format!("{first}{}", quoted_lines(&text[first.len()..]))
+}
+
 /// Writes text a sub-agent wrote as part of one engine line, such as an event or the
 /// question an agent waits on: made plain by `plain_agent_text` and every line break made a
 /// space, so it never starts a line of its own. Takes the text. Returns one line.
@@ -1881,7 +1900,9 @@ fn agent_line(text: &str) -> String {
     line
 }
 
-fn line_break(c: char) -> bool {
+/// Says whether a character breaks a line for some reader, the one rule for text an agent
+/// wrote. Takes the character. Returns whether it does.
+pub(crate) fn line_break(c: char) -> bool {
     matches!(
         c,
         '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{85}' | '\u{2028}' | '\u{2029}'

@@ -987,7 +987,10 @@ fn message_line(
     }
     Ok(format!(
         "{head}:\n  > {}",
-        bound_text(&message.body, BODY_SHOWN_MAX).replace('\n', "\n  > ")
+        bound_text(&message.body, BODY_SHOWN_MAX)
+            .split(crate::team::events::line_break)
+            .collect::<Vec<_>>()
+            .join("\n  > ")
     ))
 }
 
