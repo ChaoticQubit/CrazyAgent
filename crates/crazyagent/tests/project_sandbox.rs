@@ -2959,3 +2959,86 @@ fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
 }
+
+/// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs: a confined child reads neither
+/// the arguments nor the environment of a process outside its sandbox through either
+/// process-arguments sysctl, and still reads an ordinary sysctl value.
+#[test]
+fn a_confined_child_reads_no_process_arguments_by_sysctl() {
+    const NAME: &str = "a_confined_child_reads_no_process_arguments_by_sysctl";
+    const CANARY: &str = "DUMMY_CANARY=dummy-value";
+    const PROBE: &str = r#"$m=pack("i3",1,shift,shift);$b="\0"x262144;$l=pack("Q",262144);syscall(202,$m,3,$b,$l,0,0)==0 or exit 3;print $b"#;
+    const NCPU: &str = r#"$m=pack("i2",6,3);$b="\0"x4;$l=pack("Q",4);syscall(202,$m,2,$b,$l,0,0)==0 or exit 3;print "cpus=",unpack("i",$b)"#;
+    if std::env::var_os("DUMMY_PROCARGS_CHILD").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+    let quiet = |command: &mut std::process::Command| {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crazyagent::spawn_gate::spawn(command).unwrap()
+    };
+    let mut dummy = quiet(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1"])
+            .env_clear()
+            .env("DUMMY_PROCARGS_CHILD", "1")
+            .env("DUMMY_CANARY", "dummy-value"),
+    );
+    let mut apple = quiet(
+        std::process::Command::new("/usr/bin/env")
+            .env_clear()
+            .args(["DUMMY_CANARY=dummy-value", "/bin/sleep", "30"]),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let case = case();
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let holds =
+        |output: &Output, text: &str| String::from_utf8_lossy(&output.stdout).contains(text);
+    let mut problems = Vec::new();
+    for mib in [49, 38] {
+        let probe = |name: &str, target: u32| {
+            run(
+                &confined,
+                &case.profiles.join(format!("{name}-{mib}.sb")),
+                &format!("/usr/bin/perl -e '{PROBE}' {mib} {target}"),
+            )
+        };
+        let unconfined = crazyagent::spawn_gate::output(
+            std::process::Command::new("/usr/bin/perl")
+                .args(["-e", PROBE, &mib.to_string(), &dummy.id().to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        if !unconfined.status.success() || !holds(&unconfined, NAME) {
+            problems.push(format!(
+                "{mib}: inconclusive, the unconfined probe read nothing"
+            ));
+        }
+        let across = probe("across", dummy.id());
+        if holds(&across, CANARY) || holds(&across, NAME) {
+            problems.push(format!("{mib}: read a process outside the sandbox"));
+        }
+        let platform = probe("apple", apple.id());
+        if holds(&platform, CANARY) {
+            problems.push(format!("{mib}: read a platform binary's environment"));
+        }
+    }
+    let ordinary = run(
+        &confined,
+        &case.profiles.join("ncpu.sb"),
+        &format!("/usr/bin/perl -e '{NCPU}'"),
+    );
+    for child in [&mut dummy, &mut apple] {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if !ordinary.status.success() || !holds(&ordinary, "cpus=") {
+        problems.push(format!("an ordinary sysctl read failed: {ordinary:?}"));
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
