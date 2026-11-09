@@ -160,6 +160,8 @@ jobs:
           echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
       - name: Check Rust formatting
         run: make fmt-check
+      - name: Check the price snapshot script
+        run: make test-price-script
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
