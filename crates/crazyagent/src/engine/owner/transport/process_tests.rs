@@ -5,9 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 
-/// Makes a temporary engine folder whose `engine.db` is in WAL, the mode the engine keeps it in.
-/// In a rollback journal the macOS system SQLite can refuse a writer at once with an I/O error
-/// while read-only connections are open in the process, which no real engine meets.
+/// Makes a temporary engine folder whose `engine.db` is in WAL and written in it, as an engine
+/// leaves it. The macOS system SQLite refuses a writer at once in a rollback journal while a
+/// read-only connection holds a read, and refuses read-only connections on a WAL file never
+/// written in WAL. No real engine meets either.
 /// Output: the folder's guard and its canonical path.
 fn root() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
@@ -17,6 +18,9 @@ fn root() -> (tempfile::TempDir, PathBuf) {
         .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
         .unwrap();
     assert_eq!(mode, "wal");
+    database
+        .execute_batch("CREATE TABLE written_in_wal(x); DROP TABLE written_in_wal;")
+        .unwrap();
     (directory, root)
 }
 
