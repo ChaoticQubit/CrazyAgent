@@ -4,12 +4,12 @@ import { intakeCopy, loadSetupStatus, removePackEntry, runSetup, setPackEntry } 
 import type { SkillEntry } from "../../api-process";
 import type { PackEntry, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, Skeleton, StatusBadge, Switch } from "../../ui";
+import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, SettingSection, Skeleton, StatusBadge, Switch } from "../../ui";
+import { SettingRow } from "../../ui/setting";
 import { displayText } from "../conversation";
 import { SETUP_POLL_MS, dependencyView, entryIcon, entryName, installed, packGroups, packStateView, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
 import { SkillTag, skillEntries } from "../skill-tag";
 import "../project/projects.css";
-import "../intake/intake.css";
 
 export type PackAsk = { kind: "remove" | "install"; entry: PackEntry };
 
@@ -37,29 +37,63 @@ function ToolsSection({ status, busy, onInstallTools }: { status: SetupStatus; b
   const step = toolsStep({ kind: "ok", value: status });
   const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed");
   const offer = wanted && !setupBusy(status) && !toolsChecking(status);
-  return <section className="pj-stack-s" aria-label="Tools">
-    <h2 className="row"><Icon name="wrench" size={16} />Tools</h2>
-    <p className="pj-help">{step.body}</p>
-    <ul className="in-list">{status.dependencies.map((dependency) => {
+  return <SettingSection title="Tools" about={step.body} actions={offer ? <Button variant="primary" size="small" icon="wrench" disabled={busy !== null && busy !== TOOLS_BUSY} pending={busy === TOOLS_BUSY}
+    pendingLabel="Starting..." onClick={onInstallTools}>Install tools</Button> : undefined}>
+    {status.dependencies.map((dependency) => {
       const row = dependencyView(dependency);
-      return <li className="in-row" key={dependency.name}>
-        <span className="in-row-main">
-          <span className="pj-row"><strong>{row.title}</strong><StatusBadge word={row.word} tone={row.tone} /></span>
-          <span className="pj-small pj-secondary">{row.about}</span>
-          {row.line && <span className={`pj-small ${dependency.state.state === "failed" ? "pj-error" : "pj-muted"}`}>{row.line}</span>}
+      return <SettingRow key={dependency.name} label={row.title}>
+        <span className="set-label">{row.title}</span>
+        <span className="set-help">
+          <span>{row.about}</span>
+          {row.line && <span className={dependency.state.state === "failed" ? "pj-error" : undefined}>{row.line}</span>}
         </span>
-      </li>;
-    })}</ul>
-    {status.notes?.map((note) => <p className="pj-small pj-error" key={note}>{displayText(note)}</p>)}
-    {offer && <span><Button variant="primary" size="small" icon="wrench" disabled={busy !== null && busy !== TOOLS_BUSY} pending={busy === TOOLS_BUSY}
-      pendingLabel="Starting..." onClick={onInstallTools}>Install tools</Button></span>}
-  </section>;
+        <div className="set-ctl set-line-ctl"><StatusBadge word={row.word} tone={row.tone} /></div>
+      </SettingRow>;
+    })}
+    {status.notes && status.notes.length > 0 && <div className="set-body">{status.notes.map((note) => <p className="pj-error" key={note}>{displayText(note)}</p>)}</div>}
+  </SettingSection>;
 }
 
-/** Settings, Pack as a view of its state: tmux, uv and graphify first, then the default pack
- * grouped like setup, a switch on each installed entry, Remove on each removable one and Install
- * on each that isn't installed. Inputs: the setup read, the change in flight, the last problem
- * and the handlers. */
+/** Tells whether a pack group differs from what ships: an installed entry that is on when it
+ * ships off or off when it ships on. Entries not installed have no state to compare.
+ * Input: the group's entries. Output: true when any differs. */
+function differsFromShipped(entries: PackEntry[]): boolean {
+  return entries.some((entry) => installed(entry) && (entry.state.state === "on") !== entry.on_by_default);
+}
+
+/** One pack entry: its name and state, where it comes from and any detail on the left, and on
+ * the right a switch and Remove when installed, or Install or Try again when not.
+ * Inputs: the entry, whether changes wait, the change in flight, the skills and the handlers. */
+function PackRow({ entry, locked, busy, skills, onSwitch, onAsk }: {
+  entry: PackEntry;
+  locked: boolean;
+  busy: string | null;
+  skills: readonly SkillEntry[];
+  onSwitch: (entry: PackEntry, on: boolean) => void;
+  onAsk: (ask: PackAsk) => void;
+}) {
+  const state = packStateView(entry.state, entry.hooks_refused);
+  return <SettingRow label={entryName(entry)}>
+    <span className="set-label row"><Icon name={entryIcon(entry)} size={14} />{entry.kind === "skill" ? <SkillTag name={entry.id} label={entryName(entry)} skills={skills} /> : entryName(entry)}{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}
+      <StatusBadge word={state.word} tone={state.tone} /></span>
+    <span className="set-help">
+      <span>{displayText(entry.source)}, {displayText(entry.license)}</span>
+      {state.line && <span className="pj-error">{state.line}</span>}
+    </span>
+    <div className="set-ctl set-line-ctl">
+      {installed(entry) && <Switch id={`pack-${entry.id}`} label={`Use ${entryName(entry)}`} hideLabel checked={entry.state.state === "on"}
+        disabledReason={locked ? "Wait for the current change." : undefined} onChecked={(on) => onSwitch(entry, on)} />}
+      {installed(entry) && <Button size="small" variant="danger-text" disabled={locked} onClick={() => onAsk({ kind: "remove", entry })}>Remove</Button>}
+      {!installed(entry) && entry.state.state !== "installing" && <Button size="small" disabled={locked} pending={busy === entry.id}
+        pendingLabel="Starting..." onClick={() => onAsk({ kind: "install", entry })}>{entry.state.state === "failed" ? "Try again" : "Install"}</Button>}
+    </div>
+  </SettingRow>;
+}
+
+/** Settings, Pack as a view of its state: the title in every state, then any running or failure
+ * line, the default pack grouped like setup and last tmux, uv and graphify. A group whose
+ * installed entries differ from what ships is marked changed. Inputs: the setup read, the
+ * change in flight, the last problem and the handlers. */
 export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAsk, onInstallTools, onRetry }: {
   status: Loaded<SetupStatus>;
   busy: string | null;
@@ -70,38 +104,21 @@ export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAs
   onInstallTools: () => void;
   onRetry: () => void;
 }) {
-  if (status.kind === "loading") return <Skeleton shape="row" count={6} />;
-  if (status.kind === "not_ready") return <NotReady what="The default pack" />;
-  if (status.kind === "error") return <LoadError message={status.message} onRetry={onRetry} />;
-  const running = setupBusy(status.value);
-  return <div className="pj pj-stack">
-    <p className="pj-secondary">The skills and plugins every project starts with. Switching one off stops agents using it; removing it deletes what it installed.</p>
-    {running && <p className="pj-secondary" role="status">Setup is installing. Changes wait until it finishes.</p>}
-    {problem && <p className="pj-error" role="alert">{problem}</p>}
-    {status.value.dependencies.length > 0 && <ToolsSection status={status.value} busy={busy} onInstallTools={onInstallTools} />}
-    {packGroups(status.value.pack).map((group) => <section className="pj-stack-s" key={group.title} aria-label={group.title}>
-      <h2>{group.title}</h2>
-      {group.about && <p className="pj-help">{group.about}</p>}
-      <ul className="in-list">{group.entries.map((entry) => {
-        const state = packStateView(entry.state, entry.hooks_refused);
-        const locked = running || busy !== null;
-        return <li className="in-row" key={entry.id}>
-          <span className="in-row-main">
-            <span className="pj-row"><Icon name={entryIcon(entry)} size={14} /><strong>{entry.kind === "skill" ? <SkillTag name={entry.id} label={entryName(entry)} skills={skills} /> : entryName(entry)}</strong>{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}
-              <StatusBadge word={state.word} tone={state.tone} /></span>
-            <span className="pj-small pj-muted">{displayText(entry.source)}, {displayText(entry.license)}</span>
-            {state.line && <span className="pj-small pj-error">{state.line}</span>}
-          </span>
-          <span className="pj-row">
-            {installed(entry) && <Switch id={`pack-${entry.id}`} label={`Use ${entryName(entry)}`} hideLabel checked={entry.state.state === "on"}
-              disabledReason={locked ? "Wait for the current change." : undefined} onChecked={(on) => onSwitch(entry, on)} />}
-            {installed(entry) && <Button size="small" variant="danger-text" disabled={locked} onClick={() => onAsk({ kind: "remove", entry })}>Remove</Button>}
-            {!installed(entry) && entry.state.state !== "installing" && <Button size="small" disabled={locked} pending={busy === entry.id}
-              pendingLabel="Starting..." onClick={() => onAsk({ kind: "install", entry })}>{entry.state.state === "failed" ? "Try again" : "Install"}</Button>}
-          </span>
-        </li>;
-      })}</ul>
-    </section>)}
+  const running = status.kind === "ok" && setupBusy(status.value);
+  return <div className="stack">
+    <div className="settings-top"><div><h2>Pack</h2><p>The skills and plugins every project starts with. Switching one off stops agents using it; removing it deletes what it installed.</p></div></div>
+    {status.kind === "loading" ? <Skeleton shape="row" count={6} />
+      : status.kind === "not_ready" ? <NotReady what="The default pack" />
+      : status.kind === "error" ? <LoadError message={status.message} onRetry={onRetry} />
+      : <>
+        {running && <p className="pj-secondary" role="status">Setup is installing. Changes wait until it finishes.</p>}
+        {problem && <p className="pj-error" role="alert">{problem}</p>}
+        {packGroups(status.value.pack).map((group) => <SettingSection key={group.title} about={group.about || undefined}
+          title={differsFromShipped(group.entries) ? <>{group.title}<span className="set-changed">changed</span></> : group.title}>
+          {group.entries.map((entry) => <PackRow key={entry.id} entry={entry} locked={running || busy !== null} busy={busy} skills={skills} onSwitch={onSwitch} onAsk={onAsk} />)}
+        </SettingSection>)}
+        {status.value.dependencies.length > 0 && <ToolsSection status={status.value} busy={busy} onInstallTools={onInstallTools} />}
+      </>}
   </div>;
 }
 

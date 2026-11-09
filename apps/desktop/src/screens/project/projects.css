@@ -336,3 +336,7 @@ dialog.drawer .set-row { grid-template-columns: minmax(0, 1fr) minmax(0, max-con
 }
 dialog.dialog[open]:has(.pj-remove) { display: flex; flex-direction: column; }
 dialog.dialog[open]:has(.pj-remove) > .dialog-body { display: flex; flex-direction: column; min-height: 0; }
+.set-row > .set-help > span { display: block; }
+.set-row > button.set-label { display: inline-flex; align-items: center; gap: var(--space-2); justify-self: start; padding: 0; border: 0; background: none; color: var(--text); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
+.set-row > button.set-label:hover { color: var(--accent-text); }
+.set-body { display: grid; gap: 8px; margin: 0; padding: 12px 16px; border-top: 1px solid var(--border); }
