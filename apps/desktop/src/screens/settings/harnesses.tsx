@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { harnessCatalog, type HarnessAccountKind, type HarnessEntry } from "../../api";
 import { useLoad, type Loaded } from "../../state";
-import { Button, Icon, LoadError, NotReady, Panel, ProviderMark, Skeleton, StatusBadge } from "../../ui";
+import { Button, LoadError, NotReady, ProviderMark, SettingSection, Skeleton, StatusBadge } from "../../ui";
+import { SettingRow } from "../../ui/setting";
+import "../project/projects.css";
 
 const KIND_LABEL: Record<HarnessAccountKind, string> = {
   subscription: "Subscription",
@@ -34,40 +36,38 @@ function statusWord(entry: HarnessEntry): string {
 
 function HarnessRow({ entry }: { entry: HarnessEntry }) {
   const [open, setOpen] = useState(false);
-  return <div>
-    <button type="button" className="harness-row" aria-expanded={open} onClick={() => setOpen(!open)}>
-      <span className="cell"><ProviderMark provider={entry.id} name={entry.name} /><span className="ellipsis">{entry.name}</span></span>
-      <span><StatusBadge word={statusWord(entry)} /></span>
-      <span className="secondary">{entry.tools.kind === "switchable" ? "Can turn on or off" : entry.tools.reason}</span>
-      <span className="secondary">{entry.account_kinds.map((kind) => KIND_LABEL[kind]).join(", ") || "None"}</span>
-    </button>
+  return <>
+    <SettingRow label={entry.name}>
+      <button type="button" className="set-label" aria-expanded={open} onClick={() => setOpen(!open)}><ProviderMark provider={entry.id} name={entry.name} />{entry.name}</button>
+      <span className="set-help">
+        <span>Tools: {entry.tools.kind === "switchable" ? "Can turn on or off" : entry.tools.reason}</span>
+        <span>Accounts it can use: {entry.account_kinds.map((kind) => KIND_LABEL[kind]).join(", ") || "None"}</span>
+      </span>
+      <div className="set-ctl set-line-ctl"><StatusBadge word={statusWord(entry)} /></div>
+    </SettingRow>
     {open && <dl className="details-grid">
       <dt>Found at</dt><dd className="mono">{entry.executable ? homePath(entry.executable) : "Not found on this Mac"}</dd>
       <dt>Runs in the background with</dt><dd className="mono">{entry.headless}</dd>
       <dt>Model</dt><dd>{entry.model_selection ? "You can choose the model" : "Chosen inside the harness"}</dd>
     </dl>}
-  </div>;
+  </>;
 }
 
 /** The harness list as a pure view of the catalog read, with a Check again action.
  * Inputs: the catalog read, when it was checked and the recheck action. */
 export function HarnessesView({ catalog, checkedAt, onCheck }: { catalog: Loaded<HarnessEntry[]>; checkedAt?: string; onCheck: () => void }) {
   return <div className="stack">
-    <div className="row between">
-      <p className="secondary">CrazyAgent finds harnesses installed on this Mac. It never installs them. Install one yourself, then choose Check again.</p>
+    <div className="settings-top">
+      <div><h2>Harnesses</h2><p>CrazyAgent finds harnesses installed on this Mac. It never installs them. Install one yourself, then choose Check again.</p></div>
       <span className="row">{checkedAt && <span className="muted small">Checked {checkedAt}</span>}
         <Button icon="refresh-cw" onClick={onCheck} disabled={catalog.kind === "loading"}>Check again</Button></span>
     </div>
     {catalog.kind === "loading" ? <Skeleton shape="row" count={8} />
       : catalog.kind === "not_ready" ? <NotReady what="The harness list" />
       : catalog.kind === "error" ? <LoadError message="Couldn't check harnesses." onRetry={onCheck} />
-      : <Panel padded={false}>
-        <div className="harness-row list-head" aria-hidden="true"><span>Harness</span><span>Status</span><span>Tools</span><span>Accounts it can use</span></div>
-        {harnessGroups(catalog.value).map((group) => <section key={group.title} aria-label={group.title}>
-          <h3 className="group-title"><Icon name={group.title === "Ready" ? "circle-check" : group.title === "Not installed" ? "circle-dashed" : "triangle-alert"} size={13} /> {group.title} ({group.entries.length})</h3>
-          <div className="rows">{group.entries.map((entry) => <HarnessRow key={entry.id} entry={entry} />)}</div>
-        </section>)}
-      </Panel>}
+      : harnessGroups(catalog.value).map((group) => <SettingSection key={group.title} title={`${group.title} (${group.entries.length})`}>
+        {group.entries.map((entry) => <HarnessRow key={entry.id} entry={entry} />)}
+      </SettingSection>)}
   </div>;
 }
 

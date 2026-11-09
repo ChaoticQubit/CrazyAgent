@@ -4,11 +4,11 @@ import { graphifyVerdict, tidy } from "../trial4-accounts.mjs";
 /** Reads every Tools row and pack entry of Settings, Pack. Output: rows { section, title,
  * words, on, id }, on and id being the switch's state and id, or null with no switch. */
 function packRows() {
-  return browser.execute(() => [...document.querySelectorAll("main section[aria-label] li.in-row")].filter((node) => node.getClientRects().length).map((row) => {
+  return browser.execute(() => [...document.querySelectorAll("main .set-group .set-row")].filter((node) => node.getClientRects().length).map((row) => {
     const toggle = row.querySelector("button[role=\"switch\"]");
     return {
-      section: row.closest("section").getAttribute("aria-label"),
-      title: row.querySelector("strong")?.textContent.trim() ?? "",
+      section: row.closest(".set-group").querySelector("h3").firstChild.textContent.trim(),
+      title: row.dataset.setting ?? "",
       words: [...row.querySelectorAll(".badge")].map((badge) => badge.textContent.trim()),
       on: toggle ? toggle.getAttribute("aria-checked") === "true" : null,
       id: toggle?.id ?? null,
@@ -31,7 +31,7 @@ export const checks = [{
   after: "end",
   run: async (kit) => {
     await kit.go("#/settings/pack");
-    await kit.until(async () => await shown("section[aria-label=\"Tools\"]") && (await packRows()).some((row) => row.section !== "Tools"), kit.UI_MS, "Settings, Pack never showed its tools and pack entries");
+    await kit.until(async () => await shown("//section[contains(@class, \"set-group\")][.//h3[normalize-space(.)=\"Tools\"]]") && (await packRows()).some((row) => row.section !== "Tools"), kit.UI_MS, "Settings, Pack never showed its tools and pack entries");
     const { tool, entry } = graphifyVerdict(await packRows());
     if (!/^pack-[a-z0-9_-]+$/u.test(entry.id ?? "")) throw new Error(`the Graphify pack switch has an unexpected id ${entry.id}`);
     const selector = `#${entry.id}`;

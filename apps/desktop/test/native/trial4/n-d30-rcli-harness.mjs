@@ -13,10 +13,9 @@ export function rcliProblem(row) {
  * Output: { group, status } or null while the catalog has no RCLI row. */
 function rcliRow() {
   return browser.execute(() => {
-    for (const section of document.querySelectorAll("main section[aria-label]")) {
-      for (const row of section.querySelectorAll("button.harness-row")) {
-        const name = row.querySelector(".cell .ellipsis")?.textContent?.trim();
-        if (name === "RCLI") return { group: section.getAttribute("aria-label"), status: row.children[1]?.textContent?.trim() ?? "" };
+    for (const section of document.querySelectorAll("main .set-group")) {
+      for (const row of section.querySelectorAll(".set-row")) {
+        if (row.dataset.setting === "RCLI") return { group: section.querySelector("h3").textContent.replace(/ \(\d+\)$/, "").trim(), status: row.querySelector(".set-ctl")?.textContent?.trim() ?? "" };
       }
     }
     return null;

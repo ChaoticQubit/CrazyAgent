@@ -44,7 +44,7 @@ test("suggested and saved memories show hidden and reordering characters before 
   assert.equal(text.split("Use pnpm\\u{e0041}\\u{e0042} now\\u200b\\u202e").length, 3);
   assert.match(text, /From Harbor\\u202eNotes/);
   assert.doesNotMatch(text, /[\u{e0041}\u200b\u202e]/u);
-  assert.equal(markup.split('class="pj-note-text"').length, 3);
+  assert.equal(markup.split('class="set-label pj-note-text"').length, 3);
 });
 
 test("saved memories list with search, add and delete; empty and not ready states stay plain", () => {

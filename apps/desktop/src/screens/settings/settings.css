@@ -8,3 +8,6 @@
 .settings-nav-item[aria-current="page"] { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
 .settings-content { flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 @media (max-width: 1070px) { .settings-nav { position: static; flex: 1 1 100%; width: auto; } }
+.settings-top { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.settings-top h2 { margin: 0; font-size: 18px; line-height: 24px; font-weight: 600; }
+.settings-top p { margin: 2px 0 0; color: var(--text-2); font-size: 13px; max-width: 560px; }
