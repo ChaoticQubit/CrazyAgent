@@ -38,12 +38,6 @@
    "cache_write": null,
    "cache_read": null
   },
-  "claude-4-opus": {
-   "input": 5000000,
-   "output": 25000000,
-   "cache_write": null,
-   "cache_read": 500000
-  },
   "claude-4-sonnet": {
    "input": 3000000,
    "output": 15000000,

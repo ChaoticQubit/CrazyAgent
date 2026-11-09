@@ -142,19 +142,48 @@ pub fn table() -> &'static Prices {
     TABLE.get_or_init(|| parse(BUNDLED).expect("the bundled price snapshot is valid"))
 }
 
+/// Drops a trailing bracket suffix such as `[1m]`, the rule CodeBurn writes as a regular
+/// expression. Input: the name. Output: the name without it, or the name when it has none.
+fn without_bracket(name: &str) -> &str {
+    let Some(inner) = name.strip_suffix(']') else {
+        return name;
+    };
+    let after = inner.rfind(']').map_or(0, |at| at + 1);
+    inner[after..]
+        .find('[')
+        .map_or(name, |at| &name[..after + at])
+}
+
 fn model_key(model: &str) -> &str {
     let name = model.split('@').next().unwrap_or(model);
-    match name.rsplit_once('-') {
+    let name = match name.rsplit_once('-') {
         Some((head, date)) if date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()) => {
             head
         }
         _ => name,
-    }
+    };
+    without_bracket(name)
 }
 
 fn version_next(rest: &str) -> bool {
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
     (1..=2).contains(&digits) && matches!(rest.as_bytes().get(digits), None | Some(b'-' | b'.'))
+}
+
+/// The rate a cache write bills at, as CodeBurn prices it. A published rate wins, the tier's
+/// over the model's. A model with none pays 1.25 times its base input when it is Anthropic's,
+/// and otherwise its input rate for the call, the tier's included. Inputs: the model, its
+/// rates, the tier in force and the call's input rate. Output: picodollars per token.
+fn write_rate(model: &str, rates: &Rates, tier: Option<&Tier>, input: u128) -> u128 {
+    if rates.cache_write.is_none() {
+        let name = model.to_ascii_lowercase();
+        if !(name.contains("claude") || name.contains("anthropic")) {
+            return input;
+        }
+    }
+    tier.and_then(|tier| tier.cache_write)
+        .or(rates.cache_write)
+        .map_or(u128::from(rates.input) * 5 / 4, u128::from)
 }
 
 impl Prices {
@@ -185,9 +214,9 @@ impl Prices {
         self.rates(model).is_some()
     }
 
-    /// Prices one growth. Inputs: the model and the growth. Output: nanodollars rounded to the
-    /// nearest, None for a model without a price. Rules ported from CodeBurn (MIT,
-    /// THIRD_PARTY_NOTICES.md).
+    /// Prices one growth. Inputs: the model and the growth. Output: nanodollars rounded down,
+    /// so an estimate never reads over, None for a model without a price. Rules ported from
+    /// CodeBurn (MIT, THIRD_PARTY_NOTICES.md).
     pub fn cost_nanos(&self, model: &str, charged: Charged) -> Option<i64> {
         let rates = self.rates(model)?;
         let tier = rates
@@ -196,15 +225,11 @@ impl Prices {
             .filter(|tier| charged.prompt_tokens > tier.threshold);
         let input = u128::from(tier.map_or(rates.input, |tier| tier.input));
         let output = u128::from(tier.map_or(rates.output, |tier| tier.output));
-        let write = u128::from(
-            tier.and_then(|tier| tier.cache_write)
-                .or(rates.cache_write)
-                .unwrap_or(rates.input),
-        );
+        let write = write_rate(model, rates, tier, input);
         let read = u128::from(
             tier.and_then(|tier| tier.cache_read)
                 .or(rates.cache_read)
-                .unwrap_or(0),
+                .unwrap_or(rates.input / 10),
         );
         let one_hour = u128::from(charged.one_hour.min(charged.tokens.cache_write));
         let five_minute = u128::from(charged.tokens.cache_write) - one_hour;
@@ -221,6 +246,6 @@ impl Prices {
             FAST_UNIT
         };
         let total = pico * multiplier / FAST_UNIT;
-        Some(i64::try_from(total.saturating_add(500) / 1000).unwrap_or(i64::MAX))
+        Some(i64::try_from(total / 1000).unwrap_or(i64::MAX))
     }
 }
