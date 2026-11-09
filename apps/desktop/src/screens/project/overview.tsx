@@ -225,7 +225,7 @@ const UNDO_FILES_SHOWN = 5;
 function undoNote(result: Result<AcceptOutcome>): { note: string; moved: boolean } {
   if (result.kind === "not_ready") return { note: "Undo isn't in this build.", moved: false };
   if (result.kind === "error") return { note: changesRefusal({ code: result.code, cause: result.cause }), moved: false };
-  if (result.value.kind === "landed") return { note: `Undid the merge with one new commit on ${displayText(result.value.branch)}. Later commits stay.`, moved: true };
+  if (result.value.kind === "landed") return { note: `Undid the merge with one new commit on ${result.value.branch}. Later commits stay.`, moved: true };
   const files = result.value.files;
   const more = files.length > UNDO_FILES_SHOWN ? ` and ${files.length - UNDO_FILES_SHOWN} more` : "";
   return { note: `Couldn't undo the merge: ${files.slice(0, UNDO_FILES_SHOWN).join(", ")}${more} changed on its branch since, so nothing changed.`, moved: false };
