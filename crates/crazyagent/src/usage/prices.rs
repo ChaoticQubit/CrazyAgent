@@ -59,7 +59,7 @@ pub struct Prices {
 /// One growth to price: its tokens, the whole call's prompt size that picks the rate, the
 /// part of its cache write held one hour, its web searches and whether it ran fast.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Charged {
+pub(super) struct Charged {
     pub tokens: Tokens,
     pub prompt_tokens: u64,
     pub one_hour: u64,
@@ -157,6 +157,22 @@ fn version_next(rest: &str) -> bool {
     (1..=2).contains(&digits) && matches!(rest.as_bytes().get(digits), None | Some(b'-' | b'.'))
 }
 
+/// The rate a cache write bills at, as CodeBurn prices it. A published rate wins, the tier's
+/// over the model's. A model with none pays 1.25 times its base input when it is Anthropic's,
+/// and otherwise its input rate for the call, the tier's included. Inputs: the model, its
+/// rates, the tier in force and the call's input rate. Output: picodollars per token.
+fn write_rate(model: &str, rates: &Rates, tier: Option<&Tier>, input: u128) -> u128 {
+    if rates.cache_write.is_none() {
+        let name = model.to_ascii_lowercase();
+        if !(name.contains("claude") || name.contains("anthropic")) {
+            return input;
+        }
+    }
+    tier.and_then(|tier| tier.cache_write)
+        .or(rates.cache_write)
+        .map_or(u128::from(rates.input) * 5 / 4, u128::from)
+}
+
 impl Prices {
     /// The date of the prices. Output: `YYYY-MM-DD`.
     pub fn as_of(&self) -> &str {
@@ -188,7 +204,7 @@ impl Prices {
     /// Prices one growth. Inputs: the model and the growth. Output: nanodollars rounded to the
     /// nearest, None for a model without a price. Rules ported from CodeBurn (MIT,
     /// THIRD_PARTY_NOTICES.md).
-    pub fn cost_nanos(&self, model: &str, charged: Charged) -> Option<i64> {
+    pub(super) fn cost_nanos(&self, model: &str, charged: Charged) -> Option<i64> {
         let rates = self.rates(model)?;
         let tier = rates
             .tier
@@ -196,11 +212,7 @@ impl Prices {
             .filter(|tier| charged.prompt_tokens > tier.threshold);
         let input = u128::from(tier.map_or(rates.input, |tier| tier.input));
         let output = u128::from(tier.map_or(rates.output, |tier| tier.output));
-        let write = u128::from(
-            tier.and_then(|tier| tier.cache_write)
-                .or(rates.cache_write)
-                .unwrap_or(rates.input),
-        );
+        let write = write_rate(model, rates, tier, input);
         let read = u128::from(
             tier.and_then(|tier| tier.cache_read)
                 .or(rates.cache_read)
