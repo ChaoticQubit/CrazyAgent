@@ -9281,6 +9281,23 @@ fn a_master_land_that_took_the_sets_binary_closes_the_set() {
     set_closed(&case, &sub, "the landed blob is the set's");
 }
 
+/// LAND-3 r2: a binary file's bytes are not lines, so holding the set's bytes and more is
+/// another blob.
+#[test]
+fn a_master_land_that_added_to_the_sets_binary_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = binary_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", AGENT_FOURTH_LINE), ("data", "agent\0\nextra\n")],
+    );
+    let fix = turn_of(&case, &master, "Change the set's data");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the landed blob is not the set's");
+}
+
 /// LAND-3 r2: main renamed the file the set edited, so the conflict sits at a path the set
 /// never had and no line of the set's can be read there. That waits for the owner, though
 /// the fix may have used the set's work.
