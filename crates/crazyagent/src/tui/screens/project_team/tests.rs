@@ -2728,7 +2728,7 @@ fn catch_up_with_main_shows_on_under_overlapping_edits_and_space_flips_it() {
         (
             CatchUpMain::Off,
             "Off",
-            "Catch up with main is off for agents started from now on: their git merge of main is refused.",
+            "Catch up with main is off for agents started from now on: the git they are given refuses a merge of main. A Full access master or a git run by its full path can still bring it in.",
         ),
         (
             CatchUpMain::On,
