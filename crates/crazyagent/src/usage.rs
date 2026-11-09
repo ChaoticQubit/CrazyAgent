@@ -267,13 +267,14 @@ pub(crate) fn forget_project(db: &Connection, project: &str) -> Result<(), Engin
         (
             "usage_tokens",
             format!(
-                "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
-                 SELECT hour_ms,kind,?2,pool,account,agent,harness,session,input,output,cache_read,cache_write
+                "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos)
+                 SELECT hour_ms,kind,?2,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos
                  FROM usage_tokens WHERE project=?1
-                 ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session) DO UPDATE SET
+                 ON CONFLICT(hour_ms,kind,project,pool,account,agent,harness,session,model) DO UPDATE SET
                  input=MIN(input+excluded.input,{max}), output=MIN(output+excluded.output,{max}),
                  cache_read=MIN(cache_read+excluded.cache_read,{max}),
-                 cache_write=MIN(cache_write+excluded.cache_write,{max})",
+                 cache_write=MIN(cache_write+excluded.cache_write,{max}),
+                 cost_nanos=MIN(cost_nanos+excluded.cost_nanos,{max})",
                 max = capture::ROW_TOKENS_MAX
             ),
         ),

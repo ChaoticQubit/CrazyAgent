@@ -64,7 +64,21 @@ pub(crate) const STEPS: &[Step] = &[
         to: 8,
         run: nest_team_agents,
     },
+    Step {
+        to: 9,
+        run: usage_counts_by_model,
+    },
 ];
+
+/// Step 9 (CODEBURN-COUNT): usage rows gain the model and estimated dollars. A database that
+/// never opened the usage store gets the new shape when the store first opens.
+/// Input: the open upgrade transaction. Output: done, or the store's failure.
+fn usage_counts_by_model(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if !has_table(tx, "usage_tokens")? {
+        return Ok(());
+    }
+    crate::usage::capture::migrate_counts(tx)
+}
 
 /// Says whether a table of that name exists. Inputs: the open transaction and the name.
 /// Output: true when `sqlite_schema` holds a table row for it.

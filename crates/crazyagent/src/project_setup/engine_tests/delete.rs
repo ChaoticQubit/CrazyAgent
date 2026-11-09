@@ -258,7 +258,7 @@ async fn removing_a_project_keeps_its_usage_under_removed_projects() {
     drop(crate::usage::open(engine.root.path()).unwrap());
     write_db(
         &engine,
-        "INSERT INTO usage_tokens VALUES
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write) VALUES
            (3600000,'agent','setup-pooled','pool-team','account-codex','1','codex','s1',10,20,30,40),
            (7200000,'master','setup-pooled','pool-team','account-codex','m','codex','s2',1,1,1,1),
            (3600000,'agent','<removed>','pool-team','account-codex','1','codex','s1',100,200,300,400),
