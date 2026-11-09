@@ -945,7 +945,7 @@ fn add_tokens(
             text(attribution.pool.as_ref().map(CredentialRef::as_str)),
             text(attribution.account.as_ref().map(CredentialRef::as_str)),
             attribution.agent,
-            attribution.harness,
+            crate::harnesses::canonical(&attribution.harness),
             session,
             clamp(growth.input),
             clamp(growth.output),
