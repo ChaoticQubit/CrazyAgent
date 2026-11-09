@@ -5,10 +5,11 @@ import { mountTab, sceneRead } from "./settings-tab.mjs";
 export * from "./settings-tab.mjs";
 
 const FAILURE = { code: "engine_failed" };
-const account = (index, patch = {}) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT", method: "subscription", method_label: "Subscription",
+const account = (index, patch = {}) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT / Codex", method: "subscription", method_label: "Sign in with ChatGPT",
   url: null, model: null, status: "signed_in", status_label: "Signed in", ...patch });
 const ACCOUNTS = {
-  ok: [account(0), account(1), account(2, { provider: "claude", provider_name: "Claude" })],
+  ok: [account(0), account(1, { provider: "openai_compatible", provider_name: "Any OpenAI-compatible URL", method: "url", method_label: "Connect a URL" }),
+    account(2, { provider: "claude", provider_name: "Claude", method_label: "Sign in with your Claude subscription" })],
   empty: [],
   many: Array.from({ length: 30 }, (_, index) => account(index)),
   long_status: [account(0, { status_label: "Can't reach this URL" })],
