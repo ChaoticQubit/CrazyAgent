@@ -348,6 +348,7 @@ fn a_malformed_snapshot_is_refused() {
             format!(r#"{{"as_of":"2026-11-08","source_sha256":"a","models":{{{m}}},"extra":1}}"#),
         ),
         ("short date", dated("soon", "a", &m)),
+        ("nine byte date", dated("2026-11-0", "a", &m)),
         ("long date", dated("2026-11-081", "a", &m)),
         ("first separator", dated("2026x11-08", "a", &m)),
         ("second separator", dated("2026-11x08", "a", &m)),
