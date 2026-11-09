@@ -175,32 +175,45 @@ function freshIds(previous: ActivityRead, items: ActivityItem[]): number[] {
   return items.filter((item) => !seen.has(item.id)).map((item) => item.id);
 }
 
-/** Reads one project's activity now and again each interval while the window is visible, one
- * read at a time, and at once each time the round changes. A failed refresh keeps the last
- * good read and says why. Inputs: the project id, the interval, the read and the round.
- * Output: the read. */
+/** Reads one project's activity now, each interval while the window is visible, and at once when
+ * the window shows again or the round changes, one read at a time. A failed refresh keeps the
+ * last good read, says why and takes off the fresh mark, so a remount cannot replay it. A build
+ * without the read stops the reading. Inputs: the project id, the interval, the read and the
+ * round. Output: the read. */
 function useActivity(projectId: string, every: number, load: typeof loadActivity, round: number): ActivityRead {
   const [read, setRead] = useState<ActivityRead>(UNREAD);
   useEffect(() => setRead(UNREAD), [projectId]);
   useEffect(() => {
-    let current = true;
+    let polling = true;
+    let reading = false;
     let timer = 0;
     const tick = async () => {
+      window.clearTimeout(timer);
       if (document.visibilityState === "visible") {
+        reading = true;
         const result = await load(projectId, ACTIVITY_READ_MAX);
-        if (!current) return;
+        reading = false;
+        if (!polling) return;
         const at = Date.now();
         setRead((previous) => result.kind === "ok" || previous.shown?.kind !== "ok"
           ? { shown: result.kind === "ok" ? { kind: "ok", value: result.value.items } : result, more: result.kind === "ok" && result.value.more === true, at, stale: null, fresh: result.kind === "ok" ? freshIds(previous, result.value.items) : [] }
-          : { ...previous, stale: result.kind === "error" ? failureCopy(result) : "Activity isn't in this build." });
-        if (result.kind === "not_ready") return;
+          : { ...previous, fresh: [], stale: result.kind === "error" ? failureCopy(result) : "Activity isn't in this build." });
+        if (result.kind === "not_ready") {
+          polling = false;
+          return;
+        }
       }
       timer = window.setTimeout(() => void tick(), every);
     };
+    const onShow = () => {
+      if (polling && !reading && document.visibilityState === "visible") void tick();
+    };
+    document.addEventListener("visibilitychange", onShow);
     void tick();
     return () => {
-      current = false;
+      polling = false;
       window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onShow);
     };
   }, [projectId, every, load, round]);
   return read;

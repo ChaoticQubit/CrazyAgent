@@ -5,10 +5,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 
+/// Makes a temporary engine folder whose `engine.db` is in WAL and written in it, as an engine
+/// leaves it. The macOS system SQLite refuses a writer at once in a rollback journal while a
+/// read-only connection holds a read, and refuses read-only connections on a WAL file never
+/// written in WAL. No real engine meets either.
+/// Output: the folder's guard and its canonical path.
 fn root() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
-    rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let mode: String = database
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    database
+        .execute_batch("CREATE TABLE written_in_wal(x); DROP TABLE written_in_wal;")
+        .unwrap();
     (directory, root)
 }
 
@@ -637,6 +649,16 @@ fn stale_agent_instructions_save_is_refused() {
 /// Saves made at once from six screens each name the version they read: a save lands only
 /// on the version it read and reads back what it stored at the next one, every other save
 /// is refused as stale, and the stored version counts exactly the saves that landed (Q35).
+#[test]
+fn the_store_under_test_runs_the_journal_mode_the_engine_keeps_it_in() {
+    let (_directory, root) = root();
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let mode: String = database
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+}
+
 #[test]
 fn saves_at_once_land_only_on_the_version_they_read() {
     use crate::instruction_files::{EditDelivery, Mode};
