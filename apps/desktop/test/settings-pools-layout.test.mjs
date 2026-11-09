@@ -1,30 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bundle, withPage } from "./browser.mjs";
+import { bundle } from "./browser.mjs";
+import { CONTRAST_MIN, press, tabRunner, tabWalk } from "./settings-tab-steps.mjs";
 
 const fixture = await bundle(new URL("./fixtures/settings-pools-layout.mjs", import.meta.url).pathname);
-const CONTRAST_MIN = 4.5;
+const onPools = tabRunner(fixture);
 const EDIT_MAIN = 'button[aria-label="Edit pool Main pool"]';
-
-/** Runs a check on the real Settings page on Pools. Inputs: the scene, the check, the window
- * width and the theme. Output: the check's value. */
-function onPools(scene, check, width = 1180, theme = "light") {
-  return withPage(async (page) => {
-    await page.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
-    await page.evaluate(fixture);
-    await page.evaluate(`Fixture.mount(${JSON.stringify(scene)}, ${JSON.stringify(theme)})`);
-    return check(page);
-  });
-}
-
-/** Presses an element with the real mouse. Inputs: the page, the selector and its words, if
- * more than one element matches. */
-async function press(page, selector, wanted = null) {
-  const at = await page.evaluate(`Fixture.boxOf(${JSON.stringify(selector)}, ${JSON.stringify(wanted)})`);
-  assert.notEqual(at, null, `${selector} ${wanted ?? ""} is on the page`);
-  for (const type of ["mousePressed", "mouseReleased"]) await page.send("Input.dispatchMouseEvent", { type, x: at.x, y: at.y, button: "left", clickCount: 1 });
-  await page.evaluate("Fixture.settle(80)");
-}
 
 const read = (page) => page.evaluate("Fixture.sections()");
 const say = (page) => page.evaluate("Fixture.text()");
@@ -54,15 +35,7 @@ test("a 60-letter pool name wraps inside its label and leaves the actions alone"
 });
 
 test("real Tab keys walk New pool, then each pool's actions in row order", async () => {
-  const walked = await onPools({}, async ({ evaluate, send }) => {
-    await evaluate("[...document.querySelectorAll('.settings-nav a')].at(-1).focus()");
-    const seen = [];
-    for (let at = 0; at < 6; at += 1) {
-      for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
-      seen.push((await evaluate("Fixture.focused()")).name);
-    }
-    return seen;
-  });
+  const walked = await onPools({}, (page) => tabWalk(page, 6));
   const from = walked.indexOf("New pool");
   assert.notEqual(from, -1, JSON.stringify(walked));
   assert.deepEqual(walked.slice(from, from + 6), ["New pool", "Get ready for agents: Main pool", "Edit pool Main pool", "Delete pool Main pool", "Edit pool Spare", "Delete pool Spare"]);
