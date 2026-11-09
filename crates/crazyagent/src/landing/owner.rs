@@ -1446,19 +1446,36 @@ pub(super) fn undo(
     Ok(AcceptOutcome::Landed { commit, branch })
 }
 
-/// Records a finished undo: every set the undone merge closed (a master's merge closes the
-/// sets its head holds) whose files it changed is marked undone with it, then the set keeps
-/// the reverting commit and drops its intent, its merge rows show Undone and one Undone row
-/// names the closed sets whose work it reverted too. Inputs: the store, the undone set, the
-/// reverting commit and who undid it. Output: Ok once saved.
+/// Records a finished undo: sets accepted with no commit of their own whose work the revert
+/// removed, as [`reverted_work`] says, are marked undone with it, the set keeps the commit
+/// and drops its intent, its merge rows show Undone and one Undone row names those sets. The
+/// reads every set shares run first, so a failed one stops the step for a retry. Inputs: the
+/// store, the undone set, the reverting commit and who undid it. Output: Ok once saved.
 fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Result<(), EngineError> {
     let landed = record
         .landed
         .clone()
         .ok_or_else(|| failure("changes_undo_unavailable"))?;
+    let owner = shared(&record.repository)?;
+    let above = commits_from(&owner, &landed, commit)?;
+    let changed = diff::changed_paths(&owner, &format!("{landed}^1"), &landed)?;
+    let before = owner
+        .commit_of(&format!("{commit}^1"))?
+        .ok_or_else(|| failure("changes_git_failed"))?;
     let mut closed = Vec::new();
-    for mut other in store::closed_in(db, &record.project, &landed, &record.id)? {
-        if !reverts_closed_set(record, &landed, &other) {
+    for mut other in store::closed_without_commit(db, &record.project, &record.id)? {
+        let Some(at) = other.landed.clone().filter(|at| above.contains(at)) else {
+            continue;
+        };
+        let reverted =
+            reverted_work(&owner, [&before, commit], &changed, &other).unwrap_or_else(|error| {
+                eprintln!(
+                    "landing_undo_closed_set_unread cause={}",
+                    crate::protocol::plain_code(&error.0)
+                );
+                at == landed
+            });
+        if !reverted {
             continue;
         }
         other.undone = Some(commit.to_owned());
@@ -1474,24 +1491,36 @@ fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Resul
     Ok(())
 }
 
-/// Tells whether reverting a landed commit reverts a set recorded as landed in it: the
-/// commit changed a file the set changed. An Accept that made no commit records whatever
-/// commit was the tip, which may hold none of the set's work. A set git can no longer read
-/// counts, since the branch has already moved. Inputs: the undone set, its landed commit
-/// and the other set. Output: the answer.
-fn reverts_closed_set(record: &Record, landed: &str, closed: &Record) -> bool {
-    let overlap = shared(&record.repository).and_then(|owner| {
-        let reverted = diff::changed_paths(&owner, &format!("{landed}^1"), landed)?;
-        let changed = diff::changed_paths(&owner, &closed.base, &closed.head)?;
-        Ok(changed.iter().any(|path| reverted.contains(path)))
-    });
-    overlap.unwrap_or_else(|error| {
-        eprintln!(
-            "landing_undo_closed_set_unread cause={}",
-            crate::protocol::plain_code(&error.0)
-        );
-        true
-    })
+/// Lists the commits from a landed one up to the commit reverting it on that line, the
+/// landed one included, with one git run. Inputs: the owner repository and both commits.
+/// Output: the commits.
+fn commits_from(owner: &Repo, landed: &str, commit: &str) -> Result<BTreeSet<String>, EngineError> {
+    let range = format!("{landed}..{commit}");
+    let listed = owner.run(&["rev-list", "--ancestry-path", &range])?;
+    let text = std::str::from_utf8(&listed).map_err(|_| failure("changes_git_failed"))?;
+    let mut commits: BTreeSet<String> = text.lines().map(str::to_owned).collect();
+    commits.insert(landed.to_owned());
+    Ok(commits)
+}
+
+/// Tells whether a revert removed a set's work: the reverted commit changed one of the set's
+/// files, the branch held the set's work just before the revert and does not at the
+/// reverting commit. Inputs: the owner repository, the commits before and after the revert,
+/// the paths it changed and the set. Output: the answer, or a read failure of this set.
+fn reverted_work(
+    owner: &Repo,
+    [before, after]: [&str; 2],
+    changed: &[String],
+    set: &Record,
+) -> Result<bool, EngineError> {
+    let own = diff::changed_paths(owner, &set.base, &set.head)?;
+    if !own.iter().any(|path| changed.contains(path)) {
+        return Ok(false);
+    }
+    Ok(
+        super::merges::holds_set_work(owner, before, &set.base, &set.head)?
+            && !super::merges::holds_set_work(owner, after, &set.base, &set.head)?,
+    )
 }
 
 /// Moves an owner ref an Accept or an undo left in flight: by compare and swap when the
@@ -1799,9 +1828,11 @@ pub(super) fn settled(db: &Connection, id: &ChangeSetId) -> Result<Record, Engin
 /// an undo is finished or dropped the same way, and an agent worktree reset counts as done
 /// when HEAD already holds its target, is run again only while HEAD still holds the
 /// commit it started from and the worktree holds nothing else, and is dropped otherwise,
-/// so a commit the agent made after it stopped is never moved. The caller holds [`hold`]
-/// on its repository. Inputs: the store and the loaded record. Output: Ok once the stored
-/// record holds no intent.
+/// so a commit the agent made after it stopped is never moved. A closed set's next set
+/// opens above the target once the agent's branch holds it and not the set's head, and a
+/// restore that reached its target does what the live restore does last. The caller holds
+/// [`hold`] on its repository. Inputs: the store and the loaded record. Output: Ok once the
+/// stored record holds no intent.
 fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     match record.intent.clone() {
         Some(Intent::Land {
@@ -1858,7 +1889,12 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                 }
             }
             if !record.is_open() {
-                let start = if reset { &target } else { &record.head };
+                let reached = reset
+                    || match &agent {
+                        Some(agent) => agent.built_on(&target)? && !agent.built_on(&record.head)?,
+                        None => false,
+                    };
+                let start = if reached { &target } else { &record.head };
                 flow::set_base(
                     db,
                     &record.repository,
@@ -1866,15 +1902,17 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                     &record.git_dir,
                     start,
                 )?;
-            } else if let Some(earlier) = earlier
-                && !reset
-            {
-                let reached = match &agent {
-                    Some(agent) => agent.built_on(&target)?,
-                    None => false,
-                };
+            } else if let Some(earlier) = earlier {
+                let restoring = earlier.was_discarded();
+                let reached = reset
+                    || match &agent {
+                        Some(agent) => agent.built_on(&target)?,
+                        None => false,
+                    };
                 if !reached {
                     put_back(record, earlier)?;
+                } else if restoring {
+                    flow::finish_restore(db, record)?;
                 }
             }
             record.intent = None;

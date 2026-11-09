@@ -89,7 +89,8 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// work, which runs under its own bounds and without the barrier; a move the
 /// recheck refuses is recorded as Rejected with its code and never runs; a fresh owner deadline then bounds the record and the reply, so a finished
 /// effect is recorded as Applied or as Rejected with the refusal code. A home
-/// move then sends a settle job for this exchange's pending move: one whose
+/// move then sends a settle job for this exchange's pending move, trying again
+/// when that fails: one whose
 /// record did not finish it (a stale grant, a slow barrier, a failed record)
 /// is finished from disk, and one whose disk work never ran is forgotten. A Delete
 /// everything stops the project's IDE server before its wait and moves, and forgets
@@ -218,12 +219,11 @@ pub(super) async fn serve(
     }
     let forgotten = matches!(&answered, Ok((_, _, true)));
     let answered = answered.map(|(written, _, _)| written);
-    if moving
-        && let Err(e) = engine
-            .owner_job(|reply| Job::HomeMoveSettle(exchange, ran, reply))
-            .await
-    {
-        eprintln!("projects_home_move_not_settled cause={}", e.0);
+    if moving {
+        settled(engine, "projects_home_move_not_settled", |reply| {
+            Job::HomeMoveSettle(exchange, ran, reply)
+        })
+        .await;
     }
     if deleting && !forgotten {
         settle_delete(engine, exchange).await;
@@ -231,20 +231,30 @@ pub(super) async fn serve(
     answered.map_err(|_| failure(UNKNOWN))?
 }
 
-/// Forgets a Delete everything's plan, trying again after a full queue or a SQLite failure,
-/// since a plan left behind refuses every projects home move until the engine restarts.
-/// Inputs: the engine and the exchange. Output: whether the plan is gone.
+/// Forgets a Delete everything's plan. Inputs: the engine and the exchange. Output: whether
+/// the plan is gone.
 async fn settle_delete(engine: &Arc<Engine>, exchange: u64) -> bool {
+    settled(engine, "project_delete_not_settled", |reply| {
+        Job::DeleteSettle(exchange, reply)
+    })
+    .await
+}
+
+/// Runs one settling job, trying again after a full queue or a SQLite failure, since a row
+/// left behind refuses later projects home changes until the engine restarts. Inputs: the
+/// engine, the log line's name and the job for one try. Output: whether it settled.
+async fn settled(
+    engine: &Arc<Engine>,
+    name: &str,
+    job: impl Fn(oneshot::Sender<Result<(), EngineError>>) -> Job,
+) -> bool {
     for attempt in 0..SETTLE_TRIES {
         if attempt > 0 {
             tokio::time::sleep(SETTLE_GAP).await;
         }
-        match engine
-            .owner_job(|reply| Job::DeleteSettle(exchange, reply))
-            .await
-        {
+        match engine.owner_job(&job).await {
             Ok(()) => return true,
-            Err(e) => eprintln!("project_delete_not_settled cause={}", e.0),
+            Err(e) => eprintln!("{name} cause={}", e.0),
         }
     }
     false

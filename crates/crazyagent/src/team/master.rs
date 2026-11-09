@@ -1484,7 +1484,15 @@ fn lead_wake(
             ));
         }
     };
-    let (said, refused) = wake_in(tx, answering.access, answering.stored, agent, text, true)?;
+    let (said, refused) = wake_in(
+        tx,
+        answering.access,
+        answering.stored,
+        agent,
+        text,
+        true,
+        super::StoppedBy::Lead,
+    )?;
     if refused {
         return Ok((said, true));
     }
@@ -1896,8 +1904,8 @@ fn delegate(
 /// finished one; a name or number that reaches only a running sub-agent, none or one whose
 /// worktree is gone is refused in plain words, which point a live master at its tools and
 /// one that is not live (WK-R5) at its reply lines. Takes the transaction, the access, the
-/// setup, the name, the text and whether the master is live. Returns the sentence and
-/// whether it is a refusal, which wrote nothing, or a SQLite failure.
+/// setup, the name, the text, whether the master is live and who wakes it. Returns the
+/// sentence and whether it is a refusal, which wrote nothing, or a SQLite failure.
 pub(super) fn wake_in(
     tx: &Transaction<'_>,
     access: &ModelAccess,
@@ -1905,6 +1913,7 @@ pub(super) fn wake_in(
     agent: &str,
     text: &str,
     live: bool,
+    waker: super::StoppedBy,
 ) -> Result<(String, bool), EngineError> {
     let project = &stored.project_id;
     let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
@@ -1926,7 +1935,7 @@ pub(super) fn wake_in(
         return Ok((unknown, true));
     };
     let label = super::events::label(tx, id)?;
-    let admitted = super::admit_wake(tx, access, stored, id, text, now_ms())?;
+    let admitted = super::admit_wake(tx, access, stored, id, text, waker, now_ms())?;
     let reason = match admitted {
         Ok(_) => {
             super::names::reclaim(tx, project, id)?;
@@ -1942,6 +1951,12 @@ pub(super) fn wake_in(
         Err(super::OWNER_STOPPED) => {
             return Ok((
                 format!("The owner stopped {label}. Only the owner can wake it."),
+                true,
+            ));
+        }
+        Err(super::MASTER_STOPPED) => {
+            return Ok((
+                format!("The master stopped {label}. Only the master or the owner can wake it."),
                 true,
             ));
         }

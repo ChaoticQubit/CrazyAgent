@@ -42,11 +42,15 @@ pub const SCAN_EVERY: Duration = Duration::from_secs(2);
 pub(crate) const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
 pub(crate) const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
 pub(crate) const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its task waits for it until the owner starts it again; do not hand that work to another agent.";
+pub(crate) const MASTER_STOPPED_AGENT: &str = "The master stopped it and its teammates. Its unfinished tasks failed. The master or the owner can wake it.";
+pub(crate) const LEAD_STOPPED_AGENT: &str = "Its lead stopped it and its teammates. Its unfinished tasks failed. Its lead, the master or the owner can wake it.";
 pub(crate) const INSTRUCTIONS_RESTARTED: &str = "It restarted in its own worktree and conversation to load the owner's changed instructions. It is idle and takes the next task for its harness.";
-const OWNER_NOTICES: [&str; 4] = [
+const OWNER_NOTICES: [&str; 6] = [
     OWNER_RESTARTED,
     OWNER_WOKE,
     OWNER_STOPPED_AGENT,
+    MASTER_STOPPED_AGENT,
+    LEAD_STOPPED_AGENT,
     INSTRUCTIONS_RESTARTED,
 ];
 const SCREEN_ROWS_SCANNED: usize = 40;
@@ -65,6 +69,8 @@ const _: () = assert!(EVENTS_QUEUED_HARD_MAX < EVENTS_PER_PROJECT_MAX);
 const _: () = assert!(OWNER_RESTARTED.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(OWNER_WOKE.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(OWNER_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(MASTER_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(LEAD_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(INSTRUCTIONS_RESTARTED.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(COLD_WAKES_PER_HOUR_MAX <= HOURLY_CAP_DEFAULT);
 const _: () = assert!(EVENT_TEXT_BYTES_MAX + 256 < WAKE_BYTES_MAX);

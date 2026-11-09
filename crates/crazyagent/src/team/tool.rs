@@ -616,7 +616,7 @@ fn spec(name: &str) -> Value {
             }, "required": ["task"], "additionalProperties": false}),
         ),
         STOP_TOOL => (
-            "Stop an agent you lead: the master may stop any agent, a lead only its own sub-agents. Only the owner wakes a stopped agent again.",
+            "Stop an agent you lead: the master may stop any agent, a lead only its own sub-agents. Its unfinished tasks fail, and you or anyone above you can wake it again.",
             json!({"type": "object", "properties": {"agent": agent}, "required": ["agent"], "additionalProperties": false}),
         ),
         MERGE_TOOL => (

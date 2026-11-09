@@ -19,10 +19,10 @@ export interface SidebarProject {
   working?: number;
 }
 
-/** A project row's unseen alert count: the number on screen and, after it, the words a screen
+/** A project row's alert count: the number on screen and, after it, the words a screen
  * reader needs to know what the number counts. Input: the count as text. Output: the flag. */
-function UnseenFlag({ flag }: { flag: string }) {
-  return <><span className="nav-flag">{flag}</span><span className="visually-hidden">{flag === "1" ? "unseen alert" : "unseen alerts"}</span></>;
+function AlertFlag({ flag }: { flag: string }) {
+  return <><span className="nav-flag">{flag}</span><span className="visually-hidden">{flag === "1" ? "alert" : "alerts"}</span></>;
 }
 
 /** A project row's running-agent count: the number on screen, the words for a screen reader
@@ -53,7 +53,7 @@ export function Sidebar({ route, projects, profileName, engine, onRetry }: {
         {projects?.map((project) => <a key={project.id} className="nav-item" href={formatRoute({ name: "project", id: project.id, tab: "overview" })}
           aria-current={current(route.name === "project" && route.id === project.id)}>
           {project.working ? <span className="nav-live-dot" aria-hidden="true" /> : <Icon name="folder" />}<span className="name">{project.name}</span>
-          {project.working ? <WorkingCount count={project.working} /> : null}{project.flag && <UnseenFlag flag={project.flag} />}
+          {project.working ? <WorkingCount count={project.working} /> : null}{project.flag && <AlertFlag flag={project.flag} />}
         </a>)}
       </div>
     </nav>

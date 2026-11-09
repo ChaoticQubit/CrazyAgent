@@ -9299,6 +9299,30 @@ fn a_master_land_that_added_to_the_sets_binary_leaves_the_set_open() {
     set_stayed_open(&case, &sub, "the landed blob is not the set's");
 }
 
+/// LAND-3-R2: a conflicted path holding a line break cannot be read in the one-line-per-path
+/// batch, and a read failure leaves the set open.
+#[test]
+fn a_master_land_whose_conflicted_path_cannot_be_read_leaves_the_set_open() {
+    const NAME: &str = "line\nbreak";
+    let case = Case::new();
+    case.owner_commit(NAME, "one\n", "Owner adds a file");
+    let (sub, sub_head, master) = conflicted_set_from(&case, &[(NAME, "agent\n")], |case| {
+        case.owner_commit(NAME, "owner\n", "Owner edits the file");
+    });
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", AGENT_FOURTH_LINE), (NAME, "owner\nagent\n")],
+    );
+    let fix = turn_of(&case, &master, "Keep both sides");
+    assert!(matches!(
+        case.accept(&fix).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    set_stayed_open(&case, &sub, "its conflicted path could not be read");
+}
+
 /// LAND-3 r2: main renamed the file the set edited, so the conflict sits at a path the set
 /// never had and no line of the set's can be read there. That waits for the owner, though
 /// the fix may have used the set's work.
@@ -10052,6 +10076,363 @@ fn undoing_a_commit_leaves_a_set_accepted_above_it_whose_files_it_never_changed(
         !rows[0].text.contains(&label),
         "the Undone row claims a revert that did not happen: {}",
         rows[0].text
+    );
+}
+
+/// Has a new agent write the README and lands its set. Inputs: the case, the agent's number
+/// and the README's text. Output: the set.
+fn readme_landed_by(case: &Case, number: usize, text: &str) -> ChangeSetId {
+    let other = numbered_agent(case, number);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(&other.worktree.join("README"), text);
+    let id = turn_of(case, &other, "Change the README");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    id
+}
+
+/// Lands one set's README line from a second agent, optionally has the owner commit one
+/// unrelated file above it, then commits `files`, so the case's own set, holding the same line
+/// and `files`, is accepted with no commit at the tip. Inputs: the case, the files and whether
+/// a commit sits between. Output: the set accepted with no commit and the set that made it.
+fn same_change_accepted(
+    case: &Case,
+    files: &[(&str, &str)],
+    between: bool,
+) -> (ChangeSetId, ChangeSetId) {
+    keeps_activity(case);
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    for (path, text) in files {
+        case.edit(path, text);
+    }
+    let same = case.turn(TurnOutcome::Succeeded).unwrap();
+    let maker = readme_landed_by(case, 3, "one\ntwo\nthree\nfour\n");
+    let mut tip = case.tip();
+    if between {
+        tip = case.owner_commit("BETWEEN", "between\n", "Owner adds a file");
+    }
+    for (path, text) in files {
+        tip = case.owner_commit(path, text, "Owner takes the file");
+    }
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&same).unwrap() else {
+        panic!("the set already on main conflicted");
+    };
+    assert_eq!(commit, tip, "the Accept made no commit");
+    (same, maker)
+}
+
+/// Undoes a set and asserts another set was marked undone by that commit and named on the
+/// one Undone row. Inputs: the case, the set undone, the other set and what the row is
+/// about. Output: none.
+fn undo_marks_and_names(case: &Case, undone: &ChangeSetId, other: &ChangeSetId, about: &str) {
+    use crate::activity::ActivityKind;
+    let AcceptOutcome::Landed { commit, .. } = undo_landing(&case.db, &case.home, undone).unwrap()
+    else {
+        panic!("the undo conflicted");
+    };
+    let stored = store::load(&case.db, other).unwrap();
+    assert_eq!(stored.undone.as_deref(), Some(commit.as_str()), "{about}");
+    let rows: Vec<_> = activity_of(case, undone)
+        .into_iter()
+        .filter(|row| row.kind == ActivityKind::Undone)
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].text.contains(&stored.agent.label),
+        "{about}: {}",
+        rows[0].text
+    );
+}
+
+/// LAND-4 L1: an Accept that made no commit records whatever commit was the tip, which can
+/// sit above the commit that really made the change. Undoing that commit reverts the set
+/// too, so the set is marked and named.
+#[test]
+fn undoing_a_commit_marks_a_set_accepted_above_it_with_the_same_change() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[], true);
+    undo_marks_and_names(&case, &maker, &same, "the undo reverted this set's change");
+}
+
+/// LAND-4 L2: one reverted file is enough, since the set's work is then not all there.
+#[test]
+fn undoing_a_commit_marks_a_set_when_only_one_of_its_files_was_reverted() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[("OTHER", "other\n")], true);
+    undo_marks_and_names(&case, &maker, &same, "one of its two files was reverted");
+}
+
+/// LAND-4 L2 and SEC-F1: a set recorded at the undone commit whose head git can no longer
+/// read counts as reverted, since the branch has already moved and the undo must not fail.
+#[test]
+fn undoing_a_commit_marks_a_set_recorded_at_it_whose_head_git_cannot_read() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[], false);
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET head=?1 WHERE id=?2",
+            ["0123456789abcdef0123456789abcdef01234567", same.as_str()],
+        )
+        .unwrap();
+    undo_marks_and_names(&case, &maker, &same, "an unreadable set counts as reverted");
+}
+
+/// Land-6 r2: an unreadable set above the undone commit proves nothing about that commit,
+/// so the undo does not name it.
+#[test]
+fn undoing_a_commit_leaves_a_set_above_it_whose_head_git_cannot_read() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[], true);
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET head=?1 WHERE id=?2",
+            ["0123456789abcdef0123456789abcdef01234567", same.as_str()],
+        )
+        .unwrap();
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &maker).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(store::load(&case.db, &same).unwrap().undone, None);
+}
+
+/// Land-6 r2: sharing a file is not enough. A later set on the same file whose lines the
+/// revert left in place is neither marked nor named, so the Undone row stays true.
+#[test]
+fn undoing_a_commit_leaves_a_later_set_on_the_same_file_whose_lines_survive() {
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    keeps_activity(&case);
+    case.start();
+    case.edit("README", "zero\none\ntwo\nthree\n");
+    let later = case.turn(TurnOutcome::Succeeded).unwrap();
+    let older = readme_landed_by(&case, 3, "one\ntwo\nthree\nfour\n");
+    readme_landed_by(&case, 4, "zero\none\ntwo\nthree\nfour\n");
+    let tip = case.tip();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&later).unwrap() else {
+        panic!("the set already on main conflicted");
+    };
+    assert_eq!(commit, tip, "the Accept made no commit");
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &older).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    let stored = store::load(&case.db, &later).unwrap();
+    assert_eq!(stored.undone, None, "its line is still on main");
+    let rows: Vec<_> = activity_of(&case, &older)
+        .into_iter()
+        .filter(|row| row.kind == ActivityKind::Undone)
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        !rows[0].text.contains(&stored.agent.label),
+        "the Undone row claims a revert that did not happen: {}",
+        rows[0].text
+    );
+}
+
+/// Land-6 r2: sets below the undone commit cost no git run, since one read of the range
+/// decides for all of them.
+#[test]
+fn undoing_a_commit_costs_the_same_git_runs_for_any_number_of_sets_below_it() {
+    let runs = |copies: usize| {
+        let case = Case::new();
+        keeps_activity(&case);
+        case.start();
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        let already = case.turn(TurnOutcome::Succeeded).unwrap();
+        case.owner_commit("README", "one\ntwo\nthree\nfour\n", "Owner takes the line");
+        assert!(matches!(
+            case.accept(&already).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+        let record = store::load(&case.db, &already).unwrap();
+        for copy in 0..copies {
+            let mut below = record.clone();
+            below.id = ChangeSetId::new(format!("{copy:032x}")).unwrap();
+            store::save(&case.db, &below).unwrap();
+        }
+        let later = readme_landed_by(&case, 3, "zero\none\ntwo\nthree\nfour\n");
+        let before = git::GIT_RUNS.with(std::cell::Cell::get);
+        undo_landing(&case.db, &case.home, &later).unwrap();
+        git::GIT_RUNS.with(std::cell::Cell::get) - before
+    };
+    assert_eq!(
+        runs(5),
+        runs(0),
+        "sets below the undone commit cost git runs"
+    );
+}
+
+/// Land-6 r2: a git failure reading what the undo reverted stops the step and leaves the
+/// intent, so the next look at the set runs it again instead of marking on a guess.
+#[test]
+fn a_read_failure_in_a_finished_undo_is_left_for_settle_to_retry() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[], true);
+    let landed = store::load(&case.db, &maker).unwrap().landed.unwrap();
+    assert!(
+        owner::undo(&case.db, &case.home, &maker, &|step| {
+            step == owner::Step::BranchMoved
+        })
+        .is_err()
+    );
+    let set_landed = |value: &str| {
+        case.db
+            .execute(
+                "UPDATE landing_change_sets SET landed=?1 WHERE id=?2",
+                [value, maker.as_str()],
+            )
+            .unwrap();
+    };
+    set_landed("0123456789abcdef0123456789abcdef01234567");
+    assert!(owner::settled(&case.db, &maker).is_err());
+    assert!(store::load(&case.db, &maker).unwrap().intent.is_some());
+    assert_eq!(store::load(&case.db, &same).unwrap().undone, None);
+    set_landed(&landed);
+    owner::settled(&case.db, &maker).unwrap();
+    assert!(store::load(&case.db, &maker).unwrap().intent.is_none());
+    assert!(store::load(&case.db, &same).unwrap().undone.is_some());
+}
+
+/// LAND-4 L1: only sets above the undone commit can hold its change. A set accepted with no
+/// commit before it landed keeps its Accept, though the commit changed the same file.
+#[test]
+fn undoing_a_commit_leaves_a_set_accepted_below_it_on_the_same_file() {
+    let case = Case::new();
+    keeps_activity(&case);
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let already = case.turn(TurnOutcome::Succeeded).unwrap();
+    let tip = case.owner_commit("README", "one\ntwo\nthree\nfour\n", "Owner takes the line");
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&already).unwrap() else {
+        panic!("the set already on main conflicted");
+    };
+    assert_eq!(commit, tip, "the Accept made no commit");
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(
+        &other.worktree.join("README"),
+        "one\ntwo\nthree\nfour\nfive\n",
+    );
+    let later = turn_of(&case, &other, "Add five");
+    assert!(matches!(
+        case.accept(&later).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &later).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        store::load(&case.db, &already).unwrap().undone,
+        None,
+        "the undo left this set's line in place"
+    );
+}
+
+/// Land-6 r2: a set marked undone keeps the commit that really reverted it. A later undo of
+/// another commit on the same file finds its work already gone and does not rewrite that.
+#[test]
+fn undoing_a_second_commit_keeps_the_first_undo_of_a_set() {
+    let case = Case::new();
+    keeps_activity(&case);
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let same = case.turn(TurnOutcome::Succeeded).unwrap();
+    let older = readme_landed_by(&case, 3, "one\ntwo\nthree\nfour\n");
+    let newer = readme_landed_by(&case, 4, "zero\none\ntwo\nthree\nfour\n");
+    assert!(matches!(
+        case.accept(&same).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    let AcceptOutcome::Landed { commit: first, .. } =
+        undo_landing(&case.db, &case.home, &older).unwrap()
+    else {
+        panic!("the first undo conflicted");
+    };
+    assert_eq!(
+        store::load(&case.db, &same).unwrap().undone.as_deref(),
+        Some(first.as_str()),
+        "that undo removed this set's line"
+    );
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &newer).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        store::load(&case.db, &same).unwrap().undone.as_deref(),
+        Some(first.as_str()),
+        "the later undo rewrote the first one"
+    );
+}
+
+/// LAND-4 L1: a set whose recorded commit the repository no longer holds sits above nothing,
+/// so an undo leaves it Accepted, as a landed commit that is gone counts as not landed.
+#[test]
+fn undoing_a_commit_leaves_a_set_whose_recorded_commit_is_gone() {
+    let case = Case::new();
+    let (same, maker) = same_change_accepted(&case, &[], true);
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET landed=?1 WHERE id=?2",
+            ["0123456789abcdef0123456789abcdef01234567", same.as_str()],
+        )
+        .unwrap();
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &maker).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(store::load(&case.db, &same).unwrap().undone, None);
+}
+
+/// LAND-4 L1: an undo moves one branch. A set accepted with no commit at a commit only
+/// another branch holds still has its change there, so it keeps its Accept.
+#[test]
+fn undoing_a_commit_leaves_a_set_accepted_on_another_branch() {
+    let case = Case::new();
+    keeps_activity(&case);
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let same = case.turn(TurnOutcome::Succeeded).unwrap();
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(&other.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let maker = turn_of(&case, &other, "Add the line");
+    assert!(matches!(
+        case.accept(&maker).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    let tree = case.owner(&["rev-parse", "main^{tree}"]);
+    let on_stage = case.owner(&["commit-tree", tree.trim(), "-p", "main", "-m", "On stage"]);
+    let on_stage = on_stage.trim().to_owned();
+    case.owner(&["branch", "stage", &on_stage]);
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_land_on(project,branch) VALUES (?1,'stage')",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+    let AcceptOutcome::Landed { commit, branch } = case.accept(&same).unwrap() else {
+        panic!("the set on stage conflicted");
+    };
+    assert_eq!(
+        (commit, branch),
+        (on_stage, "stage".to_owned()),
+        "no commit, on stage"
+    );
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &maker).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        store::load(&case.db, &same).unwrap().undone,
+        None,
+        "stage still holds the change"
     );
 }
 
@@ -11015,20 +11396,21 @@ fn a_tool_that_also_rewrites_a_manifest_falls_back_to_the_agent_update() {
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
-/// A Cargo.lock-only clash of an agent the owner stopped, or of a project whose team the
-/// owner paused, is not regenerated and its agent gets no note; the stopped agent's set
-/// keeps its head for the owner (OS-8).
+/// A Cargo.lock-only clash of an agent the owner or the master stopped, or of a project
+/// whose team the owner paused, is not regenerated and its agent gets no note; the stopped
+/// agent's set keeps its head for the owner (OS-8, HB-S5-B).
 #[test]
 fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
-    for stop in ["owner stop", "paused team"] {
+    for stop in ["owner stop", "master stop", "paused team"] {
         let mut case = Case::new();
         cargo_workspace(&mut case);
         let project = case.workspace.project.as_str().to_owned();
-        if stop == "owner stop" {
+        if stop != "paused team" {
+            let maker = stop.trim_end_matches(" stop");
             case.db
                 .execute(
-                    "INSERT INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,1)",
-                    rusqlite::params![CLONE_AGENT, project],
+                    "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,?3)",
+                    rusqlite::params![CLONE_AGENT, project, maker],
                 )
                 .unwrap();
         } else {
@@ -11051,8 +11433,11 @@ fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
                 .all(|note| !note.contains("regenerated")),
             "{stop}: the agent got a regeneration note"
         );
-        if stop == "owner stop" {
-            assert_eq!(set.head, head, "the stopped agent's set keeps its head");
+        if stop != "paused team" {
+            assert_eq!(
+                set.head, head,
+                "{stop}: the stopped agent's set keeps its head"
+            );
         }
     }
 }
@@ -11783,6 +12168,82 @@ fn a_discard_whose_agent_built_on_the_reset_and_left_starts_from_the_reset() {
     assert_eq!(recorded_start(&case), Some(tip));
 }
 
+/// LAND-2-L2: a discard an engine stopped after HEAD moved, with an agent commit on top,
+/// reached its reset, so the next set opens above it and does not show the discarded work
+/// as removed by the agent.
+#[test]
+fn a_discard_stopped_after_head_moved_starts_the_next_set_from_its_reset_once_the_agent_committed()
+{
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (head, tip) = (case.view(&id).head, case.tip());
+    stopped_inside_reset(&case, &flow::AFTER_HEAD_MOVE, || {
+        discard(&case.db, &id, &head, NOW_MS)
+    });
+    case.edit("later.txt", "later\n");
+    case.agent_commit("Later work");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(recorded_start(&case), Some(tip));
+}
+
+/// LAND-2-L2: a discard's target is an ancestor of its head, so being built on the target
+/// proves nothing alone. A commit on the set's head never saw the reset and the next set
+/// keeps opening above that head.
+#[test]
+fn a_discard_stopped_before_its_reset_starts_the_next_set_from_its_head_once_the_agent_committed() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    stopped_inside_reset(&case, &flow::BEFORE_RESET, || {
+        discard(&case.db, &id, &head, NOW_MS)
+    });
+    case.edit("later.txt", "later\n");
+    case.agent_commit("Later work");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(recorded_start(&case), Some(head));
+}
+
+/// Stops a restore of a discarded set holding a claim after HEAD moved, runs `then`, settles
+/// the set and asserts the restore finished: pending, its discarded ref gone and its claim
+/// held again. Inputs: the case and what happens before the settle. Output: none.
+fn restore_stopped_after_head_moved_finishes(mut case: Case, then: impl FnOnce(&Case)) {
+    review_ready_claim(&mut case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_eq!(second_start(&case), 0, "the discarded set holds no claim");
+    stopped_inside_reset(&case, &flow::AFTER_HEAD_MOVE, || {
+        restore(&case.db, &id, NOW_MS + DAY_MS)
+    });
+    then(&case);
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(
+        case.owner(&["for-each-ref", "refs/crazyagent/discarded/"]),
+        ""
+    );
+    assert_eq!(second_start(&case), 1, "the restored set holds its claim");
+}
+
+/// LAND-2-L3: a restore finished by the next look at the set does what the live restore
+/// does last, so its claims hold again and its discarded ref does not leak.
+#[test]
+fn a_restore_stopped_after_head_moved_finishes_its_claims_and_ref_when_settled() {
+    restore_stopped_after_head_moved_finishes(Case::new(), |_| {});
+}
+
+/// LAND-2-L3: the same, reached with an agent commit on top of the restored head.
+#[test]
+fn a_restore_stopped_after_head_moved_finishes_its_claims_and_ref_once_the_agent_committed() {
+    restore_stopped_after_head_moved_finishes(Case::new(), |case| {
+        case.edit("later.txt", "later\n");
+        case.agent_commit("Later work");
+    });
+}
+
 /// A reset an engine stopped after the files moved and before HEAD moved, stored before
 /// resets recorded where they start, finishes when the worktree holds exactly its target:
 /// the files never reach the agent's next turn as its own change (RK-R2-S2).
@@ -11897,6 +12358,25 @@ fn a_restore_stopped_inside_its_reset_stays_discarded_once_the_agent_committed()
         store::load(&case.db, &id).unwrap().state,
         ChangeState::Pending
     );
+    assert_put_back(&case, &id, &before, None);
+}
+
+/// LAND-4 SEC-F1: a set restored once keeps that mark when a later restore is put back, so
+/// the put-back restores what the set held and not a constant.
+#[test]
+fn a_restore_stopped_inside_its_reset_keeps_the_mark_of_an_earlier_restore() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+    discard(&case.db, &id, &head, NOW_MS + DAY_MS + 1).unwrap();
+    let before = store::load(&case.db, &id).unwrap();
+    assert!(before.restored, "the set was restored once");
+    stopped_inside_reset(&case, &flow::BEFORE_RESET, || {
+        restore(&case.db, &id, NOW_MS + 2 * DAY_MS)
+    });
     assert_put_back(&case, &id, &before, None);
 }
 

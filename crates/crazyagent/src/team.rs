@@ -1552,7 +1552,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_owner_stops (
                 agent INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
-                stopped_ms INTEGER NOT NULL
+                stopped_ms INTEGER NOT NULL,
+                stopped_by TEXT NOT NULL DEFAULT 'owner'
             );
             CREATE TABLE IF NOT EXISTS team_caps (
                 project TEXT PRIMARY KEY,
@@ -1963,25 +1964,35 @@ pub fn admit_resolve(
 /// to that agent, so the runtime starts the same agent again under its own id and name, in
 /// its own worktree, with the message as its first input, and the master hears how it ends.
 /// Only a stopped or failed sub-agent of the project whose worktree is still recorded wakes,
-/// and never one the owner stopped (AW-1): only the owner's Wake or restart starts that one.
-/// Takes the transaction, live access, the setup, the agent, the message and the time.
-/// Returns the task id, or a plain refusal code: `team_agent_not_found`,
-/// `team_agent_running`, `team_agent_no_worktree`, `team_agent_owner_stopped`, or one of
-/// `admit`'s.
+/// and never one stopped by someone above the waker: only the owner's Wake or restart starts
+/// one the owner stopped (AW-1), and a lead does not wake one the master stopped (HB-S5-B).
+/// Takes the transaction, live access, the setup, the agent, the message, who wakes it and
+/// the time. Returns the task id, or a plain refusal code: `team_agent_not_found`,
+/// `team_agent_running`, `team_agent_no_worktree`, `team_agent_owner_stopped`,
+/// `team_agent_master_stopped`, or one of `admit`'s.
 pub fn admit_wake(
     tx: &Transaction<'_>,
     access: &ModelAccess,
     stored: &StoredSetup,
     agent: i64,
     prompt: &str,
+    waker: StoppedBy,
     now: i64,
 ) -> Result<Result<i64, &'static str>, EngineError> {
+    assert!(
+        waker != StoppedBy::Owner,
+        "the owner wakes through WakeAgent"
+    );
     let project = &stored.project_id;
     if let Some(code) = wake_refusal(tx, project, agent)? {
         return Ok(Err(code));
     }
-    if owner_stopped(tx, agent)? {
-        return Ok(Err(OWNER_STOPPED));
+    match stop_of(tx, agent)? {
+        Some((StoppedBy::Owner, _)) => return Ok(Err(OWNER_STOPPED)),
+        Some((StoppedBy::Master, _)) if waker == StoppedBy::Lead => {
+            return Ok(Err(MASTER_STOPPED));
+        }
+        _ => {}
     }
     let harness: String = tx
         .query_row(
@@ -2561,18 +2572,8 @@ fn perform(
             Ok(Outcome::Applied)
         }
         TeamAction::StopAgent { agent, .. } => {
-            let role: Option<String> = tx
-                .query_row(
-                    "SELECT role FROM team_agents WHERE id=?1 AND project=?2",
-                    params![agent, project.as_str()],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(error)?;
-            match (role.as_deref(), role.as_deref().and_then(AgentRole::parse)) {
-                (None, _) => return Ok(rejected("team_agent_not_found")),
-                (_, Some(AgentRole::Master)) => return Ok(rejected("team_stop_master")),
-                _ => {}
+            if let Some(code) = stop_refusal(tx, project, *agent)? {
+                return Ok(rejected(code));
             }
             owner_stop(tx, project, *agent, now)?;
             Ok(Outcome::Applied)
@@ -2765,17 +2766,43 @@ pub fn wake_refusal(
 /// The refusal code for a master's wake of a sub-agent the owner stopped (AW-1).
 pub const OWNER_STOPPED: &str = "team_agent_owner_stopped";
 
+/// The refusal code for a lead's wake of a sub-agent the master stopped (HB-S5-B).
+pub const MASTER_STOPPED: &str = "team_agent_master_stopped";
+
 /// Tells whether the owner stopped a sub-agent that has not started again since (AW-1), so
 /// only the owner's Wake or restart may start it. Takes a connection and the agent. Returns
 /// whether it was the owner's stop, or a SQLite failure.
 pub fn owner_stopped(connection: &Connection, agent: i64) -> Result<bool, EngineError> {
     connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM team_owner_stops WHERE agent=?1)",
+            "SELECT EXISTS(SELECT 1 FROM team_owner_stops WHERE agent=?1 AND stopped_by='owner')",
             [agent],
             |row| row.get(0),
         )
         .map_err(error)
+}
+
+/// Tells whether anyone's stop still holds a sub-agent. Takes a connection and the agent.
+/// Returns the answer, or a SQLite failure.
+pub(crate) fn stopped(connection: &Connection, agent: i64) -> Result<bool, EngineError> {
+    Ok(stop_of(connection, agent)?.is_some())
+}
+
+/// Who stopped a sub-agent that has not started again since, and when. Takes a connection
+/// and the agent. Returns them, None when no stop holds it, or a SQLite failure.
+pub(crate) fn stop_of(
+    connection: &Connection,
+    agent: i64,
+) -> Result<Option<(StoppedBy, i64)>, EngineError> {
+    let row: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT stopped_by,stopped_ms FROM team_owner_stops WHERE agent=?1",
+            [agent],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(row.map(|(by, stopped_ms)| (StoppedBy::named(&by), stopped_ms)))
 }
 
 /// Records the owner's Wake of a finished sub-agent (DEC-102), which the team runtime serves
@@ -3439,9 +3466,10 @@ const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 /// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
 /// for a lead's task), `team_agents.hookless` (1 when the agent's launch fires no hooks,
 /// DEC-104 bare-hooks), `team_agents.pane_pid` (the pane process a native teammate was
-/// first named by, PLC (b)) and `team_task_pins.held` (1 when a hold pinned the task, not
-/// its own purpose). Runs on every open and adds each column once. Takes the engine
-/// connection. Returns any SQLite failure.
+/// first named by, PLC (b)), `team_task_pins.held` (1 when a hold pinned the task, not
+/// its own purpose) and `team_owner_stops.stopped_by` (who made the stop; one from before
+/// the column was the owner's). Runs on every open and adds each column once. Takes the
+/// engine connection. Returns any SQLite failure.
 fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
     for (table, column, definition) in [
         ("team_agents", "pane", "TEXT"),
@@ -3450,6 +3478,11 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
         ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
         ("team_agents", "pane_pid", "INTEGER"),
         ("team_task_pins", "held", "INTEGER NOT NULL DEFAULT 0"),
+        (
+            "team_owner_stops",
+            "stopped_by",
+            "TEXT NOT NULL DEFAULT 'owner'",
+        ),
     ] {
         let present: bool = connection
             .query_row(
@@ -4062,6 +4095,78 @@ pub fn spread_accounts(connection: &Connection, project: &ProjectId) -> Result<b
         .map_err(error)
 }
 
+/// Who made a stop, in rising standing: a stop holds against any waker below its maker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoppedBy {
+    Lead,
+    Master,
+    Owner,
+}
+
+impl StoppedBy {
+    /// The word stored for this maker. Returns it.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Lead => "lead",
+            Self::Master => "master",
+            Self::Owner => "owner",
+        }
+    }
+
+    /// The maker a stored word names. Takes the word. Returns it, the owner for any word this
+    /// engine does not know, as that stop is the one nobody else lifts.
+    pub(crate) fn named(word: &str) -> Self {
+        match word {
+            "lead" => Self::Lead,
+            "master" => Self::Master,
+            _ => Self::Owner,
+        }
+    }
+}
+
+/// Why an agent cannot be stopped, if it cannot. Takes a connection, the project and the
+/// agent. Returns a plain refusal code or None, or a SQLite failure.
+fn stop_refusal(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Option<&'static str>, EngineError> {
+    let role: Option<String> = connection
+        .query_row(
+            "SELECT role FROM team_agents WHERE id=?1 AND project=?2",
+            params![agent, project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(
+        match (role.as_deref(), role.as_deref().and_then(AgentRole::parse)) {
+            (None, _) => Some("team_agent_not_found"),
+            (_, Some(AgentRole::Master)) => Some("team_stop_master"),
+            _ => None,
+        },
+    )
+}
+
+/// Records a stop made by the master or a lead (HB-S5-B), which never locks the agent to the
+/// owner: its unfinished tasks fail and its maker or anyone above can wake it. Takes a
+/// connection, the project, the agent, who stopped it and the time. Returns a plain refusal
+/// code, or any SQLite failure.
+pub(crate) fn agent_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    by: StoppedBy,
+    now: i64,
+) -> Result<Result<(), &'static str>, EngineError> {
+    assert!(by != StoppedBy::Owner, "the owner stops through owner_stop");
+    if let Some(code) = stop_refusal(connection, project, agent)? {
+        return Ok(Err(code));
+    }
+    record_stop(connection, project, agent, by, now)?;
+    Ok(Ok(()))
+}
+
 /// Records the owner's stop of a sub-agent and of every agent it leads, down its whole
 /// lead tree, so each stays stopped across restarts until the owner wakes it or its lead.
 /// Takes a connection, the project, the agent and the time. Returns any SQLite failure.
@@ -4069,6 +4174,20 @@ pub(crate) fn owner_stop(
     connection: &Connection,
     project: &ProjectId,
     agent: i64,
+    now: i64,
+) -> Result<(), EngineError> {
+    record_stop(connection, project, agent, StoppedBy::Owner, now)
+}
+
+/// Records a stop of a sub-agent and of every agent it leads, down its whole lead tree. A
+/// stop already there keeps the higher standing of its maker and this one and takes this
+/// one's time, so a wake queued before this stop fails. Takes a connection, the project, the
+/// agent, who stopped it and the time. Returns any SQLite failure.
+fn record_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    by: StoppedBy,
     now: i64,
 ) -> Result<(), EngineError> {
     connection
@@ -4079,9 +4198,13 @@ pub(crate) fn owner_stop(
                  SELECT a.id, led.depth + 1 FROM team_agents a JOIN led ON a.parent = led.id
                  WHERE a.project = ?2 AND a.id <> led.id AND led.depth < ?4
              )
-             INSERT OR IGNORE INTO team_owner_stops(agent,project,stopped_ms)
-             SELECT id, ?2, ?3 FROM led",
-            params![agent, project.as_str(), now, DEPTH_WALK_MAX],
+             INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by)
+             SELECT id, ?2, ?3, ?5 FROM led WHERE true
+             ON CONFLICT(agent) DO UPDATE SET stopped_ms=excluded.stopped_ms,
+             stopped_by=CASE WHEN excluded.stopped_by='owner'
+             OR (excluded.stopped_by='master' AND team_owner_stops.stopped_by='lead')
+             THEN excluded.stopped_by ELSE team_owner_stops.stopped_by END",
+            params![agent, project.as_str(), now, DEPTH_WALK_MAX, by.name()],
         )
         .map_err(error)?;
     Ok(())
@@ -4112,10 +4235,10 @@ pub(crate) fn owner_start(
     Ok(())
 }
 
-/// Clears the owner's stop of one agent that starts again for anything but the owner's
-/// Wake or restart of it, such as the owner's change-set Update or a pinned task. The
-/// stops of the agents it leads stay, so each of them waits for the owner (AW-1). Takes a
-/// connection, the project and the agent. Returns any SQLite failure.
+/// Clears the stop of one agent that starts again for anything but the owner's Wake or
+/// restart of it, such as the owner's change-set Update or a pinned task. The stops of the
+/// agents it leads stay, so each waits for whoever may wake it (AW-1). Takes a connection,
+/// the project and the agent. Returns any SQLite failure.
 pub(crate) fn owner_start_alone(
     connection: &Connection,
     project: &ProjectId,
@@ -4631,7 +4754,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     }
     let stopped: BTreeSet<i64> = {
         let mut statement = connection
-            .prepare("SELECT agent FROM team_owner_stops WHERE project=?1")
+            .prepare("SELECT agent FROM team_owner_stops WHERE project=?1 AND stopped_by='owner'")
             .map_err(error)?;
         statement
             .query_map([project.as_str()], |row| row.get(0))

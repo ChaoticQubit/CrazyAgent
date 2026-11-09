@@ -137,6 +137,7 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
     await until(() => says("dialog[open] h2", `Delete ${RENAMED}?`), 15000, "the delete question did not open");
     assert.deepEqual(await texts("dialog[open] p .stack-small > span"), [
       `${RENAMED} and its saved sign-in or key are removed from CrazyAgent. A running sign-in is cancelled first.`,
+      "An agent using this account keeps running. Its sign-in goes after that agent stops and the app restarts.",
       `It leaves pool ${POOL_RENAMED}. ${POOL_RENAMED} has no other account, so it is deleted too and its projects have no pool.`,
     ]);
     await click("button=Remove from pools and delete");

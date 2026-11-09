@@ -54,10 +54,11 @@ export function deleteDialog(accounts: readonly AccountView[], pools: readonly P
   const one = accounts.length === 1;
   const effect = poolEffect(accounts.map((account) => account.id), pools);
   const removed = `${andList(accounts.map((account) => account.name))} ${one ? "and its saved sign-in or key are" : "and their saved sign-ins or keys are"} removed from CrazyAgent. A running sign-in is cancelled first.`;
+  const inUse = `An agent using ${one ? "this account" : "one of these accounts"} keeps running. Its sign-in goes after that agent stops and the app restarts.`;
   return {
     title: one ? `Delete ${accounts[0]!.name}?` : `Delete ${accounts.length} accounts?`,
     confirmLabel: effect ? "Remove from pools and delete" : one ? "Delete account" : `Delete ${accounts.length} accounts`,
-    lines: effect ? [removed, effect] : [removed],
+    lines: effect ? [removed, inUse, effect] : [removed, inUse],
   };
 }
 

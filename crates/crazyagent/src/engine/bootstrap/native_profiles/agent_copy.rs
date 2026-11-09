@@ -9,8 +9,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
-const CODEX_RECORD: &str = "auth.json";
-const CLAUDE_RECORD: &str = ".credentials.json";
+pub(super) const CODEX_RECORD: &str = "auth.json";
+pub(super) const CLAUDE_RECORD: &str = ".credentials.json";
 const RECORD_BYTES_MAX: u64 = 65_536;
 const USABLE_MIN: Duration = Duration::from_secs(60);
 #[cfg(target_os = "macos")]
