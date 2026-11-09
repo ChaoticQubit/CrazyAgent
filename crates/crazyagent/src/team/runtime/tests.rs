@@ -17716,6 +17716,115 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
     }
 }
 
+/// Wiring test of engine mechanics, not Claude Code: the pane a native lead on a signed-in
+/// account reports ready is kept, so its own team calls are named as the lead and the
+/// teammate in its server registers and shows in the team status. The panes are real tmux
+/// panes; the report stands in for a start whose account hand-over macOS keeps in a keychain.
+#[cfg(target_os = "macos")]
+#[test]
+fn wiring_a_kept_native_lead_s_ready_pane_names_its_calls_and_registers_its_teammates() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    let agent = AgentId::team(lead).unwrap();
+    let record = fixture.pane(&host, lead);
+    let own = host
+        .panes(&agent)
+        .unwrap()
+        .into_iter()
+        .find(|listed| listed.pid == record.pid)
+        .unwrap()
+        .id;
+    let member = teammate_split(&fixture, &own);
+    let config = agent_home(&fixture.base.join("team"), lead)
+        .join("teams")
+        .join("session-1");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.json"),
+        format!(
+            r#"{{"members":[{{"name":"team-lead","tmuxPaneId":"leader"}},{{"name":"greeter","tmuxPaneId":"{member}"}}]}}"#
+        ),
+    )
+    .unwrap();
+    let worker = between_turns(&project, AgentRole::Sub, true, true);
+    assert!(worker.managed && worker.kept_session && !worker.live);
+    team.workers.insert(lead, worker);
+
+    team.apply(
+        lead,
+        Report::Ready {
+            group: record.pid,
+            pane: Some(record.clone()),
+        },
+    )
+    .unwrap();
+    team.watch_teammates().unwrap();
+
+    let shown: Vec<Option<String>> = fixture
+        .status()
+        .agents
+        .into_iter()
+        .filter(|row| row.parent == Some(lead))
+        .map(|row| row.pane)
+        .collect();
+    let named = team_caller(
+        &fixture.connection,
+        Some(host.as_ref()),
+        &project,
+        (lead, "Lead"),
+        Some((own.as_str(), record.pid)),
+    );
+    assert_eq!(
+        (fixture.recorded(lead), named, shown),
+        (true, Some((lead, "Lead".to_owned())), vec![Some(member)]),
+        "(pane row kept, the lead's call named, teammates in the status)"
+    );
+    host.kill(&agent).unwrap();
+}
+
+/// Wiring test of engine mechanics: a managed agent that starts its harness for each turn
+/// keeps no pane record, so a later engine neither leaves its pane running nor refuses to
+/// take it over, and its session record stays with recovery.
+#[test]
+fn wiring_a_per_turn_agent_s_ready_pane_stays_with_recovery() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let agent = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let record = fixture.pane(&host, agent);
+    let worker = between_turns(&project, AgentRole::Sub, true, false);
+    assert!(worker.managed && !worker.kept_session && !worker.live);
+    team.workers.insert(agent, worker);
+
+    team.apply(
+        agent,
+        Report::Ready {
+            group: record.pid,
+            pane: Some(record.clone()),
+        },
+    )
+    .unwrap();
+
+    assert!(!fixture.recorded(agent), "a per-turn pane is never kept");
+    assert!(
+        crate::recovery::sessions(&fixture.connection, Some(agent))
+            .unwrap()
+            .contains_key(&agent),
+        "its session record stays with recovery"
+    );
+    host.kill(&AgentId::team(agent).unwrap()).unwrap();
+}
+
 /// Wiring test of engine mechanics, not Claude Code: a native lead's first order without
 /// the signed-in account starts no pane, closes the turn it was given and names why.
 #[test]
