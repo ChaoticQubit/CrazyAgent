@@ -70,7 +70,8 @@ pub(super) fn conversation(run: &Interrupted) -> Result<Resume, &'static str> {
 /// Writes the note an interrupted agent resumes with: when it was cut short, each command
 /// its session record started without a result, and that it verifies before it goes on,
 /// then finishes the task or answers the message it had, quoted whole, since its session
-/// may not show it when the stop came as it was handed over. The commands may name secrets
+/// may not show it when the stop came as it was handed over; a wake task reads as
+/// `WAKE_DELIVERED`, since the note carries no messages. The commands may name secrets
 /// the agent itself used, so the note goes only to that agent and is never logged or
 /// stored. Takes the run and the task's prompt or the message's text, when it still waits.
 /// Returns the note, plain text.
@@ -97,7 +98,12 @@ pub(super) fn note(run: &Interrupted, item: Option<&str>) -> String {
     };
     let then = match (run.last_turn.task, run.last_turn.message, item) {
         (Some(_), _, Some(prompt)) => format!(
-            " Then finish the task you were given and reply with a short summary of what you did. The task, in case your session does not show it:\n{prompt}"
+            " Then finish the task you were given and reply with a short summary of what you did. The task, in case your session does not show it:\n{}",
+            if prompt == master::WAKE_TASK {
+                master::WAKE_DELIVERED
+            } else {
+                prompt
+            }
         ),
         (Some(_), _, None) => {
             " Then finish the task you were given and reply with a short summary of what you did."
