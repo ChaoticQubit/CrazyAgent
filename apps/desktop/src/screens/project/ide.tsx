@@ -94,7 +94,7 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
     const hide = () => void hideIde(projectId).then((result) => onHideProblem(result.kind === "ok" ? null : IDE_NOT_HIDDEN));
     const place = () => {
       if (!shown) return;
-      const box = bounds(element.getBoundingClientRect());
+      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
       if (!box || sameBounds(box, last)) return;
       last = box;
       void placeIde(projectId, box).then((result) => {
@@ -117,7 +117,7 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
       frame = window.requestAnimationFrame(follow);
     };
     const open = async () => {
-      const box = bounds(element.getBoundingClientRect());
+      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
       if (!box) return;
       const result = await openIde(projectId, box);
       if (!live) {

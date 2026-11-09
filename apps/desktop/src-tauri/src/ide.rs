@@ -62,8 +62,16 @@ impl Bounds {
         Ok(self)
     }
 
-    fn below_inset(self, _content_height: f64) -> Self {
-        self
+    /// Moves a panel counted from the top of the page to one counted from the top of the
+    /// window's content view. On macOS that view reaches under the title bar and the page starts
+    /// below it, so they differ by how much shorter the page is. A page read mid-resize that is
+    /// taller than the view moves nothing. Input: the content view's height in logical pixels.
+    /// Output: the moved bounds.
+    fn below_inset(self, content_height: f64) -> Self {
+        Self {
+            y: self.y + (content_height - self.viewport).max(0.0),
+            ..self
+        }
     }
 
     /// Counts the panel from the top of the window's content view, where a child webview is

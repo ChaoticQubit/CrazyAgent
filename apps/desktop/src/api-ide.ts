@@ -33,7 +33,7 @@ export type IdeTabState = { build: BuildState; unqualified: string | null };
 export type IdeView = { state: IdeTabState; platform: string };
 
 /** The panel the IDE webview covers, in the window's CSS pixels. */
-export type IdeBounds = { x: number; y: number; width: number; height: number };
+export type IdeBounds = { x: number; y: number; width: number; height: number; viewport: number };
 
 /** What the tab says about the build: its plain line, the one action it offers, and whether
  * the IDE can open now. */
@@ -155,19 +155,20 @@ export function openFailure(code: string): string {
   return OPEN_FAILURES[code] ?? failureCopy(code);
 }
 
-/** Rounds a panel's on-screen box to whole pixels for the IDE webview. Input: the box, as
- * `getBoundingClientRect` gives it. Output: the bounds, or null while the panel is hidden. */
-export function bounds(box: { left: number; top: number; width: number; height: number }): IdeBounds | null {
+/** Rounds a panel's on-screen box to whole pixels for the IDE webview. Inputs: the box, as
+ * `getBoundingClientRect` gives it, and the height of the page's view, which the app needs to
+ * place the box in its window. Output: the bounds, or null while the panel is hidden. */
+export function bounds(box: { left: number; top: number; width: number; height: number }, viewport: number): IdeBounds | null {
   const width = Math.round(box.width);
   const height = Math.round(box.height);
   if (width < 1 || height < 1) return null;
-  return { x: Math.max(0, Math.round(box.left)), y: Math.max(0, Math.round(box.top)), width, height };
+  return { x: Math.max(0, Math.round(box.left)), y: Math.max(0, Math.round(box.top)), width, height, viewport: Math.round(viewport) };
 }
 
 /** Whether the panel kept the box the IDE webview was last placed at. Inputs: the box now
  * and the one last placed, null before the first. Output: true when nothing moved. */
 export function sameBounds(box: IdeBounds, last: IdeBounds | null): boolean {
-  return last !== null && box.x === last.x && box.y === last.y && box.width === last.width && box.height === last.height;
+  return last !== null && box.x === last.x && box.y === last.y && box.width === last.width && box.height === last.height && box.viewport === last.viewport;
 }
 
 /** Reads what the project page shows for the IDE; with `retry` the engine first starts the
