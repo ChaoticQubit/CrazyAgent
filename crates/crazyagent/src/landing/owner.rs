@@ -1099,9 +1099,11 @@ pub(super) fn accept(
 /// Lands a change set as one squash commit on a target branch, the project's Land on
 /// branch when none is named (DEC-111 Q1): as [`accept`] through the owner's checkout, by
 /// moving the ref alone for a branch checked out nowhere, or through an agent's worktree
-/// for that agent's own branch. Inputs: as [`accept`], plus the target branch and who
-/// accepts, as the project's activity names them. Output: the landed commit and branch, or
-/// the conflicts.
+/// for that agent's own branch. Anyone but the owner is refused with
+/// [`super::WORKER_OPEN`] while a worker below the set's agent holds an open set, since only
+/// the owner's Accept may close that set with it (DEC-107). Inputs: as [`accept`], plus the
+/// target branch and who accepts, as the project's activity names them. Output: the landed
+/// commit and branch, or the conflicts.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn accept_to(
     db: &Connection,
@@ -1123,6 +1125,9 @@ pub(super) fn accept_to(
         || record.intent.is_some()
     {
         return Err(failure("changes_stale"));
+    }
+    if by != By::Named(OWNER_ACTOR) && super::subagent::has_open_worker(db, &record)? {
+        return Err(failure(super::WORKER_OPEN));
     }
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
     let git_dir = repository.join(".git");
