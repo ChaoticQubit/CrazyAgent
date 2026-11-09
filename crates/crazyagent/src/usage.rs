@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 
+pub mod activity;
 pub mod capture;
 pub mod health;
 pub mod metrics;
