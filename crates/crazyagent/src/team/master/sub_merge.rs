@@ -199,6 +199,9 @@ fn merge_in_clone(answering: &Answering<'_>, lead: i64, id: i64, label: &str) ->
 /// the plain code. Returns the sentence.
 fn refusal(label: &str, code: &str) -> String {
     match code {
+        crate::landing::WORKER_OPEN => {
+            format!("Not merged: {}", crate::landing::WORKER_OPEN_TEXT)
+        }
         "changes_lead_off_task_branch" => {
             "Not merged: check out your task branch in your worktree first; the merge goes into it.".to_owned()
         }

@@ -794,7 +794,15 @@ fn merge_keeping_nothing(team: &Team, worker: &Agent, ours: bool) {
     if ours {
         let from = worker.worktree.to_str().unwrap();
         team.git(lead, &["fetch", "-q", from, &worker.branch]);
-        let merge = ["merge", "--no-ff", "-q", "--no-edit", "-s", "ours", "FETCH_HEAD"];
+        let merge = [
+            "merge",
+            "--no-ff",
+            "-q",
+            "--no-edit",
+            "-s",
+            "ours",
+            "FETCH_HEAD",
+        ];
         team.git(lead, &merge);
     } else {
         team.hand_merge(&team.lead, worker);
@@ -813,7 +821,11 @@ fn a_lead_merge_that_kept_no_work_leaves_the_set_open_at_the_lead_turn_end() {
         let set = team.turn_end(&fix);
         merge_keeping_nothing(&team, &fix, ours);
         landing::settle_sub_agents(&team.db, &team.id, 1).unwrap();
-        assert_eq!(team.state(&set), ("pending".to_owned(), None), "ours {ours}");
+        assert_eq!(
+            team.state(&set),
+            ("pending".to_owned(), None),
+            "ours {ours}"
+        );
         assert_ne!(team.pending_ref(&set), "", "ours {ours}");
     }
 }
@@ -829,7 +841,11 @@ fn a_lead_merge_that_kept_no_work_leaves_the_set_open_at_the_next_read() {
         let set = team.turn_end(&fix);
         merge_keeping_nothing(&team, &fix, ours);
         landing::observe(&team.db, Some(&team.id)).unwrap();
-        assert_eq!(team.state(&set), ("pending".to_owned(), None), "ours {ours}");
+        assert_eq!(
+            team.state(&set),
+            ("pending".to_owned(), None),
+            "ours {ours}"
+        );
         assert_ne!(team.pending_ref(&set), "", "ours {ours}");
     }
 }
@@ -886,7 +902,11 @@ fn merge_of_a_branch_held_without_its_work_leaves_the_set_open() {
             },
             "ours {ours}"
         );
-        assert_eq!(team.state(&set), ("pending".to_owned(), None), "ours {ours}");
+        assert_eq!(
+            team.state(&set),
+            ("pending".to_owned(), None),
+            "ours {ours}"
+        );
     }
 }
 

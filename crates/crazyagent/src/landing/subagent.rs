@@ -103,10 +103,10 @@ pub(super) fn sub_agents(
 
 /// Closes the open change sets of a lead's sub-agents whose work the task tip of the
 /// lead's own clone already holds, however it got there: a merge the lead ran by hand
-/// after a conflict counts as the engine's merge does (F3). Each lands as the lead's tip.
-/// A lead in a linked worktree never merges by hand, so its workers are left as they are.
-/// Inputs: the store, the project and the lead. Output: Ok, or the failure that kept the
-/// lead's tip from being read.
+/// after a conflict counts as the engine's merge does (F3). Each lands as the lead's tip,
+/// as [`close_held`] says. A lead in a linked worktree never merges by hand, so its workers
+/// are left as they are. Inputs: the store, the project and the lead. Output: Ok, or the
+/// failure that kept the lead's tip from being read.
 pub(super) fn settle(db: &Connection, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
     store::initialize(db)?;
     let mut open = Vec::new();
@@ -139,31 +139,38 @@ pub(super) fn settle(db: &Connection, project: &ProjectId, lead: i64) -> Result<
         .iter()
         .filter(|sub| sub.repository == lead_place.repository)
     {
-        close_landed(db, sub, &lead_tip, &lead_tip)?;
+        close_held(db, sub, &lead_tip, &lead_tip)?;
     }
     Ok(())
 }
 
 /// Closes the open change sets of a lead's workers with the lead's own closed change set
 /// (DEC-107): when the lead's set lands, a worker set whose work it holds lands with it as
-/// Accepted, even when the lead squashed or resolved it by hand (F3); while the owner's
-/// Lands setting is Lead, every other worker set opened before the lead's set closed is
-/// discarded with it, restorable as an owner's Discard keeps one, since only that lead
-/// would have merged it. A worker's own workers close with it the same way. The caller
-/// holds [`hold`] on the closed set's repository. Inputs: the store and the lead's closed
-/// change set. Output: Ok, or the first failure.
+/// Accepted, even when the lead squashed or resolved it by hand (F3), and a set it holds
+/// the head of without the work stays open; while the owner's Lands setting is Lead, every
+/// other worker set opened before the lead's set closed is discarded with it, restorable
+/// as an owner's Discard keeps one, since only that lead would have merged it. A worker's
+/// own workers close with it the same way. The caller holds [`hold`] on the closed set's
+/// repository. Inputs: the store and the lead's closed change set. Output: Ok, or the
+/// first failure.
 pub(super) fn close_with_lead(
     db: &Connection,
     lead_set: &store::Record,
 ) -> Result<(), EngineError> {
-    close_workers(db, lead_set, WORKER_LEVELS_MAX)
+    close_workers(db, lead_set, WORKER_LEVELS_MAX, true)
 }
 
 /// Closes the workers' sets of one closed change set as [`close_with_lead`] says, then
 /// their own workers', at most `levels` deep, leaving open a set the owner restored, which
-/// the next read would otherwise close again. Inputs: the store, the closed change set and
-/// the levels left. Output: Ok, or the first failure.
-fn close_workers(db: &Connection, lead_set: &store::Record, levels: u8) -> Result<(), EngineError> {
+/// the next read would otherwise close again. Only a live close discards. Inputs: the
+/// store, the closed change set, the levels left and whether the rest may be discarded.
+/// Output: Ok, or the first failure.
+fn close_workers(
+    db: &Connection,
+    lead_set: &store::Record,
+    levels: u8,
+    discards_rest: bool,
+) -> Result<(), EngineError> {
     assert!(!lead_set.is_open());
     if levels == 0 || lead_set.agent.kind != super::AgentKind::Sub {
         return Ok(());
@@ -171,7 +178,7 @@ fn close_workers(db: &Connection, lead_set: &store::Record, levels: u8) -> Resul
     let Ok(lead) = lead_set.agent.id.parse::<i64>() else {
         return Ok(());
     };
-    let orphans = leads_merge(db, &lead_set.project)?;
+    let discards = discards_rest && leads_merge(db, &lead_set.project)?;
     for (_, sub) in sub_agents(db, &lead_set.project, lead)? {
         if sub.repository != lead_set.repository {
             continue;
@@ -188,22 +195,25 @@ fn close_workers(db: &Connection, lead_set: &store::Record, levels: u8) -> Resul
         };
         match landed {
             Some(landed) if covers(&record, &lead_set.head)? => {
-                land_covered(db, &mut record, landed)?
+                if !holds_work(&record, landed)? {
+                    continue;
+                }
+                land_covered(db, &mut record, landed)?;
             }
-            _ if orphans => {
+            _ if discards => {
                 super::flow::discard_held(db, &mut record, lead_set.updated_ms)?;
             }
             _ => continue,
         }
-        close_workers(db, &record, levels - 1)?;
+        close_workers(db, &record, levels - 1, discards_rest)?;
     }
     Ok(())
 }
 
-/// Closes the open sets of lead workers whose lead's newest change set closed after they
-/// opened, while the lead has none open, as [`close_with_lead`] would have when it closed:
-/// sets left open before the engine closed workers with their lead. The caller holds
-/// [`hold`] on their repository. Inputs: the store and the open change sets of one
+/// Lands the open sets of lead workers whose work their lead's newest change set, landed
+/// after they opened, holds, as [`close_with_lead`] would have when it closed. Nobody
+/// pressed anything at a read, so every other set stays open for the owner. The caller
+/// holds [`hold`] on their repository. Inputs: the store and the open change sets of one
 /// repository. Output: Ok, or the first failure.
 pub(super) fn close_orphaned(
     db: &Connection,
@@ -231,8 +241,8 @@ pub(super) fn close_orphaned(
         let Some(lead_set) = store::newest_of(db, &project, &lead.to_string())? else {
             continue;
         };
-        if !lead_set.is_open() && lead_set.intent.is_none() && !removed_outside(&lead_set) {
-            close_workers(db, &lead_set, WORKER_LEVELS_MAX)?;
+        if lead_set.state == ChangeState::Accepted && lead_set.intent.is_none() {
+            close_workers(db, &lead_set, WORKER_LEVELS_MAX, false)?;
         }
     }
     Ok(())
@@ -348,9 +358,9 @@ pub(super) fn leads_merge(db: &Connection, project: &ProjectId) -> Result<bool, 
 
 /// Tells whether a worker below a change set's agent, sub-agent or teammate, down to the
 /// levels the engine follows, holds an open change set under either Lands setting: closing
-/// the set unasked would hide that work and leave it to [`close_orphaned`] (HB-S4). Inputs:
-/// the store and the open change set. Output: the answer, false for an agent that leads no
-/// workers or where the engine keeps no team tables.
+/// the set unasked would hide that work (HB-S4). Inputs: the store and the open change set.
+/// Output: the answer, false for an agent that leads no workers or where the engine keeps
+/// no team tables.
 pub(super) fn has_open_worker(
     db: &Connection,
     record: &store::Record,
@@ -437,26 +447,30 @@ pub(super) fn is_lead_worker(
     .map_err(unavailable)
 }
 
-/// Tells whether a lead's worker has lost the lead that would land its work: the lead's
-/// newest change set closed because the lead's copy was removed outside the app, so the
-/// owner's list must show the worker's open set (HB-S4-LANDED). Inputs: the store, the
-/// project and the change set's agent. Output: the answer.
-pub(super) fn lead_copy_removed(
+/// Tells whether a lead's worker has lost the lead that would land its open change set, so
+/// the owner's list must show it: the lead's copy was removed outside the app
+/// (HB-S4-LANDED), or the lead's newest set closed after this one opened and left it open
+/// (fix/v21-team-4). Inputs: the store, the project and the change set. Output: the answer.
+pub(super) fn lead_left(
     db: &Connection,
     project: &ProjectId,
-    agent: &super::ChangeAgent,
+    set: &super::ChangeSetView,
 ) -> Result<bool, EngineError> {
-    let Ok(id) = agent.id.parse::<i64>() else {
+    let Ok(id) = set.agent.id.parse::<i64>() else {
         return Ok(false);
     };
-    if agent.kind != super::AgentKind::Sub {
+    if set.agent.kind != super::AgentKind::Sub {
         return Ok(false);
     }
     let Some(lead) = sub_agent_lead(db, project, id)? else {
         return Ok(false);
     };
-    let lead_set = store::newest_of(db, project, &lead.to_string())?;
-    Ok(lead_set.is_some_and(|set| removed_outside(&set)))
+    let Some(lead_set) = store::newest_of(db, project, &lead.to_string())? else {
+        return Ok(false);
+    };
+    let closed_after =
+        !lead_set.is_open() && lead_set.intent.is_none() && set.created_ms <= lead_set.updated_ms;
+    Ok(closed_after || removed_outside(&lead_set))
 }
 
 /// Lists the branches of a lead's sub-agents whose work is not yet in the lead's task
@@ -630,6 +644,11 @@ pub(super) fn merge(
         &sub_place.worktree,
         &sub_place.git_dir,
     )?;
+    if let Some(record) = store::open_for(db, path_text(&sub_place.worktree)?)?
+        && has_open_worker(db, &record)?
+    {
+        return Err(failure(super::WORKER_OPEN));
+    }
     let task =
         super::agent_branch(db, &lead_place.worktree, &lead_place.git_dir)?.ok_or_else(invalid)?;
     let own =
@@ -658,7 +677,7 @@ pub(super) fn merge(
     )?;
     let shared = shared(&lead_place.repository)?;
     if shared.test(&["merge-base", "--is-ancestor", &sub_tip, &lead_tip])? {
-        close_landed(db, &sub_place, &sub_tip, &lead_tip)?;
+        close_held(db, &sub_place, &sub_tip, &lead_tip)?;
         return Ok(MergeOutcome::AlreadyMerged { branch });
     }
     let home = crate::projects_home::owner_home()?;
@@ -928,7 +947,7 @@ pub(super) fn add_linked_teammate(
     store::set_agent_branch(db, repository, &folder, &branch)
 }
 
-/// Closes a sub-agent's open change set once its lead merged the work it holds, as
+/// Closes a sub-agent's open change set once the engine's own merge took its work, as
 /// [`close_covered`] does, under the engine's hold on the repository. Inputs: the store,
 /// the sub-agent's place, the tip that was merged and the lead's commit holding it.
 /// Output: Ok, closed or left open.
@@ -940,6 +959,33 @@ fn close_landed(
 ) -> Result<(), EngineError> {
     let _held = hold(&sub.repository);
     close_covered(db, sub, merged, landed)
+}
+
+/// Closes a sub-agent's open change set a lead's tip has in its history, only when that tip
+/// holds the work: a lead's merge can keep the head and none of the work, and that set
+/// waits for the owner. A set with a worker's open set below it stays open as well. Takes
+/// the engine's hold. Inputs: the store, the sub-agent's place, the commit that holds its
+/// head and the lead's tip. Output: Ok, closed or left open.
+fn close_held(db: &Connection, sub: &Place, merged: &str, landed: &str) -> Result<(), EngineError> {
+    let _held = hold(&sub.repository);
+    let Some(mut record) = store::open_for(db, path_text(&sub.worktree)?)? else {
+        return Ok(());
+    };
+    if record.intent.is_some()
+        || !covers(&record, merged)?
+        || !holds_work(&record, landed)?
+        || has_open_worker(db, &record)?
+    {
+        return Ok(());
+    }
+    land_covered(db, &mut record, landed)
+}
+
+/// Tells whether a commit that has an open change set's head holds its work too. Inputs:
+/// the change set and the commit. Output: the answer.
+fn holds_work(record: &store::Record, commit: &str) -> Result<bool, EngineError> {
+    let shared = shared(&record.repository)?;
+    super::merges::holds_changes_since(&shared, commit, &record.base, &record.head)
 }
 
 /// Closes a sub-agent's open change set whose head a commit holds, as an Accept closes one

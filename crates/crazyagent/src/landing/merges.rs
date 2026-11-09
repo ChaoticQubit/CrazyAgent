@@ -197,6 +197,22 @@ pub(super) fn holds_clean_changes(
     Ok(kept_clean_changes(owner, landed, landed, head)?.is_some())
 }
 
+/// Tells whether a commit holds a change set's clean changes as [`holds_clean_changes`]
+/// does, merging from the set's own base. For a commit with the set's head in its history
+/// the merge base is that head and the merge always agrees, so a merge that kept none of
+/// the work shows only from the set's base. Inputs: the owner repository, the commit and
+/// the set's base and head. Output: the answer.
+pub(super) fn holds_changes_since(
+    owner: &Repo,
+    commit: &str,
+    base: &str,
+    head: &str,
+) -> Result<bool, EngineError> {
+    assert!(is_object_id(base));
+    assert!(is_object_id(head));
+    Ok(kept_from_base(owner, commit, base, commit, head)?.is_some())
+}
+
 /// Reads whether a file of a commit has a line a conflict marker starts. A path the commit
 /// deleted has none; a path git cannot show as one file, or too large to read, counts as
 /// having one, so the set waits. Inputs: the owner repository, the commit and the path as
@@ -268,6 +284,20 @@ fn kept_clean_changes(
     if !is_object_id(base) {
         return Err(failure("changes_git_failed"));
     }
+    kept_from_base(owner, commit, base, ours, theirs)
+}
+
+/// As [`kept_clean_changes`], from a merge base the caller names. Inputs: the owner
+/// repository, the commit, the base and both sides. Output: the conflicted paths, empty for
+/// a clean merge, or None when the commit did not keep that merge or a configured command
+/// would run.
+fn kept_from_base(
+    owner: &Repo,
+    commit: &str,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+) -> Result<Option<Vec<Vec<u8>>>, EngineError> {
     let paths = super::owner::merge_paths(owner, base, ours, theirs)?;
     if super::owner::uses_configured_commands(owner, &paths, &[base, ours, theirs])? {
         return Ok(None);

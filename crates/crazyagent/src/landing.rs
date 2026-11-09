@@ -1089,8 +1089,8 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
 /// Lists one project's change sets as the owner's Changes and the master's brief show
 /// them: as [`list`], without the sets of a lead's workers while the owner's Lands setting
 /// is Lead, since that lead merges them (F3), but with a worker's open set whose lead's
-/// copy was removed outside the app, since no lead will. Inputs: the store and the project.
-/// Output: the change sets.
+/// copy was removed outside the app or whose lead's set closed and left it open, since no
+/// lead will. Inputs: the store and the project. Output: the change sets.
 pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
     let sets = list(db, project)?;
     assert!(sets.len() <= LIST_MAX);
@@ -1103,7 +1103,7 @@ pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetV
                 ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
             );
             if !subagent::is_lead_worker(db, project, &set.agent)?
-                || (open && subagent::lead_copy_removed(db, project, &set.agent)?)
+                || (open && subagent::lead_left(db, project, &set)?)
             {
                 kept.push(set);
             }
@@ -1331,8 +1331,7 @@ pub fn accept_into(
 pub const WORKER_OPEN: &str = "changes_worker_open";
 
 /// What the agent refused with [`WORKER_OPEN`] reads, after "Not merged" or "Not accepted".
-pub const WORKER_OPEN_TEXT: &str =
-    "a worker's work under that agent is still open. Land that work first, then merge again.";
+pub const WORKER_OPEN_TEXT: &str = "a worker's work under that agent is still open. The owner or, while Lands is Lead, that worker's lead has to land or discard it first. Then merge again.";
 
 /// Lands a change set on a chosen local branch as [`accept_into`] does, for an Accept the
 /// owner did not make: the project's activity names who accepted it, the master or the
