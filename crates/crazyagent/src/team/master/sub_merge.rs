@@ -223,3 +223,16 @@ fn refusal(label: &str, code: &str) -> String {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::refusal;
+
+    #[test]
+    fn a_lead_merge_refused_for_an_open_worker_says_why() {
+        assert_eq!(
+            refusal("Sub-agent 2", crate::landing::WORKER_OPEN),
+            format!("Not merged: {}", crate::landing::WORKER_OPEN_TEXT)
+        );
+    }
+}
