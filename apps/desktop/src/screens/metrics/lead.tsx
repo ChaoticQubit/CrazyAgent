@@ -25,7 +25,9 @@ function ChartTable({ bars, bucketMs, offset }: { bars: MetricsBucket[]; bucketM
 }
 
 /** The lead panel: the range's Tokens with what they are made of, beside the tokens over time
- * and the same numbers as a table. A range with only unreported usage says so, never zero.
+ * and the same numbers as a table. A range with only unreported usage says so, never zero. A
+ * pointer left on a bar the new range no longer draws counts as no pointer, because a bar
+ * that goes fires no leave event.
  * Inputs: the usage and metrics reads, the range start, now and the viewer's offset. */
 export function LeadPanel({ usage, metrics, sinceMs, nowMs, offset }: {
   usage: UsageReport;
@@ -39,6 +41,7 @@ export function LeadPanel({ usage, metrics, sinceMs, nowMs, offset }: {
   const unreported = (usage.not_reported_by ?? []).join(", ");
   const onlyUnreported = unreported !== "" && headlineTokens(total) === 0;
   const bars = chartBars(metrics, sinceMs, nowMs);
+  const pointed = hovered !== null && hovered < bars.length ? hovered : null;
   const per = barWords(metrics.bucket_ms);
   const mix: [string, number][] = [["Input", total.input], ["Cache write", total.cache_write], ["Output", total.output], ["Re-read from cache", total.cache_read]];
   return <Panel className="mx-lead">
@@ -53,7 +56,7 @@ export function LeadPanel({ usage, metrics, sinceMs, nowMs, offset }: {
       <div className="mx-lead-chart">
         <div className="mx-tools">
           <h3>Tokens per {per}</h3>
-          <span className="mx-readout" aria-live="polite">{chartReadout(bars, metrics.bucket_ms, offset, hovered)}</span>
+          <span className="mx-readout" aria-live="polite">{chartReadout(bars, metrics.bucket_ms, offset, pointed)}</span>
         </div>
         <ChartSvg bars={bars} bucketMs={metrics.bucket_ms} offset={offset} onBar={setHovered}
           label={`Tokens per ${per}: input, cache write and output. The table after the chart has the same numbers.`} />
