@@ -1275,3 +1275,22 @@ fn log_activity_is_listed_unless_switched_off_and_keeps_only_a_bounded_call() {
     );
     assert!(matches!(no_kind, Some(Err(_))), "{no_kind:?}");
 }
+
+/// SECAUDIT coord-delivery-raw-body-forges-owner-line r2: a work title reaches other agents
+/// in the engine's overlap note, so one holding any of the seven line breaks is refused.
+#[test]
+fn a_work_title_holding_any_line_break_is_refused_by_name() {
+    for line_break in [
+        '\n', '\r', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}',
+    ] {
+        assert_eq!(
+            live_call(
+                START_WORK_TOOL,
+                Some(&json!({"title": format!("a{line_break}b"), "claims": ["src/page.md"]}))
+            )
+            .unwrap(),
+            Err(START_INVALID),
+            "{line_break:?}"
+        );
+    }
+}

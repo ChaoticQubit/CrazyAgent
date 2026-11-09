@@ -3090,3 +3090,13 @@ fn a_database_made_before_the_turn_column_gets_it_on_open_and_keeps_its_messages
         );
     }
 }
+
+/// SECAUDIT coord-delivery-raw-body-forges-owner-line r2: a claim reaches other agents in the
+/// engine's overlap note, so one holding a line or paragraph separator is refused.
+#[test]
+fn a_claim_holding_a_line_separator_is_refused_by_name() {
+    let normalize = super::claims::normalize;
+    for raw in ["a\u{2028}b", "a\u{2029}b"] {
+        assert_eq!(code(normalize(raw)), "coord_claim_invalid", "{raw:?}");
+    }
+}

@@ -540,10 +540,14 @@ fn line(db: &Connection, message: &Message, max: usize) -> Result<String, Engine
     let head = format!("[crazyagent msg {}] from {sender}: {what}", message.id);
     assert!(head.len() <= HEAD_BYTES_MAX);
     let room = max - head.len();
-    let line = if message.body.len() <= room {
-        format!("{head}{}", message.body)
+    let body = match message.from {
+        Party::Agent(_) => crate::team::events::quoted_after_first_line(&message.body),
+        Party::Owner | Party::Engine => message.body.clone(),
+    };
+    let line = if body.len() <= room {
+        format!("{head}{body}")
     } else {
-        let body = crate::team::bound_text(&message.body, room - CUT.len());
+        let body = crate::team::bound_text(&body, room - CUT.len());
         format!("{head}{body}{CUT}")
     };
     assert!(line.len() <= max);
