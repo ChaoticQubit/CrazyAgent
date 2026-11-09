@@ -19493,9 +19493,6 @@ fn worker_results_go_to_the_lead_not_the_master() {
     team.shutdown().unwrap();
 }
 
-/// An idle worker takes only its own lead's next task (N1): the lead's second task goes to
-/// its idle worker rather than to the idle lead, and a master task the busy lead cannot take
-/// goes to a fresh sub-agent of the master while that worker sits idle.
 #[cfg(target_os = "macos")]
 fn handle_of(fixture: &Fixture, agent: i64) -> Option<String> {
     crate::team::names::name(&fixture.connection, agent)
@@ -19598,6 +19595,9 @@ fn an_agent_the_owner_keeps_warm_still_takes_the_next_task() {
     team.shutdown().unwrap();
 }
 
+/// An idle worker takes only its own lead's next task (N1): the lead's second task goes to
+/// its idle worker rather than to the idle lead, and a master task the busy lead cannot take
+/// goes to a fresh sub-agent of the master while that worker sits idle.
 #[cfg(target_os = "macos")]
 #[test]
 fn idle_worker_reused_only_within_its_lead() {
