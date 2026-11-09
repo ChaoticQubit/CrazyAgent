@@ -19,11 +19,14 @@ export function SettingRow({ label, wide = false, children }: { label: string; w
 
 /** One section of settings as the approved design draws it, named by its heading: the heading
  * and purpose line, any actions at the right, then its rows. Inputs: the title, the purpose
- * line, the actions and the rows. Output: the section. */
-export function SettingSection({ title, about, actions, children }: { title: ReactNode; about?: ReactNode; actions?: ReactNode; children: ReactNode }) {
+ * line, the actions, whether the whole section differs from what was saved and the rows.
+ * Output: the section. */
+export function SettingSection({ title, about, actions, changed = false, children }: {
+  title: ReactNode; about?: ReactNode; actions?: ReactNode; changed?: boolean; children: ReactNode;
+}) {
   const id = useId();
   return <section className="set-group" aria-labelledby={id}>
-    <div className="set-head"><div className="grow"><h3 id={id}>{title}</h3>{about && <p>{about}</p>}</div>{actions}</div>
+    <div className="set-head"><div className="grow"><h3 id={id}>{title}{changed && <span className="set-changed">changed</span>}</h3>{about && <p>{about}</p>}</div>{actions}</div>
     {children}
   </section>;
 }

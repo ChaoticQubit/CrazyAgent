@@ -59,7 +59,7 @@ test("setting an account up outside the desktop shell reports the engine as unre
   assert.equal(result.code, "engine_unreachable");
 });
 
-test("a pool's saved-key, URL and local members can be set up for agents again from its menu", async () => {
+test("a pool's saved-key, URL and local members can be set up for agents again from its row", async () => {
   const { keyedMembers, PoolsView } = await import("../src/screens/settings/pools.tsx");
   const { createElement } = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
@@ -70,6 +70,9 @@ test("a pool's saved-key, URL and local members can be set up for agents again f
   const forbidden = () => { throw new Error("static rendering must not act"); };
   const markup = renderToStaticMarkup(createElement(PoolsView, { pools: { kind: "ok", value: [pool] }, onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden, onPrepare: forbidden }));
   assert.match(markup, /Research/);
+  assert.match(markup, /aria-label="Get ready for agents: Research"/);
+  const subscriptions = renderToStaticMarkup(createElement(PoolsView, { pools: { kind: "ok", value: [{ ...pool, members: [member("b", "claude")] }] }, onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden, onPrepare: forbidden }));
+  assert.doesNotMatch(subscriptions, /Get ready for agents/);
 });
 
 test("an account added to a pool from Add account is set up for agents the way the pool editor sets it up", async () => {
