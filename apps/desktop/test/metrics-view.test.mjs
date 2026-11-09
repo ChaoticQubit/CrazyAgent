@@ -180,3 +180,30 @@ test("both Metrics views open on 7 days, as the mockup does", () => {
     assert.match(markup, /aria-checked="true"[^>]*>7 days</, JSON.stringify(props));
   }
 });
+
+test("All starts the chart at the oldest bar the engine kept, not at the epoch", async () => {
+  const chart = await import("../src/screens/metrics/chart.tsx");
+  const bucket = 5 * DAY;
+  const first = NOW - 20 * DAY;
+  const bars = chart.chartBars(metrics({ bucket_ms: bucket, series: [{ start_ms: first, tokens: tokens({ input: 5 }) }] }), 0, NOW);
+  assert.equal(bars[0].start_ms, first);
+  assert.equal(bars[0].tokens.input, 5);
+  assert.equal(bars.length, 5);
+});
+
+test("a chart with more bars than it can draw keeps the newest", async () => {
+  const chart = await import("../src/screens/metrics/chart.tsx");
+  const bucket = 5 * DAY;
+  const first = NOW - 1000 * DAY;
+  const bars = chart.chartBars(metrics({ bucket_ms: bucket, series: [{ start_ms: first, tokens: tokens({ input: 5 }) }] }), 0, NOW);
+  assert.equal(bars.length, 64);
+  assert.equal(bars[63].start_ms, first + 200 * bucket);
+});
+
+test("the readout names the highest bar, or the bar under the pointer", async () => {
+  const chart = await import("../src/screens/metrics/chart.tsx");
+  const bars = [{ start_ms: SINCE, tokens: tokens({ input: 5 }) }, { start_ms: SINCE + DAY, tokens: tokens({ input: 1200 }) }];
+  assert.match(chart.chartReadout(bars, DAY, 0, null), /^Highest, [A-Z][a-z]{2} \d+: 1\.2K$/);
+  assert.match(chart.chartReadout(bars, DAY, 0, 0), /^[A-Z][a-z]{2} \d+: 5$/);
+  assert.equal(chart.chartReadout([], DAY, 0, null), "No tokens in this range");
+});

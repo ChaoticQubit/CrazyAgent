@@ -57,7 +57,7 @@ const render = (patch = {}) => renderToStaticMarkup(createElement(view.MetricsPa
   onRange: forbidden, onBy: forbidden, onRetry: forbidden, ...patch,
 }));
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
-const tableText = (markup) => text(markup.slice(markup.indexOf("<table")));
+const tableText = (markup) => text(markup.slice(markup.lastIndexOf("<table")));
 
 test("the app Metrics page covers every project on the engine and filters by project", () => {
   const markup = renderToStaticMarkup(createElement(SessionContext.Provider, { value: SESSION }, createElement(appPage.AppMetrics, { projects: PROJECTS })));
@@ -69,9 +69,9 @@ test("the app Metrics page covers every project on the engine and filters by pro
 
 test("all projects shows the same tiles, and By project lists each project with its agents and runs first", () => {
   const markup = render();
-  assert.match(text(markup), /Tokens 2\.3K 1\.2K input, 800 cache write, 300 output/);
+  assert.match(text(markup), /Tokens 2\.3K Input 1\.2K Cache write 800 Output 300/);
   assert.match(text(markup), /2 projects · Updated 10 s ago · provider-reported usage per turn/);
-  assert.match(text(markup), /Tasks 6 done 1 waiting, 0 failed Merges 19 5 into main, 1 undone Lines /, "the same six tiles as the project tab");
+  assert.match(text(markup), /Tasks 6 done 1 waiting, 0 failed Merges 19 5 into main, 1 undone Lines /, "the project tab's tiles under the lead panel");
   assert.match(text(markup), /By project By agent By run By account By harness/);
   const table = tableText(markup);
   assert.match(table, /^ Project Tokens Input Cache write Output Cache read Agents Runs Merges Share of tokens /, "By project counts each project's merges, as the mockup does");
@@ -223,4 +223,35 @@ test("Check limits now stays reachable while loading and after a failed read, an
   assert.match(text(render({ usage: { kind: "error", code: "x", message: "y" } })), /Check limits now/);
   assert.match(text(render(withUsage({ limits: [limitsFor()] }))), /Check limits now/);
   assert.match(text(render({ filter: { ...FILTER, limits: { ...LIMITS, busy: "refresh" } } })), /Asking\.\.\./);
+});
+
+test("the lead panel shows Tokens with its mix beside the chart, and the chart has a table with the same numbers", () => {
+  const markup = render();
+  const lead = markup.slice(markup.indexOf('class="panel mx-lead"'));
+  const words = text(lead);
+  assert.match(words, /Tokens 2\.3K/);
+  assert.match(words, /Input 1\.2K Cache write 800 Output 300 Re-read from cache 4K/);
+  assert.match(lead, /aria-live="polite"/);
+  assert.match(lead, /role="img"/);
+  assert.match(lead, /<details class="mx-more"><summary>Show chart as a table<\/summary>/);
+  assert.match(text(lead.slice(lead.indexOf("<details"))), /Tokens Input Cache write Output Cache read/);
+});
+
+test("only unreported usage reads as not reported in the lead, never as zero", () => {
+  const none = tokens(0, 0, 0, 0);
+  assert.match(text(render(withUsage({ total: none, not_reported_by: ["Codex"] }))), /Tokens Not reported Usage not reported by Codex/);
+});
+
+test("usage some harness did not report stays under the Tokens", () => {
+  assert.match(text(render(withUsage({ not_reported_by: ["Codex"] }))), /Not in these totals: usage not reported by Codex\./);
+});
+
+test("the tiles under the lead are Re-read from cache, Runs, Tasks, Merges and Lines", () => {
+  const keys = [...render().matchAll(/mx-tile-key">([^<]*)</gu)].map((match) => match[1]);
+  assert.deepEqual(keys, ["Re-read from cache", "Runs", "Tasks", "Merges", "Lines"]);
+});
+
+test("the app page has All and the project tab does not", () => {
+  assert.match(text(render()), /Today 7 days 30 days All/);
+  assert.doesNotMatch(text(render({ filter: undefined, projectId: "alpha", by: "agent" })), /Today 7 days 30 days All/);
 });
