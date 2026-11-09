@@ -1083,7 +1083,7 @@ fn close_covered(db: &Connection, master: &Record, landed: &str) -> Vec<String> 
     let found = sets.len();
     let mut closed = Vec::new();
     for mut record in sets {
-        match super::merges::holds_clean_changes(&owner, landed, &record.head) {
+        match super::merges::holds_set_work(&owner, landed, &record.base, &record.head) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(error) => {
