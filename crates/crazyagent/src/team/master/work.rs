@@ -27,6 +27,7 @@ const WIDE_CLAIMS_CHECKED_MAX: usize = 4;
 const WIDE_CLAIMS_TIME: Duration = Duration::from_millis(1500);
 const SECTION_BYTES_MAX: usize = 6 * 1024;
 pub(crate) const WAKE_TASK: &str = "A message from your team woke you. It is at the end of this task, under Messages for you. Act on it.";
+pub(crate) const WAKE_DELIVERED: &str = "The message that woke you was already delivered, so none comes with this task. Finish what it asked if that is still unfinished, and otherwise end your turn.";
 
 const _: () = assert!(MESSAGES_SHOWN_MAX <= coord::PENDING_MAX);
 const _: () = assert!(SENT_SHOWN_MAX <= coord::PENDING_MAX);

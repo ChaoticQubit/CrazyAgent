@@ -13630,6 +13630,60 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
     team.workers.clear();
 }
 
+/// A wake task whose message was read before the task ran, as when a restart runs it a
+/// second time, says the message was already delivered rather than pointing at one that
+/// is not there (HB-S5-C).
+#[test]
+fn a_wake_task_with_its_message_already_delivered_says_so() {
+    use super::super::master::{WAKE_DELIVERED, WAKE_TASK};
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let woken = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    team.workers
+        .insert(woken, between_turns(&project, AgentRole::Sub, true, true));
+    let message = crate::coord::send(
+        &fixture.connection,
+        crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Agent(lead),
+            to: crate::coord::Party::Agent(woken),
+            kind: crate::coord::MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: "Merge your branch".into(),
+            idempotency_key: None,
+        },
+        1,
+    )
+    .unwrap();
+    let asleep = team.asleep(&project);
+    assert!(asleep.contains(&woken));
+    team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE coord_messages SET receipt='replied' WHERE id=?1",
+            [message],
+        )
+        .unwrap();
+    let (orders, turns) = channel();
+    team.workers.get_mut(&woken).unwrap().orders = orders;
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let Ok(Order::Turn(typed, None, _)) = turns.try_recv() else {
+        panic!("the woken agent's kept session got no turn");
+    };
+    assert!(!typed.contains(WAKE_TASK), "{typed}");
+    assert!(typed.contains(WAKE_DELIVERED), "{typed}");
+    assert!(!typed.contains("Messages for you"), "{typed}");
+    team.workers.clear();
+}
+
 /// A lead with one worker for the 18.15.2 owner-action tests (run 5 task 73): the lead is
 /// idle between turns in a kept session with no task, so only a waking message gives it a
 /// turn. The runtime comes first so it drops before the fixture's folder goes.
