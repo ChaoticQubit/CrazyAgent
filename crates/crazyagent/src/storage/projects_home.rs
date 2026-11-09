@@ -951,6 +951,9 @@ pub(super) fn execute(
             path: picked,
             move_projects: false,
         } => {
+            if pending_move(tx)?.is_some() {
+                return rejected("home_move_in_progress");
+            }
             if delete_planned(tx)? {
                 return rejected("home_move_delete_in_progress");
             }

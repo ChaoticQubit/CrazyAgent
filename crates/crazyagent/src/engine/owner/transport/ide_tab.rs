@@ -315,6 +315,9 @@ async fn open(
     if unqualified().is_some() {
         return Err(failure("ide_platform_unqualified"));
     }
+    if authority.ide_servers.deleting(&project) {
+        return Err(failure("ide_project_deleting"));
+    }
     let (build, written, folder, hooks) = tokio::task::spawn_blocking({
         let project = project.clone();
         move || match fetch::state(&root) {
