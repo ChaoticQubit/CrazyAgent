@@ -3436,15 +3436,9 @@ async fn desktop_ide_open(
         call.await?
     };
     let workbench = ide::workbench(&opened)?;
-    ide::show(
-        &app,
-        &webview.window(),
-        &views,
-        &project,
-        workbench,
-        bounds,
-        ticket,
-    )
+    let window = webview.window();
+    let bounds = bounds.in_window(&window)?;
+    ide::show(&app, &window, &views, &project, workbench, bounds, ticket)
 }
 
 #[tauri::command]
@@ -3457,7 +3451,8 @@ async fn desktop_ide_place<R: Runtime>(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
-    ide::place(&app, &webview.window(), &views, &project, bounds.checked()?)
+    let bounds = bounds.checked()?.in_window(&webview.window())?;
+    ide::place(&app, &views, &project, bounds)
 }
 
 #[tauri::command]

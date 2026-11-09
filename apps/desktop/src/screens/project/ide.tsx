@@ -109,7 +109,7 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
         }
         const next = waiting;
         waiting = null;
-        if (next && shown) send(next);
+        if (next) send(next);
       });
     };
     const place = () => {
