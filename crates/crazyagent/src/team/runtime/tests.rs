@@ -17454,12 +17454,8 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
     )
     .unwrap()
     .unwrap();
-    crate::team::set_reuse_idle(
-        &tx,
-        &fixture.setup.project_id,
-        crate::team::ReuseIdle::On,
-    )
-    .unwrap();
+    crate::team::set_reuse_idle(&tx, &fixture.setup.project_id, crate::team::ReuseIdle::On)
+        .unwrap();
     tx.commit().unwrap();
     (team, lead, task)
 }

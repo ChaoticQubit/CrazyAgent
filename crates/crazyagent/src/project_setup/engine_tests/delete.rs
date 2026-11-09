@@ -231,11 +231,7 @@ async fn delete_everything_removes_the_projects_master_lands_and_catch_up_choice
         .await
         .unwrap();
     assert_eq!(result(response), OwnerResult::Applied);
-    for table in [
-        "team_master_lands",
-        "team_catch_up_main",
-        "team_reuse_idle",
-    ] {
+    for table in ["team_master_lands", "team_catch_up_main", "team_reuse_idle"] {
         assert_eq!(
             engine.rows(&format!(
                 "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
