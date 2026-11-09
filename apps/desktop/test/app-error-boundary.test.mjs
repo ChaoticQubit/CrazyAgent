@@ -88,7 +88,10 @@ test("a throw while drawing the app leaves a plain message, not a blank window",
     await shown(page);
     const words = await page.evaluate(`document.querySelector('[role="alert"]')?.textContent ?? ""`);
     assert.match(words, /Your projects and agents aren't affected\./u);
+    assert.match(words, /If this comes back, restart the app\./u);
     assert.match(words, /Anything you typed and didn't save will be lost\./u);
+    await pause(300);
+    assert.equal(await page.evaluate("window.__notReloaded"), true, "the window does not reload by itself");
   });
 });
 
@@ -118,11 +121,10 @@ test("Reload reloads the window when pressed with the mouse", async () => {
   });
 });
 
-test("Reload is the first stop for Tab and Enter reloads the window", async () => {
+test("Reload has the focus as soon as the message shows and Enter reloads the window", async () => {
   await withPage(async (page) => {
     await boot(page, BAD_PROJECTS);
     await shown(page);
-    await press(page, "Tab", "Tab", 9);
     assert.equal(await page.evaluate("document.activeElement?.textContent"), "Reload");
     await press(page, "Enter", "Enter", 13, "\r");
     await reloaded(page);
