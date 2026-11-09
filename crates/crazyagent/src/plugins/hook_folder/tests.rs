@@ -2,7 +2,8 @@ use super::*;
 use std::path::PathBuf;
 
 fn plugin(parent: &Path, name: &str) -> PathBuf {
-    let folder = parent.join(name);
+    fs::create_dir_all(parent).unwrap();
+    let folder = parent.canonicalize().unwrap().join(name);
     fs::create_dir_all(folder.join("hooks")).unwrap();
     fs::create_dir_all(folder.join(".claude-plugin")).unwrap();
     fs::write(
@@ -209,7 +210,7 @@ fn a_subfolder_swapped_for_a_link_during_the_copy_brings_in_nothing_from_outside
             }
         })
     };
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut outside_bytes = false;
     let mut attempt = 0;
     while std::time::Instant::now() < until && !outside_bytes {
@@ -240,7 +241,7 @@ fn a_plugin_folder_swapped_for_a_link_before_the_copy_is_refused() {
     let parent = tempfile::tempdir().unwrap();
     let real = plugin(parent.path(), "real");
     fs::write(real.join("hooks/run.sh"), "x").unwrap();
-    let link = parent.path().join("link");
+    let link = real.with_file_name("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let copied = parent.path().join("copy");
     assert_eq!(copy(&link, &copied, &[]), Err("skill_folder_not_found"));
@@ -289,4 +290,47 @@ fn a_file_at_the_depth_bound_copies_and_one_deeper_is_refused() {
         copy_stored(&past, &parent.path().join("past-copy"), &mut tally),
         Err("hooks_too_large")
     );
+}
+
+/// SECAUDIT hook_folder copy_entry path-walk-follows-swapped-parent r2: a parent of the
+/// plugin folder swapped for a link after the folder was read cannot redirect the copy,
+/// though the folder is opened by its canonical path.
+#[test]
+fn a_parent_swapped_for_a_link_before_the_copy_brings_in_nothing_from_outside() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().canonicalize().unwrap();
+    let real = plugin(&base.join("ancestor"), "real");
+    fs::write(real.join("hooks/run.sh"), "real").unwrap();
+    let other = plugin(&base.join("elsewhere"), "real");
+    fs::write(other.join("hooks/run.sh"), "outside").unwrap();
+    fs::rename(base.join("ancestor"), base.join("parked")).unwrap();
+    std::os::unix::fs::symlink(base.join("elsewhere"), base.join("ancestor")).unwrap();
+    let copied = base.join("copy");
+    assert_eq!(copy(&real, &copied, &[]), Err("skill_folder_not_found"));
+    assert!(fs::symlink_metadata(&copied).is_err());
+}
+
+/// SECAUDIT hook_folder copy_entry path-walk-follows-swapped-parent r2, with no timing: a
+/// folder swapped for a link after it was opened is still the folder the copy reads.
+#[test]
+fn a_held_folder_copies_only_its_own_files_after_its_name_becomes_a_link() {
+    let parent = tempfile::tempdir().unwrap();
+    let base = parent.path().canonicalize().unwrap();
+    let sub = base.join("sub");
+    let outside = base.join("outside");
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(sub.join("file"), "real").unwrap();
+    fs::write(outside.join("file"), "outside").unwrap();
+    fs::write(outside.join("extra"), "outside").unwrap();
+    let held = open_folder(&sub).unwrap();
+    fs::rename(&sub, base.join("parked")).unwrap();
+    std::os::unix::fs::symlink(&outside, &sub).unwrap();
+    let target = base.join("copy");
+    fs::create_dir(&target).unwrap();
+    let mut tally = Tally::default();
+    copy_children(&held, &target, 0, &mut tally, (FILES_MAX, BYTES_MAX)).unwrap();
+    assert_eq!(fs::read_to_string(target.join("file")).unwrap(), "real");
+    assert!(fs::symlink_metadata(target.join("extra")).is_err());
+    assert_eq!(tally.files, 1);
 }
