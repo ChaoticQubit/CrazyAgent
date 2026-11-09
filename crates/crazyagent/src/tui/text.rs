@@ -305,10 +305,13 @@ pub fn plain_code(problem: &str) -> bool {
 /// Inputs: the sentence and the problem. Output: "<sentence> (code: <code>)",
 /// with `UNPLAIN_CODE` in place of a problem that is not a plain code, so raw
 /// error text never reaches the screen; a request refused by the full request queue
-/// reads as the owner-busy sentence on every screen.
+/// reads as the owner-busy sentence and a version mismatch as its own, on every screen.
 pub fn coded(sentence: &str, problem: &str) -> String {
     if problem == super::seam::OWNER_BUSY {
         return crate::config::OWNER_BUSY_LINE.to_owned();
+    }
+    if problem == "engine_version_mismatch" {
+        return crate::config::ENGINE_VERSION_LINE.to_owned();
     }
     let code = if plain_code(problem) {
         problem

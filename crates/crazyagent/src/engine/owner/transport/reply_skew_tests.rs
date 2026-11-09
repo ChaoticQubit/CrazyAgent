@@ -1,7 +1,8 @@
 use super::owner_server_tests::Fixture;
 use super::*;
+use crate::engine::owner::{AccountProfileRequest, NativeAuthScope};
 use crate::master_session::MasterOwnerAction;
-use crate::protocol::{ProjectId, SessionId, encode_frame};
+use crate::protocol::{ConfigId, CredentialRef, ProjectId, SessionId};
 use crate::usage::metrics::{AgentRow, Metrics};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -27,11 +28,23 @@ impl Skewed {
     /// Starts the engine and the swapped socket. Input: the replies, in the order the
     /// client asks. Output: the running pair with a client attached to the swapped socket.
     async fn start(replies: Vec<Value>) -> Self {
+        Self::start_raw(
+            replies
+                .iter()
+                .map(|reply| serde_json::to_vec(reply).unwrap())
+                .collect(),
+        )
+        .await
+    }
+
+    /// Starts the engine and the swapped socket. Input: the reply frames' bodies, as bytes
+    /// that need not be JSON, in the order the client asks. Output: the running pair.
+    async fn start_raw(replies: Vec<Vec<u8>>) -> Self {
         let fixture = Fixture::start().await;
         let generation = fixture.client().await.root.path.clone();
         let socket = generation.join(SOCKET);
         std::fs::rename(&socket, generation.join(ASIDE)).unwrap();
-        let listener = UnixListener::bind(&socket).unwrap();
+        let listener = crate::spawn_gate::bind_unix(&socket).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
         let server = tokio::spawn(serve(listener, replies));
         let client =
@@ -77,18 +90,17 @@ impl Skewed {
 }
 
 /// Answers one connection per queued reply with the reply's own bytes.
-/// Inputs: the listener and the replies. Output: none; ends when the queue is empty.
-async fn serve(listener: UnixListener, replies: Vec<Value>) {
-    let mut replies: VecDeque<Value> = replies.into();
+/// Inputs: the listener and the frame bodies. Output: none; ends when the queue is empty.
+async fn serve(listener: UnixListener, replies: Vec<Vec<u8>>) {
+    let mut replies: VecDeque<Vec<u8>> = replies.into();
     while let Some(reply) = replies.pop_front() {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let (mut stream, _) = crate::spawn_gate::accept_unix(&listener).await.unwrap();
         let mut auth = [0; 37];
         stream.read_exact(&mut auth).await.unwrap();
         read_frame(&mut stream).await.unwrap();
-        stream
-            .write_all(&encode_frame(&reply).unwrap())
-            .await
-            .unwrap();
+        let length = u32::try_from(reply.len()).unwrap();
+        stream.write_all(&length.to_be_bytes()).await.unwrap();
+        stream.write_all(&reply).await.unwrap();
     }
 }
 
@@ -203,7 +215,7 @@ async fn a_read_reply_with_a_field_this_client_lacks_is_a_version_mismatch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_read_of_every_exchange_reports_an_unreadable_reply_as_a_version_mismatch() {
-    let skewed = Skewed::start(vec![junk(); 13]).await;
+    let skewed = Skewed::start(vec![junk(); 14]).await;
     let client = &skewed.client;
     assert_eq!(refused(client.account_catalog().await), MISMATCH);
     assert_eq!(refused(client.agents(None, 0).await), MISMATCH);
@@ -211,17 +223,36 @@ async fn one_read_of_every_exchange_reports_an_unreadable_reply_as_a_version_mis
     assert_eq!(refused(client.finished_agents(project()).await), MISMATCH);
     assert_eq!(refused(client.github_status().await), MISMATCH);
     assert_eq!(refused(client.harness_catalog(false).await), MISMATCH);
-    assert_eq!(refused(client.ide_extension_asks(project()).await), MISMATCH);
+    assert_eq!(
+        refused(client.ide_extension_asks(project()).await),
+        MISMATCH
+    );
     assert_eq!(refused(client.ide_tab_state(false).await), MISMATCH);
     assert_eq!(refused(client.plugin_skills(None, 0).await), MISMATCH);
     assert_eq!(
         refused(client.uncommitted_instruction_import(project()).await),
         MISMATCH
     );
-    assert_eq!(refused(client.questions_list(project(), None).await), MISMATCH);
+    assert_eq!(
+        refused(client.questions_list(project(), None).await),
+        MISMATCH
+    );
     assert_eq!(refused(client.recovery_banner(project()).await), MISMATCH);
     assert_eq!(refused(client.usage_metrics(None, 0).await), MISMATCH);
-    assert_eq!(skewed.logged().len(), 13);
+    let request = AccountProfileRequest {
+        request_id: RequestId::new("skew-account").unwrap(),
+        scope: NativeAuthScope {
+            expected_database_instance: "a".repeat(64),
+            connection: CredentialRef::new("skew-connection").unwrap(),
+            expected_config_id: ConfigId::new("b".repeat(64)).unwrap(),
+            expected_source_hash: "c".repeat(64),
+        },
+    };
+    assert_eq!(
+        refused(client.read_account_auth_capabilities(request).await),
+        MISMATCH
+    );
+    assert_eq!(skewed.logged().len(), 14);
     skewed.stop().await;
 }
 
@@ -272,6 +303,8 @@ async fn a_mutation_exchange_keeps_its_unknown_outcome_and_logs_nothing() {
     skewed.stop().await;
 }
 
+/// A wrong value inside a tagged reply has no position, because serde buffers the reply
+/// before it reads the variant, so its line and column are 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_log_names_where_a_reply_broke_and_never_a_value_from_it() {
     let mut metrics = serde_json::to_value(Metrics::default()).unwrap();
@@ -282,7 +315,10 @@ async fn the_log_names_where_a_reply_broke_and_never_a_value_from_it() {
         "serde must echo the value for this row to prove anything"
     );
     let skewed = Skewed::start(vec![json!({ "kind": "metrics", "metrics": metrics })]).await;
-    assert_eq!(refused(skewed.client.usage_metrics(None, 0).await), MISMATCH);
+    assert_eq!(
+        refused(skewed.client.usage_metrics(None, 0).await),
+        MISMATCH
+    );
     let raw = std::fs::read_to_string(skewed.log()).unwrap();
     assert!(!raw.contains(MARKER), "the reply's value reached the log");
     let entries = skewed.logged();
@@ -294,8 +330,33 @@ async fn the_log_names_where_a_reply_broke_and_never_a_value_from_it() {
     assert_eq!(entry["event"], "owner_reply_unreadable");
     assert_eq!(entry["kind"], "usage.metrics");
     assert_eq!(entry["category"], "data");
-    assert_eq!(entry["line"], 1);
-    assert!(entry["column"].as_u64().unwrap() > 0);
+    assert_eq!(entry["line"], 0);
+    assert_eq!(entry["column"], 0);
+    skewed.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_that_is_not_json_is_logged_with_its_real_position() {
+    let bodies: [(&[u8], &str); 2] = [
+        (br#"{"kind":"metrics",}"#, "syntax"),
+        (br#"{"kind":"metrics","metr"#, "eof"),
+    ];
+    let skewed = Skewed::start_raw(bodies.iter().map(|(body, _)| body.to_vec()).collect()).await;
+    for _ in bodies {
+        assert_eq!(
+            refused(skewed.client.usage_metrics(None, 0).await),
+            MISMATCH
+        );
+    }
+    let entries = skewed.logged();
+    assert_eq!(entries.len(), bodies.len());
+    for ((body, category), entry) in bodies.iter().zip(&entries) {
+        let parse = serde_json::from_slice::<Value>(body).unwrap_err();
+        assert_eq!(entry["category"], *category);
+        assert_eq!(entry["line"], parse.line());
+        assert_eq!(entry["column"], parse.column());
+        assert!(parse.column() > 0);
+    }
     skewed.stop().await;
 }
 

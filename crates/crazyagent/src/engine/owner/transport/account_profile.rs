@@ -180,7 +180,7 @@ impl OwnerClient {
                 .write_all(&frame)
                 .await
                 .map_err(|_| failure("account_profile_owner_unavailable"))?;
-            let first = read_wire(&mut stream).await?;
+            let first = read_wire(self, &mut stream, read_kind(&action)).await?;
             let result = if let WireReply::AcceptSecret {
                 request_id,
                 database_instance,
@@ -209,7 +209,7 @@ impl OwnerClient {
                 .await;
                 bytes.fill(0);
                 write.map_err(|_| unknown())?;
-                let result = read_wire(&mut stream).await?;
+                let result = read_wire(self, &mut stream, None).await?;
                 if reply_epoch(&result).is_some_and(|value| value != engine_epoch) {
                     return Err(unknown());
                 }
@@ -518,9 +518,13 @@ async fn write_wire(stream: &mut UnixStream, reply: &WireReply) -> Result<(), En
         .map_err(io_error)
 }
 
-async fn read_wire(stream: &mut UnixStream) -> Result<WireReply, EngineError> {
+async fn read_wire(
+    client: &OwnerClient,
+    stream: &mut UnixStream,
+    read: Option<&str>,
+) -> Result<WireReply, EngineError> {
     let frame = read_frame(stream).await.map_err(|_| unknown())?;
-    serde_json::from_slice(&frame[4..]).map_err(|_| unknown())
+    serde_json::from_slice(&frame[4..]).map_err(|error| client.skewed_reply(&error, read, unknown))
 }
 
 fn reply_epoch(reply: &WireReply) -> Option<&str> {
@@ -611,6 +615,16 @@ fn public_code(error: EngineError) -> String {
         error.0
     } else {
         "account_profile_outcome_unknown".into()
+    }
+}
+
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Read => Some("account_profile.read"),
+        Action::Capabilities => Some("account_profile.capabilities"),
+        _ => None,
     }
 }
 

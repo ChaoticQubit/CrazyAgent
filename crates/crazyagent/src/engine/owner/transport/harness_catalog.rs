@@ -59,9 +59,16 @@ impl OwnerClient {
             let reply = read_frame(&mut stream)
                 .await
                 .map_err(|_| failure("harness_catalog_reply_invalid"))?;
-            match serde_json::from_slice(&reply[4..])
-                .map_err(|_| failure("harness_catalog_reply_invalid"))?
-            {
+            match serde_json::from_slice(&reply[4..]).map_err(|error| {
+                let read = if check {
+                    "harness_catalog.check"
+                } else {
+                    "harness_catalog.list"
+                };
+                self.skewed_reply(&error, Some(read), || {
+                    failure("harness_catalog_reply_invalid")
+                })
+            })? {
                 WireReply::Catalog { entries } if !entries.is_empty() => Ok(entries),
                 WireReply::Catalog { .. } => Err(failure("harness_catalog_reply_invalid")),
                 WireReply::Rejected { code } => Err(EngineError(code)),

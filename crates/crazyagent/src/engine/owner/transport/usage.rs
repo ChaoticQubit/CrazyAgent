@@ -66,6 +66,16 @@ enum Reply {
     Rejected { code: String },
 }
 
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Report { .. } => Some("usage.report"),
+        Action::Metrics { .. } => Some("usage.metrics"),
+        _ => None,
+    }
+}
+
 fn unknown() -> EngineError {
     failure("usage_outcome_unknown")
 }
@@ -138,6 +148,7 @@ impl OwnerClient {
 
     async fn usage_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(USAGE_TIMEOUT), async {
+            let read = read_kind(&action);
             let frame = encode_frame(&Envelope { usage: action })
                 .map_err(|_| failure("usage_request_bounds"))?;
             self.root.verify()?;
@@ -164,7 +175,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("usage_unavailable"))?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }

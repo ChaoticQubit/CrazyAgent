@@ -199,6 +199,22 @@ enum Reply {
     },
 }
 
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Skills { .. } => Some("plugins.skills"),
+        Action::SkillDetail { .. } => Some("plugins.skill_detail"),
+        Action::Servers { .. } => Some("plugins.servers"),
+        Action::Server { .. } => Some("plugins.server"),
+        Action::ImportScan => Some("plugins.import_scan"),
+        Action::Hooks { .. } => Some("plugins.hooks"),
+        Action::Effective { .. } => Some("plugins.effective"),
+        Action::Tools { .. } => Some("plugins.tools"),
+        _ => None,
+    }
+}
+
 fn unknown() -> EngineError {
     failure("plugins_outcome_unknown")
 }
@@ -744,6 +760,7 @@ impl OwnerClient {
     ) -> Result<Reply, EngineError> {
         action.validate()?;
         tokio::time::timeout(timeout, async {
+            let read = read_kind(&action);
             let envelope = Envelope {
                 plugins: action,
                 secret_present: !secrets.is_empty(),
@@ -782,7 +799,9 @@ impl OwnerClient {
                 sent.map_err(|_| failure("plugins_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
