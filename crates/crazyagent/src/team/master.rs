@@ -1606,6 +1606,10 @@ fn land_on_lead(
             ),
             true,
         ),
+        Err(problem) if problem.0 == crate::landing::WORKER_OPEN => (
+            format!("Not accepted: {}", crate::landing::WORKER_OPEN_TEXT),
+            true,
+        ),
         Err(problem) => (
             format!(
                 "Not accepted: the change set could not land ({}).",

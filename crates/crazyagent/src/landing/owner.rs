@@ -1153,9 +1153,11 @@ pub(super) fn accept(
 /// Lands a change set as one squash commit on a target branch, the project's Land on
 /// branch when none is named (DEC-111 Q1): as [`accept`] through the owner's checkout, by
 /// moving the ref alone for a branch checked out nowhere, or through an agent's worktree
-/// for that agent's own branch. Inputs: as [`accept`], plus the target branch and who
-/// accepts, as the project's activity names them. Output: the landed commit and branch, or
-/// the conflicts.
+/// for that agent's own branch. Anyone but the owner is refused with
+/// [`super::WORKER_OPEN`] while a worker below the set's agent holds an open set, since only
+/// the owner's Accept may close that set with it (DEC-107). Inputs: as [`accept`], plus the
+/// target branch and who accepts, as the project's activity names them. Output: the landed
+/// commit and branch, or the conflicts.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn accept_to(
     db: &Connection,
@@ -1195,6 +1197,9 @@ fn accept_held(
         || record.intent.is_some()
     {
         return Err(failure("changes_stale"));
+    }
+    if by != By::Named(OWNER_ACTOR) && super::subagent::has_open_worker(db, &record)? {
+        return Err(failure(super::WORKER_OPEN));
     }
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
     let git_dir = repository.join(".git");
@@ -2161,11 +2166,12 @@ fn show(
 /// [`hold`] on its repository. A gone agent copy closes it as removed outside; against the
 /// tip it lands on (DEC-107), its lead's branch for a lead's worker while Lands is Lead,
 /// else the owner's branch tip, when one is readable, a pending or conflicting set the tip
-/// holds closes as landed outside like an Accept onto that tip, and otherwise its counts
-/// become what is not yet on the tip. Inputs: the store, the change set, the owner
-/// repository with its tip, None while the owner's HEAD is detached, busy or unreadable,
-/// what the set is judged against and the heads its batch check found. Output: the two
-/// trees its diff shows against that tip, None to show its stored change.
+/// holds closes as landed outside like an Accept onto that tip, unless a worker below it
+/// still holds an open set, which no close the owner did not press may discard, and
+/// otherwise its counts become what is not yet on the tip. Inputs: the store, the change
+/// set, the owner repository with its tip, None while the owner's HEAD is detached, busy
+/// or unreadable, what the set is judged against and the heads its batch check found.
+/// Output: the two trees its diff shows against that tip, None to show its stored change.
 fn observe_one(
     db: &Connection,
     id: &ChangeSetId,
@@ -2207,6 +2213,7 @@ fn observe_one(
             close_taken(db, &mut record)?;
             Ok(None)
         }
+        Judged::Landed if super::subagent::has_open_worker(db, &record)? => Ok(None),
         Judged::Landed => {
             record.outside = true;
             let by = match against {

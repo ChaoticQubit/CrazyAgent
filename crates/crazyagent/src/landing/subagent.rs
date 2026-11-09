@@ -160,7 +160,8 @@ pub(super) fn close_with_lead(
 }
 
 /// Closes the workers' sets of one closed change set as [`close_with_lead`] says, then
-/// their own workers', at most `levels` deep. Inputs: the store, the closed change set and
+/// their own workers', at most `levels` deep, leaving open a set the owner restored, which
+/// the next read would otherwise close again. Inputs: the store, the closed change set and
 /// the levels left. Output: Ok, or the first failure.
 fn close_workers(db: &Connection, lead_set: &store::Record, levels: u8) -> Result<(), EngineError> {
     assert!(!lead_set.is_open());
@@ -178,7 +179,7 @@ fn close_workers(db: &Connection, lead_set: &store::Record, levels: u8) -> Resul
         let Some(mut record) = store::open_for(db, path_text(&sub.worktree)?)? else {
             continue;
         };
-        if record.intent.is_some() || record.created_ms > lead_set.updated_ms {
+        if record.intent.is_some() || record.restored || record.created_ms > lead_set.updated_ms {
             continue;
         }
         let landed = match (lead_set.state, lead_set.landed.as_deref()) {
@@ -220,16 +221,7 @@ pub(super) fn close_orphaned(
         let Ok(agent) = record.agent.id.parse::<i64>() else {
             continue;
         };
-        let lead: Option<i64> = db
-            .query_row(
-                "SELECT parent FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
-                params![agent, record.project.as_str()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(unavailable)?
-            .flatten();
-        if let Some(lead) = lead
+        if let Some(lead) = sub_agent_lead(db, &record.project, agent)?
             && !leads.contains(&(record.project.clone(), lead))
         {
             leads.push((record.project.clone(), lead));
@@ -239,11 +231,37 @@ pub(super) fn close_orphaned(
         let Some(lead_set) = store::newest_of(db, &project, &lead.to_string())? else {
             continue;
         };
-        if !lead_set.is_open() && lead_set.intent.is_none() {
+        if !lead_set.is_open() && lead_set.intent.is_none() && !removed_outside(&lead_set) {
             close_workers(db, &lead_set, WORKER_LEVELS_MAX)?;
         }
     }
     Ok(())
+}
+
+/// The lead of one sub-agent. Inputs: the store, the project and the sub-agent. Output: its
+/// lead, None for a sub-agent the master started.
+fn sub_agent_lead(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Option<i64>, EngineError> {
+    let lead: Option<Option<i64>> = db
+        .query_row(
+            "SELECT parent FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+            params![agent, project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    Ok(lead.flatten())
+}
+
+/// Says whether a closed change set closed because its agent's copy was removed outside the
+/// app, the only close that is both discarded and outside. No one pressed anything in the
+/// app, so it leaves its workers' open sets open (HB-S4-LANDED). Input: the change set.
+/// Output: the answer.
+fn removed_outside(record: &store::Record) -> bool {
+    record.outside && record.state == ChangeState::Discarded
 }
 
 /// The lead whose branch a change set's agent lands on while the owner's Lands setting is
@@ -417,6 +435,28 @@ pub(super) fn is_lead_worker(
         |row| row.get(0),
     )
     .map_err(unavailable)
+}
+
+/// Tells whether a lead's worker has lost the lead that would land its work: the lead's
+/// newest change set closed because the lead's copy was removed outside the app, so the
+/// owner's list must show the worker's open set (HB-S4-LANDED). Inputs: the store, the
+/// project and the change set's agent. Output: the answer.
+pub(super) fn lead_copy_removed(
+    db: &Connection,
+    project: &ProjectId,
+    agent: &super::ChangeAgent,
+) -> Result<bool, EngineError> {
+    let Ok(id) = agent.id.parse::<i64>() else {
+        return Ok(false);
+    };
+    if agent.kind != super::AgentKind::Sub {
+        return Ok(false);
+    }
+    let Some(lead) = sub_agent_lead(db, project, id)? else {
+        return Ok(false);
+    };
+    let lead_set = store::newest_of(db, project, &lead.to_string())?;
+    Ok(lead_set.is_some_and(|set| removed_outside(&set)))
 }
 
 /// Lists the branches of a lead's sub-agents whose work is not yet in the lead's task
