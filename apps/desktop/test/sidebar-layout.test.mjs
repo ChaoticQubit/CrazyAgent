@@ -4,6 +4,9 @@ import { bundle, withPage } from "./browser.mjs";
 
 const fixture = await bundle(new URL("./fixtures/sidebar-layout.mjs", import.meta.url).pathname);
 const BOTTOM = ["Home", "New project", "Settings", "Metrics"];
+const LONG_NAME = "Maximiliana Featherstonehaugh-Cholmondeley";
+const ONE_LINE_PX = 24;
+const TARGET_PX = 24;
 
 /** Runs a check on a mounted sidebar in a window of a given height. Inputs: the mount arguments
  * as source text, the window height and the check. Output: the check's value. */
@@ -71,12 +74,52 @@ test("real Tab keys walk the projects, then the bottom group, then the profile a
   assert.equal(walked.back, "Mira Okafor");
 });
 
+test("every link in the sidebar opens its own page", async () => {
+  const { hrefs } = await onSidebar("1", 800, ({ evaluate }) => evaluate("Fixture.structure()"));
+  assert.deepEqual(hrefs, {
+    "Project 0": "#/projects/p0/overview", Home: "#/home", "New project": "#/projects/new?step=basics",
+    Settings: "#/settings/accounts", Metrics: "#/metrics", "Mira Okafor": "#/settings/profile",
+  });
+});
+
+test("a real Tab's focus ring on a project link stays inside the list that would clip it", async () => {
+  const ring = await onSidebar("2", 800, async ({ evaluate, send }) => {
+    for (let at = 0; at < 2; at += 1) {
+      for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+    }
+    return evaluate("Fixture.ring()");
+  });
+  assert.equal(ring.text, "Project 0");
+  assert.equal(ring.style, "solid");
+  assert.ok(ring.width >= 2, JSON.stringify(ring));
+  assert.deepEqual(ring.past.filter((reach) => reach > 0), [], JSON.stringify(ring));
+});
+
+for (const [what, profile] of [["a short", "Mira Okafor"], ["a very long", LONG_NAME]]) {
+  test(`with ${what} profile name and the engine down the footer keeps its height, its state on one line and Try again in reach`, async () => {
+    const seen = await onSidebar(`1, { name: "home" }, "running", "light", ${JSON.stringify(profile)}`, 800, async ({ evaluate }) => {
+      const running = await evaluate("Fixture.foot()");
+      await evaluate(`Fixture.mount(1, { name: "home" }, "down", "light", ${JSON.stringify(profile)})`);
+      return { running, down: await evaluate("Fixture.foot()") };
+    });
+    const { running, down } = seen;
+    assert.equal(down.footHeight, running.footHeight, JSON.stringify(seen));
+    assert.ok(down.engineHeight <= ONE_LINE_PX, JSON.stringify(seen));
+    assert.ok(down.retry.height >= TARGET_PX && down.retry.width >= TARGET_PX, JSON.stringify(seen));
+    assert.ok(down.retry.right <= down.footRight, JSON.stringify(seen));
+    assert.ok(down.nameRight <= down.retry.left, JSON.stringify(seen));
+    assert.equal(down.nameCut, profile === LONG_NAME, JSON.stringify(seen));
+    assert.equal(running.nameCut, profile === LONG_NAME, JSON.stringify(seen));
+    assert.ok(running.nameRight <= running.footRight, JSON.stringify(seen));
+  });
+}
+
 for (const [route, expected] of [
   ['{ name: "home" }', "Home"], ['{ name: "new-project", step: "basics" }', "New project"],
-  ['{ name: "settings", tab: "pools" }', "Settings"], ['{ name: "metrics" }', "Metrics"],
+  ['{ name: "settings", tab: "pools" }', "Settings"], ['{ name: "settings", tab: "profile" }', "Settings"], ['{ name: "metrics" }', "Metrics"],
   ['{ name: "project", id: "p1", tab: "overview" }', "Project 1"],
 ]) {
-  test(`the sidebar marks ${expected} as the current page and nothing else`, async () => {
+  test(`the sidebar marks ${expected} as the current page and nothing else on ${route}`, async () => {
     const shown = await onSidebar(`3, ${route}`, 800, ({ evaluate }) => evaluate("Fixture.structure()"));
     assert.deepEqual(shown.current, [expected]);
   });
