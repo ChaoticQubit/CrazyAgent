@@ -12425,14 +12425,26 @@ fn closed_copy(
     created_ms: u64,
     project: &str,
 ) -> ChangeSetId {
+    let copy = unsaved_copy(first, digit, created_ms, project);
+    store::save(&case.db, &copy).unwrap();
+    copy.id
+}
+
+/// Copies a change set as a discarded set with another id, not stored yet. Inputs: the
+/// record, the digit its id repeats, when it was made and its project. Output: the copy.
+fn unsaved_copy(
+    first: &store::Record,
+    digit: char,
+    created_ms: u64,
+    project: &str,
+) -> store::Record {
     let mut copy = first.clone();
     copy.id = ChangeSetId::new(digit.to_string().repeat(32)).unwrap();
     copy.project = ProjectId::new(project).unwrap();
     copy.state = ChangeState::Discarded;
     copy.restorable_until_ms = Some(NOW_MS + 7 * DAY_MS);
     copy.created_ms = created_ms;
-    store::save(&case.db, &copy).unwrap();
-    copy.id
+    copy
 }
 
 /// The number each listed change set of a project carries, by id. Inputs: the case and
@@ -12493,6 +12505,81 @@ fn change_sets_are_numbered_in_the_order_a_project_adds_them() {
     again.prompt_line = "Saved again".into();
     store::save(&case.db, &again).unwrap();
     assert_eq!(case.view(&first).number, Some(1));
+}
+
+/// Two connections saving at once each take the next number of the project: every save is
+/// applied and no two sets share a number (MOCK-FIX-C r1, rv-sec F4).
+#[test]
+fn two_connections_saving_at_once_each_take_the_next_number() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &first).unwrap();
+    let path = PathBuf::from(case.db.path().unwrap());
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let saving: Vec<_> = [['a', 'b', 'c'], ['d', 'e', 'f']]
+        .into_iter()
+        .map(|digits| {
+            let (record, path, start) = (record.clone(), path.clone(), start.clone());
+            std::thread::spawn(move || {
+                let db = Connection::open(&path).unwrap();
+                db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+                start.wait();
+                for digit in digits {
+                    let copy = unsaved_copy(&record, digit, record.created_ms - 10, "project-1");
+                    store::save(&db, &copy).unwrap();
+                }
+            })
+        })
+        .collect();
+    for thread in saving {
+        thread.join().unwrap();
+    }
+    let mut given: Vec<u64> = numbers(&case, "project-1")
+        .into_values()
+        .map(Option::unwrap)
+        .collect();
+    given.sort_unstable();
+    assert_eq!(given, (1..=7).collect::<Vec<u64>>());
+}
+
+/// A save inside a caller's transaction nests in it: a refused save leaves the caller's
+/// earlier work to commit, and rolling the caller back undoes the set and its number
+/// (MOCK-FIX-C r1, rv-sec F4).
+#[test]
+fn a_save_inside_a_callers_transaction_commits_and_rolls_back_with_it() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let record = store::load(&case.db, &first).unwrap();
+    let copy = |digit| unsaved_copy(&record, digit, record.created_ms - 10, "project-1");
+    let tx = case.db.unchecked_transaction().unwrap();
+    let kept = copy('b');
+    store::save(&tx, &kept).unwrap();
+    let mut second_open = copy('c');
+    second_open.state = ChangeState::Pending;
+    second_open.restorable_until_ms = None;
+    assert_eq!(
+        refused(store::save(&tx, &second_open)),
+        "changes_agent_has_pending"
+    );
+    tx.commit().unwrap();
+    assert_eq!(case.view(&kept.id).number, Some(2));
+    assert_eq!(
+        refused(store::load(&case.db, &second_open.id)),
+        "changes_not_found"
+    );
+    let tx = case.db.unchecked_transaction().unwrap();
+    let dropped = copy('d');
+    store::save(&tx, &dropped).unwrap();
+    tx.rollback().unwrap();
+    assert_eq!(
+        refused(store::load(&case.db, &dropped.id)),
+        "changes_not_found"
+    );
+    let next = copy('e');
+    store::save(&case.db, &next).unwrap();
+    assert_eq!(case.view(&next.id).number, Some(3));
 }
 
 /// AL17 (2): change sets stored before numbers existed get numbers at the next engine

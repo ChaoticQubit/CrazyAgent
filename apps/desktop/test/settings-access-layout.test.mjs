@@ -350,13 +350,16 @@ test("each field has its one label, the wide fields fill their line, and the hel
   assert.equal(seen.roleHelp, "profile-role-helper");
 });
 
-test("the chosen stack lines up with its field", async () => {
+test("the chosen stack lines up with its field, and Save sits on the section's padding", async () => {
   const seen = await onProfile({}, (page) => page.evaluate(`(() => {
     const chip = document.querySelector(".set-row .chips .chip").getBoundingClientRect();
     const field = document.getElementById("profile-stack").getBoundingClientRect();
-    return { chipLeft: chip.left, fieldLeft: field.left };
+    const save = document.querySelector("form[aria-label=Profile] button[type=submit]").getBoundingClientRect();
+    const group = document.querySelector(".set-group").getBoundingClientRect();
+    return { chipLeft: chip.left, fieldLeft: field.left, below: group.bottom - save.bottom };
   })()`));
   assert.ok(Math.abs(seen.chipLeft - seen.fieldLeft) <= 1, JSON.stringify(seen));
+  assert.equal(seen.below, 13, JSON.stringify(seen));
 });
 
 test("Save changes waits for a change and then sends the profile", async () => {
