@@ -313,8 +313,17 @@ dialog.drawer .set-row { grid-template-columns: minmax(0, 1fr) minmax(0, max-con
 .pj-remove { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 .pj-remove .pj-radio-cards { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .pj-remove .pj-rows > li { padding-block: 6px; }
-.pj-remove-trash { grid-template-rows: auto minmax(32px, 1fr); min-height: 0; }
+.pj-remove-trash { grid-template-rows: auto minmax(32px, 1fr); min-height: 60px; }
 .pj-remove-details { overflow: auto; }
-.pj-remove-losses { list-style: none; margin: 0; gap: 2px; padding: 8px 12px; }
+.pj-remove-details > li { white-space: nowrap; }
+.pj-remove-losses { list-style: none; margin: 0; gap: 2px; padding: 8px 12px; grid-template-columns: minmax(0, 1fr); }
+.pj-remove-losses > li { display: flex; gap: 4px; min-width: 0; max-width: 100%; }
+.pj-remove-who { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pj-remove-what { flex: none; white-space: nowrap; }
+.pj-remove-name { overflow-wrap: anywhere; }
+@media (max-height: 640px) {
+  .pj-remove-deleting { gap: 8px; }
+  .pj-remove-deleting .pj-radio-body .pj-secondary { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+}
 dialog.dialog[open]:has(.pj-remove) { display: flex; flex-direction: column; }
 dialog.dialog[open]:has(.pj-remove) > .dialog-body { display: flex; flex-direction: column; min-height: 0; }
