@@ -60,6 +60,16 @@ test("at the 760 minimum the list stands above the panel and nothing scrolls sid
   assert.equal(shown.sideways, false, JSON.stringify(shown));
 });
 
+test("where the list wraps above the panel it does not stick, so it never rides over the panel", async () => {
+  const shown = await onFrame("memory", 1000, async ({ evaluate }) => {
+    await evaluate("document.querySelector('.main').scrollTop = 600");
+    await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
+    return evaluate("Fixture.layout()");
+  });
+  assert.equal(shown.navPosition, "static", JSON.stringify(shown));
+  assert.ok(shown.navBottom <= shown.panelTop, JSON.stringify(shown));
+});
+
 test("real Tab keys walk every Settings link in list order with a visible ring, then enter the panel", async () => {
   const walked = await onFrame("accounts", 1180, async ({ evaluate, send }) => {
     const seen = [];
@@ -83,6 +93,22 @@ test("a real Enter on a focused link opens that section's address", async () => 
     return evaluate("location.hash");
   });
   assert.equal(hash, "#/settings/sandbox");
+});
+
+test("opening another section from a scrolled panel starts at its top and keeps focus on the link", async () => {
+  const seen = await onFrame("memory", 1180, async ({ evaluate, send }) => {
+    await evaluate("document.querySelector('.main').scrollTop = 900");
+    await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
+    await evaluate(`document.querySelector('.settings-nav a[href="#/settings/sandbox"]').focus()`);
+    await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+    await evaluate("new Promise((done) => setTimeout(done, 50))");
+    return { layout: await evaluate("Fixture.layout()"), focused: await evaluate("Fixture.focused()"), current: (await evaluate("Fixture.structure()")).current };
+  });
+  assert.deepEqual(seen.current, ["Sandbox"]);
+  assert.equal(seen.layout.scrollTop, 0, JSON.stringify(seen));
+  assert.ok(seen.layout.panelTop >= 0, JSON.stringify(seen));
+  assert.equal(seen.focused.text, "Sandbox");
 });
 
 for (const theme of ["light", "dark"]) {

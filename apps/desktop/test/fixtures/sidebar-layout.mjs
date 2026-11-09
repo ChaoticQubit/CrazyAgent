@@ -7,8 +7,8 @@ import { AppShell, Sidebar } from "../../src/ui/shell.tsx";
 let root = null;
 
 /** Mounts the real shell and sidebar with the real stylesheet. Inputs: how many projects, the
- * route, the engine state, the theme and the profile name. */
-export function mount(count, route = { name: "home" }, engine = "running", theme = "light", profile = "Mira Okafor") {
+ * route, the engine state, the theme, the profile name and the first project's flag. */
+export function mount(count, route = { name: "home" }, engine = "running", theme = "light", profile = "Mira Okafor", flag = undefined) {
   root?.unmount();
   document.head.innerHTML = "";
   const style = document.createElement("style");
@@ -20,7 +20,7 @@ export function mount(count, route = { name: "home" }, engine = "running", theme
   document.body.style.margin = "0";
   document.body.innerHTML = '<div id="root" style="height:100%"></div>';
   root = createRoot(document.getElementById("root"));
-  const projects = Array.from({ length: count }, (_, at) => ({ id: `p${at}`, name: `Project ${at}` }));
+  const projects = Array.from({ length: count }, (_, at) => ({ id: `p${at}`, name: `Project ${at}`, flag: at === 0 ? flag : undefined }));
   const sidebar = h(Sidebar, { route, projects, profileName: profile, engine, onRetry: () => {} });
   flushSync(() => root.render(h(AppShell, { sidebar }, h("p", null, "Body"))));
 }

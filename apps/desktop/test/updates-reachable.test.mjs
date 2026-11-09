@@ -73,6 +73,6 @@ test("with the engine running and a profile saved, Updates stays inside Settings
   const markup = render({}, UPDATES);
   assert.match(markup, /class="sidebar"/);
   assert.match(markup, /<h1>Settings<\/h1>/);
-  assert.match(markup, /href="#\/settings\/updates" aria-selected="true"/);
+  assert.match(markup, /href="#\/settings\/updates" aria-current="page"/);
   assert.doesNotMatch(markup, />Back<\/button>/);
 });

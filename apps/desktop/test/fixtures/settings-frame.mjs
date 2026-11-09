@@ -4,12 +4,13 @@ import { createRoot } from "react-dom/client";
 import shell from "../../src/style.css?inline";
 import frame from "../../src/screens/settings/settings.css?inline";
 import { SettingsFrame } from "../../src/screens/settings/index.tsx";
+import { parseRoute } from "../../src/ui/router.ts";
 import { AppShell } from "../../src/ui/shell.tsx";
 
 let root = null;
 
-/** Mounts the real Settings frame in the real shell with a tall panel. Inputs: the open section
- * and the theme. */
+/** Mounts the real Settings frame in the real shell with a tall panel, following the address
+ * to the section it names as the app does. Inputs: the open section and the theme. */
 export function mount(tab, theme = "light") {
   root?.unmount();
   document.head.innerHTML = "";
@@ -23,7 +24,12 @@ export function mount(tab, theme = "light") {
   document.body.innerHTML = '<div id="root" style="height:100%"></div>';
   root = createRoot(document.getElementById("root"));
   const panel = h("div", { id: "panel", style: { height: "2400px" } }, h("button", { id: "in-panel", type: "button" }, "In the panel"));
-  flushSync(() => root.render(h(AppShell, { sidebar: h("nav", { className: "sidebar" }) }, h(SettingsFrame, { tab }, panel))));
+  const draw = (open) => flushSync(() => root.render(h(AppShell, { sidebar: h("nav", { className: "sidebar" }) }, h(SettingsFrame, { tab: open }, panel))));
+  window.onhashchange = () => {
+    const route = parseRoute(location.hash);
+    if (route.name === "settings") draw(route.tab);
+  };
+  draw(tab);
 }
 
 /** Reads the frame. Output: each group's name and links, the current links, how many tab roles
@@ -41,13 +47,17 @@ export function structure() {
   };
 }
 
-/** Reads where the list and the panel sit. Output: their edges and whether the main region
- * scrolls sideways. */
+/** Reads where the list and the panel sit. Output: their edges, the list's position style, how
+ * far the main region has scrolled and whether it scrolls sideways. */
 export function layout() {
   const main = document.querySelector(".main");
-  const nav = document.querySelector(".settings-nav").getBoundingClientRect();
+  const list = document.querySelector(".settings-nav");
+  const nav = list.getBoundingClientRect();
   const panel = document.querySelector(".settings-content").getBoundingClientRect();
-  return { navRight: nav.right, navTop: nav.top, panelLeft: panel.left, panelTop: panel.top, sideways: main.scrollWidth > main.clientWidth };
+  return {
+    navRight: nav.right, navTop: nav.top, navBottom: nav.bottom, navPosition: getComputedStyle(list).position, panelLeft: panel.left, panelTop: panel.top,
+    scrollTop: main.scrollTop, sideways: main.scrollWidth > main.clientWidth,
+  };
 }
 
 /** Reads the focused element. Output: its words and its outline style. */
