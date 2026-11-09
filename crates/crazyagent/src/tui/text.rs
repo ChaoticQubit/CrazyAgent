@@ -335,6 +335,14 @@ mod tests {
     use crate::tui::theme::{Appearance, Colors, Depth};
 
     #[test]
+    fn a_version_mismatch_reads_as_the_shared_sentence_on_every_screen() {
+        assert_eq!(
+            coded("Could not read.", "engine_version_mismatch"),
+            crate::config::ENGINE_VERSION_LINE
+        );
+    }
+
+    #[test]
     fn wrap_matches_the_design_wrapping() {
         assert_eq!(
             wrap(
