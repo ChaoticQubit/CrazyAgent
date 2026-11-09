@@ -294,6 +294,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .set-row.wide > .set-line-ctl { display: block; }
 .set-changed { display: inline-flex; align-items: center; gap: var(--space-1); margin-left: var(--space-2); color: var(--accent-text); font: 500 11px/16px var(--mono); }
 .set-changed::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.review > .set-row:first-child { border-top: 0; padding-top: 0; }
 .set-row.wide { row-gap: 6px; }
 .set-row.wide > *, .set-row.wide > .field > * { grid-column: 1 / -1; grid-row: auto; justify-self: stretch; }
 .set-row.wide > .segmented { justify-self: start; }
