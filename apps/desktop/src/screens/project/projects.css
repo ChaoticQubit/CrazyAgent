@@ -290,7 +290,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .set-row > .set-help { color: var(--text-2); font-size: 12px; line-height: 16px; }
 .set-row > .set-label, .set-row > .set-help { overflow-wrap: anywhere; }
 .set-row:not(.wide):has(> .set-help) > .set-ctl { grid-row: 1 / span 2; }
-.set-line-ctl { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
+.set-line-ctl { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .set-row.wide > .set-line-ctl { display: block; }
 .set-changed { display: inline-flex; align-items: center; gap: var(--space-1); margin-left: var(--space-2); color: var(--accent-text); font: 500 11px/16px var(--mono); }
 .set-changed::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
