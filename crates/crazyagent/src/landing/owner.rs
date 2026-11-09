@@ -862,10 +862,12 @@ fn finish(
     store::save(db, record)?;
     flow::release_agent_claims(db, record);
     if let By::Named(by) = by {
-        super::note_change(db, record, ActivityKind::Accepted, by);
-        if record.agent.kind == AgentKind::Master {
-            close_covered(db, record, landed);
-        }
+        let closed = if record.agent.kind == AgentKind::Master {
+            close_covered(db, record, landed)
+        } else {
+            Vec::new()
+        };
+        super::note_accepted(db, record, by, &closed);
     }
     if let Err(error) = super::subagent::close_with_lead(db, record) {
         eprintln!(
@@ -1008,7 +1010,8 @@ fn only_fixes(db: &Connection, master: &Record, sets: &[Record]) -> Result<bool,
     let named = land_on(db, &owner, &master.project)?.map(|(branch, _)| branch);
     let (_, tip, _) = landing_target(db, &owner, repository, named.as_deref())?;
     verify_objects(repository, &[&master.head, &tip], &[&master.base])?;
-    super::merges::only_conflict_fixes(&owner, master, sets, &tip)
+    let from = measured_from(db, &owner, master, &tip)?;
+    super::merges::only_conflict_fixes(&owner, master, sets, &tip, &from)
 }
 
 /// Records a landed master set the way the project lists it: closes every other open set
@@ -1019,9 +1022,7 @@ fn only_fixes(db: &Connection, master: &Record, sets: &[Record]) -> Result<bool,
 fn master_merged(db: &Connection, master: &Record, landed: &str, branch: &str) {
     let closed = close_covered(db, master, landed);
     let mut text = format!("Master merged {} into {branch}", super::named(db, master));
-    if !closed.is_empty() {
-        text.push_str(&format!(". It closed the changes of {}", closed.join(", ")));
-    }
+    text.push_str(&super::closed_words(&closed));
     let item = crate::activity::NewActivity {
         kind: ActivityKind::MergedIntoMain,
         actor: crate::activity::MASTER_ACTOR,
@@ -1051,11 +1052,12 @@ fn covered(db: &Connection, master: &Record) -> Result<Vec<Record>, EngineError>
     Ok(covered)
 }
 
-/// Closes, as landed in `landed`, every set [`covered`] finds for the master's landed set,
-/// the way a lead's merge closes its workers' sets. A set that fails to close is logged by
-/// its plain code and named only when the store holds it closed. The caller holds [`hold`]
-/// on the repository. Inputs: the store, the master's landed set and the commit it landed
-/// as. Output: the labels of the agents whose sets closed.
+/// Closes, as landed in `landed`, every set [`covered`] finds for the master's landed set
+/// whose clean changes reached it, the way a lead's merge closes its workers' sets; any
+/// other stays open for the owner's Accept or Discard. A set that fails to close is logged
+/// by its plain code and named only when the store holds it closed. The caller holds
+/// [`hold`] on the repository. Inputs: the store, the master's landed set and the commit it
+/// landed as. Output: the labels of the agents whose sets closed.
 fn close_covered(db: &Connection, master: &Record, landed: &str) -> Vec<String> {
     assert_eq!(master.agent.kind, AgentKind::Master);
     let logged = |error: &EngineError| {
@@ -1071,9 +1073,24 @@ fn close_covered(db: &Connection, master: &Record, landed: &str) -> Vec<String> 
             return Vec::new();
         }
     };
+    let owner = match shared(&master.repository) {
+        Ok(owner) => owner,
+        Err(error) => {
+            logged(&error);
+            return Vec::new();
+        }
+    };
     let found = sets.len();
     let mut closed = Vec::new();
     for mut record in sets {
+        match super::merges::holds_clean_changes(&owner, landed, &record.head) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                logged(&error);
+                continue;
+            }
+        }
         let shut = match super::subagent::land_covered(db, &mut record, landed) {
             Ok(()) => true,
             Err(error) => {

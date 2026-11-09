@@ -408,7 +408,7 @@ fn unavailable() -> EngineError {
 /// changed, with its sub-agent for the goal; a failure is logged by its plain code, so the
 /// action itself never fails on it. A Discarded set closed outside the app says so, and
 /// ChangesReady is a discarded set brought back. Inputs: the store, the change set, the
-/// kind of event (Accepted, Conflict, Discarded, SentBack or ChangesReady) and who acted.
+/// kind of event (Conflict, Discarded, SentBack or ChangesReady) and who acted.
 #[cfg(unix)]
 fn note_change(
     db: &Connection,
@@ -420,7 +420,6 @@ fn note_change(
     let label = &record.agent.label;
     let line = &record.prompt_line;
     let text = match kind {
-        ActivityKind::Accepted => crate::activity::accepted_text(by, &named(db, record)),
         ActivityKind::Conflict => {
             format!("The changes of {label} conflict with the branch they land on: {line}")
         }
@@ -435,6 +434,32 @@ fn note_change(
         _ => unreachable!("note_change takes a change set action"),
     };
     note_text(db, record, kind, by, &text);
+}
+
+/// Records an Accept in its project's activity, naming the agents whose sets it closed.
+/// Inputs: the store, the accepted change set, who acted and the agents' labels. Output:
+/// none.
+#[cfg(unix)]
+fn note_accepted(db: &Connection, record: &store::Record, by: &str, closed: &[String]) {
+    let mut text = crate::activity::accepted_text(by, &named(db, record));
+    text.push_str(&closed_words(closed));
+    note_text(
+        db,
+        record,
+        crate::activity::ActivityKind::Accepted,
+        by,
+        &text,
+    );
+}
+
+/// The words a landing's activity row ends with when it closed other sets. Input: the
+/// labels of their agents. Output: the words, empty when it closed none.
+#[cfg(unix)]
+fn closed_words(closed: &[String]) -> String {
+    if closed.is_empty() {
+        return String::new();
+    }
+    format!(". It closed the changes of {}", closed.join(", "))
 }
 
 /// The words an activity row names a change set by, with its number once it has one; a

@@ -87,16 +87,18 @@ pub(super) fn refuse_outside_merges(
 /// commit must be such a fix, and every one of those sets must come in through one. Any
 /// doubt is false and the set waits for the owner. The caller holds the repository hold
 /// and has verified the objects. Inputs: the owner repository, the master's set, the sets
-/// its head holds and the Land on tip. Output: the answer.
+/// its head holds, the Land on tip and the commit its squash measures from. Output: the
+/// answer.
 pub(super) fn only_conflict_fixes(
     owner: &Repo,
     master: &Record,
     covered: &[Record],
     tip: &str,
+    from: &str,
 ) -> Result<bool, EngineError> {
     assert!(!covered.is_empty());
-    assert!(is_object_id(&master.head) && is_object_id(&master.base) && is_object_id(tip));
-    let Some(merges) = own_merges(owner, master, covered, tip)? else {
+    assert!(is_object_id(&master.head) && is_object_id(from) && is_object_id(tip));
+    let Some(merges) = own_merges(owner, master, covered, tip, from)? else {
         return Ok(false);
     };
     for [commit, ours, theirs] in &merges {
@@ -112,15 +114,17 @@ pub(super) fn only_conflict_fixes(
     Ok(true)
 }
 
-/// Lists the master set's own commits, leaving out its base, the Land on tip and the sets
-/// its head holds, as commit, first parent and second parent. Inputs: the owner repository,
-/// the master's set, the sets and the tip. Output: the merges, or None when there are no
-/// own commits, too many, or one is not a merge of exactly two parents.
+/// Lists every commit the master's squash carries, leaving out where it measures from, the
+/// Land on tip and the sets its head holds, as commit, first parent and second parent.
+/// Inputs: the owner repository, the master's set, the sets, the tip and the commit the
+/// squash measures from. Output: the merges, or None when there are no own commits, too
+/// many, or one is not a merge of exactly two parents.
 fn own_merges(
     owner: &Repo,
     master: &Record,
     covered: &[Record],
     tip: &str,
+    from: &str,
 ) -> Result<Option<Vec<[String; 3]>>, EngineError> {
     let count = format!("--max-count={}", OWN_COMMITS_MAX + 1);
     let mut arguments = vec![
@@ -129,7 +133,7 @@ fn own_merges(
         &count,
         &master.head,
         "--not",
-        &master.base,
+        from,
         tip,
     ];
     arguments.extend(covered.iter().map(|set| set.head.as_str()));
@@ -157,16 +161,94 @@ fn own_merges(
     Ok(Some(merges))
 }
 
-/// Tells whether a merge commit is only the fix of a real conflict: its parents have one
-/// merge base, need no configured command, really conflict, and its tree differs from what
-/// git merged only at the conflicted paths. Paths are compared as git printed them.
-/// Inputs: the owner repository, the commit and its two parents. Output: the answer.
+/// Tells whether a merge commit is only the fix of a real conflict: git's own merge of its
+/// parents really conflicts, its tree keeps every clean change of that merge, and no
+/// conflicted file still holds a conflict marker. Inputs: the owner repository, the commit
+/// and its two parents. Output: the answer.
 fn fixes_conflict(
     owner: &Repo,
     commit: &str,
     ours: &str,
     theirs: &str,
 ) -> Result<bool, EngineError> {
+    let Some(conflicts) = kept_clean_changes(owner, commit, ours, theirs)? else {
+        return Ok(false);
+    };
+    if conflicts.is_empty() {
+        return Ok(false);
+    }
+    for path in &conflicts {
+        if holds_conflict_marker(owner, commit, path)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Tells whether a landed commit holds a change set's clean changes, by the test a conflict
+/// fix passes: merging the set's head into it again would change nothing but conflicted
+/// paths. A merge that kept none of the set's work holds its head and fails this. Inputs:
+/// the owner repository, the landed commit and the set's head. Output: the answer.
+pub(super) fn holds_clean_changes(
+    owner: &Repo,
+    landed: &str,
+    head: &str,
+) -> Result<bool, EngineError> {
+    Ok(kept_clean_changes(owner, landed, landed, head)?.is_some())
+}
+
+/// Reads whether a file of a commit has a line a conflict marker starts. A path the commit
+/// deleted has none; a path git cannot show as one file, or too large to read, counts as
+/// having one, so the set waits. Inputs: the owner repository, the commit and the path as
+/// git printed it. Output: the answer.
+fn holds_conflict_marker(owner: &Repo, commit: &str, path: &[u8]) -> Result<bool, EngineError> {
+    if path.contains(&b'\n') {
+        return Ok(true);
+    }
+    let mut request = format!("{commit}:").into_bytes();
+    request.extend_from_slice(path);
+    request.push(b'\n');
+    let read = owner.exec(
+        &["cat-file", "--batch"],
+        Some(&request),
+        &[],
+        OUTPUT_BYTES_MAX,
+    )?;
+    if read.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if read.overflow {
+        return Ok(true);
+    }
+    let end = read
+        .stdout
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .ok_or_else(|| failure("changes_git_failed"))?;
+    let (header, rest) = read.stdout.split_at(end);
+    if header.ends_with(b" missing") {
+        return Ok(false);
+    }
+    if header.split(|byte| *byte == b' ').nth(1) != Some(b"blob".as_slice()) {
+        return Ok(true);
+    }
+    Ok(rest[1..].split(|byte| *byte == b'\n').any(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        line.starts_with(b"<<<<<<< ") || line.starts_with(b">>>>>>> ") || line == b"======="
+    }))
+}
+
+/// Merges two commits again and tells whether `commit`'s tree differs from the result only
+/// at the paths that merge conflicts on, so it kept every clean change of both sides. The
+/// sides need one merge base and no configured command. Paths are compared as git printed
+/// them. Inputs: the owner repository, the commit and both sides. Output: the conflicted
+/// paths, empty for a clean merge, or None when the commit did not keep that merge.
+fn kept_clean_changes(
+    owner: &Repo,
+    commit: &str,
+    ours: &str,
+    theirs: &str,
+) -> Result<Option<Vec<Vec<u8>>>, EngineError> {
     let bases = owner.exec(
         &["merge-base", "--all", ours, theirs],
         None,
@@ -174,26 +256,23 @@ fn fixes_conflict(
         ID_FIELD_BYTES_MAX * 3,
     )?;
     if bases.code == 1 || bases.overflow {
-        return Ok(false);
+        return Ok(None);
     }
     if bases.code != 0 {
         return Err(failure("changes_git_failed"));
     }
     let text = std::str::from_utf8(&bases.stdout).map_err(|_| failure("changes_git_failed"))?;
     let [base] = text.lines().collect::<Vec<&str>>()[..] else {
-        return Ok(false);
+        return Ok(None);
     };
     if !is_object_id(base) {
         return Err(failure("changes_git_failed"));
     }
     let paths = super::owner::merge_paths(owner, base, ours, theirs)?;
     if super::owner::uses_configured_commands(owner, &paths, &[base, ours, theirs])? {
-        return Ok(false);
+        return Ok(None);
     }
     let (merged, conflicts) = super::owner::merge_raw(owner, base, ours, theirs)?;
-    if conflicts.is_empty() {
-        return Ok(false);
-    }
     let tree = owner.tree_of(commit)?;
     let changed = owner.exec(
         &[
@@ -212,11 +291,12 @@ fn fixes_conflict(
     if changed.code != 0 || changed.overflow {
         return Err(failure("changes_git_failed"));
     }
-    Ok(changed
+    let kept = changed
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-        .all(|path| conflicts.iter().any(|conflict| conflict == path)))
+        .all(|path| conflicts.iter().any(|conflict| conflict == path));
+    Ok(kept.then_some(conflicts))
 }
 
 /// Tells whether one of the merges brought a set's head in through its second parent, so
