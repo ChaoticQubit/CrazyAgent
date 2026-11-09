@@ -1886,7 +1886,8 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
 
 /// CA-SEC-002: an adopted teammate's calls go only to its lead's teammates' server. Once that
 /// server ended while the lead's own server still runs, a pane the lead split there and
-/// tagged with the teammate's name receives none of them, and the teammate reads as gone.
+/// tagged with the teammate's name receives none of them, and the teammate reads as gone
+/// whether or not the engine's own server runs. Ending the teammate ends no such pane.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teammates_server_ended() {
@@ -1944,16 +1945,32 @@ fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teamma
     until_refused(&lead.mates);
 
     let gone = Some("terminal_agent_unknown".to_owned());
-    assert_eq!(
-        host.input(&ann, b"to-own\n").err().map(|problem| problem.0),
-        gone
+    let reads_as_gone = |host: &dyn Host| {
+        assert_eq!(
+            host.input(&ann, b"to-own\n").err().map(|problem| problem.0),
+            gone
+        );
+        assert_eq!(host.input_live(&ann).err().map(|problem| problem.0), gone);
+        assert_eq!(host.quiet(&ann).err().map(|problem| problem.0), gone);
+        assert_eq!(host.snapshot(&ann).err().map(|problem| problem.0), gone);
+        assert_eq!(host.pane_pid(&ann).err().map(|problem| problem.0), gone);
+        assert_eq!(
+            host.resize(&ann, 100, 40).err().map(|problem| problem.0),
+            gone
+        );
+    };
+    reads_as_gone(host.as_ref());
+    let bob = AgentId::team(3).unwrap();
+    host.spawn(&bob, &lead.shell("bob$ ", &["/bin/sh"]))
+        .unwrap();
+    reads_as_gone(host.as_ref());
+    assert_eq!(host.kill(&ann).err().map(|problem| problem.0), gone);
+    let panes = tmux_reply(
+        &lead.tmux,
+        &lead.socket,
+        &["list-panes", "-a", "-F", "#{pane_id}"],
     );
-    assert_eq!(host.snapshot(&ann).err().map(|problem| problem.0), gone);
-    assert_eq!(host.pane_pid(&ann).err().map(|problem| problem.0), gone);
-    assert_eq!(
-        host.resize(&ann, 100, 40).err().map(|problem| problem.0),
-        gone
-    );
+    assert!(panes.lines().any(|pane| pane == own_split), "{panes}");
     let routed = root.join("routed.txt");
     host.input(
         &leader,
@@ -1966,6 +1983,41 @@ fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teamma
             .unwrap_or_default()
             .contains("to-own")
     );
+    host.close(&[]).unwrap();
+}
+
+/// CA-SEC-002 (L2): a teammates' server that could not be reached once is not an ended one.
+/// While its socket is away the adopted teammate's call is refused and goes to no other
+/// server; once it is back the same teammate is reached again, so one failed connect does
+/// not forget a live teammate until the engine restarts.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adopted_teammate_survives_one_failed_connect_to_its_teammates_server() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    let ann = AgentId::team(2).unwrap();
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+        .unwrap();
+    let ann_out = root.join("ann.txt");
+    let ann_pane = lead.new_pane(
+        host.as_ref(),
+        &leader,
+        "split-window -d",
+        &format!("cat > {}", ann_out.display()),
+    );
+    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
+
+    let aside = root.join("mates-aside.sock");
+    std::fs::rename(&lead.mates, &aside).unwrap();
+    assert_eq!(
+        host.input(&ann, b"lost\n").err().map(|problem| problem.0),
+        Some("terminal_agent_unknown".to_owned())
+    );
+    std::fs::rename(&aside, &lead.mates).unwrap();
+    host.input(&ann, b"to-ann\n").unwrap();
+    assert_eq!(wait_text(&ann_out), "to-ann\n");
     host.close(&[]).unwrap();
 }
 
