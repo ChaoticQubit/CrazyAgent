@@ -201,9 +201,9 @@ test("the usage page shows totals, limits with countdowns, named groups and line
   assert.match(words, /Work Claude max/);
   assert.match(words, /Read from the provider 3 min ago/);
   assert.match(words, /5-hour 34% used/);
-  assert.match(words, /Resets in 2 h 0 min/);
+  assert.match(words, /Resets at (?:[A-Z][a-z]{2} )?\d\d:\d\d, in 2 h 0 min/);
   assert.match(words, /Weekly 81% used/);
-  assert.match(words, /Resets in 3 d 4 h/);
+  assert.match(words, /Resets at [A-Z][a-z]{2} \d\d:\d\d, in 3 d 4 h/);
   assert.match(markup, /<meter[^>]*value="34.4"/);
   assert.match(words, /Set reset time/);
   assert.doesNotMatch(words, /Use provider's time/);
@@ -246,7 +246,7 @@ test("a manual reset, a failed check and a passed reset show on the account's ca
   const words = text(render({ report: { kind: "ok", value: report({ limits: [limits({
     five_hour_reset_override_ms: NOW + 45 * MINUTE, weekly: { used_percent: 90, resets_at_ms: NOW - MINUTE }, failure: "usage_rate_limited",
   })] }) } }));
-  assert.match(words, /Resets in 45 min \(your time\)/);
+  assert.match(words, /Resets at (?:[A-Z][a-z]{2} )?\d\d:\d\d, in 45 min \(your time\)/);
   assert.match(words, /Use provider's time/);
   assert.match(words, /Weekly 0% used/);
   assert.match(words, /Next reset not known yet/);
