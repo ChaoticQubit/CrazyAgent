@@ -102,13 +102,13 @@ test("a picked project shows its name, stays picked and drops the Project column
   assert.match(tableText(markup), /^ Agent Tokens Input Cache write Output Cache read Harness Account Share of tokens /);
 });
 
-test("the sidebar's App section opens Metrics at #/metrics, below the main items", () => {
+test("the sidebar's App section opens Metrics at #/metrics, last of its links", () => {
   assert.deepEqual(router.parseRoute("#/metrics"), { name: "metrics" });
   assert.equal(router.formatRoute({ name: "metrics" }), "#/metrics");
   assert.deepEqual(router.parseRoute("#/metrics/extra"), { name: "home" });
   const sidebar = (route) => renderToStaticMarkup(createElement(shell.Sidebar, { route, projects: PROJECTS, profileName: "Sam", engine: "running", onRetry: forbidden }));
   const markup = sidebar({ name: "metrics" });
-  assert.match(markup, /<\/nav><nav class="nav app-nav" aria-label="App"><a class="nav-item" href="#\/metrics" aria-current="page"><svg[\s\S]*?<\/svg><span class="name">Metrics<\/span><\/a><\/nav><div class="sidebar-foot">/);
+  assert.match(markup, /<\/nav><nav class="nav app-nav" aria-label="App">[\s\S]*<a class="nav-item" href="#\/metrics" aria-current="page"><svg[\s\S]*?<\/svg><span class="name">Metrics<\/span><\/a><\/nav><div class="sidebar-foot">/);
   assert.doesNotMatch(sidebar({ name: "home" }), /href="#\/metrics" aria-current/);
 });
 
