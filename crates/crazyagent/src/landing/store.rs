@@ -160,6 +160,11 @@ impl Earlier {
         }
     }
 
+    /// Tells whether the copy was of a discarded set, as a restore's is. Output: the answer.
+    pub(super) fn was_discarded(&self) -> bool {
+        self.state == ChangeState::Discarded
+    }
+
     /// Writes the copy back onto a change set, for the caller to save. Input: the set.
     /// Output: none.
     pub(super) fn put_back(self, record: &mut Record) {
@@ -871,19 +876,19 @@ pub(super) fn open_of(
     }
 }
 
-/// Reads the other change sets of a project that closed as landed in the commit a set's
-/// own Accept made, as a master's merge closes the sets its head holds. Inputs: the store,
-/// the project, that commit and the set that made it. Output: the sets.
-pub(super) fn closed_in(
+/// Reads the other change sets of a project accepted with no commit of their own and not
+/// undone yet: a master's merge closes the sets its head holds that way, and an Accept of
+/// work the branch already held records whatever commit was the tip. Inputs: the store, the
+/// project and the set being undone. Output: the sets.
+pub(super) fn closed_without_commit(
     db: &Connection,
     project: &ProjectId,
-    landed: &str,
     maker: &ChangeSetId,
 ) -> Result<Vec<Record>, EngineError> {
     let closed = collect(
         db,
-        "project=?1 AND landed=?2 AND id<>?3 AND state='accepted' AND made=0",
-        [project.as_str(), landed, maker.as_str()],
+        "project=?1 AND id<>?2 AND state='accepted' AND made=0 AND undone IS NULL",
+        [project.as_str(), maker.as_str()],
     )?;
     assert!(closed.iter().all(|record| record.id != *maker));
     Ok(closed)

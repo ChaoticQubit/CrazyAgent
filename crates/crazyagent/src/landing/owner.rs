@@ -1446,8 +1446,8 @@ pub(super) fn undo(
     Ok(AcceptOutcome::Landed { commit, branch })
 }
 
-/// Records a finished undo: every set the undone merge closed (a master's merge closes the
-/// sets its head holds) whose files it changed is marked undone with it, then the set keeps
+/// Records a finished undo: every set accepted with no commit of its own that the undone
+/// commit held, as [`reverts_closed_set`] says, is marked undone with it, then the set keeps
 /// the reverting commit and drops its intent, its merge rows show Undone and one Undone row
 /// names the closed sets whose work it reverted too. Inputs: the store, the undone set, the
 /// reverting commit and who undid it. Output: Ok once saved.
@@ -1457,8 +1457,8 @@ fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Resul
         .clone()
         .ok_or_else(|| failure("changes_undo_unavailable"))?;
     let mut closed = Vec::new();
-    for mut other in store::closed_in(db, &record.project, &landed, &record.id)? {
-        if !reverts_closed_set(record, &landed, &other) {
+    for mut other in store::closed_without_commit(db, &record.project, &record.id)? {
+        if !reverts_closed_set(record, &landed, commit, &other) {
             continue;
         }
         other.undone = Some(commit.to_owned());
@@ -1474,13 +1474,23 @@ fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Resul
     Ok(())
 }
 
-/// Tells whether reverting a landed commit reverts a set recorded as landed in it: the
-/// commit changed a file the set changed. An Accept that made no commit records whatever
-/// commit was the tip, which may hold none of the set's work. A set git can no longer read
-/// counts, since the branch has already moved. Inputs: the undone set, its landed commit
-/// and the other set. Output: the answer.
-fn reverts_closed_set(record: &Record, landed: &str, closed: &Record) -> bool {
+/// Tells whether reverting a landed commit reverts a set accepted with no commit of its
+/// own: the commit the set records sits at or above the landed one on the branch the undo
+/// moved, and the landed commit changed a file the set changed. An Accept that made no
+/// commit records whatever commit was the tip, which may hold none of the set's work. A set
+/// git can no longer read counts, since the branch has already moved. Inputs: the undone
+/// set, its landed commit, the reverting commit and the other set. Output: the answer.
+fn reverts_closed_set(record: &Record, landed: &str, commit: &str, closed: &Record) -> bool {
     let overlap = shared(&record.repository).and_then(|owner| {
+        let Some(at) = closed.landed.as_deref() else {
+            return Ok(false);
+        };
+        let above = owner.commit_of(at)?.is_some()
+            && owner.test(&["merge-base", "--is-ancestor", landed, at])?
+            && owner.test(&["merge-base", "--is-ancestor", at, commit])?;
+        if !above {
+            return Ok(false);
+        }
         let reverted = diff::changed_paths(&owner, &format!("{landed}^1"), landed)?;
         let changed = diff::changed_paths(&owner, &closed.base, &closed.head)?;
         Ok(changed.iter().any(|path| reverted.contains(path)))
@@ -1799,9 +1809,11 @@ pub(super) fn settled(db: &Connection, id: &ChangeSetId) -> Result<Record, Engin
 /// an undo is finished or dropped the same way, and an agent worktree reset counts as done
 /// when HEAD already holds its target, is run again only while HEAD still holds the
 /// commit it started from and the worktree holds nothing else, and is dropped otherwise,
-/// so a commit the agent made after it stopped is never moved. The caller holds [`hold`]
-/// on its repository. Inputs: the store and the loaded record. Output: Ok once the stored
-/// record holds no intent.
+/// so a commit the agent made after it stopped is never moved. A closed set's next set
+/// opens above the target once the agent's branch holds it and not the set's head, and a
+/// restore that reached its target does what the live restore does last. The caller holds
+/// [`hold`] on its repository. Inputs: the store and the loaded record. Output: Ok once the
+/// stored record holds no intent.
 fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     match record.intent.clone() {
         Some(Intent::Land {
@@ -1858,7 +1870,12 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                 }
             }
             if !record.is_open() {
-                let start = if reset { &target } else { &record.head };
+                let reached = reset
+                    || match &agent {
+                        Some(agent) => agent.built_on(&target)? && !agent.built_on(&record.head)?,
+                        None => false,
+                    };
+                let start = if reached { &target } else { &record.head };
                 flow::set_base(
                     db,
                     &record.repository,
@@ -1866,15 +1883,17 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                     &record.git_dir,
                     start,
                 )?;
-            } else if let Some(earlier) = earlier
-                && !reset
-            {
-                let reached = match &agent {
-                    Some(agent) => agent.built_on(&target)?,
-                    None => false,
-                };
+            } else if let Some(earlier) = earlier {
+                let restoring = earlier.was_discarded();
+                let reached = reset
+                    || match &agent {
+                        Some(agent) => agent.built_on(&target)?,
+                        None => false,
+                    };
                 if !reached {
                     put_back(record, earlier)?;
+                } else if restoring {
+                    flow::finish_restore(db, record)?;
                 }
             }
             record.intent = None;

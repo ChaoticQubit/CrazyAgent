@@ -2468,8 +2468,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
         record.restored = true;
         record.updated_ms = now;
         store::save(db, &record)?;
-        logged_claims(crate::coord::restore_set(db, id.as_str()).map(drop));
-        return set_engine_ref(&shared, &record.repository, &discarded_ref(id), None);
+        return finish_restore(db, &record);
     }
     let agent = agent(db, &record)?;
     let current = agent.head()?;
@@ -2503,9 +2502,21 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     }
     record.intent = None;
     store::save(db, &record)?;
-    logged_claims(crate::coord::restore_set(db, id.as_str()).map(drop));
-    set_engine_ref(&shared, &record.repository, &discarded_ref(id), None)?;
-    Ok(())
+    finish_restore(db, &record)
+}
+
+/// Does what a restore does last, once its set is pending again: the claims the close
+/// released hold again and its discarded ref goes, which pruning never would, since it reads
+/// discarded sets only. A failed claim step is logged and never fails the restore. Inputs:
+/// the store and the restored set. Output: Ok once the ref is gone.
+pub(super) fn finish_restore(db: &Connection, record: &Record) -> Result<(), EngineError> {
+    logged_claims(crate::coord::restore_set(db, record.id.as_str()).map(drop));
+    set_engine_ref(
+        &shared(&record.repository)?,
+        &record.repository,
+        &discarded_ref(&record.id),
+        None,
+    )
 }
 
 /// Deletes the discarded refs whose restore window ended by `now`, once each. A change set
