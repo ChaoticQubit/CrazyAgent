@@ -8157,15 +8157,32 @@ const BOTH_FOURTH_LINES: &str = "one\ntwo\nthree\nfour from the owner\nfour from
 /// in the master, at Full access with Merge into main itself. Input: the case. Output: the
 /// conflicted set, its head and the master's workspace.
 fn conflicted_set_and_master(case: &Case) -> (ChangeSetId, String, Workspace) {
+    conflicted_set_from(case, &[], |case| {
+        case.owner_commit(
+            "README",
+            "one\ntwo\nthree\nfour from the owner\n",
+            "Owner adds four",
+        );
+    })
+}
+
+/// Makes a set of the agent's fourth line and the given files conflict with what `on_main`
+/// commits to main, then brings in the master at Full access with Merge into main itself.
+/// Inputs: the case, the set's other files and the change on main. Output: the conflicted
+/// set, its head and the master's workspace.
+fn conflicted_set_from(
+    case: &Case,
+    files: &[(&str, &str)],
+    on_main: impl FnOnce(&Case),
+) -> (ChangeSetId, String, Workspace) {
     use crate::sandbox::policy::AgentAccess;
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    for (path, text) in files {
+        case.edit(path, text);
+    }
     let sub = case.turn(TurnOutcome::Succeeded).unwrap();
-    case.owner_commit(
-        "README",
-        "one\ntwo\nthree\nfour from the owner\n",
-        "Owner adds four",
-    );
+    on_main(case);
     assert!(matches!(
         case.accept(&sub).unwrap(),
         AcceptOutcome::Conflict { .. }
@@ -8791,6 +8808,112 @@ fn a_conflict_fix_on_a_path_with_a_configured_merge_driver_waits_for_the_owner()
         &sub,
         ChangeState::Conflict,
         "a configured merge driver",
+    );
+}
+
+/// Lands the master's fix and checks that the set it conflicted with stayed open while the
+/// set's clean file reached main. Inputs: the case, the master's set and the conflicted set.
+/// Output: none.
+fn land_leaves_the_set_open(case: &Case, fix: &ChangeSetId, sub: &ChangeSetId) {
+    let outcome = land_master_set(&case.db, &case.home, fix).unwrap();
+    assert!(
+        matches!(outcome, Some(AcceptOutcome::Landed { .. })),
+        "the master's fix lands: {outcome:?}"
+    );
+    assert_eq!(case.owner(&["show", "main:NEW"]), "new\n");
+    assert_eq!(
+        case.view(sub).state,
+        ChangeState::Conflict,
+        "a set whose work on a conflicted path did not land stays open"
+    );
+    assert!(store::load(&case.db, sub).unwrap().landed.is_none());
+}
+
+/// LAND-3: one conflicted path left as main had it means the set's work there was dropped,
+/// even when its other conflicted path and its clean file landed, so the set stays open
+/// for the owner (rv-secreview land-1 r2 F1).
+#[test]
+fn a_master_land_that_kept_mains_side_of_one_conflict_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_from(
+        &case,
+        &[("NOTES", "notes of the agent\n"), ("NEW", "new\n")],
+        |case| {
+            case.owner_commit(
+                "README",
+                "one\ntwo\nthree\nfour from the owner\n",
+                "Owner adds four",
+            );
+            case.owner_commit("NOTES", "notes of the owner\n", "Owner adds notes");
+        },
+    );
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[
+            ("README", BOTH_FOURTH_LINES),
+            ("NOTES", "notes of the owner\n"),
+            ("NEW", "new\n"),
+        ],
+    );
+    let fix = turn_of(&case, &master, "Keep the owner's notes");
+    land_leaves_the_set_open(&case, &fix, &sub);
+}
+
+/// LAND-3: a conflicted path that neither the landed commit nor the commit under it holds
+/// was left as main had it too, so the set whose edit of that file was dropped stays open.
+#[test]
+fn a_master_land_that_kept_mains_deletion_of_a_conflicted_file_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_from(&case, &[("NEW", "new\n")], |case| {
+        case.owner(&["rm", "-q", "README"]);
+        case.owner(&["commit", "-q", "-m", "Owner drops the README"]);
+    });
+    master_resolves(&case, &master, &sub_head, &[("NEW", "new\n")]);
+    let fix = turn_of(&case, &master, "Keep the deletion");
+    land_leaves_the_set_open(&case, &fix, &sub);
+}
+
+/// LAND-3: git writes longer markers on a path with this attribute, which the marker read
+/// does not know, so a fix of such a path waits for the owner (land-1 r2 L1, F2).
+#[test]
+fn a_conflict_fix_on_a_path_with_a_marker_size_attribute_waits_for_the_owner() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    write(
+        &case.repo.join(".git/info/attributes"),
+        "README conflict-marker-size=10\n",
+    );
+    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "a marker size attribute",
+    );
+}
+
+/// LAND-3: the marker size attribute counts from the commits' own .gitattributes too.
+#[test]
+fn a_conflict_fix_on_a_path_a_commit_gives_a_marker_size_waits_for_the_owner() {
+    let case = Case::new();
+    case.owner_commit(
+        ".gitattributes",
+        "README conflict-marker-size=10\n",
+        "Longer markers",
+    );
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "a committed marker size attribute",
     );
 }
 
