@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory() as folder:
     assert run(root, GOOD)[0] == 0
     assert out.read_bytes() == first
     for bad_source in ({"claude-a": [-1, 1e-06, None, None, None, None]}, {"claude-a": ["x", 1e-06, None, None, None, None]}, {"claude-a": [1, 1e-06, None, None, None, None]}, {"claude-a": [1e-06]}, []):
-        out.unlink()
+        out.unlink(missing_ok=True)
         assert run(root, bad_source)[0] != 0
         assert not out.exists()
     rc, out = run(root, {"claude-c": [5e-06, 2.5e-05, None, None]})
