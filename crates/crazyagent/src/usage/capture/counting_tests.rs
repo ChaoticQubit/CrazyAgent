@@ -282,3 +282,17 @@ fn an_advisor_call_counts_once_beside_its_message() {
         vec![("claude-fable-5-1".to_owned(), 70), (MODEL.to_owned(), 10)]
     );
 }
+
+#[test]
+fn a_rows_first_estimate_is_capped_like_its_later_ones() {
+    let (_root, db) = store();
+    let added = Added {
+        tokens: expected(1, 0),
+        cost_nanos: i64::MAX,
+    };
+    add_tokens(&db, NOW, &who(), "s1", MODEL, added).unwrap();
+    let cost: i64 = db
+        .query_row("SELECT cost_nanos FROM usage_tokens", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(cost, ROW_TOKENS_MAX);
+}

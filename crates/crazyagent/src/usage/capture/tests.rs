@@ -1627,7 +1627,10 @@ fn claude_transcript_tool_calls_count_only_for_an_agent_launched_without_hooks()
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("projects/-repo/s1.jsonl");
         for line in &lines {
-            append(&record, line);
+            append(
+                &record,
+                &line.replace("\"id\":\"m", &format!("\"id\":\"{agent}-m")),
+            );
         }
         (agent, home)
     });
