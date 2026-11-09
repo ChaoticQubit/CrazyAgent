@@ -150,6 +150,13 @@ fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, E
         .map_err(error)
 }
 
+/// Reads a note's name as a credential reference. Input: the name. Output: the reference,
+/// or `account_key_reference_invalid`.
+#[cfg(unix)]
+fn reference(name: &str) -> Result<crate::protocol::CredentialRef, EngineError> {
+    crate::protocol::CredentialRef::new(name).map_err(|_| error("account_key_reference_invalid"))
+}
+
 #[cfg(unix)]
 fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
     match kind {
@@ -158,7 +165,8 @@ fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
         MCP_CHECKS => super::plugins::remove_check_folder(root, name),
         SKILL_FOLDER => super::plugins::remove_skill_project_folder(root, name),
         HOOK_FOLDER => super::plugins::remove_hook_folder(root, name),
-        NATIVE_SIGN_IN | GENERATED_HOME => Ok(()),
+        NATIVE_SIGN_IN => crate::engine::bootstrap::remove_sign_in(root, &reference(name)?),
+        GENERATED_HOME => crate::engine::bootstrap::remove_generated_home(root, &reference(name)?),
         _ => Err(error("file_trash_kind_unknown")),
     }
 }
