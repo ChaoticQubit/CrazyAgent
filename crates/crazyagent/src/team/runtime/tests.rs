@@ -21761,8 +21761,8 @@ exec /usr/bin/perl -e 'open(my $out, ">", "$ARGV[0].part") or die; print $out "$
 "#;
 
 /// Starts a native lead on its own server as the lead's worker does, with a stand-in Claude
-/// Code that writes a process id to `left.pid` in the lead's folder, then ends the lead
-/// through `end`. Inputs: the stand-in and the ending, given the session, the host and the
+/// Code that writes a process id to `left.pid` in the lead's folder or its teammates' config
+/// home, then ends the lead through `end`. Inputs: the stand-in and the ending, given the session, the host and the
 /// lead. Output: the ending's outcome and whether that process still ran after it; the
 /// process is killed before this returns.
 #[cfg(target_os = "macos")]
@@ -21823,6 +21823,7 @@ fn ended_native_lead<T>(
         scratch: mates_socket.parent().unwrap().to_path_buf(),
     };
     let home = agent_home(&runtime.state, id);
+    let teammate_wrote = crate::launch_context::mates_home(&home).join("left.pid");
     let context = runtime
         .context(&project, id, AgentRole::Sub, true, Layout::Linked)
         .unwrap();
@@ -21835,9 +21836,11 @@ fn ended_native_lead<T>(
     let written = plan.working_dir.join("left.pid");
     let deadline = Instant::now() + WAIT;
     let pid = loop {
-        let read = std::fs::read_to_string(&written)
-            .ok()
-            .and_then(|text| text.trim().parse::<i32>().ok());
+        let read = [&written, &teammate_wrote].iter().find_map(|path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+        });
         match read {
             Some(pid) => break pid,
             None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
@@ -21886,6 +21889,25 @@ fn a_left_native_lead_s_end_is_not_confirmed_while_a_process_it_started_on_its_o
         "the lead's own process outlived the end: {ended:?}"
     );
     assert_eq!(ended, Ok(false));
+}
+
+/// T23-R1-F2: the status column a project's delete waits on is written after the lead's stop
+/// returns, so that stop must already have ended the lead's running native teammate, a real
+/// process in a pane of the teammates' own server.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_stop_has_ended_its_running_teammate_when_it_returns() {
+    let script = SPLITTING_CLAUDE.replace(
+        "  exec /bin/sleep 300\n  ;;",
+        "  echo $$ > \"$CLAUDE_CONFIG_DIR/left.pid\"\n  exec /bin/sleep 300\n  ;;",
+    );
+    assert_ne!(script, SPLITTING_CLAUDE, "the teammate records its own id");
+    let (stopped, running) = ended_native_lead(&script, |session, _, _| session.stop());
+    assert!(
+        !running,
+        "the teammate outlived its lead's stop: {stopped:?}"
+    );
+    assert!(matches!(stopped, Ok(None)), "{stopped:?}");
 }
 
 /// A native lead's stop that leaves nothing it started running is confirmed by a listing of
