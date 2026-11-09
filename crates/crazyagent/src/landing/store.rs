@@ -138,6 +138,8 @@ pub(super) struct Earlier {
     removed: u32,
     updated_ms: u64,
     restorable_until_ms: Option<u64>,
+    #[serde(default)]
+    restored: bool,
 }
 
 impl Earlier {
@@ -154,6 +156,7 @@ impl Earlier {
             removed: record.removed,
             updated_ms: record.updated_ms,
             restorable_until_ms: record.restorable_until_ms,
+            restored: record.restored,
         }
     }
 
@@ -170,6 +173,7 @@ impl Earlier {
         record.removed = self.removed;
         record.updated_ms = self.updated_ms;
         record.restorable_until_ms = self.restorable_until_ms;
+        record.restored = self.restored;
     }
 }
 

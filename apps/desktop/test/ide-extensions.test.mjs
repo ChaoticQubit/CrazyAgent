@@ -22,6 +22,10 @@ test("a refused approval says why, and an unknown code is named", () => {
     confirm.extensionRefusal({ code: "ide_extension_hash_mismatch" }),
     "The download didn't match the checksum Open VSX lists, so it wasn't approved.",
   );
+  assert.equal(
+    confirm.extensionRefusal({ code: "ide_extension_ai_locked" }),
+    "CrazyAgent keeps AI features out of the IDE, so this extension can't be installed.",
+  );
   assert.match(confirm.extensionRefusal({ code: "ide_extension_download_failed" }), /ide_extension_download_failed/);
 });
 

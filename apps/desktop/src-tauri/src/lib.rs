@@ -1153,6 +1153,21 @@ async fn desktop_team_catch_up_main(
 }
 
 #[tauri::command]
+async fn desktop_team_reuse_idle(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_reuse_idle(&id, &mode, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_new_folder_limit(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -3436,15 +3451,9 @@ async fn desktop_ide_open(
         call.await?
     };
     let workbench = ide::workbench(&opened)?;
-    ide::show(
-        &app,
-        &webview.window(),
-        &views,
-        &project,
-        workbench,
-        bounds,
-        ticket,
-    )
+    let window = webview.window();
+    let bounds = bounds.in_window(&window)?;
+    ide::show(&app, &window, &views, &project, workbench, bounds, ticket)
 }
 
 #[tauri::command]
@@ -3457,7 +3466,8 @@ async fn desktop_ide_place<R: Runtime>(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
-    ide::place(&app, &views, &project, bounds.checked()?)
+    let bounds = bounds.checked()?.in_window(&webview.window())?;
+    ide::place(&app, &views, &project, bounds)
 }
 
 #[tauri::command]
@@ -4000,6 +4010,7 @@ native_commands! {
     desktop_team_master_lands,
     desktop_team_reask_empty_reply,
     desktop_team_catch_up_main,
+    desktop_team_reuse_idle,
     desktop_team_new_folder_limit,
     desktop_team_coordination,
     desktop_team_harness_mode,

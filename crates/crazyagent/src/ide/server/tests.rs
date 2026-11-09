@@ -520,6 +520,33 @@ async fn the_hooks_switch_reaches_the_git_shim_through_open() {
     servers.stop_all().await;
 }
 
+/// `open` leaves the git lookup, which runs xcrun on a Mac without the Command Line Tools,
+/// to a blocking thread: the test's single async thread never makes it, and the shim it
+/// feeds still names the same git (FZ7-R1-L1).
+#[tokio::test]
+async fn open_looks_up_the_ides_git_off_the_async_thread() {
+    let checkout = scratch();
+    let data = scratch();
+    let build = cached_build();
+    let project = project("lookup");
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    crate::research::runner::SANDBOXED_GIT_LOOKUPS.set(0);
+    servers.open(&project, &root, &build, false).await.unwrap();
+    assert_eq!(
+        crate::research::runner::SANDBOXED_GIT_LOOKUPS.get(),
+        0,
+        "the async thread looked up git itself"
+    );
+    let folder = servers.project_folder(&project).unwrap();
+    let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
+    assert_eq!(
+        fs::read_to_string(&shim).unwrap(),
+        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+    );
+    servers.stop_all().await;
+}
+
 #[tokio::test]
 async fn idle_server_stops_after_the_idle_limit() {
     let checkout = scratch();
@@ -1509,4 +1536,81 @@ async fn a_delete_hold_landing_on_a_starting_open_stops_what_it_started() {
     );
     drop(hold);
     servers.stop_all().await;
+}
+
+/// A timed-out open is dropped while its blocking work runs on, and that work writes the
+/// project's settings. The work keeps the start lock until it ends, so a retry waits for it
+/// instead of writing beside it, and the work never runs without the lock (ide-8 r1 sec F1).
+#[tokio::test]
+async fn a_dropped_open_keeps_the_start_lock_until_its_blocking_work_ends() {
+    let start = Arc::new(tokio::sync::Mutex::new(()));
+    let held = Arc::clone(&start).lock_owned().await;
+    let (entered, running) = tokio::sync::oneshot::channel();
+    let (finish, done) = std::sync::mpsc::channel::<()>();
+    let open = tokio::spawn(async move {
+        let mut held = Some(held);
+        holding_start(&mut held, move || {
+            entered.send(()).unwrap();
+            done.recv().unwrap();
+        })
+        .await
+    });
+    running.await.unwrap();
+    open.abort();
+    assert!(open.await.unwrap_err().is_cancelled());
+    assert!(
+        start.try_lock().is_err(),
+        "a retry must wait for the work a dropped open left running"
+    );
+    finish.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(GONE_WAIT, start.lock()).await.is_ok(),
+        "the lock is free once the work has ended"
+    );
+    let unlocked = tokio::spawn(async { holding_start(&mut None, || ()).await });
+    assert!(unlocked.await.unwrap_err().is_panic());
+}
+
+/// A blocking call that never returns holds its project's start lock. The engine's stop waits
+/// [`STOP_LEFTOVER_WAIT`] in all for such locks, however many there are, so the shutdown
+/// steps after it still run (ide-8 r2, rv-code L1 and sec F1).
+#[tokio::test]
+async fn stop_all_goes_on_past_leftovers_that_hold_their_start_locks() {
+    let data = scratch();
+    let servers = servers_in(data.path(), Duration::from_secs(60));
+    let mut held = Vec::new();
+    for name in ["hung-one", "hung-two"] {
+        let slot = servers.slot(&project(name)).unwrap();
+        held.push(Arc::clone(&slot.start).lock_owned().await);
+    }
+    let limit = STOP_LEFTOVER_WAIT + STOP_LEFTOVER_WAIT / 2;
+    assert!(
+        tokio::time::timeout(limit, servers.stop_all())
+            .await
+            .is_ok(),
+        "the engine's stop must go on past a hung leftover"
+    );
+    assert_eq!(held.len(), 2);
+}
+
+/// Only the guard keeps the lock of an open that was dropped, so a full table must still keep
+/// that slot: otherwise the project's retry gets a new lock and writes beside the leftover
+/// (ide-8 r2, sec F2).
+#[tokio::test]
+async fn a_full_table_keeps_the_slot_a_leftover_still_holds() {
+    let data = scratch();
+    let servers = servers_in(data.path(), Duration::from_secs(60));
+    let leftover = project("leftover");
+    let slot = servers.slot(&leftover).unwrap();
+    let held = Arc::clone(&slot.start).lock_owned().await;
+    drop(slot);
+    for index in 1..PROJECTS_MAX {
+        servers.slot(&project(&format!("filler-{index}"))).unwrap();
+    }
+    servers.slot(&project("one-more")).unwrap();
+    let retry = servers.slot(&leftover).unwrap();
+    assert!(
+        Arc::ptr_eq(&retry.start, tokio::sync::OwnedMutexGuard::mutex(&held)),
+        "a retry must wait on the leftover's lock"
+    );
 }

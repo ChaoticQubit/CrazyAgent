@@ -34,6 +34,9 @@ pub const STATUS_AGENTS_MAX: i64 = super::STATUS_AGENTS_MAX;
 pub const VIEW_NOTIFICATIONS_MAX: i64 = 20;
 pub const APP_NOTIFICATIONS_MAX: i64 = 50;
 pub const UNSEEN_PROJECTS_MAX: i64 = 200;
+/// The projects the working list names. At this bound it and a full unseen list still fit one
+/// reply at the longest legal project id, so a decoration cannot fail the whole read.
+pub const WORKING_PROJECTS_MAX: i64 = 100;
 pub const HOUR_MS: i64 = 3_600_000;
 pub const SCAN_EVERY: Duration = Duration::from_secs(2);
 pub(crate) const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
@@ -446,7 +449,7 @@ pub struct AgentQuestions {
 
 /// What the app shows across projects: the app-level wake rule, the rule in force without a
 /// project rule, the newest notifications of every project, how many are unseen and how many
-/// of them each project has.
+/// of them each project has, and how many agents each project has at work.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AppEvents {
     pub rule: Option<WakeRule>,
@@ -457,6 +460,16 @@ pub struct AppEvents {
     pub unseen: i64,
     #[serde(default)]
     pub projects: Vec<ProjectUnseen>,
+    #[serde(default)]
+    pub working: Vec<ProjectWorking>,
+}
+
+/// How many agents one project has at work, for its sidebar dot: team agents working plus
+/// research jobs running, the sum its project card shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectWorking {
+    pub project_id: ProjectId,
+    pub agents: i64,
 }
 
 /// How many of one project's owner notifications are unseen, for its sidebar count, and how
@@ -1479,6 +1492,41 @@ fn app_notifications(connection: &Connection) -> Result<Vec<Notification>, Engin
     Ok(read)
 }
 
+/// Counts the agents at work in each project that has any, in one read for all projects, so
+/// the sidebar never asks project by project: team agents working plus research jobs running,
+/// the sum each project card shows. Takes the connection. Returns at most
+/// `WORKING_PROJECTS_MAX` projects by id, each with a count above zero.
+fn working_by_project(connection: &Connection) -> Result<Vec<ProjectWorking>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT project, SUM(agents) FROM (
+                 SELECT project, COUNT(*) AS agents FROM team_agents
+                 WHERE status = 'working' GROUP BY project
+                 UNION ALL
+                 SELECT project, COUNT(*) FROM research_jobs
+                 WHERE status = 'running' GROUP BY project
+             ) GROUP BY project ORDER BY project LIMIT ?1",
+        )
+        .map_err(error)?;
+    let rows: Vec<(String, i64)> = statement
+        .query_map([WORKING_PROJECTS_MAX], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    let working: Vec<ProjectWorking> = rows
+        .into_iter()
+        .filter_map(|(project, agents)| {
+            Some(ProjectWorking {
+                project_id: ProjectId::new(project).ok()?,
+                agents,
+            })
+        })
+        .collect();
+    assert!(working.len() as i64 <= WORKING_PROJECTS_MAX);
+    assert!(working.iter().all(|item| item.agents > 0));
+    Ok(working)
+}
+
 /// Counts the unseen notifications of each project that has any, and the questions-log
 /// notifications among them, by project id, so a project's count never depends on what fits
 /// in the app window. A question notification a work question raised, which
@@ -1829,6 +1877,25 @@ pub(super) fn agent_text(text: &str) -> String {
     quoted
 }
 
+/// Writes text with every line opened by `> `, so no line of it can start as the owner, the
+/// engine or any other speaker, whichever break opens it. Keeps the square brackets
+/// `agent_text` rewrites, since agents pass each other code. Takes the text. Returns it.
+pub(crate) fn quoted_lines(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + QUOTE.len());
+    for line in text.split_inclusive(line_break) {
+        quoted.push_str(QUOTE);
+        quoted.push_str(line);
+    }
+    quoted
+}
+
+/// Writes text that follows an engine head on its first line: that line as written and
+/// every later one through `quoted_lines`. Takes the text. Returns it.
+pub(crate) fn quoted_after_first_line(text: &str) -> String {
+    let first = text.split_inclusive(line_break).next().unwrap_or_default();
+    format!("{first}{}", quoted_lines(&text[first.len()..]))
+}
+
 /// Writes text a sub-agent wrote as part of one engine line, such as an event or the
 /// question an agent waits on: made plain by `plain_agent_text` and every line break made a
 /// space, so it never starts a line of its own. Takes the text. Returns one line.
@@ -1841,7 +1908,9 @@ fn agent_line(text: &str) -> String {
     line
 }
 
-fn line_break(c: char) -> bool {
+/// Says whether a character breaks a line for some reader, the one rule for text an agent
+/// wrote. Takes the character. Returns whether it does.
+pub(crate) fn line_break(c: char) -> bool {
     matches!(
         c,
         '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
@@ -2195,7 +2264,8 @@ fn cleared_levels(
 
 /// Reads what the app shows across projects: the app wake rule and the newest notifications.
 /// Takes the connection. Returns the view fitted to one owner reply by `fit_app`, with the
-/// unseen count for the badge and the unseen count of each project for the sidebar.
+/// unseen count for the badge, the unseen count of each project for the sidebar and the
+/// agents at work in each project for its live dot.
 pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
     let rule = stored_rules(connection, "")?
         .into_iter()
@@ -2215,6 +2285,7 @@ pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
         notifications: app_notifications(connection)?,
         unseen,
         projects: unseen_by_project(connection)?,
+        working: working_by_project(connection)?,
     })
 }
 
@@ -2240,8 +2311,8 @@ pub fn rule_version(connection: &Connection, target: &RuleTarget) -> Result<u64,
 
 /// Fits the app-wide view to one owner reply: the oldest seen notifications go first, then
 /// the texts are cut to one shared cap, halved until the view fits, then the oldest go. The
-/// unseen counts stay whole. Takes the view. Returns it, or `team_events_bounds` when even
-/// an empty list does not fit.
+/// unseen and working counts stay whole. Takes the view. Returns it, or
+/// `team_events_bounds` when even an empty list does not fit.
 fn fit_app(mut view: AppEvents) -> Result<AppEvents, EngineError> {
     let fits = |view: &AppEvents| -> Result<bool, EngineError> {
         Ok(super::encoded_len(view)? <= super::STATUS_REPLY_BYTES_MAX)

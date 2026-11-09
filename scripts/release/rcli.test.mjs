@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -15,7 +16,7 @@ function required(name) {
 test("the rcli host compiles in two bun stages with no environment, dotenv or install access", () => {
   const [bundle, compile] = rcliCommands({ bun: "/b/bun", entry: "/r/scripts/rcli/entry.ts", work: "/w", output: "/o/crazyagent-rcli" });
   assert.deepEqual(bundle, ["/b/bun", "build", "/r/scripts/rcli/entry.ts", "--target=bun", "--format=esm", "--packages=bundle", "--reject-unresolved", "--env=disable", "--outdir=/w/bundle", "--entry-naming=entry.js"]);
-  assert.deepEqual(compile, ["/b/bun", "build", "/w/bundle/entry.js", "--compile", "--compile-executable-path=/b/bun", "--target=bun", "--packages=bundle", "--reject-unresolved", "--env=disable", "--outfile=/o/crazyagent-rcli"]);
+  assert.deepEqual(compile, ["/b/bun", "build", "/w/bundle/entry.js", "--compile", "--compile-executable-path=/b/bun", "--target=bun", "--packages=bundle", "--reject-unresolved", "--env=disable", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", "--no-compile-autoload-tsconfig", "--no-compile-autoload-package-json", "--outfile=/o/crazyagent-rcli"]);
 });
 
 test("an rcli source alias that points elsewhere is refused before bun runs", async () => {
@@ -46,6 +47,32 @@ test("the built rcli host is a native executable that runs the CrazyAgent entry"
     assert.equal(result.status, 70);
     assert.equal(String(result.stderr), "host_execution_failed\n");
     assert.equal(String(result.stdout), "");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a compiled rcli host takes no bunfig preload or .env from the folder it runs in", async () => {
+  const root = await mkdtemp(join(tmpdir(), "release-rcli-autoload-"));
+  try {
+    const bun = required("CRAZYAGENT_BUN");
+    const entry = join(root, "entry.ts");
+    await writeFile(entry, 'process.stdout.write("DUMMY=" + (process.env.DUMMY_VALUE ?? "none"));\n');
+    const output = join(root, process.platform === "win32" ? "host.exe" : "host");
+    for (const argv of rcliCommands({ bun, entry, work: join(root, "work"), output })) {
+      const built = spawnSync(argv[0], argv.slice(1), { cwd: root, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+      assert.equal(built.status, 0, String(built.stderr));
+    }
+    const folder = join(root, "project");
+    await mkdir(folder);
+    await writeFile(join(folder, "bunfig.toml"), 'preload = ["./canary.ts"]\n');
+    await writeFile(join(folder, "canary.ts"), 'await Bun.write(import.meta.dir + "/marker", "ran");\n');
+    await writeFile(join(folder, ".env"), "DUMMY_VALUE=1\n");
+    const env = process.platform === "win32" ? { SystemRoot: process.env.SystemRoot, USERPROFILE: root, TEMP: root, TMP: root } : { PATH: "/usr/bin:/bin", HOME: root, TMPDIR: root };
+    const result = spawnSync(output, [], { cwd: folder, stdio: ["ignore", "pipe", "pipe"], env, timeout: 60_000 });
+    assert.equal(result.status, 0, String(result.stderr));
+    assert.equal(String(result.stdout), "DUMMY=none");
+    assert.equal(existsSync(join(folder, "marker")), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

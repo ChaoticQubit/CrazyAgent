@@ -21,7 +21,7 @@ async function projectMemory(kit) {
 /** Reads the source line Settings, Memory shows under one memory row, through WebDriver since
  * the row is found by XPath. Input: the row's XPath. Output: its text, "" when none is shown. */
 async function sourceOf(row) {
-  const line = `${row}//span[contains(@class, "muted")]`;
+  const line = `${row}//span[contains(@class, "set-help")]`;
   return (await shown(line)) ? $(line).getText() : "";
 }
 
@@ -52,7 +52,7 @@ export const checks = [{
       return { done: saved, seen: saved ? `${token} is listed` : `${token} is not listed yet` };
     }, MASTER_MS, `OP-22: Context, Project memory never showed the master's fact ${token}`);
 
-    const row = `//div[contains(@class, "item-row")][.//p[contains(normalize-space(.), ${lit(token)})]]`;
+    const row = `//div[contains(@class, "set-row")][.//p[contains(normalize-space(.), ${lit(token)})]]`;
     const approve = `${row}//button[normalize-space(.)="Approve"]`;
     await kit.go("#/settings/memory");
     await kit.pick("#memory-scope", kit.project());

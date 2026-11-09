@@ -5,8 +5,8 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::team::agent_messages::{AgentMessages, Cursor, MessageSettings};
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{
-    BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, MasterLands, SwitchApply, SwitchMode,
-    TeamAction, TeamStatus, TerminalsPerWindow,
+    BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, MasterLands, ReuseIdle, SwitchApply,
+    SwitchMode, TeamAction, TeamStatus, TerminalsPerWindow,
 };
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
@@ -458,8 +458,9 @@ impl NativeBridge {
     }
 
     /// Sets a project's "Catch up with main" setting: `on` lets every agent merge
-    /// `crazyagent/main` into its own branch and tells it to, `off` keeps every merge
-    /// refused (OS-8). Takes the project id, the mode and the client generation. Returns the
+    /// `crazyagent/main` into its own branch and tells it to, `off` makes the git the app
+    /// writes for an agent refuse that merge, except a master at Full access, a guide and
+    /// not a lock, since landed work can still come in another way (OS-8). Takes the project id, the mode and the client generation. Returns the
     /// actual commit receipt, or `team_action_invalid` for any other mode.
     pub async fn team_catch_up_main(
         &mut self,
@@ -470,6 +471,22 @@ impl NativeBridge {
         let project_id = project(id)?;
         let mode = CatchUpMain::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
         self.team_action(TeamAction::CatchUpMain { project_id, mode }, generation)
+            .await
+    }
+
+    /// Sets a project's "Reuse idle agents" setting: `off` starts a new agent for each new
+    /// task, `on` lets an idle agent of the same lead take it (HB-S5-A). Takes the project
+    /// id, the mode and the client generation. Returns the actual commit receipt, or
+    /// `team_action_invalid` for any other mode.
+    pub async fn team_reuse_idle(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = ReuseIdle::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::ReuseIdle { project_id, mode }, generation)
             .await
     }
 

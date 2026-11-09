@@ -20,7 +20,7 @@ use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, R
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
-    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, SwitchApply,
+    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, ReuseIdle, SwitchApply,
     SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness,
     TeamStatus, TeamTask,
 };
@@ -180,9 +180,10 @@ pub(in crate::tui) enum CoordRow {
     TaskStart,
     Counted,
     Skills(SkillRole),
+    ReuseIdle,
 }
 
-const COORD_ROWS: [CoordRow; 16] = [
+const COORD_ROWS: [CoordRow; 17] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::ClaudeDisplay,
@@ -199,6 +200,7 @@ const COORD_ROWS: [CoordRow; 16] = [
     CoordRow::Skills(SkillRole::Master),
     CoordRow::Skills(SkillRole::Lead),
     CoordRow::Skills(SkillRole::Worker),
+    CoordRow::ReuseIdle,
 ];
 const DELIVERIES: [Delivery; 3] = [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly];
 const OVERLAPS: [Overlaps; 4] = [
@@ -2422,13 +2424,28 @@ impl TeamView {
                         "Catch up with main is on for agents started from now on: they may git merge crazyagent/main."
                     }
                     CatchUpMain::Off => {
-                        "Catch up with main is off for agents started from now on: their git merge of main is refused."
+                        "Catch up with main is off for agents started from now on: the git the app writes for an agent refuses git merge crazyagent/main, except a master at Full access. It is a guide, not a lock: landed work can still come in another way."
                     }
                 };
                 (
                     TeamAction::CatchUpMain { project_id, mode },
                     done.to_owned(),
                 )
+            }
+            CoordRow::ReuseIdle => {
+                let mode = match self.status.as_ref().map(|status| status.reuse_idle) {
+                    Some(ReuseIdle::On) => ReuseIdle::Off,
+                    Some(ReuseIdle::Off) | None => ReuseIdle::On,
+                };
+                let done = match mode {
+                    ReuseIdle::On => {
+                        "Reuse idle agents is on: an idle agent may take the next task, on the history it already has."
+                    }
+                    ReuseIdle::Off => {
+                        "Reuse idle agents is off: each new task starts a new agent on the current branch."
+                    }
+                };
+                (TeamAction::ReuseIdle { project_id, mode }, done.to_owned())
             }
             CoordRow::Nudges => {
                 settings.nudges = cycle(&Nudges::ALL, settings.nudges, forward);
@@ -2656,6 +2673,15 @@ impl TeamView {
                     match self.status.as_ref().map(|status| status.catch_up_main) {
                         Some(CatchUpMain::Off) => "Off",
                         Some(CatchUpMain::On) | None => "On",
+                    }
+                    .to_owned(),
+                    "",
+                ),
+                CoordRow::ReuseIdle => (
+                    "Reuse idle agents".to_owned(),
+                    match self.status.as_ref().map(|status| status.reuse_idle) {
+                        Some(ReuseIdle::On) => "On",
+                        Some(ReuseIdle::Off) | None => "Off",
                     }
                     .to_owned(),
                     "",

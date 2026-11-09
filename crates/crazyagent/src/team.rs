@@ -736,6 +736,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         mode: CatchUpMain,
     },
+    ReuseIdle {
+        project_id: ProjectId,
+        mode: ReuseIdle,
+    },
     NewFolderLimit {
         project_id: ProjectId,
         files: u32,
@@ -996,6 +1000,7 @@ impl TeamAction {
             | Self::ReaskEmptyReply { .. }
             | Self::TerminalsPerWindow { .. }
             | Self::CatchUpMain { .. }
+            | Self::ReuseIdle { .. }
             | Self::LiveMaster { .. }
             | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
@@ -1026,6 +1031,7 @@ impl TeamAction {
             | Self::MasterLands { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
             | Self::CatchUpMain { project_id, .. }
+            | Self::ReuseIdle { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
             | Self::TerminalsPerWindow { project_id, .. }
             | Self::MessageSettings { project_id, .. }
@@ -1499,6 +1505,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 per_window INTEGER NOT NULL CHECK(per_window IN (4,6,9))
             );
             CREATE TABLE IF NOT EXISTS team_catch_up_main (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('on','off'))
+            );
+            CREATE TABLE IF NOT EXISTS team_reuse_idle (
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('on','off'))
             );
@@ -2494,6 +2504,10 @@ fn perform(
             set_catch_up_main(tx, project, *mode)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::ReuseIdle { mode, .. } => {
+            set_reuse_idle(tx, project, *mode)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::NewFolderLimit { files, .. } => {
             tx.execute(
                 "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,?2)
@@ -3117,6 +3131,8 @@ pub struct TeamStatus {
     pub reask_empty_reply: bool,
     #[serde(default)]
     pub catch_up_main: CatchUpMain,
+    #[serde(default)]
+    pub reuse_idle: ReuseIdle,
     #[serde(default = "new_folder_default")]
     pub new_folder_files_max: u32,
     #[serde(default)]
@@ -3853,6 +3869,79 @@ pub fn set_catch_up_main(
     connection
         .execute(
             "INSERT INTO team_catch_up_main(project,mode) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+            params![project.as_str(), value.name()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// The owner's "Reuse idle agents" setting (HB-S5-A): `Off`, the default, starts a new
+/// agent for each new task, in its own worktree on the current branch; `On` lets an idle
+/// agent of the same lead take it, on the history it already has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReuseIdle {
+    #[default]
+    Off,
+    On,
+}
+
+impl ReuseIdle {
+    /// The stored name of the setting. Output: `off` or `on`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// Reads a stored setting name. Input: the name. Output: the setting, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Off, Self::On]
+            .into_iter()
+            .find(|value| value.name() == name)
+    }
+}
+
+/// Reads a project's "Reuse idle agents" setting: `Off` when no choice is saved and for a
+/// store that keeps no team tables. Takes a connection and the project. Returns the
+/// setting, or `team_reuse_idle_invalid` for a stored name it does not know.
+pub fn reuse_idle(connection: &Connection, project: &ProjectId) -> Result<ReuseIdle, EngineError> {
+    let kept: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_reuse_idle')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !kept {
+        return Ok(ReuseIdle::default());
+    }
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_reuse_idle WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode {
+        None => Ok(ReuseIdle::default()),
+        Some(mode) => ReuseIdle::named(&mode).ok_or_else(|| failure("team_reuse_idle_invalid")),
+    }
+}
+
+/// Saves a project's "Reuse idle agents" setting, replacing an earlier choice. Takes a
+/// connection, the project and the setting. Returns done.
+pub fn set_reuse_idle(
+    connection: &Connection,
+    project: &ProjectId,
+    value: ReuseIdle,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_reuse_idle(project,mode) VALUES (?1,?2)
              ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
             params![project.as_str(), value.name()],
         )
@@ -4701,6 +4790,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         master_lands: offered_master_lands(connection, project)?,
         reask_empty_reply: reask_empty_reply(connection, project)?,
         catch_up_main: catch_up_main(connection, project)?,
+        reuse_idle: reuse_idle(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
         message_settings: agent_messages::settings(connection, project)?,

@@ -4,7 +4,7 @@ import { loadSetupStatus } from "../../api-intake";
 import { loadResearch, loadTeamStatus, type TeamStatus } from "../../api-projects";
 import type { ResearchJob, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded, type ProjectRow } from "../../state";
-import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, formatRoute, type IconName } from "../../ui";
+import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, agentsWorking, formatRoute, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { FoundProjects } from "../intake/found";
 import { SETUP_POLL_MS, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
@@ -54,7 +54,7 @@ export function cardActivity(team: Result<Pick<TeamStatus, "agents" | "tasks">> 
     if (!waiting && count("cancelled") > 0) line += `, ${count("cancelled")} stopped`;
   }
   const working = (crew?.agents.filter((agent) => agent.status === "working").length ?? 0) + count("running");
-  const agents = crew === null && jobs === null ? null : working === 0 ? "No agents working" : `${working} ${working === 1 ? "agent" : "agents"} working`;
+  const agents = crew === null && jobs === null ? null : working === 0 ? "No agents working" : agentsWorking(working);
   const live = Boolean(jobs?.some((job) => LIVE_RESEARCH.has(job.status)) || crew?.agents.some((agent) => LIVE_AGENT.has(agent.status)) ||
     crew?.tasks.some((task) => LIVE_TASK.has(task.status)));
   return { research: line, agents, waiting, live };

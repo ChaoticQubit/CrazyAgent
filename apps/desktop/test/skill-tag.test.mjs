@@ -64,7 +64,7 @@ test("the skills list, the default pack and the Process page all draw skill name
   const packed = html(pack.PackSettingsView, { status, busy: null, problem: "", skills: CATALOG, onSwitch: forbidden, onAsk: forbidden, onInstallTools: forbidden, onRetry: forbidden });
   assert.match(packed, /<a class="skill-tag"[^>]*>grill-me<\/a>/);
   assert.match(packed, /<a class="skill-tag" href="#\/settings\/plugins\?skill=skill-000000000000000000000002"[^>]*>Graphify skill for agents<\/a>/);
-  assert.match(packed, /<strong>superpowers<\/strong>/);
+  assert.match(packed, /<\/svg>superpowers</);
   assert.doesNotMatch(packed, /<a class="skill-tag"[^>]*>serena<\/a>/);
 
   const text = html(process.TaggedText, { text: "Run grill-me first.", skills: CATALOG });

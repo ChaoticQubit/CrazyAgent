@@ -30,6 +30,9 @@ const HASH_BYTES_MAX: u64 = 1024;
 const VSIX_BYTES_MAX: u64 = 256 * 1024 * 1024;
 const LIST_BYTES_MAX: u64 = 256 * 1024;
 const APPROVED_MAX: usize = 64;
+/// The extension the build grants the default chat participant, which brings the Chat view
+/// back whatever `chat.disableAIFeatures` says (DEC-098).
+const AI_LOCKED: &str = "github.copilot-chat";
 const ASKS_PER_PROJECT_MAX: usize = 8;
 const ASKS_MAX: usize = 256;
 const ASK_TTL_MS: i64 = 10 * 60 * 1000;
@@ -231,6 +234,7 @@ pub fn ask(
     now_ms: i64,
 ) -> Result<Asked, EngineError> {
     checked(id, version)?;
+    allowed_past_ai_lock(id)?;
     let _writes = writes();
     let mut policy = load(root)?;
     let approved = policy
@@ -356,6 +360,7 @@ pub fn approve(
     now_ms: i64,
 ) -> Result<Approved, EngineError> {
     checked(id, version)?;
+    allowed_past_ai_lock(id)?;
     {
         let policy = load(root)?;
         let asked = policy.asks.iter().any(|ask| {
@@ -728,6 +733,13 @@ fn checked(id: &str, version: &str) -> Result<(), EngineError> {
     Ok(())
 }
 
+fn allowed_past_ai_lock(id: &str) -> Result<(), EngineError> {
+    if id == AI_LOCKED {
+        return Err(failure("ide_extension_ai_locked"));
+    }
+    Ok(())
+}
+
 fn split(id: &str) -> Result<(&str, &str), EngineError> {
     id.split_once('.')
         .filter(|_| valid_id(id))
@@ -809,7 +821,7 @@ fn load(root: &Path) -> Result<Policy, EngineError> {
     if bytes.len() as u64 > POLICY_BYTES_MAX {
         return Err(failure("ide_extensions_unavailable"));
     }
-    let policy: Policy =
+    let mut policy: Policy =
         serde_json::from_slice(&bytes).map_err(|_| failure("ide_extensions_unavailable"))?;
     let sound = policy.approved.len() <= APPROVED_MAX
         && policy.asks.len() <= ASKS_MAX
@@ -831,6 +843,9 @@ fn load(root: &Path) -> Result<Policy, EngineError> {
     if !sound {
         return Err(failure("ide_extensions_unavailable"));
     }
+    policy.approved.retain(|known| known.id != AI_LOCKED);
+    policy.asks.retain(|ask| ask.id != AI_LOCKED);
+    policy.updates.retain(|update| update.id != AI_LOCKED);
     Ok(policy)
 }
 

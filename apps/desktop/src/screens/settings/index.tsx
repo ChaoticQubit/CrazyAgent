@@ -14,7 +14,7 @@ import { ProjectsHomeSettings } from "./projects-home";
 import { SandboxSettingsTab } from "./sandbox";
 import { TeamAlertsSettings } from "./team-alerts";
 import { UpdatesSettings } from "./updates";
-import { UsageSettings } from "./usage";
+import "../project/projects.css";
 import "./settings.css";
 
 interface SettingsGroup {
@@ -33,7 +33,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   ] },
   { title: "App", items: [
     { id: "home", label: "Projects folder" }, { id: "sandbox", label: "Sandbox" },
-    { id: "alerts", label: "Team alerts" }, { id: "updates", label: "Updates" }, { id: "usage", label: "Usage" },
+    { id: "alerts", label: "Team alerts" }, { id: "updates", label: "Updates" },
   ] },
 ];
 
@@ -85,7 +85,6 @@ export function Settings({ tab, action, account, skill }: { tab: SettingsTab; ac
       : tab === "github" ? <GitHubSettings />
       : tab === "sandbox" ? <SandboxSettingsTab />
       : tab === "memory" ? <MemorySettings />
-      : tab === "usage" ? <UsageSettings />
       : tab === "alerts" ? <TeamAlertsSettings />
       : tab === "updates" ? <UpdatesSettings />
       : <ProfileSettings />}

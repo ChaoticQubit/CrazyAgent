@@ -1679,3 +1679,30 @@ fn a_huge_message_id_is_not_kept_whole_in_a_record_s_progress() {
         .unwrap();
     assert!(length < 1024, "{length}");
 }
+
+/// SECAUDIT usage/capture/progress-message-id-unbounded: an id at the bound is kept, so the
+/// second line of its message adds only growth; an id past the bound is not kept, and
+/// each line still counts whole, so no tokens are lost.
+#[test]
+fn a_message_id_is_kept_up_to_its_bound_and_tokens_count_past_it() {
+    for (length, counted) in [
+        (NAME_BYTES_MAX, 5),
+        (NAME_BYTES_MAX + 1, 10),
+        (3 * 1024 * 1024, 10),
+    ] {
+        let (_directory, db) = store();
+        let who = attribution(RunKind::Agent, None);
+        let home = tempfile::tempdir().unwrap();
+        let record = home.path().join("projects/-work-alpha/s1.jsonl");
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        let line = claude_assistant(&"a".repeat(length), 5, 0, 0, 0, "end_turn");
+        std::fs::write(&record, format!("{line}{line}")).unwrap();
+        for _ in 0..2 {
+            scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+        }
+        let input: i64 = db
+            .query_row("SELECT SUM(input) FROM usage_tokens", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(input, counted, "{length}");
+    }
+}

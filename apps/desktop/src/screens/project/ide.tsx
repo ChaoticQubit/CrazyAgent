@@ -92,13 +92,13 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
     let last: IdeBounds | null = null;
     let frame = 0;
     let misplaced = false;
+    let sending = false;
+    let waiting: IdeBounds | null = null;
     const hide = () => void hideIde(projectId).then((result) => onHideProblem(result.kind === "ok" ? null : IDE_NOT_HIDDEN));
-    const place = () => {
-      if (!shown) return;
-      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
-      if (!box || sameBounds(box, last)) return;
-      last = box;
+    const send = (box: IdeBounds) => {
+      sending = true;
       void placeIde(projectId, box).then((result) => {
+        sending = false;
         if (!live) return;
         if (result.kind !== "ok") {
           misplaced = true;
@@ -107,7 +107,18 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
           misplaced = false;
           setProblem(null);
         }
+        const next = waiting;
+        waiting = null;
+        if (next) send(next);
       });
+    };
+    const place = () => {
+      if (!shown) return;
+      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
+      if (!box || sameBounds(box, last)) return;
+      last = box;
+      if (sending) waiting = box;
+      else send(box);
     };
     const follow = () => {
       if (!live || !shown) {

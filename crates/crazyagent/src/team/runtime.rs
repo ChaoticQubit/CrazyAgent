@@ -4812,6 +4812,8 @@ impl TeamRuntime {
             .into_iter()
             .map(|run| run.agent)
             .collect();
+        let reuse = super::reuse_idle(&self.connection, project)? == super::ReuseIdle::On
+            || super::keep_warm(&self.connection, project)?;
         for (task, harness, prompt, pin, by_master, parent, mode) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
@@ -4841,7 +4843,7 @@ impl TeamRuntime {
                             && !w.stopping
                             && !reserved.contains(*id)
                             && !paused.contains(&w.connection)
-                            && pin.map_or(w.parent == parent, |pin| pin == **id)
+                            && pin.map_or(reuse && w.parent == parent, |pin| pin == **id)
                             && mode.as_deref().is_none_or(|mode| {
                                 self.stored_mode(**id).ok().flatten().as_deref() == Some(mode)
                             })
@@ -4921,12 +4923,21 @@ impl TeamRuntime {
                     }
                 }
                 (None, None) => {
-                    if self.live(project, AgentRole::Sub, Some(&harness))
-                        >= usize::from(slot.agents)
+                    let slot_full = self.live(project, AgentRole::Sub, Some(&harness))
+                        >= usize::from(slot.agents);
+                    let cap_full = self.capped(project, parent, harness_cap);
+                    if slot_full
+                        || cap_full
                         || self.live(project, AgentRole::Sub, None) >= subs_max
                         || self.panes(project) >= PANES_PER_PROJECT_MAX
-                        || self.capped(project, parent, harness_cap)
                     {
+                        if !reuse {
+                            let counted = |w: &Worker| {
+                                (!slot_full || w.harness == harness)
+                                    && (!cap_full || w.parent == parent)
+                            };
+                            self.stop_idle_for(project, &harness, counted, &reserved)?;
+                        }
                         continue;
                     }
                     let Ok(Some(account)) = self.account_for(access, project, &harness, paused)
@@ -5227,6 +5238,68 @@ impl TeamRuntime {
             let _ = worker.orders.send(Order::Stop);
         }
         Ok(())
+    }
+
+    /// Makes room at a full limit for a task that may not reuse an idle agent: stops one idle
+    /// sub-agent the limits count, the task's harness first, none while another is stopping.
+    /// A live agent, one with agents of its own, one reserved for recovery, one a queued task
+    /// waits for and a kept lead with work stay. Takes the project, the harness, which
+    /// agents the full limits count and the reserved agents. Returns any SQLite failure.
+    fn stop_idle_for(
+        &mut self,
+        project: &ProjectId,
+        harness: &str,
+        counted: impl Fn(&Worker) -> bool,
+        reserved: &BTreeSet<i64>,
+    ) -> Result<(), EngineError> {
+        let sub = |w: &Worker| &w.project == project && w.role == AgentRole::Sub;
+        if self.workers.values().any(|w| sub(w) && w.stopping) {
+            return Ok(());
+        }
+        let mut idle: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(id, w)| {
+                sub(w)
+                    && counted(w)
+                    && w.busy.is_none()
+                    && w.own_turn.is_none()
+                    && !w.live
+                    && !reserved.contains(*id)
+                    && !self.workers.values().any(|c| c.parent == Some(**id))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        idle.sort_by_key(|id| self.workers[id].harness != harness);
+        for id in idle {
+            if (self.workers[&id].kept_session && self.lead_waits(id)?)
+                || self.queued_work(project, id)?
+            {
+                continue;
+            }
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            worker.stopping = true;
+            let _ = worker.orders.send(Order::Stop);
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    /// Whether a task of the project not yet started, queued or waiting for a pool, waits for
+    /// this agent: one pinned to it, or one naming it as its lead, whose result only a running
+    /// lead receives. Takes the project and the agent. Returns the answer, or any SQLite
+    /// failure.
+    fn queued_work(&self, project: &ProjectId, id: i64) -> Result<bool, EngineError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM team_tasks t
+                               LEFT JOIN team_task_pins p ON p.task=t.id
+                               WHERE t.project=?2 AND t.status IN ('queued','needs_pool')
+                               AND (t.parent=?1 OR p.agent=?1))",
+                params![id, project.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(error)
     }
 
     /// Whether a kept native lead still has work around it that idle time must not end: a

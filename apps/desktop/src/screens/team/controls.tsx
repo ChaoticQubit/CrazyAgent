@@ -1,5 +1,5 @@
 import { useContext, useEffect, useState, type ReactNode } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
@@ -247,7 +247,7 @@ const PER_HARNESS_ROWS = ["Messages to Claude Code agents", "Claude Code termina
  * line and the labels of its rows in the order they show. */
 export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; about: string })[] = [
   { id: "model", title: "Model and harness", about: "Which harnesses run, on which accounts, and how many.", icon: "cpu",
-    rows: ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"] },
+    rows: ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"] },
   { id: "access", title: "Access and merging", about: "What agents may touch, and who merges finished work.", icon: "shield-check",
     rows: ["Agent access", MERGE_INTO_MAIN, "Ask me before merging into the master's branch", "Agent branches", RESTARTS_FROM_MAIN, "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"] },
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
@@ -455,6 +455,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const [askMerge, holdAskMerge] = useHeld<"off" | "on">(status.ask_before_merge === true ? "on" : "off");
   const [masterLands, holdMasterLands] = useHeld<MasterLands>(status.master_lands ?? "waits");
   const [catchUp, holdCatchUp] = useHeld<"off" | "on">(status.catch_up_main === "off" ? "off" : "on");
+  const [reuseIdle, holdReuseIdle] = useHeld<"off" | "on">(status.reuse_idle === "on" ? "on" : "off");
   const [newFolder, holdNewFolder] = useHeld(status.new_folder_files_max ?? NEW_FOLDER_DEFAULT);
   const [maxHarnesses, holdMaxHarnesses] = useHeld(capValue(status.max_harnesses));
   const [maxTeammates, holdMaxTeammates] = useHeld(capValue(status.max_teammates));
@@ -518,6 +519,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const chooseMasterLands = (choice: MasterLands) => change(() => setMasterLands(projectId, choice), "what the master does with its conflict fixes", () => holdMasterLands(choice));
   const chooseAskMerge = (choice: "off" | "on") => change(() => setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting", () => holdAskMerge(choice));
   const chooseCatchUp = (choice: "off" | "on") => change(() => setCatchUpMain(projectId, choice), "the catch up with main setting", () => holdCatchUp(choice));
+  const chooseReuseIdle = (choice: "off" | "on") => change(() => setReuseIdle(projectId, choice), "the reuse idle agents setting", () => holdReuseIdle(choice));
   const chooseNewFolder = (files: number) => change(() => setNewFolderLimit(projectId, files), "the new folder limit", () => holdNewFolder(files));
 
   async function saveBackground(choice: BackgroundAtEnd) {
@@ -549,6 +551,12 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           <SettingRow label="Keep sub-agents ready">
             <Switch id={`tg-warm-${projectId}`} label={`Keep ${status.min_agents} ${status.min_agents === 1 ? "sub-agent" : "sub-agents"} ready`} checked={checked}
               onChecked={(on) => void toggle(on)} disabledReason={busy ? "Saving the last change." : status.min_agents < 1 ? "The team plan keeps no sub-agents ready." : undefined} />
+          </SettingRow>
+          <SettingRow label="Reuse idle agents">
+            <span className="set-label" aria-hidden="true">Reuse idle agents</span>
+            <Segmented label="Reuse idle agents" value={reuseIdle} onValue={(choice) => { if (!busy) void chooseReuseIdle(choice); }}
+              options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
+            <span className="tg-terminal-note">Off, each new task starts a new agent on the current branch. On, an idle agent of the same lead may take the next task, on the history it already has. Keep sub-agents ready reuses its agents either way.</span>
           </SettingRow>
           <OnSwitchSetting projectId={projectId} status={status} reload={reload} />
           <SettingRow label="Spread harnesses across accounts">
@@ -647,7 +655,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
             <span className="set-label" aria-hidden="true">Catch up with main</span>
             <Segmented label="Catch up with main" value={catchUp} onValue={(choice) => { if (!busy) void chooseCatchUp(choice); }}
               options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
-            <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off refuses that merge. Merging another agent's branch stays refused either way.</span>
+            <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off makes the git the app writes for an agent refuse that command, except a master at Full access, whose git runs everything. Off is a guide, not a lock: nothing checks it later, so landed work can still come in another way.</span>
           </SettingRow>
           <SettingRow label="Finished agents">
             <span className="set-label" aria-hidden="true">Finished agents</span>

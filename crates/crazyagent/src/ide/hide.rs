@@ -7,7 +7,7 @@ pub const BUNDLE: &str = "out/vs/code/browser/workbench/workbench.js";
 
 /// Names the set of [`EDITS`] a build was installed with, so a build installed under another
 /// revision is fetched again. Change it whenever [`EDITS`] change.
-pub const REVISION: &str = "h3";
+pub const REVISION: &str = "h4";
 
 const BUNDLE_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const WINDOW: usize = 32;
@@ -24,8 +24,10 @@ struct Edit {
 /// entries of the Remote menu, remote extension install, the Accounts commands, account
 /// policy sync and diagnostics, inline suggestion snoozing, dynamic authentication providers
 /// and Copilot; the Remote menu's shortcut; the Remote indicator (`status.host`); the Accounts
-/// entry, read from a stored choice; and the Settings Chat section. Remote connections stay.
-const EDITS: [Edit; 18] = [
+/// entry, read from a stored choice; the Settings Chat section; and the terminal's Select
+/// Default Profile entries and profile gear, whose writes the read-only Remote settings refuse
+/// with a raw EPERM toast. Remote connections stay.
+const EDITS: [Edit; 21] = [
     Edit {
         anchor: "\"Show Remote Menu\")",
         from: "f1:!0,keybinding:{weight:200,primary:2605}",
@@ -115,6 +117,21 @@ const EDITS: [Edit; 18] = [
         anchor: "{id:\"chat\",label:",
         from: "children:[",
         to: "hide:!0,children:[",
+    },
+    Edit {
+        anchor: "H(19950,\"Select Default Profile\")",
+        from: "run:o=>",
+        to: "f1:!1,run:o=>",
+    },
+    Edit {
+        anchor: "H(20028,\"Select Default Profile\")",
+        from: "group:\"3_configure\"",
+        to: "when:D.false(),group:\"3_configure\"",
+    },
+    Edit {
+        anchor: "_createProfileQuickPickItem(o){",
+        from: "let e=[{iconClass:J.asClassName(KMn),tooltip:d(20038,null)}],",
+        to: "let e=[],",
     },
 ];
 

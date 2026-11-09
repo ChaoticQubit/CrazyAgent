@@ -52,3 +52,11 @@
 .mx-row-words { grid-column: 1 / -1; grid-row: 2; font-weight: 400; text-align: left; }
 .mx-row-side { font: 12px var(--mono); color: var(--text-3); text-align: right; }
 @media (max-width: 900px) { .mx-panels { grid-template-columns: minmax(0, 1fr); } }
+.usage-limit-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.usage-limits { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-panel); }
+.usage-limits h3 { margin: 0; font-size: 14px; }
+.usage-window { display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+.usage-window-head { justify-content: space-between; }
+.usage-meter { width: 100%; height: 8px; }
+.usage-table td { font-family: var(--mono); white-space: nowrap; }
+@media (max-width: 1200px) { .usage-limit-grid { grid-template-columns: minmax(0, 1fr); } }
