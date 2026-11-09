@@ -249,7 +249,7 @@ fn post_tool_hands_each_session_only_its_own_letters_and_logs_the_tool_for_its_t
     );
     assert!(
         lead.ends_with(
-            "[crazyagent msg 5] from Ada (@lead-a) (note, it takes no reply):\nFor the lead."
+            "[crazyagent msg 5] from Ada (@lead-a) (note, it takes no reply):\n> For the lead."
         ),
         "{lead}"
     );
@@ -299,7 +299,7 @@ fn the_leads_stop_blocks_only_while_a_letter_waits_for_it() {
         answer["reason"]
             .as_str()
             .unwrap()
-            .ends_with("[crazyagent msg 9] from Ada (@lead-a) (note, it takes no reply):\nMerge greet's branch."),
+            .ends_with("[crazyagent msg 9] from Ada (@lead-a) (note, it takes no reply):\n> Merge greet's branch."),
         "{blocked}"
     );
     assert_eq!(team.hook("stop", None, stop), "");
