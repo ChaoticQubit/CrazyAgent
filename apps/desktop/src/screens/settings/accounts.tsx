@@ -184,8 +184,8 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry, onNewPoo
           const account = shown[index];
           const row = <button type="button" className="account-row" onClick={() => onOpen(account)}>
             <span className="cell"><ProviderMark provider={account.provider} name={account.provider_name} /><span className="ellipsis">{account.name}</span></span>
-            <span className="ellipsis secondary">{account.provider_name}</span>
-            <span className="ellipsis secondary">{account.method_label}</span>
+            <span className="ellipsis secondary" title={account.provider_name}>{account.provider_name}</span>
+            <span className="ellipsis secondary" title={account.method_label}>{account.method_label}</span>
             <span><StatusBadge word={account.status_label} /></span>
             <span className="secondary">{poolCount(account.id) ?? ""}</span>
           </button>;

@@ -13,23 +13,32 @@ const server = (patch) => ({ id: "server-1", name: "github", scope: { kind: "glo
 const hook = (patch) => ({ id: "hook-1", name: "caveman", plugin: "caveman", event: "SessionStart", matcher: "startup", command: "node hook.js", scope: { kind: "global" }, scope_label: "For every project",
   enabled: true, on_here: null, follows: "the caveman skill", source: "/Users/owner/plugins/caveman", version: 0, ...patch });
 const tool = (patch) => ({ server: "crazyagent-team", server_id: null, tool: "start_work", description: "Start a unit of work.", builtin: true, global: "on", here: null, ...patch });
-const SKILLS = { ok: [skill({}), skill({ id: "skill-2", name: "pdf", refused: "skill_description_hidden" })], empty: [] };
+const SKILLS = { ok: [skill({}), skill({ id: "skill-2", name: "pdf", refused: "skill_description_hidden" })], here: [skill({ on_here: false }), skill({ id: "skill-2", name: "pdf", on_here: true })], empty: [] };
 const SERVERS = {
   ok: [server({}), server({ id: "server-2", name: "waiting", status: "waiting_for_approval", status_label: "Waiting for approval", tools: [], runs: "/bin/wait now" }),
     server({ id: "server-3", name: "broken", status: "cant_start", status_label: "Can't start", problem: "the server exited.", tools: [], secrets: [] }),
     server({ id: "server-4", name: "remote", spec: { kind: "http", url: "https://mcp.example.invalid/sse" }, runs: "https://mcp.example.invalid/sse", status: "waiting_for_approval", status_label: "Waiting for approval", tools: [], secrets: [] })],
+  here: [server({ on_here: false }), server({ id: "server-2", name: "plain", on_here: true })],
   empty: [],
 };
-const HOOKS = { ok: [hook({}), hook({ id: "hook-2", name: "adhd", plugin: "adhd", matcher: null, follows: null })], empty: [] };
-const TOOLS = { ok: [tool({}), tool({ tool: "graphify", description: "", global: "off" }), tool({ tool: "ctx_batch", global: "hidden" })], empty: [] };
+const HOOKS = { ok: [hook({}), hook({ id: "hook-2", name: "adhd", plugin: "adhd", matcher: null, follows: null })], here: [hook({ on_here: false }), hook({ id: "hook-2", name: "adhd", plugin: "adhd", on_here: true })], empty: [] };
+const TOOLS = { ok: [tool({}), tool({ tool: "graphify", description: "", global: "off" }), tool({ tool: "ctx_batch", global: "hidden" })], here: [tool({ here: "off" }), tool({ tool: "graphify", global: "off" })], empty: [] };
 const MCP_TOOLS = [tool({ server: "files", server_id: "server-1", tool: "echo", description: "", builtin: false })];
+
+/** Gives each global item the project switch the engine sends with a project read, on unless
+ * the item says off. Inputs: the scene and a read. Output: the read, as the engine would send it. */
+function asRead(scene, read) {
+  if (!scene.project || !Array.isArray(read)) return read;
+  return read.map((item) => (item.scope.kind === "global" && item.on_here === null ? { ...item, on_here: true } : item));
+}
 
 /** Answers one engine command for a scene. Inputs: the scene, the command and its arguments.
  * Output: the answer, or a failure thrown. */
 function answer(scene, command, args) {
-  if (command === "desktop_plugin_skills") return sceneRead(scene.skills ?? "ok", SKILLS, FAILURE, command);
-  if (command === "desktop_plugin_servers") return sceneRead(scene.servers ?? "ok", SERVERS, FAILURE, command);
-  if (command === "desktop_plugin_hooks") return sceneRead(scene.hooks ?? "ok", HOOKS, FAILURE, command);
+  if (scene.hold === command) return new Promise(() => {});
+  if (command === "desktop_plugin_skills") return asRead(scene, sceneRead(scene.skills ?? "ok", SKILLS, FAILURE, command));
+  if (command === "desktop_plugin_servers") return asRead(scene, sceneRead(scene.servers ?? "ok", SERVERS, FAILURE, command));
+  if (command === "desktop_plugin_hooks") return asRead(scene, sceneRead(scene.hooks ?? "ok", HOOKS, FAILURE, command));
   if (command === "desktop_tool_switches") return args.serverId === null ? sceneRead(scene.tools ?? "ok", TOOLS, FAILURE, command) : MCP_TOOLS;
   if (/^desktop_(remove_skill|remove_mcp_server|approve_mcp_server|check_mcp_server|switch_plugin|set_skill_enabled|set_tool_switch)$/.test(command)) throw FAILURE;
   throw `Command ${command} not found`;

@@ -7,10 +7,23 @@ export { BrandMark };
 
 export type EngineState = "connecting" | "running" | "down" | "outdated";
 
+/** Says how many agents are working. Input: the count, above zero. Output: the words. */
+export function agentsWorking(count: number): string {
+  return `${count} ${count === 1 ? "agent" : "agents"} working`;
+}
+
 export interface SidebarProject {
   id: string;
   name: string;
   flag?: string;
+  working?: number;
+}
+
+/** A project row's running-agent count: the number on screen, the words for a screen reader
+ * and the tooltip. Input: how many agents are working, above zero. Output: the count. */
+function WorkingCount({ count }: { count: number }) {
+  const words = agentsWorking(count);
+  return <span className="nav-live" title={words}><span aria-hidden="true">{count}</span><span className="visually-hidden">{words}</span></span>;
 }
 
 /** The fixed 220 px sidebar as the approved design draws it: the brand, the project list alone
@@ -33,7 +46,8 @@ export function Sidebar({ route, projects, profileName, engine, onRetry }: {
       <div className="nav-group">
         {projects?.map((project) => <a key={project.id} className="nav-item" href={formatRoute({ name: "project", id: project.id, tab: "overview" })}
           aria-current={current(route.name === "project" && route.id === project.id)}>
-          <Icon name="folder" /><span className="name">{project.name}</span>{project.flag && <span className="nav-flag">{project.flag}</span>}
+          {project.working ? <span className="nav-live-dot" aria-hidden="true" /> : <Icon name="folder" />}<span className="name">{project.name}</span>
+          {project.working ? <WorkingCount count={project.working} /> : null}{project.flag && <span className="nav-flag">{project.flag}</span>}
         </a>)}
       </div>
     </nav>

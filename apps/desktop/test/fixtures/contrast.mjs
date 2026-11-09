@@ -16,3 +16,11 @@ export function contrast(selector) {
   const [high, low] = [luminance(getComputedStyle(node).color), luminance(backdrop(node))].sort((one, two) => two - one);
   return (high + 0.05) / (low + 0.05);
 }
+
+/** The contrast ratio of one element's fill on what is behind it. Input: the selector.
+ * Output: the ratio. */
+export function markContrast(selector) {
+  const node = document.querySelector(selector);
+  const [high, low] = [luminance(getComputedStyle(node).backgroundColor), luminance(backdrop(node.parentElement))].sort((one, two) => two - one);
+  return (high + 0.05) / (low + 0.05);
+}
