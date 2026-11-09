@@ -1656,3 +1656,35 @@ fn claude_transcript_tool_calls_count_only_for_an_agent_launched_without_hooks()
         "the agent with hooks counts its calls through them"
     );
 }
+
+#[test]
+fn one_harness_name_holds_claude_and_claude_code_rows() {
+    let (_root, db) = store();
+    let mut alias = attribution(RunKind::Agent, None);
+    alias.harness = "claude".into();
+    let named = attribution(RunKind::Agent, None);
+    let mut unknown = attribution(RunKind::Agent, None);
+    unknown.harness = "mystery-cli".into();
+    let tokens = Tokens {
+        input: 10,
+        output: 5,
+        ..Tokens::default()
+    };
+    count_reported(&db, &alias, tokens, "s1", NOW).unwrap();
+    count_reported(&db, &named, tokens, "s1", NOW).unwrap();
+    count_reported(&db, &unknown, tokens, "s1", NOW).unwrap();
+    let rows: Vec<(String, i64)> = db
+        .prepare("SELECT harness,input FROM usage_tokens ORDER BY harness")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("claude-code".to_owned(), 20),
+            ("mystery-cli".to_owned(), 10)
+        ]
+    );
+}
