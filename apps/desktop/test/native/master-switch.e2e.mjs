@@ -112,7 +112,7 @@ async function area() {
  * nothing saved or Terminal only, exactly one with a box choice. Logs what the store held. */
 async function masterFollowsSavedInput() {
   const seen = await browser.execute(() => ({
-    saved: window.localStorage.getItem("crazyagent.master-input"),
+    saved: window.localStorage.getItem("crazyagent.terminal-input"),
     boxes: [...document.querySelectorAll("textarea:not(.xterm-helper-textarea)")].filter((item) => item.getClientRects().length > 0).length,
   }));
   console.log(`Master tab, saved Terminal input and text areas: ${JSON.stringify(seen)}`);

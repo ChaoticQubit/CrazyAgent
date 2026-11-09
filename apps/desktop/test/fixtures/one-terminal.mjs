@@ -376,16 +376,16 @@ export function drawer() {
   };
 }
 
-/** Gives the page the app's local storage, which this blank test page lacks, holding the
- * owner's Terminal input under the key a saved choice has always used, or nothing for an
- * app that never saved one. Input: the choice, or null. */
-export function saveInput(choice) {
+/** Gives the page the app's local storage, which this blank test page lacks, holding a
+ * saved input choice under a key, or nothing for an app that never saved one. Inputs: the
+ * choice, or null, and the key, by default the Terminal input setting's own. */
+export function saveInput(choice, key = "crazyagent.terminal-input") {
   kept.clear();
   Object.defineProperty(window, "localStorage", {
     configurable: true,
     value: { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) },
   });
-  if (choice !== null) kept.set("crazyagent.master-input", choice);
+  if (choice !== null) kept.set(key, choice);
 }
 
 /** Opens one agent's terminal through one real door of the app: "agents" clicks its graph

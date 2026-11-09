@@ -21,12 +21,13 @@ function offers(door, name, saved) {
 }
 
 /** Opens one agent's terminal through one door of the real app with this Terminal input
- * saved. Inputs: the door, the agent's name and the saved choice. Output: what it offers. */
-function through(door, name, saved) {
+ * saved. Inputs: the door, the agent's name, the saved choice and the key it is saved under.
+ * Output: what the terminal offers. */
+function through(door, name, saved, key = "crazyagent.terminal-input") {
   return withPage(async ({ evaluate, send }) => {
     await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
     await evaluate(fixture);
-    await evaluate(`Fixture.saveInput(${JSON.stringify(saved)})`);
+    await evaluate(`Fixture.saveInput(${JSON.stringify(saved)}, ${JSON.stringify(key)})`);
     await evaluate(`Fixture.openDoor(${JSON.stringify(door)}, ${JSON.stringify(name)})`);
     return evaluate(`Fixture.doorShown(${JSON.stringify(name)})`);
   });
@@ -38,6 +39,9 @@ for (const [door, name] of DOORS) {
       assert.deepEqual(await through(door, name, saved), offers(door, name, saved));
     });
   }
+  test(`${door}, ${name}: an old Master input of Both left in the store is not honoured`, { timeout: 60_000 }, async () => {
+    assert.deepEqual(await through(door, name, "both", "crazyagent.master-input"), offers(door, name, null));
+  });
 }
 
 test("Team activity has no row for a master, so no master terminal opens there", { timeout: 60_000 }, async () => {
