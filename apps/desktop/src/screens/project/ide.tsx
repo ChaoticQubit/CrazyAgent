@@ -37,12 +37,13 @@ export function IdeUnavailable({ view, failure, busy = false, onAction }: { view
   </div>;
 }
 
-/** Closes the project's IDE when its page closes, and tells the owner when that failed. Inputs:
- * the project and the toast the page tells the owner through. Output: none. */
+/** Closes the project's IDE when its page closes, and tells the owner when that failed. A build
+ * with no IDE has nothing to close and says nothing. Inputs: the project and the toast the page
+ * tells the owner through. Output: none. */
 export function useCloseIde(projectId: string, notify: (line: string) => void) {
   useEffect(() => () => {
     void closeIde(projectId).then((result) => {
-      if (result.kind !== "ok") notify(IDE_NOT_CLOSED);
+      if (result.kind === "error") notify(IDE_NOT_CLOSED);
     });
   }, [projectId]);
 }
