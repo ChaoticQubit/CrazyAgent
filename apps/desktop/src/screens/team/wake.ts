@@ -100,8 +100,8 @@ export function unseenByProject(events: Pick<AppTeamEvents, "projects">): Map<st
 /** The agents at work in each project for its sidebar dot, as the engine counts them in one
  * read. A reply from an engine without the list counts nothing. Input: the app events.
  * Output: a map from project id to its count, without projects at zero. */
-export function workingByProject(_events: Pick<AppTeamEvents, "working">): Map<string, number> {
-  return new Map();
+export function workingByProject(events: Pick<AppTeamEvents, "working">): Map<string, number> {
+  return new Map((events.working ?? []).filter((item) => item.agents > 0).map((item) => [item.project_id, item.agents]));
 }
 
 const BADGE_ONLY: ReadonlySet<TeamNotification["kind"]> = new Set(["question"]);

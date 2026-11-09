@@ -121,6 +121,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .nav-item[aria-current="page"] { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
 .nav-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-flag { font-family: var(--mono); font-size: 12px; color: var(--warn); white-space: nowrap; }
+.nav-live { font-family: var(--mono); font-size: 12px; color: var(--text-3); white-space: nowrap; }
+.nav-live-dot { flex: none; width: 8px; height: 8px; margin: 0 4px; border: 1px solid var(--ok); border-radius: 50%; background: var(--ok); }
 .nav-label { margin: 0; padding: var(--space-1) 10px; font-family: var(--mono); font-size: 12px; line-height: 16px; color: var(--text-3); }
 .nav-projects { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 96px; }
 .nav-group { flex: 1 1 auto; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 2px; min-height: 0; overflow: auto; }

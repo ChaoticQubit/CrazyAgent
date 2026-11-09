@@ -441,7 +441,7 @@ pub struct AgentQuestions {
 
 /// What the app shows across projects: the app-level wake rule, the rule in force without a
 /// project rule, the newest notifications of every project, how many are unseen and how many
-/// of them each project has.
+/// of them each project has, and how many agents each project has at work.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AppEvents {
     pub rule: Option<WakeRule>,
@@ -1484,6 +1484,41 @@ fn app_notifications(connection: &Connection) -> Result<Vec<Notification>, Engin
     Ok(read)
 }
 
+/// Counts the agents at work in each project that has any, in one read for all projects, so
+/// the sidebar never asks project by project: team agents working plus research jobs running,
+/// the sum each project card shows. Takes the connection. Returns at most
+/// `WORKING_PROJECTS_MAX` projects by id, each with a count above zero.
+fn working_by_project(connection: &Connection) -> Result<Vec<ProjectWorking>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT project, SUM(agents) FROM (
+                 SELECT project, COUNT(*) AS agents FROM team_agents
+                 WHERE status = 'working' GROUP BY project
+                 UNION ALL
+                 SELECT project, COUNT(*) FROM research_jobs
+                 WHERE status = 'running' GROUP BY project
+             ) GROUP BY project ORDER BY project LIMIT ?1",
+        )
+        .map_err(error)?;
+    let rows: Vec<(String, i64)> = statement
+        .query_map([WORKING_PROJECTS_MAX], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    let working: Vec<ProjectWorking> = rows
+        .into_iter()
+        .filter_map(|(project, agents)| {
+            Some(ProjectWorking {
+                project_id: ProjectId::new(project).ok()?,
+                agents,
+            })
+        })
+        .collect();
+    assert!(working.len() as i64 <= WORKING_PROJECTS_MAX);
+    assert!(working.iter().all(|item| item.agents > 0));
+    Ok(working)
+}
+
 /// Counts the unseen notifications of each project that has any, and the questions-log
 /// notifications among them, by project id, so a project's count never depends on what fits
 /// in the app window. A question notification a work question raised, which
@@ -2200,7 +2235,8 @@ fn cleared_levels(
 
 /// Reads what the app shows across projects: the app wake rule and the newest notifications.
 /// Takes the connection. Returns the view fitted to one owner reply by `fit_app`, with the
-/// unseen count for the badge and the unseen count of each project for the sidebar.
+/// unseen count for the badge, the unseen count of each project for the sidebar and the
+/// agents at work in each project for its live dot.
 pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
     let rule = stored_rules(connection, "")?
         .into_iter()
@@ -2220,7 +2256,7 @@ pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
         notifications: app_notifications(connection)?,
         unseen,
         projects: unseen_by_project(connection)?,
-        working: Vec::new(),
+        working: working_by_project(connection)?,
     })
 }
 
@@ -2246,8 +2282,8 @@ pub fn rule_version(connection: &Connection, target: &RuleTarget) -> Result<u64,
 
 /// Fits the app-wide view to one owner reply: the oldest seen notifications go first, then
 /// the texts are cut to one shared cap, halved until the view fits, then the oldest go. The
-/// unseen counts stay whole. Takes the view. Returns it, or `team_events_bounds` when even
-/// an empty list does not fit.
+/// unseen and working counts stay whole. Takes the view. Returns it, or
+/// `team_events_bounds` when even an empty list does not fit.
 fn fit_app(mut view: AppEvents) -> Result<AppEvents, EngineError> {
     let fits = |view: &AppEvents| -> Result<bool, EngineError> {
         Ok(super::encoded_len(view)? <= super::STATUS_REPLY_BYTES_MAX)
