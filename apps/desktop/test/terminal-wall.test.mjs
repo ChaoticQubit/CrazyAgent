@@ -2,6 +2,17 @@ import "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
+/** Renders with the owner's Terminal input saved as Both, as a render with no window reads the
+ * default, Terminal only. Input: the render. Output: what it returns. */
+function withBox(render) {
+  globalThis.window = { localStorage: { getItem: () => "both" } };
+  try {
+    return render();
+  } finally {
+    delete globalThis.window;
+  }
+}
+
 const { wallPages } = await import("../src/screens/terminals/pages.ts");
 
 /** A graph node for the wall's page math. Inputs: the id, the kind and whether it has a
@@ -75,14 +86,14 @@ test("a terminal past the view bound shows the terminal limit reached state", ()
   assert.match(io.endCopy("terminal_viewers_full"), /^Terminal limit reached\./u);
 });
 
-test("a wall window draws its tiles master first with Message and Stop, then free slots up to the setting", async () => {
+test("a wall window draws its tiles master first with Stop, no Message with no box, then free slots up to the setting", async () => {
   const wall = await import("../src/screens/terminals/index.tsx");
   const nodes = [{ ...node("m", "master"), agent: 9 }, { ...node("a1"), agent: 1 }];
   const html = renderToStaticMarkup(createElement(wall.WallGrid, { projectId: "larkspur", tiles: nodes, nodes, perWindow: 4, onStop: () => {} }));
   assert.equal(html.match(/class="tw-tile"/gu)?.length, 2);
   assert.equal(html.match(/Free slot/gu)?.length, 2);
   assert.ok(html.indexOf("m terminal") < html.indexOf("a1 terminal"), "the master's tile comes first");
-  assert.equal(html.match(/aria-label="Message [^"]+"/gu)?.length, 2);
+  assert.equal(html.match(/aria-label="Message [^"]+"/gu), null, "Terminal only is the default, so no tile has Message");
   assert.deepEqual(html.match(/aria-label="Stop [^"]+"/gu), ["aria-label=\"Stop a1\""]);
 });
 
@@ -92,7 +103,7 @@ test("each wall tile has the panel's head and input: name, harness and state, ro
     { ...node("m", "master"), label: "Master", agent: 9, status: "idle", status_label: "Idle", branch: "main", started_ms: null },
     { ...node("a1"), agent: 1, status: "working", status_label: "Working", branch: "crazyagent/calendar-api", started_ms: Date.now() - 14 * 60_000 - 5_000 },
   ];
-  const html = renderToStaticMarkup(createElement(wall.WallGrid, { projectId: "larkspur", tiles: nodes, nodes, perWindow: 4, onStop: () => {} }));
+  const html = withBox(() => renderToStaticMarkup(createElement(wall.WallGrid, { projectId: "larkspur", tiles: nodes, nodes, perWindow: 4, onStop: () => {} })));
   const tiles = html.split('class="tw-tile"').slice(1);
   assert.equal(tiles.length, 2);
   const [master, sub] = tiles;
@@ -187,7 +198,7 @@ test("the wall grows itself: each wall window asks the bridge for its project's 
 });
 
 test("a wall tile attaches naming its own project, so the bridge can refuse a terminal of another project", () => {
-  assert.match(source("screens/terminals/index.tsx"), /<TerminalPanel node=\{node\} projectId=\{projectId\} tile input="both" /u);
+  assert.match(source("screens/terminals/index.tsx"), /<TerminalPanel node=\{node\} projectId=\{projectId\} tile harness=/u);
   const panel = source("screens/team/terminal-panel.tsx");
   assert.match(panel, /projectId\?: string;/u);
   assert.match(panel, /attachTerminal\(name, channel, pane, projectId \?\? null\)/u);

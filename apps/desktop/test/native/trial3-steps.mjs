@@ -298,21 +298,21 @@ export const TRIAL3_STEPS = [
   {
     slug: "master-input",
     it: "shows the message box under the master terminal",
-    title: "Set Master input to Both",
+    title: "Set Terminal input to Both",
     why: "The trial prompt is sent from the message box under the live master terminal",
     action: async () => {
       await go("#/settings/profile");
       const options = ["Terminal only", "Message box only", "Both"];
       await until(async () => {
-        for (const option of options) if (await shown(segment("Master input", option)) && await $(segment("Master input", option)).getAttribute("aria-checked") === "true") run.input = option;
+        for (const option of options) if (await shown(segment("Terminal input", option)) && await $(segment("Terminal input", option)).getAttribute("aria-checked") === "true") run.input = option;
         return run.input !== null;
-      }, UI_MS, "Master input was never shown with a choice");
-      if (run.input !== SETTINGS.input) await click(segment("Master input", SETTINGS.input));
+      }, UI_MS, "Terminal input was never shown with a choice");
+      if (run.input !== SETTINGS.input) await click(segment("Terminal input", SETTINGS.input));
       await go("#/settings/process");
       await go("#/settings/profile");
-      await until(async () => await shown(segment("Master input", SETTINGS.input)) && await $(segment("Master input", SETTINGS.input)).getAttribute("aria-checked") === "true", UI_MS, "Master input did not read back");
-      await inView(segment("Master input", SETTINGS.input));
-      return `Master input reads Both after reopening Settings, Profile (it was ${run.input})`;
+      await until(async () => await shown(segment("Terminal input", SETTINGS.input)) && await $(segment("Terminal input", SETTINGS.input)).getAttribute("aria-checked") === "true", UI_MS, "Terminal input did not read back");
+      await inView(segment("Terminal input", SETTINGS.input));
+      return `Terminal input reads Both after reopening Settings, Profile (it was ${run.input})`;
     },
   },
   {
@@ -426,15 +426,15 @@ export const TRIAL3_STEPS = [
   },
   {
     slug: "restore-master-input",
-    it: "puts Master input back",
-    title: "Put Master input back",
-    why: "The owner's own Master input choice comes back after the trial",
+    it: "puts Terminal input back",
+    title: "Put Terminal input back",
+    why: "The owner's own Terminal input choice comes back after the trial",
     action: async () => {
-      assert(run.input, "needs the Master input read by the master-input step");
+      assert(run.input, "needs the Terminal input read by the master-input step");
       await go("#/settings/profile");
-      if (await $(segment("Master input", run.input)).getAttribute("aria-checked") !== "true") await click(segment("Master input", run.input));
-      await until(async () => await $(segment("Master input", run.input)).getAttribute("aria-checked") === "true", UI_MS, "Master input did not go back");
-      return `Master input reads ${run.input} again`;
+      if (await $(segment("Terminal input", run.input)).getAttribute("aria-checked") !== "true") await click(segment("Terminal input", run.input));
+      await until(async () => await $(segment("Terminal input", run.input)).getAttribute("aria-checked") === "true", UI_MS, "Terminal input did not go back");
+      return `Terminal input reads ${run.input} again`;
     },
   },
 ];

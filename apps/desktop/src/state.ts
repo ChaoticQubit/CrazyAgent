@@ -12,22 +12,23 @@ export type ThemeChoice = "system" | "light" | "dark";
 export type ProjectRow = ProjectPage["items"][number];
 
 const THEME_KEY = "crazyagent.theme";
-const MASTER_INPUT_KEY = "crazyagent.master-input";
+const TERMINAL_INPUT_KEY = "crazyagent.master-input";
 
-/** Reads where the owner types to a live master, as kept in this app (not in the engine).
+/** Reads where the owner types to every agent's terminal, as kept in this app (not in the
+ * engine), under the key of the old Master input so a saved choice survives the rename.
  * Output: the choice; the default when storage is unavailable or holds something else. */
-export function readMasterInput(): InputChoice {
+export function readTerminalInput(): InputChoice {
   try {
-    return inputChoice(window.localStorage.getItem(MASTER_INPUT_KEY));
+    return inputChoice(window.localStorage.getItem(TERMINAL_INPUT_KEY));
   } catch {
     return INPUT_DEFAULT;
   }
 }
 
-/** Remembers where the owner types to a live master. Input: the choice. Output: none. */
-export function saveMasterInput(choice: InputChoice): void {
+/** Remembers where the owner types to every agent's terminal. Input: the choice. Output: none. */
+export function saveTerminalInput(choice: InputChoice): void {
   try {
-    window.localStorage.setItem(MASTER_INPUT_KEY, choice);
+    window.localStorage.setItem(TERMINAL_INPUT_KEY, choice);
   } catch {
     return;
   }

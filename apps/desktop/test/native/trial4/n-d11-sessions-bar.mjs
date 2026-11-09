@@ -43,17 +43,17 @@ function items() {
   return texts(ITEMS);
 }
 
-/** Sets the Master input setting in Settings, Profile and waits until it reads back. Inputs:
+/** Sets the Terminal input setting in Settings, Profile and waits until it reads back. Inputs:
  * the kit and the option. Output: the option it had before. */
 async function input(kit, option) {
   await kit.go("#/settings/profile");
   let was = null;
   await kit.until(async () => {
-    for (const choice of INPUTS) if (await shown(kit.segment("Master input", choice)) && await $(kit.segment("Master input", choice)).getAttribute("aria-checked") === "true") was = choice;
+    for (const choice of INPUTS) if (await shown(kit.segment("Terminal input", choice)) && await $(kit.segment("Terminal input", choice)).getAttribute("aria-checked") === "true") was = choice;
     return was !== null;
-  }, UI_MS, "Master input was never shown with a choice");
-  if (was !== option) await click(kit.segment("Master input", option));
-  await kit.until(async () => await $(kit.segment("Master input", option)).getAttribute("aria-checked") === "true", UI_MS, `Master input did not take ${option}`);
+  }, UI_MS, "Terminal input was never shown with a choice");
+  if (was !== option) await click(kit.segment("Terminal input", option));
+  await kit.until(async () => await $(kit.segment("Terminal input", option)).getAttribute("aria-checked") === "true", UI_MS, `Terminal input did not take ${option}`);
   return was;
 }
 

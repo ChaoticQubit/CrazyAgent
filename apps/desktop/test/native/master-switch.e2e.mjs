@@ -107,6 +107,18 @@ async function area() {
   return { ...seen, rows: (await masterRows()).join("\n") };
 }
 
+/** Checks the running Master tab in the real window against the Terminal input this app has
+ * saved, reading the store and never writing it: no text area beside the terminal with
+ * nothing saved or Terminal only, exactly one with a box choice. Logs what the store held. */
+async function masterFollowsSavedInput() {
+  const seen = await browser.execute(() => ({
+    saved: window.localStorage.getItem("crazyagent.master-input"),
+    boxes: [...document.querySelectorAll("textarea:not(.xterm-helper-textarea)")].filter((item) => item.getClientRects().length > 0).length,
+  }));
+  console.log(`Master tab, saved Terminal input and text areas: ${JSON.stringify(seen)}`);
+  assert.equal(seen.boxes, seen.saved === "box" || seen.saved === "both" ? 1 : 0, JSON.stringify(seen));
+}
+
 /** Opens the master area with the live master running and its terminal showing a harness's
  * ready line. Input: the harness name the stand-in prints. Output: the area. */
 async function liveMaster(name) {
@@ -185,6 +197,7 @@ describe("A saved master harness change reaches the live master as the owner's A
     assert.equal(await $(APPLY).getValue(), "when_idle", "When the master is idle is the default");
     await saveMaster("claude-code");
     await liveMaster("Claude");
+    await masterFollowsSavedInput();
     await ownerTurn("Start a long turn.", "Claude");
     const saved = Date.now();
     await saveMaster("codex");

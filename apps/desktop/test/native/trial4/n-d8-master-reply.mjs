@@ -114,7 +114,7 @@ export async function terminalLive(kit, timeout) {
 }
 
 /** Sends one message to the live master as the owner does: through the message box when the
- * Master input setting shows it, else typed into the terminal and sent with Enter. Inputs: the
+ * Terminal input setting shows it, else typed into the terminal and sent with Enter. Inputs: the
  * kit and the text. Output: which input it used. */
 export async function sendToMaster(kit, text) {
   if (await shown(BOX)) {

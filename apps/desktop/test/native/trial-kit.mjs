@@ -21,7 +21,7 @@ const PURPOSES = ["skill", "project", "projects_home", "memory", "plugin"];
 assert(Number.isFinite(TEAM_MS) && TEAM_MS > 0, "the team deadline is positive");
 
 /** The state the steps of one trial run share: desktop step count, the project id, the leads,
- * the owner's Master input, the failed step slugs, the team deadline and the step being run. */
+ * the owner's Terminal input, the failed step slugs, the team deadline and the step being run. */
 export const run = { desktop: 0, project: null, leads: [], input: null, failed: [], teamBy: null, current: null };
 
 /** Quotes text as an XPath string literal. Input: text without a double quote. Output: it quoted. */
