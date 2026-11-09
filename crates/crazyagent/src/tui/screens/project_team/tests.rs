@@ -162,6 +162,7 @@ fn team() -> TeamStatus {
         master_lands: None,
         reask_empty_reply: true,
         catch_up_main: crate::team::CatchUpMain::On,
+        reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
