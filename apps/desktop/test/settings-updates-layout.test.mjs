@@ -36,7 +36,7 @@ test("the changed mark shows on Dev and never on Stable, the engine's default", 
   const onDev = await onTab("updates", { channel: "dev" }, shown);
   assert.equal(channelRow(onDev)?.mark, "changed", JSON.stringify(onDev.sections));
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/update.rs", import.meta.url), "utf8");
-  assert.match(engine, /stable when the file or key is missing/, "the mark's default is the engine's default");
+  assert.match(engine, /None => Ok\(Channel::Stable\)/, "the mark's default is the engine's default");
   assert.match(engine, /ErrorKind::NotFound => return Ok\(Channel::Stable\)/);
   const source = readFileSync(new URL("../src/screens/settings/updates.tsx", import.meta.url), "utf8");
   assert.match(source, /UPDATE_CHANNEL_DEFAULT: UpdateChannel = "stable"/);
