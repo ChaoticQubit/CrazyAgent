@@ -8600,7 +8600,7 @@ fn a_master_merge_committed_with_a_conflict_marker_waits_for_the_owner() {
 fn a_conflict_fix_holding_text_like_a_marker_lands_itself() {
     let case = Case::new();
     let (sub, sub_head, master) = conflicted_set_and_master(&case);
-    let text = "one\ntwo\nthree\nsee <<<<<<< here\n========\n =======\n>>>>>>>tight\n";
+    let text = "one\ntwo\nthree\nfour from the agent\nsee <<<<<<< here\n========\n =======\n>>>>>>>tight\n";
     master_resolves(&case, &master, &sub_head, &[("README", text)]);
     let fix = turn_of(&case, &master, "Resolve the README conflict");
     let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
@@ -8610,7 +8610,8 @@ fn a_conflict_fix_holding_text_like_a_marker_lands_itself() {
 }
 
 /// MASTER-LAND-SPLIT r2: a fix that resolves the conflict by deleting the file has no
-/// markers to find, so it lands by itself (CODE M2).
+/// markers to find, so it lands by itself (CODE M2). The set whose edit it dropped stays
+/// open (LAND-3 r2).
 #[test]
 fn a_conflict_fix_that_deletes_the_conflicted_file_lands_itself() {
     let case = Case::new();
@@ -8636,7 +8637,7 @@ fn a_conflict_fix_that_deletes_the_conflicted_file_lands_itself() {
             .owner(&["ls-tree", "--name-only", "main"])
             .contains("README")
     );
-    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+    set_stayed_open(&case, &sub, "the fix dropped the file the set edited");
 }
 
 /// MASTER-LAND-SPLIT r2: an edit the owner Discarded while the master's worktree was busy
