@@ -362,3 +362,11 @@ test("a range with no usage shows the empty state and keeps Account limits", () 
   assert.match(words, /No usage in this range Runs show up here a few seconds after an agent works\./);
   assert.match(words, /Account limits/);
 });
+
+test("a row with no tokens draws no bar, so it never reads as a little usage", () => {
+  const silent = usageRow("team-44", tokens(0, 0, 0, 0), { not_reported_by: "rcli" });
+  const part = panel(render(withUsage({ agents: [silent] })), "By agent");
+  const bar = part.slice(part.indexOf("Agent 44")).match(/<i style="width:([^"]*)"/);
+  assert.ok(bar, "the row has its bar track");
+  assert.equal(bar[1], "0%");
+});
