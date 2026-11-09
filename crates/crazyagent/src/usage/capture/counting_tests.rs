@@ -497,6 +497,7 @@ fn a_file_stored_before_the_codex_state_existed_still_reads() {
     let text = r#"{"identity":[1,2],"offset":9,"skipping":false,"total":{"input":1,"output":1,"cache_read":0,"cache_write":0}}"#;
     let progress: Progress = serde_json::from_str(text).unwrap();
     assert_eq!(progress.codex, CodexState::default());
+}
 
 #[test]
 fn a_lower_line_in_one_read_leaves_the_largest() {
