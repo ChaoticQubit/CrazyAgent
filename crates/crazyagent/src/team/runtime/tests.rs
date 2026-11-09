@@ -6809,6 +6809,7 @@ fn badge(fixture: &Fixture, agent: i64) -> bool {
 #[test]
 fn with_next_message_an_edit_reaches_a_running_agent_once_in_its_next_task() {
     let fixture = Fixture::new(1);
+    reuse_idle_on(&fixture);
     let host = fixture.host();
     let mut team = edit_runtime(
         &fixture,
@@ -6856,6 +6857,7 @@ fn with_next_message_an_edit_reaches_a_running_agent_once_in_its_next_task() {
 #[test]
 fn with_restart_the_agent_restarts_at_its_next_idle_with_the_new_text() {
     let fixture = Fixture::new(1);
+    reuse_idle_on(&fixture);
     let host = fixture.host();
     let counting = RESUMING_CLAUDE.replacen(
         "#!/bin/sh\n",
@@ -6924,6 +6926,7 @@ fn with_restart_the_agent_restarts_at_its_next_idle_with_the_new_text() {
 #[test]
 fn with_badge_nothing_is_sent_and_the_status_shows_instructions_changed() {
     let fixture = Fixture::new(1);
+    reuse_idle_on(&fixture);
     let host = fixture.host();
     let mut team = edit_runtime(
         &fixture,
@@ -11879,6 +11882,7 @@ fn a_signed_in_master_starts_each_turn_fresh_so_its_briefing_is_not_repeated() {
 #[test]
 fn the_owners_wake_without_a_conversation_hands_the_last_result_to_the_next_task() {
     let fixture = Fixture::new(1);
+    reuse_idle_on(&fixture);
     let host = fixture.host();
     let agents = Arc::new(Agents::open(&fixture.base).unwrap());
     let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default())
@@ -17450,6 +17454,12 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
     )
     .unwrap()
     .unwrap();
+    crate::team::set_reuse_idle(
+        &tx,
+        &fixture.setup.project_id,
+        crate::team::ReuseIdle::On,
+    )
+    .unwrap();
     tx.commit().unwrap();
     (team, lead, task)
 }
@@ -19989,6 +19999,7 @@ const HELD_TASK: &str = "Plan the next release.";
 /// harness.
 #[cfg(target_os = "macos")]
 fn busy_harness(fixture: &Fixture, team: &mut TeamRuntime) -> i64 {
+    reuse_idle_on(fixture);
     let lead = idle_sub_agent(fixture, team);
     std::fs::write(worktree_of(fixture, lead).join("hold"), "").unwrap();
     owner(fixture, &[hand_off(fixture, HELD_TASK)]);
