@@ -734,21 +734,43 @@ fn recorded(engine: &Engine) -> i64 {
     engine.rows("SELECT count(*) FROM projects_delete_files")
 }
 
+/// Reads a folder's inode as a delete's record keeps it. Input: the folder. Output: the number.
+fn inode(folder: &std::path::Path) -> i64 {
+    let metadata = std::fs::symlink_metadata(folder).unwrap();
+    i64::try_from(std::os::unix::fs::MetadataExt::ino(&metadata)).unwrap()
+}
+
+/// Writes one record as a delete whose reply never arrived leaves it. Inputs: the engine, the
+/// name and the inode.
+fn record(engine: &Engine, name: &str, inode: i64) {
+    write_db(
+        engine,
+        &format!("INSERT INTO projects_delete_files(name,inode) VALUES ('{name}',{inode})"),
+    );
+}
+
+/// Waits for a start to settle every record, the last step of its removal. Input: the engine.
+async fn settled(engine: &Engine) {
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while recorded(engine) != 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(recorded(engine), 0, "a start settles every record");
+}
+
 /// A delete whose reply never arrived leaves its record behind, so the next engine start
 /// removes exactly the files it names and clears it.
 #[tokio::test]
 async fn an_engine_start_finishes_the_files_a_delete_recorded() {
     let mut engine = Engine::start().await;
     let made = engine_files(engine.root.path(), 9, "job-41-1");
-    write_db(
-        &engine,
-        "INSERT INTO projects_delete_files(name) VALUES ('agent-9'),('job-41-1')",
-    );
+    record(&engine, "agent-9", inode(&made[0]));
+    record(&engine, "job-41-1", inode(&made[1]));
     engine.restart().await;
+    settled(&engine).await;
     for path in &made {
         assert!(!path.exists(), "{} goes", path.display());
     }
-    assert_eq!(recorded(&engine), 0, "the record is cleared last");
     engine.stop().await;
 }
 
@@ -759,20 +781,14 @@ async fn an_engine_start_finishes_the_files_a_delete_recorded() {
 async fn an_engine_start_keeps_every_engine_file_no_record_names_exactly() {
     let mut engine = Engine::start().await;
     let made = engine_files(engine.root.path(), 77, "job-88-1");
-    write_db(
-        &engine,
-        "INSERT INTO projects_delete_files(name)
-         VALUES ('../agents/agent-77'),('job-88-1/home'),('agent-077'),('job-88')",
-    );
+    for name in ["../agents/agent-77", "job-88-1/home", "agent-077", "job-88"] {
+        record(&engine, name, 0);
+    }
     engine.restart().await;
+    settled(&engine).await;
     for path in &made {
         assert!(path.exists(), "{} stays", path.display());
     }
-    assert_eq!(
-        recorded(&engine),
-        0,
-        "a name that is no engine file is dropped"
-    );
     engine.stop().await;
 }
 
@@ -811,6 +827,32 @@ async fn a_delete_records_its_engine_files_and_removes_every_one() {
     );
     assert_eq!(recorded(&engine), 2, "the record names nothing else");
     drop(owner);
+    engine.stop().await;
+}
+
+/// An old database image put back can name an id another database has since used, so a
+/// record removes only the folder it was written for: another folder under the recorded name
+/// stays, a name whose folder is gone removes nothing, and the record clears either way.
+#[tokio::test]
+async fn an_engine_start_keeps_a_folder_its_record_s_inode_does_not_name() {
+    let mut engine = Engine::start().await;
+    let first = engine_files(engine.root.path(), 9, "job-41-1");
+    let (agent, run) = (inode(&first[0]), inode(&first[1]));
+    let aside = engine.root.path().join("aside");
+    std::fs::create_dir_all(&aside).unwrap();
+    std::fs::rename(&first[0], aside.join("agent")).unwrap();
+    std::fs::rename(&first[1], aside.join("run")).unwrap();
+    let made = engine_files(engine.root.path(), 9, "job-41-1");
+    assert_ne!(inode(&made[0]), agent, "another agent folder, same name");
+    assert_ne!(inode(&made[1]), run, "another run folder, same name");
+    record(&engine, "agent-9", agent);
+    record(&engine, "job-41-1", run);
+    record(&engine, "agent-12", agent);
+    engine.restart().await;
+    settled(&engine).await;
+    for path in &made {
+        assert!(path.exists(), "{} stays", path.display());
+    }
     engine.stop().await;
 }
 

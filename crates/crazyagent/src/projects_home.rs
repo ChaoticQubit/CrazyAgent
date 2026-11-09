@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS projects_delete_pending (
     exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
 );
 CREATE TABLE IF NOT EXISTS projects_delete_files (
-    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64)
+    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64),
+    inode INTEGER NOT NULL
 )";
 
 /// The owner's projects home folder and whether the engine is watching it.
