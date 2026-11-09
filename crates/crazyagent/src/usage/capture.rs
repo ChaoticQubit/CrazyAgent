@@ -127,7 +127,7 @@ impl Tokens {
 
     /// How much this count grew past an earlier one, field by field, never below zero.
     /// Input: the earlier count. Output: the growth.
-    pub(super) fn growth_over(self, earlier: Tokens) -> Tokens {
+    fn growth_over(self, earlier: Tokens) -> Tokens {
         Tokens {
             input: self.input.saturating_sub(earlier.input),
             output: self.output.saturating_sub(earlier.output),
@@ -228,6 +228,7 @@ struct Progress {
     identity: (u64, u64),
     offset: u64,
     skipping: bool,
+    /// The running total older builds stored. Read once, to start the Codex counters.
     total: Tokens,
     #[serde(default)]
     codex: CodexState,
@@ -310,12 +311,7 @@ fn codex_line(
     now_ms: i64,
     fallback_thread: &str,
 ) -> (Option<Usage>, Option<Observation>) {
-    let usage = codex_usage(
-        value,
-        &mut progress.total,
-        &mut progress.codex,
-        fallback_thread,
-    );
+    let usage = codex_usage(value, progress.total, &mut progress.codex, fallback_thread);
     let payload = &value["payload"];
     if value["type"] != "event_msg" || payload["type"] != "token_count" {
         return (usage, None);

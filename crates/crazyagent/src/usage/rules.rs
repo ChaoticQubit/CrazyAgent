@@ -274,6 +274,16 @@ pub(super) fn timestamp_ms(text: &str) -> Option<i64> {
 const REPLAY_GAP_MS: i64 = 1000;
 const REPLAY_WINDOW_MS: i64 = 5000;
 const INFO_BYTES_MAX: usize = 2048;
+const USAGE_FIELDS: [&str; 5] = [
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+];
+
+/// One call's or a whole rollout's counters as Codex reports them, in `USAGE_FIELDS` order.
+type Counters = [u64; 5];
 
 /// The burst of copied records at the start of a forked rollout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +343,8 @@ pub(super) struct CodexState {
     #[serde(default)]
     cumulative: Option<u64>,
     #[serde(default)]
+    running: Option<Counters>,
+    #[serde(default)]
     last_info: Option<String>,
 }
 
@@ -344,31 +356,88 @@ fn bounded_text(value: &Value) -> Option<String> {
 }
 
 /// One call's counts in engine terms: input without its cached or cache-written part, a
-/// Codex cache write being carved out of the uncached input. Input: a usage object.
-/// Output: the tokens, capped.
-fn codex_tokens(usage: &Value) -> Tokens {
-    let count = |key: &str| usage[key].as_u64().unwrap_or(0);
-    let cached = count("cached_input_tokens");
-    let uncached = count("input_tokens").saturating_sub(cached);
-    let written = count("cache_write_input_tokens").min(uncached);
+/// Codex cache write being carved out of the uncached input. Input: the counters. Output:
+/// the tokens, capped.
+fn counted_tokens([input, cached, write, output, _reasoning]: Counters) -> Tokens {
+    let uncached = input.saturating_sub(cached);
+    let written = write.min(uncached);
     Tokens {
         input: uncached - written,
-        output: count("output_tokens"),
+        output,
         cache_read: cached,
         cache_write: written,
     }
     .at_most(LINE_TOKENS_MAX)
 }
 
+/// One usage object's counts in engine terms, an omitted counter as zero. Input: the
+/// object. Output: the tokens, capped.
+fn codex_tokens(usage: &Value) -> Tokens {
+    counted_tokens(USAGE_FIELDS.map(|name| usage[name].as_u64().unwrap_or(0)))
+}
+
+/// Whether a usage object can be counted: at least one counter and none invalid, as
+/// CodeBurn requires before a record takes over from token counts. Input: the object.
+/// Output: the answer.
+fn valid_usage(usage: &Value) -> bool {
+    let counter = |field: &Value| field.as_f64().is_some_and(|count| count >= 0.0);
+    usage.is_object()
+        && USAGE_FIELDS
+            .iter()
+            .any(|name| usage.get(name).is_some_and(counter))
+        && USAGE_FIELDS
+            .iter()
+            .all(|name| usage.get(name).is_none_or(counter))
+}
+
+/// The counters a total stored by an older build stands for. Input: that total. Output: the
+/// counters.
+fn older_counters(total: Tokens) -> Counters {
+    [
+        total
+            .input
+            .saturating_add(total.cache_read)
+            .saturating_add(total.cache_write),
+        total.cache_read,
+        total.cache_write,
+        total.output,
+        0,
+    ]
+}
+
+/// The counters a total leaves a rollout at: a field it leaves out keeps its value. Not
+/// capped, because only what a record adds is bounded. Inputs: the counters so far and the
+/// total. Output: the new counters.
+fn advanced(running: Counters, totals: &Value) -> Counters {
+    std::array::from_fn(|index| {
+        totals[USAGE_FIELDS[index]]
+            .as_u64()
+            .unwrap_or(running[index])
+    })
+}
+
+/// Whether a total starts the counters again: at most a tenth of the previous total or,
+/// with none, every field it reports at most a tenth of its running value. Inputs: the
+/// total, its sum, the previous sum and the counters. Output: the answer.
+fn restarted(totals: &Value, sum: u64, previous: Option<u64>, running: Counters) -> bool {
+    if let Some(before) = previous {
+        return sum.saturating_mul(10) <= before;
+    }
+    let mut reported = (0..USAGE_FIELDS.len())
+        .filter_map(|index| Some((totals[USAGE_FIELDS[index]].as_u64()?, running[index])))
+        .peekable();
+    reported.peek().is_some() && reported.all(|(now, before)| now.saturating_mul(10) <= before)
+}
+
 /// The record a Codex rollout line reports, advancing the rollout's state. A forked or
 /// spawned rollout's copied burst counts nothing, and records share a key with the parent's
 /// so a copy past the burst or in a resumed rollout collides. Inputs: the parsed line, the
-/// cumulative counters so far, the state and the thread to use when no line named one.
+/// total an older build stored, the state and the thread to use when no line named one.
 /// Output: the record to count, None for any other line. Rules ported from CodeBurn (MIT,
 /// THIRD_PARTY_NOTICES.md).
 pub(super) fn codex_usage(
     value: &Value,
-    total: &mut Tokens,
+    older_total: Tokens,
     state: &mut CodexState,
     fallback_thread: &str,
 ) -> Option<Usage> {
@@ -380,7 +449,9 @@ pub(super) fn codex_usage(
     let payload = &value["payload"];
     let kind = value["type"].as_str()?;
     if kind == "session_meta" {
-        state.thread = bounded_text(&payload["id"]).or(state.thread.take());
+        state.thread = bounded_text(&payload["id"])
+            .or_else(|| bounded_text(&payload["session_id"]))
+            .or(state.thread.take());
         state.parent = bounded_text(&payload["forked_from_id"])
             .or_else(|| bounded_text(&payload["parent_thread_id"]))
             .or_else(|| {
@@ -393,6 +464,9 @@ pub(super) fn codex_usage(
                 active: true,
             });
             state.last_info = None;
+        }
+        if payload["model"].is_string() {
+            state.model = model_name(&payload["model"]);
         }
         return None;
     }
@@ -416,7 +490,7 @@ pub(super) fn codex_usage(
         .unwrap_or_else(|| fallback_thread.to_owned());
     if kind == "token_usage_record" {
         let usage = &payload["usage"];
-        if !usage.is_object() || replayed {
+        if !valid_usage(usage) || replayed {
             return None;
         }
         state.usage_records = true;
@@ -438,49 +512,52 @@ pub(super) fn codex_usage(
     if !info.is_object() {
         return None;
     }
+    let totals = &info["total_token_usage"];
+    let cumulative = totals["total_tokens"].as_u64();
     let identity = Some(info.to_string()).filter(|text| text.len() <= INFO_BYTES_MAX);
+    let mut running = state.running.unwrap_or_else(|| older_counters(older_total));
+    if replayed {
+        if cumulative.is_some() {
+            state.last_info = identity;
+        }
+        state.cumulative = cumulative;
+        state.running = Some(advanced(running, totals));
+        return None;
+    }
     if identity.is_some() && identity == state.last_info {
         return None;
     }
     state.last_info = identity;
-    let totals = &info["total_token_usage"];
-    let cumulative = totals["total_tokens"].as_u64();
     if cumulative.is_some() && cumulative == state.cumulative {
         return None;
     }
     let previous = state.cumulative;
     state.cumulative = cumulative;
-    let now = codex_tokens(totals);
     let last = &info["last_token_usage"];
     let tokens = if last.is_object() {
         codex_tokens(last)
-    } else if cumulative.unwrap_or(0) > 0 {
-        let restarted = match (previous, cumulative) {
-            (Some(before), Some(current)) => current.saturating_mul(10) <= before,
-            _ => false,
-        };
-        if restarted {
+    } else if let Some(sum) = cumulative.filter(|sum| *sum > 0) {
+        if restarted(totals, sum, previous, running) {
             state.epoch += 1;
-            *total = Tokens::default();
+            running = [0; USAGE_FIELDS.len()];
         }
-        now.growth_over(*total)
+        counted_tokens(std::array::from_fn(|index| {
+            totals[USAGE_FIELDS[index]]
+                .as_u64()
+                .map_or(0, |now| now.saturating_sub(running[index]))
+        }))
     } else {
-        return None;
+        Tokens::default()
     };
-    if totals.is_object() {
-        *total = now;
-    }
-    if replayed {
+    running = advanced(running, totals);
+    state.running = Some(running);
+    if tokens.is_empty() {
         return None;
     }
-    let raw = |key: &str| totals[key].as_u64().unwrap_or(0);
-    let key = cumulative.map(|current| {
+    let [input, cached, _, output, reasoning] = running;
+    let key = cumulative.map(|sum| {
         format!(
-            "codex:{scope}:{current}:{}:{}:{}:{}:{}",
-            raw("input_tokens"),
-            raw("cached_input_tokens"),
-            raw("output_tokens"),
-            raw("reasoning_output_tokens"),
+            "codex:{scope}:{sum}:{input}:{cached}:{output}:{reasoning}:{}",
             state.epoch
         )
     });
