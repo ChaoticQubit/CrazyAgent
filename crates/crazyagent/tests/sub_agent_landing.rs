@@ -954,3 +954,39 @@ fn a_worker_set_the_owner_restored_survives_the_next_read() {
     let listed = landing::list(&team.db, &team.id).unwrap();
     assert!(listed.iter().any(|view| view.id == worker_set));
 }
+
+/// A lead's worktree removed outside the app closes only the lead's set: its workers' open
+/// sets stay open at every later read and on the owner's list under either Lands setting,
+/// and the owner can still close them, since no one pressed anything in the app
+/// (HB-S4-LANDED).
+#[test]
+fn a_lead_removed_outside_the_app_leaves_its_workers_sets_open_and_listed() {
+    for (lands, role) in [
+        ("lead", "sub"),
+        ("owner", "sub"),
+        ("lead", "teammate"),
+        ("owner", "teammate"),
+    ] {
+        let team = Team::new();
+        team.lands(lands);
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        team.db
+            .execute("UPDATE team_agents SET role=?1 WHERE id=2", [role])
+            .unwrap();
+        team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        fs::remove_dir_all(&team.lead.worktree).unwrap();
+        for _ in 0..3 {
+            landing::observe(&team.db, Some(&team.id)).unwrap();
+        }
+        let shape = format!("{lands} {role}");
+        assert_eq!(team.state(&lead_set).0, "discarded", "{shape}");
+        assert_eq!(team.state(&worker_set).0, "pending", "{shape}");
+        assert!(team.owner_listed().contains(&worker_set), "{shape}");
+        let head = team.view_head(&worker_set);
+        landing::discard(&team.db, &worker_set, &head, now_ms()).unwrap();
+        assert_eq!(team.state(&worker_set).0, "discarded", "{shape}");
+    }
+}
