@@ -735,3 +735,91 @@ fn a_worker_set_left_open_by_its_closed_lead_is_swept_but_a_newer_one_is_kept() 
     assert_eq!(team.state(&left).0, "discarded");
     assert_eq!(team.state(&newer).0, "pending");
 }
+
+/// The owner's branch takes the lead's README line in a commit of its own and then moves
+/// that line on, so a merge of the lead's set conflicts though main holds its work. Takes
+/// the team.
+fn owner_takes_the_lead_line(team: &Team) {
+    for (text, message) in [
+        ("one\nlead\nthree\n", "Port the lead's work"),
+        ("one\nowner\nthree\n", "Build on the port"),
+    ] {
+        fs::write(team.project.join("README"), text).unwrap();
+        team.git(&team.project, &["add", "README"]);
+        team.git(&team.project, &["commit", "-q", "-m", message]);
+    }
+}
+
+/// A lead's set main took stays open while a worker main never took holds an open set, as
+/// a sub-agent or as a native teammate and under either Lands setting: closing the lead
+/// would hide that work and let the orphan sweep discard it (HB-S4).
+#[test]
+fn a_lead_main_took_stays_open_while_a_worker_main_never_took_is_open() {
+    for (lands, role) in [("lead", "sub"), ("owner", "sub"), ("lead", "teammate")] {
+        let team = Team::new();
+        team.lands(lands);
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        team.db
+            .execute("UPDATE team_agents SET role=?1 WHERE id=2", [role])
+            .unwrap();
+        team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        owner_takes_the_lead_line(&team);
+        landing::observe(&team.db, Some(&team.id)).unwrap();
+        assert_eq!(team.state(&worker_set).0, "pending", "{lands} {role}");
+        assert_eq!(team.state(&lead_set).0, "pending", "{lands} {role}");
+        let listed = landing::list(&team.db, &team.id).unwrap();
+        assert!(listed.iter().any(|view| view.id == worker_set));
+        assert!(team.owner_listed().contains(&lead_set), "{lands} {role}");
+    }
+}
+
+/// A worker's worker counts: a lead's set main took stays open while a level below its
+/// direct worker holds an open set (HB-S4).
+#[test]
+fn a_lead_main_took_stays_open_while_a_deeper_worker_is_open() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    let deep = team.worker(3, &fix, "deep");
+    team.commit(&deep, "deep.txt", "deep\n", "Go deep");
+    let deep_set = team.turn_end(&deep);
+    team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    owner_takes_the_lead_line(&team);
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&deep_set).0, "pending");
+    assert_eq!(team.state(&lead_set).0, "pending");
+}
+
+/// Once no worker holds an open set the lead's set main took closes at the next read, and
+/// Restore gives back that set, its head and its pending ref (HB-S4).
+#[test]
+fn a_lead_main_took_closes_after_its_workers_and_restore_gives_it_back_whole() {
+    let team = Team::new();
+    let fix = team.worker(2, &team.lead, "fix");
+    team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+    let worker_set = team.turn_end(&fix);
+    team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    let head = team.view_head(&lead_set);
+    owner_takes_the_lead_line(&team);
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "pending");
+    landing::discard(
+        &team.db,
+        &worker_set,
+        &team.view_head(&worker_set),
+        now_ms(),
+    )
+    .unwrap();
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "discarded");
+    assert_eq!(team.pending_ref(&lead_set), "");
+    let closed = landing::change_set(&team.db, &lead_set).unwrap().unwrap().1;
+    landing::restore(&team.db, &lead_set, closed.restorable_until_ms.unwrap() - 1).unwrap();
+    assert_eq!(team.state(&lead_set).0, "pending");
+    assert_eq!(team.view_head(&lead_set), head);
+    assert_ne!(team.pending_ref(&lead_set), "");
+}

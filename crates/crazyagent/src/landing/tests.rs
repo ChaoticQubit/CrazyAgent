@@ -6851,10 +6851,8 @@ fn a_change_set_the_owner_landed_in_part_by_hand_shows_only_the_rest_until_all_o
     case.landed_outside(&id, &head);
 }
 
-/// A case whose agent turn changed the README's second line, with the activity tables the
-/// rows of its closing need. Output: the case, its change set and that set's head.
-fn taken_case() -> (Case, ChangeSetId, String) {
-    let case = Case::new();
+/// Makes the activity tables the rows of a change set's closing need. Input: the case.
+fn closing_tables(case: &Case) {
     case.db
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
@@ -6862,6 +6860,13 @@ fn taken_case() -> (Case, ChangeSetId, String) {
         .unwrap();
     crate::coord::ensure(&case.db).unwrap();
     crate::activity::initialize(&case.db).unwrap();
+}
+
+/// A case whose agent turn changed the README's second line, with the activity tables the
+/// rows of its closing need. Output: the case, its change set and that set's head.
+fn taken_case() -> (Case, ChangeSetId, String) {
+    let case = Case::new();
+    closing_tables(&case);
     case.edit("README", "one\nagent\nthree\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     let head = case.view(&id).head;
@@ -6972,6 +6977,76 @@ fn a_deletion_main_took_and_moved_on_from_closes_too() {
     case.owner_commit("README", "written again\n", "Write it again");
     case.observe();
     assert_eq!(case.view(&id).state, ChangeState::Discarded);
+}
+
+#[test]
+fn a_change_set_main_took_through_a_merge_and_moved_on_from_closes_too() {
+    let (case, id, _) = taken_case();
+    case.owner(&["switch", "-q", "-c", "port"]);
+    case.owner_commit("README", "one\nagent\nthree\n", "Port on a branch");
+    case.owner(&["switch", "-q", "main"]);
+    case.owner(&["merge", "--no-ff", "-q", "-m", "Merge the port", "port"]);
+    case.owner_commit("README", "one\nowner\nthree\n", "Build on the port");
+    case.observe();
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+}
+
+#[test]
+fn a_change_set_only_a_side_branch_held_stays_open() {
+    let (case, id, _) = taken_case();
+    case.owner(&["switch", "-q", "-c", "side"]);
+    case.owner_commit(
+        "README",
+        "one\nagent\nthree\n",
+        "Same content on a side branch",
+    );
+    case.owner(&["switch", "-q", "main"]);
+    case.owner_commit("README", "one\nowner\nthree\n", "Main's own line");
+    case.owner(&[
+        "merge",
+        "-q",
+        "-s",
+        "ours",
+        "-m",
+        "Keep main's line",
+        "side",
+    ]);
+    case.observe();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
+
+#[test]
+fn a_change_set_main_took_and_reverted_stays_open() {
+    let (case, id, _) = taken_case();
+    case.owner_commit("README", "one\nagent\nthree\n", "Port the agent work");
+    case.owner_commit("README", "one\ntwo\nthree\n", "Revert the port");
+    case.owner_commit("README", "one\nowner\nthree\n", "Main's own line");
+    case.observe();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
+
+#[test]
+fn restoring_a_set_main_took_gives_back_its_head_its_ref_and_its_claims() {
+    let mut case = Case::new();
+    closing_tables(&case);
+    review_ready_claim(&mut case);
+    case.edit("README", "one\nagent\nthree\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    take_and_move_on(&case);
+    case.observe();
+    let closed = case.view(&id);
+    assert_eq!(closed.state, ChangeState::Discarded);
+    assert_eq!(second_start(&case), 0, "the closed set holds no claim");
+    restore(&case.db, &id, closed.restorable_until_ms.unwrap() - 1).unwrap();
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.head),
+        (ChangeState::Pending, head.clone())
+    );
+    assert_eq!(case.agent_head(), head);
+    assert!(case.owner_refs("refs/crazyagent").contains(&head));
+    assert_eq!(second_start(&case), 1, "the restored set holds its claim");
 }
 
 #[test]
