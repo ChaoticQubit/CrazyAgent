@@ -19,3 +19,4 @@
 .set-bar .field { flex: none; }
 .set-body { display: grid; gap: 8px; margin: 0; padding: 12px 16px; border-top: 1px solid var(--border); }
 .set-line-ctl > .field { width: 260px; max-width: 100%; }
+#process-app { font: 13px/20px var(--mono); }
