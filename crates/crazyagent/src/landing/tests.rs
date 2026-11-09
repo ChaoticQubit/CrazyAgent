@@ -7782,6 +7782,102 @@ fn a_master_review_of_a_sub_s_work_keeps_its_claims_until_the_set_closes() {
     }
 }
 
+/// Registers agent 2 and the project's master, agent 3, in the team tables and returns the
+/// master's workspace. Input: the case. Output: the workspace.
+fn team_with_master(case: &Case) -> Workspace {
+    let master = master_agent(case);
+    crate::team::initialize(&case.db).unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    case.db
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (2,'project-1','sub','claude-code',1,'working',1,1),
+                    (3,'project-1','master','claude-code',1,'working',1,1);",
+        )
+        .unwrap();
+    master
+}
+
+/// Has the master start and finish work on README, so it holds that claim on ended work.
+/// Input: the case. Output: none.
+fn master_finishes_readme(case: &Case) {
+    let now = crate::team::now_ms();
+    let (work, _) = crate::coord::start_work(
+        &case.db,
+        &case.workspace.project,
+        3,
+        "Readme".into(),
+        vec!["README".into()],
+        now,
+    )
+    .unwrap();
+    crate::coord::finish(
+        &case.db,
+        work,
+        1,
+        crate::coord::Finish::Complete,
+        "Done.".into(),
+        3,
+        now,
+    )
+    .unwrap();
+}
+
+/// T5-R2-L1: the master's finished work holds its claims while the change set carrying it
+/// waits, as a sub-agent's does, and that set's Accept releases them.
+#[test]
+fn a_master_s_finished_work_keeps_its_claims_until_its_set_lands() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    master_finishes_readme(&case);
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let id = turn_of(&case, &master, "Add the line");
+    assert_eq!(second_start(&case), 1, "the master's set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the master's set landed");
+}
+
+/// T5-R2-L1: a master's turn that leaves nothing to land releases its finished claims, so
+/// they never hold forever.
+#[test]
+fn a_master_s_finished_work_is_released_by_a_turn_end_with_nothing_to_land() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    master_finishes_readme(&case);
+    assert_eq!(second_start(&case), 1, "the turn has not ended yet");
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-master".into(),
+        prompt_line: "Nothing to change".into(),
+    };
+    assert_eq!(record_turn_end(&case.db, &master, &turn).unwrap(), None);
+    assert_eq!(second_start(&case), 0, "nothing waits to land");
+}
+
+/// T5-R2-L1: a stopped master has no more turn ends, so the sweep holds the claims of work
+/// it finished for its open set, and that set's Accept releases them.
+#[test]
+fn a_stopped_master_s_finished_work_is_held_for_its_open_set_by_the_sweep() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let id = turn_of(&case, &master, "Add the line");
+    master_finishes_readme(&case);
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=3", [])
+        .unwrap();
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS).unwrap();
+    assert_eq!(second_start(&case), 1, "the master's set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the master's set landed");
+}
+
 /// OS-8 L1: closing a change set releases only the claims of the work it holds. Work the
 /// agent finished after the set's last turn end keeps its claims through that set's Accept
 /// and is released by the Accept of the next set, which holds it.

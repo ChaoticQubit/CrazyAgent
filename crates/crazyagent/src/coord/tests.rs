@@ -2051,11 +2051,11 @@ fn the_master_completing_or_closing_review_ready_work_keeps_the_sub_agent_s_clai
     }
 }
 
-/// OS-8: the master's own work has no sub-agent change set to wait for, so finishing it
-/// releases its claims at every end, review-ready included, and nothing holds them forever.
+/// T5-R2-L1: the master's own finished work holds its claims at every end, as any agent's
+/// does, until the change set carrying it lands or its turn ends with nothing to land.
 #[cfg(unix)]
 #[test]
-fn a_master_s_own_finished_work_releases_its_claims_at_every_end() {
+fn a_master_s_own_finished_work_keeps_its_claims_at_every_end() {
     let connection = db();
     let master = agent(&connection, "master", None);
     for (index, outcome) in [Finish::ReviewReady, Finish::Complete, Finish::Closed]
@@ -2072,7 +2072,7 @@ fn a_master_s_own_finished_work_releases_its_claims_at_every_end() {
         )
         .unwrap();
         finish(&connection, work, 1, outcome, "Done.".into(), master, NOW).unwrap();
-        assert_eq!(held(&connection, master, work), 0, "{outcome:?}");
+        assert_eq!(held(&connection, master, work), 1, "{outcome:?}");
     }
 }
 
