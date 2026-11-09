@@ -1203,6 +1203,7 @@ pub(crate) fn migrate_counts(tx: &Connection) -> Result<(), EngineError> {
             CAST(strftime('%s','now') AS INTEGER)*1000
          FROM usage_files WHERE CASE WHEN json_valid(progress) THEN
             json_type(progress,'$.message')='text'
+            AND length(CAST(json_extract(progress,'$.message') AS BLOB)) BETWEEN 1 AND 128
             AND json_type(progress,'$.counted.input')='integer'
             AND json_type(progress,'$.counted.output')='integer'
             AND json_type(progress,'$.counted.cache_read')='integer'
