@@ -10260,7 +10260,11 @@ fn undoing_a_commit_costs_the_same_git_runs_for_any_number_of_sets_below_it() {
         undo_landing(&case.db, &case.home, &later).unwrap();
         git::GIT_RUNS.with(std::cell::Cell::get) - before
     };
-    assert_eq!(runs(5), runs(0), "sets below the undone commit cost git runs");
+    assert_eq!(
+        runs(5),
+        runs(0),
+        "sets below the undone commit cost git runs"
+    );
 }
 
 /// Land-6 r2: a git failure reading what the undo reverted stops the step and leaves the

@@ -1467,8 +1467,8 @@ fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Resul
         let Some(at) = other.landed.clone().filter(|at| above.contains(at)) else {
             continue;
         };
-        let reverted = reverted_work(&owner, [&before, commit], &changed, &other)
-            .unwrap_or_else(|error| {
+        let reverted =
+            reverted_work(&owner, [&before, commit], &changed, &other).unwrap_or_else(|error| {
                 eprintln!(
                     "landing_undo_closed_set_unread cause={}",
                     crate::protocol::plain_code(&error.0)
@@ -1494,16 +1494,11 @@ fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Resul
 /// Lists the commits from a landed one up to the commit reverting it on that line, the
 /// landed one included, with one git run. Inputs: the owner repository and both commits.
 /// Output: the commits.
-fn commits_from(
-    owner: &Repo,
-    landed: &str,
-    commit: &str,
-) -> Result<BTreeSet<String>, EngineError> {
+fn commits_from(owner: &Repo, landed: &str, commit: &str) -> Result<BTreeSet<String>, EngineError> {
     let range = format!("{landed}..{commit}");
     let listed = owner.run(&["rev-list", "--ancestry-path", &range])?;
     let text = std::str::from_utf8(&listed).map_err(|_| failure("changes_git_failed"))?;
-    let mut commits: BTreeSet<String> =
-        text.lines().map(str::to_owned).collect();
+    let mut commits: BTreeSet<String> = text.lines().map(str::to_owned).collect();
     commits.insert(landed.to_owned());
     Ok(commits)
 }
