@@ -118,6 +118,39 @@ async fn a_trash_move_that_fails_removes_nothing_and_leaves_stop_all_on() {
 }
 
 #[tokio::test]
+async fn a_delete_plan_is_gone_when_the_reply_arrives_even_after_a_settle_that_failed() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    std::fs::remove_dir_all(&folder).unwrap();
+    write_db(
+        &engine,
+        "CREATE TABLE settle_fault(n);
+         CREATE TRIGGER settle_fails_once BEFORE DELETE ON projects_delete_pending
+         WHEN (SELECT count(*) FROM settle_fault) = 0
+         BEGIN
+           INSERT INTO settle_fault VALUES (1);
+           SELECT RAISE(FAIL, 'settle fails once');
+         END;",
+    );
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects_delete_pending"),
+        0,
+        "the reply means the plan is gone, or every home move stays refused until a restart"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM settle_fault"),
+        1,
+        "the first settle really failed"
+    );
+}
+
+#[tokio::test]
 async fn delete_everything_of_a_project_whose_folder_is_gone_removes_its_records_and_engine_files()
 {
     let engine = Engine::start().await;
