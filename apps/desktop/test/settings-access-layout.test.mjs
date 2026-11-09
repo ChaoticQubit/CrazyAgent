@@ -391,6 +391,18 @@ test("Terminal input offers its three choices and starts on Terminal only", asyn
   assert.deepEqual(seen, [["Terminal only", "true"], ["Message box only", "false"], ["Both", "false"]]);
 });
 
+test("choosing Both saves it under the Terminal input key alone and it reads back when Profile opens again", async () => {
+  const group = '[role=radiogroup][aria-label="Terminal input"]';
+  const seen = await onProfile({}, async (page) => {
+    await page.evaluate(`Object.defineProperty(window, "localStorage", { configurable: true, value: (() => { const kept = new Map(); window.keptInput = kept; return { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) }; })() })`);
+    await press(page, `${group} button`, "Both");
+    const saved = await page.evaluate("[...window.keptInput.entries()]");
+    await page.evaluate(`Fixture.mount(${JSON.stringify({ tab: "profile" })}, "light")`);
+    return { saved, chosen: await page.evaluate(`[...document.querySelectorAll('${group} button[aria-checked="true"]')].map((button) => button.textContent.trim())`) };
+  });
+  assert.deepEqual(seen, { saved: [["crazyagent.terminal-input", "both"]], chosen: ["Both"] });
+});
+
 test("Theme changes the app's look from its line", async () => {
   await onProfile({}, async (page) => {
     await press(page, '[role=radiogroup][aria-label="Theme"] button', "Dark");

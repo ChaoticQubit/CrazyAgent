@@ -14,7 +14,7 @@ import { teamStatus } from "./team-status.mjs";
 let root = null;
 let shownData = null;
 const kept = new Map();
-const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok", questions: [], release: () => {} };
+const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], prompts: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok", questions: [], release: () => {} };
 
 /** One open question Brook put to the owner, most urgent first as the engine lists them.
  * Inputs: its id, its urgency and its text. Output: the question. */
@@ -118,6 +118,10 @@ function bridge() {
         return null;
       }
       if (command === "desktop_terminal_resize") return null;
+      if (command === "desktop_terminal_prompt") {
+        engine.prompts.push(args.text);
+        return null;
+      }
       if (command === "desktop_team_cancel") {
         engine.cancels.push(args.task);
         return { generation: args.generation, outcome: "applied", pending: false, rejection: null };
@@ -140,7 +144,7 @@ function bridge() {
  * Inputs: the delay in ms, the graph mode, the tasks, the changes and the view. */
 export function mount(delayMs = 0, graph = "ok", tasks = [], patch = {}, view = {}) {
   root?.unmount();
-  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], callbacks: new Map(), next: new Map(), delayMs, graph, questions: view.questions ?? [] });
+  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], prompts: [], callbacks: new Map(), next: new Map(), delayMs, graph, questions: view.questions ?? [] });
   bridge();
   document.head.innerHTML = "";
   for (const text of [styles, projectStyles, teamStyles, xtermStyles]) {
@@ -386,6 +390,11 @@ export function saveInput(choice, key = "crazyagent.terminal-input") {
     value: { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) },
   });
   if (choice !== null) kept.set(key, choice);
+}
+
+/** The prompts the owner sent from a message box, as the engine got them. Output: their texts. */
+export function sentPrompts() {
+  return engine.prompts;
 }
 
 /** Opens one agent's terminal through one real door of the app: "agents" clicks its graph
