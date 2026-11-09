@@ -990,3 +990,34 @@ fn a_lead_removed_outside_the_app_leaves_its_workers_sets_open_and_listed() {
         assert_eq!(team.state(&worker_set).0, "discarded", "{shape}");
     }
 }
+
+/// A land the owner did not press is refused while a worker below the set's agent holds
+/// an open set, for the master and for the engine alike: nothing lands, nothing closes,
+/// and a refusal leaves both sets as they were (HB-S4-LANDED r2).
+#[test]
+fn a_land_the_owner_did_not_press_is_refused_while_a_worker_set_is_open() {
+    use crazyagent::activity::{ENGINE_ACTOR, MASTER_ACTOR};
+    for by in [MASTER_ACTOR, ENGINE_ACTOR] {
+        let team = Team::new();
+        let fix = team.worker(2, &team.lead, "fix");
+        team.commit(&fix, "fix.txt", "fixed\n", "Fix it");
+        let worker_set = team.turn_end(&fix);
+        team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
+        let lead_set = team.turn_end(&team.lead);
+        let start = team.git(&team.project, &["rev-parse", "main"]);
+        let refused = landing::accept_into_as(
+            &team.db,
+            &team.home,
+            &lead_set,
+            &team.view_head(&lead_set),
+            None,
+            "main",
+            by,
+        )
+        .unwrap_err();
+        assert_eq!(refused.0, landing::WORKER_OPEN, "{by}");
+        assert_eq!(team.git(&team.project, &["rev-parse", "main"]), start);
+        assert_eq!(team.state(&lead_set).0, "pending", "{by}");
+        assert_eq!(team.state(&worker_set).0, "pending", "{by}");
+    }
+}
