@@ -10,6 +10,7 @@ const router = await import("../src/ui/router.ts");
 const shell = await import("../src/ui/shell.tsx");
 const app = await import("../src/app.tsx");
 const { SessionContext } = await import("../src/state.ts");
+const { dayLabel } = await import("../src/screens/metrics/usage-model.tsx");
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -349,10 +350,11 @@ test("Lines changed lists added and removed, and All columns keeps change sets a
   assert.match(part, /Project Change sets Lines Accepted commits Lines accepted/);
 });
 
-test("By day shows seven days and offers the rest", () => {
-  const days = Array.from({ length: 30 }, (_, index) => ({ day_ms: SINCE - index * DAY, tokens: ALPHA }));
+test("By day shows the newest seven days and offers the rest", () => {
+  const days = Array.from({ length: 30 }, (_, index) => ({ day_ms: SINCE + (index - 29) * DAY, tokens: ALPHA }));
   const part = panel(render(withUsage({ days })), "By day");
-  assert.equal([...part.matchAll(/<th scope="row">/gu)].length, 7);
+  const shown = [...part.matchAll(/<th scope="row">([^<]*)<\/th>/gu)].map((match) => match[1]);
+  assert.deepEqual(shown, [0, 1, 2, 3, 4, 5, 6].map((back) => dayLabel(SINCE - back * DAY, 0)));
   assert.match(text(part), /Show all 30 days/);
   assert.match(text(part), /Day Tokens Input Cache write Output Cache read/);
 });
@@ -369,4 +371,62 @@ test("a row with no tokens draws no bar, so it never reads as a little usage", (
   const bar = part.slice(part.indexOf("Agent 44")).match(/<i style="width:([^"]*)"/);
   assert.ok(bar, "the row has its bar track");
   assert.equal(bar[1], "0%");
+});
+
+const NOTHING = tokens(0, 0, 0, 0);
+const agentRow = (project, agent, value) => ({ project, agent, harnesses: ["codex"], accounts: ["acct-a"], tokens: value });
+const agentsRead = (rows, used) => ({ ...withUsage({ agents: used }), metrics: { kind: "ok", value: { ...metrics, agents: rows } } });
+
+test("one agent key on two projects' rows leaves Runs and Last used blank on both (r1 M1)", () => {
+  const rows = [agentRow("alpha", "onboarding", ALPHA), agentRow("beta", "onboarding", NOTHING)];
+  const table = tableText(render(agentsRead(rows, [usageRow("onboarding", ALPHA, { runs: 42, last_ms: NOW - HOUR })])), "agent");
+  assert.match(table, /Runs Last used/);
+  assert.doesNotMatch(table, /\b42\b/);
+  assert.doesNotMatch(table, / ago /);
+});
+
+test("an agent key whose usage holds more than its one listed row leaves Runs and Last used blank (r1 M1)", () => {
+  const rows = [agentRow("alpha", "onboarding", BETA)];
+  const table = tableText(render(agentsRead(rows, [usageRow("onboarding", ALPHA, { runs: 42, last_ms: NOW - HOUR })])), "agent");
+  assert.doesNotMatch(table, /\b42\b/);
+  assert.doesNotMatch(table, / ago /);
+});
+
+test("an agent on one project keeps its Runs and Last used, and one that reported nothing lists once (r1 L1)", () => {
+  const rows = [agentRow("alpha", "team-8", ALPHA), agentRow("beta", "team-9", BETA)];
+  const used = [usageRow("team-8", ALPHA, { runs: 5, last_ms: NOW - 3 * MINUTE }), usageRow("team-9", BETA, { not_reported_by: "rcli" })];
+  const markup = render(agentsRead(rows, used));
+  assert.match(tableText(markup, "agent"), /5 3 min ago/);
+  assert.equal([...panel(markup, "By agent").matchAll(/class="mx-row"/gu)].length, 2);
+});
+
+test("a usage row with no metrics row is listed only when its harness reported nothing (r1 L1)", () => {
+  assert.doesNotMatch(text(panel(render(withUsage({ agents: [usageRow("team-44", ALPHA)] })), "By agent")), /Agent 44/);
+});
+
+test("a range with only lines changed is not empty (r1 L1)", () => {
+  const words = text(render(withUsage({ total: NOTHING, days: [] })));
+  assert.doesNotMatch(words, /No usage in this range/);
+  assert.match(words, /Lines changed by project/);
+});
+
+test("a range where only a harness that reports nothing ran is not empty (r1 L1)", () => {
+  assert.doesNotMatch(text(render(withUsage({ total: NOTHING, lines: [], days: [], not_reported_by: ["rcli"] }))), /No usage in this range/);
+});
+
+test("Lines changed shows at most five rows and All columns counts every one (r1 L1)", () => {
+  const lines = Array.from({ length: 7 }, (_, index) => ({ project: `p${index}`, change_sets: 1, added: 9 - index, removed: 1, commits: 1, committed_added: 1, committed_removed: 1 }));
+  const part = panel(render(withUsage({ lines })), "Lines changed by project");
+  assert.equal([...part.matchAll(/class="mx-row"/gu)].length, 5);
+  assert.match(part, /<summary>All columns, 7 rows<\/summary>/);
+});
+
+test("a row that reported nothing lines up with the table's columns (r1 L1)", () => {
+  const silent = usageRow("team-44", NOTHING, { not_reported_by: "rcli" });
+  const part = panel(render(withUsage({ agents: [silent] })), "By agent");
+  const rows = [...part.slice(part.indexOf("<table")).matchAll(/<tr[^>]*>.*?<\/tr>/gsu)].map((match) => match[0]);
+  const width = (row) => [...row.matchAll(/<t[dh]\b[^>]*>/gu)].reduce((sum, cell) => sum + Number(/colspan="(\d+)"/iu.exec(cell[0])?.[1] ?? 1), 0);
+  const row = rows.find((one) => one.includes("Usage not reported by rcli"));
+  assert.ok(row, "the row is in the table");
+  assert.equal(width(row), width(rows[0]));
 });
