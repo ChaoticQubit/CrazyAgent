@@ -489,9 +489,16 @@ fn turns(
     Ok(ended)
 }
 
+/// Whether an agent key names a team's master or sub-agent, the agents turns are kept for.
+/// Input: the key. Output: the answer.
+fn is_team_agent(agent: &str) -> bool {
+    agent.starts_with("master-") || agent.starts_with("team-")
+}
+
 /// The largest `ROWS_MAX` agents by the headline, each with the harnesses and accounts it used,
-/// once each in name order, and a team agent's turns in the range (`turns`). Inputs: the
-/// store, the project or None, and the range start. Output: the rows.
+/// once each in name order, and a team agent's turns in the range (`turns`), then while the
+/// list has room the team agents that ended turns but used no tokens, most turns first.
+/// Inputs: the store, the project or None, and the range start. Output: the rows.
 fn agents(
     db: &Connection,
     project: Option<&str>,
@@ -550,12 +557,34 @@ fn agents(
         }
     }
     let ended = turns(db, project, since_ms)?;
+    let mut turns_only: Vec<(&(String, String), &u64)> = ended
+        .iter()
+        .filter(|(key, count)| **count > 0 && is_team_agent(&key.1) && !index.contains_key(*key))
+        .collect();
+    turns_only.sort_by(|one, other| other.1.cmp(one.1).then_with(|| one.0.cmp(other.0)));
+    let room = ROWS_MAX.saturating_sub(rows.len());
+    rows.extend(
+        turns_only
+            .into_iter()
+            .take(room)
+            .map(|((owner, agent), _)| AgentRow {
+                project: owner.clone(),
+                agent: agent.clone(),
+                label: None,
+                harnesses: Vec::new(),
+                more_harnesses: 0,
+                accounts: Vec::new(),
+                more_accounts: 0,
+                tokens: Tokens::default(),
+                turns: None,
+            }),
+    );
+    assert!(rows.len() <= ROWS_MAX);
     for row in &mut rows {
         (row.harnesses, row.more_harnesses) = capped(std::mem::take(&mut row.harnesses));
         (row.accounts, row.more_accounts) = capped(std::mem::take(&mut row.accounts));
         row.label = agent_name(db, &row.project, &row.agent)?;
-        let team = row.agent.starts_with("master-") || row.agent.starts_with("team-");
-        row.turns = team.then(|| {
+        row.turns = is_team_agent(&row.agent).then(|| {
             ended
                 .get(&(row.project.clone(), row.agent.clone()))
                 .copied()

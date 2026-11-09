@@ -227,17 +227,20 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
   }
   const tools = new Map((adoption?.agents ?? []).map((row) => [agentKey(projectId, row), row]));
   const turns = new Map(metrics.agents.filter((row) => row.project === projectId).map((row) => [row.agent, row.turns]));
+  const agentRow = (key: string, name: string, tokens: Tokens): BreakdownRow => {
+    const used = tools.get(key);
+    const skills = used ? (used.skills ?? []).reduce((sum, count) => sum + count, 0) + (used.other_skills ?? []).reduce((sum, other) => sum + other.count, 0) : null;
+    const ended = turns.get(key);
+    return {
+      key, name, tokens,
+      extra: [typeof ended === "number" ? String(ended) : "", ...(used ? [String(used.graphify ?? 0), String(used.context_mode ?? 0), String(skills)] : ["", "", ""])],
+    };
+  };
+  const reported = new Set(usage.agents.map((row) => row.key));
+  const turnsOnly = metrics.agents.filter((row) => row.project === projectId && !reported.has(row.agent) && (row.turns ?? 0) > 0);
   return {
     head: "Agent", extra: ["Turns", "graphify", "ctx_*", "Skills"], projectColumn,
-    rows: usage.agents.map((row) => {
-      const used = tools.get(row.key);
-      const skills = used ? (used.skills ?? []).reduce((sum, count) => sum + count, 0) + (used.other_skills ?? []).reduce((sum, other) => sum + other.count, 0) : null;
-      const ended = turns.get(row.key);
-      return {
-        key: row.key, name: agent(row.key), tokens: row.tokens,
-        extra: [typeof ended === "number" ? String(ended) : "", ...(used ? [String(used.graphify ?? 0), String(used.context_mode ?? 0), String(skills)] : ["", "", ""])],
-      };
-    }),
+    rows: [...usage.agents.map((row) => agentRow(row.key, agent(row.key), row.tokens)), ...turnsOnly.map((row) => agentRow(row.agent, agent(row.agent, row.label), row.tokens))],
   };
 }
 
