@@ -9316,7 +9316,10 @@ fn a_master_land_whose_conflicted_path_cannot_be_read_leaves_the_set_open() {
         &[("README", AGENT_FOURTH_LINE), (NAME, "owner\nagent\n")],
     );
     let fix = turn_of(&case, &master, "Keep both sides");
-    master_fix_lands(&case, &fix);
+    assert!(matches!(
+        case.accept(&fix).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
     set_stayed_open(&case, &sub, "its conflicted path could not be read");
 }
 
@@ -10199,8 +10202,8 @@ fn undoing_a_commit_leaves_a_set_accepted_below_it_on_the_same_file() {
     );
 }
 
-/// LAND-4 L1: an undo moves one branch. A set accepted with no commit on another branch
-/// cut from the undone commit still holds its change there, so it keeps its Accept.
+/// LAND-4 L1: an undo moves one branch. A set accepted with no commit at a commit only
+/// another branch holds still has its change there, so it keeps its Accept.
 #[test]
 fn undoing_a_commit_leaves_a_set_accepted_on_another_branch() {
     let case = Case::new();
@@ -10212,10 +10215,14 @@ fn undoing_a_commit_leaves_a_set_accepted_on_another_branch() {
     record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
     write(&other.worktree.join("README"), "one\ntwo\nthree\nfour\n");
     let maker = turn_of(&case, &other, "Add the line");
-    let AcceptOutcome::Landed { commit: made, .. } = case.accept(&maker).unwrap() else {
-        panic!("the accept conflicted");
-    };
-    case.owner(&["branch", "stage"]);
+    assert!(matches!(
+        case.accept(&maker).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    let tree = case.owner(&["rev-parse", "main^{tree}"]);
+    let on_stage = case.owner(&["commit-tree", tree.trim(), "-p", "main", "-m", "On stage"]);
+    let on_stage = on_stage.trim().to_owned();
+    case.owner(&["branch", "stage", &on_stage]);
     crate::team::initialize(&case.db).unwrap();
     case.db
         .execute(
@@ -10228,7 +10235,7 @@ fn undoing_a_commit_leaves_a_set_accepted_on_another_branch() {
     };
     assert_eq!(
         (commit, branch),
-        (made, "stage".to_owned()),
+        (on_stage, "stage".to_owned()),
         "no commit, on stage"
     );
     assert!(matches!(
