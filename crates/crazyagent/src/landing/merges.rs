@@ -31,8 +31,9 @@ const OWN_COMMITS_MAX: usize = 32;
 /// engine recorded at an earlier turn end or made itself as the update merge it hands the
 /// agent, or, for a lead, in the tip of one of its own workers, or, for the master at Full
 /// access, in the head of any open change set of the project (DEC-117 Q2). "Catch up with
-/// main" Off is the git copy's rule and not read here: the owner's branch must stay known
-/// for the update merges, so landed work merged by a git outside the copy passes. The caller
+/// main" Off is a rule of the git the app writes for an agent and is not read here: the
+/// owner's branch must stay known for the update merges, so landed work merged any other
+/// way passes. The caller
 /// holds the repository hold, so nothing here takes it. Inputs: the store, the workspace, the owner
 /// repository and the agent's head. Output: Ok, else `changes_outside_merge`,
 /// `changes_too_large` or a plain git or store code.

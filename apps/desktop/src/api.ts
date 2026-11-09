@@ -1334,8 +1334,8 @@ export function closeProjectWalls(id: string): Promise<Result<void>> {
 
 /** Sets the project's "Catch up with main" setting for agents started from now on: on lets each
  * agent merge the landed main, `crazyagent/main`, into its own branch and tells it to; off makes the
- * git each agent is given refuse that merge, which a master at Full access or a git run by its full
- * path does not meet.
+ * git the app writes for an agent refuse that merge, except a master at Full access, and is a guide,
+ * not a lock: landed work can still come in another way.
  * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
 export function setCatchUpMain(id: string, mode: CatchUpMain): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_catch_up_main", { id, mode, generation: nextGeneration() });
