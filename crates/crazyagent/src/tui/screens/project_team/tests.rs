@@ -162,6 +162,7 @@ fn team() -> TeamStatus {
         master_lands: None,
         reask_empty_reply: true,
         catch_up_main: crate::team::CatchUpMain::On,
+        reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -2728,7 +2729,7 @@ fn catch_up_with_main_shows_on_under_overlapping_edits_and_space_flips_it() {
         (
             CatchUpMain::Off,
             "Off",
-            "Catch up with main is off for agents started from now on: their git merge of main is refused.",
+            "Catch up with main is off for agents started from now on: the git the app writes for an agent refuses git merge crazyagent/main, except a master at Full access. It is a guide, not a lock: landed work can still come in another way.",
         ),
         (
             CatchUpMain::On,
@@ -2745,6 +2746,58 @@ fn catch_up_with_main_shows_on_under_overlapping_edits_and_space_flips_it() {
             })
         );
         stored.catch_up_main = mode;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(row(&view).contains(words), "{}", row(&view));
+    }
+}
+
+/// The Coordination screen's last row shows the stored Reuse idle agents choice, Off by
+/// default, and Space flips it: each press sends the setting's own change, the engine's
+/// answer says what a new task now does and the row shows the choice (HB-S5-A).
+#[test]
+fn reuse_idle_agents_shows_off_by_default_and_space_flips_it() {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut stored = team();
+    stored.coordination = Some(crate::team::coordination(&connection, &project()).unwrap());
+    stored.reuse_idle = crate::team::reuse_idle(&connection, &project()).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    for _ in 0..16 {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 16);
+    let row = |view: &TeamView| find(&frame(view, 120, 40), "Reuse idle agents").to_owned();
+    assert!(row(&view).contains("Off"), "{}", row(&view));
+    let mut at = NOW;
+    for (mode, words, done) in [
+        (
+            crate::team::ReuseIdle::On,
+            "On",
+            "Reuse idle agents is on: an idle agent may take the next task, on the history it already has.",
+        ),
+        (
+            crate::team::ReuseIdle::Off,
+            "Off",
+            "Reuse idle agents is off: each new task starts a new agent on the current branch.",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::ReuseIdle {
+                project_id: project(),
+                mode,
+            })
+        );
+        stored.reuse_idle = mode;
         at += 60_000;
         assert_eq!(
             settled(&mut view, reply, &stored, at),

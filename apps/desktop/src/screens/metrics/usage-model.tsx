@@ -20,13 +20,6 @@ export const RANGES: { value: UsageRange; label: string }[] = [
   { value: "all", label: "All" },
 ];
 
-/** Names shown in place of ids: projects, pools and accounts by id. */
-export interface UsageNames {
-  projects: Map<string, string>;
-  pools: Map<string, string>;
-  accounts: Map<string, string>;
-}
-
 /** Where a range starts: midnight today at the viewer's offset now, the one fixed offset the
  * engine cuts every day with, six or twenty-nine days before it so the range holds whole
  * engine days even across a daylight saving change, or null for all time. Inputs: the range
@@ -88,12 +81,6 @@ export function untilText(atMs: number, nowMs: number): string {
   if (hours < 1) return `in ${minutes} min`;
   if (hours < 24) return `in ${hours} h ${minutes % 60} min`;
   return `in ${Math.floor(hours / 24)} d ${hours % 24} h`;
-}
-
-/** How long until a window resets. Inputs: the reset time, null when unknown, and now.
- * Output: "Resets in 2 h 14 min" or "Next reset not known yet". */
-export function resetText(atMs: number | null, nowMs: number): string {
-  return atMs === null ? "Next reset not known yet" : `Resets ${untilText(atMs, nowMs)}`;
 }
 
 /** How long ago something happened. Inputs: the time and now. Output: "just now",

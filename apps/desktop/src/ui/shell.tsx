@@ -7,10 +7,29 @@ export { BrandMark };
 
 export type EngineState = "connecting" | "running" | "down" | "outdated";
 
+/** Says how many agents are working. Input: the count, above zero. Output: the words. */
+export function agentsWorking(count: number): string {
+  return `${count} ${count === 1 ? "agent" : "agents"} working`;
+}
+
 export interface SidebarProject {
   id: string;
   name: string;
   flag?: string;
+  working?: number;
+}
+
+/** A project row's unseen alert count: the number on screen and, after it, the words a screen
+ * reader needs to know what the number counts. Input: the count as text. Output: the flag. */
+function UnseenFlag({ flag }: { flag: string }) {
+  return <><span className="nav-flag">{flag}</span><span className="visually-hidden">{flag === "1" ? "unseen alert" : "unseen alerts"}</span></>;
+}
+
+/** A project row's running-agent count: the number on screen, the words for a screen reader
+ * and the tooltip. Input: how many agents are working, above zero. Output: the count. */
+function WorkingCount({ count }: { count: number }) {
+  const words = agentsWorking(count);
+  return <span className="nav-live" title={words}><span aria-hidden="true">{count}</span><span className="visually-hidden">{words}</span></span>;
 }
 
 /** The fixed 220 px sidebar as the approved design draws it: the brand, the project list alone
@@ -33,7 +52,8 @@ export function Sidebar({ route, projects, profileName, engine, onRetry }: {
       <div className="nav-group">
         {projects?.map((project) => <a key={project.id} className="nav-item" href={formatRoute({ name: "project", id: project.id, tab: "overview" })}
           aria-current={current(route.name === "project" && route.id === project.id)}>
-          <Icon name="folder" /><span className="name">{project.name}</span>{project.flag && <span className="nav-flag">{project.flag}</span>}
+          {project.working ? <span className="nav-live-dot" aria-hidden="true" /> : <Icon name="folder" />}<span className="name">{project.name}</span>
+          {project.working ? <WorkingCount count={project.working} /> : null}{project.flag && <UnseenFlag flag={project.flag} />}
         </a>)}
       </div>
     </nav>
@@ -44,7 +64,7 @@ export function Sidebar({ route, projects, profileName, engine, onRetry }: {
       <a className="nav-item" href={formatRoute({ name: "new-project", step: "basics" })} aria-current={current(route.name === "new-project")}>
         <Icon name="folder-plus" /><span className="name">New project</span>
       </a>
-      <a className="nav-item" href={formatRoute({ name: "settings", tab: "accounts" })} aria-current={current(route.name === "settings" && route.tab !== "profile")}>
+      <a className="nav-item" href={formatRoute({ name: "settings", tab: "accounts" })} aria-current={current(route.name === "settings")}>
         <Icon name="settings" /><span className="name">Settings</span>
       </a>
       <a className="nav-item" href={formatRoute({ name: "metrics" })} aria-current={current(route.name === "metrics")}>
@@ -54,11 +74,13 @@ export function Sidebar({ route, projects, profileName, engine, onRetry }: {
     <div className="sidebar-foot">
       <span className="avatar" aria-hidden="true">{Array.from(name)[0].toUpperCase()}</span>
       <span className="foot-text">
-        <a className="me" href={formatRoute({ name: "settings", tab: "profile" })} aria-current={current(route.name === "settings" && route.tab === "profile")}>{name}</a>
+        <span className="foot-name">
+          <a className="me" href={formatRoute({ name: "settings", tab: "profile" })}>{name}</a>
+          {engine !== "running" && engine !== "connecting" && <button type="button" className="btn quiet small foot-retry" onClick={onRetry}>Try again</button>}
+        </span>
         {engine === "running" ? <span className="engine-state running"><Icon name="server" size={13} />Engine running</span>
           : engine === "connecting" ? <span className="engine-state connecting"><Icon name="loader-circle" size={13} spin />Connecting...</span>
-          : <span className="row"><span className="engine-state down"><Icon name="wifi-off" size={13} />Engine not running</span>
-            <button type="button" className="btn quiet small" onClick={onRetry}>Try again</button></span>}
+          : <span className="engine-state down"><Icon name="wifi-off" size={13} />Engine not running</span>}
       </span>
     </div>
   </aside>;

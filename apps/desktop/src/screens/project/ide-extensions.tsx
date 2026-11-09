@@ -22,6 +22,7 @@ export interface ApprovedExtension {
 const POLL_MS = 3000;
 
 const REFUSALS: Record<string, string> = {
+  ide_extension_ai_locked: "CrazyAgent keeps AI features out of the IDE, so this extension can't be installed.",
   ide_extension_ask_missing: "The IDE's request expired. Ask again from the IDE.",
   ide_extension_hash_mismatch: "The download didn't match the checksum Open VSX lists, so it wasn't approved.",
   ide_extension_not_found: "Open VSX doesn't list this extension or version.",

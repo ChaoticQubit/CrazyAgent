@@ -20,8 +20,9 @@ function Counter({ value, maxLength, counterAt }: { value: string; maxLength?: n
 
 /** A labelled one-line text input with helper text, an error linked by aria-describedby and
  * an optional character counter shown near the limit. Inputs: id, label, value, change
- * handler, helper, error, max length, counter threshold, native input attributes. */
-export function TextField({ id, label, value, onValue, helper, error, maxLength, counterAt, ...rest }: {
+ * handler, helper, error, max length, counter threshold, whether a setting row around the
+ * field draws the label, native input attributes. */
+export function TextField({ id, label, value, onValue, helper, error, maxLength, counterAt, labelOutside = false, ...rest }: {
   id: string;
   label: string;
   value: string;
@@ -30,9 +31,10 @@ export function TextField({ id, label, value, onValue, helper, error, maxLength,
   error?: string;
   maxLength?: number;
   counterAt?: number;
+  labelOutside?: boolean;
 } & Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "id">) {
   return <div className="field">
-    <label htmlFor={id}>{label}</label>
+    {!labelOutside && <label htmlFor={id}>{label}</label>}
     <input {...rest} id={id} className="input" value={value} maxLength={maxLength} aria-invalid={error ? true : undefined}
       aria-describedby={describedBy(id, helper, error)} onChange={(event) => onValue(event.target.value)} />
     <Counter value={value} maxLength={maxLength} counterAt={counterAt} />
@@ -41,8 +43,9 @@ export function TextField({ id, label, value, onValue, helper, error, maxLength,
 }
 
 /** A labelled multi-line text area with helper, error and an optional near-limit counter.
- * Inputs: id, label, value, change handler, rows, helper, error, max length, counter threshold. */
-export function TextArea({ id, label, value, onValue, rows = 3, helper, error, maxLength, counterAt, readOnly = false }: {
+ * Inputs: id, label, value, change handler, rows, helper, error, max length, counter threshold
+ * and whether a label elsewhere on the page already names it. */
+export function TextArea({ id, label, value, onValue, rows = 3, helper, error, maxLength, counterAt, readOnly = false, labelOutside = false }: {
   id: string;
   label: string;
   value: string;
@@ -53,9 +56,10 @@ export function TextArea({ id, label, value, onValue, rows = 3, helper, error, m
   maxLength?: number;
   counterAt?: number;
   readOnly?: boolean;
+  labelOutside?: boolean;
 }) {
   return <div className="field">
-    <label htmlFor={id}>{label}</label>
+    {!labelOutside && <label htmlFor={id}>{label}</label>}
     <textarea id={id} className="textarea" rows={rows} value={value} maxLength={maxLength} readOnly={readOnly} aria-invalid={error ? true : undefined}
       aria-describedby={describedBy(id, helper, error)} onChange={(event) => onValue(event.target.value)} />
     <Counter value={value} maxLength={maxLength} counterAt={counterAt} />
@@ -137,8 +141,9 @@ export function addChip(values: string[], text: string, max: number, maxLength: 
 
 /** Chips for a short list (tech stack): removable chips, a text entry that adds on Enter or
  * comma, and catalog suggestions shown as quick-add chips. Inputs: id, label, values,
- * change handler, suggestions, max count and length, helper. */
-export function ChipInput({ id, label, values, onValues, suggestions = [], max = 12, maxLength = 40, helper }: {
+ * change handler, suggestions, max count and length, helper and whether a label elsewhere on
+ * the page already names it. */
+export function ChipInput({ id, label, values, onValues, suggestions = [], max = 12, maxLength = 40, helper, labelOutside = false }: {
   id: string;
   label: string;
   values: string[];
@@ -147,6 +152,7 @@ export function ChipInput({ id, label, values, onValues, suggestions = [], max =
   max?: number;
   maxLength?: number;
   helper?: ReactNode;
+  labelOutside?: boolean;
 }) {
   const [text, setText] = useState("");
   const [error, setError] = useState("");
@@ -161,7 +167,7 @@ export function ChipInput({ id, label, values, onValues, suggestions = [], max =
   const open = suggestions.filter((item) => !values.some((value) => value.toLowerCase() === item.toLowerCase()) &&
     item.toLowerCase().includes(text.trim().toLowerCase())).slice(0, 12);
   return <div className="field chip-input">
-    <label htmlFor={id}>{label}</label>
+    {!labelOutside && <label htmlFor={id}>{label}</label>}
     {values.length > 0 && <ul className="chips plain-list" aria-label={`${label} chosen`}>
       {values.map((value) => <li key={value} className="chip">{value}
         <button type="button" aria-label={`Remove ${value}`} onClick={() => onValues(values.filter((item) => item !== value))}><Icon name="x" size={12} /></button>

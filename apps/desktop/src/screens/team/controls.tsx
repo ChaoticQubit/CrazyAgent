@@ -1,15 +1,16 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { useContext, useEffect, useState, type ReactNode } from "react";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { IconName, SelectOption } from "../../ui";
+import { SettingFind, SettingRow, settingMatches } from "../../ui/setting";
 import { afterSave, shownChoice, useHeld } from "../../state";
 import { displayText } from "../conversation";
 import { savedStale } from "../project/settings";
 import { CoordinationControls, PerHarnessControls, ToolsControls } from "./coordination";
-import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, type TeamProject } from "./setup-rows";
+import { AgentAccessSetting, MasterHarnessSetting, SubHarnessesSetting, useTeam, type TeamProject } from "./setup-rows";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
 export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
@@ -187,7 +188,7 @@ export function settingsVersion(status: Pick<TeamStatus, "settings_version">): n
   return status.settings_version ?? 0;
 }
 
-export { afterSave, shownChoice };
+export { afterSave, shownChoice, SettingRow };
 
 type Limits = { turn: number | null; session: number | null; idle: number | null };
 
@@ -246,7 +247,7 @@ const PER_HARNESS_ROWS = ["Messages to Claude Code agents", "Claude Code termina
  * line and the labels of its rows in the order they show. */
 export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; about: string })[] = [
   { id: "model", title: "Model and harness", about: "Which harnesses run, on which accounts, and how many.", icon: "cpu",
-    rows: ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"] },
+    rows: ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"] },
   { id: "access", title: "Access and merging", about: "What agents may touch, and who merges finished work.", icon: "shield-check",
     rows: ["Agent access", MERGE_INTO_MAIN, "Ask me before merging into the master's branch", "Agent branches", RESTARTS_FROM_MAIN, "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"] },
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
@@ -261,19 +262,13 @@ function findWords(query: string): string {
   return query.trim().toLowerCase();
 }
 
-function matches(label: string, words: string): boolean {
-  return words === "" || label.toLowerCase().includes(words);
-}
-
 /** The groups and rows Find a setting keeps: every row whose label holds the typed words, any
  * case, in each group that holds one. Input: the typed words. Output: the groups with their
  * kept rows, in order; every group and row for blank words. */
 export function matchingGroups(query: string): { id: SettingGroupId; rows: string[] }[] {
   const words = findWords(query);
-  return SETTING_GROUPS.map((group) => ({ id: group.id, rows: group.rows.filter((row) => matches(row, words)) })).filter((group) => group.rows.length > 0);
+  return SETTING_GROUPS.map((group) => ({ id: group.id, rows: group.rows.filter((row) => settingMatches(row, words)) })).filter((group) => group.rows.length > 0);
 }
-
-const SettingFind = createContext("");
 
 /** One group of settings drawn as the mockup's panel: its icon, heading and purpose line over its
  * rows, hidden while Find a setting keeps none of its rows. Inputs: the group, the id prefix of
@@ -282,19 +277,11 @@ export function SettingGroup({ group, prefix, level = 2, children }: { group: Se
   const words = useContext(SettingFind);
   const id = `${prefix}-${group.id}`;
   const Heading = level === 2 ? "h2" : "h3";
-  return <section className="set-group" id={id} aria-labelledby={`${id}-title`} hidden={!group.rows.some((row) => matches(row, words))}>
+  return <section className="set-group" id={id} aria-labelledby={`${id}-title`} hidden={!group.rows.some((row) => settingMatches(row, words))}>
     <div className="set-head"><span className="set-icon" aria-hidden="true"><Icon name={group.icon} size={16} /></span>
       <div><Heading id={`${id}-title`} tabIndex={-1}>{group.title}</Heading>{group.about && <p>{group.about}</p>}</div></div>
     {children}
   </section>;
-}
-
-/** One setting row: its label with any help under it on the left and its control on the
- * right, or all stacked for a wide row; hidden while Find a setting does not match its label.
- * Inputs: the label, whether it is wide and the row's parts. Output: the row. */
-export function SettingRow({ label, wide = false, children }: { label: string; wide?: boolean; children: ReactNode }) {
-  const words = useContext(SettingFind);
-  return <div className={wide ? "set-row wide" : "set-row"} data-setting={label} hidden={!matches(label, words)}>{children}</div>;
 }
 
 /** Saves one team setting with the settings version of the team read the controls show, so a
@@ -452,6 +439,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   data?: TeamProject;
   group?: SettingGroupId | null;
 }) {
+  const harnessRows = useTeam(data);
   const [masterBranch, setMasterBranchText] = useState<string | null>(null);
   const [landOn, setLandOnText] = useState<string | null>(null);
   const [graceText, setGraceText] = useState<string | null>(null);
@@ -468,6 +456,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const [askMerge, holdAskMerge] = useHeld<"off" | "on">(status.ask_before_merge === true ? "on" : "off");
   const [masterLands, holdMasterLands] = useHeld<MasterLands>(status.master_lands ?? "waits");
   const [catchUp, holdCatchUp] = useHeld<"off" | "on">(status.catch_up_main === "off" ? "off" : "on");
+  const [reuseIdle, holdReuseIdle] = useHeld<"off" | "on">(status.reuse_idle === "on" ? "on" : "off");
   const [newFolder, holdNewFolder] = useHeld(status.new_folder_files_max ?? NEW_FOLDER_DEFAULT);
   const [maxHarnesses, holdMaxHarnesses] = useHeld(capValue(status.max_harnesses));
   const [maxTeammates, holdMaxTeammates] = useHeld(capValue(status.max_teammates));
@@ -531,6 +520,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const chooseMasterLands = (choice: MasterLands) => change(() => setMasterLands(projectId, choice), "what the master does with its conflict fixes", () => holdMasterLands(choice));
   const chooseAskMerge = (choice: "off" | "on") => change(() => setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting", () => holdAskMerge(choice));
   const chooseCatchUp = (choice: "off" | "on") => change(() => setCatchUpMain(projectId, choice), "the catch up with main setting", () => holdCatchUp(choice));
+  const chooseReuseIdle = (choice: "off" | "on") => change(() => setReuseIdle(projectId, choice), "the reuse idle agents setting", () => holdReuseIdle(choice));
   const chooseNewFolder = (files: number) => change(() => setNewFolderLimit(projectId, files), "the new folder limit", () => holdNewFolder(files));
 
   async function saveBackground(choice: BackgroundAtEnd) {
@@ -556,12 +546,18 @@ export function TeamControls({ projectId, status, reload, data, group }: {
       <div className="set-groups">
         {words !== "" && kept.length === 0 && <p className="pj-muted" role="status">No setting matches "{find.trim()}".</p>}
         <SettingGroup group={model} prefix={prefix}>
-          <MasterHarnessSetting data={data} label="Master harness" id={`${prefix}-master-harness`}
+          <MasterHarnessSetting rows={harnessRows} data={data} label="Master harness" id={`${prefix}-master-harness`}
             helper="The master plans, hands out tasks and merges. A change reaches the running master as Apply a master harness change says." />
-          <SubHarnessesSetting data={data} prefix={`${prefix}-slots`} />
+          <SubHarnessesSetting rows={harnessRows} data={data} prefix={`${prefix}-slots`} />
           <SettingRow label="Keep sub-agents ready">
             <Switch id={`tg-warm-${projectId}`} label={`Keep ${status.min_agents} ${status.min_agents === 1 ? "sub-agent" : "sub-agents"} ready`} checked={checked}
               onChecked={(on) => void toggle(on)} disabledReason={busy ? "Saving the last change." : status.min_agents < 1 ? "The team plan keeps no sub-agents ready." : undefined} />
+          </SettingRow>
+          <SettingRow label="Reuse idle agents">
+            <span className="set-label" aria-hidden="true">Reuse idle agents</span>
+            <Segmented label="Reuse idle agents" value={reuseIdle} onValue={(choice) => { if (!busy) void chooseReuseIdle(choice); }}
+              options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
+            <span className="tg-terminal-note">Off, each new task starts a new agent on the current branch. On, an idle agent of the same lead may take the next task, on the history it already has. Keep sub-agents ready reuses its agents either way.</span>
           </SettingRow>
           <OnSwitchSetting projectId={projectId} status={status} reload={reload} />
           <SettingRow label="Spread harnesses across accounts">
@@ -603,7 +599,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
             <span className="tg-terminal-note">On stops the master merging by itself: each finished harness's work waits in Changes for your Accept, and so does a master change set that fixes a conflict.</span>
           </SettingRow>
-          <h3 className="set-sub" hidden={!access.rows.slice(3).some((row) => matches(row, words))}>Branches</h3>
+          <h3 className="set-sub" hidden={!access.rows.slice(3).some((row) => settingMatches(row, words))}>Branches</h3>
           <SettingRow label="Agent branches">
             <span className="set-label" aria-hidden="true">Agent branches</span>
             <Segmented label="Agent branches" value={branchMode} onValue={(choice) => { if (!busy) void branches(choice); }}
@@ -660,7 +656,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
             <span className="set-label" aria-hidden="true">Catch up with main</span>
             <Segmented label="Catch up with main" value={catchUp} onValue={(choice) => { if (!busy) void chooseCatchUp(choice); }}
               options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
-            <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off refuses that merge. Merging another agent's branch stays refused either way.</span>
+            <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off makes the git the app writes for an agent refuse that command, except a master at Full access, whose git runs everything. Off is a guide, not a lock: nothing checks it later, so landed work can still come in another way.</span>
           </SettingRow>
           <SettingRow label="Finished agents">
             <span className="set-label" aria-hidden="true">Finished agents</span>
@@ -668,7 +664,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
             <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
           </SettingRow>
-          <h3 className="set-sub" hidden={!PER_HARNESS_ROWS.some((row) => matches(row, words))}>Per harness</h3>
+          <h3 className="set-sub" hidden={!PER_HARNESS_ROWS.some((row) => settingMatches(row, words))}>Per harness</h3>
           <PerHarnessControls projectId={projectId} status={status} reload={reload} />
         </SettingGroup>
         <SettingGroup group={limitsGroup} prefix={prefix}>

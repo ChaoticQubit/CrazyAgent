@@ -835,6 +835,8 @@ export type BranchMode = "named" | "detached";
 export type MasterLands = "merges" | "waits";
 /** Whether a project's agents may merge the landed main, `crazyagent/main`, into their own branch. */
 export type CatchUpMain = "on" | "off";
+/** Whether an idle agent of the same lead may take a project's next task, or each new task starts a new agent. */
+export type ReuseIdle = "on" | "off";
 
 /** A harness kind the coordination settings are kept for, by its catalog id. */
 export type CoordHarness = "claude-code" | "codex" | "rcli";
@@ -926,6 +928,7 @@ export interface TeamStatus {
   master_lands?: MasterLands | null;
   reask_empty_reply?: boolean;
   catch_up_main?: CatchUpMain;
+  reuse_idle?: ReuseIdle;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
   message_settings?: MessageSettings;
@@ -1109,6 +1112,7 @@ export interface AppTeamEvents {
   notifications: TeamNotification[];
   unseen: number;
   projects: { project_id: string; unseen: number; questions?: number }[];
+  working?: { project_id: string; agents: number }[];
 }
 
 export interface TeamPlanStep {

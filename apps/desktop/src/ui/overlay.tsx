@@ -64,7 +64,8 @@ function useModal(open: boolean) {
 }
 
 /** A modal dialog on the native dialog element: traps focus, starts on the first field, Esc
- * asks onClose, and focus returns to the opener. While busy, Back, Close and Esc do nothing.
+ * asks this dialog's onClose alone, and focus returns to the opener. While busy, Back, Close and
+ * Esc do nothing.
  * Inputs: open, title, close handler, optional Back handler, body, footer, wide layout, busy. */
 export function Dialog({ open, title, onClose, onBack, children, footer, wide = false, busy = false }: {
   open: boolean;
@@ -80,7 +81,7 @@ export function Dialog({ open, title, onClose, onBack, children, footer, wide = 
   const titleId = useId();
   if (!open) return null;
   return <dialog ref={ref} className={`dialog${wide ? " wide" : ""}`} aria-labelledby={titleId} aria-busy={busy || undefined}
-    onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}>
+    onCancel={(event) => { event.preventDefault(); event.stopPropagation(); if (!busy) onClose(); }}>
     <div className="dialog-head">
       {onBack && <Button iconOnly="Back" icon="arrow-left" disabled={busy} onClick={onBack} />}
       <h2 id={titleId}>{title}</h2>

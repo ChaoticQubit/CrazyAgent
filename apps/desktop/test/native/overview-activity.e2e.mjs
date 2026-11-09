@@ -164,6 +164,12 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.match(shown, /\d+ items? · last just now/, "the goal says how many events it has and when the last was");
         const first = await page.evaluate("document.querySelector('.pj-activity-goal')?.getAttribute('aria-label') ?? null");
         assert.equal(first, GOAL, "the goal with the newest event comes first");
+        const full = await value(bridge, "desktop_project_activity", { id: project, limit: 200 });
+        assert.ok(full.items.length >= 2, "the project has events to cut");
+        assert.equal(full.more, false, "a read that holds every event is not cut");
+        const cut = await value(bridge, "desktop_project_activity", { id: project, limit: full.items.length - 1 });
+        assert.equal(cut.items.length, full.items.length - 1, "the engine keeps to the limit");
+        assert.equal(cut.more, true, "the engine says the limit left an event out");
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});

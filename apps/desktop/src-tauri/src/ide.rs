@@ -45,6 +45,10 @@ pub struct Bounds {
     pub viewport: f64,
 }
 
+/// A panel counted from the top of the window's content view. Only [`Bounds::in_window`] makes
+/// one, so the window was read before whoever holds it takes the views lock.
+pub struct InWindow(Bounds);
+
 impl Bounds {
     /// Checks the panel the window sent: finite, inside a sane screen and at least one
     /// pixel each way. Input: the bounds. Output: them, or `ide_bounds_invalid`.
@@ -75,11 +79,14 @@ impl Bounds {
     }
 
     /// Counts the panel from the top of the window's content view, where a child webview is
-    /// placed, not from the top of the page. Input: the window. Output: the bounds to place.
-    fn in_window<R: Runtime>(self, window: &Window<R>) -> Result<Self, BridgeError> {
+    /// placed, not from the top of the page. Each read waits on the main thread, so it comes
+    /// before [`show`] or [`place`] take the views lock. Input: the window. Output: the bounds
+    /// to place, or the failure when the window cannot be read.
+    pub fn in_window<R: Runtime>(self, window: &Window<R>) -> Result<InWindow, BridgeError> {
         let scale = window.scale_factor().map_err(failed)?;
         let content = window.inner_size().map_err(failed)?;
-        Ok(self.below_inset(content.to_logical::<f64>(scale).height))
+        let height = content.to_logical::<f64>(scale).height;
+        Ok(InWindow(self.below_inset(height)))
     }
 
     fn rect(self) -> Rect {
@@ -382,8 +389,8 @@ fn restore_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(), BridgeError> {
 /// else a new child webview with the input guard in every frame, a navigation lock that only
 /// refuses, and links opened as new windows sent to the browser. Any other project's IDE is
 /// hidden, and the app menu gives up Cmd+Z, W, N, P, F and comma before the IDE takes focus.
-/// Inputs: the app, the main window, the views, the project, its workbench, the panel and
-/// the open's ticket. Output: Ok once shown, or `ide_open_cancelled` when a hide or close or a
+/// Inputs: the app, the main window to add the child to, the views, the project, its
+/// workbench, the panel counted in the window and the open's ticket. Output: Ok once shown, or `ide_open_cancelled` when a hide or close or a
 /// newer open came while the engine opened it.
 pub fn show(
     app: &AppHandle,
@@ -391,10 +398,9 @@ pub fn show(
     views: &IdeViews,
     project: &ProjectId,
     workbench: Workbench,
-    bounds: Bounds,
+    InWindow(bounds): InWindow,
     ticket: u64,
 ) -> Result<(), BridgeError> {
-    let bounds = bounds.in_window(window)?;
     let mut held = views.lock();
     if !held.admit(project, ticket) {
         return Err(refused("ide_open_cancelled"));
@@ -471,13 +477,15 @@ pub fn show(
     Ok(())
 }
 
-/// Moves the shown IDE webview over its panel after the panel moved or resized. Inputs: the
-/// app, the views, the project and the panel. Output: Ok, also when that IDE is not shown.
+/// Moves the shown IDE webview over its panel after the panel moved or resized. It takes no
+/// window: [`InWindow`] was read before this call, so the views lock never waits on one.
+/// Inputs: the app, the views, the project and the panel counted in the window. Output: Ok,
+/// also when that IDE is not shown.
 pub fn place<R: Runtime>(
     app: &AppHandle<R>,
     views: &IdeViews,
     project: &ProjectId,
-    bounds: Bounds,
+    InWindow(bounds): InWindow,
 ) -> Result<(), BridgeError> {
     let held = views.lock();
     if held.shown.as_deref() != Some(project.as_str()) {
@@ -488,7 +496,6 @@ pub fn place<R: Runtime>(
         .get(project.as_str())
         .and_then(|loaded| app.get_webview(&loaded.label))
     {
-        let bounds = bounds.in_window(&webview.window())?;
         webview.set_bounds(bounds.rect()).map_err(failed)?;
     }
     Ok(())

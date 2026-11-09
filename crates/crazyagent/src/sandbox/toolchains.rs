@@ -62,9 +62,10 @@ const GIT_SCRIPT_BYTES_MAX: u64 = 8192;
 /// a lead's copy, `@FREE@` for 1 in the free copy and `@MAIN@` for 1 while "Catch up with
 /// main" is on, else 0. It refuses merge, pull, rebase and cherry-pick, and aliases for
 /// them, with a plain reason (DEC-107 rule 2); with main on any copy merges
-/// `crazyagent/main` only while that name resolves to the commit the engine's own
-/// `refs/crazyagent/main` holds, a lead its own workers' `BRANCH--NAME` branches, and the
-/// free copy runs every command as is.
+/// `crazyagent/main` only while that name resolves to the commit `refs/crazyagent/main`
+/// holds, a courtesy check, since the copy lets an agent set that ref and the engine's turn
+/// end check is what refuses a merge of anything else, a lead its own workers'
+/// `BRANCH--NAME` branches, and the free copy runs every command as is.
 #[cfg(unix)]
 const GIT_SCRIPT: &str = r##"#!/bin/sh
 git='@GIT@'

@@ -10,6 +10,7 @@ const router = await import("../src/ui/router.ts");
 const shell = await import("../src/ui/shell.tsx");
 const app = await import("../src/app.tsx");
 const { SessionContext } = await import("../src/state.ts");
+const { dayLabel } = await import("../src/screens/metrics/usage-model.tsx");
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -57,7 +58,17 @@ const render = (patch = {}) => renderToStaticMarkup(createElement(view.MetricsPa
   onRange: forbidden, onBy: forbidden, onRetry: forbidden, ...patch,
 }));
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
-const tableText = (markup) => text(markup.slice(markup.lastIndexOf("<table")));
+const TITLES = { project: "By project", agent: "By agent", run: "By run", account: "By account", harness: "By harness" };
+const panel = (markup, title) => {
+  const start = markup.indexOf(`<h2>${title}</h2>`);
+  assert.ok(start >= 0, `no ${title} panel`);
+  return markup.slice(start, markup.indexOf("</section>", start));
+};
+const tableText = (markup, by = "project") => {
+  const part = panel(markup, TITLES[by]);
+  return text(part.slice(part.indexOf("<table")));
+};
+const usageRow = (key, value, patch = {}) => ({ key, tokens: value, runs: 1, last_ms: NOW - MINUTE, ...patch });
 
 test("the app Metrics page covers every project on the engine and filters by project", () => {
   const markup = renderToStaticMarkup(createElement(SessionContext.Provider, { value: SESSION }, createElement(appPage.AppMetrics, { projects: PROJECTS })));
@@ -72,38 +83,37 @@ test("all projects shows the same tiles, and By project lists each project with 
   assert.match(text(markup), /Tokens 2\.3K Input 1\.2K Cache write 800 Output 300/);
   assert.match(text(markup), /2 projects · Updated 10 s ago · provider-reported usage per turn/);
   assert.match(text(markup), /Tasks 6 done 1 waiting, 0 failed Merges 19 5 into main, 1 undone Lines /, "the project tab's tiles under the lead panel");
-  assert.match(text(markup), /By project By agent By run By account By harness/);
   const table = tableText(markup);
-  assert.match(table, /^ Project Tokens Input Cache write Output Cache read Agents Runs Merges Share of tokens /, "By project counts each project's merges, as the mockup does");
+  assert.match(table, /^ Project Tokens Input Cache write Output Cache read Agents Runs Merges Last used Share of tokens /, "By project counts each project's merges, as the mockup does");
   assert.match(table, /Alpha 1\.4K 700 500 200 3K 2 3 4 61%/);
   assert.match(table, /Beta 900 500 300 100 1K 1 1 0 39%/);
 });
 
 test("across all projects, By agent and By run add a Project column, and an agent names its harness and accounts", () => {
-  const agents = tableText(render({ by: "agent" }));
-  assert.match(agents, /^ Agent Project Tokens Input Cache write Output Cache read Harness Account Share of tokens /);
+  const agents = tableText(render(), "agent");
+  assert.match(agents, /^ Agent Project Tokens Input Cache write Output Cache read Harness Account Runs Last used Share of tokens /);
   assert.match(agents, /Juniper Alpha 1\.4K 700 500 200 3K Codex Pool A, Claude 1, acct-b 61%/);
   assert.match(agents, /Master, Beta Beta 900 500 300 100 1K Claude Code Pool A, Claude 1 39%/);
   assert.doesNotMatch(agents, /graphify|ctx_\*/);
-  const runs = tableText(render({ by: "run" }));
+  const runs = tableText(render(), "run");
   assert.match(runs, /^ Run Project Tokens Input Cache write Output Cache read Agent Ended Result Share of tokens /);
   assert.match(runs, /#142 Calendar API endpoints Alpha 1\.4K 700 500 200 3K Juniper running Working 61%/);
   assert.match(runs, /No task Beta 900 500 300 100 1K Master, Beta 11 min ago 39%/);
 });
 
 test("By account and By harness name the projects that used each one", () => {
-  assert.match(tableText(render({ by: "account" })), /^ Account Tokens Input Cache write Output Cache read Agents Projects Share of tokens Pool A, Claude 1 2\.3K 1\.2K 800 300 4K 2 Alpha, Beta 100%/);
-  const harnesses = tableText(render({ by: "harness" }));
+  assert.match(tableText(render(), "account"), /^ Account Tokens Input Cache write Output Cache read Agents Projects Runs Last used Share of tokens Pool A, Claude 1 2\.3K 1\.2K 800 300 4K 2 Alpha, Beta 100%/);
+  const harnesses = tableText(render(), "harness");
   assert.match(harnesses, /^ Harness Tokens Input Cache write Output Cache read Agents Projects Share of tokens /);
   assert.match(harnesses, /Codex 1\.4K 700 500 200 3K 1 Alpha 61%/);
   assert.match(harnesses, /Claude Code 900 500 300 100 1K 1 Beta 39%/);
 });
 
 test("a picked project shows its name, stays picked and drops the Project column", () => {
-  const markup = render({ projectId: "alpha", by: "agent" });
+  const markup = render({ projectId: "alpha" });
   assert.match(text(markup), /Alpha · Updated 10 s ago · provider-reported usage per turn/);
   assert.match(markup, /<option value="alpha" selected="">Alpha<\/option>/);
-  assert.match(tableText(markup), /^ Agent Tokens Input Cache write Output Cache read Harness Account Share of tokens /);
+  assert.match(tableText(markup, "agent"), /^ Agent Tokens Input Cache write Output Cache read Harness Account Runs Last used Share of tokens /);
 });
 
 test("the sidebar's App section opens Metrics at #/metrics, last of its links", () => {
@@ -130,7 +140,7 @@ test("a Projects, Harness or Account cell lists the names the read kept, then ho
     harnesses: [{ ...metrics.harnesses[0], more_projects: 0 }],
     agents: [{ ...metrics.agents[0], more_harnesses: 0, more_accounts: 2 }],
   };
-  const shown = (by) => tableText(render({ by, metrics: { kind: "ok", value: capped } }));
+  const shown = (by) => tableText(render({ metrics: { kind: "ok", value: capped } }), by);
   assert.match(shown("account"), /p-0, p-1, p-2, p-3, p-4, p-5, p-6, p-7, \+3 more/);
   assert.match(shown("agent"), /Codex Pool A, Claude 1, acct-b, \+2 more/);
   assert.doesNotMatch(shown("harness"), /more/);
@@ -148,7 +158,7 @@ test("the app page names agents from the metrics read and reads no team status p
     runs: metrics.runs.map((run) => ({ ...run, label: label(run.agent) })),
     agents: metrics.agents.map((row) => ({ ...row, label: label(row.agent) })),
   };
-  const shown = (by) => tableText(render({ by, names: { agents: new Map(), accounts: names.accounts }, metrics: { kind: "ok", value: labelled } }));
+  const shown = (by) => tableText(render({ names: { agents: new Map(), accounts: names.accounts }, metrics: { kind: "ok", value: labelled } }), by);
   assert.match(shown("agent"), /Ada \(@calendar\) Alpha 1\.4K/);
   assert.match(shown("agent"), /Master Beta 900/);
   assert.match(shown("run"), /#142 Calendar API endpoints Alpha 1\.4K 700 500 200 3K Ada \(@calendar\) /);
@@ -156,7 +166,7 @@ test("the app page names agents from the metrics read and reads no team status p
 
 test("across all projects By project and By agent total the Tokens tile, an Other row holding what the listed rows leave", () => {
   const listed = { ...metrics, projects: [metrics.projects[0]], agents: [metrics.agents[0]] };
-  const shown = (by) => tableText(render({ by, metrics: { kind: "ok", value: listed } }));
+  const shown = (by) => tableText(render({ metrics: { kind: "ok", value: listed } }), by);
   for (const by of ["project", "agent"]) {
     assert.match(shown(by), /Other, not listed 900 500 300 100 1K 39%/, by);
     assert.match(shown(by), /Total 2\.3K 1\.2K 800 300 4K/, by);
@@ -292,4 +302,131 @@ test("a picked project keeps the app page's notice and Account limits (r1 L3)", 
   assert.match(words, /These numbers still use the old counting\./);
   assert.match(words, /Account limits/);
   assert.match(words, /Set reset time/);
+});
+
+test("the page has a panel by project, agent, run, account, pool and harness, then lines changed, in the mockup's order", () => {
+  const markup = render(withUsage({ pools: [usageRow("pool-a", ALPHA)], days: [{ day_ms: SINCE, tokens: ALPHA }] }));
+  const titles = [...markup.matchAll(/<h2>([^<]*)<\/h2>/gu)].map((match) => match[1]);
+  assert.deepEqual(titles.filter((title) => /^(By|Lines)/u.test(title)), ["By project", "By agent", "By run", "By account", "By pool", "By harness", "Lines changed by project", "By day"]);
+});
+
+test("a panel shows at most five rows, and All columns holds every row with every column", () => {
+  const many = Array.from({ length: 7 }, (_, index) => ({ key: `p${index}`, tokens: ALPHA, agents: 1, runs: 1, projects: [`p${index}`], merges: 0 }));
+  const part = panel(render({ metrics: { kind: "ok", value: { ...metrics, projects: many } } }), "By project");
+  assert.equal([...part.matchAll(/class="mx-row"/gu)].length, 5);
+  assert.match(part, /<summary>All columns, 7 rows<\/summary>/);
+  assert.equal([...part.slice(part.indexOf("<table")).matchAll(/<th scope="row">p\d/gu)].length, 7);
+});
+
+test("By account keeps Runs and Last used from the usage read", () => {
+  const part = text(panel(render(withUsage({ accounts: [usageRow("acct-a", ALPHA, { runs: 9, last_ms: NOW - 3 * MINUTE })] })), "By account"));
+  assert.match(part, /Runs Last used/);
+  assert.match(part, /9 3 min ago/);
+});
+
+test("By pool names the pool and a harness that reported nothing says so, never zero", () => {
+  const limits = { ...LIMITS, pools: new Map([["pool-a", "Pool A"]]) };
+  const silent = usageRow("pool-a", tokens(0, 0, 0, 0), { not_reported_by: "rcli" });
+  const part = text(panel(render({ ...withUsage({ pools: [silent] }), filter: { ...FILTER, limits } }), "By pool"));
+  assert.match(part, /Pool A/);
+  assert.match(part, /Usage not reported by rcli/);
+});
+
+test("an agent only the usage read knows stays listed as not reported", () => {
+  const silent = usageRow("team-44", tokens(0, 0, 0, 0), { not_reported_by: "rcli" });
+  const part = text(panel(render(withUsage({ agents: [silent] })), "By agent"));
+  assert.match(part, /Agent 44 Usage not reported by rcli/);
+  assert.doesNotMatch(part, /Agent 44 Usage not reported by rcli 0 cache read/, "a harness that reported nothing never reads as zero");
+});
+
+test("runs tied to no project read as Unattributed", () => {
+  const rows = [{ key: "", tokens: ALPHA, agents: 0, runs: 1, projects: [], merges: 0 }];
+  assert.match(text(panel(render({ metrics: { kind: "ok", value: { ...metrics, projects: rows } } }), "By project")), /Unattributed/);
+});
+
+test("Lines changed lists added and removed, and All columns keeps change sets and accepted commits", () => {
+  const part = text(panel(render(), "Lines changed by project"));
+  assert.match(part, /Alpha \+90 −57/);
+  assert.match(part, /Project Change sets Lines Accepted commits Lines accepted/);
+});
+
+test("By day shows the newest seven days and offers the rest", () => {
+  const days = Array.from({ length: 30 }, (_, index) => ({ day_ms: SINCE + (index - 29) * DAY, tokens: ALPHA }));
+  const part = panel(render(withUsage({ days })), "By day");
+  const shown = [...part.matchAll(/<th scope="row">([^<]*)<\/th>/gu)].map((match) => match[1]);
+  assert.deepEqual(shown, [0, 1, 2, 3, 4, 5, 6].map((back) => dayLabel(SINCE - back * DAY, 0)));
+  assert.match(text(part), /Show all 30 days/);
+  assert.match(text(part), /Day Tokens Input Cache write Output Cache read/);
+});
+
+test("a range with no usage shows the empty state and keeps Account limits", () => {
+  const words = text(render(withUsage({ total: tokens(0, 0, 0, 0), lines: [], days: [] })));
+  assert.match(words, /No usage in this range Runs show up here a few seconds after an agent works\./);
+  assert.match(words, /Account limits/);
+});
+
+test("a row with no tokens draws no bar, so it never reads as a little usage", () => {
+  const silent = usageRow("team-44", tokens(0, 0, 0, 0), { not_reported_by: "rcli" });
+  const part = panel(render(withUsage({ agents: [silent] })), "By agent");
+  const bar = part.slice(part.indexOf("Agent 44")).match(/<i style="width:([^"]*)"/);
+  assert.ok(bar, "the row has its bar track");
+  assert.equal(bar[1], "0%");
+});
+
+const NOTHING = tokens(0, 0, 0, 0);
+const agentRow = (project, agent, value) => ({ project, agent, harnesses: ["codex"], accounts: ["acct-a"], tokens: value });
+const agentsRead = (rows, used) => ({ ...withUsage({ agents: used }), metrics: { kind: "ok", value: { ...metrics, agents: rows } } });
+
+test("one agent key on two projects' rows leaves Runs and Last used blank on both (r1 M1)", () => {
+  const rows = [agentRow("alpha", "onboarding", ALPHA), agentRow("beta", "onboarding", NOTHING)];
+  const table = tableText(render(agentsRead(rows, [usageRow("onboarding", ALPHA, { runs: 42, last_ms: NOW - HOUR })])), "agent");
+  assert.match(table, /Runs Last used/);
+  assert.doesNotMatch(table, /\b42\b/);
+  assert.doesNotMatch(table, / ago /);
+});
+
+test("an agent key whose usage holds more than its one listed row leaves Runs and Last used blank (r1 M1)", () => {
+  const rows = [agentRow("alpha", "onboarding", BETA)];
+  const table = tableText(render(agentsRead(rows, [usageRow("onboarding", ALPHA, { runs: 42, last_ms: NOW - HOUR })])), "agent");
+  assert.doesNotMatch(table, /\b42\b/);
+  assert.doesNotMatch(table, / ago /);
+});
+
+test("an agent on one project keeps its Runs and Last used, and one that reported nothing lists once (r1 L1)", () => {
+  const rows = [agentRow("alpha", "team-8", ALPHA), agentRow("beta", "team-9", BETA)];
+  const used = [usageRow("team-8", ALPHA, { runs: 5, last_ms: NOW - 3 * MINUTE }), usageRow("team-9", BETA, { not_reported_by: "rcli" })];
+  const markup = render(agentsRead(rows, used));
+  assert.match(tableText(markup, "agent"), /5 3 min ago/);
+  assert.equal([...panel(markup, "By agent").matchAll(/class="mx-row"/gu)].length, 2);
+});
+
+test("a usage row with no metrics row is listed only when its harness reported nothing (r1 L1)", () => {
+  assert.doesNotMatch(text(panel(render(withUsage({ agents: [usageRow("team-44", ALPHA)] })), "By agent")), /Agent 44/);
+});
+
+test("a range with only lines changed is not empty (r1 L1)", () => {
+  const words = text(render(withUsage({ total: NOTHING, days: [] })));
+  assert.doesNotMatch(words, /No usage in this range/);
+  assert.match(words, /Lines changed by project/);
+});
+
+test("a range where only a harness that reports nothing ran is not empty (r1 L1)", () => {
+  assert.doesNotMatch(text(render(withUsage({ total: NOTHING, lines: [], days: [], not_reported_by: ["rcli"] }))), /No usage in this range/);
+});
+
+test("Lines changed shows at most five rows and All columns counts every one (r1 L1)", () => {
+  const lines = Array.from({ length: 7 }, (_, index) => ({ project: `p${index}`, change_sets: 1, added: 9 - index, removed: 1, commits: 1, committed_added: 1, committed_removed: 1 }));
+  const part = panel(render(withUsage({ lines })), "Lines changed by project");
+  assert.equal([...part.matchAll(/class="mx-row"/gu)].length, 5);
+  assert.match(part, /<summary>All columns, 7 rows<\/summary>/);
+});
+
+test("a row that reported nothing lines up with the table's columns (r1 L1)", () => {
+  const silent = usageRow("team-44", NOTHING, { not_reported_by: "rcli" });
+  const part = panel(render(withUsage({ agents: [silent] })), "By agent");
+  const rows = [...part.slice(part.indexOf("<table")).matchAll(/<tr[^>]*>.*?<\/tr>/gsu)].map((match) => match[0]);
+  const width = (row) => [...row.matchAll(/<t[dh]\b[^>]*>/gu)].reduce((sum, cell) => sum + Number(/colspan="(\d+)"/iu.exec(cell[0])?.[1] ?? 1), 0);
+  const row = rows.find((one) => one.includes("Usage not reported by rcli"));
+  assert.ok(row, "the row is in the table");
+  assert.equal(width(row), width(rows[0]));
 });

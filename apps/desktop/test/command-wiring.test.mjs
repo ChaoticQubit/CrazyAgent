@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
+import { assertWindowGrants } from "./window-grants.mjs";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -31,14 +32,13 @@ function registered() {
 
 test("every command any window file calls, through invoke or call, is registered in all four native places", () => {
   const build = read("src-tauri/build.rs");
-  const allowed = JSON.parse(read("src-tauri/capabilities/main-window.json")).permissions;
   const { lib, list } = registered();
   const commands = called();
   assert.ok(commands.size > 100);
+  assertWindowGrants(commands);
   for (const command of commands) {
     assert.ok(list.includes(command), `${command} missing from invoke_handler`);
     assert.ok(build.includes(`"${command}"`), `${command} missing from build.rs`);
-    assert.ok(allowed.includes(`allow-${command.replaceAll("_", "-")}`), `${command} missing from main-window.json`);
     assert.match(lib, new RegExp(`#\\[tauri::command\\]\\s*(?:async )?fn ${command}(?:<[^>]*>)?\\(`), `${command} has no tauri command`);
   }
 });

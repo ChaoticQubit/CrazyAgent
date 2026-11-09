@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { gitHubSignOut, intakeCopy, loadGitHubStatus } from "../../api-intake";
 import type { GitHubStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, Icon, LoadError, NotReady, Skeleton } from "../../ui";
+import { Button, ConfirmDialog, LoadError, NotReady, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { GitHubSignIn } from "../intake/clone";
 import { accountLine } from "../intake/intake";
@@ -17,16 +17,15 @@ export function GitHubAccountView({ status, busy, problem, onSignOut }: {
   problem: string;
   onSignOut: () => void;
 }) {
-  return <section className="pj-stack-s in-panel" aria-label="GitHub account">
-    <h2 className="row"><Icon name="git-branch" size={16} />GitHub account</h2>
-    <p>{accountLine(status)}</p>
-    <p className="pj-secondary">{status.method === "cli"
+  return <SettingSection title="GitHub account">
+    <SettingLine label={accountLine(status)} help={status.method === "cli"
       ? "CrazyAgent uses the GitHub CLI's sign-in on this Mac to list and clone. Signing out here leaves the GitHub CLI signed in."
-      : "CrazyAgent keeps this sign-in in your Mac's keychain and uses it only to list and clone. Agents never get it."}</p>
-    {status.problem && <p className="pj-error" role="alert">{displayText(status.problem)}</p>}
-    {problem && <p className="pj-error" role="alert">{problem}</p>}
-    <span><Button variant="danger-text" icon="log-out" pending={busy} pendingLabel="Signing out..." onClick={onSignOut}>Sign out of GitHub</Button></span>
-  </section>;
+      : "CrazyAgent keeps this sign-in in your Mac's keychain and uses it only to list and clone. Agents never get it."}>
+      <Button variant="danger-text" icon="log-out" pending={busy} pendingLabel="Signing out..." onClick={onSignOut}>Sign out of GitHub</Button>
+    </SettingLine>
+    {status.problem && <p className="set-body pj-error" role="alert">{displayText(status.problem)}</p>}
+    {problem && <p className="set-body pj-error" role="alert">{problem}</p>}
+  </SettingSection>;
 }
 
 /** Settings, GitHub as a view of its reads: the account and Sign out while signed in, otherwise
@@ -40,10 +39,7 @@ export function GitHubSettingsView({ status, signIn, account, onRetry }: {
   if (status.kind === "loading") return <Skeleton shape="line" count={3} />;
   if (status.kind === "not_ready") return <NotReady what="Signing in to GitHub" />;
   if (status.kind === "error") return <LoadError message={status.message} onRetry={onRetry} />;
-  return <div className="pj pj-stack">
-    <p className="pj-secondary">GitHub lets you clone your repositories into the projects folder. Agents commit locally; you push.</p>
-    {status.value.signed_in ? account(status.value) : signIn(status.value)}
-  </div>;
+  return <div className="pj pj-stack">{status.value.signed_in ? account(status.value) : signIn(status.value)}</div>;
 }
 
 /** Settings, GitHub: reads the status, signs in through the device flow, the GitHub CLI or a
@@ -68,7 +64,8 @@ export function GitHubSettings() {
     session.showToast("Signed out of GitHub.");
   };
 
-  return <>
+  return <div className="stack">
+    <div className="settings-top"><div><h2>GitHub</h2><p>GitHub lets you clone your repositories into the projects folder. Agents commit locally; you push.</p></div></div>
     <GitHubSettingsView status={status} onRetry={reload}
       signIn={(value) => <GitHubSignIn status={value} reloadStatus={reload} />}
       account={(value) => <GitHubAccountView status={value} busy={busy} problem={problem} onSignOut={() => setAsking(true)} />} />
@@ -76,5 +73,5 @@ export function GitHubSettings() {
       onCancel={() => setAsking(false)} onConfirm={() => void signOut()}>
       CrazyAgent deletes its GitHub sign-in from your keychain. Projects you cloned stay where they are; cloning again needs a new sign-in.
     </ConfirmDialog>
-  </>;
+  </div>;
 }

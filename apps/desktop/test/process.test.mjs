@@ -73,7 +73,6 @@ test("Settings and a project each have a Process tab, and a skill link keeps its
 
 test("the app Process page shows the saved text, the two seeds and a Save that waits for a change", () => {
   const markup = page();
-  assert.match(markup, /Instructions every master and sub-agent gets, in every project\./);
   assert.match(markup, /Import from file/);
   assert.match(markup, /Use the CrazyAgent default process/);
   assert.match(markup, /<textarea[^>]*id="process-app"[^>]*>Use tdd\.\n<\/textarea>/);

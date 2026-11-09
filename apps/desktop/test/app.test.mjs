@@ -127,9 +127,9 @@ test("an unconfirmed account set-up for agents shows its own banner whose Check 
 test("routes reach Settings tabs and the project screens", () => {
   const settings = render({}, { name: "settings", tab: "pools" });
   assert.match(settings, /<h1>Settings<\/h1>/);
-  assert.match(settings, /role="tablist" aria-label="Settings sections"/);
-  assert.match(settings, /<a id="tab-pools" role="tab" class="tab" href="#\/settings\/pools" aria-selected="true" tabindex="0">/);
-  for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory", "Profile"]) assert.match(settings, new RegExp(`</svg>${label}</a>`));
+  assert.match(settings, /<nav class="settings-nav" aria-label="Settings sections">/);
+  assert.match(settings, /<a class="settings-nav-item" href="#\/settings\/pools" aria-current="page">Pools<\/a>/);
+  for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory", "Profile"]) assert.match(settings, new RegExp(`>${label}</a>`));
   const project = render({ projects: { kind: "ok", value: [{ id: "p-1", name: "Harbor Notes", repository_count: 1 }] } }, { name: "project", id: "p-1", tab: "overview" });
   assert.match(project, /<h1>Harbor Notes<\/h1>/);
   assert.match(project, /role="tablist" aria-label="Project"/);
@@ -490,4 +490,18 @@ test("a TUI open in IDE focus opens that project's IDE tab, which the router kee
   assert.deepEqual(route, { name: "project", id: "harbor-notes", tab: "ide" });
   assert.equal(formatRoute(route), "#/projects/harbor-notes/ide");
   assert.deepEqual(parseRoute(formatRoute(route)), route);
+});
+
+test("each sidebar row gets its project's working count, beside its unseen count", () => {
+  const value = [{ id: "a", name: "Alpha", repository_count: 0 }, { id: "b", name: "Beta", repository_count: 0 }];
+  const markup = renderToStaticMarkup(createElement(AppView, {
+    session: session({ projects: { kind: "ok", value } }), route: { name: "home" },
+    alerts: new Map([["a", 4], ["b", 1]]), working: new Map([["a", 2]]),
+  }));
+  const rows = markup.slice(markup.indexOf('<div class="nav-group">'), markup.indexOf("</nav>"));
+  const [alpha, beta] = rows.split('<a class="nav-item"').slice(1);
+  assert.match(alpha, /title="2 agents working"/u);
+  assert.match(alpha, /<span class="nav-flag">4<\/span>/u);
+  assert.doesNotMatch(beta, /nav-live/u);
+  assert.match(beta, /<span class="nav-flag">1<\/span>/u);
 });

@@ -9,7 +9,7 @@ import {
   type InstructionSettings, type InstructionView, type SavedText, type SkillEntry, type EditDelivery,
 } from "../api-process";
 import { sameJson, useAppSession, useHeld, useLoad, type Loaded } from "../state";
-import { Button, ConfirmDialog, Dialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
+import { Button, ConfirmDialog, Dialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
 import { navigate } from "../ui/router";
 import { displayText } from "./conversation";
 import { ConflictView, keepMine, type Conflict } from "./conflict";
@@ -133,9 +133,6 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   onAll?: () => void;
   onUseDefault?: () => void;
 }) {
-  const intro = scope.kind === "app"
-    ? "Instructions every master and sub-agent gets, in every project. A project's own instructions come after these."
-    : `Instructions every agent in ${scope.name} gets, after the app-wide ones. Kept in the project's .crazyagent/instructions.md, which git ignores.`;
   if (saved.kind === "loading") return <Skeleton shape="card" count={2} />;
   if (saved.kind === "not_ready") return <NotReady what="Instructions" />;
   if (saved.kind === "error") return <LoadError message={saved.message} onRetry={onRetry} />;
@@ -182,20 +179,22 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
       {leave}
     </div>;
   }
-  const seeds = scope.kind === "app" && <span className="row">
-    <Button icon="upload" pending={busy === "import"} pendingLabel="Reading..." disabled={busy !== null} onClick={onImport}>Import from file</Button>
-    <Button icon="sparkles" pending={busy === "default"} pendingLabel="Reading..." disabled={busy !== null} onClick={onDefault}>Use the CrazyAgent default process</Button>
-  </span>;
   return <div className="stack">
-    <p className="secondary">{intro}</p>
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
     {conflict && <ConflictView conflict={conflict} busy={busy === "save"} onReload={onReload} onKeepMine={onKeepMine}>
       <TaggedText text={conflict.current} skills={skills} />
     </ConflictView>}
-    {seeds}
-    <Panel title="Instructions">
-      <form className="stack-small" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed && !conflict) onSave(); }}>
-        <TextArea id={`process-${scope.kind}`} label="Instructions for agents" value={draft} onValue={onDraft} rows={16} error={invalid} readOnly={busy === "save"}
+    <SettingSection title="Start from" about="Both open a preview first. Nothing changes until you save.">
+      <SettingLine label="Your own file" help="Read a text file into the editor.">
+        <Button icon="upload" pending={busy === "import"} pendingLabel="Reading..." disabled={busy !== null} onClick={onImport}>Import from file</Button>
+      </SettingLine>
+      <SettingLine label="CrazyAgent default" help="The process CrazyAgent ships with.">
+        <Button icon="sparkles" pending={busy === "default"} pendingLabel="Reading..." disabled={busy !== null} onClick={onDefault}>Use the CrazyAgent default process</Button>
+      </SettingLine>
+    </SettingSection>
+    <SettingSection title={<label htmlFor="process-app">Instructions for agents</label>} changed={changed}>
+      <form className="set-body" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed && !conflict) onSave(); }}>
+        <TextArea id="process-app" label="Instructions for agents" labelOutside value={draft} onValue={onDraft} rows={16} error={invalid} readOnly={busy === "save"}
           helper={`${byteSize(textBytes(draft))} of ${byteSize(PROCESS_TEXT_BYTES_MAX)}${changed ? ". Not saved yet." : ""}`} />
         <span className="row">
           <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
@@ -203,8 +202,10 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
           {changed && !conflict && <Button disabled={busy !== null} onClick={() => onDraft(saved.value)}>Discard edits</Button>}
         </span>
       </form>
-    </Panel>
-    {draft.trim() && <Panel title="As agents read it"><TaggedText text={draft} skills={skills} onOpen={onOpenSkill} /></Panel>}
+    </SettingSection>
+    {draft.trim() && <SettingSection title="As agents read it" about="Highlighted names are skills. Each opens its own details.">
+      <div className="set-body"><TaggedText text={draft} skills={skills} onOpen={onOpenSkill} /></div>
+    </SettingSection>}
     <Dialog open={preview !== null} wide title={preview?.source === "import" ? "Instructions from your file" : "CrazyAgent default process"}
       onClose={onClosePreview}
       footer={<>
@@ -686,7 +687,11 @@ export function InstructionImportPrompt({ projectId, name, onMoved }: { projectI
     onConfirm={() => void confirm()} onLater={() => setClosed(true)} />;
 }
 
-/** Settings, Process: the app-wide instructions every agent gets. */
+/** Settings, Process: the top line, which stays through every load state, and the app-wide
+ * instructions every agent gets. */
 export function ProcessSettings() {
-  return <ProcessEditor scope={{ kind: "app" }} />;
+  return <div className="stack">
+    <div className="settings-top"><div><h2>Process</h2><p>Instructions every master and sub-agent gets, in every project. A project's own instructions come after these.</p></div></div>
+    <ProcessEditor scope={{ kind: "app" }} />
+  </div>;
 }

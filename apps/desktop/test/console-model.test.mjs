@@ -35,7 +35,8 @@ test("commands are data: each says what it does and where it goes", () => {
   assert.deepEqual(model.commandRoute("agents", "p-1"), { name: "project", id: "p-1", tab: "agents" });
   assert.deepEqual(model.commandRoute("changes", "p-1"), { name: "project", id: "p-1", tab: "changes" });
   assert.deepEqual(model.commandRoute("process", "p-1"), { name: "project", id: "p-1", tab: "process" });
-  assert.deepEqual(model.commandRoute("usage", "p-1"), { name: "settings", tab: "usage" });
+  assert.deepEqual(model.commandRoute("usage", "p-1"), { name: "metrics" });
+  assert.equal(model.filterCommands("/").find((command) => command.name === "usage").help, "Open Metrics");
   assert.deepEqual(model.CONSOLE_COMMANDS.find((command) => command.name === "clear")?.action, { kind: "clear" });
   assert.deepEqual(model.CONSOLE_COMMANDS.find((command) => command.name === "stop")?.action, { kind: "stop" });
   assert.match(model.helpLines().join("\n"), /\/agents\s+Open the Agents tab/);

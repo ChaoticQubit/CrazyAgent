@@ -4,7 +4,7 @@ import { Button, Notice, Panel, TextField } from "../../ui";
 import { atText } from "../settings/account-choice";
 import { API_KEY_ACCOUNT, manualReset, missingWindow, readLine, untilText, windowNow } from "./usage-model";
 import "../project/projects.css";
-import "../settings/usage.css";
+import "./metrics.css";
 
 const NEAR_LIMIT_PERCENT = 80;
 

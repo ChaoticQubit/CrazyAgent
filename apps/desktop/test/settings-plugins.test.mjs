@@ -88,7 +88,7 @@ test("a stored skill agents no longer get says why on the list and its page, and
   const list = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [refused, skill({ id: "skill-2", name: "pdf" })] })));
   assert.equal(list.match(/Not given to agents/g)?.length, 1);
   assert.match(list, new RegExp(why));
-  assert.match(list, /aria-label="More for frontend-design"/);
+  assert.match(list, /aria-label="Remove frontend-design"/);
   const page = renderToStaticMarkup(createElement(SkillDetailView, detailProps({ kind: "ok", value: detail({ skill: refused }) })));
   assert.match(page, new RegExp(why));
   assert.match(page, /Remove it in Settings, Plugins and skills\./);
