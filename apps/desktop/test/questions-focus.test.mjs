@@ -11,6 +11,48 @@ async function type(send, text) {
   }
 }
 
+async function clickAt(send, { x, y }) {
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+}
+
+test("a waiting agent that appears after the owner started typing leaves the keyboard in the answer box", { timeout: 120_000 }, async () => {
+  const fixture = await bundle(FIXTURE);
+  const seen = await withPage(async ({ evaluate, send }) => {
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(true, "waiting", false)`);
+    await clickAt(send, await evaluate(`Fixture.pointOf("answer")`));
+    await evaluate("Fixture.frames()");
+    await clickAt(send, await evaluate(`Fixture.pointOf("box")`));
+    const typing = await evaluate("Fixture.where()");
+    await type(send, "ab");
+    await evaluate("Fixture.reread(true)");
+    const after = await evaluate("Fixture.where()");
+    await type(send, "c");
+    await evaluate("Fixture.reread(true)");
+    return { typing, after, later: await evaluate("Fixture.where()"), typed: await evaluate("Fixture.typed()") };
+  });
+  assert.equal(seen.typing.tag, "textarea", "the owner's click put the cursor in the answer box");
+  assert.equal(seen.after.tag, "textarea", "the new row does not pull the keyboard off the answer box");
+  assert.equal(seen.later.tag, "textarea", "nor does the next read");
+  assert.equal(seen.typed, "abc", "every key reaches the answer box");
+});
+
+test("a waiting agent that appears later takes the keyboard when the owner is not on a field", { timeout: 120_000 }, async () => {
+  const fixture = await bundle(FIXTURE);
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(true, "waiting", false)`);
+    const opened = await evaluate("Fixture.where()");
+    await evaluate("Fixture.reread(true)");
+    return { opened, after: await evaluate("Fixture.where()") };
+  });
+  assert.notEqual(seen.opened.tag, "li", "no waiting row exists yet");
+  assert.equal(seen.after.tag, "li", "the row takes the keyboard once it is read");
+  assert.match(seen.after.row, /Tester 4/);
+});
+
 test("with the inbox already read when the drawer opens, the next poll leaves the keyboard in the answer box", { timeout: 120_000 }, async () => {
   const fixture = await bundle(FIXTURE);
   const seen = await withPage(async ({ evaluate, send }) => {

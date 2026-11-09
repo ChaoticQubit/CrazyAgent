@@ -7,7 +7,7 @@ import { Drawer } from "../../src/ui/overlay.tsx";
 const idle = () => {};
 const QUESTION = { id: 7, agent: 3, label: "Builder 3", severity: "low", asked_for: "me", for_label: "Me", text: "Which database?", assumption: "SQLite", created_ms: 0, terminal: null };
 const WAITING = { agent: 4, label: "Tester 4", waiting: "permission", terminal: null };
-const inbox = () => ({ shown: { kind: "ok", value: { project_id: "alpha", questions: [QUESTION], more: 0, waiting: [WAITING] } }, stale: null });
+const inbox = (waiting) => ({ shown: { kind: "ok", value: { project_id: "alpha", questions: [QUESTION], more: 0, waiting: waiting ? [WAITING] : [] } }, stale: null });
 let root = null;
 let startOn = null;
 
@@ -16,25 +16,36 @@ function render(read) {
     h(QuestionsPanel, { projectId: "alpha", read, reload: idle, onOpen: idle, focus: startOn }))));
 }
 
-function frames() {
+export function frames() {
   return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
 }
 
 /** Opens the Questions drawer on the Agents tab, as a toast does. Inputs: whether the inbox is
- * already read and the row kind the keyboard starts on. Output: nothing. */
-export async function mount(loaded, focus) {
+ * already read, the row kind the keyboard starts on and whether an agent waits in its terminal.
+ * Output: nothing. */
+export async function mount(loaded, focus, waiting = true) {
   root?.unmount();
   document.body.innerHTML = '<div id="root"></div>';
   root = createRoot(document.getElementById("root"));
   startOn = focus;
-  render(loaded ? inbox() : { shown: undefined, stale: null });
+  render(loaded ? inbox(waiting) : { shown: undefined, stale: null });
   await frames();
 }
 
-/** Lands a new read of the inbox, as the poll does. Output: nothing. */
-export async function reread() {
-  render(inbox());
+/** Lands a new read of the inbox, as the poll does. Input: whether an agent waits in its
+ * terminal. Output: nothing. */
+export async function reread(waiting = true) {
+  render(inbox(waiting));
   await frames();
+}
+
+/** Where a real click on the Answer button or the answer box lands. Input: "answer" or "box".
+ * Output: the point in the window. */
+export function pointOf(what) {
+  const element = what === "box" ? document.querySelector("dialog[open] textarea")
+    : [...document.querySelectorAll("dialog[open] button")].find((button) => button.textContent.trim() === "Answer");
+  const box = element.getBoundingClientRect();
+  return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
 }
 
 /** Clicks Answer and puts the cursor in the answer box, as the owner does. Output: whether the
