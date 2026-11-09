@@ -6,7 +6,7 @@ const SAMPLE: &str = r#"{"as_of":"2026-11-08","source_sha256":"aa","models":{
 "tiered":{"input":3000000,"output":15000000,"cache_write":3750000,"cache_read":300000,
  "tier":{"threshold":200000,"input":6000000,"output":22500000,"cache_write":7500000,"cache_read":600000}},
 "tiered-fast":{"input":1000000,"output":1000000,"cache_write":null,"cache_read":null,"fast_milli":2000,
- "tier":{"threshold":100,"input":2000000,"output":2000000,"cache_write":null,"cache_read":null,"fast_milli":1000}},
+ "tier":{"threshold":100,"input":2000000,"output":2000000,"cache_write":null,"cache_read":null,"fast_milli":1500}},
 "plain":{"input":1250000,"output":10000000,"cache_write":null,"cache_read":125000}}}"#;
 
 fn sample() -> Prices {
@@ -39,6 +39,20 @@ fn cost_is_exact_integer_nanodollars() {
 #[test]
 fn a_dated_name_finds_its_model() {
     assert!(sample().has("claude-x-1-20251101"));
+}
+
+#[test]
+fn a_date_suffix_is_dropped_before_the_lookup() {
+    let prices = parse(
+        r#"{"as_of":"2026-11-08","source_sha256":"aa","models":{
+        "dated":{"input":1000000,"output":1,"cache_write":null,"cache_read":null},
+        "dated-20251101":{"input":9000000,"output":1,"cache_write":null,"cache_read":null}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        prices.cost_nanos("dated-20251101", charged(input(1000))),
+        Some(1_000_000)
+    );
 }
 
 #[test]
@@ -80,10 +94,15 @@ fn a_new_version_or_unknown_name_has_no_price() {
 #[test]
 fn a_suffix_that_is_not_a_version_keeps_the_model_price() {
     let prices = sample();
-    let unpriced: Vec<&str> = ["claude-x-1-123", "claude-x-1-2x", "claude-x-1-preview"]
-        .into_iter()
-        .filter(|name| !prices.has(name))
-        .collect();
+    let unpriced: Vec<&str> = [
+        "claude-x-1-123",
+        "claude-x-1-123-preview",
+        "claude-x-1-2x",
+        "claude-x-1-preview",
+    ]
+    .into_iter()
+    .filter(|name| !prices.has(name))
+    .collect();
     assert_eq!(unpriced, Vec::<&str>::new());
 }
 
@@ -275,7 +294,7 @@ fn a_tier_that_names_its_own_fast_multiplier_replaces_the_models() {
         ..charged(input(1000))
     };
     assert_eq!(sample().cost_nanos("tiered-fast", at), Some(2_000_000));
-    assert_eq!(sample().cost_nanos("tiered-fast", past), Some(2_000_000));
+    assert_eq!(sample().cost_nanos("tiered-fast", past), Some(3_000_000));
 }
 
 const LEAN: &str = r#""input":1,"output":1,"cache_write":null,"cache_read":null"#;
@@ -324,6 +343,10 @@ fn a_malformed_snapshot_is_refused() {
     let m = format!(r#""m":{{{LEAN}}}"#);
     let cases = [
         ("no fields", "{}".to_owned()),
+        (
+            "unknown top field",
+            format!(r#"{{"as_of":"2026-11-08","source_sha256":"a","models":{{{m}}},"extra":1}}"#),
+        ),
         ("short date", dated("soon", "a", &m)),
         ("long date", dated("2026-11-081", "a", &m)),
         ("first separator", dated("2026x11-08", "a", &m)),
