@@ -547,3 +547,326 @@ fn one_scan_stops_reading_files_at_its_bound_and_the_next_goes_on() {
     assert_eq!(scan_it(&db, root.path()), expected(8192, 0));
     assert_eq!(scan_it(&db, root.path()), expected(4096, 0));
 }
+
+fn token_count(at: &str, info: serde_json::Value) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "timestamp": at,
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": info, "rate_limits": null}
+        })
+    )
+}
+
+fn started(home: &Path, id: &str) -> PathBuf {
+    let file = rollout(home, id);
+    append(&file, &meta(T0, id, serde_json::json!({})));
+    file
+}
+
+fn forked(home: &Path, id: &str) -> PathBuf {
+    let file = rollout(home, id);
+    append(
+        &file,
+        &meta(T0, id, serde_json::json!({"forked_from_id": "parent"})),
+    );
+    file
+}
+
+#[test]
+fn a_first_event_counts_its_last_usage_not_its_running_total() {
+    let (root, db) = store();
+    let file = started(root.path(), "first");
+    append(&file, &counted(T0_1, (1000, 0, 0), (50, 0, 0)));
+    assert_eq!(scan_codex(&db, root.path()), plain(50, 0, 0));
+}
+
+#[test]
+fn a_last_line_then_a_line_with_no_last_counts_only_the_difference() {
+    let (root, db) = store();
+    let file = started(root.path(), "mixed");
+    append(&file, &counted(T0_1, (100, 40, 10), (100, 40, 10)));
+    append(
+        &file,
+        &token_count(
+            T0_2,
+            serde_json::json!({"total_token_usage": usage(150, 60, 15)}),
+        ),
+    );
+    assert_eq!(scan_codex(&db, root.path()), plain(90, 60, 15));
+}
+
+#[test]
+fn two_different_lines_with_only_a_last_usage_both_count() {
+    let (root, db) = store();
+    let file = started(root.path(), "last-only");
+    for (at, input) in [(T0_1, 10), (T0_2, 20)] {
+        append(
+            &file,
+            &token_count(
+                at,
+                serde_json::json!({"last_token_usage": usage(input, 0, 1)}),
+            ),
+        );
+    }
+    assert_eq!(scan_codex(&db, root.path()), plain(30, 0, 2));
+}
+
+#[test]
+fn a_repeated_line_with_only_a_last_usage_counts_once() {
+    let (root, db) = store();
+    let file = started(root.path(), "repeat-last");
+    let line = token_count(
+        T0_1,
+        serde_json::json!({"last_token_usage": usage(10, 0, 1)}),
+    );
+    append(&file, &line);
+    append(&file, &line);
+    assert_eq!(scan_codex(&db, root.path()), plain(10, 0, 1));
+}
+
+#[test]
+fn a_total_that_leaves_out_a_field_keeps_that_fields_running_value() {
+    let (root, db) = store();
+    let file = started(root.path(), "omitted");
+    let totals = [
+        (T0_1, usage(100, 40, 10)),
+        (
+            T0_2,
+            serde_json::json!({"input_tokens": 150, "output_tokens": 15, "total_tokens": 165}),
+        ),
+        (LATER, usage(200, 60, 20)),
+    ];
+    for (at, total) in totals {
+        append(
+            &file,
+            &token_count(at, serde_json::json!({"total_token_usage": total})),
+        );
+    }
+    assert_eq!(scan_codex(&db, root.path()), plain(140, 60, 20));
+}
+
+#[test]
+fn a_usage_record_with_no_valid_counter_leaves_the_token_counts_counted() {
+    let (root, db) = store();
+    let file = started(root.path(), "bad-record");
+    let bad = [
+        serde_json::json!({}),
+        serde_json::json!({"input_tokens": "x", "output_tokens": 5}),
+    ];
+    for record in bad {
+        append(
+            &file,
+            &format!(
+                "{}\n",
+                serde_json::json!({
+                    "timestamp": T0_1,
+                    "type": "token_usage_record",
+                    "payload": {"response_id": "resp_1", "usage": record}
+                })
+            ),
+        );
+    }
+    append(&file, &counted(T0_2, (100, 40, 10), (100, 40, 10)));
+    assert_eq!(scan_codex(&db, root.path()), plain(60, 40, 10));
+}
+
+#[test]
+fn a_real_call_two_seconds_after_the_copies_counts() {
+    let (root, db) = store();
+    let file = forked(root.path(), "gap");
+    append(&file, &counted(T0_1, (100, 40, 10), (100, 40, 10)));
+    append(
+        &file,
+        &counted("2026-11-09T03:00:02.200Z", (150, 50, 15), (50, 10, 5)),
+    );
+    assert_eq!(scan_codex(&db, root.path()), plain(40, 10, 5));
+}
+
+#[test]
+fn a_steady_burst_of_copies_ends_five_seconds_after_the_fork() {
+    let (root, db) = store();
+    let file = forked(root.path(), "window");
+    let copies = [
+        "2026-11-09T03:00:00.900Z",
+        "2026-11-09T03:00:01.800Z",
+        "2026-11-09T03:00:02.700Z",
+        "2026-11-09T03:00:03.600Z",
+        "2026-11-09T03:00:04.500Z",
+    ];
+    for (index, at) in copies.iter().enumerate() {
+        let calls = index as u64 + 1;
+        append(&file, &counted(at, (10 * calls, 0, calls), (10, 0, 1)));
+    }
+    append(
+        &file,
+        &counted("2026-11-09T03:00:05.400Z", (60, 0, 6), (10, 0, 1)),
+    );
+    assert_eq!(scan_codex(&db, root.path()), plain(10, 0, 1));
+}
+
+#[test]
+fn a_copied_line_without_totals_does_not_hide_the_same_real_call() {
+    let (root, db) = store();
+    let file = forked(root.path(), "copy");
+    let line = |at: &str| token_count(at, serde_json::json!({"last_token_usage": usage(10, 0, 1)}));
+    append(&file, &line(T0_1));
+    append(&file, &line(LATER));
+    assert_eq!(scan_codex(&db, root.path()), plain(10, 0, 1));
+}
+
+#[test]
+fn a_rollout_named_only_by_its_session_id_is_one_thread_across_files() {
+    let (root, db) = store();
+    for id in ["a", "b"] {
+        let file = rollout(root.path(), id);
+        append(
+            &file,
+            &format!(
+                "{}\n",
+                serde_json::json!({
+                    "timestamp": T0,
+                    "type": "session_meta",
+                    "payload": {"session_id": "thread-9"}
+                })
+            ),
+        );
+        append(&file, &counted(T0_1, (100, 40, 10), (100, 40, 10)));
+    }
+    assert_eq!(scan_codex(&db, root.path()), plain(60, 40, 10));
+}
+
+#[test]
+fn session_meta_names_the_rollouts_model() {
+    let (root, db) = store();
+    let file = rollout(root.path(), "named");
+    append(
+        &file,
+        &meta(T0, "named", serde_json::json!({"model": CODEX})),
+    );
+    append(&file, &counted(T0_1, (100, 40, 10), (100, 40, 10)));
+    scan_codex(&db, root.path());
+    let model: String = db
+        .query_row("SELECT model FROM usage_tokens", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(model, CODEX);
+}
+
+#[test]
+fn a_restart_with_no_previous_total_is_read_field_by_field() {
+    let (root, db) = store();
+    let file = started(root.path(), "restart");
+    append(
+        &file,
+        &token_count(
+            T0_1,
+            serde_json::json!({
+                "total_token_usage": {"input_tokens": 1000, "output_tokens": 100},
+                "last_token_usage": usage(100, 0, 10)
+            }),
+        ),
+    );
+    append(
+        &file,
+        &token_count(
+            T0_2,
+            serde_json::json!({"total_token_usage": usage(50, 0, 5)}),
+        ),
+    );
+    assert_eq!(scan_codex(&db, root.path()), plain(150, 0, 15));
+}
+
+#[test]
+fn a_running_total_past_the_line_cap_keeps_growing() {
+    let (root, db) = store();
+    let file = started(root.path(), "huge");
+    for (at, input) in [(T0_1, 2_000_000_000), (T0_2, 2_000_000_100)] {
+        append(
+            &file,
+            &token_count(
+                at,
+                serde_json::json!({"total_token_usage": usage(input, 0, 0)}),
+            ),
+        );
+    }
+    assert_eq!(scan_codex(&db, root.path()), plain(1_000_000_100, 0, 0));
+}
+
+#[test]
+fn a_cache_write_is_carved_out_of_the_uncached_input() {
+    let (root, db) = store();
+    let file = started(root.path(), "write");
+    let call = serde_json::json!({
+        "input_tokens": 100,
+        "cached_input_tokens": 40,
+        "cache_write_input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 105
+    });
+    append(
+        &file,
+        &token_count(
+            T0_1,
+            serde_json::json!({"total_token_usage": call, "last_token_usage": call}),
+        ),
+    );
+    let expected = Tokens {
+        input: 50,
+        output: 5,
+        cache_read: 40,
+        cache_write: 10,
+    };
+    assert_eq!(scan_codex(&db, root.path()), expected);
+}
+
+#[test]
+fn a_thread_setting_turns_fast_on_and_off() {
+    let mut progress = Progress::default();
+    let mut fast_after = |tier: &str, calls: u64| {
+        let setting = serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "thread_settings_applied",
+                "thread_settings": {"service_tier": tier}
+            }
+        });
+        codex_line(&setting, &mut progress, NOW, "thread");
+        let line: Value =
+            serde_json::from_str(&counted(T0_1, (calls, 0, 1), (calls, 0, 1))).unwrap();
+        codex_line(&line, &mut progress, NOW, "thread")
+            .0
+            .unwrap()
+            .fast
+    };
+    assert!(fast_after("priority", 10));
+    assert!(!fast_after("default", 20));
+}
+
+#[test]
+fn a_total_an_older_build_stored_still_counts_only_the_growth() {
+    let (root, db) = store();
+    let file = started(root.path(), "older");
+    append(
+        &file,
+        &token_count(
+            T0_1,
+            serde_json::json!({"total_token_usage": usage(100, 40, 10)}),
+        ),
+    );
+    assert_eq!(scan_codex(&db, root.path()), plain(60, 40, 10));
+    db.execute(
+        r#"UPDATE usage_files SET progress=json_set(json_remove(progress,'$.codex'),'$.total',
+            json('{"input":60,"output":10,"cache_read":40,"cache_write":0}'))"#,
+        [],
+    )
+    .unwrap();
+    append(
+        &file,
+        &token_count(
+            T0_2,
+            serde_json::json!({"total_token_usage": usage(150, 50, 15)}),
+        ),
+    );
+    assert_eq!(scan_codex(&db, root.path()), plain(40, 10, 5));
+}
