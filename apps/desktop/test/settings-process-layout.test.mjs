@@ -63,7 +63,18 @@ test("the section heading is the field's one label, and the field fills the sect
   })()`));
   assert.deepEqual(seen.labels, ["Instructions for agents"]);
   assert.equal(seen.inHead, true);
-  assert.ok(seen.slack >= 0 && seen.slack <= 34, JSON.stringify(seen));
+  assert.equal(seen.slack, 34, JSON.stringify(seen));
+});
+
+test("the instructions field uses the mono face at 13 on 20, as the approved page draws it", async () => {
+  const seen = await onProcess({}, (page) => page.evaluate(`(() => {
+    const style = getComputedStyle(document.querySelector("${FIELD}"));
+    return { family: style.fontFamily, mono: getComputedStyle(document.documentElement).getPropertyValue("--mono"), size: style.fontSize, line: style.lineHeight };
+  })()`));
+  const plain = (font) => font.replace(/["'\s]/g, "");
+  assert.equal(plain(seen.family), plain(seen.mono));
+  assert.equal(seen.size, "13px");
+  assert.equal(seen.line, "20px");
 });
 
 test("with nothing typed there is no mark, Save waits and Discard edits is absent", async () => {
