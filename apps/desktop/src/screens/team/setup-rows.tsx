@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { listMcpServers, type HarnessEntry, type McpServerView } from "../../api";
 import { failureCopy, loadAgentPolicy, type AgentAccess, type PolicyView, type PoolChoice, type StoredSetup } from "../../api-projects";
-import { useLoad } from "../../state";
+import { useHeld, useLoad } from "../../state";
 import { Button, ConfirmDialog, Icon, Segmented, Select, Switch, type SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { ACCESS_LEVELS, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, accessLabel, confirmFirst, policyOf } from "../project/access";
@@ -231,25 +231,25 @@ export function McpServersSetting({ projectId }: { projectId: string }) {
  * saved in place through project Settings' own pool save. Inputs: the project data and the
  * select's id. Output: the row. */
 export function AccountSetting({ data, id }: { data: TeamProject; id: string }) {
-  const [held, setHeld] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const listed = valueOf(data.pools) ?? [];
   const pools = data.assigned && !listed.some((choice) => choice.pool.id === data.assigned?.pool.id) ? [data.assigned, ...listed] : listed;
   const current = data.assigned?.pool.id ?? "";
+  const [shown, hold] = useHeld(current);
 
   async function choose(value: string) {
     if (busy || value === current) return;
-    setHeld(value);
+    const settled = hold(value);
     setBusy(true);
     const error = await savePool(data, valueOf(data.setup), value === "" ? null : value);
     setBusy(false);
-    setHeld(null);
+    settled(error);
     setNote(error);
   }
 
   return <SettingRow label="Account">
-    <Select id={id} label="Account" value={held ?? current} options={accountOptions(pools)} onValue={(value) => void choose(value)}
+    <Select id={id} label="Account" value={shown} options={accountOptions(pools)} onValue={(value) => void choose(value)}
       helper="From the project's pool; fails over to the next account." />
     <RowNote note={note} />
   </SettingRow>;
