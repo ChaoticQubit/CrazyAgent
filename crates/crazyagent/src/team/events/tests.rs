@@ -2693,7 +2693,12 @@ fn working_list_counts_agents_at_work_and_running_research_as_a_project_card_doe
 #[test]
 fn working_list_stops_at_its_bound_and_fits_one_reply_beside_a_full_unseen_list() {
     let fixture = Fixture::new();
-    let long = |at: i64| format!("{}-{at:03}", "p".repeat(60));
+    let long = |at: i64| format!("{}-{at:03}", "p".repeat(124));
+    assert_eq!(long(0).len(), 128);
+    assert!(
+        ProjectId::new("p".repeat(129)).is_err(),
+        "128 bytes is the longest legal id"
+    );
     for at in 0..=WORKING_PROJECTS_MAX {
         fixture.agent(&long(at), "sub", "codex", "working");
     }
@@ -2709,7 +2714,8 @@ fn working_list_stops_at_its_bound_and_fits_one_reply_beside_a_full_unseen_list(
         .unwrap();
     }
 
-    let view = app(&fixture.connection).unwrap();
+    let view =
+        app(&fixture.connection).expect("both full lists fit one reply at the longest legal ids");
 
     assert_eq!(view.working.len() as i64, WORKING_PROJECTS_MAX);
     assert_eq!(view.projects.len() as i64, UNSEEN_PROJECTS_MAX);
