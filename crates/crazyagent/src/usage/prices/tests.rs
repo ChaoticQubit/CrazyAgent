@@ -182,7 +182,7 @@ fn a_web_search_is_a_cent_each() {
 }
 
 #[test]
-fn a_cache_read_costs_its_own_rate_and_nothing_without_one() {
+fn a_cache_read_costs_its_own_rate_or_a_tenth_of_the_base_input() {
     let read = Tokens {
         cache_read: 1000,
         ..Tokens::default()
@@ -193,7 +193,7 @@ fn a_cache_read_costs_its_own_rate_and_nothing_without_one() {
             prices.cost_nanos("claude-x-1", charged(read)),
             prices.cost_nanos("tiered-fast", charged(read)),
         ],
-        [Some(500_000), Some(0)]
+        [Some(500_000), Some(100_000)]
     );
 }
 
@@ -453,18 +453,50 @@ fn the_bundled_snapshot_is_dated_and_prices_the_harness_models() {
 }
 
 #[test]
-fn a_cost_rounds_to_the_nearest_nanodollar() {
+fn a_cost_rounds_down_so_it_never_reads_over() {
     let prices = parse(
         r#"{"as_of":"2026-11-08","source_sha256":"aa","models":{
         "half":{"input":1500,"output":1400,"cache_write":null,"cache_read":null}}}"#,
     )
     .unwrap();
-    assert_eq!(prices.cost_nanos("half", charged(input(1))), Some(2));
+    assert_eq!(prices.cost_nanos("half", charged(input(1))), Some(1));
     let output = Tokens {
         output: 1,
         ..Tokens::default()
     };
     assert_eq!(prices.cost_nanos("half", charged(output)), Some(1));
+}
+
+#[test]
+fn a_bracket_suffix_is_dropped_as_the_source_drops_it() {
+    let prices = parse(
+        r#"{"as_of":"2026-11-08","source_sha256":"aa","models":{
+        "claude-x":{"input":1000000,"output":1,"cache_write":null,"cache_read":null},
+        "claude-x-5":{"input":4000000,"output":1,"cache_write":null,"cache_read":null},
+        "dated":{"input":1000000,"output":1,"cache_write":null,"cache_read":null},
+        "dated-20251101":{"input":9000000,"output":1,"cache_write":null,"cache_read":null}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        [
+            "claude-x-5[1m]",
+            "claude-x-5[a[b]",
+            "dated-20251101[1m]",
+            "claude-x-5[a]b]",
+        ]
+        .map(|model| prices.cost_nanos(model, charged(input(1000)))),
+        [
+            Some(4_000_000),
+            Some(4_000_000),
+            Some(9_000_000),
+            Some(1_000_000)
+        ]
+    );
+}
+
+#[test]
+fn a_name_only_an_alias_table_could_price_has_no_price() {
+    assert!(!table().has("claude-4-opus"));
 }
 
 #[test]

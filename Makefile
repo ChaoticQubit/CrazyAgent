@@ -1,4 +1,4 @@
-.PHONY: help fmt fmt-check lint test test-rust-selected test-node test-bun build check desktop-dist
+.PHONY: help fmt fmt-check lint test test-rust-selected test-node test-bun build check desktop-dist test-price-script
 
 NODE_TESTS := $(filter-out $(NODE_TESTS_EXCLUDE),$(shell find apps crates scripts \( -name node_modules -o -name target -o -name dist \) -prune -o \( -name '*.test.mjs' -o -name '*.test.cjs' \) -type f -print | LC_ALL=C sort))
 BUN_TESTS := $(filter-out $(BUN_TESTS_EXCLUDE),$(shell find scripts -name '*.test.ts' -type f -print | LC_ALL=C sort))
@@ -33,6 +33,9 @@ test-rust-selected: desktop-dist
 	cargo test -p crazyagent --locked --offline --lib --bins $(foreach test,$(ENGINE_TESTS),--test $(test))$(if $(ENGINE_ROWS_EXCLUDE), -- --exact $(foreach row,$(ENGINE_ROWS_EXCLUDE),--skip $(row)))
 	cargo test -p crazyagent-desktop --locked --offline --lib --bins $(foreach test,$(DESKTOP_TESTS),--test $(test))
 
+test-price-script:
+	python3 -B -I scripts/usage/test_refresh_prices.py
+
 test-node:
 	CRAZYAGENT_BUN="$(BUN)" CRAZYAGENT_RCLI_SDK="$(RCLI_SDK)" node --test --test-timeout=15000 $(NODE_TESTS)
 
@@ -50,6 +53,7 @@ desktop-dist:
 check:
 	$(MAKE) fmt-check
 	$(MAKE) lint
+	$(MAKE) test-price-script
 	$(MAKE) test
 	$(MAKE) build
 	$(MAKE) test

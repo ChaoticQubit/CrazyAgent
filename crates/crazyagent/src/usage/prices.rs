@@ -142,14 +142,27 @@ pub fn table() -> &'static Prices {
     TABLE.get_or_init(|| parse(BUNDLED).expect("the bundled price snapshot is valid"))
 }
 
+/// Drops a trailing bracket suffix such as `[1m]`, the rule CodeBurn writes as a regular
+/// expression. Input: the name. Output: the name without it, or the name when it has none.
+fn without_bracket(name: &str) -> &str {
+    let Some(inner) = name.strip_suffix(']') else {
+        return name;
+    };
+    let after = inner.rfind(']').map_or(0, |at| at + 1);
+    inner[after..]
+        .find('[')
+        .map_or(name, |at| &name[..after + at])
+}
+
 fn model_key(model: &str) -> &str {
     let name = model.split('@').next().unwrap_or(model);
-    match name.rsplit_once('-') {
+    let name = match name.rsplit_once('-') {
         Some((head, date)) if date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()) => {
             head
         }
         _ => name,
-    }
+    };
+    without_bracket(name)
 }
 
 fn version_next(rest: &str) -> bool {
@@ -201,9 +214,9 @@ impl Prices {
         self.rates(model).is_some()
     }
 
-    /// Prices one growth. Inputs: the model and the growth. Output: nanodollars rounded to the
-    /// nearest, None for a model without a price. Rules ported from CodeBurn (MIT,
-    /// THIRD_PARTY_NOTICES.md).
+    /// Prices one growth. Inputs: the model and the growth. Output: nanodollars rounded down,
+    /// so an estimate never reads over, None for a model without a price. Rules ported from
+    /// CodeBurn (MIT, THIRD_PARTY_NOTICES.md).
     pub(super) fn cost_nanos(&self, model: &str, charged: Charged) -> Option<i64> {
         let rates = self.rates(model)?;
         let tier = rates
@@ -216,7 +229,7 @@ impl Prices {
         let read = u128::from(
             tier.and_then(|tier| tier.cache_read)
                 .or(rates.cache_read)
-                .unwrap_or(0),
+                .unwrap_or(rates.input / 10),
         );
         let one_hour = u128::from(charged.one_hour.min(charged.tokens.cache_write));
         let five_minute = u128::from(charged.tokens.cache_write) - one_hour;
@@ -233,6 +246,6 @@ impl Prices {
             FAST_UNIT
         };
         let total = pico * multiplier / FAST_UNIT;
-        Some(i64::try_from(total.saturating_add(500) / 1000).unwrap_or(i64::MAX))
+        Some(i64::try_from(total / 1000).unwrap_or(i64::MAX))
     }
 }

@@ -3,6 +3,8 @@
 Input: --source, a local copy of CodeBurn's src/data/litellm-snapshot.json; --as-of, its date as
 YYYY-MM-DD; --out, the file to write. Output: sorted JSON with integer picodollar rates per
 token. It reads only the named file, opens no network connection and writes nothing on a refusal.
+A name in DROPPED is left out: CodeBurn prices it through an alias table the engine does not port,
+so it must read as no price, never as the source row's wrong one.
 """
 import argparse
 import datetime
@@ -14,6 +16,7 @@ import sys
 
 NAME = re.compile(r"^(?:claude-|gpt-|codex-|o[134](?:-|$))[a-z0-9._-]{0,60}$")
 DATED = re.compile(r"-[0-9]{8}$")
+DROPPED = frozenset({"claude-4-opus"})
 MODELS_MAX = 512
 RATE_MAX = 1e-3
 PICO = 1e12
@@ -70,7 +73,7 @@ def build(raw, as_of):
     source = json.loads(raw)
     if not isinstance(source, dict):
         raise ValueError("source is not an object")
-    models = {name: rates_of(entry) for name, entry in source.items() if NAME.match(name) and not DATED.search(name)}
+    models = {name: rates_of(entry) for name, entry in source.items() if NAME.match(name) and not DATED.search(name) and name not in DROPPED}
     if not 0 < len(models) <= MODELS_MAX:
         raise ValueError(f"{len(models)} models")
     return {"as_of": as_of, "source_sha256": hashlib.sha256(raw).hexdigest(), "models": dict(sorted(models.items()))}
