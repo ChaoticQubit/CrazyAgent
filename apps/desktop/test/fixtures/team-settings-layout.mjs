@@ -31,6 +31,7 @@ let most = 0;
 let coordSaved = null;
 let policy = POLICY;
 let saveAnswer = null;
+let saveDelay = SAVE_MS;
 let render = null;
 let poolAssigned = "pool-a";
 const poolRecord = (id) => ({ kind: "pool", pool: { id, projects: poolAssigned === id ? ["alpha"] : [] } });
@@ -47,6 +48,7 @@ function engine(status) {
   coordSaved = null;
   policy = POLICY;
   saveAnswer = null;
+  saveDelay = SAVE_MS;
   poolAssigned = "pool-a";
   window.__TAURI_INTERNALS__ = {
     plugins: {},
@@ -66,7 +68,7 @@ function engine(status) {
       if (command === "desktop_team_coordination") {
         running += 1;
         most = Math.max(most, running);
-        await new Promise((done) => setTimeout(done, SAVE_MS));
+        await new Promise((done) => setTimeout(done, saveDelay));
         running -= 1;
         if (saveAnswer !== null) return saveAnswer;
         coordSaved = { ...args.settings };
@@ -74,6 +76,7 @@ function engine(status) {
       }
       if (saveAnswer !== null) {
         if (command.startsWith("desktop_team_") || command === "desktop_update_project_setup") return saveAnswer;
+        if (command === "desktop_project_setup") return { ...SETUP, pool: poolAssigned, revision: 5 };
         if (command === "desktop_open_project") return { fresh: true, project_id: "alpha" };
         if (command === "desktop_model_access_page") return { writable: true, ticket: "ticket", has_more: false, items: [poolRecord("pool-a"), poolRecord("pool-b")] };
         if (command === "desktop_edit_model_access") {
@@ -86,9 +89,45 @@ function engine(status) {
   };
 }
 
-/** Gives every team save this answer until the next mount. Input: the receipt. Output: nothing. */
-export function answerSaves(receipt) {
+/** Gives every team save this answer until the next mount. Inputs: the receipt and how long a
+ * coordination save takes, in milliseconds. Output: nothing. */
+export function answerSaves(receipt, delay = SAVE_MS) {
   saveAnswer = receipt;
+  saveDelay = delay;
+}
+
+/** Puts the focus on a segmented row's checked option, as Tab does. Input: the row's label.
+ * Output: whether it took the focus. */
+export function focusChecked(row) {
+  const radio = document.querySelector(`[data-setting="${row}"] [role="radio"][aria-checked="true"]`);
+  radio?.focus();
+  return radio !== null && document.activeElement === radio;
+}
+
+/** What a segmented row says to the keyboard. Input: the row's label. Output: the checked
+ * option's words and the focused option's words, null when the focus is outside the row. */
+export function keyboard(row) {
+  const group = document.querySelector(`[data-setting="${row}"] [role="radiogroup"]`);
+  return { checked: group?.querySelector('[aria-checked="true"]')?.textContent.trim() ?? null, focused: group?.contains(document.activeElement) ? document.activeElement.textContent.trim() : null };
+}
+
+/** Puts the focus on a select and marks that element, so a later check can tell it is the same
+ * one and not a remounted copy. Input: its id. Output: whether it took the focus. */
+export function markFocus(id) {
+  const select = document.getElementById(id);
+  select?.focus();
+  select?.setAttribute("data-marked", "yes");
+  return select !== null && document.activeElement === select;
+}
+
+/** Says whether the element markFocus marked still has the focus. Output: true or false. */
+export function markedHasFocus() {
+  return document.activeElement?.getAttribute("data-marked") === "yes";
+}
+
+/** Reads the help line under one select. Input: its id. Output: the words, or null. */
+export function helperOf(id) {
+  return document.getElementById(id)?.closest(".field")?.querySelector(".helper")?.textContent ?? null;
 }
 
 /** Changes the coordination settings the fake engine holds, as the TUI or another window
