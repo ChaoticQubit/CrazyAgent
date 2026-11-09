@@ -19381,6 +19381,95 @@ fn worker_results_go_to_the_lead_not_the_master() {
 /// its idle worker rather than to the idle lead, and a master task the busy lead cannot take
 /// goes to a fresh sub-agent of the master while that worker sits idle.
 #[cfg(target_os = "macos")]
+fn handle_of(fixture: &Fixture, agent: i64) -> Option<String> {
+    crate::team::names::name(&fixture.connection, agent)
+        .unwrap()
+        .and_then(|name| name.handle)
+}
+
+/// Hands off one task and waits until it is done and its agent idle. Takes the fixture,
+/// the team and the prompt. Returns the agent that ran it.
+#[cfg(target_os = "macos")]
+fn done_and_idle(fixture: &Fixture, team: &mut TeamRuntime, prompt: &str) -> i64 {
+    owner(fixture, &[hand_off(fixture, prompt)]);
+    fixture.until(team, "the task is done", |f| task_of(f, prompt).0 == "done");
+    let agent = task_and_agent(fixture, prompt).1.unwrap();
+    fixture.until(team, "its agent is idle", |f| {
+        f.agent_status(agent).0 == AgentStatus::Idle
+    });
+    agent
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn with_reuse_idle_off_a_new_task_starts_a_new_agent_and_the_idle_one_keeps_its_handle() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    assert_eq!(fixture.status().reuse_idle, crate::team::ReuseIdle::Off);
+    let first = done_and_idle(&fixture, &mut team, "Write a.md");
+    let handle = handle_of(&fixture, first);
+    let second = done_and_idle(&fixture, &mut team, "Write b.md");
+    assert_ne!(first, second, "a new task starts a new agent");
+    assert_eq!(handle_of(&fixture, first), handle);
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn with_reuse_idle_on_an_idle_agent_takes_the_next_task() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::ReuseIdle {
+            project_id: fixture.setup.project_id.clone(),
+            mode: crate::team::ReuseIdle::On,
+        }],
+    );
+    assert_eq!(fixture.status().reuse_idle, crate::team::ReuseIdle::On);
+    let first = done_and_idle(&fixture, &mut team, "Write a.md");
+    let second = done_and_idle(&fixture, &mut team, "Write b.md");
+    assert_eq!(first, second, "the idle agent takes it");
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn with_reuse_idle_off_at_the_limit_the_idle_agent_stops_and_a_new_one_starts() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    let first = done_and_idle(&fixture, &mut team, "Write a.md");
+    let second = done_and_idle(&fixture, &mut team, "Write b.md");
+    assert_ne!(first, second, "a new task starts a new agent");
+    assert_eq!(fixture.agent_status(first).0, AgentStatus::Stopped);
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_the_owner_keeps_warm_still_takes_the_next_task() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::KeepWarm {
+            project_id: fixture.setup.project_id.clone(),
+            on: true,
+            version: crate::team::settings_version(&fixture.connection, &fixture.setup.project_id)
+                .unwrap(),
+        }],
+    );
+    let first = done_and_idle(&fixture, &mut team, "Write a.md");
+    let second = done_and_idle(&fixture, &mut team, "Write b.md");
+    assert_eq!(first, second, "the warm agent takes it");
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn idle_worker_reused_only_within_its_lead() {
     let fixture = Fixture::new(3);
