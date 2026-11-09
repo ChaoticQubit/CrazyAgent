@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const view = await import("../src/screens/metrics/view.tsx");
+const chartModule = await import("../src/screens/metrics/chart.tsx");
 const page = await import("../src/screens/project/index.tsx");
 const router = await import("../src/ui/router.ts");
 
@@ -103,12 +104,12 @@ test("the chart draws a stacked bar for every two hours since midnight and never
 
 test("the chart fills a week with one bar a day and labels each by its date", () => {
   const since = SINCE - 6 * DAY;
-  const bars = view.chartBars(metrics({ bucket_ms: DAY, series: [{ start_ms: since + 2 * DAY, tokens: tokens({ input: 5 }) }] }), since, NOW);
+  const bars = chartModule.chartBars(metrics({ bucket_ms: DAY, series: [{ start_ms: since + 2 * DAY, tokens: tokens({ input: 5 }) }] }), since, NOW);
   assert.deepEqual(bars.map((bar) => (bar.start_ms - since) / DAY), [0, 1, 2, 3, 4, 5, 6]);
   assert.deepEqual(bars.map((bar) => bar.tokens.input), [0, 0, 5, 0, 0, 0, 0]);
-  assert.equal(view.barLabel(SINCE, DAY, 0), new Date(SINCE).toLocaleDateString(undefined, { timeZone: "UTC", month: "short", day: "numeric" }));
-  assert.equal(view.barLabel(SINCE + 14 * HOUR, 2 * HOUR, 60), "15:00");
-  assert.throws(() => view.chartBars(metrics({ bucket_ms: 0 }), SINCE, NOW), /a chart bar spans time/);
+  assert.equal(chartModule.barLabel(SINCE, DAY, 0), new Date(SINCE).toLocaleDateString(undefined, { timeZone: "UTC", month: "short", day: "numeric" }));
+  assert.equal(chartModule.barLabel(SINCE + 14 * HOUR, 2 * HOUR, 60), "15:00");
+  assert.throws(() => chartModule.chartBars(metrics({ bucket_ms: 0 }), SINCE, NOW), /a chart bar spans time/);
 });
 
 test("By agent lists each agent's tokens in four parts, its turns in the range, its tool counts and its share, with a total", () => {
