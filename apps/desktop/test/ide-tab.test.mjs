@@ -246,7 +246,7 @@ test("an open the tab gave up on is refused quietly instead of showing a problem
   const lib = read("src-tauri/src/lib.rs");
   const open = lib.slice(lib.indexOf("async fn desktop_ide_open"), lib.indexOf("async fn desktop_ide_place"));
   assert.ok(open.indexOf("views.begin(&project)") >= 0 && open.indexOf("views.begin(&project)") < open.indexOf("ide_open(project"), "the ticket is taken before the engine call");
-  assert.match(open, /ide::show\(\s*&app,\s*&webview\.window\(\),\s*&views,\s*&project,\s*workbench,\s*bounds,\s*ticket,?\s*\)/);
+  assert.match(open, /ide::show\(\s*&app,\s*&window,\s*&views,\s*&project,\s*workbench,\s*bounds,\s*ticket,?\s*\)/);
 });
 
 test("the TUI focus poll reaches the engine only while a project's IDE webview is loaded", () => {
