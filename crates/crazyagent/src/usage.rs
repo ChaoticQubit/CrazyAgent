@@ -11,8 +11,11 @@ pub mod health;
 pub mod metrics;
 pub mod poll;
 pub mod report;
+mod rules;
 pub mod service;
 pub mod turns;
+
+pub use rules::THIRD_PARTY_NOTICES;
 
 pub const PLAN_BYTES_MAX: usize = 64;
 pub const FAILURE_BYTES_MAX: usize = 64;
@@ -333,7 +336,8 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(capture::SCHEMA).map_err(storage)?;
     db.execute_batch(health::SCHEMA).map_err(storage)?;
     db.execute_batch(report::SCHEMA).map_err(storage)?;
-    db.execute_batch(turns::SCHEMA).map_err(storage)
+    db.execute_batch(turns::SCHEMA).map_err(storage)?;
+    capture::count_rows(db)
 }
 
 fn add_columns(db: &Connection, last: &str, batch: &str) -> Result<(), EngineError> {

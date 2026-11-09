@@ -1,9 +1,11 @@
+use super::rules::{Usage, advisor_usages, claude_usage};
 use super::{LimitSource, LimitWindow, Observation, failure, record_observation, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -24,6 +26,15 @@ pub const LINE_TOKENS_MAX: u64 = 1_000_000_000;
 pub(super) const ROW_TOKENS_MAX: i64 = 1_000_000_000_000_000;
 const TOOLS_PER_READ_MAX: usize = 4096;
 const ARGUMENTS_BYTES_MAX: usize = 64 * 1024;
+/// The most records one read of one file parses before it stops at a line boundary.
+const USAGES_PER_READ_MAX: usize = 4096;
+/// The most rows transcript lines can create in each counted table.
+pub(super) const TABLE_ROWS_MAX: i64 = 4 * 1024 * 1024;
+/// The records at which one scan stops opening files, so one write under the store's lock
+/// holds at most one read more. The rest is read by the next scan.
+const USAGES_PER_SCAN_MAX: usize = 8 * 1024;
+const MESSAGES_KEPT_MS: i64 = 400 * 24 * HOUR_MS;
+const MESSAGES_FORGOTTEN_PER_SCAN: i64 = 4096;
 
 pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_tokens (
     hour_ms INTEGER NOT NULL,
@@ -125,6 +136,16 @@ impl Tokens {
         }
     }
 
+    /// The largest of two counts, field by field. Input: the other count. Output: the result.
+    pub fn largest(self, other: Tokens) -> Tokens {
+        Tokens {
+            input: self.input.max(other.input),
+            output: self.output.max(other.output),
+            cache_read: self.cache_read.max(other.cache_read),
+            cache_write: self.cache_write.max(other.cache_write),
+        }
+    }
+
     /// Caps every count at `max`. Input: the cap. Output: the capped count.
     pub fn at_most(self, max: u64) -> Tokens {
         Tokens {
@@ -207,45 +228,43 @@ struct Progress {
     identity: (u64, u64),
     offset: u64,
     skipping: bool,
-    #[serde(default)]
-    message: Option<String>,
-    #[serde(default)]
-    counted: Tokens,
     total: Tokens,
 }
 
-/// The token growth one Claude Code transcript line shows. Each assistant line carries its
-/// message's usage, and several lines of one message repeat it, so each message counts
-/// once at its largest values, each count capped at `LINE_TOKENS_MAX`.
-/// Inputs: the parsed line and the file's progress. Output: the growth to add.
-fn claude_line(value: &Value, progress: &mut Progress) -> Tokens {
-    let message = &value["message"];
-    if value["type"] != "assistant" || !message["usage"].is_object() {
-        return Tokens::default();
+/// The records of one read, one entry per message. Inputs arrive line by line.
+#[derive(Default)]
+struct Reading {
+    usages: Vec<Usage>,
+    by_key: std::collections::HashMap<String, usize>,
+}
+
+impl Reading {
+    /// Adds one line's record, folding it into an earlier line of the same message.
+    /// Input: the record.
+    fn add(&mut self, usage: Usage) {
+        let earlier = usage
+            .key
+            .as_ref()
+            .and_then(|key| self.by_key.get(key).copied());
+        if let Some(index) = earlier {
+            self.usages[index].merge(usage);
+            return;
+        }
+        if let Some(key) = &usage.key {
+            self.by_key.insert(key.clone(), self.usages.len());
+        }
+        self.usages.push(usage);
     }
-    let usage = &message["usage"];
-    let count = |key: &str| usage[key].as_u64().unwrap_or(0);
-    let seen = Tokens {
-        input: count("input_tokens"),
-        output: count("output_tokens"),
-        cache_read: count("cache_read_input_tokens"),
-        cache_write: count("cache_creation_input_tokens"),
+
+    /// Whether the read holds its bound. Output: the answer.
+    fn full(&self) -> bool {
+        self.usages.len() >= USAGES_PER_READ_MAX
     }
-    .at_most(LINE_TOKENS_MAX);
-    let id = message["id"].as_str().map(str::to_owned);
-    if id.is_some() && id == progress.message {
-        let growth = seen.growth_over(progress.counted);
-        progress.counted = Tokens {
-            input: progress.counted.input.max(seen.input),
-            output: progress.counted.output.max(seen.output),
-            cache_read: progress.counted.cache_read.max(seen.cache_read),
-            cache_write: progress.counted.cache_write.max(seen.cache_write),
-        };
-        return growth;
+
+    /// Ends the read. Output: the records to count.
+    fn finished(self) -> Vec<Usage> {
+        self.usages.into_iter().map(Usage::settled).collect()
     }
-    progress.message = id;
-    progress.counted = seen;
-    seen
 }
 
 /// One limit window a rollout line reports. The agent writes its own rollout, so a window
@@ -283,15 +302,15 @@ fn codex_window(value: &Value, now_ms: i64) -> Option<(u64, LimitWindow)> {
 /// past the last ones counted, each capped at `LINE_TOKENS_MAX`, and the account's limit
 /// windows when the line carries them. Codex counts cached input inside input; the growth
 /// keeps them apart. Inputs: the parsed line, the file's progress and the time.
-/// Output: growth and limits.
+/// Output: the growth as a record with no key, None when nothing grew, and the limits.
 fn codex_line(
     value: &Value,
     progress: &mut Progress,
     now_ms: i64,
-) -> (Tokens, Option<Observation>) {
+) -> (Option<Usage>, Option<Observation>) {
     let payload = &value["payload"];
     if value["type"] != "event_msg" || payload["type"] != "token_count" {
-        return (Tokens::default(), None);
+        return (None, None);
     }
     let mut growth = Tokens::default();
     let total = &payload["info"]["total_token_usage"];
@@ -325,7 +344,11 @@ fn codex_line(
         }
     }
     let reported = observation.five_hour.is_some() || observation.weekly.is_some();
-    (growth, reported.then_some(observation))
+    let usage = (!growth.is_empty()).then(|| Usage {
+        tokens: growth,
+        ..Usage::default()
+    });
+    (usage, reported.then_some(observation))
 }
 
 /// Names the tool call one Codex rollout line records, the way adoption counts it: a
@@ -671,31 +694,31 @@ fn session_name(path: &Path) -> String {
 /// Reads what one record gained since its stored progress, at most `READ_BYTES_MAX`.
 /// A replaced or shortened record starts over; one whose volume a reboot renumbered keeps
 /// its place. A line longer than the read is skipped.
-/// Inputs: the record, its progress and the time. Output: the growth and the last limits.
+/// Inputs: the record, its progress and the time. Output: the records and the last limits.
 fn read_record(
     path: &Path,
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
-) -> (Tokens, Option<Observation>) {
+) -> (Vec<Usage>, Option<Observation>) {
     let Some(opened) = open_record(path) else {
-        return (Tokens::default(), None);
+        return (Vec::new(), None);
     };
     read_opened(opened, format, progress, now_ms)
 }
 
 /// Reads one record as `read_record` does and also collects the tool calls its new lines
 /// record. Inputs: the record, its progress, the time and the collected tools.
-/// Output: the growth and the last limits.
+/// Output: the records and the last limits.
 fn read_record_with(
     path: &Path,
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
     tools: &mut Vec<String>,
-) -> (Tokens, Option<Observation>) {
+) -> (Vec<Usage>, Option<Observation>) {
     let Some(opened) = open_record(path) else {
-        return (Tokens::default(), None);
+        return (Vec::new(), None);
     };
     read_opened_with(opened, format, progress, now_ms, Some(tools))
 }
@@ -705,7 +728,7 @@ fn read_opened(
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
-) -> (Tokens, Option<Observation>) {
+) -> (Vec<Usage>, Option<Observation>) {
     read_opened_with(opened, format, progress, now_ms, None)
 }
 
@@ -715,14 +738,14 @@ fn read_opened(
 /// the same, under the crate-wide volume renumber rule, and the pin then moves to the live
 /// device, so a reboot never counts a whole record again. Inputs: the open record with its
 /// identity and length, its progress, the time and where to collect the tool calls read,
-/// at most `TOOLS_PER_READ_MAX`, if anywhere. Output: the growth and the last limits.
+/// at most `TOOLS_PER_READ_MAX`, if anywhere. Output: the records and the last limits.
 fn read_opened_with(
     (mut file, identity, length): (File, (u64, u64), u64),
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
     mut tools: Option<&mut Vec<String>>,
-) -> (Tokens, Option<Observation>) {
+) -> (Vec<Usage>, Option<Observation>) {
     if crate::file_identity::same_files(&[progress.identity], &[identity])
         && length >= progress.offset
     {
@@ -734,7 +757,7 @@ fn read_opened_with(
         };
     }
     if length == progress.offset || file.seek(SeekFrom::Start(progress.offset)).is_err() {
-        return (Tokens::default(), None);
+        return (Vec::new(), None);
     }
     let mut bytes = Vec::new();
     if file
@@ -742,19 +765,23 @@ fn read_opened_with(
         .read_to_end(&mut bytes)
         .is_err()
     {
-        return (Tokens::default(), None);
+        return (Vec::new(), None);
     }
     let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n') else {
         if bytes.len() == READ_BYTES_MAX {
             progress.offset += bytes.len() as u64;
             progress.skipping = true;
         }
-        return (Tokens::default(), None);
+        return (Vec::new(), None);
     };
-    progress.offset += end as u64 + 1;
-    let mut growth = Tokens::default();
+    let mut reading = Reading::default();
     let mut limits = None;
+    let mut consumed: u64 = 0;
     for line in bytes[..end].split(|byte| *byte == b'\n') {
+        if reading.full() {
+            break;
+        }
+        consumed += line.len() as u64 + 1;
         if std::mem::take(&mut progress.skipping) {
             continue;
         }
@@ -762,10 +789,19 @@ fn read_opened_with(
             continue;
         };
         match format {
-            Format::Claude => growth = growth.plus(claude_line(&value, progress)),
+            Format::Claude => {
+                if let Some(usage) = claude_usage(&value) {
+                    reading.add(usage);
+                }
+                for usage in advisor_usages(&value) {
+                    reading.add(usage);
+                }
+            }
             Format::Codex => {
-                let (gained, observed) = codex_line(&value, progress, now_ms);
-                growth = growth.plus(gained);
+                let (usage, observed) = codex_line(&value, progress, now_ms);
+                if let Some(usage) = usage {
+                    reading.add(usage);
+                }
                 limits = observed.or(limits);
             }
         }
@@ -781,9 +817,10 @@ fn read_opened_with(
             }
         }
     }
+    progress.offset += consumed;
     assert!(progress.offset <= length);
     assert!(tools.is_none_or(|tools| tools.len() <= TOOLS_PER_READ_MAX));
-    (growth, limits)
+    (reading.finished(), limits)
 }
 
 fn stored_progress(db: &Connection, key: &str) -> Result<Progress, EngineError> {
@@ -852,22 +889,27 @@ fn scan(
     let (paths, left, stopped) = records(home, format);
     mark_cut(db, home, attribution, &left, stopped, now_ms)?;
     let mut changed = Vec::new();
+    let mut budget = USAGES_PER_SCAN_MAX;
     for path in paths {
+        if budget == 0 {
+            break;
+        }
         let key = path.to_string_lossy().into_owned();
         let before = stored_progress(db, &key)?;
         let mut progress = before.clone();
         let mut tools = Vec::new();
-        let (growth, observed) = match counting {
+        let (usages, observed) = match counting {
             Some(_) => read_record_with(&path, format, &mut progress, now_ms, &mut tools),
             None => read_record(&path, format, &mut progress, now_ms),
         };
+        budget = budget.saturating_sub(usages.len());
         if progress != before {
             changed.push((
                 key,
                 session_name(&path),
                 before,
                 progress,
-                growth,
+                usages,
                 observed,
                 tools,
             ));
@@ -879,7 +921,7 @@ fn scan(
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
     let mut added = Tokens::default();
     let mut limits = None;
-    for (key, session, before, progress, growth, observed, tools) in changed {
+    for (key, session, before, progress, usages, observed, tools) in changed {
         if stored_progress(&tx, &key)? != before {
             continue;
         }
@@ -894,18 +936,10 @@ fn scan(
             params![key, serde_json::to_string(&progress).map_err(storage)?],
         )
         .map_err(storage)?;
-        add_tokens(
-            &tx,
-            now_ms,
-            attribution,
-            &session,
-            "",
-            Added {
-                tokens: growth,
-                cost_nanos: 0,
-            },
-        )?;
-        added = added.plus(growth);
+        for (model, growth) in count_usages(&tx, Messages::Live, &usages, now_ms)? {
+            add_tokens(&tx, now_ms, attribution, &session, &model, growth)?;
+            added = added.plus(growth.tokens);
+        }
         limits = limits.or(observed);
     }
     if let (Some(observation), Some(account)) = (limits, &attribution.account) {
@@ -931,6 +965,204 @@ fn launched_without_hooks(db: &Connection, agent: i64) -> Result<bool, EngineErr
 
 fn text(value: Option<&str>) -> &str {
     value.unwrap_or("")
+}
+
+/// Which table holds the keys already counted: the live store's or the recount's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Messages {
+    Live,
+    Recount,
+}
+
+impl Messages {
+    fn table(self) -> &'static str {
+        match self {
+            Self::Live => "usage_messages",
+            Self::Recount => "usage_recount_messages",
+        }
+    }
+}
+
+/// Counts what one record adds over what its key already counted. Inputs: the open write,
+/// the key table, the record and the time. Output: the tokens and web searches it adds.
+fn count_message(
+    tx: &Connection,
+    table: Messages,
+    usage: &Usage,
+    now_ms: i64,
+) -> Result<(Tokens, u64), EngineError> {
+    let Some(key) = &usage.key else {
+        return Ok((usage.tokens, usage.web_searches));
+    };
+    let name = table.table();
+    let prior: Option<(Tokens, u64)> = tx
+        .query_row(
+            &format!("SELECT input,output,cache_read,cache_write,web FROM {name} WHERE id=?1"),
+            [key],
+            |row| {
+                let count = |index: usize| -> rusqlite::Result<u64> {
+                    Ok(row.get::<_, i64>(index)?.max(0) as u64)
+                };
+                Ok((
+                    Tokens {
+                        input: count(0)?,
+                        output: count(1)?,
+                        cache_read: count(2)?,
+                        cache_write: count(3)?,
+                    },
+                    count(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(storage)?;
+    if prior.is_none() && !has_room(tx, name)? {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            eprintln!("usage: message keys are at their cap, repeats of new messages count again")
+        });
+        return Ok((usage.tokens, usage.web_searches));
+    }
+    let (before, web_before) = prior.unwrap_or_default();
+    let largest = before.largest(usage.tokens);
+    let web = web_before.max(usage.web_searches);
+    tx.execute(
+        &format!(
+            "INSERT INTO {name} (id,input,output,cache_read,cache_write,web,last_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(id) DO UPDATE SET input=excluded.input,output=excluded.output,
+                cache_read=excluded.cache_read,cache_write=excluded.cache_write,
+                web=excluded.web,last_ms=excluded.last_ms"
+        ),
+        params![
+            key,
+            clamp(largest.input),
+            clamp(largest.output),
+            clamp(largest.cache_read),
+            clamp(largest.cache_write),
+            clamp(web),
+            now_ms
+        ],
+    )
+    .map_err(storage)?;
+    if usage.exact && prior.is_some() {
+        return Ok((Tokens::default(), 0));
+    }
+    Ok((usage.tokens.growth_over(before), web - web_before))
+}
+
+/// Counts one read's records. Inputs: the open write, the key table, the records and the
+/// time. Output: what each model added.
+pub(super) fn count_usages(
+    tx: &Connection,
+    table: Messages,
+    usages: &[Usage],
+    now_ms: i64,
+) -> Result<BTreeMap<String, Added>, EngineError> {
+    let mut by_model: BTreeMap<String, Added> = BTreeMap::new();
+    for usage in usages {
+        let (growth, _web) = count_message(tx, table, usage, now_ms)?;
+        let row = by_model.entry(usage.model.clone()).or_default();
+        row.tokens = row.tokens.plus(growth);
+    }
+    Ok(by_model)
+}
+
+/// Forgets counted keys past their age, a bounded number per scan. Inputs: the store and the
+/// time. Output: done, or `usage_unavailable`.
+fn forget_old_messages(db: &Connection, now_ms: i64) -> Result<(), EngineError> {
+    db.execute(
+        "DELETE FROM usage_messages WHERE id IN
+            (SELECT id FROM usage_messages WHERE last_ms<?1 LIMIT ?2)",
+        params![now_ms - MESSAGES_KEPT_MS, MESSAGES_FORGOTTEN_PER_SCAN],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// The most models one session keeps rows for in one hour; later models file under `''`.
+const MODELS_PER_HOUR_MAX: i64 = 16;
+/// The tables whose rows transcript lines create.
+const COUNTED_TABLES: &[&str] = &["usage_messages", "usage_tokens"];
+
+/// A usage row's key without its session and model.
+pub(super) type RowKey<'a> = (i64, &'a str, &'a str, &'a str, &'a str, &'a str, &'a str);
+
+/// Starts counting each table's rows, at the first open from the rows it holds, in one write so
+/// that none is missed. A store already counting takes no write lock, because every open
+/// comes here. Input: the store. Output: done, or `usage_unavailable`.
+pub(super) fn count_rows(db: &Connection) -> Result<(), EngineError> {
+    let missing = |table: &&str| -> bool {
+        db.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name=?1)",
+            [format!("{table}_gone")],
+            |row| row.get(0),
+        )
+        .unwrap_or(true)
+    };
+    if !COUNTED_TABLES.iter().any(missing) {
+        return Ok(());
+    }
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS usage_row_counts (name TEXT PRIMARY KEY, rows INTEGER NOT NULL) WITHOUT ROWID;")
+        .map_err(storage)?;
+    for table in COUNTED_TABLES {
+        tx.execute_batch(&format!(
+            "INSERT INTO usage_row_counts (name,rows) SELECT '{table}',(SELECT COUNT(*) FROM {table})
+                WHERE NOT EXISTS (SELECT 1 FROM usage_row_counts WHERE name='{table}');
+             CREATE TRIGGER IF NOT EXISTS {table}_added AFTER INSERT ON {table}
+                BEGIN UPDATE usage_row_counts SET rows=rows+1 WHERE name='{table}'; END;
+             CREATE TRIGGER IF NOT EXISTS {table}_gone AFTER DELETE ON {table}
+                BEGIN UPDATE usage_row_counts SET rows=rows-1 WHERE name='{table}'; END;"
+        ))
+        .map_err(storage)?;
+    }
+    tx.commit().map_err(storage)
+}
+
+/// Whether a counted table can take one more row. Inputs: the store and the table. Output: the
+/// answer; a table that has no counter yet has room.
+pub(super) fn has_room(tx: &Connection, table: &str) -> Result<bool, EngineError> {
+    let rows: Option<i64> = tx
+        .query_row(
+            "SELECT rows FROM usage_row_counts WHERE name=?1",
+            [table],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    Ok(rows.is_none_or(|rows| rows < TABLE_ROWS_MAX))
+}
+
+/// The model one session's growth is filed under in one hour: its own name while the hour
+/// holds fewer than `MODELS_PER_HOUR_MAX` models or already has this one, else `''`. Inputs:
+/// the open write, the table, the row key, the session and the model. Output: the model and
+/// whether its row exists already.
+pub(super) fn filed_model<'a>(
+    tx: &Connection,
+    table: &str,
+    (hour_ms, kind, project, pool, account, agent, harness): RowKey<'_>,
+    session: &str,
+    model: &'a str,
+) -> Result<(&'a str, bool), EngineError> {
+    let (models, named): (i64, i64) = tx
+        .query_row(
+            &format!(
+                "SELECT COUNT(*),COALESCE(SUM(model=?9),0) FROM {table}
+                 WHERE hour_ms=?1 AND kind=?2 AND project=?3 AND pool=?4 AND account=?5
+                    AND agent=?6 AND harness=?7 AND session=?8"
+            ),
+            params![
+                hour_ms, kind, project, pool, account, agent, harness, session, model
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(storage)?;
+    Ok(if named > 0 || models < MODELS_PER_HOUR_MAX {
+        (model, named > 0)
+    } else {
+        ("", false)
+    })
 }
 
 /// Step 9 of the engine database: usage rows gain the model and their estimated dollars, the
@@ -969,12 +1201,20 @@ pub(crate) fn migrate_counts(tx: &Connection) -> Result<(), EngineError> {
             json_extract(progress,'$.counted.input'),json_extract(progress,'$.counted.output'),
             json_extract(progress,'$.counted.cache_read'),json_extract(progress,'$.counted.cache_write'),
             CAST(strftime('%s','now') AS INTEGER)*1000
-         FROM usage_files WHERE json_type(progress,'$.message')='text'
+         FROM usage_files WHERE CASE WHEN json_valid(progress) THEN
+            json_type(progress,'$.message')='text'
+            AND length(CAST(json_extract(progress,'$.message') AS BLOB)) BETWEEN 1 AND 128
+            AND json_type(progress,'$.counted.input')='integer'
+            AND json_type(progress,'$.counted.output')='integer'
+            AND json_type(progress,'$.counted.cache_read')='integer'
+            AND json_type(progress,'$.counted.cache_write')='integer' ELSE 0 END
          ON CONFLICT(id) DO UPDATE SET input=MAX(input,excluded.input),
             output=MAX(output,excluded.output),cache_read=MAX(cache_read,excluded.cache_read),
             cache_write=MAX(cache_write,excluded.cache_write);
          UPDATE usage_files SET progress=json_remove(progress,'$.message','$.counted')
-         WHERE json_type(progress,'$.counted') IS NOT NULL;",
+         WHERE CASE WHEN json_valid(progress) THEN
+            json_type(progress,'$.message') IS NOT NULL OR json_type(progress,'$.counted') IS NOT NULL
+            ELSE 0 END;",
     )
     .map_err(storage)
 }
@@ -1012,6 +1252,21 @@ fn add_tokens(
         params![project, attribution.agent, session, now_ms],
     )
     .map_err(storage)?;
+    let key = (
+        hour_ms,
+        attribution.kind.name(),
+        project,
+        pool,
+        account,
+        attribution.agent.as_str(),
+        harness,
+    );
+    let (model, exists) = filed_model(tx, "usage_tokens", key, session, model)?;
+    let (session, model) = if exists || has_room(tx, "usage_tokens")? {
+        (session, model)
+    } else {
+        ("", "")
+    };
     tx.execute(
         "INSERT INTO usage_tokens (hour_ms,kind,project,pool,account,agent,harness,session,model,\
             input,output,cache_read,cache_write,cost_nanos)
@@ -1035,7 +1290,7 @@ fn add_tokens(
             clamp(added.tokens.output),
             clamp(added.tokens.cache_read),
             clamp(added.tokens.cache_write),
-            added.cost_nanos.max(0),
+            added.cost_nanos.clamp(0, ROW_TOKENS_MAX),
             ROW_TOKENS_MAX,
         ],
     )
@@ -1201,6 +1456,7 @@ pub fn scan_runs(
         )?);
     }
     forget_finished_runs(db, now_ms)?;
+    forget_old_messages(db, now_ms)?;
     Ok(added)
 }
 
@@ -1263,3 +1519,6 @@ mod tests;
 
 #[cfg(test)]
 mod migration_tests;
+
+#[cfg(test)]
+mod counting_tests;
