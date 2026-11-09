@@ -22,7 +22,7 @@ window.__TAURI_INTERNALS__ = {
     if (command === "desktop_ide_place") places.push(args.bounds);
     if (absent.includes(command)) throw `Command ${command} not found`;
     if (refused.includes(command)) throw { code: "ide_webview_failed" };
-    if (command === "desktop_ide_place" && heldPlaces) return new Promise((answer) => heldPlaces.push(answer));
+    if (command === "desktop_ide_place" && heldPlaces) return new Promise((answer, refuse) => heldPlaces.push({ answer, refuse }));
     return command === "desktop_ide_state" ? READY : null;
   },
 };
@@ -77,7 +77,13 @@ export function placed() {
 
 /** Answers the oldest held place. Output: once the tab has had the answer. */
 export function answerPlace() {
-  heldPlaces.shift()?.(null);
+  heldPlaces.shift()?.answer(null);
+  return frames();
+}
+
+/** Refuses the oldest held place. Output: once the tab has had the refusal. */
+export function refusePlace() {
+  heldPlaces.shift()?.refuse({ code: "ide_webview_failed" });
   return frames();
 }
 
