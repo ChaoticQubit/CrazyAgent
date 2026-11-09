@@ -2699,9 +2699,14 @@ fn working_list_stops_at_its_bound_and_fits_one_reply_beside_a_full_unseen_list(
     }
     for at in 0..=UNSEEN_PROJECTS_MAX {
         let team = ProjectId::new(long(at)).unwrap();
-        escalate(&fixture.connection, &team, "Spend on a new provider?", at + 1)
-            .unwrap()
-            .unwrap();
+        escalate(
+            &fixture.connection,
+            &team,
+            "Spend on a new provider?",
+            at + 1,
+        )
+        .unwrap()
+        .unwrap();
     }
 
     let view = app(&fixture.connection).unwrap();
