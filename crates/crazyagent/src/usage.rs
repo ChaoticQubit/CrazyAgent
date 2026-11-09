@@ -156,6 +156,27 @@ impl AccountLimits {
     pub fn polled_weekly_at(&self, now_ms: i64) -> Option<LimitWindow> {
         window_at(self.polled_weekly, self.weekly_reset_override_ms, now_ms)
     }
+
+    /// Drops each window whose reset has passed when the last read of this account failed:
+    /// nothing has read the window that came next, so 0% would be a guess and the report
+    /// says not read instead. Scheduling keeps `window_at`. Input: the time now. Output:
+    /// none; the windows are cleared on this row.
+    fn forget_unread_windows(&mut self, now_ms: i64) {
+        if self.failure.is_none() {
+            return;
+        }
+        let passed = |window: Option<LimitWindow>, override_ms: Option<i64>| {
+            window
+                .and_then(|window| override_ms.or(window.resets_at_ms))
+                .is_some_and(|at| at <= now_ms)
+        };
+        if passed(self.five_hour, self.five_hour_reset_override_ms) {
+            self.five_hour = None;
+        }
+        if passed(self.weekly, self.weekly_reset_override_ms) {
+            self.weekly = None;
+        }
+    }
 }
 
 /// Applies the owner's manual reset to an observed window and ages it to `now_ms`: a manual

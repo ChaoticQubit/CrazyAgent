@@ -1,7 +1,7 @@
 use super::*;
 use crate::protocol::CredentialRef;
 use crate::usage::capture::{Attribution, Format, RunKind, register_run, scan_home, scan_runs};
-use crate::usage::{LimitSource, LimitWindow, Observation, record_observation};
+use crate::usage::{LimitSource, LimitWindow, Observation, record_failure, record_observation};
 use std::io::Write;
 use std::path::Path;
 
@@ -924,4 +924,51 @@ fn a_report_past_one_reply_frame_keeps_its_largest_rows_and_newest_days_and_fits
         now,
         "the newest day stays"
     );
+}
+
+#[test]
+fn a_window_past_its_reset_reads_as_not_read_when_the_last_read_failed() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let now = MIDNIGHT + 2 * HOUR;
+    let passed = LimitWindow {
+        used_percent: 40.0,
+        resets_at_ms: Some(MIDNIGHT + HOUR),
+    };
+    let ahead = LimitWindow {
+        used_percent: 60.0,
+        resets_at_ms: Some(now + DAY),
+    };
+    let held: Vec<CredentialRef> = ["failed", "healthy", "mixed"]
+        .iter()
+        .map(|id| CredentialRef::new(*id).unwrap())
+        .collect();
+    for (account, five_hour) in held.iter().zip([passed, passed, ahead]) {
+        record_observation(
+            &db,
+            account,
+            &Observation {
+                plan: None,
+                five_hour: Some(five_hour),
+                weekly: Some(if account.as_str() == "mixed" {
+                    passed
+                } else {
+                    ahead
+                }),
+                provider: Some(crate::usage::poll::Provider::Claude),
+            },
+            LimitSource::Poll,
+            MIDNIGHT,
+        )
+        .unwrap();
+    }
+    record_failure(&db, &held[0], "usage_unreachable", MIDNIGHT).unwrap();
+    record_failure(&db, &held[2], "usage_unreachable", MIDNIGHT).unwrap();
+    let shown = report(&db, None, None, 0, now, &held).unwrap().limits;
+    let row = |id: &str| shown.iter().find(|row| row.account.as_str() == id).unwrap();
+    assert_eq!(row("failed").five_hour, None);
+    assert_eq!(row("failed").weekly, Some(ahead));
+    assert_eq!(row("healthy").five_hour, Some(passed));
+    assert_eq!(row("mixed").five_hour, Some(ahead));
+    assert_eq!(row("mixed").weekly, None);
 }

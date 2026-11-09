@@ -533,6 +533,9 @@ pub fn report(
     let mut limits = all_limits(db)?;
     limits.retain(|row| held.contains(&row.account) || saved.contains(row.account.as_str()));
     limits.truncate(LIMITS_MAX);
+    for row in &mut limits {
+        row.forget_unread_windows(now_ms);
+    }
     let report = fit(UsageReport {
         since_ms,
         total,
