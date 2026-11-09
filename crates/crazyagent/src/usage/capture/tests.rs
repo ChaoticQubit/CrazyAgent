@@ -4,6 +4,12 @@ use std::io::Write;
 const HOUR: i64 = 60 * 60 * 1000;
 const NOW: i64 = 1_793_000_000_000;
 
+fn tokens_of(usages: &[Usage]) -> Tokens {
+    usages
+        .iter()
+        .fold(Tokens::default(), |sum, usage| sum.plus(usage.tokens))
+}
+
 fn attribution(kind: RunKind, pool: Option<&str>) -> Attribution {
     Attribution {
         kind,
@@ -421,7 +427,7 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
     let opened = open_record(&record).unwrap();
     let length = opened.2;
     append(&record, &claude_assistant("g2", 3, 1, 0, 0, "end_turn"));
-    let (growth, _) = read_opened(opened, Format::Claude, &mut progress, NOW);
+    let growth = tokens_of(&read_opened(opened, Format::Claude, &mut progress, NOW).0);
     assert_eq!(
         growth,
         Tokens {
@@ -432,7 +438,7 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
         }
     );
     assert_eq!(progress.offset, length);
-    let (growth, _) = read_record(&record, Format::Claude, &mut progress, NOW + 1);
+    let growth = tokens_of(&read_record(&record, Format::Claude, &mut progress, NOW + 1).0);
     assert_eq!(
         growth,
         Tokens {
@@ -450,14 +456,14 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
     append(&record, head);
     let opened = open_record(&record).unwrap();
     append(&record, tail);
-    let (growth, _) = read_opened(opened, Format::Claude, &mut progress, NOW + 2);
+    let growth = tokens_of(&read_opened(opened, Format::Claude, &mut progress, NOW + 2).0);
     assert_eq!(growth, Tokens::default());
     assert_eq!(progress.offset, grown);
-    let (growth, _) = read_record(&record, Format::Claude, &mut progress, NOW + 3);
+    let growth = tokens_of(&read_record(&record, Format::Claude, &mut progress, NOW + 3).0);
     assert_eq!((growth.input, growth.output), (5, 5));
     assert_eq!(progress.offset, std::fs::metadata(&record).unwrap().len());
     assert_eq!(
-        read_record(&record, Format::Claude, &mut progress, NOW + 4).0,
+        tokens_of(&read_record(&record, Format::Claude, &mut progress, NOW + 4).0),
         Tokens::default()
     );
 }
@@ -695,7 +701,7 @@ fn a_record_that_is_a_fifo_is_skipped_without_waiting_for_a_writer() {
     });
     assert_eq!(
         read.recv_timeout(std::time::Duration::from_secs(5)),
-        Ok(((Tokens::default(), None), Progress::default())),
+        Ok(((Vec::new(), None), Progress::default())),
         "a FIFO record is skipped without waiting for a writer"
     );
 }
