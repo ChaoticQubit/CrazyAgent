@@ -2326,7 +2326,8 @@ pub(super) fn hold_agent_claims(
 }
 
 /// Settles a project's claims no turn end will, as [`super::sweep_claims`] says. Reads
-/// enough held sets that the open ones never crowd out `SWEPT_SETS_MAX` closed ones.
+/// enough held sets that the open ones never crowd out `SWEPT_SETS_MAX` closed ones. A chat
+/// master's set records its session id, so a master takes the newest open master set.
 /// Inputs: the store, the project and the time now. Output: Ok or the first failure.
 pub(super) fn sweep_claims(
     db: &Connection,
@@ -2350,9 +2351,9 @@ pub(super) fn sweep_claims(
     for agent in crate::coord::stopped_with_unheld(db, project)? {
         let id = agent.to_string();
         let master = crate::coord::is_master(db, agent)?;
-        let set = open.iter().find(|record| match record.agent.kind {
+        let set = open.iter().rev().find(|record| match record.agent.kind {
             AgentKind::Master => master,
-            AgentKind::Sub => !master && record.agent.id == id,
+            AgentKind::Sub => record.agent.id == id,
         });
         match set {
             Some(record) => crate::coord::hold_for_set(db, agent, record.id.as_str())?,
