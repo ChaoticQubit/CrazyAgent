@@ -74,6 +74,8 @@ mod owner_deadline_tests;
 #[cfg(all(test, unix))]
 mod owner_server_tests;
 #[cfg(all(test, unix))]
+mod reply_skew_tests;
+#[cfg(all(test, unix))]
 mod secret_storage_wait_tests;
 #[cfg(all(test, unix))]
 mod setup_tests;
@@ -81,6 +83,8 @@ mod setup_tests;
 mod usage_tests;
 
 const SOCKET: &str = "owner.sock";
+/// The log of owner replies this client could not read, in the data root's logs folder.
+const REPLY_LOG: &str = "owner-reply.log";
 const CLIENTS_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const DEFERRED_MAX: usize = 4;
 const HANDSHAKES_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
@@ -3334,6 +3338,41 @@ impl OwnerClient {
         })
     }
 
+    /// Says what a reply that would not parse means. For a read it is an engine writing what
+    /// this client cannot read, noted in the logs folder by where the reply broke and never
+    /// by what it held, since serde's message can echo values. A mutation may have landed, so
+    /// it keeps its unknown outcome. Inputs: the parse error, the read's name or None, and
+    /// the unknown-outcome error. Output: the error to return.
+    fn skewed_reply(
+        &self,
+        error: &serde_json::Error,
+        read: Option<&str>,
+        unknown: fn() -> EngineError,
+    ) -> EngineError {
+        let Some(kind) = read else {
+            return unknown();
+        };
+        let category = match error.classify() {
+            serde_json::error::Category::Io => "io",
+            serde_json::error::Category::Syntax => "syntax",
+            serde_json::error::Category::Data => "data",
+            serde_json::error::Category::Eof => "eof",
+        };
+        let entry = serde_json::json!({
+            "event": "owner_reply_unreadable",
+            "kind": kind,
+            "category": category,
+            "line": error.line(),
+            "column": error.column(),
+        });
+        let _ = crate::engine::claude_host::diagnostic::append_to(
+            &self.root.path.with_file_name("logs"),
+            REPLY_LOG,
+            &entry,
+        );
+        failure("engine_version_mismatch")
+    }
+
     /// Authenticates a fresh bounded connection for one closed owner operation.
     /// Takes a stable operation identity and returns live or historical state.
     /// Uncertain delivery requires reconciliation or retry of the same payload.
@@ -3365,8 +3404,13 @@ impl OwnerClient {
             let bytes = read_frame(&mut stream)
                 .await
                 .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?;
-            let reply: OwnerReply = serde_json::from_slice(&bytes[4..])
-                .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?;
+            let reply: OwnerReply = serde_json::from_slice(&bytes[4..]).map_err(|error| {
+                self.skewed_reply(
+                    &error,
+                    owner_read_kind(&request.operation).as_deref(),
+                    || failure("owner_outcome_unknown_reconcile_same_identity"),
+                )
+            })?;
             if reply.request_id != request.request_id {
                 return Err(failure("owner_outcome_unknown_reconcile_same_identity"));
             }
@@ -3375,6 +3419,17 @@ impl OwnerClient {
         .await
         .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
     }
+}
+
+/// Names an owner request that only reads, for the log of replies this client could not
+/// read. Input: the operation. Output: the read's kind, None for a mutation or a reconcile,
+/// whose outcome stays unknown.
+fn owner_read_kind(operation: &OwnerOperation) -> Option<String> {
+    let OwnerOperation::Read { query } = operation else {
+        return None;
+    };
+    let query = serde_json::to_value(query).ok()?;
+    Some(format!("owner.{}", query.get("kind")?.as_str()?))
 }
 
 #[cfg(all(test, unix))]

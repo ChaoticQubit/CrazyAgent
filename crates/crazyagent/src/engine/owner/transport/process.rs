@@ -302,6 +302,24 @@ enum Answer {
     Committed(ImportCommit),
 }
 
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Read { .. } => Some("process.read"),
+        Action::PendingImport { .. } => Some("process.pending_import"),
+        Action::UncommittedImport { .. } => Some("process.uncommitted_import"),
+        Action::ReadFile { .. } => Some("process.read_file"),
+        Action::Default => Some("process.default"),
+        Action::Given { .. } => Some("process.given"),
+        Action::Agent { .. } => Some("process.agent"),
+        Action::AgentText { .. } => Some("process.agent_text"),
+        Action::Settings { .. } => Some("process.settings"),
+        Action::Adoption { .. } => Some("process.adoption"),
+        _ => None,
+    }
+}
+
 fn unknown() -> EngineError {
     failure("process_outcome_unknown")
 }
@@ -663,6 +681,7 @@ impl OwnerClient {
         text: Option<String>,
     ) -> Result<(Reply, Option<String>), EngineError> {
         tokio::time::timeout(self.timeout, async {
+            let read = read_kind(&action);
             let envelope = Envelope {
                 process: action,
                 text_bytes: text.as_ref().map(|text| text.len() as u32),
@@ -693,7 +712,9 @@ impl OwnerClient {
                     .map_err(unavailable)?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 Reply::Text { bytes } => {
                     let text = read_text(&mut stream, bytes).await.map_err(|_| unknown())?;

@@ -7,7 +7,7 @@ use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 
-fn usage_error(error: EngineError) -> BridgeError {
+pub(super) fn usage_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }

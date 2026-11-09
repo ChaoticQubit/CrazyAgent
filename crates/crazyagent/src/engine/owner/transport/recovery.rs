@@ -137,6 +137,15 @@ pub struct RecoveryBanner {
     pub more: u32,
 }
 
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::List { .. } => Some("recovery.list"),
+        _ => None,
+    }
+}
+
 fn unknown() -> EngineError {
     failure("recovery_outcome_unknown")
 }
@@ -178,6 +187,7 @@ impl OwnerClient {
 
     async fn recovery_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(RECOVERY_TIMEOUT), async {
+            let read = read_kind(&action);
             let frame = encode_frame(&Envelope { recovery: action })
                 .map_err(|_| failure("recovery_request_bounds"))?;
             self.root.verify()?;
@@ -204,7 +214,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("recovery_unavailable"))?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }

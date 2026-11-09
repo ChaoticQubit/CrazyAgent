@@ -331,7 +331,7 @@ fn profile_id() -> Result<RequestId, BridgeError> {
     RequestId::new(native_random_id()?).map_err(|_| failure("account_identity_unavailable"))
 }
 
-fn profile_error(error: EngineError) -> BridgeError {
+pub(super) fn profile_error(error: EngineError) -> BridgeError {
     caused(
         match error.0.as_str() {
             "controller_disconnected" => "not_connected",
