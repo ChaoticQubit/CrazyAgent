@@ -136,6 +136,12 @@ export function pluginSwitch(item: { scope: PluginScope; enabled: boolean; on_he
   return { checked: item.enabled, label: item.scope.kind === "global" ? "On for every project" : "On", project: false };
 }
 
+/** Whether a project has its own switch for an item from global settings. Inputs: the item
+ * and the project id, if any. Output: the answer, always false outside a project. */
+export function pluginChanged(item: { scope: PluginScope; on_here: boolean | null }, projectId?: string): boolean {
+  return Boolean(projectId) && item.scope.kind === "global" && item.on_here !== null;
+}
+
 /** Says that agents do not get a stored skill the engine refuses now, and why.
  * Input: the refusal code. Output: the sentence. */
 export function skillUnused(code: string): string {
@@ -167,7 +173,7 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
     {failure && <div className="set-body"><Notice tone="danger" alert>{failure}</Notice></div>}
     {skills.value.length === 0 ? <div className="set-body"><EmptyState icon="book-open" title="No skills yet" compact action={add} /></div> : skills.value.map((skill, index) => {
       const on = pluginSwitch(skill, projectId);
-      return <SettingLine key={skill.id} label={skill.name}
+      return <SettingLine key={skill.id} label={skill.name} changed={pluginChanged(skill, projectId)}
         shown={<SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]} onOpen={() => onOpen(skill)} />}
         help={<><span>{skill.description}</span><span className="mono small">{homePath(skill.source)}</span>
           {skill.refused && <span className="row"><StatusBadge word="Not given to agents" tone="danger" /><span>{skillUnused(skill.refused)}</span></span>}</>}>
@@ -405,9 +411,11 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
     const command = server.spec.kind === "stdio";
     const waiting = server.status === "waiting_for_approval";
     const broken = server.status === "cant_start";
+    const check = broken ? "Check again" : "Check";
+    const checking = busy === `check:${server.id}`;
     const open = expanded === server.id;
     return <Fragment key={server.id}>
-      <SettingLine label={server.name} shown={<>{server.name} <StatusBadge word={serverWord(server.status)} /></>} help={<>
+      <SettingLine label={server.name} changed={pluginChanged(server, projectId)} shown={<>{server.name} <StatusBadge word={serverWord(server.status)} /></>} help={<>
         {!waiting && <span className="mono small">{server.runs}</span>}
         {waiting && (command ? <span>Runs: <span className="mono">{server.runs}</span></span>
           : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? server.spec.url : ""}</span></span>)}
@@ -419,8 +427,8 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
       </>}>
         <Switch id={`server-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(server, next)}
           disabledReason={on.project && !server.enabled ? "Turned off for every project in Settings." : undefined} />
-        {command && <Button aria-label={`Check ${server.name}`} pending={broken && busy === server.id} pendingLabel="Checking..." onClick={() => onCheck(server)}>{broken ? "Check again" : "Check"}</Button>}
-        {waiting && <Button variant="primary" icon="shield-check" aria-label={`Approve ${server.name}`} pending={busy === server.id} pendingLabel="Approving..." onClick={() => onApprove(server)}>Approve</Button>}
+        {command && <Button aria-label={`${check} ${server.name}`} pending={checking} pendingLabel="Checking..." disabled={busy === server.id} onClick={() => onCheck(server)}>{check}</Button>}
+        {waiting && <Button variant="primary" icon="shield-check" aria-label={`Approve ${server.name}`} pending={busy === server.id} pendingLabel="Approving..." disabled={checking} onClick={() => onApprove(server)}>Approve</Button>}
         {!on.project && <Button aria-label={`Secrets for ${server.name}`} onClick={() => onSecrets(server)}>Secrets</Button>}
         {!on.project && <Button variant="quiet" aria-label={`Remove ${server.name}`} onClick={() => onRemove(server)}>Remove</Button>}
       </SettingLine>
@@ -460,7 +468,7 @@ export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onRetry 
     {failure && <div className="set-body"><Notice tone="danger" alert>{failure}</Notice></div>}
     {hooks.value.length === 0 ? <div className="set-body"><EmptyState icon="zap" title="No hooks yet" compact action={add} /></div> : hooks.value.map((hook, index) => {
       const on = pluginSwitch(hook, projectId);
-      return <SettingLine key={hook.id} label={hook.plugin}
+      return <SettingLine key={hook.id} label={hook.plugin} changed={pluginChanged(hook, projectId)}
         help={<><span>{hookTrigger(hook)}</span><span className="mono small">{hook.command}</span>{hook.follows && <span>Runs while {hook.follows} is on.</span>}</>}>
         <Switch id={`hook-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(hook, next)}
           disabledReason={on.project && !hook.enabled ? "Turned off for every project in Settings." : undefined} />
@@ -757,7 +765,7 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
       : <ServersView servers={servers} projectId={projectId} failure={failure} busy={busy} onRetry={reloadServers} onAdd={() => setAdding({ kind: "server" })}
         onToggle={toggleServer} onSecrets={setSecrets} onRemove={(server) => setRemoving({ kind: "server", server })}
         onApprove={(server) => void act(server.id, () => approveMcpServer(server.id, server.spec), () => "Server approved.", reloadServers)}
-        onCheck={(server) => void act(server.id, () => checkMcpServer(server.id),
+        onCheck={(server) => void act(`check:${server.id}`, () => checkMcpServer(server.id),
           (checked) => checked.status === "cant_start" ? `${checked.name} can't start.` : `${checked.name} answered with ${checked.tools.length} ${checked.tools.length === 1 ? "tool" : "tools"}.`,
           reloadServers)} />}
     <AddSkillDialog open={adding?.kind === "skill"} scope={scope} message={adding?.kind === "skill" ? adding.message : undefined} onClose={() => setAdding(undefined)}

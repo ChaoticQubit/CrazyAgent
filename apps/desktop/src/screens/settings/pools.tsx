@@ -103,13 +103,14 @@ export async function readyAdded(previous: string[], members: string[], accounts
 
 /** The pool list as a pure view, one line per pool with its actions on the right. Inputs: the
  * pools read and the new, edit, delete, retry and set-up actions. */
-export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry, onPrepare }: {
+export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry, onPrepare, preparing = null }: {
   pools: Loaded<PoolSummary[]>;
   onNew: () => void;
   onEdit: (pool: PoolSummary) => void;
   onDelete: (pool: PoolSummary) => void;
   onRetry: () => void;
   onPrepare?: (pool: PoolSummary) => void;
+  preparing?: string | null;
 }) {
   if (pools.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (pools.kind === "not_ready") return <NotReady what="Pools" />;
@@ -121,7 +122,7 @@ export function PoolsView({ pools, onNew, onEdit, onDelete, onRetry, onPrepare }
   return <SettingSection title="Your pools" about={`${pools.value.length} ${pools.value.length === 1 ? "pool" : "pools"}`}>
     {pools.value.map((pool) => <SettingLine key={pool.id} label={pool.name}
       help={`${pool.summary}. ${pool.members.length} of ${POOL_MEMBER_MAX}, ${poolReadiness(pool.members)}. ${poolUse(pool.project_count)}.`}>
-      {onPrepare && keyedMembers(pool).length > 0 && <Button icon="refresh-cw" aria-label={`Get ready for agents: ${pool.name}`} onClick={() => onPrepare(pool)}>Get ready for agents</Button>}
+      {onPrepare && keyedMembers(pool).length > 0 && <Button icon="refresh-cw" aria-label={`Get ready for agents: ${pool.name}`} pending={preparing === pool.id} pendingLabel="Getting ready..." disabled={preparing !== null} onClick={() => onPrepare(pool)}>Get ready for agents</Button>}
       <Button aria-label={`Edit pool ${pool.name}`} onClick={() => onEdit(pool)}>Edit pool</Button>
       <Button variant="quiet" aria-label={`Delete pool ${pool.name}`} onClick={() => onDelete(pool)}>Delete pool</Button>
     </SettingLine>)}
@@ -287,6 +288,7 @@ export function Pools({ creating }: { creating: boolean }) {
   const [deleting, setDeleting] = useState<PoolSummary>();
   const [users, setUsers] = useState<string[]>();
   const [removing, setRemoving] = useState(false);
+  const [preparing, setPreparing] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string>();
   useEffect(() => {
     if (!creating) return;
@@ -296,10 +298,12 @@ export function Pools({ creating }: { creating: boolean }) {
   }, [creating]);
 
   const prepareAll = async (pool: PoolSummary) => {
+    setPreparing(pool.id);
     setRefusal(undefined);
     const names = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account.name]) : []);
     const ids = keyedMembers(pool);
     const failures = await readyEach(ids.map((id) => ({ id, name: names.get(id) ?? "An account" })), session.noteResult);
+    setPreparing(null);
     setRefusal(setupNote(failures));
     if (failures.length === 0) session.showToast(`${pool.name} is ready for agents.`);
   };
@@ -352,7 +356,7 @@ export function Pools({ creating }: { creating: boolean }) {
     </div>
     {refusal && <Notice tone="danger" alert><span className="grow">{refusal}</span></Notice>}
     <PoolsView pools={pools} onNew={() => setEditing({})} onEdit={(pool) => setEditing({ id: pool.id, opened: { name: pool.name, members: pool.members.map((member) => member.id) } })}
-      onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} />
+      onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} preparing={preparing} />
     {pools.kind === "ok" && pools.value.length > 0 && <AccountChoice pools={pools} accounts={accounts} />}
     <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel={copy?.confirmLabel ?? "Delete pool"} pending={removing}
       onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}>
