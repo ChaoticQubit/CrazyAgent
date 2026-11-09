@@ -125,14 +125,14 @@ fn content_chars(content: &Value) -> u64 {
 /// cache write held one hour and the web searches, each capped.
 fn reported(usage: &Value) -> (Tokens, u64, u64) {
     let count = |key: &str| usage[key].as_u64().unwrap_or(0);
-    let one_hour = usage["cache_creation"]["ephemeral_1h_input_tokens"]
-        .as_u64()
-        .unwrap_or(0);
+    let split = |key: &str| usage["cache_creation"][key].as_u64().unwrap_or(0);
+    let one_hour = split("ephemeral_1h_input_tokens");
     let tokens = Tokens {
         input: count("input_tokens"),
         output: count("output_tokens"),
         cache_read: count("cache_read_input_tokens"),
-        cache_write: count("cache_creation_input_tokens").max(one_hour),
+        cache_write: count("cache_creation_input_tokens")
+            .max(split("ephemeral_5m_input_tokens").saturating_add(one_hour)),
     }
     .at_most(LINE_TOKENS_MAX);
     let web_searches = usage["server_tool_use"]["web_search_requests"]

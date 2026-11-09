@@ -175,3 +175,48 @@ fn the_notice_keeps_codeburns_mit_text() {
     assert!(THIRD_PARTY_NOTICES.contains("Copyright (c) 2026 AgentSeal"));
     assert!(THIRD_PARTY_NOTICES.contains("Permission is hereby granted, free of charge"));
 }
+
+#[test]
+fn only_a_message_id_within_the_bound_is_a_key() {
+    let key_of = |id: &str| {
+        claude_usage(&json!({"type": "assistant", "message": {
+            "id": id,
+            "usage": {"input_tokens": 1}
+        }}))
+        .unwrap()
+        .key
+    };
+    for id in ["a".repeat(128), "é".repeat(64)] {
+        assert_eq!(key_of(&id), Some(format!("claude:{id}")));
+    }
+    for id in ["a".repeat(129), "é".repeat(65), String::new()] {
+        assert_eq!(key_of(&id), None);
+    }
+}
+
+#[test]
+fn a_cache_split_with_no_total_counts_both_parts() {
+    let written = |five: u64, hour: u64| {
+        claude_usage(&json!({"type": "assistant", "message": {"usage": {
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": five,
+                "ephemeral_1h_input_tokens": hour
+            }
+        }}}))
+        .unwrap()
+        .tokens
+        .cache_write
+    };
+    assert_eq!(written(10, 20), 30);
+    assert_eq!(written(u64::MAX, u64::MAX), LINE_TOKENS_MAX);
+}
+
+#[test]
+#[should_panic(expected = "only lines of one message merge")]
+fn lines_of_two_messages_do_not_merge() {
+    let of = |key: &str| Usage {
+        key: Some(key.to_owned()),
+        ..Usage::default()
+    };
+    of("claude:a").merge(of("claude:b"));
+}

@@ -30,8 +30,9 @@ const ARGUMENTS_BYTES_MAX: usize = 64 * 1024;
 const USAGES_PER_READ_MAX: usize = 4096;
 /// The most rows transcript lines can create in each counted table.
 pub(super) const TABLE_ROWS_MAX: i64 = 4 * 1024 * 1024;
-/// The most records one scan writes under the store's lock.
-const USAGES_PER_SCAN_MAX: usize = 64 * 1024;
+/// The records at which one scan stops opening files, so one write under the store's lock
+/// holds at most one read more. The rest is read by the next scan.
+const USAGES_PER_SCAN_MAX: usize = 8 * 1024;
 const MESSAGES_KEPT_MS: i64 = 400 * 24 * HOUR_MS;
 const MESSAGES_FORGOTTEN_PER_SCAN: i64 = 4096;
 
@@ -817,7 +818,6 @@ fn read_opened_with(
         }
     }
     progress.offset += consumed;
-    assert!(consumed <= end as u64 + 1);
     assert!(progress.offset <= length);
     assert!(tools.is_none_or(|tools| tools.len() <= TOOLS_PER_READ_MAX));
     (reading.finished(), limits)
