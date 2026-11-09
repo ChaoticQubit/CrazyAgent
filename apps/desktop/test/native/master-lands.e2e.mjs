@@ -138,7 +138,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         const masterFix = () => masterConflictFix({ bridgeBinary, env, runtime, project, root, repo, start, lease, changes, masterTurn });
         const status = () => value(bridge, "desktop_team_status", { id: project });
         const activity = async () => (await value(bridge, "desktop_project_activity", { id: project, limit: 50 })).items;
-        await steps({ me, page, open, masterTurn, masterFix, changes, status, activity, repo, start });
+        const askBeforeMerging = (on) => value(bridge, "desktop_team_ask_before_merge", { id: project, on, generation: (generation += 1) });
+        await steps({ me, page, open, masterTurn, masterFix, changes, status, activity, repo, start, askBeforeMerging });
         assert.equal(await page.evaluate("document.visibilityState"), "visible", "the page stayed visible");
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
@@ -204,18 +205,12 @@ test("below Full access the master merge setting is off, the master's edit waits
 
 test("at Full access Merge into main itself lands the master's conflict fix on main with no Accept and Activity lists it, while an ordinary master edit waits", { timeout: 600000 }, async (t) => {
   await withProject(t, "full", async (run) => {
-    const { me, open, masterTurn, masterFix, changes, status, activity, repo, start } = run;
+    const { me, open, masterTurn, masterFix, changes, status, activity, repo } = run;
     await open("agents?section=access", SETTING);
     assert.equal((await status()).master_lands, "merges", "Full access starts with Merge into main itself");
     await choose(run, WAITS, "waits");
     await choose(run, MERGES, "merges");
     await me.capture("full-merges-agents");
-
-    const plain = masterTurn(README);
-    assert.equal(plain.how, "waits", "an edit that fixes no conflict waits for the owner's Accept");
-    assert.equal(git(repo, "rev-parse", "HEAD"), start, "main did not move");
-    assert.ok(waiting(await changes(), plain.id), "the master's ordinary edit waits in Changes");
-    assert.deepEqual((await activity()).filter((item) => item.change_set === plain.id), [], "nothing was merged, so no activity row");
 
     const { id, how, sub, tip } = await masterFix();
     assert.equal(how, "landed", "the master merged its own conflict fix");
@@ -231,6 +226,29 @@ test("at Full access Merge into main itself lands the master's conflict fix on m
       "the project's activity, which Overview reads, holds one merge row by the master and no Accept by the owner");
     assert.match(rows[0].text, new RegExp(`^Master merged change set #\\d+ \\(Master: ${escaped(PROMPT)}, \\d+ files?\\) into main\\. It closed the changes of ${escaped(SUB_LABEL)}$`),
       "the merge row names the master's set by its number and the set it closed");
+
+    const landed = git(repo, "rev-parse", "HEAD");
+    const plain = masterTurn(README);
+    assert.equal(plain.how, "waits", "an edit that fixes no conflict waits for the owner's Accept");
+    assert.equal(git(repo, "rev-parse", "HEAD"), landed, "main did not move");
+    assert.ok(waiting(await changes(), plain.id), "the master's ordinary edit waits in Changes");
+    assert.deepEqual((await activity()).filter((item) => item.change_set === plain.id), [], "nothing was merged, so no activity row");
+  });
+});
+
+test("at Full access Ask me before merging on leaves the master's fix in Changes under Merge into main itself", { timeout: 600000 }, async (t) => {
+  await withProject(t, "full", async (run) => {
+    const { open, masterFix, changes, status, activity, repo, askBeforeMerging } = run;
+    await open("agents?section=access", SETTING);
+    assert.equal((await status()).master_lands, "merges", "Full access starts with Merge into main itself");
+    assert.equal((await askBeforeMerging(true)).outcome, "applied", "the owner turns Ask on");
+    assert.equal((await status()).ask_before_merge, true, "the engine keeps Ask on");
+
+    const { id, how, tip } = await masterFix();
+    assert.equal(how, "waits", "with Ask on the master does not merge its own conflict fix");
+    assert.equal(git(repo, "rev-parse", "HEAD"), tip, "main did not move");
+    assert.ok(waiting(await changes(), id), "the master's fix waits in Changes");
+    assert.deepEqual((await activity()).filter((item) => item.change_set === id), [], "nothing was merged, so no activity row");
   });
 });
 

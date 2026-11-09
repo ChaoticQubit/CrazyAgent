@@ -2014,7 +2014,7 @@ impl TeamView {
         let on = !status.ask_before_merge;
         self.changing = Some(
             if on {
-                "The master's merge tool now waits for your Accept. At Full access, a master change set that merges a harness in can still land by itself."
+                "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
             } else {
                 "The master now merges a finished harness without asking."
             }
