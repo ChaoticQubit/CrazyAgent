@@ -55,6 +55,11 @@ test("Start from has one line per seed, its words left and its button right", as
   assert.ok(shipped.controlLeft > shipped.labelRight, JSON.stringify(shipped));
 });
 
+test("at a narrow width the long seed button wraps inside its column and never crosses the label", async () => {
+  const [start] = await onProcess({}, read, 640);
+  for (const row of start.rows) assert.ok(row.controlLeft >= row.labelRight, JSON.stringify(row));
+});
+
 test("the section heading is the field's one label, and the field fills the section", async () => {
   const seen = await onProcess({}, (page) => page.evaluate(`(() => {
     const field = document.querySelector("${FIELD}");
