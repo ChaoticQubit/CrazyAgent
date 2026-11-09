@@ -160,7 +160,8 @@ pub(super) fn close_with_lead(
 }
 
 /// Closes the workers' sets of one closed change set as [`close_with_lead`] says, then
-/// their own workers', at most `levels` deep. Inputs: the store, the closed change set and
+/// their own workers', at most `levels` deep, leaving open a set the owner restored, which
+/// the next read would otherwise close again. Inputs: the store, the closed change set and
 /// the levels left. Output: Ok, or the first failure.
 fn close_workers(db: &Connection, lead_set: &store::Record, levels: u8) -> Result<(), EngineError> {
     assert!(!lead_set.is_open());
@@ -178,7 +179,7 @@ fn close_workers(db: &Connection, lead_set: &store::Record, levels: u8) -> Resul
         let Some(mut record) = store::open_for(db, path_text(&sub.worktree)?)? else {
             continue;
         };
-        if record.intent.is_some() || record.created_ms > lead_set.updated_ms {
+        if record.intent.is_some() || record.restored || record.created_ms > lead_set.updated_ms {
             continue;
         }
         let landed = match (lead_set.state, lead_set.landed.as_deref()) {
