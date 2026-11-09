@@ -296,6 +296,18 @@ function AppNotices({ usage, failure, nowMs }: { usage: UsageReport; failure: st
   </>;
 }
 
+/** What the app page keeps while its reads are incomplete: a refused action's words and, once
+ * the usage read holds, each account's limits and the next accounts. Without that read only
+ * Check limits now stays. Inputs: the usage read, the filter, the names and now. */
+function LimitsWhileReading({ usage, filter, names, nowMs }: { usage: Loaded<UsageReport>; filter: MetricsFilter; names: MetricsNames; nowMs: number }) {
+  return <>
+    {filter.limits.failure && <Notice tone="danger" alert>{filter.limits.failure}</Notice>}
+    {usage.kind === "ok"
+      ? <><AccountLimitsPanel limits={usage.value.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />{filter.limits.next}</>
+      : <CheckLimits busy={filter.limits.busy} onRefresh={filter.limits.onRefresh} />}
+  </>;
+}
+
 /** The Metrics page as a pure view: the range switch and what it covers, the tiles (tokens
  * with their three parts, cache re-reads apart, runs, tasks, merges and lines), the tokens chart and
  * the breakdown by agent, run, account or harness, each with its four token parts and its
@@ -331,14 +343,16 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
     </div> : ranges}
     <span className="mx-count">{covers} · {updatedText(updatedMs, nowMs)} · provider-reported usage per turn</span>
   </div>;
-  const check = filter && <CheckLimits busy={filter.limits.busy} onRefresh={filter.limits.onRefresh} />;
+  const kept = filter && <LimitsWhileReading usage={usage} filter={filter} names={names} nowMs={nowMs} />;
   const reads = [usage, metrics];
-  if (reads.some((read) => read.kind === "not_ready" || (read.kind === "error" && usageNotReady(read)))) return <NotReady what="Metrics" />;
+  if (reads.some((read) => read.kind === "not_ready" || (read.kind === "error" && usageNotReady(read)))) {
+    return filter && usage.kind === "ok" ? <div className="stack">{tools}<NotReady what="Metrics" />{kept}</div> : <NotReady what="Metrics" />;
+  }
   if (usage.kind === "error" || metrics.kind === "error") {
     const failed = usage.kind === "error" ? usage : metrics.kind === "error" ? metrics : null;
-    return <div className="stack">{tools}{check}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
+    return <div className="stack">{tools}{kept}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
   }
-  if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{tools}{check}<Skeleton shape="card" count={3} /></div>;
+  if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{tools}{kept}<Skeleton shape="card" count={3} /></div>;
   const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs, filter);
   if (filter) return <div className="stack mx-page">
     {tools}
