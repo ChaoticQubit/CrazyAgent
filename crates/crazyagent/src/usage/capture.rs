@@ -1,4 +1,4 @@
-use super::rules::{Usage, advisor_usages, claude_usage};
+use super::rules::{CodexState, Usage, advisor_usages, claude_usage};
 use super::{LimitSource, LimitWindow, Observation, failure, record_observation, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
@@ -228,6 +228,8 @@ struct Progress {
     offset: u64,
     skipping: bool,
     total: Tokens,
+    #[serde(default)]
+    codex: CodexState,
 }
 
 /// The records of one read, one entry per message. Inputs arrive line by line.

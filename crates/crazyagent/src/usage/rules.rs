@@ -1,4 +1,5 @@
 use super::capture::{LINE_TOKENS_MAX, Tokens};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The third-party notices of the code and data this engine carries.
@@ -269,6 +270,11 @@ pub(super) fn timestamp_ms(text: &str) -> Option<i64> {
     let days = era * 146_097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year - 719_468;
     Some((days * 86_400 + hour * 3600 + minute * 60 + second) * 1000 + fraction)
 }
+
+/// What a rollout's earlier lines settled. Not filled in yet.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CodexState {}
 
 #[cfg(test)]
 mod tests;

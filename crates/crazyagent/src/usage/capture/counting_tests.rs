@@ -296,3 +296,204 @@ fn a_rows_first_estimate_is_capped_like_its_later_ones() {
         .unwrap();
     assert_eq!(cost, ROW_TOKENS_MAX);
 }
+
+const T0: &str = "2026-11-09T03:00:00.000Z";
+const T0_1: &str = "2026-11-09T03:00:00.200Z";
+const T0_2: &str = "2026-11-09T03:00:00.400Z";
+const LATER: &str = "2026-11-09T03:01:00.000Z";
+const BEFORE: &str = "2026-11-09T01:00:00.000Z";
+const CODEX: &str = "gpt-5-codex";
+
+fn rollout(home: &Path, id: &str) -> PathBuf {
+    home.join("sessions/2026/11/09")
+        .join(format!("rollout-2026-11-09T03-00-00-{id}.jsonl"))
+}
+
+fn meta(at: &str, id: &str, payload: serde_json::Value) -> String {
+    let mut payload = payload;
+    payload["id"] = serde_json::json!(id);
+    format!(
+        "{}\n",
+        serde_json::json!({"timestamp": at, "type": "session_meta", "payload": payload})
+    )
+}
+
+fn context(at: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"timestamp": at, "type": "turn_context", "payload": {"model": CODEX}})
+    )
+}
+
+fn usage(input: u64, cached: u64, output: u64) -> serde_json::Value {
+    serde_json::json!({
+        "input_tokens": input,
+        "cached_input_tokens": cached,
+        "output_tokens": output,
+        "reasoning_output_tokens": 0,
+        "total_tokens": input + output
+    })
+}
+
+fn counted(at: &str, total: (u64, u64, u64), last: (u64, u64, u64)) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "timestamp": at,
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {
+                "total_token_usage": usage(total.0, total.1, total.2),
+                "last_token_usage": usage(last.0, last.1, last.2)
+            }, "rate_limits": null}
+        })
+    )
+}
+
+fn parent(home: &Path) {
+    let file = rollout(home, "parent");
+    append(&file, &meta(T0, "parent", serde_json::json!({})));
+    append(&file, &context(T0));
+    append(&file, &counted(T0_1, (100, 40, 10), (100, 40, 10)));
+    append(&file, &counted(LATER, (300, 90, 30), (200, 50, 20)));
+}
+
+fn scan_codex(db: &Connection, home: &Path) -> Tokens {
+    let mut who = who();
+    who.harness = "codex".into();
+    scan_home(db, home, Format::Codex, &who, NOW).unwrap()
+}
+
+fn plain(input: u64, cached: u64, output: u64) -> Tokens {
+    Tokens {
+        input,
+        cache_read: cached,
+        output,
+        cache_write: 0,
+    }
+}
+
+fn fork(home: &Path, payload: serde_json::Value, replay_at: &str) {
+    let file = rollout(home, "fork");
+    append(&file, &meta(T0, "fork", payload));
+    append(&file, &counted(replay_at, (100, 40, 10), (100, 40, 10)));
+    append(&file, &counted(T0_2, (300, 90, 30), (200, 50, 20)));
+    append(&file, &counted(LATER, (350, 95, 35), (50, 5, 5)));
+}
+
+#[test]
+fn a_fork_does_not_count_the_parents_calls_again() {
+    let (root, db) = store();
+    parent(root.path());
+    fork(
+        root.path(),
+        serde_json::json!({"forked_from_id": "parent"}),
+        T0_1,
+    );
+    assert_eq!(scan_codex(&db, root.path()), plain(255, 95, 35));
+}
+
+#[test]
+fn a_fork_scanned_before_its_parent_counts_nothing_twice() {
+    let (root, db) = store();
+    fork(
+        root.path(),
+        serde_json::json!({"forked_from_id": "parent"}),
+        T0_1,
+    );
+    let first = scan_codex(&db, root.path());
+    parent(root.path());
+    let second = scan_codex(&db, root.path());
+    assert_eq!(first.plus(second), plain(255, 95, 35));
+}
+
+#[test]
+fn a_spawned_rollout_with_the_parents_old_times_does_not_count_the_parent() {
+    let (root, db) = store();
+    parent(root.path());
+    let spawned = serde_json::json!({"source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}}});
+    fork(root.path(), spawned, BEFORE);
+    assert_eq!(scan_codex(&db, root.path()), plain(255, 95, 35));
+}
+
+#[test]
+fn a_resumed_rollout_of_one_thread_counts_its_copied_records_once() {
+    let (root, db) = store();
+    parent(root.path());
+    assert_eq!(scan_codex(&db, root.path()), plain(210, 90, 30));
+    let resumed = rollout(root.path(), "resumed");
+    append(&resumed, &meta(LATER, "parent", serde_json::json!({})));
+    append(&resumed, &counted(LATER, (300, 90, 30), (200, 50, 20)));
+    assert_eq!(scan_codex(&db, root.path()), plain(0, 0, 0));
+}
+
+#[test]
+fn a_response_record_and_its_token_count_twin_count_once() {
+    let (root, db) = store();
+    let file = rollout(root.path(), "records");
+    append(&file, &meta(T0, "records", serde_json::json!({})));
+    append(
+        &file,
+        &format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp": T0_1,
+                "type": "token_usage_record",
+                "payload": {"response_id": "resp_1", "usage": usage(100, 40, 10)}
+            })
+        ),
+    );
+    append(&file, &counted(T0_2, (100, 40, 10), (100, 40, 10)));
+    assert_eq!(scan_codex(&db, root.path()), plain(60, 40, 10));
+}
+
+#[test]
+fn a_repeated_token_count_counts_once() {
+    let (root, db) = store();
+    let file = rollout(root.path(), "repeat");
+    append(&file, &meta(T0, "repeat", serde_json::json!({})));
+    let line = counted(T0_1, (100, 40, 10), (100, 40, 10));
+    append(&file, &line);
+    append(&file, &line);
+    assert_eq!(scan_codex(&db, root.path()), plain(60, 40, 10));
+}
+
+#[test]
+fn a_counter_restart_counts_the_new_calls() {
+    let (root, db) = store();
+    let file = rollout(root.path(), "restart");
+    append(&file, &meta(T0, "restart", serde_json::json!({})));
+    for (at, total) in [(T0_1, (1000, 0, 100)), (T0_2, (50, 0, 5))] {
+        append(
+            &file,
+            &format!(
+                "{}\n",
+                serde_json::json!({
+                    "timestamp": at,
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": usage(total.0, total.1, total.2)}}
+                })
+            ),
+        );
+    }
+    assert_eq!(scan_codex(&db, root.path()), plain(1050, 0, 105));
+}
+
+#[test]
+fn codex_rows_carry_the_turns_model() {
+    let (root, db) = store();
+    parent(root.path());
+    scan_codex(&db, root.path());
+    let model: String = db
+        .query_row("SELECT DISTINCT model FROM usage_tokens", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(model, CODEX);
+}
+
+#[test]
+fn a_file_stored_before_the_codex_state_existed_still_reads() {
+    let text = r#"{"identity":[1,2],"offset":9,"skipping":false,"total":{"input":1,"output":1,"cache_read":0,"cache_write":0}}"#;
+    let progress: Progress = serde_json::from_str(text).unwrap();
+    assert_eq!(progress.codex, CodexState::default());
+}
