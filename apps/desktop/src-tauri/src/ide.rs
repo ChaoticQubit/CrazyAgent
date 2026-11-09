@@ -471,14 +471,18 @@ pub fn show(
     Ok(())
 }
 
-/// Moves the shown IDE webview over its panel after the panel moved or resized. Inputs: the
-/// app, the views, the project and the panel. Output: Ok, also when that IDE is not shown.
+/// Moves the shown IDE webview over its panel after the panel moved or resized. The window's
+/// size is read before the views lock, as [`show`] does, since each read waits on the main
+/// thread. Inputs: the app, the main window, the views, the project and the panel. Output: Ok,
+/// also when that IDE is not shown.
 pub fn place<R: Runtime>(
     app: &AppHandle<R>,
+    window: &Window<R>,
     views: &IdeViews,
     project: &ProjectId,
     bounds: Bounds,
 ) -> Result<(), BridgeError> {
+    let bounds = bounds.in_window(window)?;
     let held = views.lock();
     if held.shown.as_deref() != Some(project.as_str()) {
         return Ok(());
@@ -488,7 +492,6 @@ pub fn place<R: Runtime>(
         .get(project.as_str())
         .and_then(|loaded| app.get_webview(&loaded.label))
     {
-        let bounds = bounds.in_window(&webview.window())?;
         webview.set_bounds(bounds.rect()).map_err(failed)?;
     }
     Ok(())

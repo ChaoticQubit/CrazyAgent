@@ -12,13 +12,15 @@ const SPARE = { id: "pool-spare", name: "Spare", summary: "1 ChatGPT", members: 
 const FULL = { ...MAIN, members: Array.from({ length: 15 }, (_, index) => member(index)) };
 const LATE = { status: "not_signed_in", status_label: "Not signed in" };
 const WAITING = { ...MAIN, members: [member(0, "api_key"), { ...member(1), ...LATE }, member(2)] };
-const POOLS = { ok: [MAIN, SPARE], full: [FULL], waiting: [WAITING], long: [{ ...SPARE, name: "W".repeat(60) }], empty: [] };
+const KEYED_SPARE = { ...SPARE, members: [member(3, "api_key")] };
+const POOLS = { ok: [MAIN, SPARE], keyed: [MAIN, KEYED_SPARE], full: [FULL], waiting: [WAITING], long: [{ ...SPARE, name: "W".repeat(60) }], empty: [] };
 const SIGNED_IN = Array.from({ length: 18 }, (_, index) => account(index));
 const ACCOUNTS = { ok: SIGNED_IN, waiting: SIGNED_IN.map((item, index) => (index === 1 ? { ...item, ...LATE } : item)), empty: [] };
 /** Answers one engine command for a scene. Inputs: the scene and the command. Output: the
  * answer, a failure thrown, or a read that never lands. */
 function answer(scene, command) {
   const failing = (state, list) => sceneRead(state, list, FAILURE, command);
+  if (scene.hold === command) return new Promise(() => {});
   if (command === "desktop_pool_summaries") return failing(scene.pools ?? "ok", POOLS);
   if (command === "desktop_list_accounts") {
     const accounts = failing(scene.accounts ?? "ok", ACCOUNTS);

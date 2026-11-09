@@ -491,3 +491,17 @@ test("a TUI open in IDE focus opens that project's IDE tab, which the router kee
   assert.equal(formatRoute(route), "#/projects/harbor-notes/ide");
   assert.deepEqual(parseRoute(formatRoute(route)), route);
 });
+
+test("each sidebar row gets its project's working count, beside its unseen count", () => {
+  const value = [{ id: "a", name: "Alpha", repository_count: 0 }, { id: "b", name: "Beta", repository_count: 0 }];
+  const markup = renderToStaticMarkup(createElement(AppView, {
+    session: session({ projects: { kind: "ok", value } }), route: { name: "home" },
+    alerts: new Map([["a", 4], ["b", 1]]), working: new Map([["a", 2]]),
+  }));
+  const rows = markup.slice(markup.indexOf('<div class="nav-group">'), markup.indexOf("</nav>"));
+  const [alpha, beta] = rows.split('<a class="nav-item"').slice(1);
+  assert.match(alpha, /title="2 agents working"/u);
+  assert.match(alpha, /<span class="nav-flag">4<\/span>/u);
+  assert.doesNotMatch(beta, /nav-live/u);
+  assert.match(beta, /<span class="nav-flag">1<\/span>/u);
+});
