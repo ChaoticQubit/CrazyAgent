@@ -16,8 +16,9 @@ function project(tasks) {
   };
 }
 
-/** Mounts the real project menu over an engine that applies a cancel. Inputs: the scene, with
- * each team task's status, and the theme. Output: nothing. */
+/** Mounts the real project menu at the right of a row, as the project header draws it, so its
+ * list opens on the page, over an engine that applies a cancel. Inputs: the scene, with each
+ * team task's status, and the theme. Output: nothing. */
 export async function mount(scene, theme = "light") {
   cancels = [];
   notes = [];
@@ -26,7 +27,8 @@ export async function mount(scene, theme = "light") {
     cancels.push({ id: args.id, task: args.task });
     return APPLIED;
   };
-  await mountTab(createElement(ProjectMenu, { data: project(scene.tasks), replaced: [] }), answer, theme);
+  const header = { style: { display: "flex", justifyContent: "flex-end" } };
+  await mountTab(createElement("div", header, createElement(ProjectMenu, { data: project(scene.tasks), replaced: [] })), answer, theme);
 }
 
 /** What the engine was asked to cancel. Output: the project and task of each call. */
