@@ -1698,16 +1698,17 @@ fn desktop_focus_terminal_window(
     }
 }
 
-/// Closes one project's terminal wall windows once the main window removed the project.
+/// Closes one project's terminal wall windows: for the main window once it removed the
+/// project, and for a wall window of that project once its read finds the project gone.
 /// Inputs: the calling window, the app and the project id. Output: unit, `window_denied`
-/// from any window but main, or `invalid_project`.
+/// from any other window or a wall window of another project, or `invalid_project`.
 #[tauri::command]
 fn desktop_close_project_walls(
     webview: Webview,
     app: AppHandle,
     id: String,
 ) -> Result<(), BridgeError> {
-    main_window(&webview)?;
+    terminal_window_for(&webview, &id)?;
     let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
     close_walls(&app, Some(&project));
     Ok(())
@@ -1736,12 +1737,17 @@ fn app_page(url: &tauri::Url) -> bool {
 }
 
 /// The project name a terminal wall window shows in its title: the shown name without
-/// control characters, at most WALL_NAME_CHARS_MAX characters, or "Project" when blank.
-/// Takes the name the main window sent. Returns the name to show.
+/// control characters and with every other hidden character as its visible escape, at most
+/// WALL_NAME_CHARS_MAX characters, or "Project" when blank. Takes the name the main window
+/// sent. Returns the name to show.
 fn wall_name(name: &str) -> String {
-    let shown: String = name
+    let plain: String = name
         .chars()
         .filter(|c| !c.is_control())
+        .take(WALL_NAME_CHARS_MAX)
+        .collect();
+    let shown: String = crazyagent::memory::visible_text(&plain)
+        .chars()
         .take(WALL_NAME_CHARS_MAX)
         .collect();
     let shown = shown.trim();

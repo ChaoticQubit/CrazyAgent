@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { loadTeamGraph, nextGeneration, openTerminalWindows } from "../../api";
+import { loadTeamGraph, loadTerminalsPerWindow, nextGeneration, openTerminalWindows } from "../../api";
 import type { Result } from "../../api";
 import { loadChanges } from "../../api-changes";
 import { AGENT_MESSAGE_BYTES_MAX, failureCopy, receiptState, sendAgentMessage, stopTeamAgent, stopTeammate } from "../../api-projects";
@@ -174,19 +174,22 @@ export function panelKey(node: Pick<GraphNode, "agent" | "id">): string {
   return typeof node.agent === "number" ? `agent:${node.agent}` : `node:${node.id}`;
 }
 
-/** What the graph view shows: the read it draws, and why the latest read failed while an
- * older graph stays on screen. */
-export type GraphState = { shown: Result<TeamGraph> | undefined; stale: string | null };
+/** What the graph view shows: the read it draws, why the latest read failed while an older
+ * graph stays on screen, and whether the latest read found the project removed. */
+export type GraphState = { shown: Result<TeamGraph> | undefined; stale: string | null; gone: boolean };
 
-export const GRAPH_UNREAD: GraphState = { shown: undefined, stale: null };
+export const GRAPH_UNREAD: GraphState = { shown: undefined, stale: null, gone: false };
+
+const PROJECT_GONE = ["project_missing", "project_setup_missing"];
 
 /** Takes one graph read into the view. A failed read after a good one keeps the good graph,
  * so an open terminal and its unsent prompt stay, and says why the refresh failed; before
- * any good read the failure is what the view shows. Inputs: the current state and the read.
- * Output: the next state. */
+ * any good read the failure is what the view shows. A read that says the project is no longer
+ * there is marked gone. Inputs: the current state and the read. Output: the next state. */
 export function graphRead(state: GraphState, result: Result<TeamGraph>): GraphState {
-  if (result.kind === "ok" || state.shown?.kind !== "ok") return { shown: result, stale: null };
-  return { shown: state.shown, stale: result.kind === "error" ? result.message : "The team graph isn't ready in this build." };
+  const gone = result.kind === "error" && PROJECT_GONE.includes(result.code);
+  if (result.kind === "ok" || state.shown?.kind !== "ok") return { shown: result, stale: null, gone };
+  return { shown: state.shown, stale: result.kind === "error" ? result.message : "The team graph isn't ready in this build.", gone };
 }
 
 /** Reads one project's team graph, again every 2 s while work is live and every 10 s
@@ -218,10 +221,11 @@ export function useTeamGraph(projectId: string): [GraphState, () => void] {
 /** The Agents toolbar, one row as the mockup draws it above both Agents views: `lead`, then
  * the team line (`line`, how many of the team's agents work and tasks are live once it is
  * read and has agents, what `asks` the owner and the `pool`), then `tools` and Open all
- * terminals, which opens the terminal wall windows, perWindow terminals each, and says why
- * under the row when they could not open. Inputs: the project id and name, the terminals per
- * window, the drawn team or null while it is not read, the team line and the row's parts.
- * Output: the row and its note. */
+ * terminals, which reads the team and its Terminals per window again, so an older read closes
+ * no window the team still needs, opens the terminal wall windows, perWindow terminals each,
+ * and says why under the row when they could not open. Inputs: the project id and name, the
+ * terminals per window, the drawn team or null while it is not read, the team line and the
+ * row's parts. Output: the row and its note. */
 export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, asks, pool, tools }: {
   projectId: string; name: string; perWindow: PerWindow; team: TeamGraph | null; line: string | null;
   lead?: ReactNode; asks?: ReactNode; pool?: string; tools?: ReactNode;
@@ -232,7 +236,9 @@ export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, as
   const walls = team === null ? null : wallPages(team.nodes, perWindow).length;
   if (walls !== null && !(Number.isSafeInteger(walls) && walls >= 0)) throw new Error(`a team needs a whole number of windows: ${walls}`);
 
-  async function openAll(windows: number) {
+  async function openAll(shown: number) {
+    const [graph, setting] = await Promise.all([loadTeamGraph(projectId), loadTerminalsPerWindow(projectId)]);
+    const windows = graph.kind === "ok" ? wallPages(graph.value.nodes, setting.kind === "ok" ? setting.value : perWindow).length : shown;
     if (windows === 0) return;
     setNote(wallNote(await openTerminalWindows(projectId, name, windows, true)));
   }
