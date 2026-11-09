@@ -473,16 +473,14 @@ impl Host for Servers {
         }
         let mut ended = false;
         for lead in self.leads_listening() {
-            let server = match self.team_mates(&lead) {
-                Ok(Some(mates)) => Some(mates),
-                Ok(None) => self.own(&lead).ok().flatten(),
-                Err(_) => None,
-            };
-            if let Some(server) = server
-                && server.holds(agent)
-                && server.kill(agent).is_ok()
+            let servers = [self.mates(&lead), self.own(&lead)];
+            for server in servers
+                .into_iter()
+                .filter_map(|server| server.ok().flatten())
             {
-                ended = true;
+                if server.holds(agent) && server.kill(agent).is_ok() {
+                    ended = true;
+                }
             }
         }
         if ended {
