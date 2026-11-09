@@ -135,9 +135,9 @@ test("no native command or main-window lookup goes through the WebviewWindow typ
 test("a refused place, hide or close reaches the owner instead of vanishing", async () => {
   const { bundle, withPage } = await import("./browser.mjs");
   const fixture = await bundle(new URL("./fixtures/ide-tab-failures.mjs", import.meta.url).pathname);
-  const opened = (refused, then) => withPage(async ({ evaluate }) => {
+  const opened = (refused, then, missing = []) => withPage(async ({ evaluate }) => {
     await evaluate(fixture);
-    await evaluate(`Fixture.mount(${JSON.stringify(refused)})`);
+    await evaluate(`Fixture.mount(${JSON.stringify(refused)}, ${JSON.stringify(missing)})`);
     assert.equal(await evaluate(`Fixture.called("desktop_ide_place")`), true, "the opened IDE is placed");
     await evaluate("Fixture.frames()");
     return then(evaluate);
@@ -146,6 +146,8 @@ test("a refused place, hide or close reaches the owner instead of vanishing", as
   assert.match(await opened(["desktop_ide_place"], (evaluate) => evaluate("Fixture.seen()")).then((seen) => seen.alert), /couldn't move to fit/, "a failed place shows on the tab");
   assert.ok((await opened(["desktop_ide_hide"], left)).reported.some((line) => /^hide: .*couldn't be hidden/.test(line)), "a failed hide reaches the page");
   assert.ok((await opened(["desktop_ide_close"], left)).reported.some((line) => /^close: .*didn't close/.test(line)), "a failed close reaches the owner");
+  const absent = await opened([], left, ["desktop_ide_close"]);
+  assert.deepEqual(absent.reported.filter((line) => line.startsWith("close:")), [], "a build with no IDE to close tells the owner nothing, so it never replaces the page's last toast");
   const page = read("src/screens/project/index.tsx");
   assert.ok(page.indexOf("{ideHideProblem &&") >= 0 && page.indexOf("{ideHideProblem &&") < page.indexOf('className="pj-tab-panel"'), "a failed hide shows above the tab panel, outside the box the IDE may still cover");
   const clean = await opened([], left);

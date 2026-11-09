@@ -10,12 +10,14 @@ const POLL_MS = 20;
 
 let root = null;
 let refused = [];
+let absent = [];
 let calls = [];
 let reported = [];
 
 window.__TAURI_INTERNALS__ = {
   async invoke(command) {
     calls.push(command);
+    if (absent.includes(command)) throw `Command ${command} not found`;
     if (refused.includes(command)) throw { code: "ide_webview_failed" };
     return command === "desktop_ide_state" ? READY : null;
   },
@@ -26,10 +28,11 @@ function Page() {
   return h(IdeTab, { projectId: "project-one", onView: () => {}, onHideProblem: (line) => reported.push(`hide: ${line}`) });
 }
 
-/** Opens the real IDE tab with its stylesheet and the native answers stubbed. Input: the
- * commands that refuse. */
-export function mount(refusing) {
+/** Opens the real IDE tab with its stylesheet and the native answers stubbed. Inputs: the
+ * commands that refuse and the commands this build does not have. */
+export function mount(refusing, missing = []) {
   refused = refusing;
+  absent = missing;
   calls = [];
   reported = [];
   const style = document.createElement("style");
