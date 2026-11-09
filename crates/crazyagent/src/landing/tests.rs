@@ -8297,6 +8297,374 @@ fn a_master_commit_after_its_conflict_fix_leaves_the_set_waiting() {
     );
 }
 
+/// MASTER-LAND-SPLIT r2: every own merge is judged, so a clean merge of another set under
+/// a real conflict fix keeps the master's set waiting (CODE L1).
+#[test]
+fn a_clean_merge_under_a_conflict_fix_leaves_the_master_set_waiting() {
+    let case = Case::new();
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(&other.worktree.join("NOTES"), "clean\n");
+    let clean = turn_of(&case, &other, "Write notes");
+    let clean_head = case.view(&clean).head;
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    git_in(
+        &case.home,
+        &master.worktree,
+        &[
+            "-c",
+            "user.name=Master",
+            "-c",
+            "user.email=master@example.invalid",
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Bring in the notes",
+            &clean_head,
+        ],
+    );
+    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "a clean merge under the fix",
+    );
+    assert_eq!(case.view(&clean).state, ChangeState::Pending);
+}
+
+/// MASTER-LAND-SPLIT r2: a merge committed with a conflict marker still in the conflicted
+/// file is no fix, whichever marker is left (CODE M2).
+#[test]
+fn a_master_merge_committed_with_a_conflict_marker_waits_for_the_owner() {
+    for marker in ["<<<<<<< HEAD", ">>>>>>> theirs", "=======", "=======\r"] {
+        let case = Case::new();
+        let (sub, sub_head, master) = conflicted_set_and_master(&case);
+        let text = format!("one\ntwo\nthree\nfour from the owner\n{marker}\nfour from the agent\n");
+        master_resolves(&case, &master, &sub_head, &[("README", text.as_str())]);
+        let fix = turn_of(&case, &master, "Resolve the README conflict");
+        master_set_waits(&case, &fix, &sub, ChangeState::Conflict, marker);
+    }
+}
+
+/// MASTER-LAND-SPLIT r2: only a whole marker counts, so a fix whose text merely looks like
+/// one still lands by itself (CODE M2).
+#[test]
+fn a_conflict_fix_holding_text_like_a_marker_lands_itself() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    let text = "one\ntwo\nthree\nsee <<<<<<< here\n========\n =======\n>>>>>>>tight\n";
+    master_resolves(&case, &master, &sub_head, &[("README", text)]);
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
+    assert!(matches!(outcome, Some(AcceptOutcome::Landed { .. })));
+    assert_eq!(case.owner(&["show", "main:README"]), text);
+    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+}
+
+/// MASTER-LAND-SPLIT r2: a fix that resolves the conflict by deleting the file has no
+/// markers to find, so it lands by itself (CODE M2).
+#[test]
+fn a_conflict_fix_that_deletes_the_conflicted_file_lands_itself() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
+    in_master(&["merge", "--no-commit", "-s", "ours", &sub_head]);
+    in_master(&["rm", "-q", "README"]);
+    in_master(&[
+        "-c",
+        "user.name=Master",
+        "-c",
+        "user.email=master@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Drop the README",
+    ]);
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
+    assert!(matches!(outcome, Some(AcceptOutcome::Landed { .. })));
+    assert!(
+        !case
+            .owner(&["ls-tree", "--name-only", "main"])
+            .contains("README")
+    );
+    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+}
+
+/// MASTER-LAND-SPLIT r2: an edit the owner Discarded while the master's worktree was busy
+/// stays below the next set's stored base, and a later conflict fix must not carry it to
+/// main with no Accept: the own commits are listed from where the squash measures (SEC F1).
+#[test]
+fn a_conflict_fix_above_a_discarded_edit_the_worktree_kept_waits_for_the_owner() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    write(&master.worktree.join("NOTES"), "thrown away\n");
+    let thrown = turn_of(&case, &master, "Write notes");
+    let head = case.view(&thrown).head;
+    let busy = master.worktree.join("busy.txt");
+    write(&busy, "not committed yet\n");
+    discard(&case.db, &thrown, &head, NOW_MS).unwrap();
+    std::fs::remove_file(&busy).unwrap();
+    assert_eq!(
+        git_in(&case.home, &master.worktree, &["rev-parse", "HEAD"]).trim(),
+        head,
+        "the busy worktree keeps the discarded head"
+    );
+
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-master-later".into(),
+        prompt_line: "Resolve the README conflict".into(),
+    };
+    let fix = record_turn_end(&case.db, &master, &turn).unwrap().unwrap();
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "a fix above a discarded edit",
+    );
+    assert!(
+        !case
+            .owner(&["ls-tree", "--name-only", "main"])
+            .contains("NOTES"),
+        "the discarded edit is not on main"
+    );
+}
+
+/// MASTER-LAND-SPLIT r2: a master working from a branch other than Land on holds commits
+/// the Land on branch lacks, below its stored base, and a conflict fix must not carry them
+/// there with no Accept (SEC F1).
+#[test]
+fn a_conflict_fix_on_a_base_the_land_on_branch_lacks_waits_for_the_owner() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    let sub = case.turn(TurnOutcome::Succeeded).unwrap();
+    let sub_head = case.view(&sub).head;
+    case.owner(&["branch", "release"]);
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_land_on(project,branch) VALUES (?1,'release')",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+    case.owner_commit(
+        "README",
+        "one\ntwo\nthree\nfour from the owner\n",
+        "Owner adds four",
+    );
+    case.owner_commit("NOTES", "only on main\n", "Main only");
+    let release = case.owner(&["rev-parse", "release"]);
+    let master = master_at_work(&case);
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
+    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Pending,
+        "a base Land on lacks",
+    );
+    assert_eq!(
+        case.owner(&["rev-parse", "release"]),
+        release,
+        "the Land on branch does not move"
+    );
+}
+
+/// MASTER-LAND-SPLIT r2: a merge that keeps none of a set's work holds the set's head yet
+/// not its changes, so the owner's Accept of the master's set leaves that set open for its
+/// own Accept or Discard (CODE M1).
+#[test]
+fn an_owner_accept_of_a_master_set_that_dropped_a_sets_work_leaves_that_set_open() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(&other.worktree.join("src/kept.rs"), "kept\n");
+    let dropped = turn_of(&case, &other, "Add kept");
+    let dropped_head = case.view(&dropped).head;
+    case.start();
+    let master = master_at_work(&case);
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Waits);
+    git_in(
+        &case.home,
+        &master.worktree,
+        &[
+            "-c",
+            "user.name=Master",
+            "-c",
+            "user.email=master@example.invalid",
+            "merge",
+            "-q",
+            "-s",
+            "ours",
+            "-m",
+            "Keep none of it",
+            &dropped_head,
+        ],
+    );
+    write(&master.worktree.join("MASTER"), "own edit\n");
+    let set = turn_of(&case, &master, "Own edit");
+    let AcceptOutcome::Landed { .. } = case.accept(&set).unwrap() else {
+        panic!("the owner's Accept of the master's set conflicted");
+    };
+    assert_eq!(
+        case.view(&dropped).state,
+        ChangeState::Pending,
+        "a set whose work did not land stays open"
+    );
+    assert!(store::load(&case.db, &dropped).unwrap().landed.is_none());
+    let AcceptOutcome::Landed { .. } = case.accept(&dropped).unwrap() else {
+        panic!("the dropped set can no longer be accepted");
+    };
+    assert_eq!(case.owner(&["show", "main:src/kept.rs"]), "kept\n");
+}
+
+/// MASTER-LAND-SPLIT r2: the owner's Accepted row names the sets that Accept closed, as
+/// the master's own merge row does, so no set leaves Changes unmentioned (SEC F2).
+#[test]
+fn an_owner_accept_of_a_master_set_names_the_sets_it_closed_on_its_row() {
+    use crate::activity::ActivityKind;
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    let (sub, fix, _) = master_fixing_a_conflict(&case);
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Waits);
+    assert!(matches!(
+        case.accept(&fix).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+    let rows = activity_of(&case, &fix);
+    let row = rows
+        .iter()
+        .find(|row| row.kind == ActivityKind::Accepted)
+        .expect("the Accept wrote its row");
+    assert!(
+        row.text.contains("It closed the changes of Agent 1"),
+        "the Accepted row names the set it closed: {}",
+        row.text
+    );
+}
+
+/// MASTER-LAND-SPLIT r2: a path carrying a configured merge driver stops the gate before
+/// its re-merge reads it, so the set waits instead of failing at the land (SEC F3).
+#[test]
+fn a_conflict_fix_on_a_path_with_a_configured_merge_driver_waits_for_the_owner() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    write(
+        &case.repo.join(".git/info/attributes"),
+        "README merge=mark\n",
+    );
+    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "a configured merge driver",
+    );
+}
+
+/// MASTER-LAND-SPLIT r2: a set already on the first parent of the fix came in by no fix,
+/// even when the second parent holds it too, so the master's set waits (SEC F3).
+#[test]
+fn a_set_on_both_sides_of_a_conflict_fix_leaves_the_master_set_waiting() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    let held = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &held.repository, &held.worktree, &held.git_dir).unwrap();
+    write(&held.worktree.join("NOTES"), "on both sides\n");
+    let both = turn_of(&case, &held, "Write notes");
+    let both_head = case.view(&both).head;
+    let other = numbered_agent(&case, 4);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    git_in(
+        &case.home,
+        &other.worktree,
+        &["merge", "-q", "--ff-only", &both_head],
+    );
+    write(
+        &other.worktree.join("README"),
+        "one\ntwo\nthree\nfour from the other\n",
+    );
+    let clashing = turn_of(&case, &other, "Add the other four");
+    let clashing_head = case.view(&clashing).head;
+    case.owner(&["merge", "-q", "--ff-only", &both_head]);
+    case.owner_commit(
+        "README",
+        "one\ntwo\nthree\nfour from the owner\n",
+        "Owner adds four",
+    );
+    let master = master_at_work(&case);
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
+    master_resolves(
+        &case,
+        &master,
+        &clashing_head,
+        &[("README", "one\ntwo\nthree\nfour from both\n")],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &both,
+        ChangeState::Pending,
+        "a set on both sides",
+    );
+    assert_eq!(case.view(&clashing).state, ChangeState::Pending);
+}
+
+/// MASTER-LAND-SPLIT r2: a master set already held in conflict, or with a step of the
+/// engine half done, does not land by itself though its commits would pass (CODE L1).
+#[test]
+fn a_master_set_held_in_conflict_or_mid_step_does_not_land_itself() {
+    for mid_step in [false, true] {
+        let case = Case::new();
+        let (_, fix, _) = master_fixing_a_conflict(&case);
+        let mut held = store::load(&case.db, &fix).unwrap();
+        if mid_step {
+            held.intent = Some(
+                serde_json::from_value(serde_json::json!({
+                    "step": "reset",
+                    "from": held.head,
+                    "target": held.head,
+                }))
+                .unwrap(),
+            );
+        } else {
+            held.state = ChangeState::Conflict;
+        }
+        store::save(&case.db, &held).unwrap();
+        let tip = case.tip();
+        assert_eq!(
+            land_master_set(&case.db, &case.home, &fix).unwrap(),
+            None,
+            "mid_step {mid_step}"
+        );
+        assert_eq!(case.tip(), tip, "main does not move");
+        assert_eq!(store::load(&case.db, &fix).unwrap(), held);
+    }
+}
+
 /// MASTER-LAND-SPLIT: with criss-cross history a merge has more than one merge base, so
 /// the engine cannot tell what the merge would have been and the set waits.
 #[test]
