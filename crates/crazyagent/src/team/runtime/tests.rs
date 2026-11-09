@@ -20552,6 +20552,11 @@ fn a_stop_by_the_master_or_a_lead_fails_the_held_task_and_leaves_the_agent_wakea
             task_of(f, WOKEN).0 == "done"
         });
         assert_eq!(task_and_agent(&fixture, WOKEN).1, Some(lead), "{by:?}");
+        assert_eq!(
+            crate::team::stop_of(&fixture.connection, lead).unwrap(),
+            None,
+            "{by:?}: the wake that started it clears the stop"
+        );
         team.shutdown().unwrap();
     }
 }

@@ -3272,9 +3272,14 @@ fn lead_tools_reach_only_its_workers() {
     .unwrap();
     assert!(!refused, "{text}");
     assert!(text.starts_with("Stopping "), "{text}");
-    assert!(crate::team::owner_stopped(&fixture.connection, mine).unwrap());
+    assert_eq!(
+        crate::team::stop_of(&fixture.connection, mine)
+            .unwrap()
+            .map(|stop| stop.0),
+        Some(crate::team::StoppedBy::Lead)
+    );
     for other in [theirs, sibling, lead] {
-        assert!(!crate::team::owner_stopped(&fixture.connection, other).unwrap());
+        assert!(!crate::team::stopped(&fixture.connection, other).unwrap());
     }
 }
 
