@@ -1469,8 +1469,14 @@ pub fn discard_as(
     by: &str,
 ) -> Result<u64, EngineError> {
     #[cfg(unix)]
-    return flow::discard(db, id, expected_head, now_ms)
-        .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded, by));
+    return flow::discard(
+        db,
+        id,
+        expected_head,
+        now_ms,
+        by == crate::activity::OWNER_ACTOR,
+    )
+    .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded, by));
     #[cfg(not(unix))]
     {
         let _ = (db, id, expected_head, now_ms, by);

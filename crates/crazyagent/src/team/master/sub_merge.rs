@@ -201,7 +201,7 @@ fn merge_in_clone(answering: &Answering<'_>, lead: i64, id: i64, label: &str) ->
 /// branch. Returns the sentence.
 fn work_absent(label: &str, branch: &str) -> String {
     format!(
-        "Nothing to merge: {label}'s branch {} is already in your task branch.",
+        "Nothing to merge: {label}'s branch {} is in your task branch's history, but its work is absent from your task branch. Its change set stays open and is waiting for the owner; merging again will not change that.",
         bound_text(branch, crate::landing::BRANCH_BYTES_MAX)
     )
 }

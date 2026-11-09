@@ -2180,12 +2180,14 @@ pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String
 /// Discards an open change set: keeps its head under a discarded ref, then points the
 /// agent's worktree at the owner's current commit when it holds nothing newer. A lead's
 /// workers' open sets close with it (DEC-107). Inputs: the store, the change set, the head
-/// the owner reviewed and the time now. Output: the time it stays restorable until.
+/// that was reviewed, the time now and whether the owner pressed it. Output: the time it
+/// stays restorable until.
 pub(super) fn discard(
     db: &Connection,
     id: &ChangeSetId,
     expected_head: &str,
     now: u64,
+    owner_pressed: bool,
 ) -> Result<u64, EngineError> {
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
@@ -2195,7 +2197,7 @@ pub(super) fn discard(
         return Err(failure("changes_stale"));
     }
     let until = discard_held(db, &mut record, now)?;
-    if let Err(error) = super::subagent::close_with_lead(db, &record) {
+    if let Err(error) = super::subagent::close_with_lead(db, &record, owner_pressed) {
         eprintln!(
             "landing_settle_failed cause={}",
             crate::protocol::plain_code(&error.0)

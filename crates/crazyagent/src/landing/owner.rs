@@ -869,7 +869,8 @@ fn finish(
         };
         super::note_accepted(db, record, by, &closed);
     }
-    if let Err(error) = super::subagent::close_with_lead(db, record) {
+    let owner_pressed = by == By::Named(OWNER_ACTOR);
+    if let Err(error) = super::subagent::close_with_lead(db, record, owner_pressed) {
         eprintln!(
             "landing_settle_failed cause={}",
             crate::protocol::plain_code(&error.0)
