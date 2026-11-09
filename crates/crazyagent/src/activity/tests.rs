@@ -617,6 +617,71 @@ fn the_store_keeps_its_bound_with_the_created_event_and_drops_the_oldest_others(
     assert_eq!(count("1"), KEPT_PER_PROJECT_MAX);
 }
 
+/// A lead's merge and a merge into main are the only record the Merges count has, so they
+/// keep a share of their own: however many other events arrive none of them goes, and past
+/// that share only the oldest merges do.
+#[test]
+fn merges_keep_their_own_share_and_other_events_never_push_them_out() {
+    let (_folder, db) = db();
+    let filler = |kind: &str, first: i64, rows: i64| {
+        db.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < ?4)
+             INSERT INTO project_activity(project,at_ms,kind,actor,text)
+             SELECT ?1, ?3 + i, ?2, 'Master', 'Event ' || i FROM n",
+            params![PROJECT, kind, first, rows],
+        )
+        .unwrap();
+    };
+    let event = |kind, text: &'static str| NewActivity {
+        kind,
+        actor: MASTER_ACTOR,
+        agent: None,
+        goal: None,
+        text,
+        change_set: None,
+    };
+    let count = |filter: &str| -> i64 {
+        db.query_row(
+            &format!("SELECT COUNT(*) FROM project_activity WHERE project=?1 AND {filter}"),
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let merges = "kind IN ('lead_merged','merged_into_main')";
+    filler("lead_merged", 1, 2);
+    filler("merged_into_main", 3, 1);
+    filler("task_started", 100, KEPT_PER_PROJECT_MAX);
+    let newest = KEPT_PER_PROJECT_MAX + 1_000;
+    record(
+        &db,
+        &project(),
+        &event(ActivityKind::TaskStarted, "One more event"),
+        newest,
+    )
+    .unwrap();
+    assert_eq!(count(merges), 3, "other events pushed out no merge");
+    assert_eq!(
+        count("kind='task_started'"),
+        KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX
+    );
+    filler("lead_merged", newest + 1, MERGES_KEPT_MAX);
+    record(
+        &db,
+        &project(),
+        &event(ActivityKind::MergedIntoMain, "The newest merge"),
+        newest + 60_000,
+    )
+    .unwrap();
+    assert_eq!(count(merges), MERGES_KEPT_MAX);
+    assert_eq!(count(&format!("{merges} AND at_ms <= 3")), 0);
+    assert_eq!(
+        count("kind='task_started'"),
+        KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX,
+        "merges push out none of the others"
+    );
+}
+
 /// Phases and test runs agents log keep their own newest 1,000 (T11 r1 M1): a looping
 /// agent's 10,001 phases never push out the owner's Accept, which the store keeps.
 #[test]
