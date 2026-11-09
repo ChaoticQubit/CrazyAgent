@@ -208,3 +208,9 @@ test("the readout names the highest bar, or the bar under the pointer", async ()
   assert.match(chart.chartReadout(bars, DAY, 0, 0), /^[A-Z][a-z]{2} \d+: 5$/);
   assert.equal(chart.chartReadout([], DAY, 0, null), "No tokens in this range");
 });
+
+test("a readout asked for a bar past the drawn ones is a programming error", async () => {
+  const chart = await import("../src/screens/metrics/chart.tsx");
+  const bars = [{ start_ms: SINCE, tokens: tokens({ input: 5 }) }];
+  assert.throws(() => chart.chartReadout(bars, DAY, 0, 1), /a readout names a drawn bar/);
+});

@@ -138,6 +138,28 @@ test("the readout says the highest bar, and the bar under the real mouse", async
   });
 });
 
+test("a pointer resting on a bar survives a shorter range: the page stays and the readout drops it", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    const target = await page.evaluate(`(() => {
+      const hits = [...document.querySelectorAll(".mx-chart .hit")];
+      const last = hits.at(-1);
+      last.scrollIntoView({ block: "center" });
+      const box = last.getBoundingClientRect();
+      return { count: hits.length, x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    })()`);
+    assert.equal(target.count, 7, "seven days draw seven bars");
+    await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y });
+    await page.evaluate("Fixture.settle(120)");
+    assert.match(await page.evaluate(`document.querySelector(".mx-readout").textContent`), /^[A-Z][a-z]{2} \d+: 0$/);
+    await page.evaluate(`document.querySelector('[aria-label="Range"] [aria-checked="true"]').focus()`);
+    await key(page, "ArrowLeft", 37);
+    assert.equal(await page.evaluate(`document.querySelector(".mx-lead") !== null`), true, "the page is still there");
+    assert.equal(await page.evaluate(`document.querySelectorAll(".mx-chart .hit").length`), 1);
+    assert.equal(await page.evaluate(`document.querySelector(".mx-readout").textContent`), "No tokens in this range");
+  });
+});
+
 for (const width of [1440, 760]) {
   test(`the lead panel does not overflow at ${width} px`, async () => {
     await withPage(async (page) => {
