@@ -127,9 +127,9 @@ test("an unconfirmed account set-up for agents shows its own banner whose Check 
 test("routes reach Settings tabs and the project screens", () => {
   const settings = render({}, { name: "settings", tab: "pools" });
   assert.match(settings, /<h1>Settings<\/h1>/);
-  assert.match(settings, /role="tablist" aria-label="Settings sections"/);
-  assert.match(settings, /<a id="tab-pools" role="tab" class="tab" href="#\/settings\/pools" aria-selected="true" tabindex="0">/);
-  for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory", "Profile"]) assert.match(settings, new RegExp(`</svg>${label}</a>`));
+  assert.match(settings, /<nav class="settings-nav" aria-label="Settings sections">/);
+  assert.match(settings, /<a class="settings-nav-item" href="#\/settings\/pools" aria-current="page">Pools<\/a>/);
+  for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory", "Profile"]) assert.match(settings, new RegExp(`>${label}</a>`));
   const project = render({ projects: { kind: "ok", value: [{ id: "p-1", name: "Harbor Notes", repository_count: 1 }] } }, { name: "project", id: "p-1", tab: "overview" });
   assert.match(project, /<h1>Harbor Notes<\/h1>/);
   assert.match(project, /role="tablist" aria-label="Project"/);

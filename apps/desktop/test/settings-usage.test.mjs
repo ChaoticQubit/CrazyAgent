@@ -314,7 +314,7 @@ test("Settings has a Usage tab", () => {
   assert.deepEqual(router.parseRoute("#/settings/usage"), { name: "settings", tab: "usage" });
   assert.equal(router.formatRoute({ name: "settings", tab: "usage" }), "#/settings/usage");
   const settings = readFileSync(new URL("../src/screens/settings/index.tsx", import.meta.url), "utf8");
-  assert.match(settings, /\{ id: "usage", label: "Usage", icon: "trending-up" \}/);
+  assert.match(settings, /\{ id: "usage", label: "Usage" \}/);
   assert.match(settings, /tab === "usage" \? <UsageSettings \/>/);
 });
 
