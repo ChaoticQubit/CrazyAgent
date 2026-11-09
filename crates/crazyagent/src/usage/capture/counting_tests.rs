@@ -1165,3 +1165,48 @@ fn growth_on_a_repeated_message_keeps_the_whole_calls_tier() {
         priced(expected(250_000, 10)) + priced(expected(0, 20))
     );
 }
+
+#[test]
+fn a_web_search_that_arrives_on_a_repeat_is_still_charged() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(
+        &file,
+        &priced_line(
+            "msg_a",
+            SONNET,
+            serde_json::json!({"input_tokens": 10, "output_tokens": 1}),
+        ),
+    );
+    scan_it(&db, root.path());
+    append(
+        &file,
+        &priced_line(
+            "msg_a",
+            SONNET,
+            serde_json::json!({
+                "input_tokens": 10,
+                "output_tokens": 1,
+                "server_tool_use": {"web_search_requests": 2}
+            }),
+        ),
+    );
+    scan_it(&db, root.path());
+    let first = estimate(
+        SONNET,
+        super::super::prices::Charged {
+            tokens: expected(10, 1),
+            prompt_tokens: 10,
+            ..Default::default()
+        },
+    );
+    let searches = estimate(
+        SONNET,
+        super::super::prices::Charged {
+            prompt_tokens: 10,
+            web_searches: 2,
+            ..Default::default()
+        },
+    );
+    assert_eq!(spent(&db), first + searches);
+}
