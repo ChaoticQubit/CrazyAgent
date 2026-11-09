@@ -49,6 +49,24 @@ test("Your accounts holds the search, the filters, the count and every account",
   assert.equal(seen.old, 0);
 });
 
+for (const width of [1180, 700]) {
+  test(`at ${width} px the list stays in its column and its last control can be reached`, async () => {
+    const seen = await onAccounts({}, (page) => page.evaluate(`(() => {
+      const main = document.querySelector("#main");
+      const column = document.querySelector(".settings-content").getBoundingClientRect();
+      const add = document.querySelector(".settings-top button").getBoundingClientRect();
+      const group = document.querySelector(".set-group").getBoundingClientRect();
+      const menu = document.querySelector('button[aria-label="More for Account 0"]');
+      menu.focus();
+      return { sideways: main.scrollWidth - main.clientWidth, columnRight: column.right, addRight: add.right, groupRight: group.right, menuRight: menu.getBoundingClientRect().right };
+    })()`), width);
+    assert.equal(seen.sideways, 0, JSON.stringify(seen));
+    assert.ok(seen.addRight <= seen.columnRight + 0.5, JSON.stringify(seen));
+    assert.ok(seen.groupRight <= seen.columnRight + 0.5, JSON.stringify(seen));
+    assert.ok(seen.menuRight <= seen.groupRight + 0.5, JSON.stringify(seen));
+  });
+}
+
 test("Add account opens its dialog, also straight from the add route", async () => {
   await onAccounts({}, async (page) => {
     await button(page, "Add account");
@@ -242,6 +260,18 @@ test("each field has its one label, the wide fields fill their line, and the hel
   assert.deepEqual(seen.stack, ["Preferred stack"]);
   assert.equal(seen.bioSlack, 32, JSON.stringify(seen));
   assert.equal(seen.roleHelp, "profile-role-helper");
+});
+
+test("the chosen stack lines up with its field, and Save sits on the section's padding", async () => {
+  const seen = await onProfile({}, (page) => page.evaluate(`(() => {
+    const chip = document.querySelector(".set-row .chips .chip").getBoundingClientRect();
+    const field = document.getElementById("profile-stack").getBoundingClientRect();
+    const save = document.querySelector("form[aria-label=Profile] button[type=submit]").getBoundingClientRect();
+    const group = document.querySelector(".set-group").getBoundingClientRect();
+    return { chipLeft: chip.left, fieldLeft: field.left, below: group.bottom - save.bottom };
+  })()`));
+  assert.ok(Math.abs(seen.chipLeft - seen.fieldLeft) <= 1, JSON.stringify(seen));
+  assert.equal(seen.below, 13, JSON.stringify(seen));
 });
 
 test("Save changes waits for a change and then sends the profile", async () => {
