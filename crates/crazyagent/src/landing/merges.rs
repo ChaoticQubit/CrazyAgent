@@ -6,7 +6,10 @@ use crate::agent_git::Layout;
 use crate::engine::EngineError;
 use crate::worktrees::TREE_BOUNDS;
 use rusqlite::Connection;
+use std::collections::HashMap;
 
+/// How much of a file git reads when it decides the file is binary.
+const BINARY_PROBE_BYTES: usize = 8000;
 /// The most merge commits one change set's own commits may hold before the engine stops
 /// reading them and refuses the set as too large, well past the 130 merges one lead made
 /// in the DEC-107 evidence.
@@ -163,8 +166,8 @@ fn own_merges(
 
 /// Tells whether a merge commit is only the fix of a real conflict: git's own merge of its
 /// parents really conflicts, its tree keeps every clean change of that merge, and no
-/// conflicted file still holds a conflict marker. Inputs: the owner repository, the commit
-/// and its two parents. Output: the answer.
+/// conflicted file still holds a conflict marker or has a marker size of its own. Inputs:
+/// the owner repository, the commit and its two parents. Output: the answer.
 fn fixes_conflict(
     owner: &Repo,
     commit: &str,
@@ -174,7 +177,7 @@ fn fixes_conflict(
     let Some(conflicts) = kept_clean_changes(owner, commit, ours, theirs)? else {
         return Ok(false);
     };
-    if conflicts.is_empty() {
+    if conflicts.is_empty() || sets_marker_size(owner, &conflicts, &[commit, ours, theirs])? {
         return Ok(false);
     }
     for path in &conflicts {
@@ -185,16 +188,196 @@ fn fixes_conflict(
     Ok(true)
 }
 
-/// Tells whether a landed commit holds a change set's clean changes, by the test a conflict
-/// fix passes: merging the set's head into it again would change nothing but conflicted
-/// paths. A merge that kept none of the set's work holds its head and fails this. Inputs:
-/// the owner repository, the landed commit and the set's head. Output: the answer.
-pub(super) fn holds_clean_changes(
+/// Tells whether a landed commit holds a change set's work: merging the set's head into it
+/// again would change nothing but conflicted paths, and at each of those the landed tree
+/// shows the set's work ([`holds_work_at`]). Doubt stays open: a reworded resolution waits
+/// for the owner. Inputs: the owner repository, the commit the land left the branch at and
+/// the set's base and head. Output: the answer.
+pub(super) fn holds_set_work(
     owner: &Repo,
     landed: &str,
+    base: &str,
     head: &str,
 ) -> Result<bool, EngineError> {
-    Ok(kept_clean_changes(owner, landed, landed, head)?.is_some())
+    let Some(conflicts) = kept_clean_changes(owner, landed, landed, head)? else {
+        return Ok(false);
+    };
+    for path in &conflicts {
+        if !holds_work_at(owner, [base, head, landed], path)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// One side of a path: its object id and bytes.
+type Blob = (Vec<u8>, Vec<u8>);
+
+/// Reads whether a landed tree shows what a set did at one path. A set that deleted the file
+/// needs it absent; a binary path needs the set's blob; otherwise see [`kept_lines`]. A
+/// path that is no file on some side, or too large to read, counts as not shown. Inputs: the
+/// owner repository, the base, head and landed commits and the path as git printed it.
+/// Output: the answer.
+fn holds_work_at(owner: &Repo, commits: [&str; 3], path: &[u8]) -> Result<bool, EngineError> {
+    let Some([before, after, now]) = blobs_at(owner, commits, path)? else {
+        return Ok(false);
+    };
+    let Some(after) = after else {
+        return Ok(before.is_some() && now.is_none());
+    };
+    let binary = |blob: &Blob| blob.1[..blob.1.len().min(BINARY_PROBE_BYTES)].contains(&0);
+    if binary(&after) || before.as_ref().is_some_and(binary) || now.as_ref().is_some_and(binary) {
+        return Ok(now.is_some_and(|now| now.0 == after.0));
+    }
+    let text = |blob: &Option<Blob>| blob.as_ref().map_or(Vec::new(), |blob| blob.1.clone());
+    Ok(kept_lines(&text(&before), &after.1, &text(&now)))
+}
+
+/// Reads one path at three commits with no filter. Inputs: the owner repository, the commits
+/// and the path as git printed it. Output: each side, None for a path that commit lacks, or
+/// None overall for a side that is no file or a reply over the bound; a path with a line
+/// break makes the reply too long, which is an error.
+fn blobs_at(
+    owner: &Repo,
+    commits: [&str; 3],
+    path: &[u8],
+) -> Result<Option<[Option<Blob>; 3]>, EngineError> {
+    let mut request = Vec::new();
+    for commit in commits {
+        request.extend_from_slice(commit.as_bytes());
+        request.push(b':');
+        request.extend_from_slice(path);
+        request.push(b'\n');
+    }
+    let read = owner.exec(
+        &["cat-file", "--batch"],
+        Some(&request),
+        &[],
+        OUTPUT_BYTES_MAX,
+    )?;
+    if read.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if read.overflow {
+        return Ok(None);
+    }
+    let mut rest = read.stdout.as_slice();
+    let mut sides: [Option<Blob>; 3] = [None, None, None];
+    for side in &mut sides {
+        let end = rest
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(|| failure("changes_git_failed"))?;
+        let (header, tail) = rest.split_at(end);
+        rest = &tail[1..];
+        if header.ends_with(b" missing") {
+            continue;
+        }
+        let fields: Vec<&[u8]> = header.split(|byte| *byte == b' ').collect();
+        let [id, kind, size] = fields[..] else {
+            return Err(failure("changes_git_failed"));
+        };
+        if kind != b"blob" {
+            return Ok(None);
+        }
+        let size: usize = std::str::from_utf8(size)
+            .ok()
+            .and_then(|size| size.parse().ok())
+            .ok_or_else(|| failure("changes_git_failed"))?;
+        if rest.len() <= size {
+            return Err(failure("changes_git_failed"));
+        }
+        *side = Some((id.to_vec(), rest[..size].to_vec()));
+        rest = &rest[size + 1..];
+    }
+    if !rest.is_empty() {
+        return Err(failure("changes_git_failed"));
+    }
+    Ok(Some(sides))
+}
+
+/// Tells whether a file still shows a set's edit, line by line: every line the set added is
+/// there as many times as it was added, or, for a set that only removed lines, those lines
+/// are gone. A line main already held counts as there, and a set that changed no line count
+/// shows nothing. Inputs: the file at the base, at the head and as landed. Output: the answer.
+fn kept_lines(before: &[u8], after: &[u8], now: &[u8]) -> bool {
+    let (before, after, now) = (line_counts(before), line_counts(after), line_counts(now));
+    let times = |lines: &HashMap<&[u8], usize>, line: &[u8]| lines.get(line).copied().unwrap_or(0);
+    let added: Vec<(&[u8], usize)> = after
+        .iter()
+        .filter(|(line, count)| **count > times(&before, line))
+        .map(|(line, count)| (*line, count - times(&before, line)))
+        .collect();
+    if !added.is_empty() {
+        return added
+            .iter()
+            .all(|(line, count)| times(&now, line) >= *count);
+    }
+    let removed: Vec<&[u8]> = before
+        .keys()
+        .filter(|line| times(&after, line) < times(&before, line))
+        .copied()
+        .collect();
+    !removed.is_empty()
+        && removed
+            .iter()
+            .all(|line| times(&now, line) <= times(&after, line))
+}
+
+/// Counts each line of a text, the final line break not making a line of its own. Input: the
+/// text. Output: each line and how many times it occurs.
+fn line_counts(text: &[u8]) -> HashMap<&[u8], usize> {
+    let mut counts = HashMap::new();
+    if text.is_empty() {
+        return counts;
+    }
+    let body = text.strip_suffix(b"\n").unwrap_or(text);
+    for line in body.split(|byte| *byte == b'\n') {
+        *counts.entry(line).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Tells whether any path has a conflict-marker-size attribute in any of the commits, read
+/// from each commit and the repository's own info/attributes, so its markers may be a
+/// length [`holds_conflict_marker`] does not know. Inputs: the owner repository, the paths
+/// as git printed them and the commits. Output: the answer.
+fn sets_marker_size(
+    owner: &Repo,
+    paths: &[Vec<u8>],
+    commits: &[&str],
+) -> Result<bool, EngineError> {
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path);
+        input.push(0);
+    }
+    for commit in commits {
+        let output = owner.exec(
+            &[
+                "check-attr",
+                "-z",
+                "--stdin",
+                "--source",
+                commit,
+                "conflict-marker-size",
+            ],
+            Some(&input),
+            &[],
+            OUTPUT_BYTES_MAX,
+        )?;
+        if output.code != 0 || output.overflow {
+            return Err(failure("changes_git_failed"));
+        }
+        let fields: Vec<&[u8]> = output.stdout.split(|byte| *byte == 0).collect();
+        if fields
+            .chunks(3)
+            .any(|triple| triple.len() == 3 && triple[2] != b"unspecified")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Tells whether a commit holds a change set's clean changes as [`holds_clean_changes`]

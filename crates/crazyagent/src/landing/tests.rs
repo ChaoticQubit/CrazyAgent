@@ -8157,15 +8157,49 @@ const BOTH_FOURTH_LINES: &str = "one\ntwo\nthree\nfour from the owner\nfour from
 /// in the master, at Full access with Merge into main itself. Input: the case. Output: the
 /// conflicted set, its head and the master's workspace.
 fn conflicted_set_and_master(case: &Case) -> (ChangeSetId, String, Workspace) {
+    conflicted_set_from(case, &[], |case| {
+        case.owner_commit(
+            "README",
+            "one\ntwo\nthree\nfour from the owner\n",
+            "Owner adds four",
+        );
+    })
+}
+
+/// Makes a set of the agent's fourth line and the given files conflict with what `on_main`
+/// commits to main, then brings in the master at Full access with Merge into main itself.
+/// Inputs: the case, the set's other files and the change on main. Output: the conflicted
+/// set, its head and the master's workspace.
+fn conflicted_set_from(
+    case: &Case,
+    files: &[(&str, &str)],
+    on_main: impl FnOnce(&Case),
+) -> (ChangeSetId, String, Workspace) {
+    conflicted_set_changing(
+        case,
+        |case| {
+            case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+            for (path, text) in files {
+                case.edit(path, text);
+            }
+        },
+        on_main,
+    )
+}
+
+/// Makes a set of whatever `in_set` changes conflict with what `on_main` commits to main,
+/// then brings in the master at Full access with Merge into main itself. Inputs: the case
+/// and both changes. Output: the conflicted set, its head and the master's workspace.
+fn conflicted_set_changing(
+    case: &Case,
+    in_set: impl FnOnce(&Case),
+    on_main: impl FnOnce(&Case),
+) -> (ChangeSetId, String, Workspace) {
     use crate::sandbox::policy::AgentAccess;
     case.start();
-    case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    in_set(case);
     let sub = case.turn(TurnOutcome::Succeeded).unwrap();
-    case.owner_commit(
-        "README",
-        "one\ntwo\nthree\nfour from the owner\n",
-        "Owner adds four",
-    );
+    on_main(case);
     assert!(matches!(
         case.accept(&sub).unwrap(),
         AcceptOutcome::Conflict { .. }
@@ -8566,7 +8600,7 @@ fn a_master_merge_committed_with_a_conflict_marker_waits_for_the_owner() {
 fn a_conflict_fix_holding_text_like_a_marker_lands_itself() {
     let case = Case::new();
     let (sub, sub_head, master) = conflicted_set_and_master(&case);
-    let text = "one\ntwo\nthree\nsee <<<<<<< here\n========\n =======\n>>>>>>>tight\n";
+    let text = "one\ntwo\nthree\nfour from the agent\nsee <<<<<<< here\n========\n =======\n>>>>>>>tight\n";
     master_resolves(&case, &master, &sub_head, &[("README", text)]);
     let fix = turn_of(&case, &master, "Resolve the README conflict");
     let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
@@ -8576,7 +8610,8 @@ fn a_conflict_fix_holding_text_like_a_marker_lands_itself() {
 }
 
 /// MASTER-LAND-SPLIT r2: a fix that resolves the conflict by deleting the file has no
-/// markers to find, so it lands by itself (CODE M2).
+/// markers to find, so it lands by itself (CODE M2). The set whose edit it dropped stays
+/// open (LAND-3 r2).
 #[test]
 fn a_conflict_fix_that_deletes_the_conflicted_file_lands_itself() {
     let case = Case::new();
@@ -8602,7 +8637,7 @@ fn a_conflict_fix_that_deletes_the_conflicted_file_lands_itself() {
             .owner(&["ls-tree", "--name-only", "main"])
             .contains("README")
     );
-    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+    set_stayed_open(&case, &sub, "the fix dropped the file the set edited");
 }
 
 /// MASTER-LAND-SPLIT r2: an edit the owner Discarded while the master's worktree was busy
@@ -8792,6 +8827,511 @@ fn a_conflict_fix_on_a_path_with_a_configured_merge_driver_waits_for_the_owner()
         ChangeState::Conflict,
         "a configured merge driver",
     );
+}
+
+/// Lands the master's fix and checks that the set it conflicted with stayed open while the
+/// set's clean file reached main. Inputs: the case, the master's set and the conflicted set.
+/// Output: none.
+fn land_leaves_the_set_open(case: &Case, fix: &ChangeSetId, sub: &ChangeSetId) {
+    let outcome = land_master_set(&case.db, &case.home, fix).unwrap();
+    assert!(
+        matches!(outcome, Some(AcceptOutcome::Landed { .. })),
+        "the master's fix lands: {outcome:?}"
+    );
+    assert_eq!(case.owner(&["show", "main:NEW"]), "new\n");
+    assert_eq!(
+        case.view(sub).state,
+        ChangeState::Conflict,
+        "a set whose work on a conflicted path did not land stays open"
+    );
+    assert!(store::load(&case.db, sub).unwrap().landed.is_none());
+}
+
+/// LAND-3: one conflicted path left as main had it means the set's work there was dropped,
+/// even when its other conflicted path and its clean file landed, so the set stays open
+/// for the owner (rv-secreview land-1 r2 F1).
+#[test]
+fn a_master_land_that_kept_mains_side_of_one_conflict_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_from(
+        &case,
+        &[("NOTES", "notes of the agent\n"), ("NEW", "new\n")],
+        |case| {
+            case.owner_commit(
+                "README",
+                "one\ntwo\nthree\nfour from the owner\n",
+                "Owner adds four",
+            );
+            case.owner_commit("NOTES", "notes of the owner\n", "Owner adds notes");
+        },
+    );
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[
+            ("README", BOTH_FOURTH_LINES),
+            ("NOTES", "notes of the owner\n"),
+            ("NEW", "new\n"),
+        ],
+    );
+    let fix = turn_of(&case, &master, "Keep the owner's notes");
+    land_leaves_the_set_open(&case, &fix, &sub);
+}
+
+/// LAND-3: a conflicted path that neither the landed commit nor the commit under it holds
+/// was left as main had it too, so the set whose edit of that file was dropped stays open.
+#[test]
+fn a_master_land_that_kept_mains_deletion_of_a_conflicted_file_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_from(&case, &[("NEW", "new\n")], |case| {
+        case.owner(&["rm", "-q", "README"]);
+        case.owner(&["commit", "-q", "-m", "Owner drops the README"]);
+    });
+    master_resolves(&case, &master, &sub_head, &[("NEW", "new\n")]);
+    let fix = turn_of(&case, &master, "Keep the deletion");
+    land_leaves_the_set_open(&case, &fix, &sub);
+}
+
+/// LAND-3: git writes longer markers on a path with this attribute, which the marker read
+/// does not know, so a fix of such a path waits for the owner (land-1 r2 L1, F2).
+#[test]
+fn a_conflict_fix_on_a_path_with_a_marker_size_attribute_waits_for_the_owner() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    write(
+        &case.repo.join(".git/info/attributes"),
+        "README conflict-marker-size=10\n",
+    );
+    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "a marker size attribute",
+    );
+}
+
+/// LAND-3: the marker size attribute counts from the commits' own .gitattributes too, here
+/// from the set's, which neither main nor the owner's checkout holds.
+#[test]
+fn a_conflict_fix_on_a_path_a_commit_gives_a_marker_size_waits_for_the_owner() {
+    let case = Case::new();
+    let attributes = (".gitattributes", "README conflict-marker-size=10\n");
+    let (sub, sub_head, master) = conflicted_set_from(&case, &[attributes], |case| {
+        case.owner_commit(
+            "README",
+            "one\ntwo\nthree\nfour from the owner\n",
+            "Owner adds four",
+        );
+    });
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", BOTH_FOURTH_LINES), attributes],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "a committed marker size attribute",
+    );
+}
+
+/// Lands the master's fix. Inputs: the case and the master's set. Output: none.
+fn master_fix_lands(case: &Case, fix: &ChangeSetId) {
+    let outcome = land_master_set(&case.db, &case.home, fix).unwrap();
+    assert!(
+        matches!(outcome, Some(AcceptOutcome::Landed { .. })),
+        "the master's fix lands: {outcome:?}"
+    );
+}
+
+/// Asserts a conflicted set stayed open with nothing recorded as landed. Inputs: the case,
+/// the set and what the row is about. Output: none.
+fn set_stayed_open(case: &Case, set: &ChangeSetId, about: &str) {
+    assert_eq!(case.view(set).state, ChangeState::Conflict, "{about}");
+    assert!(
+        store::load(&case.db, set).unwrap().landed.is_none(),
+        "{about}"
+    );
+}
+
+/// Asserts a conflicted set closed as landed. Inputs: the case, the set and what the row is
+/// about. Output: none.
+fn set_closed(case: &Case, set: &ChangeSetId, about: &str) {
+    assert_eq!(case.view(set).state, ChangeState::Accepted, "{about}");
+    assert!(
+        store::load(&case.db, set).unwrap().landed.is_some(),
+        "{about}"
+    );
+}
+
+/// The README a master's fix holds when it keeps main's line and both sets' lines.
+const ALL_FOURTH_LINES: &str =
+    "one\ntwo\nthree\nfour from the owner\nfour from the agent\nfour from the second\n";
+
+/// The README a master's fix holds when it keeps main's line and the second set's.
+const OWNER_AND_SECOND: &str = "one\ntwo\nthree\nfour from the owner\nfour from the second\n";
+
+/// Makes two agents' sets conflict with the owner's fourth line and brings in the master, at
+/// Full access with Merge into main itself. Input: the case. Output: each set with its head,
+/// and the master's workspace.
+fn two_conflicted_sets_and_master(
+    case: &Case,
+) -> ((ChangeSetId, String), (ChangeSetId, String), Workspace) {
+    use crate::sandbox::policy::AgentAccess;
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let other = numbered_agent(case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(
+        &other.worktree.join("README"),
+        "one\ntwo\nthree\nfour from the second\n",
+    );
+    let second = turn_of(case, &other, "Add the second line");
+    case.owner_commit(
+        "README",
+        "one\ntwo\nthree\nfour from the owner\n",
+        "Owner adds four",
+    );
+    for set in [&first, &second] {
+        assert!(matches!(
+            case.accept(set).unwrap(),
+            AcceptOutcome::Conflict { .. }
+        ));
+    }
+    let master = master_at_work(case);
+    master_may_land(case, AgentAccess::Full, crate::team::MasterLands::Merges);
+    let (first_head, second_head) = (case.view(&first).head, case.view(&second).head);
+    ((first, first_head), (second, second_head), master)
+}
+
+/// Commits a merge of a set in the master's worktree with `path` removed. Inputs: the case,
+/// the master, the set's head and the path. Output: none.
+fn master_merges_without(case: &Case, master: &Workspace, head: &str, path: &str) {
+    let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
+    in_master(&["merge", "--no-commit", "-s", "ours", head]);
+    in_master(&["rm", "-q", path]);
+    in_master(&[
+        "-c",
+        "user.name=Master",
+        "-c",
+        "user.email=master@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Drop the file",
+    ]);
+}
+
+/// LAND-3 r2 (rv-code H1): the second fix kept the first set's line and dropped the second's.
+#[test]
+fn a_master_land_that_dropped_the_second_set_leaves_it_open_and_closes_the_first() {
+    let case = Case::new();
+    let ((first, first_head), (second, second_head), master) =
+        two_conflicted_sets_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &first_head,
+        &[("README", BOTH_FOURTH_LINES)],
+    );
+    master_resolves(
+        &case,
+        &master,
+        &second_head,
+        &[("README", BOTH_FOURTH_LINES)],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflicts");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &second, "its line is not in the landed file");
+    set_closed(&case, &first, "its line is in the landed file");
+}
+
+/// LAND-3 r2 (rv-code H1): the second fix took the second set's line and dropped the first's.
+#[test]
+fn a_master_land_that_dropped_the_first_set_leaves_it_open_and_closes_the_second() {
+    let case = Case::new();
+    let ((first, first_head), (second, second_head), master) =
+        two_conflicted_sets_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &first_head,
+        &[("README", BOTH_FOURTH_LINES)],
+    );
+    master_resolves(
+        &case,
+        &master,
+        &second_head,
+        &[("README", OWNER_AND_SECOND)],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflicts");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &first, "its line is not in the landed file");
+    set_closed(&case, &second, "its line is in the landed file");
+}
+
+/// LAND-3 r2: a fix that uses every set's line closes every set.
+#[test]
+fn a_master_land_that_kept_both_sets_lines_closes_both() {
+    let case = Case::new();
+    let ((first, first_head), (second, second_head), master) =
+        two_conflicted_sets_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &first_head,
+        &[("README", BOTH_FOURTH_LINES)],
+    );
+    master_resolves(
+        &case,
+        &master,
+        &second_head,
+        &[("README", ALL_FOURTH_LINES)],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflicts");
+    master_fix_lands(&case, &fix);
+    set_closed(&case, &first, "its line is in the landed file");
+    set_closed(&case, &second, "its line is in the landed file");
+}
+
+/// LAND-3 r2: main's side plus any other line differs from main and still holds none of the
+/// set's work (rv-code H1, sec land-3 F2).
+#[test]
+fn a_master_land_of_mains_side_and_an_unrelated_line_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[(
+            "README",
+            "one\ntwo\nthree\nfour from the owner\nunrelated\n",
+        )],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "its line is not in the landed file");
+}
+
+/// LAND-3 r2 (sec land-3 F1): a land whose tree equals main makes no commit, and the commit
+/// it records is the tip, so only the landed file can say the set's work is missing.
+#[test]
+fn a_master_land_that_made_no_commit_leaves_a_one_file_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    let tip = case.tip();
+    master_resolves(&case, &master, &sub_head, &[]);
+    let fix = turn_of(&case, &master, "Keep main's README");
+    master_fix_lands(&case, &fix);
+    assert_eq!(case.tip(), tip, "the land made no commit");
+    set_stayed_open(&case, &sub, "its line is not on main");
+}
+
+/// LAND-3 r2: a set that added one line twice needs both copies in the landed file.
+#[test]
+fn a_master_land_that_kept_one_copy_of_a_line_added_twice_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_from(
+        &case,
+        &[("README", "one\ntwo\nthree\nsame\nsame\n")],
+        |case| {
+            case.owner_commit(
+                "README",
+                "one\ntwo\nthree\nfour from the owner\n",
+                "Owner adds four",
+            );
+        },
+    );
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", "one\ntwo\nthree\nfour from the owner\nsame\n")],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "one copy of its line is missing");
+}
+
+/// Conflicts a set that only removes README's third line with an edit of that line on main
+/// and brings in the master. Input: the case. Output: the set, its head and the master.
+fn removed_line_set_and_master(case: &Case) -> (ChangeSetId, String, Workspace) {
+    conflicted_set_from(case, &[("README", "one\ntwo\n")], |case| {
+        case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edits three");
+    })
+}
+
+/// LAND-3 r2: a set that only removed a line, with the line back in the landed file.
+#[test]
+fn a_master_land_that_brought_a_removed_line_back_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = removed_line_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", "one\ntwo\nthree\nTHREE\n")],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the line it removed is back");
+}
+
+/// LAND-3 r2: a set that only removed a line, with the line gone from the landed file.
+#[test]
+fn a_master_land_that_kept_a_removed_line_gone_closes_the_set() {
+    let case = Case::new();
+    let (sub, sub_head, master) = removed_line_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", "one\ntwo\nTHREE\nmore\n")],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_fix_lands(&case, &fix);
+    set_closed(&case, &sub, "the line it removed is gone");
+}
+
+/// Conflicts a set that deletes README with an edit of README on main and brings in the
+/// master. Input: the case. Output: the set, its head and the master.
+fn deleted_file_set_and_master(case: &Case) -> (ChangeSetId, String, Workspace) {
+    conflicted_set_changing(
+        case,
+        |case| std::fs::remove_file(case.workspace.worktree.join("README")).unwrap(),
+        |case| {
+            case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edits three");
+        },
+    )
+}
+
+/// LAND-3 r2: a set that deleted a file needs it absent from the landed tree.
+#[test]
+fn a_master_land_that_kept_a_file_the_set_deleted_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = deleted_file_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", "one\ntwo\nTHREE\nmore\n")],
+    );
+    let fix = turn_of(&case, &master, "Keep the README");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the file it deleted is still there");
+}
+
+/// LAND-3 r2: a set that deleted a file closes when the landed tree lacks it.
+#[test]
+fn a_master_land_that_deleted_the_file_the_set_deleted_closes_the_set() {
+    let case = Case::new();
+    case.owner_commit("KEEP", "keep\n", "Owner adds a file");
+    let (sub, sub_head, master) = deleted_file_set_and_master(&case);
+    master_merges_without(&case, &master, &sub_head, "README");
+    let fix = turn_of(&case, &master, "Delete the README");
+    master_fix_lands(&case, &fix);
+    set_closed(&case, &sub, "the file it deleted is gone");
+}
+
+/// The README of a set that only added its fourth line, with main not touching README.
+const AGENT_FOURTH_LINE: &str = "one\ntwo\nthree\nfour from the agent\n";
+
+/// Conflicts a set that changes a binary file with another change of it on main and brings
+/// in the master. Input: the case. Output: the set, its head and the master.
+fn binary_set_and_master(case: &Case) -> (ChangeSetId, String, Workspace) {
+    case.owner_commit("data", "base\0\n", "Owner adds data");
+    conflicted_set_from(case, &[("data", "agent\0\n")], |case| {
+        case.owner_commit("data", "owner\0\n", "Owner edits data");
+    })
+}
+
+/// LAND-3 r2: a binary path has no lines to read, so the landed blob must be the set's.
+#[test]
+fn a_master_land_that_took_mains_binary_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = binary_set_and_master(&case);
+    master_resolves(&case, &master, &sub_head, &[("README", AGENT_FOURTH_LINE)]);
+    let fix = turn_of(&case, &master, "Keep main's data");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the landed blob is not the set's");
+}
+
+/// LAND-3 r2: a binary path closes when the landed blob is the set's.
+#[test]
+fn a_master_land_that_took_the_sets_binary_closes_the_set() {
+    let case = Case::new();
+    let (sub, sub_head, master) = binary_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", AGENT_FOURTH_LINE), ("data", "agent\0\n")],
+    );
+    let fix = turn_of(&case, &master, "Take the set's data");
+    master_fix_lands(&case, &fix);
+    set_closed(&case, &sub, "the landed blob is the set's");
+}
+
+/// LAND-3 r2: a binary file's bytes are not lines, so holding the set's bytes and more is
+/// another blob.
+#[test]
+fn a_master_land_that_added_to_the_sets_binary_leaves_the_set_open() {
+    let case = Case::new();
+    let (sub, sub_head, master) = binary_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", AGENT_FOURTH_LINE), ("data", "agent\0\nextra\n")],
+    );
+    let fix = turn_of(&case, &master, "Change the set's data");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the landed blob is not the set's");
+}
+
+/// LAND-3 r2: main renamed the file the set edited, so the conflict sits at a path the set
+/// never had and no line of the set's can be read there. That waits for the owner, though
+/// the fix may have used the set's work.
+#[test]
+fn a_master_land_at_a_path_the_set_never_had_leaves_the_set_open() {
+    let case = Case::new();
+    let long: String = (1..=12).map(|number| format!("line {number}\n")).collect();
+    case.owner_commit("LONG", &long, "Owner adds a long file");
+    case.agent(&["merge", "-q", "--ff-only", "main"]);
+    let (sub, sub_head, master) = conflicted_set_changing(
+        &case,
+        |case| case.edit("LONG", &format!("{long}from the agent\n")),
+        |case| {
+            case.owner(&["mv", "LONG", "RENAMED"]);
+            case.owner_commit(
+                "RENAMED",
+                &format!("{long}from the owner\n"),
+                "Owner renames and edits",
+            );
+        },
+    );
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[(
+            "RENAMED",
+            &format!("{long}from the owner\nfrom the agent\n"),
+        )],
+    );
+    let fix = turn_of(&case, &master, "Resolve the renamed file");
+    master_fix_lands(&case, &fix);
+    set_stayed_open(&case, &sub, "the conflicted path was never the set's");
 }
 
 /// MASTER-LAND-SPLIT r2: a set already on the first parent of the fix came in by no fix,
