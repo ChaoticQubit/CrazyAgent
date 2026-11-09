@@ -1,4 +1,5 @@
 import { click, shown } from "../settings-steps.mjs";
+import { pasteTerminal } from "../trial-kit.mjs";
 
 /** The first character of a reply line each live master harness draws on its terminal:
  * Claude Code's record dot and Codex's bullet. Keyed by catalog id and alias. */
@@ -114,8 +115,8 @@ export async function terminalLive(kit, timeout) {
 }
 
 /** Sends one message to the live master as the owner does: through the message box when the
- * Terminal input setting shows it, else typed into the terminal and sent with Enter. Inputs: the
- * kit and the text. Output: which input it used. */
+ * Terminal input setting shows it, else pasted into the terminal and sent with Enter, so a new
+ * line in the text never presses Enter. Inputs: the kit and the text. Output: which input it used. */
 export async function sendToMaster(kit, text) {
   if (await shown(BOX)) {
     await kit.paste(BOX, text);
@@ -128,7 +129,7 @@ export async function sendToMaster(kit, text) {
     return "message box";
   }
   await $(TERMINAL).click();
-  await browser.keys(text);
+  if (!(await browser.execute(pasteTerminal, text))) throw new Error("the master terminal lost the focus before the paste");
   await browser.keys(KEYS.enter);
   return "terminal";
 }

@@ -59,6 +59,13 @@ test("every committed tui4 check module in scripts/trial/tui4 passes the same co
   assert.equal(plan(TRIAL3_STEPS, [...desktop, ...tui]).length, SLUGS.length + desktop.length + tui.length);
 });
 
+test("no trial step changes the owner's Terminal input, since a restore cannot survive an interrupted run", () => {
+  const steps = [fileURLToPath(new URL("./trial3-steps.mjs", import.meta.url)), fileURLToPath(new URL("./trial-kit.mjs", import.meta.url))];
+  const sources = [...steps, ...readdirSync(CHECKS).filter((file) => file.endsWith(".mjs")).map((file) => join(CHECKS, file))];
+  assert(sources.length > steps.length, "the scan read the check modules");
+  assert.deepEqual(sources.filter((path) => readFileSync(path, "utf8").includes('segment("Terminal input"')), []);
+});
+
 test("plan refuses an id that a desktop and a TUI module both use", async () => {
   const desktop = modules({ "n-t1-a.mjs": check({ id: "N-T1" }) });
   const tui = modules({ "n-t1-b.mjs": check({ id: "N-T1", after: "end" }) });
@@ -82,7 +89,7 @@ test("checks run right after the trial 3 step they name, in file order, and end 
     const order = plan(TRIAL3_STEPS, checks).map((item) => item.slug);
     const land = order.indexOf("land-on");
     assert.deepEqual(order.slice(land, land + 4), ["land-on", "n-d1", "n-d3", "background"]);
-    assert.deepEqual(order.slice(-2), ["restore-master-input", "n-d2"]);
+    assert.deepEqual(order.slice(-2), ["final-tree", "n-d2"]);
     assert.equal(order.length, SLUGS.length + 3);
     assert.equal(await checks[0].run({ go() {} }), "ok");
   } finally {
