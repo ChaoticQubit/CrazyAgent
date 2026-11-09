@@ -209,8 +209,8 @@ test("Settings, GitHub shows the account with Sign out, or the three sign-in way
 test("Settings, Pack, Projects folder and GitHub draw their Lucide icons", () => {
   const svg = (name, size) => html(Icon, { name, size });
   const markup = html(PackSettingsView, packProps(ok(setup())));
-  assert.ok(markup.includes(`${svg("blocks", 14)}<strong>superpowers</strong>`), markup);
-  assert.ok(markup.includes(`${svg("server", 14)}<strong>headroom</strong>`), markup);
+  assert.ok(markup.includes(`${svg("blocks", 14)}superpowers<`), markup);
+  assert.ok(markup.includes(`${svg("server", 14)}headroom<`), markup);
   assert.ok(markup.includes(svg("circle-check", 12)), "On carries its status icon");
   assert.ok(markup.includes(svg("power-off", 12)), "Off carries its status icon");
   const base = { busy: false, problem: "", onChoose: forbidden, onUse: forbidden, onMove: forbidden, onCancel: forbidden, onRetry: forbidden };

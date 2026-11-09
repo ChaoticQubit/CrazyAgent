@@ -130,11 +130,11 @@ function SuggestedSection({ suggested, busy, onSave, onSaveEdited, onDismiss }: 
   return <SettingSection title="Suggested">
     {suggested.value.map((suggestion) => {
       const key = `${suggestion.project_id}/${suggestion.id}`;
-      if (editing === key) return <SettingRow key={key} label={key} wide>
+      if (editing === key) return <div className="set-row wide" key={key}>
         <SuggestionEditor suggestion={suggestion} pending={busy === suggestion.id} onCancel={() => setEditing(null)}
           onSave={(text) => onSaveEdited(suggestion, text)} />
-      </SettingRow>;
-      return <SettingRow key={key} label={key}>
+      </div>;
+      return <div className="set-row" key={key}>
         <p className="set-label pj-note-text">{displayText(suggestion.text)}</p>
         <span className="set-help">From {displayText(suggestion.project_name)}</span>
         <div className="set-ctl set-line-ctl">
@@ -142,7 +142,7 @@ function SuggestedSection({ suggested, busy, onSave, onSaveEdited, onDismiss }: 
           <Button size="small" icon="pencil" disabled={busy === suggestion.id} onClick={() => setEditing(key)}>Edit</Button>
           <Button size="small" disabled={busy === suggestion.id} onClick={() => onDismiss(suggestion)}>Dismiss</Button>
         </div>
-      </SettingRow>;
+      </div>;
     })}
   </SettingSection>;
 }
@@ -168,14 +168,14 @@ function SavedList({ saved, search, names, busy, onDelete, onMore, onRetry, onAp
       : <EmptyState icon="brain" title="No memories yet" compact>When agents find something worth keeping, it shows up here for you to save.</EmptyState>;
   }
   return <>
-    {saved.value.items.map((memory) => <SettingRow key={memory.id} label={memory.id}>
+    {saved.value.items.map((memory) => <div className="set-row" key={memory.id}>
       <p className="set-label pj-note-text">{displayText(memory.text)}</p>
       <span className="set-help">{displayText(memorySource(memory, names))}</span>
       <div className="set-ctl set-line-ctl">
         {memory.origin === "requested" && onApprove && <Button variant="primary" size="small" icon="brain" pending={busy === memory.id} pendingLabel="Approving..." onClick={() => onApprove(memory)}>Approve</Button>}
         <Button variant="danger-text" size="small" icon="trash" onClick={() => onDelete(memory)}>Delete</Button>
       </div>
-    </SettingRow>)}
+    </div>)}
     {saved.value.next !== null && <div className="item-row"><span /><Button size="small" onClick={onMore}>Show older</Button></div>}
   </>;
 }

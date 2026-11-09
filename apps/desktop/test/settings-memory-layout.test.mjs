@@ -194,12 +194,12 @@ test("Try again reads the memories a second time", async () => {
 
 test("Delete asks first and sends only on the confirm, and Cancel sends nothing", async () => {
   const seen = await on({}, async (page) => {
-    await press(page, '[data-setting="m1"] button', "Delete");
+    await press(page, ".set-row button", "Delete");
     const asking = await dialog(page);
     await press(page, "dialog[open] button", "Cancel");
     const open = await count(page, "dialog[open]");
     const before = await argsOf(page, "desktop_delete_memory");
-    await press(page, '[data-setting="m1"] button', "Delete");
+    await press(page, ".set-row button", "Delete");
     await press(page, "dialog[open] button", "Delete");
     return { asking, open, before, sent: await argsOf(page, "desktop_delete_memory"), toasts: await toasts(page) };
   });
@@ -212,7 +212,7 @@ test("Delete asks first and sends only on the confirm, and Cancel sends nothing"
 
 test("a change this build lacks shows the failure under the title", async () => {
   const alert = await on({ absent: "desktop_delete_memory" }, async (page) => {
-    await press(page, '[data-setting="m1"] button', "Delete");
+    await press(page, ".set-row button", "Delete");
     await press(page, "dialog[open] button", "Delete");
     return page.evaluate("Fixture.alert()");
   });
