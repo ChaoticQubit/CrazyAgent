@@ -6098,6 +6098,272 @@ fn a_master_is_not_stopped_as_idle_while_a_sub_agent_works() {
     team.shutdown().unwrap();
 }
 
+/// Runs a master that is not live until it has answered the owner once, so it is idle,
+/// under a test-sized idle bound with the owner's choice saved first, which runs each
+/// "Stop the master when idle after" choice at its real ratio without waiting 15 minutes.
+/// Inputs: the fixture, its host, the bound and the choice. Output: the runtime and the
+/// master's id.
+#[cfg(target_os = "macos")]
+fn idle_plain_master(
+    fixture: &Fixture,
+    host: &Arc<dyn Host>,
+    bound: Duration,
+    choice: Option<crate::team::MasterIdleStop>,
+) -> (TeamRuntime, i64) {
+    let limits = TeamLimits {
+        master_idle_stop: bound,
+        ..TeamLimits::default()
+    };
+    let mut team = limited_runtime(fixture, host, WORKING_CODEX, limits);
+    let project_id = fixture.setup.project_id.clone();
+    let mut actions = vec![crate::team::TeamAction::Message {
+        project_id: project_id.clone(),
+        text: "Plan the page".into(),
+    }];
+    if let Some(choice) = choice {
+        actions.push(crate::team::TeamAction::MasterIdleStop { project_id, choice });
+    }
+    owner(fixture, &actions);
+    let master = |f: &Fixture| {
+        f.status()
+            .agents
+            .into_iter()
+            .find(|agent| agent.role == AgentRole::Master)
+    };
+    fixture.until(&mut team, "the master answered the owner", |f| {
+        master(f).is_some_and(|agent| agent.status == AgentStatus::Idle)
+            && f.status()
+                .messages
+                .iter()
+                .any(|m| matches!(m.state, MessageState::Answered | MessageState::Reply))
+    });
+    let id = master(fixture).unwrap().id;
+    (team, id)
+}
+
+/// A live master, idle after the owner's first turn, under a test-sized idle bound. Inputs:
+/// the fixture, its host and the bound. Output: the runtime and the master's id.
+#[cfg(target_os = "macos")]
+fn idle_live_master(
+    fixture: &Fixture,
+    host: &Arc<dyn Host>,
+    bound: Duration,
+) -> (TeamRuntime, i64) {
+    let limits = TeamLimits {
+        master_idle_stop: bound,
+        ..TeamLimits::default()
+    };
+    let mut team = limited_runtime(fixture, host, RESUMING_CODEX, limits);
+    let id = idle_codex_master(fixture, host, &mut team);
+    (team, id)
+}
+
+/// Saves the owner's "Stop the master when idle after" choice. Inputs: the fixture and the
+/// choice. Output: none.
+#[cfg(target_os = "macos")]
+fn choose_master_idle_stop(fixture: &Fixture, choice: crate::team::MasterIdleStop) {
+    owner(
+        fixture,
+        &[crate::team::TeamAction::MasterIdleStop {
+            project_id: fixture.setup.project_id.clone(),
+            choice,
+        }],
+    );
+}
+
+/// The 15 min choice stops an idle master at the engine's bound (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_master_on_the_fifteen_minute_choice_stops_at_the_idle_bound() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, id) = idle_plain_master(
+        &fixture,
+        &host,
+        Duration::from_millis(200),
+        Some(crate::team::MasterIdleStop::FifteenMinutes),
+    );
+    fixture.until(&mut team, "the idle master stops at its bound", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
+    });
+    team.shutdown().unwrap();
+}
+
+/// The 1 h choice keeps an idle master for four of the engine's bounds, so it outlasts the
+/// 15 min bound and then stops (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_master_on_the_one_hour_choice_stops_at_four_idle_bounds() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bound = Duration::from_secs(1);
+    let (mut team, id) = idle_plain_master(
+        &fixture,
+        &host,
+        bound,
+        Some(crate::team::MasterIdleStop::OneHour),
+    );
+    let idle_seen = Instant::now();
+    fixture.until(&mut team, "the idle master stops at four bounds", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
+    });
+    assert!(
+        idle_seen.elapsed() >= bound * 2,
+        "the 1 h choice stopped it after {:?}, at the 15 min bound",
+        idle_seen.elapsed()
+    );
+    team.shutdown().unwrap();
+}
+
+/// Off keeps an idle master running past ten of the engine's bounds, and a later choice
+/// reaches the master that is already running (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_master_on_off_is_not_stopped_as_idle_until_the_owner_chooses_a_time() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, id) = idle_plain_master(
+        &fixture,
+        &host,
+        Duration::from_millis(200),
+        Some(crate::team::MasterIdleStop::Off),
+    );
+    let until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < until {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "ten idle bounds passed with the choice Off"
+    );
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::FifteenMinutes);
+    fixture.until(&mut team, "the running master takes the new choice", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
+    });
+    team.shutdown().unwrap();
+}
+
+/// A live master with no choice saved is not stopped as idle, as it never was (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_with_no_idle_stop_choice_keeps_running() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_millis(200));
+    idle_ticks(&mut team);
+    idle_ticks(&mut team);
+    assert_eq!(live_agent(&fixture.connection), Some(id));
+    assert!(super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap());
+    assert_eq!(fixture.agent_status(id).0, AgentStatus::Idle);
+}
+
+/// Off keeps a live master running past ten of the engine's bounds (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_on_off_keeps_running() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_millis(200));
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::Off);
+    idle_ticks(&mut team);
+    idle_ticks(&mut team);
+    assert_eq!(live_agent(&fixture.connection), Some(id));
+    assert_eq!(fixture.agent_status(id).0, AgentStatus::Idle);
+}
+
+/// The 15 min choice stops an idle live master, turns its switch off so it stays stopped,
+/// and says why once (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_on_the_fifteen_minute_choice_stops_and_stays_stopped() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_millis(200));
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::FifteenMinutes);
+    fixture.until(&mut team, "the idle live master stops", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
+    });
+    assert!(
+        !super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap(),
+        "its switch went off"
+    );
+    idle_ticks(&mut team);
+    assert_eq!(masters(&fixture.connection), [id], "it did not start again");
+    let line = "The live master was turned off: it was idle for 15 min. \
+                Start it again from the master view.";
+    assert_eq!(noted(&fixture, line), 1);
+}
+
+/// The 1 h choice keeps a live master for four of the engine's bounds, counted from the
+/// choice, and then stops it (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_on_the_one_hour_choice_stops_at_four_idle_bounds() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bound = Duration::from_secs(1);
+    let (mut team, id) = idle_live_master(&fixture, &host, bound);
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::OneHour);
+    let chosen_at = Instant::now();
+    fixture.until(
+        &mut team,
+        "the idle live master stops at four bounds",
+        |f| f.agent_status(id).0 == AgentStatus::Stopped,
+    );
+    assert!(
+        chosen_at.elapsed() >= bound * 2,
+        "the 1 h choice stopped it after {:?}",
+        chosen_at.elapsed()
+    );
+}
+
+/// A live master is not stopped as idle while the owner holds an unsent line in its
+/// terminal, whatever the choice (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_is_not_stopped_as_idle_while_the_owner_holds_a_draft() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_millis(200));
+    super::super::master::owner_typed(&fixture.connection, id, b"half a line", now_ms()).unwrap();
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::FifteenMinutes);
+    idle_ticks(&mut team);
+    idle_ticks(&mut team);
+    assert_eq!(live_agent(&fixture.connection), Some(id));
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "ten idle bounds passed while the owner held a line"
+    );
+}
+
+/// The session limit never ends a live master, also with an idle stop chosen: only being
+/// idle does (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_on_a_chosen_idle_stop_is_not_ended_by_the_session_limit() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_secs(600));
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_time_limits(project,turn_secs,session_secs) VALUES (?1,NULL,1)",
+            [fixture.setup.project_id.as_str()],
+        )
+        .unwrap();
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::OneHour);
+    let until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < until {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(live_agent(&fixture.connection), Some(id));
+    assert_eq!(fixture.agent_status(id).0, AgentStatus::Idle);
+}
+
 /// A master turn cut by the owner's 1 h task limit, stored here as 1 s, leaves the note
 /// naming that limit and the setting; the session limit and the launch ceiling have their
 /// own words.

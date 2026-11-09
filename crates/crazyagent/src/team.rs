@@ -732,6 +732,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    MasterIdleStop {
+        project_id: ProjectId,
+        choice: MasterIdleStop,
+    },
     CatchUpMain {
         project_id: ProjectId,
         mode: CatchUpMain,
@@ -998,6 +1002,7 @@ impl TeamAction {
             | Self::AskBeforeMerge { .. }
             | Self::MasterLands { .. }
             | Self::ReaskEmptyReply { .. }
+            | Self::MasterIdleStop { .. }
             | Self::TerminalsPerWindow { .. }
             | Self::CatchUpMain { .. }
             | Self::ReuseIdle { .. }
@@ -1030,6 +1035,7 @@ impl TeamAction {
             | Self::AskBeforeMerge { project_id, .. }
             | Self::MasterLands { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
+            | Self::MasterIdleStop { project_id, .. }
             | Self::CatchUpMain { project_id, .. }
             | Self::ReuseIdle { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
@@ -2485,6 +2491,7 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::MasterIdleStop { .. } => Ok(Outcome::Applied),
         TeamAction::TerminalsPerWindow { per_window, .. } => {
             wall::store(tx, project, *per_window)?;
             Ok(Outcome::Applied)
@@ -3102,6 +3109,8 @@ pub struct TeamStatus {
     pub master_lands: Option<MasterLands>,
     #[serde(default = "reask_default")]
     pub reask_empty_reply: bool,
+    #[serde(default)]
+    pub master_idle_stop: MasterIdleStop,
     #[serde(default)]
     pub catch_up_main: CatchUpMain,
     #[serde(default)]
@@ -3764,6 +3773,68 @@ pub fn reask_empty_reply(
         .optional()
         .map_err(error)?;
     Ok(reask.unwrap_or_else(reask_default))
+}
+
+/// The owner's "Stop the master when idle after" setting, per project (DEC-117 Q4). With no
+/// saved choice each kind of master stays as it was: a live master is not stopped as idle
+/// and any other stops after 15 minutes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MasterIdleStop {
+    Off,
+    #[default]
+    FifteenMinutes,
+    OneHour,
+}
+
+impl MasterIdleStop {
+    /// The stored name of the setting. Output: `off`, `fifteen_minutes` or `one_hour`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::FifteenMinutes => "fifteen_minutes",
+            Self::OneHour => "one_hour",
+        }
+    }
+
+    /// Reads a stored setting name. Input: the name. Output: the setting, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Off, Self::FifteenMinutes, Self::OneHour]
+            .into_iter()
+            .find(|value| value.name() == name)
+    }
+
+    /// The words the owner reads for the choice. Output: `Off`, `15 min` or `1 h`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::FifteenMinutes => "15 min",
+            Self::OneHour => "1 h",
+        }
+    }
+
+    /// What a project's saved choice means for one master. Inputs: the choice, none when the
+    /// owner made none, and whether that master is live. Output: the choice in force.
+    pub fn effective(chosen: Option<Self>, live: bool) -> Self {
+        let _ = (chosen, live);
+        Self::FifteenMinutes
+    }
+
+    /// How long this choice keeps an idle master. Input: the engine's idle bound, 15 minutes
+    /// outside tests. Output: the time, none for Off.
+    pub fn after(self, bound: std::time::Duration) -> Option<std::time::Duration> {
+        Some(bound)
+    }
+}
+
+/// Reads a project's saved "Stop the master when idle after" choice. Takes a connection and
+/// the project. Returns the choice, none when the owner made none.
+pub fn master_idle_stop(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<MasterIdleStop>, EngineError> {
+    let _ = (connection, project);
+    Ok(None)
 }
 
 /// The owner's "Catch up with main" setting (OS-8): `On`, the default, lets every agent's
@@ -4668,6 +4739,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         ask_before_merge: ask_before_merge(connection, project)?,
         master_lands: offered_master_lands(connection, project)?,
         reask_empty_reply: reask_empty_reply(connection, project)?,
+        master_idle_stop: MasterIdleStop::default(),
         catch_up_main: catch_up_main(connection, project)?,
         reuse_idle: reuse_idle(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,

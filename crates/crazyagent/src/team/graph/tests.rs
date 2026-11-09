@@ -95,6 +95,7 @@ fn status() -> TeamStatus {
         ask_before_merge: false,
         master_lands: None,
         reask_empty_reply: true,
+        master_idle_stop: crate::team::MasterIdleStop::default(),
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
