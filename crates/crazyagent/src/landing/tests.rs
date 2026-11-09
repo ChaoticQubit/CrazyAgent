@@ -10224,7 +10224,7 @@ fn undoing_a_second_commit_keeps_the_first_undo_of_a_set() {
         id
     };
     let older = landed(3, "one\ntwo\nthree\nfour\n");
-    let newer = landed(4, "one\ntwo\nthree\nfour\nfive\n");
+    let newer = landed(4, "zero\none\ntwo\nthree\nfour\n");
     assert!(matches!(
         case.accept(&same).unwrap(),
         AcceptOutcome::Landed { .. }
