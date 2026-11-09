@@ -2626,13 +2626,13 @@ fn remove(
 
 /// Records a Delete everything once the owner transport finished its disk work: the
 /// project's records go as in Remove from dashboard when every folder reached the Trash, the
-/// exact names of its engine files recorded in the same write, and otherwise the refusal is
-/// kept with nothing removed. Inputs: the transaction, the action, the transport's outcome
-/// and the revision. Output: the outcome to record.
+/// exact names and folder identities of its engine files recorded in the same write, and
+/// otherwise the refusal is kept with nothing removed. Inputs: the transaction, the action,
+/// the transport's outcome and the revision. Output: the outcome to record.
 pub(crate) fn record_delete(
     tx: &Transaction<'_>,
     action: &SetupAction,
-    outcome: &Result<Vec<String>, String>,
+    outcome: &Result<Vec<crate::projects_home::RecordedFile>, String>,
     revision: u64,
 ) -> Result<Outcome, EngineError> {
     let SetupAction::Delete { project_id, .. } = action else {
@@ -2644,10 +2644,10 @@ pub(crate) fn record_delete(
     };
     let recorded = remove(tx, project_id, revision)?;
     if matches!(recorded, Outcome::Applied) {
-        for file in files {
+        for (name, inode) in files {
             tx.execute(
-                "INSERT OR IGNORE INTO projects_delete_files(name) VALUES (?1)",
-                [file],
+                "INSERT OR IGNORE INTO projects_delete_files(name,inode) VALUES (?1,?2)",
+                params![name, inode],
             )
             .map_err(error)?;
         }

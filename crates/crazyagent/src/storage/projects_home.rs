@@ -416,19 +416,45 @@ pub(super) fn delete_settle(db: &Connection, exchange: Option<u64>) -> Result<()
     Ok(())
 }
 
-/// Finishes at engine start the engine files a delete recorded and never removed, the
-/// record's names only, at most `DELETE_FILES_PER_START` a start. Inputs: the connection and
-/// the database path. Output: Ok once the finished names are cleared.
-pub(super) fn delete_files_finish(db: &Connection, path: &Path) -> Result<(), EngineError> {
+/// Finishes at engine start the engine files a delete recorded and never removed, on a thread
+/// of its own so no owner job waits on a folder, and clears through the job the live path
+/// uses: the record's names only, at most `DELETE_FILES_PER_START` a start. Inputs: the
+/// connection, the database path and the storage queue. Output: Ok once the thread started,
+/// or at once with nothing recorded.
+pub(super) fn delete_files_finish(
+    db: &Connection,
+    path: &Path,
+    jobs: mpsc::Sender<Job>,
+) -> Result<(), EngineError> {
     let mut query = db
-        .prepare("SELECT name FROM projects_delete_files ORDER BY name LIMIT ?1")
+        .prepare("SELECT name, inode FROM projects_delete_files ORDER BY name LIMIT ?1")
         .map_err(error)?;
-    let names = query
-        .query_map([DELETE_FILES_PER_START], |row| row.get::<_, String>(0))
+    let files = query
+        .query_map([DELETE_FILES_PER_START], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    delete_files_clear(db, &home::remove_engine_files(path, &names))
+    if files.is_empty() {
+        return Ok(());
+    }
+    let path = path.to_path_buf();
+    std::thread::Builder::new()
+        .name("crazyagent-delete-files".into())
+        .spawn(move || {
+            let done = home::remove_engine_files(&path, &files);
+            let (reply, answer) = oneshot::channel();
+            let cleared = jobs
+                .blocking_send(Job::DeleteFilesClear(done, reply))
+                .is_ok()
+                && matches!(answer.blocking_recv(), Ok(Ok(())));
+            if !cleared {
+                eprintln!("project_delete_files_not_cleared cause=storage_unavailable");
+            }
+        })
+        .map_err(error)?;
+    Ok(())
 }
 
 /// Clears the record of engine files that are finished, the last step of a delete. Inputs:

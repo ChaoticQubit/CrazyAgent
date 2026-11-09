@@ -17,7 +17,7 @@ enum Step {
     Record(HomeEffect),
     Staged(Result<Staged, String>),
     Size(u64),
-    Deleted(Result<(PathBuf, Vec<String>), String>),
+    Deleted(Result<(PathBuf, Vec<crate::projects_home::RecordedFile>), String>),
 }
 
 enum Work {

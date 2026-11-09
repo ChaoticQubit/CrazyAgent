@@ -751,39 +751,60 @@ impl DeletePlan {
     }
 
     /// Names the engine's own files of this deleted project for the record its row removal
-    /// writes: each agent, and each research run of its jobs. A folder that is no real run is
-    /// left out. Input: the project's research jobs. Output: the exact names.
-    pub fn engine_files(&self, research: &[i64]) -> Vec<String> {
+    /// writes: each agent and each research run of its jobs, with the identity of the folder
+    /// that holds it. A folder that is no real run, or that is not there, is left out. Input:
+    /// the project's research jobs. Output: the records.
+    pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
+        let Some(root) = self.database.parent() else {
+            return Vec::new();
+        };
         let mut names: Vec<String> = self
             .agents
             .iter()
             .map(|agent| format!("agent-{agent}"))
             .collect();
-        let Some(root) = self.database.parent() else {
-            return names;
-        };
         if let Ok(entries) = std::fs::read_dir(root.join("research").join("agents")) {
             for entry in entries.flatten().take(RESEARCH_RUNS_MAX) {
                 let Ok(name) = entry.file_name().into_string() else {
                     continue;
                 };
-                if engine_file(&name).is_some()
-                    && research
-                        .iter()
-                        .any(|job| name.starts_with(&format!("job-{job}-")))
+                if research
+                    .iter()
+                    .any(|job| name.starts_with(&format!("job-{job}-")))
                 {
                     names.push(name);
                 }
             }
         }
         names
+            .into_iter()
+            .filter_map(|name| {
+                let inode = folder_inode(&engine_file(&name)?.folder(root, &name))?;
+                Some((name, inode))
+            })
+            .collect()
     }
 }
+
+/// One engine file a delete recorded: its exact name and the identity of the folder that held
+/// it when the project's rows were dropped.
+pub type RecordedFile = (String, i64);
 
 /// One engine file a delete's record can name.
 enum EngineFile {
     Agent(i64),
     Run,
+}
+
+impl EngineFile {
+    /// Gives the folder a recorded name holds. Inputs: the engine root and the exact name.
+    /// Output: the path under the team or research state.
+    fn folder(&self, root: &Path, name: &str) -> PathBuf {
+        match self {
+            Self::Agent(_) => root.join("team").join("agents").join(name),
+            Self::Run => root.join("research").join("agents").join(name),
+        }
+    }
 }
 
 /// Reads a recorded name as an engine file, exact shapes only: `agent-<id>`, or
@@ -804,22 +825,43 @@ fn plain_number(text: &str) -> Option<i64> {
         .filter(|number| *number >= 0 && number.to_string() == text)
 }
 
+/// Gives the number that ties a record to the folder it was written for: the inode alone,
+/// since macOS renumbers a volume across reboots, or the creation time on Windows, which has
+/// no inode in stable Rust. Input: the folder. Output: the number, or None when it is unread.
+fn folder_inode(folder: &Path) -> Option<i64> {
+    let metadata = std::fs::symlink_metadata(folder).ok()?;
+    #[cfg(unix)]
+    let number = std::os::unix::fs::MetadataExt::ino(&metadata);
+    #[cfg(windows)]
+    let number = std::os::windows::fs::MetadataExt::creation_time(&metadata);
+    i64::try_from(number).ok()
+}
+
 /// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles and
-/// teammates' records, or a research run's folder. A name that is no engine file removes
-/// nothing. A file left behind is logged as `project_files_left` and keeps its record.
-/// Inputs: the engine database path and the names. Output: the names that are finished.
-pub fn remove_engine_files(database: &Path, names: &[String]) -> Vec<String> {
+/// teammates' records, or a research run's folder. Only the folder the record was written for
+/// goes: under any other identity it stays, logged as `project_files_kept`, and the record is
+/// finished. A name that is no engine file removes nothing. A file left behind is logged as
+/// `project_files_left` and keeps its record. Inputs: the engine database path and the
+/// records. Output: the names that are finished.
+pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<String> {
     let Some(root) = database.parent() else {
         return Vec::new();
     };
-    let team = root.join("team");
-    let runs = root.join("research").join("agents");
-    let mut done = Vec::with_capacity(names.len());
-    for name in names {
+    let mut done = Vec::with_capacity(files.len());
+    for (name, inode) in files {
         let removed = match engine_file(name) {
-            Some(EngineFile::Agent(id)) => crate::team::cleanup::remove_agent_files(&team, id),
-            Some(EngineFile::Run) => crate::team::cleanup::remove_tree(&runs.join(name)),
             None => Ok(()),
+            Some(file) => {
+                let folder = file.folder(root, name);
+                if folder_inode(&folder) != Some(*inode) {
+                    eprintln!("project_files_kept name={name} kind=engine_folder");
+                    Ok(())
+                } else if let EngineFile::Agent(id) = file {
+                    crate::team::cleanup::remove_agent_files(&root.join("team"), id)
+                } else {
+                    crate::team::cleanup::remove_tree(&folder)
+                }
+            }
         };
         if removed.is_ok() {
             done.push(name.clone());
