@@ -11396,20 +11396,21 @@ fn a_tool_that_also_rewrites_a_manifest_falls_back_to_the_agent_update() {
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
-/// A Cargo.lock-only clash of an agent the owner stopped, or of a project whose team the
-/// owner paused, is not regenerated and its agent gets no note; the stopped agent's set
-/// keeps its head for the owner (OS-8).
+/// A Cargo.lock-only clash of an agent the owner or the master stopped, or of a project
+/// whose team the owner paused, is not regenerated and its agent gets no note; the stopped
+/// agent's set keeps its head for the owner (OS-8, HB-S5-B).
 #[test]
 fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
-    for stop in ["owner stop", "paused team"] {
+    for stop in ["owner stop", "master stop", "paused team"] {
         let mut case = Case::new();
         cargo_workspace(&mut case);
         let project = case.workspace.project.as_str().to_owned();
-        if stop == "owner stop" {
+        if stop != "paused team" {
+            let maker = stop.trim_end_matches(" stop");
             case.db
                 .execute(
-                    "INSERT INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,1)",
-                    rusqlite::params![CLONE_AGENT, project],
+                    "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,?3)",
+                    rusqlite::params![CLONE_AGENT, project, maker],
                 )
                 .unwrap();
         } else {
@@ -11432,8 +11433,11 @@ fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
                 .all(|note| !note.contains("regenerated")),
             "{stop}: the agent got a regeneration note"
         );
-        if stop == "owner stop" {
-            assert_eq!(set.head, head, "the stopped agent's set keeps its head");
+        if stop != "paused team" {
+            assert_eq!(
+                set.head, head,
+                "{stop}: the stopped agent's set keeps its head"
+            );
         }
     }
 }

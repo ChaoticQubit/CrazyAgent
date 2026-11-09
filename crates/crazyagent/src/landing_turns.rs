@@ -104,9 +104,9 @@ enum Asker {
 }
 
 /// Starts the resolve work the engine hands an agent at its turn end, which never starts
-/// an agent the owner stopped: see `hand_over`. Inputs: the store and the change set.
+/// a stopped agent: see `hand_over`. Inputs: the store and the change set.
 /// Output: Ok once started or left to the owner runtime, or a plain refusal,
-/// `team_agent_owner_stopped` for an agent the owner stopped.
+/// `team_agent_owner_stopped` for a stopped agent.
 pub(crate) fn start_resolve(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     hand_over(db, id, Asker::Engine)
 }
@@ -146,7 +146,7 @@ fn admit(
     prompt: &str,
     asker: Asker,
 ) -> Result<Result<(), &'static str>, EngineError> {
-    if asker == Asker::Engine && crate::team::owner_stopped(tx, agent)? {
+    if asker == Asker::Engine && crate::team::stopped(tx, agent)? {
         return Ok(Err(crate::team::OWNER_STOPPED));
     }
     crate::team::admit_resolve(tx, project, agent, prompt, crate::team::now_ms())

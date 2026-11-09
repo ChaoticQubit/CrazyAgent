@@ -12046,6 +12046,7 @@ fn an_agent_the_owner_stopped_wakes_only_by_the_owner() {
             &fixture.setup,
             member,
             "Finish the page.",
+            crate::team::StoppedBy::Master,
             now_ms()
         )
         .unwrap(),
@@ -20467,6 +20468,292 @@ fn stop_harness_persists_across_restart_task_waits_and_owner_wake_resumes_it() {
     assert_eq!(agent_worktree(&fixture, lead), worktree);
     assert_eq!(subs(&fixture), vec![lead]);
     team.shutdown().unwrap();
+}
+
+/// A stop by the master or a lead is not the owner's (HB-S5-B): it ends the harness, fails
+/// the task it held with who stopped it, records who did, and the harness starts again
+/// for a wake with no owner's press.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stop_by_the_master_or_a_lead_fails_the_held_task_and_leaves_the_agent_wakeable() {
+    const WOKEN: &str = "Write the next page.";
+    for (by, failed, noted) in [
+        (
+            crate::team::StoppedBy::Master,
+            "The master stopped this sub-agent before it finished this task.",
+            "The master stopped it and its teammates. Its unfinished tasks failed. The master or the owner can wake it.",
+        ),
+        (
+            crate::team::StoppedBy::Lead,
+            "Its lead stopped this sub-agent before it finished this task.",
+            "Its lead stopped it and its teammates. Its unfinished tasks failed. Its lead, the master or the owner can wake it.",
+        ),
+    ] {
+        let fixture = Fixture::new(1);
+        let host = fixture.host();
+        let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+        let lead = busy_harness(&fixture, &mut team);
+        crate::team::agent_stop(
+            &fixture.connection,
+            &fixture.setup.project_id,
+            lead,
+            by,
+            now_ms(),
+        )
+        .unwrap()
+        .unwrap();
+        fixture.until(&mut team, "the stop fails the held task", |f| {
+            f.agent_status(lead).0 == AgentStatus::Stopped && task_of(f, HELD_TASK).0 == "failed"
+        });
+        assert_eq!(
+            task_of(&fixture, HELD_TASK),
+            ("failed".to_owned(), Some(failed.to_owned())),
+            "{by:?}"
+        );
+        assert!(!crate::team::owner_stopped(&fixture.connection, lead).unwrap());
+        let status =
+            crate::team::owner_status(&fixture.connection, &fixture.setup, Some(&fixture.access))
+                .unwrap();
+        assert!(
+            !status
+                .agents
+                .iter()
+                .find(|agent| agent.id == lead)
+                .unwrap()
+                .owner_stopped,
+            "{by:?}: the owner's status does not call this the owner's stop"
+        );
+        let told: i64 = fixture
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_events WHERE agent=?1 AND kind='progress' AND text=?2",
+                params![lead, noted],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(told, 1, "{by:?}");
+
+        std::fs::remove_file(worktree_of(&fixture, lead).join("hold")).unwrap();
+        let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+        let tx = connection.transaction().unwrap();
+        crate::team::admit_wake(
+            &tx,
+            &fixture.access,
+            &fixture.setup,
+            lead,
+            WOKEN,
+            by,
+            now_ms(),
+        )
+        .unwrap()
+        .unwrap();
+        tx.commit().unwrap();
+        fixture.until(&mut team, "the woken harness finishes its new task", |f| {
+            task_of(f, WOKEN).0 == "done"
+        });
+        assert_eq!(task_and_agent(&fixture, WOKEN).1, Some(lead), "{by:?}");
+        assert_eq!(
+            crate::team::stop_of(&fixture.connection, lead).unwrap(),
+            None,
+            "{by:?}: the wake that started it clears the stop"
+        );
+        team.shutdown().unwrap();
+    }
+}
+
+/// A running lead hears which of its sub-agents the owner or the master stopped, named by
+/// who stopped it, and hears nothing of a stop it made itself (HB-S5-B).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_hears_who_stopped_its_sub_agent_and_nothing_of_a_stop_it_made() {
+    use crate::team::StoppedBy;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, HEARING_CODEX, TeamLimits::default());
+    let lead = idle_sub_agent(&fixture, &mut team);
+    let child = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![child, lead],
+        )
+        .unwrap();
+    let notes = || -> Vec<String> {
+        let mut statement = fixture
+            .connection
+            .prepare(
+                "SELECT body FROM coord_messages WHERE to_agent=?1 AND from_kind='engine'
+                 AND body LIKE '%stopped your sub-agent%' ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([lead], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let project = fixture.setup.project_id.clone();
+    team.tell_leads(&[(child, project.clone(), StoppedBy::Lead)])
+        .unwrap();
+    assert_eq!(notes(), Vec::<String>::new(), "the lead made this stop");
+    for by in [StoppedBy::Master, StoppedBy::Owner] {
+        team.tell_leads(&[(child, project.clone(), by)]).unwrap();
+    }
+    let said = notes();
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(
+        said[0].starts_with("The master stopped your sub-agent"),
+        "{said:?}"
+    );
+    assert!(
+        said[0].ends_with("The master or the owner can wake it."),
+        "{said:?}"
+    );
+    assert!(
+        said[1].starts_with("The owner stopped your sub-agent"),
+        "{said:?}"
+    );
+    team.shutdown().unwrap();
+}
+
+/// A native teammate a stop ends keeps the reason of who stopped it, and the stop reports
+/// who made it (HB-S5-B).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
+    use crate::team::StoppedBy;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    for (by, maker, reason) in [
+        (
+            StoppedBy::Owner,
+            "owner",
+            "The owner stopped this teammate.",
+        ),
+        (
+            StoppedBy::Master,
+            "master",
+            "The master stopped this teammate.",
+        ),
+        (StoppedBy::Lead, "lead", "Its lead stopped this teammate."),
+    ] {
+        let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET parent=?2 WHERE id=?1",
+                params![mate, lead],
+            )
+            .unwrap();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,?3)",
+                params![mate, PROJECT, maker],
+            )
+            .unwrap();
+        assert_eq!(
+            team.stop_unmanaged().unwrap(),
+            vec![(mate, fixture.setup.project_id.clone(), by)],
+            "{maker}"
+        );
+        let error: Option<String> = fixture
+            .connection
+            .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(error.as_deref(), Some(reason), "{maker}");
+    }
+    team.shutdown().unwrap();
+}
+
+#[test]
+#[should_panic(expected = "the owner wakes through WakeAgent")]
+fn the_owner_never_wakes_through_admit_wake() {
+    let fixture = Fixture::new(1);
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    let _ = crate::team::admit_wake(
+        &tx,
+        &fixture.access,
+        &fixture.setup,
+        1,
+        "Go on.",
+        crate::team::StoppedBy::Owner,
+        now_ms(),
+    );
+}
+
+/// A wake admitted after one stop and still queued dies at a later stop, whoever makes it:
+/// the task fails, the agent stays stopped and the stop stands at its new time (HB-S5-B).
+#[test]
+fn a_later_stop_fails_a_wake_still_queued_behind_a_full_team() {
+    use crate::team::StoppedBy::{Lead, Master};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let running = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers
+        .insert(running, between_turns(&project, AgentRole::Sub, true, true));
+    for (first, second, held, reason) in [
+        (Lead, Lead, Lead, super::LEAD_STOPPED_TASK),
+        (Lead, Master, Master, super::MASTER_STOPPED_TASK),
+        (Master, Lead, Master, super::MASTER_STOPPED_TASK),
+        (Master, Master, Master, super::MASTER_STOPPED_TASK),
+    ] {
+        let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+        let wake = format!("Wake agent {agent}.");
+        crate::team::agent_stop(&fixture.connection, &project, agent, first, 10)
+            .unwrap()
+            .unwrap();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,?2,'queued',20)",
+                params![PROJECT, wake],
+            )
+            .unwrap();
+        let task = fixture.connection.last_insert_rowid();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+                params![task, PROJECT, agent],
+            )
+            .unwrap();
+        team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+            .unwrap();
+        assert_eq!(
+            task_of(&fixture, &wake),
+            ("queued".to_owned(), None),
+            "{first:?} then {second:?}: the full team holds the wake"
+        );
+        crate::team::agent_stop(&fixture.connection, &project, agent, second, 30)
+            .unwrap()
+            .unwrap();
+        team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+            .unwrap();
+        assert_eq!(
+            task_of(&fixture, &wake),
+            ("failed".to_owned(), Some(reason.to_owned())),
+            "{first:?} then {second:?}"
+        );
+        assert_eq!(
+            fixture.agent_status(agent).0,
+            AgentStatus::Stopped,
+            "{first:?} then {second:?}"
+        );
+        assert_eq!(
+            crate::team::stop_of(&fixture.connection, agent).unwrap(),
+            Some((held, 30)),
+            "{first:?} then {second:?}"
+        );
+    }
+    team.workers.clear();
 }
 
 /// Stop all holds across an engine restart and Start all wakes the same agent (S4): the

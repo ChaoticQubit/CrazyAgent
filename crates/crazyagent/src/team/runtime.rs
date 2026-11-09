@@ -1,9 +1,12 @@
-use super::events::{INSTRUCTIONS_RESTARTED, OWNER_RESTARTED, OWNER_STOPPED_AGENT, OWNER_WOKE};
+use super::events::{
+    INSTRUCTIONS_RESTARTED, LEAD_STOPPED_AGENT, MASTER_STOPPED_AGENT, OWNER_RESTARTED,
+    OWNER_STOPPED_AGENT, OWNER_WOKE,
+};
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
-    MessageAuthor, MessageState, NOTE_BYTES_MAX, TaskSource, TaskStatus, TeamAccount, TeamReach,
-    admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, names, now_ms,
-    parse_delegations, parse_wakes, pick_account, tool,
+    MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy, TaskSource, TaskStatus, TeamAccount,
+    TeamReach, admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness,
+    names, now_ms, parse_delegations, parse_wakes, pick_account, tool,
 };
 use crate::agent_git::Layout;
 use crate::agents::{
@@ -1693,25 +1696,28 @@ impl TeamRuntime {
     /// switch turned off and the owner's stop of a sub-agent (AW-1), is written before the
     /// agent is touched, so a failed write leaves the stop to the next tick.
     fn owner_controls(&mut self) -> Result<(), EngineError> {
-        let stops: BTreeSet<i64> = {
+        let stops: BTreeMap<i64, StoppedBy> = {
             let mut statement = self
                 .connection
-                .prepare("SELECT agent FROM team_owner_stops")
+                .prepare("SELECT agent,stopped_by FROM team_owner_stops")
                 .map_err(error)?;
             statement
-                .query_map([], |row| row.get(0))
+                .query_map([], |row| {
+                    Ok((row.get(0)?, StoppedBy::named(&row.get::<_, String>(1)?)))
+                })
                 .map_err(error)?
                 .collect::<Result<_, _>>()
                 .map_err(error)?
         };
         let mut stopped = Vec::new();
         for (id, worker) in &mut self.workers {
-            if worker.role == AgentRole::Sub && !worker.stopping && stops.contains(id) {
+            if let (AgentRole::Sub, false, Some(by)) = (worker.role, worker.stopping, stops.get(id))
+            {
                 worker.held = true;
                 worker.stopping = true;
                 worker.cancel.store(true, Ordering::SeqCst);
                 let _ = worker.orders.send(Order::Stop);
-                stopped.push((*id, worker.project.clone()));
+                stopped.push((*id, worker.project.clone(), *by));
                 continue;
             }
             let Some(hosted) = &worker.hosted else {
@@ -1736,7 +1742,7 @@ impl TeamRuntime {
                 if !restart {
                     super::owner_stop(&self.connection, &worker.project, *id, now_ms())?;
                     worker.held = true;
-                    stopped.push((*id, worker.project.clone()));
+                    stopped.push((*id, worker.project.clone(), StoppedBy::Owner));
                 }
             }
             if restart {
@@ -1748,38 +1754,39 @@ impl TeamRuntime {
             let _ = worker.orders.send(Order::Stop);
         }
         stopped.extend(self.stop_unmanaged()?);
-        for (id, project) in &stopped {
+        for (id, project, by) in &stopped {
             super::events::record(
                 &self.connection,
                 project,
                 *id,
                 None,
                 super::events::EventKind::Progress,
-                OWNER_STOPPED_AGENT,
+                stop_notice(*by),
                 now_ms(),
             )?;
         }
         self.tell_leads(&stopped)
     }
 
-    /// Ends the owner-stopped sub-agents that no worker of this engine runs: native
-    /// teammates a lead's own agent team started (DEC-104 K5a), which the terminal host knows
-    /// by their own names once adopted. Each ends through `Host::kill`, never a tmux client
-    /// of the lead's server (K5c), and its row is marked stopped; a host that failed leaves
-    /// it to the next tick. Returns the agents stopped now, or any SQLite failure.
-    fn stop_unmanaged(&mut self) -> Result<Vec<(i64, ProjectId)>, EngineError> {
-        let listed: Vec<(i64, String)> = {
+    /// Ends the stopped sub-agents that no worker of this engine runs: native teammates a
+    /// lead's own agent team started (DEC-104 K5a), which the terminal host knows by their
+    /// own names once adopted. Each ends through `Host::kill`, never a tmux client of the
+    /// lead's server (K5c), and its row is marked stopped; a host that failed leaves it to
+    /// the next tick. Returns the agents stopped now and who stopped each, or any SQLite
+    /// failure.
+    fn stop_unmanaged(&mut self) -> Result<Vec<(i64, ProjectId, StoppedBy)>, EngineError> {
+        let listed: Vec<(i64, String, String)> = {
             let mut statement = self
                 .connection
                 .prepare(
-                    "SELECT a.id,a.project FROM team_agents a JOIN team_owner_stops s ON s.agent=a.id
+                    "SELECT a.id,a.project,s.stopped_by FROM team_agents a JOIN team_owner_stops s ON s.agent=a.id
                      WHERE a.parent IS NOT NULL AND a.parent<>a.id
                      AND a.status IN ('starting','idle','working') ORDER BY a.id LIMIT ?1",
                 )
                 .map_err(error)?;
             statement
                 .query_map([UNMANAGED_STOPS_PER_TICK_MAX as i64], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })
                 .map_err(error)?
                 .collect::<Result<_, _>>()
@@ -1787,17 +1794,18 @@ impl TeamRuntime {
         };
         assert!(listed.len() <= UNMANAGED_STOPS_PER_TICK_MAX);
         let mut stopped = Vec::new();
-        for (id, project) in listed {
+        for (id, project, by) in listed {
             if self.workers.contains_key(&id) {
                 continue;
             }
             let Ok(project) = ProjectId::new(project) else {
                 continue;
             };
-            if !self.end_unmanaged(id, OWNER_STOPPED_TEAMMATE)? {
+            let by = StoppedBy::named(&by);
+            if !self.end_unmanaged(id, stopped_teammate(by))? {
                 continue;
             }
-            stopped.push((id, project));
+            stopped.push((id, project, by));
         }
         Ok(stopped)
     }
@@ -1941,11 +1949,15 @@ impl TeamRuntime {
         }
     }
 
-    /// Tells each running lead which of its sub-agents the owner just stopped, once per
-    /// stop, so it neither waits for them nor hands their work to another agent. A lead the
-    /// owner stopped too is not told. Takes the stopped agents. Returns any SQLite failure.
-    fn tell_leads(&self, stopped: &[(i64, ProjectId)]) -> Result<(), EngineError> {
-        for (id, project) in stopped {
+    /// Tells each running lead which of its sub-agents the owner or the master just stopped,
+    /// once per stop, so it neither waits for them nor starts their work again unasked. A
+    /// lead stopped too is not told, nor one that made the stop. Takes the stopped agents and
+    /// who stopped each. Returns any SQLite failure.
+    fn tell_leads(&self, stopped: &[(i64, ProjectId, StoppedBy)]) -> Result<(), EngineError> {
+        for (id, project, by) in stopped {
+            if *by == StoppedBy::Lead {
+                continue;
+            }
             let lead: Option<i64> = self
                 .connection
                 .query_row("SELECT parent FROM team_agents WHERE id=?1", [*id], |row| {
@@ -1964,10 +1976,16 @@ impl TeamRuntime {
                 continue;
             };
             let name = names::name(&self.connection, *id)?;
-            let text = format!(
-                "The owner stopped your sub-agent {}. Its task waits for it until the owner wakes it; do not start another sub-agent for that work unless the owner asks.",
-                names::label(AgentRole::Sub, *id, name.as_ref())
-            );
+            let label = names::label(AgentRole::Sub, *id, name.as_ref());
+            let text = if *by == StoppedBy::Owner {
+                format!(
+                    "The owner stopped your sub-agent {label}. Its task waits for it until the owner wakes it; do not start another sub-agent for that work unless the owner asks."
+                )
+            } else {
+                format!(
+                    "The master stopped your sub-agent {label}. Its unfinished tasks failed. The master or the owner can wake it."
+                )
+            };
             self.note_lead(project, lead, text)?;
         }
         Ok(())
@@ -4856,6 +4874,10 @@ impl TeamRuntime {
                     continue;
                 }
                 (None, Some(pinned)) => {
+                    if let Some(reason) = self.stop_failure(pinned, task)? {
+                        self.fail_task(task, reason)?;
+                        continue;
+                    }
                     if self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents)
                         || self.live(project, AgentRole::Sub, None) >= subs_max
@@ -5396,6 +5418,32 @@ impl TeamRuntime {
                 |row| row.get(0),
             )
             .map_err(error)
+    }
+
+    /// What fails a pinned task that a stop by the master or a lead left unfinished: one
+    /// created before the stop (HB-S5-B). A task pinned after it is a wake, which starts the
+    /// agent. Takes the agent and the task. Returns the reason, None when no such stop holds
+    /// the task, or any SQLite failure.
+    fn stop_failure(&self, agent: i64, task: i64) -> Result<Option<&'static str>, EngineError> {
+        let Some((by, stopped_ms)) = super::stop_of(&self.connection, agent)? else {
+            return Ok(None);
+        };
+        let created_ms: i64 = self
+            .connection
+            .query_row(
+                "SELECT created_ms FROM team_tasks WHERE id=?1",
+                [task],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if created_ms > stopped_ms {
+            return Ok(None);
+        }
+        Ok(Some(match by {
+            StoppedBy::Lead => LEAD_STOPPED_TASK,
+            StoppedBy::Master => MASTER_STOPPED_TASK,
+            StoppedBy::Owner => OWNER_STOPPED_TASK,
+        }))
     }
 
     fn fail_task(&mut self, task: i64, reason: &str) -> Result<(), EngineError> {
@@ -8254,8 +8302,15 @@ impl TeamRuntime {
         }
         let mut woken = Vec::with_capacity(wakes.len());
         for wake in &wakes {
-            let (said, _) =
-                super::master::wake_in(&tx, &access, &stored, &wake.agent, &wake.text, false)?;
+            let (said, _) = super::master::wake_in(
+                &tx,
+                &access,
+                &stored,
+                &wake.agent,
+                &wake.text,
+                false,
+                StoppedBy::Master,
+            )?;
             woken.push(format!("- {said}"));
         }
         if !woken.is_empty() {
@@ -9459,6 +9514,8 @@ const OWN_TURN_TASK: &str =
 const OWN_TURN_FAILED: &str = "The lead's own turn did not finish";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
+const MASTER_STOPPED_TASK: &str = "The master stopped this sub-agent before it finished this task.";
+const LEAD_STOPPED_TASK: &str = "Its lead stopped this sub-agent before it finished this task.";
 const INSTRUCTIONS_WAIT_FOR_ROOM: &str = "The message just typed into the live master left no room for your instruction change, so a later message carries it; it applies in full when the master starts again.";
 /// The most teammate rows one harness keeps: its running teammates and the newest ended ones.
 const TEAMMATE_ROWS_KEPT: i64 = 32;
@@ -9476,6 +9533,25 @@ const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX)
 /// The most owner-stopped native teammates one tick ends, so a long list never stalls it.
 const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;
 const OWNER_STOPPED_TEAMMATE: &str = "The owner stopped this teammate.";
+const MASTER_STOPPED_TEAMMATE: &str = "The master stopped this teammate.";
+const LEAD_STOPPED_TEAMMATE: &str = "Its lead stopped this teammate.";
+/// The event text for a sub-agent's stop. Takes who made it. Returns the text.
+fn stop_notice(by: StoppedBy) -> &'static str {
+    match by {
+        StoppedBy::Lead => LEAD_STOPPED_AGENT,
+        StoppedBy::Master => MASTER_STOPPED_AGENT,
+        StoppedBy::Owner => OWNER_STOPPED_AGENT,
+    }
+}
+
+/// The reason recorded on a native teammate a stop ended. Takes who made it. Returns it.
+fn stopped_teammate(by: StoppedBy) -> &'static str {
+    match by {
+        StoppedBy::Lead => LEAD_STOPPED_TEAMMATE,
+        StoppedBy::Master => MASTER_STOPPED_TEAMMATE,
+        StoppedBy::Owner => OWNER_STOPPED_TEAMMATE,
+    }
+}
 const LEAD_ENDED_TEAMMATE: &str = "Its lead stopped, and its terminal ended with the lead's.";
 const OVER_TEAMMATE_CAP: &str = "The engine ended it: its lead ran more sub-agents than the owner's Max teammates per harness allows.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
