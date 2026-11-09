@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { engineVersions, restartEngine, type EngineVersions, type Failure } from "../../api";
 import { checkForUpdate, installUpdate, linkCommandLineTool, loadUpdateSettings, restartApp, setUpdateChannel, type UpdateChannel, type UpdateSettings } from "../../api-updates";
 import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
-import { Button, Icon, LoadError, NotReady, Segmented, Skeleton } from "../../ui";
+import { Button, Icon, LoadError, NotReady, Segmented, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { blocking, CHECK_INTERVAL_MS, progressLabel, progressPercent, shouldAnnounce, updateMessage, updateStore, type UpdatePhase } from "./updates-state";
 import "../project/projects.css";
@@ -15,6 +15,14 @@ const CHANNELS: { value: UpdateChannel; label: string }[] = [
   { value: "stable", label: "Stable" },
   { value: "dev", label: "Dev" },
 ];
+
+/** The channel an owner has until they pick another: the engine's when none is saved. */
+export const UPDATE_CHANNEL_DEFAULT: UpdateChannel = "stable";
+
+const UPDATES_TOP = <div className="settings-top"><div>
+  <h2>Updates</h2>
+  <p>Which CrazyAgent you run and how it gets new versions.</p>
+</div></div>;
 
 const failure = (result: Failure, what: string) =>
   result.kind === "not_ready" ? `${what} isn't in this build.` : updateMessage(result.code);
@@ -114,9 +122,10 @@ export function useEngineRestart(onDone: () => void): [EngineRestart, () => void
   return [restart, () => void run()];
 }
 
-/** Settings, Updates as a view of its state: this app's version and channel with the channel
- * switch, the engine's version with Restart engine when it differs, the check and install
- * status with progress, Restart, and Install command line tool. A channel pick stays on screen
+/** Settings, Updates as a view of its state: the title in every state, this app's version and
+ * channel with the channel switch, marked away from the default, the engine's version with
+ * Restart engine when it differs, the check and install status with progress, Restart, and
+ * Install command line tool. A channel pick stays on screen
  * until a read moves the channel or its save is refused. Inputs: the settings and engine version
  * reads, the update phase, the channel, engine restart and command line tool states and the
  * handlers, the channel's giving the failure, empty once saved. Output: the page. */
@@ -137,9 +146,9 @@ export function UpdatesView({ settings, engine, phase, channelBusy, channelProbl
   onRetry: () => void;
 }) {
   const [held, holdChannel] = useHeld<UpdateChannel | null>(settings.kind === "ok" ? settings.value.channel : null);
-  if (settings.kind === "loading") return <Skeleton shape="line" count={3} />;
-  if (settings.kind === "not_ready") return <NotReady what="Updates" />;
-  if (settings.kind === "error") return <LoadError message={settings.code === "unknown" ? settings.message : updateMessage(settings.code)} onRetry={onRetry} />;
+  if (settings.kind === "loading") return <>{UPDATES_TOP}<Skeleton shape="line" count={3} /></>;
+  if (settings.kind === "not_ready") return <>{UPDATES_TOP}<NotReady what="Updates" /></>;
+  if (settings.kind === "error") return <>{UPDATES_TOP}<LoadError message={settings.code === "unknown" ? settings.message : updateMessage(settings.code)} onRetry={onRetry} /></>;
   const { current_version } = settings.value;
   const channel = held ?? settings.value.channel;
   const busy = blocking(phase);
@@ -148,28 +157,31 @@ export function UpdatesView({ settings, engine, phase, channelBusy, channelProbl
     const settled = holdChannel(next);
     void onChannel(next).then(settled);
   };
-  return <div className="pj pj-stack">
-    <section className="pj-stack-s in-panel" aria-label="Version and channel">
-      <h2 className="row"><Icon name="shield-check" size={16} />CrazyAgent {displayText(current_version)}</h2>
-      <EngineVersionLine versions={engine} restart={engineRestart} onRestart={onRestartEngine} installing={busy} />
-      <p className="pj-secondary">Stable gets tested releases. Dev gets every change as soon as it's merged.</p>
-      {busy
-        ? <p>Channel: {channel === "dev" ? "Dev" : "Stable"}</p>
-        : <Segmented label="Update channel" value={channel} options={CHANNELS} onValue={pickChannel} />}
-      {channelProblem && <p className="pj-error" role="alert">{channelProblem}</p>}
-    </section>
-    <section className="pj-stack-s in-panel" aria-label="Updates">
-      <h2 className="row"><Icon name="refresh-cw" size={16} />Updates</h2>
-      <UpdateStatus phase={phase} onCheck={onCheck} onInstall={onInstall} onRestart={onRestart} />
-    </section>
-    <section className="pj-stack-s in-panel" aria-label="Command line tool">
-      <h2 className="row"><Icon name="square-terminal" size={16} />Command line tool</h2>
-      <p className="pj-secondary">Use crazyagent in Terminal, for example crazyagent tui. It talks to the same engine as this app.</p>
-      {cli.kind === "done" && <p role="status">{displayText(cli.message)}</p>}
-      {cli.kind === "failed" && <p className="pj-error" role="alert">{cli.message}</p>}
-      <span><Button icon="square-terminal" pending={cli.kind === "busy"} pendingLabel="Installing..." onClick={onLinkCli}>Install command line tool</Button></span>
-    </section>
-  </div>;
+  return <>
+    {UPDATES_TOP}
+    <div className="pj set-groups">
+      <SettingSection title="Version and channel">
+        <div className="set-body">
+          <p className="row"><Icon name="shield-check" size={16} />CrazyAgent {displayText(current_version)}</p>
+          <EngineVersionLine versions={engine} restart={engineRestart} onRestart={onRestartEngine} installing={busy} />
+        </div>
+        <SettingLine label="Update channel" help="Stable gets tested releases. Dev gets every change as soon as it's merged." changed={channel !== UPDATE_CHANNEL_DEFAULT}>
+          {busy
+            ? <p>Channel: {channel === "dev" ? "Dev" : "Stable"}</p>
+            : <Segmented label="Update channel" value={channel} options={CHANNELS} onValue={pickChannel} />}
+        </SettingLine>
+        {channelProblem && <div className="set-body"><p className="pj-error" role="alert">{channelProblem}</p></div>}
+      </SettingSection>
+      <SettingSection title="Updates">
+        <div className="set-body"><UpdateStatus phase={phase} onCheck={onCheck} onInstall={onInstall} onRestart={onRestart} /></div>
+      </SettingSection>
+      <SettingSection title="Command line tool" about="Use crazyagent in Terminal, for example crazyagent tui. It talks to the same engine as this app."
+        actions={<Button icon="square-terminal" pending={cli.kind === "busy"} pendingLabel="Installing..." onClick={onLinkCli}>Install command line tool</Button>}>
+        {cli.kind === "done" && <div className="set-body"><p role="status">{displayText(cli.message)}</p></div>}
+        {cli.kind === "failed" && <div className="set-body"><p className="pj-error" role="alert">{cli.message}</p></div>}
+      </SettingSection>
+    </div>
+  </>;
 }
 
 /** Checks for updates when the app starts and every 6 hours, and tells the owner once per new
