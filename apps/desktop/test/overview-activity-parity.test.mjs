@@ -99,6 +99,29 @@ test("rows a later read brings in are marked fresh, and the first read marks non
   assert.deepEqual(seen.later.fresh, ["Ada finished Login"]);
 });
 
+test("a failed refresh takes the fresh mark off, so changing the view does not replay it", { timeout: 60_000 }, async () => {
+  const older = { kind: "ok", value: { project_id: "alpha", items: ITEMS.slice(0, 6), more: false } };
+  const failed = { kind: "error", code: "engine_unreachable", message: "The engine isn't running." };
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    return evaluate(`(async () => {
+      await Fixture.mount("alpha");
+      await Fixture.reply(${JSON.stringify(older)});
+      await Fixture.wait(450);
+      const later = await Fixture.reply(${JSON.stringify(ok)});
+      await Fixture.wait(450);
+      const stale = await Fixture.reply(${JSON.stringify(failed)});
+      const moved = await Fixture.click("[role=radio]", "Timeline");
+      return { later, stale, moved };
+    })()`);
+  });
+  assert.deepEqual(seen.later.fresh, ["Ada finished Login"]);
+  assert.equal(seen.stale.rows, 7, "the failed refresh keeps the rows");
+  assert.deepEqual(seen.stale.fresh, [], "the rows are not new any more");
+  assert.equal(seen.moved.missed, null);
+  assert.deepEqual(seen.moved.fresh, [], "a remount has no highlight to replay");
+});
+
 test("a project switch puts the chips back on All and keeps the view", { timeout: 60_000 }, async () => {
   const seen = await steps(`
     const timeline = await Fixture.click("[role=radio]", "Timeline");
