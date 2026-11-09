@@ -22,3 +22,5 @@
 .set-line-ctl > .field { width: 260px; max-width: 100%; }
 .set-row.wide > .set-line-ctl > .field { width: auto; }
 #process-app { font: 13px/20px var(--mono); }
+.set-line-ctl > fieldset { margin: 0; padding: 0; border: 0; }
+.set-body .tg-terminal-note { padding: 0; }

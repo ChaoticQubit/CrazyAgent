@@ -95,11 +95,17 @@ impl<'a> Scope<'a> {
 /// same claim: `module:<label>` and `domain:<label>` stay labels; a path loses `./`, `.`
 /// and empty segments and keeps a trailing `/` for a folder; `.` or `**` alone claims the
 /// whole repository. An absolute path, a `..` segment, a backslash or a control character
-/// is refused. Takes the declared text. Returns the stored form or `coord_claim_invalid`.
+/// or a line break of any kind is refused. Takes the declared text. Returns the stored
+/// form or `coord_claim_invalid`.
 pub(super) fn normalize(raw: &str) -> Result<String, EngineError> {
     let invalid = || failure("coord_claim_invalid");
     let raw = raw.trim();
-    if raw.is_empty() || raw.len() > PATTERN_BYTES_MAX || raw.chars().any(char::is_control) {
+    if raw.is_empty()
+        || raw.len() > PATTERN_BYTES_MAX
+        || raw
+            .chars()
+            .any(|c| c.is_control() || crate::team::events::line_break(c))
+    {
         return Err(invalid());
     }
     for prefix in ["module:", "domain:"] {
