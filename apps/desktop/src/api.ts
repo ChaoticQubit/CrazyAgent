@@ -45,6 +45,7 @@ const COPY: Record<string, string> = {
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
+  project_not_found: "This project no longer exists.",
   account_rank_invalid: "Use a rank from 1 to 999, or leave it empty.",
   account_reserve_invalid: "Use a reserve from 0 to 99 percent.",
   account_schedule_invalid: "Use a rank from 1 to 999 and a reserve from 0 to 99 percent.",
