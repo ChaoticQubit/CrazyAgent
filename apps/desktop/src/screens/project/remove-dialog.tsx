@@ -26,14 +26,40 @@ export function deleteReady(preview: RemovalPreview | null, typed: string): bool
   return preview !== null && preview.can_delete && typed === preview.name;
 }
 
-/** What Delete everything would lose, one plain line each. Input: the preview. Output: the
- * running agents, the open change sets and each agent's unlanded work. */
+const LOSS_LINES_MAX = 4;
+const EDIT_LOSSES = ["cleanup_worktree_dirty", "cleanup_worktree_unreadable"];
+
+function agentCount(count: number, one: string, many: string): string {
+  return `${count} agent${count === 1 ? "" : "s"} ${count === 1 ? one : many}`;
+}
+
+function agentsWith(preview: RemovalPreview, wanted: (code: string) => boolean): number {
+  return new Set(preview.losses.filter((loss) => wanted(loss.code)).map((loss) => loss.id)).size;
+}
+
+/** What Delete everything would lose, in plain lines that always fit the dialog: one line each
+ * up to four lines, past that counts of each kind, so no kind of loss drops out. Input: the
+ * preview. Output: the running agents, the open change sets and the agents' unlanded work. */
 export function lossLines(preview: RemovalPreview): string[] {
   const sets = preview.open_change_sets;
-  return [
+  const setLine = sets > 0 ? [`${sets} change set${sets === 1 ? "" : "s"} not accepted or discarded`] : [];
+  const lines = [
     ...preview.running.map((label) => `${label} is running and will be stopped`),
-    ...(sets > 0 ? [`${sets} change set${sets === 1 ? "" : "s"} not accepted or discarded`] : []),
+    ...setLine,
     ...preview.losses.map((loss) => `${loss.label} ${LOSS_WORDS[loss.code] ?? "has work that never landed"}`),
+  ];
+  if (lines.length <= LOSS_LINES_MAX) return lines;
+  const dirty = agentsWith(preview, (code) => code === "cleanup_worktree_dirty");
+  const unsure = agentsWith(preview, (code) => code === "cleanup_worktree_unreadable");
+  const edits = agentsWith(preview, (code) => EDIT_LOSSES.includes(code));
+  const unlanded = agentsWith(preview, (code) => !EDIT_LOSSES.includes(code));
+  return [
+    ...(preview.running.length > 0 ? [agentCount(preview.running.length, "is running and will be stopped", "are running and will be stopped")] : []),
+    ...setLine,
+    ...(edits > 0 ? [unsure === 0 ? agentCount(edits, "has uncommitted edits", "have uncommitted edits")
+      : dirty === 0 ? agentCount(edits, "may have uncommitted edits", "may have uncommitted edits")
+        : agentCount(edits, "has or may have uncommitted edits", "have or may have uncommitted edits")] : []),
+    ...(unlanded > 0 ? [agentCount(unlanded, "has work that never landed", "have work that never landed")] : []),
   ];
 }
 
@@ -41,8 +67,8 @@ export function lossLines(preview: RemovalPreview): string[] {
  * removal is running and the change, confirm and cancel handlers. Output: the choices, why
  * Delete everything is not offered when the engine refuses it, the loss list and the name box,
  * then Keep project and the button that sends the picked choice. Only the folder list scrolls
- * when the window is short, so the choices, the whole loss list beside Delete everything and
- * the name box stay in the frame. */
+ * when the window is short, by mouse or keyboard, and the loss list never runs past four lines,
+ * so at the app's smallest window the choices, the losses and the name box stay in the frame. */
 export function RemoveDialogView({ preview, choice, typed, pending, onChoice, onTyped, onConfirm, onCancel }: {
   preview: RemovalPreview | null;
   choice: RemoveChoice;
@@ -78,7 +104,7 @@ export function RemoveDialogView({ preview, choice, typed, pending, onChoice, on
     {preview && everything && <>
       <div className="pj-field pj-remove-trash">
         <span className="pj-label">Moves to the Trash</span>
-        <ul className="pj-rows pj-remove-details" aria-label="Folders moved to the Trash">{preview.folders.map((folder) => <li className="pj-mono" key={folder}>{displayText(folder)}</li>)}</ul>
+        <ul className="pj-rows pj-remove-details" aria-label="Folders moved to the Trash" tabIndex={0}>{preview.folders.map((folder) => <li className="pj-mono" key={folder}>{displayText(folder)}</li>)}</ul>
       </div>
       {losses.length > 0
         ? <ul className="pj-note warn pj-remove-losses" aria-label="What would be lost">{losses.map((line) => <li key={line}>{displayText(line)}</li>)}</ul>
