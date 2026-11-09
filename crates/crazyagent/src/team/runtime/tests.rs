@@ -19968,6 +19968,72 @@ fn stop_harness_persists_across_restart_task_waits_and_owner_wake_resumes_it() {
     team.shutdown().unwrap();
 }
 
+/// A stop by the master or a lead is not the owner's (HB-S5-B): it ends the harness, fails
+/// the task it held with who stopped it, records who did, and the harness starts again
+/// for a wake with no owner's press.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stop_by_the_master_or_a_lead_fails_the_held_task_and_leaves_the_agent_wakeable() {
+    const WOKEN: &str = "Write the next page.";
+    for (by, failed, noted) in [
+        (
+            crate::team::StoppedBy::Master,
+            "The master stopped this sub-agent before it finished this task.",
+            "The master stopped it and its teammates. Its unfinished tasks failed. The master or the owner can wake it.",
+        ),
+        (
+            crate::team::StoppedBy::Lead,
+            "Its lead stopped this sub-agent before it finished this task.",
+            "Its lead stopped it and its teammates. Its unfinished tasks failed. Its lead, the master or the owner can wake it.",
+        ),
+    ] {
+        let fixture = Fixture::new(1);
+        let host = fixture.host();
+        let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+        let lead = busy_harness(&fixture, &mut team);
+        crate::team::agent_stop(
+            &fixture.connection,
+            &fixture.setup.project_id,
+            lead,
+            by,
+            now_ms(),
+        )
+        .unwrap()
+        .unwrap();
+        fixture.until(&mut team, "the stop fails the held task", |f| {
+            f.agent_status(lead).0 == AgentStatus::Stopped && task_of(f, HELD_TASK).0 == "failed"
+        });
+        assert_eq!(
+            task_of(&fixture, HELD_TASK),
+            ("failed".to_owned(), Some(failed.to_owned())),
+            "{by:?}"
+        );
+        assert!(!crate::team::owner_stopped(&fixture.connection, lead).unwrap());
+        let told: i64 = fixture
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_events WHERE agent=?1 AND kind='progress' AND text=?2",
+                params![lead, noted],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(told, 1, "{by:?}");
+
+        std::fs::remove_file(worktree_of(&fixture, lead).join("hold")).unwrap();
+        let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+        let tx = connection.transaction().unwrap();
+        crate::team::admit_wake(&tx, &fixture.access, &fixture.setup, lead, WOKEN, now_ms())
+            .unwrap()
+            .unwrap();
+        tx.commit().unwrap();
+        fixture.until(&mut team, "the woken harness finishes its new task", |f| {
+            task_of(f, WOKEN).0 == "done"
+        });
+        assert_eq!(task_and_agent(&fixture, WOKEN).1, Some(lead), "{by:?}");
+        team.shutdown().unwrap();
+    }
+}
+
 /// Stop all holds across an engine restart and Start all wakes the same agent (S4): the
 /// paused team's busy harness stops with its task waiting for it, a restarted engine keeps
 /// the team paused and starts nothing, and the owner's resume wakes that harness in its own

@@ -4347,6 +4347,54 @@ fn a_lead_keeps_the_mode_it_first_started_in_whatever_the_setting_says_later() {
     );
 }
 
+/// A stop keeps the highest standing of those who made it, down the stopped agent's lead
+/// tree: a lead's or a master's stop is not the owner's, the owner's stop of such an agent
+/// is, and a later master's stop leaves it the owner's (HB-S5-B).
+#[test]
+fn a_stop_keeps_the_highest_standing_of_who_made_it() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-stop").unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent) VALUES
+             (7,'team-stop','sub','claude-code',1,'working',1,1,NULL),
+             (8,'team-stop','master','claude-code',1,'working',1,1,NULL),
+             (9,'team-stop','sub','claude-code',1,'working',1,1,7);",
+        )
+        .unwrap();
+    let recorded = || -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_owner_stops WHERE agent IN (7,9)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(recorded(), 0);
+    assert_eq!(
+        agent_stop(&connection, &project, 100, StoppedBy::Master, 1).unwrap(),
+        Err("team_agent_not_found")
+    );
+    assert_eq!(
+        agent_stop(&connection, &project, 8, StoppedBy::Master, 1).unwrap(),
+        Err("team_stop_master")
+    );
+    for by in [StoppedBy::Lead, StoppedBy::Master] {
+        agent_stop(&connection, &project, 7, by, 1).unwrap().unwrap();
+        assert_eq!(recorded(), 2, "{by:?} stops the agent and its worker");
+        assert!(!owner_stopped(&connection, 7).unwrap(), "{by:?}");
+        assert!(!owner_stopped(&connection, 9).unwrap(), "{by:?}");
+    }
+    owner_stop(&connection, &project, 7, 2).unwrap();
+    assert!(owner_stopped(&connection, 7).unwrap());
+    assert!(owner_stopped(&connection, 9).unwrap());
+    agent_stop(&connection, &project, 7, StoppedBy::Master, 3)
+        .unwrap()
+        .unwrap();
+    assert!(owner_stopped(&connection, 7).unwrap());
+}
+
 #[test]
 fn stop_agent_on_teammate_records_an_owner_stop_and_stop_teammate_marks_its_pane() {
     let (_directory, mut connection) = database();

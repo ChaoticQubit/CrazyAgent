@@ -2358,11 +2358,11 @@ fn finish_work_tells_the_lead_or_master_of_review_and_the_master_finishes_unchec
 }
 
 /// The stop tool: a lead stops only its own workers and never itself, the master stops
-/// any sub-agent, each stop is the owner's stop, and once it ends a message to the
-/// stopped agent cannot wake it.
+/// any sub-agent, neither stop is the owner's, and a message from the lead that stopped
+/// its worker wakes it again (HB-S5-B).
 #[cfg(target_os = "macos")]
 #[test]
-fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owner() {
+fn a_lead_stops_only_its_own_workers_and_wakes_the_one_it_stopped() {
     let mut fixture = Fixture::new();
     master_row(&fixture);
     fixture
@@ -2413,7 +2413,7 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
             json!({"agent": worker.to_string()})
         ),
         (
-            format!("Stopping {worker_label}. Only the owner can wake it again."),
+            format!("Stopping {worker_label}. Its unfinished tasks fail, and you can wake it again."),
             false
         )
     );
@@ -2424,7 +2424,7 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
             json!({"agent": other.to_string()})
         ),
         (
-            format!("Stopping {other_label}. Only the owner can wake it again."),
+            format!("Stopping {other_label}. Its unfinished tasks fail, and you can wake it again."),
             false
         )
     );
@@ -2434,6 +2434,12 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
         lead,
     );
     assert_eq!(stops, vec![worker.to_string(), other.to_string()]);
+    for stopped in [worker, other] {
+        assert!(
+            !crate::team::owner_stopped(&fixture.connection, stopped).unwrap(),
+            "a stop by an agent is not the owner's"
+        );
+    }
     fixture
         .connection
         .execute(
@@ -2447,11 +2453,45 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
         tool::UPDATE_WORK_TOOL,
         json!({"to": worker.to_string(), "text": "Go on."}),
     );
+    assert!(
+        !refused && said.starts_with("Sent #") && said.contains(&format!(". Waking {worker_label}:")),
+        "{said}"
+    );
+    assert_eq!(pinned(&fixture, worker).len(), 1);
+}
+
+/// A worker the master stopped stays stopped for its lead: the lead's message is refused
+/// and stores nothing, and the master's own message wakes it (HB-S5-B).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_worker_the_master_stopped_wakes_for_the_master_and_not_for_its_lead() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    let lead = named_sub(&fixture, "lead-charts", "working");
+    let worker = named_sub(&fixture, "bar-chart", "working");
+    lead_of(&fixture, lead, worker);
+    let label = super::super::events::label(&fixture.connection, worker).unwrap();
+    let stop = json!({"agent": worker.to_string()});
+    assert!(!as_master(&mut fixture, tool::STOP_TOOL, stop).1);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='stopped' WHERE id=?1",
+            [worker],
+        )
+        .unwrap();
+    let go_on = json!({"to": worker.to_string(), "text": "Go on."});
     assert_eq!(
-        (said.as_str(), refused),
+        as_sub(&mut fixture, lead, tool::UPDATE_WORK_TOOL, go_on.clone()),
         (
-            format!("Not sent: the owner stopped {worker_label}. Only the owner can wake it.")
-                .as_str(),
+            format!("Not sent: the master stopped {label}. Only the master or the owner can wake it."),
             true
         )
     );
@@ -2465,6 +2505,12 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
         )
         .unwrap();
     assert_eq!(stored, 0, "a refused message is not stored");
+    let (said, refused) = as_master(&mut fixture, tool::UPDATE_WORK_TOOL, go_on);
+    assert!(
+        !refused && said.starts_with("Sent #") && said.contains(&format!(". Waking {label}:")),
+        "{said}"
+    );
+    assert_eq!(pinned(&fixture, worker).len(), 1);
 }
 
 /// A message to a finished agent that cannot wake, here one whose worktree is gone, is

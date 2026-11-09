@@ -3973,6 +3973,28 @@ pub fn spread_accounts(connection: &Connection, project: &ProjectId) -> Result<b
         .map_err(error)
 }
 
+/// Who made a stop, in rising standing: a stop holds against any waker below its maker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum StoppedBy {
+    Lead,
+    Master,
+    Owner,
+}
+
+/// Records a stop made by the master or a lead. Takes a connection, the project, the agent,
+/// who stopped it and the time. Returns a refusal code, or any SQLite failure.
+pub(crate) fn agent_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    by: StoppedBy,
+    now: i64,
+) -> Result<Result<(), &'static str>, EngineError> {
+    assert!(by != StoppedBy::Owner, "the owner stops through owner_stop");
+    owner_stop(connection, project, agent, now)?;
+    Ok(Ok(()))
+}
+
 /// Records the owner's stop of a sub-agent and of every agent it leads, down its whole
 /// lead tree, so each stays stopped across restarts until the owner wakes it or its lead.
 /// Takes a connection, the project, the agent and the time. Returns any SQLite failure.
