@@ -32,6 +32,7 @@ const WORKBENCH_MS = 120000;
 const SETTLE_MS = 1500;
 const PRIMARY = process.platform === "darwin" ? 4 : 2;
 const CTRL = 2;
+const CHAT_KEYS = process.platform === "darwin" ? CTRL | PRIMARY : CTRL | 1;
 const SHIFT = 8;
 const KEYS = { F1: ["F1", 112], Enter: ["Enter", 13], Escape: ["Escape", 27], ArrowLeft: ["ArrowLeft", 37], ArrowRight: ["ArrowRight", 39] };
 const LEFTOVER_COMMANDS = ["Terminal: Select Default Profile", "Chat:", "Inline Chat", "Snooze Inline Suggestions", "Sync Account Policy", "Manage Accounts", "Accounts:", "Show Remote Menu", "Install Remote Development Extensions", "Settings Sync"];
@@ -177,7 +178,7 @@ function input({ send }) {
     const [code, keyCode] = KEYS[name] ?? [`Key${name}`, name.charCodeAt(0)];
     const pressed = KEYS[name] ? name : name.toLowerCase();
     for (const type of ["rawKeyDown", "keyUp"]) {
-      await send("Input.dispatchKeyEvent", { type, key: pressed, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers });
+      await send("Input.dispatchKeyEvent", { type, key: pressed, code, windowsVirtualKeyCode: keyCode, modifiers });
     }
   };
   const text = (value) => send("Input.insertText", { text: value });
@@ -435,8 +436,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await t.test("the chat shortcut, Open View and the secondary side bar bring back no chat", async () => {
         assert.ok(server, "blocked: the IDE tab step opened no IDE");
         const chatShown = `document.querySelectorAll(".interactive-session, .chat-widget, .inline-chat, .interactive-input-part").length`;
-        await keys.key("I", CTRL | PRIMARY);
+        await page.evaluate(`window.chatKeysSeen = 0; addEventListener("keydown", (event) => { if (event.code === "KeyI" && event.ctrlKey) window.chatKeysSeen += 1; }, true); 1`);
+        await keys.key("I", CHAT_KEYS);
         await pause(SETTLE_MS);
+        assert.equal(await page.evaluate("window.chatKeysSeen"), 1, "the chat shortcut reached the workbench once");
         assert.equal(await page.evaluate(chatShown), 0, "the chat shortcut opens no chat");
         await ide.run("View: Open View");
         await ide.until("the Open View list", ide.rows);
