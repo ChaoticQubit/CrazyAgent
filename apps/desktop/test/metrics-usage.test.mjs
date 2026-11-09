@@ -75,8 +75,8 @@ test("ranges and day labels follow the engine's fixed-offset days across a dayli
     const label = (date) => new Date(Date.UTC(2026, 2, date)).toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
     assert.deepEqual(days.map((day) => usage.dayLabel(day.day_ms, offset)), dates.map(label));
     const words = text(render({ nowMs: spring.getTime(), report: { kind: "ok", value: report({ days }) } }));
-    const at = dates.map((date) => words.indexOf(`${label(date)} `));
-    assert.ok(at.every((index, place) => index >= 0 && (place === 0 || index > at[place - 1])), `every day keeps its own date, in order: ${words}`);
+    const at = [...dates].reverse().map((date) => words.indexOf(`${label(date)} `));
+    assert.ok(at.every((index, place) => index >= 0 && (place === 0 || index > at[place - 1])), `every day keeps its own date, newest first: ${words}`);
     assert.equal(words.split(label(7)).length, 2, "the Saturday before the change is listed once");
     assert.ok(!words.includes(new Date(Date.UTC(2026, 2, 4)).toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" })), "no day before the range is listed");
   } finally {
