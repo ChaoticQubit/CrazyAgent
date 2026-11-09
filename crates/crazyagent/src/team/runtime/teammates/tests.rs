@@ -302,6 +302,8 @@ fn members_stop_at_their_bound() {
 fn owner_stopped_row_stays_stopped_while_pane_lives() {
     for reason in [
         super::super::OWNER_STOPPED_TEAMMATE,
+        super::super::MASTER_STOPPED_TEAMMATE,
+        super::super::LEAD_STOPPED_TEAMMATE,
         super::super::LEAD_ENDED_TEAMMATE,
         super::super::OVER_TEAMMATE_CAP,
     ] {

@@ -20511,6 +20511,18 @@ fn a_stop_by_the_master_or_a_lead_fails_the_held_task_and_leaves_the_agent_wakea
             "{by:?}"
         );
         assert!(!crate::team::owner_stopped(&fixture.connection, lead).unwrap());
+        let status =
+            crate::team::owner_status(&fixture.connection, &fixture.setup, Some(&fixture.access))
+                .unwrap();
+        assert!(
+            !status
+                .agents
+                .iter()
+                .find(|agent| agent.id == lead)
+                .unwrap()
+                .owner_stopped,
+            "{by:?}: the owner's status does not call this the owner's stop"
+        );
         let told: i64 = fixture
             .connection
             .query_row(
@@ -20542,6 +20554,116 @@ fn a_stop_by_the_master_or_a_lead_fails_the_held_task_and_leaves_the_agent_wakea
         assert_eq!(task_and_agent(&fixture, WOKEN).1, Some(lead), "{by:?}");
         team.shutdown().unwrap();
     }
+}
+
+/// A running lead hears which of its sub-agents the owner or the master stopped, named by
+/// who stopped it, and hears nothing of a stop it made itself (HB-S5-B).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_hears_who_stopped_its_sub_agent_and_nothing_of_a_stop_it_made() {
+    use crate::team::StoppedBy;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, HEARING_CODEX, TeamLimits::default());
+    let lead = idle_sub_agent(&fixture, &mut team);
+    let child = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![child, lead],
+        )
+        .unwrap();
+    let notes = || -> Vec<String> {
+        let mut statement = fixture
+            .connection
+            .prepare(
+                "SELECT body FROM coord_messages WHERE to_agent=?1 AND from_kind='engine'
+                 AND body LIKE '%stopped your sub-agent%' ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([lead], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let project = fixture.setup.project_id.clone();
+    team.tell_leads(&[(child, project.clone(), StoppedBy::Lead)])
+        .unwrap();
+    assert_eq!(notes(), Vec::<String>::new(), "the lead made this stop");
+    for by in [StoppedBy::Master, StoppedBy::Owner] {
+        team.tell_leads(&[(child, project.clone(), by)]).unwrap();
+    }
+    let said = notes();
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(
+        said[0].starts_with("The master stopped your sub-agent"),
+        "{said:?}"
+    );
+    assert!(
+        said[0].ends_with("The master or the owner can wake it."),
+        "{said:?}"
+    );
+    assert!(
+        said[1].starts_with("The owner stopped your sub-agent"),
+        "{said:?}"
+    );
+    team.shutdown().unwrap();
+}
+
+/// A native teammate a stop ends keeps the reason of who stopped it, and the stop reports
+/// who made it (HB-S5-B).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
+    use crate::team::StoppedBy;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    for (by, maker, reason) in [
+        (
+            StoppedBy::Owner,
+            "owner",
+            "The owner stopped this teammate.",
+        ),
+        (
+            StoppedBy::Master,
+            "master",
+            "The master stopped this teammate.",
+        ),
+        (StoppedBy::Lead, "lead", "Its lead stopped this teammate."),
+    ] {
+        let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET parent=?2 WHERE id=?1",
+                params![mate, lead],
+            )
+            .unwrap();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,?3)",
+                params![mate, PROJECT, maker],
+            )
+            .unwrap();
+        assert_eq!(
+            team.stop_unmanaged().unwrap(),
+            vec![(mate, fixture.setup.project_id.clone(), by)],
+            "{maker}"
+        );
+        let error: Option<String> = fixture
+            .connection
+            .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(error.as_deref(), Some(reason), "{maker}");
+    }
+    team.shutdown().unwrap();
 }
 
 /// Stop all holds across an engine restart and Start all wakes the same agent (S4): the

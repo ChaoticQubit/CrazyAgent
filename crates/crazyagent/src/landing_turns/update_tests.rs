@@ -599,6 +599,25 @@ fn a_resolve_the_engine_starts_never_clears_an_owner_stop() {
     assert_eq!(case.resolve_tasks().len(), 1);
 }
 
+/// The engine starts no resolve for an agent the master stopped either: the stop holds the
+/// agent until someone wakes it, and the set waits (HB-S5-B).
+#[test]
+fn a_resolve_the_engine_starts_is_refused_under_a_master_stop_too() {
+    let case = Case::new(true);
+    landing::update(&case.db, &case.id).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,'project-1',1,'master')",
+            [case.agent()],
+        )
+        .unwrap();
+    assert_eq!(
+        start_resolve(&case.db, &case.id).unwrap_err().0,
+        crate::team::OWNER_STOPPED
+    );
+    assert!(case.resolve_tasks().is_empty());
+}
+
 /// A setup run just before the agent's turn end is recorded: the store, the agent's id and
 /// its workspace.
 type BeforeTurnEnd = fn(&Connection, i64, &mut Workspace);
