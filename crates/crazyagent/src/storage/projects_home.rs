@@ -518,14 +518,7 @@ pub(super) fn move_plan(
     if pending_move(&tx)?.is_some() {
         return Err(error("home_move_in_progress"));
     }
-    let deleting: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects_delete_pending)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if deleting {
+    if delete_planned(&tx)? {
         return Err(error("home_move_delete_in_progress"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
@@ -805,6 +798,18 @@ pub(super) fn settle_pending(
     Ok(changed)
 }
 
+/// Whether a Delete everything is planned and not yet forgotten. It keeps the projects home
+/// where the plan saw it, since the plan trashes folders from that home. Input: the
+/// connection. Output: true while any plan is recorded.
+fn delete_planned(db: &Connection) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects_delete_pending)",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
 fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcome, EngineError> {
     match home::check_home(Path::new(picked), &engine_root(path)?) {
         Ok(canonical) => {
@@ -945,7 +950,12 @@ pub(super) fn execute(
         | HomeAction::MoveHome {
             path: picked,
             move_projects: false,
-        } => switch_home(tx, path, picked),
+        } => {
+            if delete_planned(tx)? {
+                return rejected("home_move_delete_in_progress");
+            }
+            switch_home(tx, path, picked)
+        }
         HomeAction::MoveHome {
             move_projects: true,
             ..

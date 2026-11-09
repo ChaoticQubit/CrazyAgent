@@ -118,6 +118,41 @@ async fn a_trash_move_that_fails_removes_nothing_and_leaves_stop_all_on() {
 }
 
 #[tokio::test]
+async fn a_delete_plan_is_gone_when_the_reply_arrives_even_after_a_settle_that_failed() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    std::fs::remove_dir_all(&folder).unwrap();
+    write_db(
+        &engine,
+        "CREATE TABLE settle_fault(n);
+         CREATE TRIGGER settle_fails_once BEFORE DELETE ON projects_delete_pending
+         WHEN (SELECT count(*) FROM settle_fault) = 0
+         BEGIN
+           INSERT INTO settle_fault VALUES (1);
+           SELECT RAISE(FAIL, 'settle fails once');
+         END;",
+    );
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects_delete_pending"),
+        0,
+        "the reply means the plan is gone, or every home move stays refused until a restart"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM settle_fault"),
+        1,
+        "the first settle really failed"
+    );
+}
+
+/// Delete everything of a project whose folder is already gone removes its records, then its
+/// engine files once the reply is out, and leaves another project's files alone.
+#[tokio::test]
 async fn delete_everything_of_a_project_whose_folder_is_gone_removes_its_records_and_engine_files()
 {
     let engine = Engine::start().await;
@@ -159,6 +194,12 @@ async fn delete_everything_of_a_project_whose_folder_is_gone_removes_its_records
         engine.rows("SELECT count(*) FROM team_agents WHERE project='setup-pooled'"),
         0
     );
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while ours.iter().any(|path| path.parent().unwrap().exists())
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     for path in &ours {
         assert!(
             !path.parent().unwrap().exists(),
@@ -415,7 +456,7 @@ async fn delete_everything_refuses_a_repository_another_project_declares() {
 
 /// A projects home move and a Delete everything never overlap: a pending move refuses a
 /// delete with nothing stopped, and a move asked while a delete waits for the project's
-/// agents refuses `home_move_delete_in_progress`; the delete's plan is forgotten once it ends.
+/// agents refuses `home_move_delete_in_progress`; the delete's plan is forgotten once it ends, even refused, and the next move goes.
 #[tokio::test]
 async fn a_pending_home_move_holds_a_delete_and_a_planned_delete_holds_a_home_move() {
     let engine = Engine::start().await;
@@ -499,7 +540,76 @@ async fn a_pending_home_move_holds_a_delete_and_a_planned_delete_holds_a_home_mo
     assert_eq!(planned(), 0, "the plan is forgotten once the delete ends");
     assert!(folder.is_dir());
     assert_eq!(kept(&engine), 2);
+    let moved = desktop
+        .move_projects_home(next.to_str().unwrap().into(), true, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        result(moved),
+        OwnerResult::Applied,
+        "a delete refused after its plan was written holds no later move"
+    );
     drop(desktop);
     drop(owner);
+    engine.stop().await;
+}
+
+/// While a Delete everything waits, the owner can neither pick another projects home nor move
+/// it without its projects, so the delete never trashes folders from a home the owner has
+/// left. Both go once the plan is forgotten.
+#[tokio::test]
+async fn a_planned_delete_holds_a_home_switch_until_it_is_forgotten() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    project(&mut owner).await;
+    let next = tempfile::Builder::new()
+        .prefix("ca-next-home-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let target = std::fs::canonicalize(next.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let saved = || {
+        engine.rows(&format!(
+            "SELECT count(*) FROM projects_home WHERE path='{}'",
+            engine.home().display()
+        ))
+    };
+    write_db(
+        &engine,
+        "INSERT INTO projects_delete_pending(exchange) VALUES (7)",
+    );
+    let refused = rejected("home_move_delete_in_progress");
+    let set = owner.set_projects_home(target.clone(), 2).await.unwrap();
+    assert_eq!(result(set), refused);
+    let moved = owner
+        .move_projects_home(target.clone(), false, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(moved), refused);
+    assert_eq!(saved(), 1, "the refusals leave the home the plan saw");
+    write_db(&engine, "DELETE FROM projects_delete_pending");
+    let set = owner.set_projects_home(target, 4).await.unwrap();
+    assert_eq!(result(set), OwnerResult::Applied);
+    assert_eq!(saved(), 0, "the switch goes once the plan is forgotten");
+    drop(owner);
+    engine.stop().await;
+}
+
+/// An engine start forgets a delete plan a crash left behind, so nothing holds a home move.
+#[tokio::test]
+async fn an_engine_start_forgets_a_delete_plan_left_behind() {
+    let mut engine = Engine::start().await;
+    write_db(
+        &engine,
+        "INSERT INTO projects_delete_pending(exchange) VALUES (7)",
+    );
+    engine.restart().await;
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects_delete_pending"),
+        0
+    );
     engine.stop().await;
 }

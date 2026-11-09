@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const SIZE_MARGIN: Duration = Duration::from_millis(250);
 const UNKNOWN: &str = "owner_outcome_unknown_reconcile_same_identity";
 const UNSETTLED: [&str; 2] = [UNKNOWN, "owner_actor_stopped_outcome_unknown"];
+const SETTLE_TRIES: usize = 3;
+const SETTLE_GAP: Duration = Duration::from_millis(50);
 static EXCHANGES: AtomicU64 = AtomicU64::new(1);
 
 enum Step {
@@ -87,8 +89,9 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// move then sends a settle job for this exchange's pending move: one whose
 /// record did not finish it (a stale grant, a slow barrier, a failed record)
 /// is finished from disk, and one whose disk work never ran is forgotten. A Delete
-/// everything stops the project's IDE server before its wait and moves, and then
-/// sends a settle job that forgets its plan, so projects home moves may go again.
+/// everything stops the project's IDE server before its wait and moves, and forgets
+/// its plan before its reply, trying again when that fails, so the reply means projects
+/// home moves may go again; a plan the reply could not reach is forgotten after it.
 /// The exchange number is unique within the engine process; engine start finishes
 /// any move and forgets any delete plan left by an earlier process before serving.
 pub(super) async fn serve(
@@ -120,6 +123,8 @@ pub(super) async fn serve(
             mutation: OwnerMutation::DeleteProject { .. }
         }
     );
+    #[cfg(unix)]
+    let mut _ide_refused = None;
     let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
             let admitted = tokio::time::timeout_at(deadline, async {
@@ -145,7 +150,8 @@ pub(super) async fn serve(
                 Ok(Ok(())) => {
                     #[cfg(unix)]
                     if let Work::Delete(plan, _) = &work {
-                        authority.ide_servers.stop(&plan.project).await;
+                        _ide_refused =
+                            Some(authority.ide_servers.hold_for_delete(&plan.project).await);
                     }
                     let interrupted = work.interrupted();
                     let step = tokio::task::spawn_blocking(move || work.run())
@@ -186,16 +192,19 @@ pub(super) async fn serve(
             Ok(OwnerReply { response: OwnerResponse::Applied { operation }, .. })
                 if operation.result == OwnerResult::Applied && !operation.historical_replay
         );
+        let forgotten = deleting && settle_delete(engine, exchange).await;
         (
             write_owner_reply(stream, result, id, mutation).await,
             removed,
+            forgotten,
         )
     };
     let answered = tokio::time::timeout_at(deadline, answer).await;
-    if let (Ok((_, true)), Some((plan, research))) = (&answered, deleted) {
+    if let (Ok((_, true, _)), Some((plan, research))) = (&answered, deleted) {
         let _ = tokio::task::spawn_blocking(move || plan.remove_engine_files(&research)).await;
     }
-    let answered = answered.map(|(written, _)| written);
+    let forgotten = matches!(&answered, Ok((_, _, true)));
+    let answered = answered.map(|(written, _, _)| written);
     if moving
         && let Err(e) = engine
             .owner_job(|reply| Job::HomeMoveSettle(exchange, ran, reply))
@@ -203,14 +212,29 @@ pub(super) async fn serve(
     {
         eprintln!("projects_home_move_not_settled cause={}", e.0);
     }
-    if deleting
-        && let Err(e) = engine
-            .owner_job(|reply| Job::DeleteSettle(exchange, reply))
-            .await
-    {
-        eprintln!("project_delete_not_settled cause={}", e.0);
+    if deleting && !forgotten {
+        settle_delete(engine, exchange).await;
     }
     answered.map_err(|_| failure(UNKNOWN))?
+}
+
+/// Forgets a Delete everything's plan, trying again after a full queue or a SQLite failure,
+/// since a plan left behind refuses every projects home move until the engine restarts.
+/// Inputs: the engine and the exchange. Output: whether the plan is gone.
+async fn settle_delete(engine: &Arc<Engine>, exchange: u64) -> bool {
+    for attempt in 0..SETTLE_TRIES {
+        if attempt > 0 {
+            tokio::time::sleep(SETTLE_GAP).await;
+        }
+        match engine
+            .owner_job(|reply| Job::DeleteSettle(exchange, reply))
+            .await
+        {
+            Ok(()) => return true,
+            Err(e) => eprintln!("project_delete_not_settled cause={}", e.0),
+        }
+    }
+    false
 }
 
 async fn plan(

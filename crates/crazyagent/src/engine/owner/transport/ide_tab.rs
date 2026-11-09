@@ -38,6 +38,7 @@ pub const IDE_TAB_CODES: &[&str] = &[
     "ide_path_unreadable",
     "ide_platform_unqualified",
     "ide_port_unavailable",
+    "ide_project_deleting",
     "ide_project_folder_invalid",
     "ide_project_invalid",
     "ide_project_unknown",

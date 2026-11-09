@@ -125,6 +125,23 @@ impl Engine {
     async fn stop(mut self) {
         self.service.take().unwrap().shutdown().await.unwrap();
     }
+
+    /// Stops this engine and starts a new one on the same data folder, as a restart does.
+    async fn restart(&mut self) {
+        self.service.take().unwrap().shutdown().await.unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            self.root.path(),
+            "e.sock",
+            &self.root.path().join("global.toml"),
+            &self.root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        self.service = Some(service);
+        self._stop = stop;
+    }
 }
 
 fn result(response: OwnerResponse) -> OwnerResult {

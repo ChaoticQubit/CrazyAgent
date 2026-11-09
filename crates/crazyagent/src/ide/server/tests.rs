@@ -1454,3 +1454,19 @@ async fn a_start_stops_waiting_once_stop_all_began() {
         "ide_server_stopped"
     );
 }
+
+/// A project's IDE stays refused until the last Delete everything holding it ends, and the
+/// open then goes on to its next check.
+#[tokio::test]
+async fn a_projects_ide_stays_refused_until_its_last_delete_hold_ends() {
+    let folder = scratch();
+    let servers = servers_in(folder.path(), Duration::from_secs(60));
+    let held = project("held");
+    let open = || servers.open(&held, folder.path(), folder.path(), false);
+    let first = servers.hold_for_delete(&held).await;
+    let second = servers.hold_for_delete(&held).await;
+    drop(first);
+    assert_eq!(open().await.unwrap_err().0, "ide_project_deleting");
+    drop(second);
+    assert_eq!(open().await.unwrap_err().0, "ide_build_invalid");
+}
