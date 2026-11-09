@@ -9891,6 +9891,150 @@ fn commit_then_switch(home: &Path, worktree: &Path) {
     git_in(home, worktree, &["switch", "-q", "-c", "side"]);
 }
 
+/// Commits what the agent's index holds, the way an agent can inside a reset. Inputs: the
+/// home and the worktree. Output: none.
+fn commit_the_index(home: &Path, worktree: &Path) {
+    git_in(
+        home,
+        worktree,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "Later work",
+        ],
+    );
+}
+
+/// Land-2 r1 M1: a commit made after the files moved took them with it, so putting them
+/// back would stage a reversal of the agent's own commit for its next turn to post.
+#[test]
+fn an_agent_commit_after_a_reset_moved_the_files_gets_no_reversal() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let before = store::load(&case.db, &id).unwrap();
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(&flow::AFTER_READ_TREE, &case.workspace.git_dir, move || {
+        commit_the_index(&home, &worktree);
+    });
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(
+        case.agent(&["status", "--porcelain"]),
+        "",
+        "the engine staged a reversal of the agent's commit"
+    );
+    assert_eq!(case.agent(&["rev-parse", "HEAD^"]).trim(), before.head);
+    let committed = case.agent(&["show", "HEAD:README"]);
+    assert_ne!(
+        committed,
+        case.agent(&["show", &format!("{}:README", before.head)]),
+        "the commit holds what the reset moved"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        committed,
+        "the file stays at what the reset moved it to"
+    );
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+}
+
+/// Land-2 r1 M1: an unstaged edit of another file does not make the agent's commit any less
+/// its own. The index says whether the moved files were committed, the worktree cannot.
+#[test]
+fn an_agent_commit_and_an_edit_elsewhere_after_a_reset_moved_the_files_gets_no_reversal() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(&flow::AFTER_READ_TREE, &case.workspace.git_dir, move || {
+        write(&worktree.join("later.txt"), "later\n");
+        git_in(&home, &worktree, &["add", "later.txt"]);
+        commit_the_index(&home, &worktree);
+        write(&worktree.join("later.txt"), "edited\n");
+    });
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(
+        case.agent(&["status", "--porcelain"]),
+        " M later.txt\n",
+        "the engine staged a reversal of the agent's commit"
+    );
+}
+
+/// Land-2 r1 F1: a commit made before the files moved holds none of them, so they still go
+/// back under it, or the next turn would post the reset as the agent's change.
+#[test]
+fn an_agent_commit_before_a_reset_moved_the_files_still_gets_them_back() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let before = store::load(&case.db, &id).unwrap();
+    let original = case.agent(&["show", &format!("{}:README", before.head)]);
+    let (home, worktree) = (case.home.clone(), case.workspace.worktree.clone());
+    let runs = plant(
+        &flow::BEFORE_READ_TREE,
+        &case.workspace.git_dir,
+        move || {
+            write(&worktree.join("later.txt"), "later\n");
+            git_in(&home, &worktree, &["add", "later.txt"]);
+            commit_the_index(&home, &worktree);
+        },
+    );
+    assert_eq!(refused(update(&case.db, &id)), "changes_agent_busy");
+    assert_eq!(unplant(&case, &runs), 1);
+    assert_eq!(case.agent(&["status", "--porcelain"]), "");
+    assert_eq!(case.agent(&["rev-parse", "HEAD^"]).trim(), before.head);
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        original,
+        "the files the reset moved did not go back"
+    );
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+}
+
+/// Land-2 r1 L1: an update an engine stopped after the files moved, with the agent then
+/// committing, drops the reset and puts the set back. The files stay in the agent's commit.
+#[test]
+fn an_update_stopped_after_its_files_moved_is_put_back_once_the_agent_committed() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let before = store::load(&case.db, &id).unwrap();
+    let original = case.agent(&["show", &format!("{}:README", before.head)]);
+    stopped_inside_reset(&case, &flow::AFTER_READ_TREE, || update(&case.db, &id));
+    assert!(store::load(&case.db, &id).unwrap().intent.is_some());
+    assert_put_back(&case, &id, &before, Some(&before.head));
+    assert_ne!(
+        case.agent(&["show", "HEAD:README"]),
+        original,
+        "the agent's commit took what the reset moved"
+    );
+}
+
+/// Land-2 r1 L1: an update an engine stopped after the files moved, with the agent then
+/// editing, moves nothing and puts the set back, the edit and HEAD as the agent left them.
+#[test]
+fn an_update_stopped_after_its_files_moved_is_put_back_once_the_agent_edited() {
+    let case = Case::new();
+    let id = conflicted(&case);
+    let before = store::load(&case.db, &id).unwrap();
+    stopped_inside_reset(&case, &flow::AFTER_READ_TREE, || update(&case.db, &id));
+    case.edit("README", "agent edit\n");
+    owner::settled(&case.db, &id).unwrap();
+    assert_eq!(
+        case.agent_head(),
+        before.head,
+        "HEAD moved over the agent's edit"
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        "agent edit\n"
+    );
+    assert_eq!(store::load(&case.db, &id).unwrap(), before);
+}
+
 /// A set of the case's agent that conflicts with an owner commit, held by a refused
 /// Accept. Input: the case. Output: its id.
 fn conflicted(case: &Case) -> ChangeSetId {

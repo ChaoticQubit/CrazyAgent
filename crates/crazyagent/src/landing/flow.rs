@@ -868,6 +868,12 @@ pub(super) type PlantedEdit = std::sync::Arc<dyn Fn() + Send + Sync>;
 pub(super) static BEFORE_RESET: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Test seam (land-2 r2): edits [`reset_agent`] makes after it checked HEAD and refreshed
+/// the index and before its two-tree read-tree, the way an agent can write in that window.
+#[cfg(test)]
+pub(super) static BEFORE_READ_TREE: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// Test seam (RESET-KEEP r2): edits [`reset_agent`] makes right after its two-tree
 /// read-tree moved the files and before HEAD moves, the way an agent can write in that
 /// window.
@@ -927,6 +933,8 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
     if refreshed.code != 0 {
         return Ok(false);
     }
+    #[cfg(test)]
+    run_planted(&BEFORE_READ_TREE, agent);
     let moved = agent
         .repo
         .exec(&["read-tree", "-u", "-m", from, target], None, &[], 4096)?;
