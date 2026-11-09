@@ -1884,6 +1884,91 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
     host.close(&[]).unwrap();
 }
 
+/// CA-SEC-002: an adopted teammate's calls go only to its lead's teammates' server. Once that
+/// server ended while the lead's own server still runs, a pane the lead split there and
+/// tagged with the teammate's name receives none of them, and the teammate reads as gone.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teammates_server_ended() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    let ann = AgentId::team(2).unwrap();
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !contains(&host.snapshot(&leader).unwrap().screen, b"lead$") {
+        assert!(Instant::now() < deadline, "the lead's shell never prompted");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let ann_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
+    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
+
+    let own_out = root.join("own.txt");
+    let own_id = root.join("own-id.txt");
+    let line = format!(
+        "{} -S {} split-window -d -P -F '#{{pane_id}}' 'cat > {}' > {}\n",
+        lead.tmux.display(),
+        lead.socket.display(),
+        own_out.display(),
+        own_id.display()
+    );
+    host.input(&leader, line.as_bytes()).unwrap();
+    let own_split = wait_text(&own_id).trim().to_owned();
+    tmux_reply(
+        &lead.tmux,
+        &lead.socket,
+        &[
+            "set-option",
+            "-p",
+            "-t",
+            &own_split,
+            "@crazyagent",
+            ann.as_str(),
+        ],
+    );
+
+    let killed = crazyagent::spawn_gate::status(
+        Command::new(&lead.tmux)
+            .arg("-S")
+            .arg(&lead.mates)
+            .arg("kill-server")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(killed.success());
+    until_refused(&lead.mates);
+
+    let gone = Some("terminal_agent_unknown".to_owned());
+    assert_eq!(
+        host.input(&ann, b"to-own\n").err().map(|problem| problem.0),
+        gone
+    );
+    assert_eq!(host.snapshot(&ann).err().map(|problem| problem.0), gone);
+    assert_eq!(host.pane_pid(&ann).err().map(|problem| problem.0), gone);
+    assert_eq!(
+        host.resize(&ann, 100, 40).err().map(|problem| problem.0),
+        gone
+    );
+    let routed = root.join("routed.txt");
+    host.input(
+        &leader,
+        format!("echo lead-$((40 + 2)) > {}\n", routed.display()).as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(wait_text(&routed), "lead-42\n");
+    assert!(
+        !std::fs::read_to_string(&own_out)
+            .unwrap_or_default()
+            .contains("to-own")
+    );
+    host.close(&[]).unwrap();
+}
+
 /// Starts a stand-in tmux server at one of a native lead's sockets, as another process could
 /// once the engine's server there ended, shaped like the engine's: its session and holder
 /// window, whose one pane is tagged as the lead's. Takes the tmux program, the socket and
