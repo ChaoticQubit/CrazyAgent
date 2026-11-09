@@ -211,10 +211,9 @@ fn a_subfolder_swapped_for_a_link_during_the_copy_brings_in_nothing_from_outside
     };
     let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut outside_bytes = false;
-    for attempt in 0..2000 {
-        if std::time::Instant::now() >= until || outside_bytes {
-            break;
-        }
+    let mut attempt = 0;
+    while std::time::Instant::now() < until && !outside_bytes {
+        attempt += 1;
         let destination = parent.path().join(format!("copy-{attempt}"));
         if super::copy(&raced, &destination, &[]).is_ok() {
             let copied = destination.join("hooks/sub");
