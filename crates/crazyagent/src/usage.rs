@@ -10,6 +10,7 @@ pub mod capture;
 pub mod health;
 pub mod metrics;
 pub mod poll;
+pub mod prices;
 pub mod report;
 mod rules;
 pub mod service;
