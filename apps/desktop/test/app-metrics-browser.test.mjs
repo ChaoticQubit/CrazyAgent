@@ -81,7 +81,7 @@ test("the Account limits panel does not overflow the window at 760 px", async ()
 /** Presses a key on the focused element with the real keyboard. Inputs: the page, the key's
  * name and its code. Output: nothing. */
 async function key(page, name, code) {
-  for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: code });
+  for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: name, code: name, windowsVirtualKeyCode: code, ...(name === "Enter" && type === "keyDown" ? { text: "\r" } : {}) });
   await page.evaluate("Fixture.settle(120)");
 }
 
