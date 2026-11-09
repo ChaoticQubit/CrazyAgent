@@ -481,6 +481,23 @@ impl Agent {
         Ok(commit)
     }
 
+    /// Tells whether the agent's own pointer holds a commit or work built on it, whichever
+    /// branch HEAD names now: its branch, or HEAD itself for a detached agent. A commit the
+    /// repository no longer holds counts as no. Input: the commit. Output: the answer.
+    pub(super) fn built_on(&self, target: &str) -> Result<bool, EngineError> {
+        let pointer = match &self.pointer {
+            Pointer::Detached => "HEAD".to_owned(),
+            Pointer::Branch(branch) => format!("refs/heads/{branch}"),
+        };
+        let Some(commit) = self.repo.commit_of(&pointer)? else {
+            return Ok(false);
+        };
+        Ok(self.repo.commit_of(target)?.is_some()
+            && self
+                .repo
+                .test(&["merge-base", "--is-ancestor", target, &commit])?)
+    }
+
     /// Moves HEAD from `old`, when given, to `new`. A detached HEAD is rewritten by the
     /// engine under git's own `HEAD.lock` with no reflog; the master's lease branch is
     /// moved by its name in the shared repository with no dereference, after its reflog
@@ -860,11 +877,23 @@ pub(super) type PlantedEdit = std::sync::Arc<dyn Fn() + Send + Sync>;
 pub(super) static BEFORE_RESET: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Test seam (land-2 r2): edits [`reset_agent`] makes after it checked HEAD and refreshed
+/// the index and before its two-tree read-tree, the way an agent can write in that window.
+#[cfg(test)]
+pub(super) static BEFORE_READ_TREE: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// Test seam (RESET-KEEP r2): edits [`reset_agent`] makes right after its two-tree
 /// read-tree moved the files and before HEAD moves, the way an agent can write in that
 /// window.
 #[cfg(test)]
 pub(super) static AFTER_READ_TREE: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Test seam (RK-R2-S1): edits [`reset_agent`] makes right after HEAD moved and before it
+/// reads HEAD again, the way an agent can write in that window.
+#[cfg(test)]
+pub(super) static AFTER_HEAD_MOVE: std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Runs the edit a test planted in `planted` for this agent's git folder, if any. Inputs:
@@ -887,14 +916,21 @@ fn run_planted(planted: &std::sync::Mutex<Vec<(PathBuf, PlantedEdit)>>, agent: &
     }
 }
 
+/// The refusal [`reset_agent`] gives when the agent's pointer moved on from a reset it
+/// reached. The owner reads it as the agent still writing, which it is.
+pub(super) const POINTER_MOVED_ON: &str = "changes_agent_busy";
+
 /// Moves an agent worktree from the commit it holds to another, never over the agent's
 /// work: an index git cannot refresh (locked, mid-merge) refuses; git's two-tree
 /// read-tree moves its index and tracked files and refuses, changing nothing, when a path
 /// it would change was edited, staged or is in its way untracked; then HEAD moves only
-/// while it still holds `from` and must still be the agent's pointer after, else HEAD and
-/// the files go back. A stop between the steps leaves a state an engine start can finish.
-/// Inputs: the worktree and both commits. Output: true once it holds `target`, false when
-/// it refused.
+/// while it still holds `from` and must still be the agent's pointer after. When HEAD did
+/// not move, the files go back unless the agent committed them meanwhile; when the pointer
+/// left, HEAD goes back and the files too when the agent's checkout holds `from`. A stop
+/// between the steps leaves a state an engine start can finish. Inputs: the worktree and
+/// both commits.
+/// Output: true once it holds `target`, false when it refused, [`POINTER_MOVED_ON`] when
+/// the pointer cannot go back, so the caller leaves the step stored and undoes nothing.
 pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
     assert!(is_object_id(from) && is_object_id(target));
     #[cfg(test)]
@@ -908,6 +944,8 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
     if refreshed.code != 0 {
         return Ok(false);
     }
+    #[cfg(test)]
+    run_planted(&BEFORE_READ_TREE, agent);
     let moved = agent
         .repo
         .exec(&["read-tree", "-u", "-m", from, target], None, &[], 4096)?;
@@ -923,6 +961,8 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
         files_back(agent, from, target);
         return Ok(false);
     }
+    #[cfg(test)]
+    run_planted(&AFTER_HEAD_MOVE, agent);
     if agent.head().is_err() {
         eprintln!("landing_reset_head_left_its_pointer");
         if agent
@@ -930,18 +970,42 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
             .is_err()
         {
             eprintln!("landing_reset_pointer_not_put_back");
+            return Err(failure(POINTER_MOVED_ON));
         }
-        files_back(agent, from, target);
+        if agent.repo.commit_of("HEAD").ok().flatten().as_deref() == Some(from) {
+            files_back(agent, from, target);
+        }
         return Ok(false);
     }
     Ok(true)
 }
 
+/// As [`reset_agent`], for a caller with nobody left to refuse: a pointer that moved on
+/// from the reset counts as done, because the agent built on what the reset reached.
+/// Inputs: the worktree and both commits. Output: true once it holds `target` or moved on
+/// from it, false when it refused.
+pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<bool, EngineError> {
+    match reset_agent(agent, from, target) {
+        Err(moved) if moved.0 == POINTER_MOVED_ON => Ok(true),
+        other => other,
+    }
+}
+
 /// Puts an agent worktree's index and files back from `target` to `from` after its reset
 /// did not hold, with the same two-tree read-tree, so an edit the agent made meanwhile is
-/// never overwritten: git refuses, writing nothing, and the refusal is logged. Inputs:
-/// the worktree and both commits. Output: none.
+/// never overwritten: git refuses, writing nothing, and the refusal is logged. An index
+/// equal to HEAD stays: the agent committed what the reset moved, and putting it back would
+/// stage a reversal of that commit. Inputs: the worktree and both commits. Output: none.
 fn files_back(agent: &Agent, from: &str, target: &str) {
+    let committed = agent.repo.exec(
+        &["diff-index", "--quiet", "--cached", "HEAD", "--"],
+        None,
+        &[],
+        4096,
+    );
+    if committed.is_ok_and(|committed| committed.code == 0) {
+        return;
+    }
     let back = agent
         .repo
         .exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096);
@@ -990,9 +1054,10 @@ pub(super) fn reset_if_quiet(
     record.intent = Some(Intent::Reset {
         from: Some(expected.to_owned()),
         target: target.to_owned(),
+        earlier: None,
     });
     store::save(db, record)?;
-    let start = if reset_agent(&agent, expected, target)? {
+    let start = if reset_settling(&agent, expected, target)? {
         target
     } else {
         expected
@@ -2426,6 +2491,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
     record.intent = Some(Intent::Reset {
         from: Some(current.clone()),
         target: record.head.clone(),
+        earlier: Some(store::Earlier::of(&before)),
     });
     store::save(db, &record)?;
     if !reset_agent(&agent, &current, &record.head)? {

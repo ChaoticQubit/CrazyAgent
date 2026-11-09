@@ -1593,6 +1593,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     record.intent = Some(Intent::Reset {
         from: Some(before.head.clone()),
         target: merged.clone(),
+        earlier: Some(store::Earlier::of(&before)),
     });
     store::save(db, &record)?;
     if !flow::reset_agent(&agent, &before.head, &merged)? {
@@ -1813,7 +1814,11 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                 store::save(db, record)?;
             }
         }
-        Some(Intent::Reset { from, target }) => {
+        Some(Intent::Reset {
+            from,
+            target,
+            earlier,
+        }) => {
             let agent = match flow::agent(db, record) {
                 Err(refused) if refused.0 == "changes_workspace_invalid" => None,
                 opened => Some(opened?),
@@ -1824,11 +1829,8 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             {
                 if current == target {
                     reset = true;
-                } else if from.as_deref() == Some(current.as_str())
-                    && (flow::holds_only(&agent.repo, &target)?
-                        || flow::holds_only(&agent.repo, &current)?)
-                {
-                    reset = flow::reset_agent(agent, &current, &target)?;
+                } else if may_finish_reset(agent, record, &current, from.as_deref(), &target)? {
+                    reset = flow::reset_settling(agent, &current, &target)?;
                 }
             }
             if !record.is_open() {
@@ -1840,6 +1842,16 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
                     &record.git_dir,
                     start,
                 )?;
+            } else if let Some(earlier) = earlier
+                && !reset
+            {
+                let reached = match &agent {
+                    Some(agent) => agent.built_on(&target)?,
+                    None => false,
+                };
+                if !reached {
+                    put_back(record, earlier)?;
+                }
             }
             record.intent = None;
             store::save(db, record)?;
@@ -1848,6 +1860,45 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     }
     assert!(record.intent.is_none());
     Ok(())
+}
+
+/// Tells whether a stored reset may still move the agent's HEAD: only from the commit it
+/// recorded, with the worktree holding one of the two; or, for a step stored before resets
+/// recorded that, when the files already hold `target` and HEAD holds the set's head or a
+/// commit behind `target`, so no commit of the agent's leaves its branch. Inputs: the
+/// agent, the set, HEAD, the recorded start and the target. Output: the answer.
+fn may_finish_reset(
+    agent: &flow::Agent,
+    record: &Record,
+    current: &str,
+    from: Option<&str>,
+    target: &str,
+) -> Result<bool, EngineError> {
+    if let Some(from) = from {
+        return Ok(from == current
+            && (flow::holds_only(&agent.repo, target)?
+                || flow::holds_only(&agent.repo, current)?));
+    }
+    Ok(agent.repo.commit_of(target)?.is_some()
+        && flow::holds_only(&agent.repo, target)?
+        && (current == record.head
+            || agent
+                .repo
+                .test(&["merge-base", "--is-ancestor", current, target])?))
+}
+
+/// Puts an open change set back as it was before a reset that did not happen, with its
+/// pending ref, as the step's own refusal does. The caller saves the record. Inputs: the
+/// set and what it held. Output: Ok once the ref is back.
+fn put_back(record: &mut Record, earlier: store::Earlier) -> Result<(), EngineError> {
+    earlier.put_back(record);
+    let pending = record.is_open().then(|| record.head.clone());
+    flow::set_engine_ref(
+        &shared(&record.repository)?,
+        &record.repository,
+        &pending_ref(&record.id),
+        pending.as_deref(),
+    )
 }
 
 /// What the owner's branch tip leaves of one open change set's work (DEC-107): the two
