@@ -163,8 +163,8 @@ fn own_merges(
 
 /// Tells whether a merge commit is only the fix of a real conflict: git's own merge of its
 /// parents really conflicts, its tree keeps every clean change of that merge, and no
-/// conflicted file still holds a conflict marker. Inputs: the owner repository, the commit
-/// and its two parents. Output: the answer.
+/// conflicted file still holds a conflict marker or has a marker size of its own. Inputs:
+/// the owner repository, the commit and its two parents. Output: the answer.
 fn fixes_conflict(
     owner: &Repo,
     commit: &str,
@@ -174,7 +174,7 @@ fn fixes_conflict(
     let Some(conflicts) = kept_clean_changes(owner, commit, ours, theirs)? else {
         return Ok(false);
     };
-    if conflicts.is_empty() {
+    if conflicts.is_empty() || sets_marker_size(owner, &conflicts, &[commit, ours, theirs])? {
         return Ok(false);
     }
     for path in &conflicts {
@@ -185,16 +185,112 @@ fn fixes_conflict(
     Ok(true)
 }
 
-/// Tells whether a landed commit holds a change set's clean changes, by the test a conflict
-/// fix passes: merging the set's head into it again would change nothing but conflicted
-/// paths. A merge that kept none of the set's work holds its head and fails this. Inputs:
-/// the owner repository, the landed commit and the set's head. Output: the answer.
+/// Tells whether a landed commit holds a change set's work, by the test a conflict fix
+/// passes: merging the set's head into it again would change nothing but conflicted paths,
+/// and the landing changed every one of those. A merge that kept none of the set's work
+/// holds its head and fails this. Inputs: the owner repository, the landed commit and the
+/// set's head. Output: the answer.
 pub(super) fn holds_clean_changes(
     owner: &Repo,
     landed: &str,
     head: &str,
 ) -> Result<bool, EngineError> {
-    Ok(kept_clean_changes(owner, landed, landed, head)?.is_some())
+    let Some(conflicts) = kept_clean_changes(owner, landed, landed, head)? else {
+        return Ok(false);
+    };
+    Ok(!left_a_path_as_it_was(owner, landed, &conflicts)?)
+}
+
+/// Tells whether a landing left any of the paths exactly as the commit under it had them,
+/// a path neither holds included, so a set's work there did not land. A path with a line
+/// break breaks the reply's line count and fails, which leaves the set open. Inputs: the
+/// owner repository, the landed commit and the paths as git printed them. Output: the answer.
+fn left_a_path_as_it_was(
+    owner: &Repo,
+    landed: &str,
+    paths: &[Vec<u8>],
+) -> Result<bool, EngineError> {
+    let parent = format!("{landed}^1");
+    let mut request = Vec::new();
+    for path in paths {
+        for commit in [landed, parent.as_str()] {
+            request.extend_from_slice(commit.as_bytes());
+            request.push(b':');
+            request.extend_from_slice(path);
+            request.push(b'\n');
+        }
+    }
+    let read = owner.exec(
+        &["cat-file", "--batch-check"],
+        Some(&request),
+        &[],
+        OUTPUT_BYTES_MAX,
+    )?;
+    if read.code != 0 || read.overflow {
+        return Err(failure("changes_git_failed"));
+    }
+    let lines: Vec<&[u8]> = read
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.len() != paths.len() * 2 {
+        return Err(failure("changes_git_failed"));
+    }
+    Ok(lines
+        .chunks(2)
+        .any(|pair| object_named(pair[0]) == object_named(pair[1])))
+}
+
+/// The object id a `cat-file --batch-check` line names. Input: the line. Output: the id, or
+/// None for a path the commit does not hold.
+fn object_named(line: &[u8]) -> Option<&[u8]> {
+    if line.ends_with(b" missing") {
+        return None;
+    }
+    line.split(|byte| *byte == b' ').next()
+}
+
+/// Tells whether any path has a conflict-marker-size attribute in any of the commits, read
+/// from each commit and the repository's own info/attributes, so its markers may be a
+/// length [`holds_conflict_marker`] does not know. Inputs: the owner repository, the paths
+/// as git printed them and the commits. Output: the answer.
+fn sets_marker_size(
+    owner: &Repo,
+    paths: &[Vec<u8>],
+    commits: &[&str],
+) -> Result<bool, EngineError> {
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path);
+        input.push(0);
+    }
+    for commit in commits {
+        let output = owner.exec(
+            &[
+                "check-attr",
+                "-z",
+                "--stdin",
+                "--source",
+                commit,
+                "conflict-marker-size",
+            ],
+            Some(&input),
+            &[],
+            OUTPUT_BYTES_MAX,
+        )?;
+        if output.code != 0 || output.overflow {
+            return Err(failure("changes_git_failed"));
+        }
+        let fields: Vec<&[u8]> = output.stdout.split(|byte| *byte == 0).collect();
+        if fields
+            .chunks(3)
+            .any(|triple| triple.len() == 3 && triple[2] != b"unspecified")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Reads whether a file of a commit has a line a conflict marker starts. A path the commit
