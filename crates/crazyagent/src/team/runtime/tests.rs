@@ -22346,7 +22346,11 @@ fn ended_native_lead<T>(
         match read {
             Some(pid) => break pid,
             None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            None => panic!("the stand-in lead never wrote {}", written.display()),
+            None => panic!(
+                "the stand-in never wrote {} or {}",
+                written.display(),
+                teammate_wrote.display()
+            ),
         }
     };
     let process = rustix::process::Pid::from_raw(pid).unwrap();

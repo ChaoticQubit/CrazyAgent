@@ -1498,6 +1498,32 @@ async fn a_projects_ide_stays_refused_until_its_last_delete_hold_ends() {
     assert_eq!(open().await.unwrap_err().0, "ide_build_invalid");
 }
 
+/// A Delete everything counts its hold before its stop waits for the start lock, so an open
+/// that arrives while the stop waits is refused.
+#[tokio::test]
+async fn a_delete_hold_counts_before_its_stop_waits_for_the_start_lock() {
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let id = project("held-open");
+    let held = Arc::clone(&servers.slot(&id).unwrap().start)
+        .lock_owned()
+        .await;
+    let mut holding = std::pin::pin!(servers.hold_for_delete(&id));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut holding)
+            .await
+            .is_err(),
+        "the stop must wait for the start lock"
+    );
+    assert!(
+        servers.deleting(&id),
+        "an open arriving while the stop waits must be refused"
+    );
+    drop(held);
+    drop(holding.await);
+    assert!(!servers.deleting(&id));
+}
+
 /// A hold that lands while an open is still starting waits for that open and stops what it
 /// started, and the next open is refused.
 #[tokio::test]
