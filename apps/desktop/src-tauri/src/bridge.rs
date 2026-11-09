@@ -60,6 +60,9 @@ pub use queue::BridgeQueue;
 const PAGE_SIZE: u8 = 16;
 const PROJECTION_BYTES_MAX: usize = 65_536;
 
+/// The engine's code for a reply this app could not read.
+const ENGINE_VERSION_MISMATCH: &str = "engine_version_mismatch";
+
 #[derive(Debug, Serialize)]
 pub struct BridgeError {
     pub code: &'static str,
@@ -111,16 +114,31 @@ fn failure(code: &'static str) -> BridgeError {
 }
 
 /// A bridge failure that keeps the engine code behind it, so the window names it after its
-/// own sentence instead of hiding it. Inputs: the bridge code and the raw engine code.
+/// own sentence instead of hiding it. An engine version mismatch stays that code, so the
+/// window shows its restart sentence. Inputs: the bridge code and the raw engine code.
 /// Output: the error; the cause is the engine code made plain by `plain_code`, absent when
 /// it equals the bridge code.
 fn caused(code: &'static str, engine: &str) -> BridgeError {
+    if engine == ENGINE_VERSION_MISMATCH {
+        return failure(ENGINE_VERSION_MISMATCH);
+    }
     let cause = crazyagent::protocol::plain_code(engine);
     BridgeError {
         code,
         cause: (cause != code).then(|| cause.to_owned()),
         account: None,
     }
+}
+
+/// A bridge failure on a route that shows no engine cause. An engine version mismatch stays
+/// that code, so the window shows its restart sentence. Inputs: the bridge code and the raw
+/// engine code. Output: the error.
+fn uncaused(code: &'static str, engine: &str) -> BridgeError {
+    failure(if engine == ENGINE_VERSION_MISMATCH {
+        ENGINE_VERSION_MISMATCH
+    } else {
+        code
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -384,7 +402,7 @@ impl NativeBridge {
             controller
                 .reattach_configured(client)
                 .await
-                .map_err(|_| failure("owner_reconnect_failed"))?
+                .map_err(|error| uncaused("owner_reconnect_failed", &error.0))?
         } else {
             let (ordinary, controller) =
                 OwnerController::attach_configured(client, OwnerClientKind::Desktop)
@@ -1329,7 +1347,10 @@ mod tests {
             ("plugins", plugins::plugin_failure(engine())),
             ("team", team::read_failure(CODE)),
             ("project setup", project_setup::read_failure(CODE)),
-            ("intake and github", intake::known(CODE, &[], "intake_failed")),
+            (
+                "intake and github",
+                intake::known(CODE, &[], "intake_failed"),
+            ),
             ("harness catalog", caused("owner_read_failed", CODE)),
         ];
         let dropped: Vec<&str> = mapped

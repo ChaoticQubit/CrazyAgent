@@ -47,12 +47,13 @@ pub(super) fn account_error(error: EngineError) -> BridgeError {
     } else {
         error.0.as_str()
     };
-    failure(
+    uncaused(
         ACCOUNT_CODES
             .iter()
             .copied()
             .find(|known| *known == code)
             .unwrap_or("accounts_outcome_unknown"),
+        code,
     )
 }
 

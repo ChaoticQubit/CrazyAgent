@@ -17,12 +17,13 @@ pub(super) fn ide_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }
-    failure(
+    uncaused(
         IDE_TAB_CODES
             .iter()
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("ide_tab_outcome_unknown"),
+        &error.0,
     )
 }
 

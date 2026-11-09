@@ -622,7 +622,6 @@ fn public_code(error: EngineError) -> String {
 /// Input: the request. Output: its name, None for a request that changes something.
 fn read_kind(action: &Action) -> Option<&'static str> {
     match action {
-        Action::Read => Some("account_profile.read"),
         Action::Capabilities => Some("account_profile.capabilities"),
         _ => None,
     }

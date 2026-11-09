@@ -1,4 +1,4 @@
-use super::{BridgeError, NativeBridge, Unlocked, failure};
+use super::{BridgeError, NativeBridge, Unlocked, failure, uncaused};
 use crazyagent::client_controller::OwnerController;
 use crazyagent::coord::tool_switches::Switch;
 use crazyagent::engine::EngineError;
@@ -9,7 +9,10 @@ use crazyagent::plugins::{
 use crazyagent::protocol::ProjectId;
 
 pub(super) fn plugin_failure(error: EngineError) -> BridgeError {
-    failure(crazyagent::plugins::known_code(&error.0).unwrap_or("plugins_failed"))
+    uncaused(
+        crazyagent::plugins::known_code(&error.0).unwrap_or("plugins_failed"),
+        &error.0,
+    )
 }
 
 fn project(id: Option<String>) -> Result<Option<ProjectId>, BridgeError> {

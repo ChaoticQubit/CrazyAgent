@@ -106,7 +106,7 @@ impl NativeBridge {
                             project_id: project.clone(),
                         })
                         .await
-                        .map_err(|_| failure("owner_read_failed"))?;
+                        .map_err(|error| uncaused("owner_read_failed", &error.0))?;
                     self.controller()?
                         .begin_mutation(
                             OwnerMutation::ProjectMaster {
