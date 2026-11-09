@@ -218,7 +218,10 @@ fn claude_line(value: &Value, progress: &mut Progress) -> Tokens {
         cache_write: count("cache_creation_input_tokens"),
     }
     .at_most(LINE_TOKENS_MAX);
-    let id = message["id"].as_str().map(str::to_owned);
+    let id = message["id"]
+        .as_str()
+        .filter(|id| id.len() <= NAME_BYTES_MAX)
+        .map(str::to_owned);
     if id.is_some() && id == progress.message {
         let growth = seen.growth_over(progress.counted);
         progress.counted = Tokens {

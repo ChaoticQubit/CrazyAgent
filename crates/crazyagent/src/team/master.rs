@@ -30,6 +30,8 @@ const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const LEAD_MODE_REFUSED: &str = "Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).";
 const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.";
 const MASTER_LABEL: &str = "Master";
+const RECALL_LEFT_OUT: &str =
+    "More memories matched and were left out. Search for something narrower.\n";
 const NOT_LIVE_TOOL: &str = "Not done: without its live terminal the master's team tools are delegate, ask, record_answer, remember and recall.";
 const WORKERS_LISTED_MAX: i64 = 64;
 const AGENT_SHOWN_MAX: usize = 64;
@@ -1701,10 +1703,15 @@ fn recall(
             MemoryOrigin::Selected { .. } => "the owner, from a file",
             MemoryOrigin::Imported { .. } => "the owner, imported from a file",
         };
-        text.push_str(&format!(
+        let line = format!(
             "> ({place}, saved by {by}) {}\n",
             memory.text.trim().replace('\n', "\n> ")
-        ));
+        );
+        if text.len() + line.len() + RECALL_LEFT_OUT.len() > tool::REPLY_TEXT_MAX {
+            text.push_str(RECALL_LEFT_OUT);
+            break;
+        }
+        text.push_str(&line);
     }
     assert!(text.len() <= tool::REPLY_TEXT_MAX);
     Ok((text, false))
