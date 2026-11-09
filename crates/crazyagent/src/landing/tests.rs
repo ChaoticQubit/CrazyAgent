@@ -9477,6 +9477,7 @@ fn undoing_a_master_merge_names_and_marks_the_sets_it_closed() {
 fn undoing_a_commit_leaves_a_set_accepted_above_it_whose_files_it_never_changed() {
     use crate::activity::ActivityKind;
     let case = Case::new();
+    keeps_activity(&case);
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour\n");
     let already = case.turn(TurnOutcome::Succeeded).unwrap();
