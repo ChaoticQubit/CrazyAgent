@@ -9470,6 +9470,50 @@ fn undoing_a_master_merge_names_and_marks_the_sets_it_closed() {
     );
 }
 
+/// T4-R2-L1: an Accept that made no commit records the branch tip as where it landed. An
+/// undo of the commit at that tip reverts nothing of the set when that commit changed none
+/// of the set's files, so the set keeps its Accept and the Undone row does not name it.
+#[test]
+fn undoing_a_commit_leaves_a_set_accepted_above_it_whose_files_it_never_changed() {
+    use crate::activity::ActivityKind;
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let already = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\ntwo\nthree\nfour\n", "Owner takes the line");
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(&other.worktree.join("src/kept.rs"), "kept\n");
+    let later = turn_of(&case, &other, "Add kept");
+    let AcceptOutcome::Landed { commit: tip, .. } = case.accept(&later).unwrap() else {
+        panic!("the later set conflicted");
+    };
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&already).unwrap() else {
+        panic!("the set already on main conflicted");
+    };
+    assert_eq!(commit, tip, "the Accept made no commit");
+    assert!(matches!(
+        undo_landing(&case.db, &case.home, &later).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        store::load(&case.db, &already).unwrap().undone,
+        None,
+        "the undo reverted nothing of this set"
+    );
+    let label = store::load(&case.db, &already).unwrap().agent.label;
+    let rows: Vec<_> = activity_of(&case, &later)
+        .into_iter()
+        .filter(|row| row.kind == ActivityKind::Undone)
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        !rows[0].text.contains(&label),
+        "the Undone row claims a revert that did not happen: {}",
+        rows[0].text
+    );
+}
+
 #[test]
 fn an_undo_reverts_on_the_branch_the_set_landed_on_after_land_on_changes() {
     let case = Case::new();
