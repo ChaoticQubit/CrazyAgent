@@ -6,6 +6,7 @@ const fixture = await bundle(new URL("./fixtures/setting-row.mjs", import.meta.u
 const CONTRAST_MIN = 4.5;
 const WIDTH_PX = 760;
 const NARROW_PX = 320;
+const ACTION_GAP_MAX = 17;
 
 /** Runs a check on a mounted section. Inputs: the section's width, the check and the theme.
  * Output: the check's value. */
@@ -31,7 +32,7 @@ test("a row keeps its label and help on the left and its control on the right", 
 
 test("only a row whose value differs from its default carries the changed mark", async () => {
   const shown = await onSection(WIDTH_PX, rows);
-  assert.deepEqual(shown.map((row) => row.marks), [[], ["changed"], [], []]);
+  assert.deepEqual(shown.map((row) => row.marks), [[], ["changed"], [], [], []]);
 });
 
 test("a wide row stacks its control under the label at the label's left edge", async () => {
@@ -68,12 +69,22 @@ test("at a narrow width nothing scrolls sideways and the control stays inside th
   assert.ok(seen.rows[0].right <= seen.section.right, JSON.stringify(seen));
 });
 
+test("at a narrow width two controls wrap inside their column and never cross the label", async () => {
+  const two = (await onSection(NARROW_PX, rows)).at(-1);
+  const [first, second] = two.parts;
+  assert.ok(two.control >= two.labelRight, JSON.stringify(two));
+  assert.ok(second.top >= first.bottom, JSON.stringify(two));
+  assert.ok(first.left >= two.control - 1, JSON.stringify(two));
+  assert.ok(second.right <= two.right + 1, JSON.stringify(two));
+});
+
 test("the section is named by its h3 and shows its purpose line and actions inside its box", async () => {
   const section = await onSection(WIDTH_PX, ({ evaluate }) => evaluate("Fixture.section()"));
   assert.equal(section.heading, "Your pools");
   assert.equal(section.name, "Your pools");
   assert.equal(section.about, "Sample words.");
   assert.equal(section.action, true, JSON.stringify(section));
+  assert.ok(section.actionGap <= ACTION_GAP_MAX, JSON.stringify(section));
 });
 
 for (const theme of ["light", "dark"]) {
