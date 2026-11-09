@@ -1201,12 +1201,19 @@ pub(crate) fn migrate_counts(tx: &Connection) -> Result<(), EngineError> {
             json_extract(progress,'$.counted.input'),json_extract(progress,'$.counted.output'),
             json_extract(progress,'$.counted.cache_read'),json_extract(progress,'$.counted.cache_write'),
             CAST(strftime('%s','now') AS INTEGER)*1000
-         FROM usage_files WHERE json_type(progress,'$.message')='text'
+         FROM usage_files WHERE CASE WHEN json_valid(progress) THEN
+            json_type(progress,'$.message')='text'
+            AND json_type(progress,'$.counted.input')='integer'
+            AND json_type(progress,'$.counted.output')='integer'
+            AND json_type(progress,'$.counted.cache_read')='integer'
+            AND json_type(progress,'$.counted.cache_write')='integer' ELSE 0 END
          ON CONFLICT(id) DO UPDATE SET input=MAX(input,excluded.input),
             output=MAX(output,excluded.output),cache_read=MAX(cache_read,excluded.cache_read),
             cache_write=MAX(cache_write,excluded.cache_write);
          UPDATE usage_files SET progress=json_remove(progress,'$.message','$.counted')
-         WHERE json_type(progress,'$.counted') IS NOT NULL;",
+         WHERE CASE WHEN json_valid(progress) THEN
+            json_type(progress,'$.message') IS NOT NULL OR json_type(progress,'$.counted') IS NOT NULL
+            ELSE 0 END;",
     )
     .map_err(storage)
 }
@@ -1282,7 +1289,7 @@ fn add_tokens(
             clamp(added.tokens.output),
             clamp(added.tokens.cache_read),
             clamp(added.tokens.cache_write),
-            added.cost_nanos.max(0),
+            added.cost_nanos.clamp(0, ROW_TOKENS_MAX),
             ROW_TOKENS_MAX,
         ],
     )
