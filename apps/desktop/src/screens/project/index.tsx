@@ -133,7 +133,7 @@ function useProject(id: string, navigate: (path: string) => void, known = "") {
   return { data, toast, session };
 }
 
-function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly { id: TabId; label: string; icon: IconName }[] }) {
+export function ProjectMenu({ data, replaced }: { data: ProjectData; replaced: readonly { id: TabId; label: string; icon: IconName }[] }) {
   const [pausing, setPausing] = useState(false);
   const [busy, setBusy] = useState(false);
   const team = data.team.result;
