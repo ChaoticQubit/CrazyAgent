@@ -8896,17 +8896,25 @@ fn a_conflict_fix_on_a_path_with_a_marker_size_attribute_waits_for_the_owner() {
     );
 }
 
-/// LAND-3: the marker size attribute counts from the commits' own .gitattributes too.
+/// LAND-3: the marker size attribute counts from the commits' own .gitattributes too, here
+/// from the set's, which neither main nor the owner's checkout holds.
 #[test]
 fn a_conflict_fix_on_a_path_a_commit_gives_a_marker_size_waits_for_the_owner() {
     let case = Case::new();
-    case.owner_commit(
-        ".gitattributes",
-        "README conflict-marker-size=10\n",
-        "Longer markers",
+    let attributes = (".gitattributes", "README conflict-marker-size=10\n");
+    let (sub, sub_head, master) = conflicted_set_from(&case, &[attributes], |case| {
+        case.owner_commit(
+            "README",
+            "one\ntwo\nthree\nfour from the owner\n",
+            "Owner adds four",
+        );
+    });
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", BOTH_FOURTH_LINES), attributes],
     );
-    let (sub, sub_head, master) = conflicted_set_and_master(&case);
-    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
     let fix = turn_of(&case, &master, "Resolve the README conflict");
     master_set_waits(
         &case,
