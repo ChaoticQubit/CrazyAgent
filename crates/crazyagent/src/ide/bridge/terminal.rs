@@ -248,9 +248,9 @@ async fn greet(writer: &mut OwnedWriteHalf, viewer: &TerminalStream) -> Result<(
 }
 
 /// Streams the pane's output and applies the extension's input and resizes until one side
-/// ends or the capability no longer admits this project. Inputs: the read half, the
-/// writer, the packet, the owner runtime, the project, the host and the viewer. Output:
-/// the plain reason it ended.
+/// ends or the capability no longer admits this project, which each input and resize is
+/// checked against first (CA-SEC-005). Inputs: the read half, the writer, the packet, the
+/// owner runtime, the project, the host and the viewer. Output: the plain reason it ended.
 async fn relay(
     mut reader: crate::platform::unix_socket::OwnedReadHalf,
     writer: &mut OwnedWriteHalf,
@@ -272,6 +272,7 @@ async fn relay(
             }
         }
     });
+    let admitted = || runtime.ide_grants().admit(packet).ok().as_ref() == Some(project);
     let mut check = tokio::time::interval(GRANT_CHECK);
     let reason = loop {
         tokio::select! {
@@ -302,13 +303,16 @@ async fn relay(
                     break "terminal_request_invalid";
                 }
                 Some(request) => {
+                    if !admitted() {
+                        break "ide_capability_revoked";
+                    }
                     if act(host, &name, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
                         break "terminal_ended";
                     }
                 }
             },
             _ = check.tick() => {
-                if runtime.ide_grants().admit(packet).ok().as_ref() != Some(project) {
+                if !admitted() {
                     break "ide_capability_revoked";
                 }
             }
