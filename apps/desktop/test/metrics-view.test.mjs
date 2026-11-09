@@ -175,7 +175,7 @@ test("the project page lists Metrics after Process, and its route opens it", () 
 });
 
 test("both Metrics views open on 7 days, as the mockup does", () => {
-  for (const props of [{ projectId: "p" }, { projectId: null, filter: { projects: [], onProject: forbidden } }]) {
+  for (const props of [{ projectId: "p" }, { projectId: null, filter: { projects: [], onProject: forbidden, limits: { pools: new Map(), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden } } }]) {
     const markup = renderToStaticMarkup(createElement(view.MetricsView, props));
     assert.match(markup, /aria-checked="true"[^>]*>7 days</, JSON.stringify(props));
   }

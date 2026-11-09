@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GIT_ARGS_MAX = exports.GIT_OUTCOME_UNKNOWN = exports.GIT_REQUEST_MS = exports.GIT_FORWARD_ENV = exports.GIT_NODE_ENV = exports.GIT_SOCKET_ENV = void 0;
+exports.GIT_ARGS_MAX = exports.GIT_OUTCOME_UNKNOWN = exports.GIT_REQUEST_MS = exports.GIT_SECRET_ENV = exports.GIT_FORWARD_ENV = exports.GIT_NODE_ENV = exports.GIT_SOCKET_ENV = void 0;
 exports.gitCall = gitCall;
 exports.gitOutcome = gitOutcome;
 exports.startRelay = startRelay;
@@ -14,6 +14,7 @@ const engine_js_1 = require("./engine.js");
 exports.GIT_SOCKET_ENV = "CRAZYAGENT_IDE_GIT_SOCKET";
 exports.GIT_NODE_ENV = "CRAZYAGENT_IDE_GIT_NODE";
 exports.GIT_FORWARD_ENV = "CRAZYAGENT_IDE_GIT_FORWARD";
+exports.GIT_SECRET_ENV = "CRAZYAGENT_IDE_GIT_SECRET";
 exports.GIT_REQUEST_MS = 700_000;
 exports.GIT_OUTCOME_UNKNOWN = "ide_git_outcome_unknown";
 exports.GIT_ARGS_MAX = 16;
@@ -48,7 +49,8 @@ function gitOutcome(value) {
 }
 async function startRelay(engine, env, forwarder) {
     const path = (0, node_path_1.join)((0, node_os_1.tmpdir)(), `cai-git-${(0, node_crypto_1.randomBytes)(8).toString("hex")}.sock`);
-    const server = (0, node_net_1.createServer)((connection) => relay(engine, connection));
+    const secret = (0, node_crypto_1.randomBytes)(32).toString("hex");
+    const server = (0, node_net_1.createServer)((connection) => relay(engine, connection, secret));
     server.maxConnections = CONNECTIONS_MAX;
     await new Promise((resolve, reject) => {
         server.once("error", reject);
@@ -60,18 +62,29 @@ async function startRelay(engine, env, forwarder) {
     env[exports.GIT_SOCKET_ENV] = path;
     env[exports.GIT_NODE_ENV] = process.execPath;
     env[exports.GIT_FORWARD_ENV] = forwarder;
+    env[exports.GIT_SECRET_ENV] = secret;
     return {
         dispose: () => {
             if (env[exports.GIT_SOCKET_ENV] === path) {
                 delete env[exports.GIT_SOCKET_ENV];
                 delete env[exports.GIT_NODE_ENV];
                 delete env[exports.GIT_FORWARD_ENV];
+                delete env[exports.GIT_SECRET_ENV];
             }
             server.close();
         },
     };
 }
-function relay(engine, connection) {
+function carries(value, secret) {
+    if (typeof value !== "object" || value === null)
+        return false;
+    const given = value.secret;
+    if (typeof given !== "string")
+        return false;
+    const [held, wanted] = [Buffer.from(given), Buffer.from(secret)];
+    return held.length === wanted.length && (0, node_crypto_1.timingSafeEqual)(held, wanted);
+}
+function relay(engine, connection, secret) {
     const reader = new engine_js_1.FrameReader();
     let asked = false;
     connection.on("error", () => undefined);
@@ -89,7 +102,7 @@ function relay(engine, connection) {
         if (frames.length === 0)
             return;
         asked = true;
-        const call = gitCall(frames[0]);
+        const call = carries(frames[0], secret) ? gitCall(frames[0]) : undefined;
         if (call === undefined) {
             answer(connection, { kind: "rejected", code: "ide_git_refused" });
             return;

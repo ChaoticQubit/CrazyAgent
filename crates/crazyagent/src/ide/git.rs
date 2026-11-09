@@ -120,7 +120,7 @@ pub const SHIM: &str = "git";
 /// plain message. `worktree prune` and `worktree remove` are refused, since the IDE sees an
 /// agent worktree as missing and would drop it (IN1-FN1). Every other command runs the
 /// `git` on the server's PATH, as stock VS Code does, where the engine resolved no real git
-/// ([`shim_text`]).
+/// ([`shim_text`]), without the relay's secret, so a project's hook under it does not hold it.
 pub const SHIM_TEXT: &str = "#!/bin/sh\n\
 case \"$1\" in\n\
 push|pull|fetch|ls-remote)\n  \
@@ -139,6 +139,7 @@ exit 128\n    \
 esac\n  \
 ;;\n\
 esac\n\
+unset CRAZYAGENT_IDE_GIT_SECRET\n\
 exec git \"$@\"\n";
 
 const SHIM_EXEC: &str = "exec git \"$@\"\n";

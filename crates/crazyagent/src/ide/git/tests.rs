@@ -337,6 +337,70 @@ fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
     assert_eq!(hooks_path(&off, &project), forced);
 }
 
+/// CA-SEC-004 r2: a project's hook under the git the shim runs does not hold the relay's
+/// secret, while the forwarder a network command goes to still does.
+#[test]
+fn the_shim_keeps_the_relay_secret_from_git_and_hands_it_to_the_forwarder() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let project = base.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    ok(&project, &["init", "-q"]);
+    let seen = base.join("seen");
+    let print = |target: &str| {
+        format!("#!/bin/sh\nprintf '%s' \"${{CRAZYAGENT_IDE_GIT_SECRET-absent}}\"{target}\n")
+    };
+    let hook = project.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    let forwarder = base.join("forwarder");
+    let shim = base.join("shim");
+    let path_git = Path::new(crate::research::runner::GIT);
+    for (file, text) in [
+        (&hook, print(&format!(" > '{}'", seen.display()))),
+        (&forwarder, print("")),
+        (&shim, shim_text(Some(&project), path_git).unwrap()),
+    ] {
+        std::fs::write(file, text).unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let run = |args: &[&str]| {
+        crate::spawn_gate::output(
+            Command::new(&shim)
+                .current_dir(&project)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &project)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .envs(CONFIG_ENV.iter().copied())
+                .env("CRAZYAGENT_IDE_GIT_SECRET", "dummy-secret")
+                .env("CRAZYAGENT_IDE_GIT_NODE", "/bin/sh")
+                .env("CRAZYAGENT_IDE_GIT_FORWARD", &forwarder)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap()
+    };
+    let committed = run(&[
+        "-c",
+        "user.name=Owner",
+        "-c",
+        "user.email=owner@example.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "Plant beds",
+    ]);
+    assert!(committed.status.success(), "{committed:?}");
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "absent");
+    let pushed = run(&["push", "origin", "main"]);
+    assert!(pushed.status.success(), "{pushed:?}");
+    assert_eq!(String::from_utf8_lossy(&pushed.stdout), "dummy-secret");
+}
+
 /// INT1-1, INT1-R2-1: a git that cannot read an agent folder's `.git` treats it as missing
 /// and walks up to the project's repository. The ceiling is the agents root of the project's
 /// own layout: git in an agent folder finds no repository, while the project folder and its

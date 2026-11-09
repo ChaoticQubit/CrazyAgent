@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { encodeFrame, FrameReader, type Reply } from "./engine.js";
-import { GIT_OUTCOME_UNKNOWN, GIT_REQUEST_MS, GIT_SOCKET_ENV, gitOutcome, type GitOutcome } from "./git.js";
+import { GIT_OUTCOME_UNKNOWN, GIT_REQUEST_MS, GIT_SECRET_ENV, GIT_SOCKET_ENV, gitOutcome, type GitOutcome } from "./git.js";
 import { unconfirmed } from "./scm-model.js";
 
 const ANSWER_GRACE_MS = 5_000;
@@ -27,6 +27,8 @@ export interface Printer {
  * network step, and of a pull it only fetches, so once that fetch succeeded the merge or
  * rebase of the branch's upstream runs here, in the IDE sandbox, where the sandbox's write
  * denies apply. A pull with no upstream to take is refused before anything is fetched.
+ * The script hands this a copy of its environment and removes the relay's secret from its
+ * own, so no git it starts, and no hook of that git, holds the secret.
  * Inputs: the environment naming the relay, git's arguments, the folder git runs in and
  * the two streams. Output: the exit code.
  */
@@ -167,7 +169,7 @@ function ask(
       );
     const timer = setTimeout(lost, GIT_REQUEST_MS + ANSWER_GRACE_MS);
     connection.on("connect", () => {
-      connection.write(encodeFrame({ args, folder }));
+      connection.write(encodeFrame({ args, folder, secret: env[GIT_SECRET_ENV] }));
       sent = true;
     });
     connection.on("data", (chunk: Buffer) => {
@@ -199,7 +201,9 @@ function ask(
 }
 
 if (require.main === module) {
-  void forward(process.env, process.argv.slice(2), process.cwd(), process.stdout, process.stderr).then((code) => {
+  const env = { ...process.env };
+  delete process.env[GIT_SECRET_ENV];
+  void forward(env, process.argv.slice(2), process.cwd(), process.stdout, process.stderr).then((code) => {
     process.exitCode = code;
   });
 }

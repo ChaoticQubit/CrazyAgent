@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,9 @@ export const GIT_NODE_ENV = "CRAZYAGENT_IDE_GIT_NODE";
 
 /** Variable naming the forwarder script the engine's `git.path` shim runs. */
 export const GIT_FORWARD_ENV = "CRAZYAGENT_IDE_GIT_FORWARD";
+
+/** Variable holding the secret of one relay start, which every forwarded command carries. */
+export const GIT_SECRET_ENV = "CRAZYAGENT_IDE_GIT_SECRET";
 
 /**
  * How long the relay waits for the engine to run one git network command: past the
@@ -83,7 +86,7 @@ export function gitOutcome(value: unknown): GitOutcome | undefined {
  * Starts the relay the engine's `git.path` shim reaches: a Unix socket in this server's
  * temp folder that takes one git network command per connection, sends it to the engine
  * as `ide.git` and answers with the engine's reply. VS Code's git inherits this process's
- * environment, so the socket, node and forwarder are named there once it listens.
+ * environment, so the socket, node, forwarder and secret are named there once it listens.
  * Inputs: the engine bridge, the environment to name them in and the forwarder's path.
  * Output: the relay, which closes its socket and clears the names when disposed.
  */
@@ -93,7 +96,8 @@ export async function startRelay(
   forwarder: string,
 ): Promise<Disposable> {
   const path = join(tmpdir(), `cai-git-${randomBytes(8).toString("hex")}.sock`);
-  const server = createServer((connection) => relay(engine, connection));
+  const secret = randomBytes(32).toString("hex");
+  const server = createServer((connection) => relay(engine, connection, secret));
   server.maxConnections = CONNECTIONS_MAX;
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -105,20 +109,38 @@ export async function startRelay(
   env[GIT_SOCKET_ENV] = path;
   env[GIT_NODE_ENV] = process.execPath;
   env[GIT_FORWARD_ENV] = forwarder;
+  env[GIT_SECRET_ENV] = secret;
   return {
     dispose: () => {
       if (env[GIT_SOCKET_ENV] === path) {
         delete env[GIT_SOCKET_ENV];
         delete env[GIT_NODE_ENV];
         delete env[GIT_FORWARD_ENV];
+        delete env[GIT_SECRET_ENV];
       }
       server.close();
     },
   };
 }
 
-/** Answers one relay connection: its first frame is the command, anything after it is ignored. */
-function relay(engine: Requester, connection: Socket): void {
+/**
+ * Says whether a forwarded frame carries this relay's secret, in constant time for a secret
+ * of the right length. Inputs: the parsed frame and the secret. Output: whether it matches.
+ */
+function carries(value: unknown, secret: string): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const given = (value as { secret?: unknown }).secret;
+  if (typeof given !== "string") return false;
+  const [held, wanted] = [Buffer.from(given), Buffer.from(secret)];
+  return held.length === wanted.length && timingSafeEqual(held, wanted);
+}
+
+/**
+ * Answers one relay connection: its first frame is the command, refused without this
+ * relay's secret, and anything after it is ignored.
+ * Inputs: the engine bridge, the connection and the secret. Output: none.
+ */
+function relay(engine: Requester, connection: Socket, secret: string): void {
   const reader = new FrameReader();
   let asked = false;
   connection.on("error", () => undefined);
@@ -133,7 +155,7 @@ function relay(engine: Requester, connection: Socket): void {
     }
     if (frames.length === 0) return;
     asked = true;
-    const call = gitCall(frames[0]);
+    const call = carries(frames[0], secret) ? gitCall(frames[0]) : undefined;
     if (call === undefined) {
       answer(connection, { kind: "rejected", code: "ide_git_refused" });
       return;
