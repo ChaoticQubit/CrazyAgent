@@ -53,6 +53,10 @@ pub(crate) const ANSWER_BYTES_MAX: u64 = 64 * 1024;
 pub(crate) const TOOLS_LOG_BYTES_MAX: u64 = 32 * 1024;
 pub(crate) const WAITING_BYTES_MAX: u64 = 16;
 pub(crate) const PREVIEW_BYTES: usize = 200;
+/// The bytes of a letter's quoted body a session reads. Quoting grows a body of line breaks
+/// threefold, and a letter past one delivery's room would hold up every letter behind it.
+const QUOTED_BODY_BYTES_MAX: usize = 2 * BODY_BYTES_MAX;
+const _: () = assert!(QUOTED_BODY_BYTES_MAX + 2 * FROM_BYTES_MAX < super::hook::LETTERS_CHARS_MAX);
 const PLUGIN_NAME: &str = "crazyagent-relay";
 const MONITOR_NAME: &str = "crazyagent-inbox";
 const ROSTER_PART: &str = "relay.json.part";
@@ -115,7 +119,8 @@ impl Letter {
     }
 
     /// The whole message as a session reads it: the mark, the sender, what kind of
-    /// message it is and the full body. Takes the letter. Returns the text.
+    /// message it is and the full body with every line quoted, so none starts as a speaker
+    /// or another message. Takes the letter. Returns the text.
     pub(crate) fn text(&self) -> String {
         let about = match (self.kind, self.question) {
             (MessageKind::Question, Some((target, severity))) => {
@@ -138,9 +143,12 @@ impl Letter {
             .work
             .map(|work| format!(" on work {work}"))
             .unwrap_or_default();
+        let body = crate::team::events::quoted_lines(&self.body);
         format!(
             "{MARK}{}] from {}{about}{work}:\n{}",
-            self.id, self.from, self.body
+            self.id,
+            self.from,
+            clip(&body, QUOTED_BODY_BYTES_MAX)
         )
     }
 }
