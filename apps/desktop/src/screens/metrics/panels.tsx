@@ -33,7 +33,8 @@ function AllColumns({ count, children }: { count: number; children: ReactNode })
   return <details className="mx-more"><summary>All columns, {count} {count === 1 ? "row" : "rows"}</summary>{children}</details>;
 }
 
-/** A compact panel of the first rows by tokens, with every row and column one step away.
+/** A compact panel of the first rows as the engine orders them: the largest by tokens, and
+ * for runs the newest, since a run list is a timeline. Every row and column is one step away.
  * Nothing shows for an empty list. Inputs: the title, the rows and the full table. */
 export function TokenPanel({ title, rows, children }: { title: string; rows: BreakdownRow[]; children: ReactNode }) {
   if (rows.length === 0) return null;
@@ -43,7 +44,7 @@ export function TokenPanel({ title, rows, children }: { title: string; rows: Bre
       {rows.slice(0, PANEL_ROWS_SHOWN).map((row) => <div className="mx-row" role="row" key={row.key}>
         <span className="mx-row-name" role="cell">{row.name}</span>
         <span className="mx-bar" aria-hidden="true"><i style={{ width: barWidth(headlineTokens(row.tokens), top) }} /></span>
-        <span className="mx-row-main" role="cell">{tokenText(headlineTokens(row.tokens), row.notReportedBy)}</span>
+        <span className={row.notReportedBy ? "mx-row-main mx-row-words" : "mx-row-main"} role="cell">{tokenText(headlineTokens(row.tokens), row.notReportedBy)}</span>
         <span className="mx-row-side" role="cell">{row.notReportedBy && headlineTokens(row.tokens) === 0 ? "" : `${compactCount(row.tokens.cache_read)} cache read`}</span>
       </div>)}
     </div>
@@ -82,12 +83,13 @@ export function LinesPanel({ rows, name }: { rows: LinesRow[]; name: (key: strin
   </Panel>;
 }
 
-/** By day: the newest seven days, as the engine lists them, and a button for the rest. Inputs:
- * the days, newest first, and the offset the engine cut them with. */
+/** By day: the newest seven days first, and a button for every day. Inputs: the days, oldest
+ * first as the engine sends them, and the offset the engine cut them with. */
 export function DaysPanel({ days, offset }: { days: DayTokens[]; offset: number }) {
   const [all, setAll] = useState(false);
   if (days.length === 0) return null;
-  const shown = all ? days : days.slice(0, DAYS_SHOWN);
+  const newest = [...days].reverse();
+  const shown = all ? newest : newest.slice(0, DAYS_SHOWN);
   const more = days.length > DAYS_SHOWN;
   return <Panel title="By day" padded={false} className="mx-days" actions={more
     ? <Button size="small" onClick={() => setAll(!all)}>{all ? `Show last ${DAYS_SHOWN} days` : `Show all ${days.length} days`}</Button> : undefined}>

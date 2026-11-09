@@ -56,10 +56,6 @@ const RESULTS: Record<string, string> = {
   needs_pool: "Waiting",
 };
 
-function assert(condition: boolean, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
-
 /** Names shown in place of usage keys: agents by usage key and accounts by id. */
 export interface MetricsNames {
   agents: Map<string, string>;
@@ -247,25 +243,34 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
 
 type BreakdownParts = ReturnType<typeof breakdownRows>;
 
+/** Whether two token counts match in every part. Inputs: the two counts. Output: the answer. */
+function sameTokens(one: Tokens, other: Tokens): boolean {
+  return one.input === other.input && one.output === other.output && one.cache_read === other.cache_read && one.cache_write === other.cache_write;
+}
+
 /** Adds what only the usage read knows to the app page's rows: when each was last used, its
- * runs when asked, and which harness ran for it without reporting usage. A usage row the
- * metrics read has no row for stays listed when it is one of those. Inputs: the table, the
- * usage rows, whether to add Runs, the namer and now. Output: the table with its added
- * columns. */
+ * runs when asked, and which harness ran for it without reporting usage. An agent's usage row
+ * adds up every project, so its Runs and Last used stay blank unless it is plainly that row's
+ * alone: no other row has the key and the tokens match. A usage row the metrics read has no
+ * row for stays listed when its harness reported nothing. Inputs: the table, the usage rows,
+ * whether to add Runs, the namer and now. Output: the table with its added columns. */
 function withUsage(table: BreakdownParts, used: UsageRow[], runs: boolean, name: (key: string) => string, nowMs: number): BreakdownParts {
   const byKey = new Map(used.map((row) => [row.key, row]));
+  const keyOf = (row: BreakdownRow) => row.usageKey ?? row.key;
+  const rowsOfKey = new Map<string, number>();
+  for (const row of table.rows) rowsOfKey.set(keyOf(row), (rowsOfKey.get(keyOf(row)) ?? 0) + 1);
+  const isAlone = (row: BreakdownRow, match: UsageRow) => row.usageKey === undefined || (rowsOfKey.get(row.usageKey) === 1 && sameTokens(match.tokens, row.tokens));
   const cells = (row: UsageRow | undefined) => [...(runs ? [row ? String(row.runs) : ""] : []), row ? agoText(row.last_ms, nowMs) : ""];
   const kept = table.rows.map((row) => {
-    const match = byKey.get(row.usageKey ?? row.key);
-    return { ...row, notReportedBy: match?.not_reported_by, extra: [...row.extra, ...cells(match)] };
+    const match = byKey.get(keyOf(row));
+    return { ...row, notReportedBy: match?.not_reported_by, extra: [...row.extra, ...cells(match && isAlone(row, match) ? match : undefined)] };
   });
-  const listed = new Set(table.rows.map((row) => row.usageKey ?? row.key));
+  const listed = new Set(table.rows.map(keyOf));
   const added = used.filter((row) => row.not_reported_by && !listed.has(row.key)).map((row) => ({
     key: row.key, name: name(row.key), tokens: row.tokens, notReportedBy: row.not_reported_by,
     extra: [...table.extra.map(() => ""), ...cells(row)],
   }));
   const columns = [...table.extra, ...(runs ? ["Runs"] : []), "Last used"];
-  assert([...kept, ...added].every((row) => row.extra.length === columns.length), "every row fills every column");
   return { ...table, extra: columns, rows: [...kept, ...added] };
 }
 
