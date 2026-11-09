@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { go, until } from "./trial-kit.mjs";
 
 const root = process.env.MS_ROOT;
 const evidence = process.env.MS_EVIDENCE;
+const DARK_BELOW = 110;
+const DARK_SHARE = 0.7;
+const SCAN_LINES = 60;
+const SCAN_INSET = 20;
+const FIT_PX = 2;
+const FIT_STEPS = [["open", "open-92s"], ["back", "back"], ["moved", "moved"], ["resized", "resized"], ["second-open", "second-open"]];
 const windowIdTool = process.env.IDE_WINDOW_ID_TOOL;
 const app = process.env.WD_APP;
 const GIT = "/usr/bin/git";
@@ -70,6 +76,64 @@ async function buildReady() {
   }
 }
 
+/** One saved window picture as pixels. Input: the picture's name. Output: its size and a test
+ * for whether a pixel is as dark as the IDE and unlike any part of the app's light page. */
+function pixels(name) {
+  const bmp = join(evidence, "scan.bmp");
+  const made = spawnSync("/usr/bin/sips", ["-s", "format", "bmp", join(evidence, `${name}.png`), "--out", bmp], { encoding: "utf8" });
+  assert.equal(made.status, 0, `the ${name} picture converts: ${made.stderr}`);
+  const data = readFileSync(bmp);
+  rmSync(bmp);
+  const start = data.readUInt32LE(10);
+  const width = data.readInt32LE(18);
+  const rows = data.readInt32LE(22);
+  const bytes = data.readUInt16LE(28) / 8;
+  const height = Math.abs(rows);
+  const stride = Math.ceil((width * bytes) / 4) * 4;
+  const dark = (x, y) => {
+    const at = start + (rows > 0 ? height - 1 - y : y) * stride + x * bytes;
+    return (data[at] + data[at + 1] + data[at + 2]) / 3 < DARK_BELOW;
+  };
+  return { width, height, dark };
+}
+
+/** Finds the IDE in a window picture from its pixels alone, not from what the page asked for.
+ * Inputs: the picture's pixels and the left and right pixel columns to search. Output: the
+ * dark box's edges in pixels, or null when there is none. */
+function darkBox(image, left, right) {
+  const span = (from, to) => Array.from({ length: SCAN_LINES }, (_, line) => Math.round(from + ((to - from) * line) / (SCAN_LINES - 1)));
+  const columns = span(left + SCAN_INSET, right - SCAN_INSET);
+  const rowDark = (y) => columns.filter((x) => image.dark(x, y)).length >= DARK_SHARE * SCAN_LINES;
+  let top = 0;
+  while (top < image.height && !rowDark(top)) top += 1;
+  if (top === image.height) return null;
+  let bottom = image.height - 1;
+  while (!rowDark(bottom)) bottom -= 1;
+  const rows = span(top + SCAN_INSET, bottom - SCAN_INSET);
+  const columnDark = (x) => rows.filter((y) => image.dark(x, y)).length >= DARK_SHARE * SCAN_LINES;
+  let first = 0;
+  while (first < image.width && !columnDark(first)) first += 1;
+  let last = image.width - 1;
+  while (!columnDark(last)) last -= 1;
+  return { left: first, top, right: last + 1, bottom: bottom + 1 };
+}
+
+/** Compares where the IDE really is in a window picture with its panel. Inputs: the page's row
+ * for the step and the picture's name. Output: both boxes in window points, the largest edge
+ * difference and whether the IDE stays clear of the tab row and the side rail. */
+function fit(row, picture) {
+  const image = pixels(picture);
+  const scale = image.width / row.inner[0];
+  const chrome = image.height / scale - row.inner[1];
+  const found = darkBox(image, Math.round(row.panel.x * scale), Math.round((row.panel.x + row.panel.width) * scale));
+  assert.ok(found, `${row.step}: the IDE is in the ${picture} picture`);
+  const seen = Object.fromEntries(Object.entries(found).map(([edge, value]) => [edge, value / scale]));
+  const want = { left: row.panel.x, top: row.panel.y + chrome, right: row.panel.x + row.panel.width, bottom: row.panel.y + row.panel.height + chrome };
+  const off = Math.max(...Object.keys(want).map((edge) => Math.abs(seen[edge] - want[edge])));
+  const clear = seen.top >= row.tabs.bottom + chrome - FIT_PX && seen.left >= row.rail.right - FIT_PX;
+  return { step: row.step, picture, scale, chrome, seen, want, off, clear };
+}
+
 /** What the real IDE page got back when it called a native command. Output: the page's address
  * and its answer, from the file the test build wrote; the webview may JSON-encode the script's
  * result a second time. */
@@ -110,9 +174,13 @@ function startPlan(plan) {
     const log = [];
     window.__ideWindowLog = log;
     const answer = (command) => window.__TAURI_INTERNALS__.invoke(command).then(() => "ok", (failure) => `failed: ${JSON.stringify(failure)}`);
+    const rect = (selector) => {
+      const box = document.querySelector(selector)?.getBoundingClientRect();
+      return box ? { top: box.top, right: box.right, bottom: box.bottom, left: box.left } : null;
+    };
     const note = async (step) => {
       const box = document.querySelector(".ide-panel")?.getBoundingClientRect();
-      log.push({ step, status: await answer("desktop_status"), alerts: [...document.querySelectorAll("[role=alert]")].map((node) => node.textContent), panel: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null, inner: [innerWidth, innerHeight], hash: location.hash });
+      log.push({ step, status: await answer("desktop_status"), alerts: [...document.querySelectorAll("[role=alert]")].map((node) => node.textContent), panel: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null, inner: [innerWidth, innerHeight], outer: [outerWidth, outerHeight], screen: [screenX, screenY], tabs: rect(".tabs[role=tablist]"), rail: rect(".sidebar"), hash: location.hash });
     };
     for (const [at, kind, value] of rows) {
       setTimeout(() => {
@@ -190,5 +258,15 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     const refusal = ideRefusal();
     assert.match(refusal.origin, /^http:\/\/127\.0\.0\.1:\d+$/, `the call came from the real IDE page: ${JSON.stringify(refusal)}`);
     assert.match(refusal.answer ?? "", /^refused: .*not allowed/, `the real IDE page gets no native command: ${JSON.stringify(refusal)}`);
+    const backRow = log.find((row) => row.step === "back");
+    const leftImage = pixels("left");
+    const leftScale = leftImage.width / backRow.inner[0];
+    assert.equal(darkBox(leftImage, Math.round(backRow.panel.x * leftScale), Math.round((backRow.panel.x + backRow.panel.width) * leftScale)), null, "the IDE is not on screen once its tab is left");
+    const fits = FIT_STEPS.map(([step, picture]) => fit(log.find((row) => row.step === step), picture));
+    writeFileSync(join(evidence, "fit.json"), JSON.stringify(fits, null, 2));
+    for (const row of fits) {
+      assert.ok(row.off <= FIT_PX, `${row.step}: the IDE sits on its panel within ${FIT_PX} px: ${JSON.stringify(row)}`);
+      assert.ok(row.clear, `${row.step}: the IDE covers neither the tab row nor the side rail: ${JSON.stringify(row)}`);
+    }
   });
 });
