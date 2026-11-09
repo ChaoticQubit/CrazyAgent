@@ -116,7 +116,8 @@ test("a failed refresh takes the fresh mark off, so changing the view does not r
     })()`);
   });
   assert.deepEqual(seen.later.fresh, ["Ada finished Login"]);
-  assert.equal(seen.stale.rows, 7, "the failed refresh keeps the rows");
+  assert.ok(seen.later.rows > 0, "the read shows rows");
+  assert.equal(seen.stale.rows, seen.later.rows, "the failed refresh keeps the rows");
   assert.deepEqual(seen.stale.fresh, [], "the rows are not new any more");
   assert.equal(seen.moved.missed, null);
   assert.deepEqual(seen.moved.fresh, [], "a remount has no highlight to replay");
