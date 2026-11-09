@@ -34,7 +34,7 @@ const PRIMARY = process.platform === "darwin" ? 4 : 2;
 const CTRL = 2;
 const SHIFT = 8;
 const KEYS = { F1: ["F1", 112], Enter: ["Enter", 13], Escape: ["Escape", 27], ArrowLeft: ["ArrowLeft", 37], ArrowRight: ["ArrowRight", 39] };
-const LEFTOVER_COMMANDS = ["Chat:", "Inline Chat", "Snooze Inline Suggestions", "Sync Account Policy", "Manage Accounts", "Accounts:", "Show Remote Menu", "Install Remote Development Extensions", "Settings Sync"];
+const LEFTOVER_COMMANDS = ["Terminal: Select Default Profile", "Chat:", "Inline Chat", "Snooze Inline Suggestions", "Sync Account Policy", "Manage Accounts", "Accounts:", "Show Remote Menu", "Install Remote Development Extensions", "Settings Sync"];
 const LOOPBACK = /^(127\.0\.0\.1|localhost|[0-9a-v]{52}\.localhost)$/;
 const IDE_FAILED = /didn't match its published checksum|couldn't be downloaded|couldn't start|stopped while it started|unavailable on/;
 
@@ -430,6 +430,35 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         }
         assert.deepEqual(shown.saveFailures, [], "no settings file fails to save on a cold start");
         assert.deepEqual(shown.settingsEditors, [], "no settings.json editor opens on a cold start");
+      });
+
+      await t.test("the chat shortcut, Open View and the secondary side bar bring back no chat", async () => {
+        assert.ok(server, "blocked: the IDE tab step opened no IDE");
+        const chatShown = `document.querySelectorAll(".interactive-session, .chat-widget, .inline-chat, .interactive-input-part").length`;
+        await keys.key("I", CTRL | PRIMARY);
+        await pause(SETTLE_MS);
+        assert.equal(await page.evaluate(chatShown), 0, "the chat shortcut opens no chat");
+        await ide.run("View: Open View");
+        await ide.until("the Open View list", ide.rows);
+        await pause(SETTLE_MS);
+        const views = await page.evaluate(ide.rows);
+        await keys.key("Escape");
+        assert.deepEqual(views.filter((label) => /chat/i.test(label)), [], "Open View lists no chat view");
+        await ide.run("View: Toggle Secondary Side Bar Visibility");
+        await ide.until("the secondary side bar open", `(() => {
+          const bar = document.querySelector(".part.auxiliarybar");
+          return Boolean(bar && bar.getClientRects().length && bar.getBoundingClientRect().width > 0);
+        })()`);
+        await pause(SETTLE_MS);
+        await me.capture("secondary-side-bar");
+        const bar = await page.evaluate(`[...document.querySelectorAll(".part.auxiliarybar [aria-label]")].map((item) => item.getAttribute("aria-label")).filter((name) => /chat/i.test(name) && name !== "Chat actions")`);
+        assert.deepEqual(bar, [], "the opened secondary side bar names no chat but its empty toolbar");
+        assert.equal(await page.evaluate(chatShown), 0, "the opened secondary side bar holds no chat");
+        await ide.run("View: Toggle Secondary Side Bar Visibility");
+        await ide.until("the secondary side bar closed", `(() => {
+          const bar = document.querySelector(".part.auxiliarybar");
+          return !bar || !bar.getClientRects().length || bar.getBoundingClientRect().width === 0;
+        })()`);
       });
 
       await t.test("the owner opens a project file, types and saves, and the edit is in the project folder", async () => {
