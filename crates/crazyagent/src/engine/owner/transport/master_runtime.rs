@@ -69,13 +69,13 @@ fn master_landed_note(
     }
 }
 
-/// What the note under a master turn says after trying to land the turn's change set. The
-/// set lands or conflicts whole, with edits from earlier turns in it, so the note names the
-/// set. Input: the outcome. Output: the note.
+/// What the note under a master turn says after trying to land the turn's change set. Only
+/// a set of nothing but conflict fixes gets this far, so a land is named as that. Input:
+/// the outcome. Output: the note.
 fn master_land_words(outcome: &crate::landing::AcceptOutcome) -> String {
     match outcome {
         crate::landing::AcceptOutcome::Landed { branch, .. } => format!(
-            "The master merged its change set into {branch} itself, with everything in that set, as this project's setting lets it at Full access. Activity lists the merge."
+            "The master merged its conflict fix into {branch} itself, as this project's setting lets it at Full access. Activity lists the merge."
         ),
         crate::landing::AcceptOutcome::Conflict { files } => {
             let named: Vec<&str> = files
