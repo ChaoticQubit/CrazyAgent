@@ -1886,8 +1886,10 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
 
 /// CA-SEC-002: an adopted teammate's calls go only to its lead's teammates' server. Once that
 /// server ended while the lead's own server still runs, a pane the lead split there and
-/// tagged with the teammate's name receives none of them, and the teammate reads as gone
-/// whether or not the engine's own server runs. Ending the teammate ends no such pane.
+/// tagged with the teammate's name receives none of them, and the teammate reads as gone.
+/// A running engine server answers its two display probes with no target, so there
+/// `input_live` says false and `quiet` fails where the lead's pane would answer. Ending the
+/// teammate ends no such pane.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teammates_server_ended() {
@@ -1945,13 +1947,24 @@ fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teamma
     until_refused(&lead.mates);
 
     let gone = Some("terminal_agent_unknown".to_owned());
-    let reads_as_gone = |host: &dyn Host| {
+    let reads_as_gone = |host: &dyn Host, engine_runs: bool| {
         assert_eq!(
             host.input(&ann, b"to-own\n").err().map(|problem| problem.0),
             gone
         );
-        assert_eq!(host.input_live(&ann).err().map(|problem| problem.0), gone);
-        assert_eq!(host.quiet(&ann).err().map(|problem| problem.0), gone);
+        if engine_runs {
+            assert_eq!(
+                host.input_live(&ann).map_err(|problem| problem.0),
+                Ok(false)
+            );
+            assert_eq!(
+                host.quiet(&ann).map_err(|problem| problem.0),
+                Err("terminal_command_failed".to_owned())
+            );
+        } else {
+            assert_eq!(host.input_live(&ann).err().map(|problem| problem.0), gone);
+            assert_eq!(host.quiet(&ann).err().map(|problem| problem.0), gone);
+        }
         assert_eq!(host.snapshot(&ann).err().map(|problem| problem.0), gone);
         assert_eq!(host.pane_pid(&ann).err().map(|problem| problem.0), gone);
         assert_eq!(
@@ -1959,11 +1972,11 @@ fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teamma
             gone
         );
     };
-    reads_as_gone(host.as_ref());
+    reads_as_gone(host.as_ref(), false);
     let bob = AgentId::team(3).unwrap();
     host.spawn(&bob, &lead.shell("bob$ ", &["/bin/sh"]))
         .unwrap();
-    reads_as_gone(host.as_ref());
+    reads_as_gone(host.as_ref(), true);
     assert_eq!(host.kill(&ann).err().map(|problem| problem.0), gone);
     let panes = tmux_reply(
         &lead.tmux,
