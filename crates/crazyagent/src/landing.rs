@@ -1301,6 +1301,14 @@ pub fn accept_into(
     )
 }
 
+/// The refusal of a land the owner did not press while a worker below the set's agent
+/// holds an open change set (HB-S4-LANDED).
+pub const WORKER_OPEN: &str = "changes_worker_open";
+
+/// What the agent refused with [`WORKER_OPEN`] reads, after "Not merged" or "Not accepted".
+pub const WORKER_OPEN_TEXT: &str =
+    "a worker's work under that agent is still open. Land that work first, then merge again.";
+
 /// Lands a change set on a chosen local branch as [`accept_into`] does, for an Accept the
 /// owner did not make: the project's activity names who accepted it, the master or the
 /// engine. Inputs: as [`accept_into`], plus who accepts. Output: the landed commit and
