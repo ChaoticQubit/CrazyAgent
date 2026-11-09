@@ -2521,6 +2521,44 @@ fn a_worker_the_master_stopped_wakes_for_the_master_and_not_for_its_lead() {
     assert_eq!(pinned(&fixture, worker).len(), 1);
 }
 
+/// A stop of an agent a higher stop already holds says who holds it and who can wake it,
+/// instead of offering a wake that would be refused (HB-S5-B).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stop_under_a_higher_stop_says_who_holds_it() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let lead = named_sub(&fixture, "lead-charts", "working");
+    let worker = named_sub(&fixture, "bar-chart", "working");
+    lead_of(&fixture, lead, worker);
+    let label = super::super::events::label(&fixture.connection, worker).unwrap();
+    let stop = json!({"agent": worker.to_string()});
+    assert!(!as_master(&mut fixture, tool::STOP_TOOL, stop.clone()).1);
+    assert_eq!(
+        as_sub(&mut fixture, lead, tool::STOP_TOOL, stop.clone()),
+        (
+            format!(
+                "The master stopped {label} already. Only the master or the owner can wake it."
+            ),
+            false
+        )
+    );
+    crate::team::owner_stop(
+        &fixture.connection,
+        &ProjectId::new(PROJECT).unwrap(),
+        worker,
+        2,
+    )
+    .unwrap();
+    assert_eq!(
+        as_master(&mut fixture, tool::STOP_TOOL, stop),
+        (
+            format!("The owner stopped {label} already. Only the owner can wake it."),
+            false
+        )
+    );
+}
+
 /// A message to a finished agent that cannot wake, here one whose worktree is gone, is
 /// refused with the wake's own sentence and stores nothing, so no message waits for an
 /// agent that never runs again (K1b `update_work`).

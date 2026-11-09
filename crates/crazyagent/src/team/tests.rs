@@ -4398,8 +4398,8 @@ fn a_stop_keeps_the_highest_standing_of_who_made_it() {
         .unwrap();
     assert_eq!(
         stop_of(&connection, 7).unwrap(),
-        Some((StoppedBy::Master, 1)),
-        "a lead's later stop does not lower the master's"
+        Some((StoppedBy::Master, 2)),
+        "a lead's later stop does not lower the master's, and its time stands"
     );
     owner_stop(&connection, &project, 7, 2).unwrap();
     assert!(owner_stopped(&connection, 7).unwrap());
@@ -4408,6 +4408,10 @@ fn a_stop_keeps_the_highest_standing_of_who_made_it() {
         .unwrap()
         .unwrap();
     assert!(owner_stopped(&connection, 7).unwrap());
+    assert_eq!(
+        stop_of(&connection, 7).unwrap(),
+        Some((StoppedBy::Owner, 3))
+    );
 }
 
 /// A stop recorded before stops named their maker was the owner's own, so an engine DB from

@@ -20671,6 +20671,74 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
     team.shutdown().unwrap();
 }
 
+/// A wake admitted after one stop and still queued dies at a later stop, whoever makes it:
+/// the task fails, the agent stays stopped and the stop stands at its new time (HB-S5-B).
+#[test]
+fn a_later_stop_fails_a_wake_still_queued_behind_a_full_team() {
+    use crate::team::StoppedBy::{Lead, Master};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let running = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers
+        .insert(running, between_turns(&project, AgentRole::Sub, true, true));
+    for (first, second, held, reason) in [
+        (Lead, Lead, Lead, super::LEAD_STOPPED_TASK),
+        (Lead, Master, Master, super::MASTER_STOPPED_TASK),
+        (Master, Lead, Master, super::MASTER_STOPPED_TASK),
+        (Master, Master, Master, super::MASTER_STOPPED_TASK),
+    ] {
+        let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+        let wake = format!("Wake agent {agent}.");
+        crate::team::agent_stop(&fixture.connection, &project, agent, first, 10)
+            .unwrap()
+            .unwrap();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,?2,'queued',20)",
+                params![PROJECT, wake],
+            )
+            .unwrap();
+        let task = fixture.connection.last_insert_rowid();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+                params![task, PROJECT, agent],
+            )
+            .unwrap();
+        team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+            .unwrap();
+        assert_eq!(
+            task_of(&fixture, &wake),
+            ("queued".to_owned(), None),
+            "{first:?} then {second:?}: the full team holds the wake"
+        );
+        crate::team::agent_stop(&fixture.connection, &project, agent, second, 30)
+            .unwrap()
+            .unwrap();
+        team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+            .unwrap();
+        assert_eq!(
+            task_of(&fixture, &wake),
+            ("failed".to_owned(), Some(reason.to_owned())),
+            "{first:?} then {second:?}"
+        );
+        assert_eq!(
+            fixture.agent_status(agent).0,
+            AgentStatus::Stopped,
+            "{first:?} then {second:?}"
+        );
+        assert_eq!(
+            crate::team::stop_of(&fixture.connection, agent).unwrap(),
+            Some((held, 30)),
+            "{first:?} then {second:?}"
+        );
+    }
+    team.workers.clear();
+}
+
 /// Stop all holds across an engine restart and Start all wakes the same agent (S4): the
 /// paused team's busy harness stops with its task waiting for it, a restarted engine keeps
 /// the team paused and starts nothing, and the owner's resume wakes that harness in its own
