@@ -23,6 +23,17 @@ function session(patch = {}) {
 
 const render = (patch, route = { name: "home" }) => renderToStaticMarkup(createElement(AppView, { session: session(patch), route }));
 
+test("a reply this app could not read shows the restart sentence", async () => {
+  const { classifyFailure } = await import("../src/api.ts");
+  const failed = classifyFailure({ code: "engine_version_mismatch" });
+  assert.deepEqual(failed, {
+    kind: "error",
+    code: "engine_version_mismatch",
+    message: "CrazyAgent's engine is a different version from this app. Restart the engine.",
+  });
+  assert.equal(state.engineState(failed), "outdated");
+});
+
 test("the real App first renders the launch skeleton without calling the engine during render", () => {
   const markup = renderToStaticMarkup(createElement(App));
   assert.match(markup, /aria-busy="true"/);

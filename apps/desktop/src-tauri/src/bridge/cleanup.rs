@@ -5,7 +5,7 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::team::cleanup::{FinishedAgent, Removal, RemovalPreview};
 use std::sync::Arc;
 
-fn cleanup_error(error: EngineError) -> BridgeError {
+pub(super) fn cleanup_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }

@@ -61,7 +61,7 @@ impl From<KnowledgeEntry> for MemoryItem {
     }
 }
 
-fn read_failure(code: &str) -> BridgeError {
+pub(super) fn read_failure(code: &str) -> BridgeError {
     caused(
         match code {
             "pool_missing" => "pool_missing",

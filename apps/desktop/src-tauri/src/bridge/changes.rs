@@ -5,7 +5,7 @@ use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView,
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
-fn changes_error(error: EngineError) -> BridgeError {
+pub(super) fn changes_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }

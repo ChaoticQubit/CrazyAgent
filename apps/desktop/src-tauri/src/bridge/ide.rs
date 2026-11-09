@@ -13,7 +13,7 @@ pub struct IdeView {
     pub platform: &'static str,
 }
 
-fn ide_error(error: EngineError) -> BridgeError {
+pub(super) fn ide_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }

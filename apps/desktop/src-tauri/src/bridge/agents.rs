@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 const BRIDGE_CODES: &[&str] = &["not_connected", "agent_launch_failed"];
 
-fn agent_error(error: EngineError) -> BridgeError {
+pub(super) fn agent_error(error: EngineError) -> BridgeError {
     let code = match error.0.as_str() {
         "controller_disconnected" => "not_connected",
         launch if launch.starts_with("launch_") => "agent_launch_failed",

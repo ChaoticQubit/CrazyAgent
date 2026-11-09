@@ -41,7 +41,7 @@ const ACCOUNT_CODES: &[&str] = &[
     "stale_config",
 ];
 
-fn account_error(error: EngineError) -> BridgeError {
+pub(super) fn account_error(error: EngineError) -> BridgeError {
     let code = if error.0 == "controller_disconnected" {
         "not_connected"
     } else {

@@ -1308,6 +1308,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_bridge_error_function_keeps_an_engine_version_mismatch() {
+        const CODE: &str = "engine_version_mismatch";
+        let engine = || crazyagent::engine::EngineError(CODE.to_owned());
+        let mapped = [
+            ("changes", changes::changes_error(engine())),
+            ("usage", usage::usage_error(engine())),
+            ("agents", agents::agent_error(engine())),
+            ("process", process::process_error(engine())),
+            ("questions", questions::questions_error(engine())),
+            ("recovery", recovery::recovery_error(engine())),
+            ("cleanup", cleanup::cleanup_error(engine())),
+            ("ide reveal", ide_reveal::ide_error(engine())),
+            ("ide extensions", ide_extensions::extensions_error(engine())),
+            ("ide tab", ide::ide_error(engine())),
+            ("notify", notify::notify_error(engine())),
+            ("native auth", native_auth::auth_error(engine())),
+            ("account profile", account_profile::profile_error(engine())),
+            ("accounts", accounts::account_error(engine())),
+            ("plugins", plugins::plugin_failure(engine())),
+            ("team", team::read_failure(CODE)),
+            ("project setup", project_setup::read_failure(CODE)),
+            ("intake and github", intake::known(CODE, &[], "intake_failed")),
+            ("harness catalog", caused("owner_read_failed", CODE)),
+        ];
+        let dropped: Vec<&str> = mapped
+            .iter()
+            .filter(|(_, error)| error.code != CODE || error.cause.is_some())
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(dropped, Vec::<&str>::new());
+    }
+
+    #[test]
     fn a_project_list_stops_at_its_bound_says_so_and_fits_the_worst_rows() {
         let rows = |count: usize| -> Vec<ProjectRow> {
             (1..=count)

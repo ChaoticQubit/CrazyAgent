@@ -188,7 +188,7 @@ const SIZE_PROBLEMS: [&str; 3] = [
     "folder_size_unreadable",
 ];
 
-fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeError {
+pub(super) fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeError {
     let code = if code == "controller_disconnected" {
         "not_connected"
     } else {

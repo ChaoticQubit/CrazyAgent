@@ -8,7 +8,7 @@ use crazyagent::plugins::{
 };
 use crazyagent::protocol::ProjectId;
 
-fn plugin_failure(error: EngineError) -> BridgeError {
+pub(super) fn plugin_failure(error: EngineError) -> BridgeError {
     failure(crazyagent::plugins::known_code(&error.0).unwrap_or("plugins_failed"))
 }
 

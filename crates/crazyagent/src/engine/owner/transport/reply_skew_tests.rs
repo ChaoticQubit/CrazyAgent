@@ -177,6 +177,19 @@ fn project() -> ProjectId {
     ProjectId::new("p").unwrap()
 }
 
+/// An account profile request naming a synthetic connection. Output: the request.
+fn account_request() -> AccountProfileRequest {
+    AccountProfileRequest {
+        request_id: RequestId::new("skew-account").unwrap(),
+        scope: NativeAuthScope {
+            expected_database_instance: "a".repeat(64),
+            connection: CredentialRef::new("skew-connection").unwrap(),
+            expected_config_id: ConfigId::new("b".repeat(64)).unwrap(),
+            expected_source_hash: "c".repeat(64),
+        },
+    }
+}
+
 /// The refusal a call ended with. Input: the call's result. Output: its code.
 fn refused<T: std::fmt::Debug>(result: Result<T, EngineError>) -> String {
     result.unwrap_err().0
@@ -239,17 +252,12 @@ async fn one_read_of_every_exchange_reports_an_unreadable_reply_as_a_version_mis
     );
     assert_eq!(refused(client.recovery_banner(project()).await), MISMATCH);
     assert_eq!(refused(client.usage_metrics(None, 0).await), MISMATCH);
-    let request = AccountProfileRequest {
-        request_id: RequestId::new("skew-account").unwrap(),
-        scope: NativeAuthScope {
-            expected_database_instance: "a".repeat(64),
-            connection: CredentialRef::new("skew-connection").unwrap(),
-            expected_config_id: ConfigId::new("b".repeat(64)).unwrap(),
-            expected_source_hash: "c".repeat(64),
-        },
-    };
     assert_eq!(
-        refused(client.read_account_auth_capabilities(request).await),
+        refused(
+            client
+                .read_account_auth_capabilities(account_request())
+                .await
+        ),
         MISMATCH
     );
     assert_eq!(skewed.logged().len(), 14);
@@ -298,6 +306,17 @@ async fn a_mutation_exchange_keeps_its_unknown_outcome_and_logs_nothing() {
     assert_eq!(
         refused(skewed.client.usage_refresh().await),
         "usage_outcome_unknown"
+    );
+    assert!(skewed.logged().is_empty());
+    skewed.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_skewed_read_back_of_a_configure_keeps_its_unknown_outcome() {
+    let skewed = Skewed::start(vec![junk()]).await;
+    assert_eq!(
+        refused(skewed.client.read_account_profile(account_request()).await),
+        "account_profile_outcome_unknown"
     );
     assert!(skewed.logged().is_empty());
     skewed.stop().await;
