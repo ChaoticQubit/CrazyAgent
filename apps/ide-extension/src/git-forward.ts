@@ -27,6 +27,8 @@ export interface Printer {
  * network step, and of a pull it only fetches, so once that fetch succeeded the merge or
  * rebase of the branch's upstream runs here, in the IDE sandbox, where the sandbox's write
  * denies apply. A pull with no upstream to take is refused before anything is fetched.
+ * The script hands this a copy of its environment and removes the relay's secret from its
+ * own, so no git it starts, and no hook of that git, holds the secret.
  * Inputs: the environment naming the relay, git's arguments, the folder git runs in and
  * the two streams. Output: the exit code.
  */
@@ -199,7 +201,9 @@ function ask(
 }
 
 if (require.main === module) {
-  void forward(process.env, process.argv.slice(2), process.cwd(), process.stdout, process.stderr).then((code) => {
+  const env = { ...process.env };
+  delete process.env[GIT_SECRET_ENV];
+  void forward(env, process.argv.slice(2), process.cwd(), process.stdout, process.stderr).then((code) => {
     process.exitCode = code;
   });
 }

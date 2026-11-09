@@ -141,7 +141,9 @@ function ask(env, args, folder, stdout, stderr) {
     });
 }
 if (require.main === module) {
-    void forward(process.env, process.argv.slice(2), process.cwd(), process.stdout, process.stderr).then((code) => {
+    const env = { ...process.env };
+    delete process.env[git_js_1.GIT_SECRET_ENV];
+    void forward(env, process.argv.slice(2), process.cwd(), process.stdout, process.stderr).then((code) => {
         process.exitCode = code;
     });
 }
