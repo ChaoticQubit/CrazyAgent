@@ -12,6 +12,7 @@ import {
   GIT_ARGS_MAX,
   GIT_FORWARD_ENV,
   GIT_NODE_ENV,
+  GIT_SECRET_ENV,
   GIT_SOCKET_ENV,
   gitCall,
   gitFailure,
@@ -53,6 +54,7 @@ async function withRelay(check) {
       engine.dispose();
       rmSync(project, { recursive: true, force: true });
       assert.equal(env[GIT_SOCKET_ENV], undefined, "a closed relay is no longer named");
+      assert.equal(env[GIT_SECRET_ENV], undefined, "a closed relay's secret is cleared");
     }
   });
 }

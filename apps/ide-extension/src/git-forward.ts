@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { encodeFrame, FrameReader, type Reply } from "./engine.js";
-import { GIT_OUTCOME_UNKNOWN, GIT_REQUEST_MS, GIT_SOCKET_ENV, gitOutcome, type GitOutcome } from "./git.js";
+import { GIT_OUTCOME_UNKNOWN, GIT_REQUEST_MS, GIT_SECRET_ENV, GIT_SOCKET_ENV, gitOutcome, type GitOutcome } from "./git.js";
 import { unconfirmed } from "./scm-model.js";
 
 const ANSWER_GRACE_MS = 5_000;
@@ -167,7 +167,7 @@ function ask(
       );
     const timer = setTimeout(lost, GIT_REQUEST_MS + ANSWER_GRACE_MS);
     connection.on("connect", () => {
-      connection.write(encodeFrame({ args, folder }));
+      connection.write(encodeFrame({ args, folder, secret: env[GIT_SECRET_ENV] }));
       sent = true;
     });
     connection.on("data", (chunk: Buffer) => {

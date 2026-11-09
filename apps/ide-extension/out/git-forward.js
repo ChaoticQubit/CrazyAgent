@@ -108,7 +108,7 @@ function ask(env, args, folder, stdout, stderr) {
             : "fatal: the CrazyAgent IDE relay is not reachable\n");
         const timer = setTimeout(lost, git_js_1.GIT_REQUEST_MS + ANSWER_GRACE_MS);
         connection.on("connect", () => {
-            connection.write((0, engine_js_1.encodeFrame)({ args, folder }));
+            connection.write((0, engine_js_1.encodeFrame)({ args, folder, secret: env[git_js_1.GIT_SECRET_ENV] }));
             sent = true;
         });
         connection.on("data", (chunk) => {
