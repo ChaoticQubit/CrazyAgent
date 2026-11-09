@@ -2968,6 +2968,7 @@ fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
 fn a_confined_child_reads_no_process_arguments_by_sysctl() {
     const NAME: &str = "a_confined_child_reads_no_process_arguments_by_sysctl";
     const CANARY: &str = "DUMMY_CANARY=dummy-value";
+    const PLATFORM_ARGUMENT: &str = "30.0417";
     const PROBE: &str = r#"$m=pack("i3",1,shift,shift);$b="\0"x262144;$l=pack("Q",262144);syscall(202,$m,3,$b,$l,0,0)==0 or exit 3;print $b"#;
     const NCPU: &str = r#"$m=pack("i2",6,3);$b="\0"x4;$l=pack("Q",4);syscall(202,$m,2,$b,$l,0,0)==0 or exit 3;print "cpus=",unpack("i",$b)"#;
     if std::env::var_os("DUMMY_PROCARGS_CHILD").is_some() {
@@ -2991,7 +2992,7 @@ fn a_confined_child_reads_no_process_arguments_by_sysctl() {
     let mut apple = quiet(
         std::process::Command::new("/usr/bin/env")
             .env_clear()
-            .args(["DUMMY_CANARY=dummy-value", "/bin/sleep", "30"]),
+            .args(["DUMMY_CANARY=dummy-value", "/bin/sleep", PLATFORM_ARGUMENT]),
     );
     std::thread::sleep(std::time::Duration::from_millis(500));
     let case = case();
@@ -3007,14 +3008,23 @@ fn a_confined_child_reads_no_process_arguments_by_sysctl() {
                 &format!("/usr/bin/perl -e '{PROBE}' {mib} {target}"),
             )
         };
-        let unconfined = crazyagent::spawn_gate::output(
-            std::process::Command::new("/usr/bin/perl")
-                .args(["-e", PROBE, &mib.to_string(), &dummy.id().to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
-        )
-        .unwrap();
+        let plain = |target: u32| {
+            crazyagent::spawn_gate::output(
+                std::process::Command::new("/usr/bin/perl")
+                    .args(["-e", PROBE, &mib.to_string(), &target.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap()
+        };
+        let plain_platform = plain(apple.id());
+        if !plain_platform.status.success() || !holds(&plain_platform, PLATFORM_ARGUMENT) {
+            problems.push(format!(
+                "{mib}: inconclusive, the unconfined probe read no platform argument"
+            ));
+        }
+        let unconfined = plain(dummy.id());
         if !unconfined.status.success() || !holds(&unconfined, NAME) {
             problems.push(format!(
                 "{mib}: inconclusive, the unconfined probe read nothing"
@@ -3025,8 +3035,10 @@ fn a_confined_child_reads_no_process_arguments_by_sysctl() {
             problems.push(format!("{mib}: read a process outside the sandbox"));
         }
         let platform = probe("apple", apple.id());
-        if holds(&platform, CANARY) {
-            problems.push(format!("{mib}: read a platform binary's environment"));
+        if holds(&platform, CANARY) || holds(&platform, PLATFORM_ARGUMENT) {
+            problems.push(format!(
+                "{mib}: read a platform binary's arguments or environment"
+            ));
         }
     }
     let ordinary = run(
@@ -3052,4 +3064,46 @@ fn a_confined_child_reads_no_process_arguments_by_sysctl() {
         problems.push(format!("an ordinary sysctl read failed: {ordinary:?}"));
     }
     assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs r2: `lsof` lists process ids
+/// before it reads one, so listing them stays open and a confined agent can still ask what
+/// its own process holds.
+#[test]
+fn a_confined_lsof_on_its_own_process_succeeds() {
+    let case = case();
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let output = run(
+        &confined,
+        &case.profiles.join("lsof.sb"),
+        "/usr/sbin/lsof -p $$",
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(text.contains("COMMAND") && text.contains("cwd"), "{text}");
+}
+
+/// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs r2: a confined shell lists its
+/// own running child, the list a harness walks to stop a tool's processes. The probe makes
+/// the `proc_info` list call with the parent-only filter, which `proc_listchildpids` wraps.
+#[test]
+fn a_confined_shell_lists_its_own_running_child() {
+    const LIST: &str = r#"$b="\0"x65536;$n=syscall(336,1,6,getppid(),0,$b,65536);$n>=0 or exit 3;print join(" ",grep{$_}unpack("i*",substr($b,0,$n))),"\n""#;
+    let case = case();
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let output = run(
+        &confined,
+        &case.profiles.join("children.sb"),
+        &format!(
+            "/bin/sleep 30 & p=$!; echo child=$p; /usr/bin/perl -e '{LIST}'; c=$?; kill $p; exit $c"
+        ),
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    let child = text
+        .lines()
+        .find_map(|line| line.strip_prefix("child="))
+        .unwrap();
+    let listed = text.lines().last().unwrap();
+    assert!(listed.split(' ').any(|pid| pid == child), "{text}");
 }
