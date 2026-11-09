@@ -82,6 +82,18 @@ export async function mount(id, interval = EVERY) {
   return state();
 }
 
+/** Mounts Recent activity on its real loader, the bridge answering every command the same way.
+ * Inputs: the project id and the bridge's answer. Output: what it shows and the calls it sent. */
+export async function mountReal(id, answer) {
+  root?.unmount();
+  const sent = [];
+  window.__TAURI_INTERNALS__ = { transformCallback: () => 0, invoke: async (command, args) => { sent.push({ command, args }); return answer; } };
+  document.body.innerHTML = '<div id="root"></div>';
+  root = createRoot(document.getElementById("root"));
+  await acted(() => root.render(createElement(RecentActivity, { projectId: id, every: 60_000 })));
+  return { ...state(), sent };
+}
+
 /** Shows another project in the same section. Input: its id. Output: the state. */
 export async function move(id) {
   await acted(() => root.render(createElement(RecentActivity, { projectId: id, every, read, undo })));
