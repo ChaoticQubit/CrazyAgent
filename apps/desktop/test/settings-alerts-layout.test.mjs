@@ -3,7 +3,7 @@ import test from "node:test";
 import { onTab, readable, shown, walk } from "./fixtures/settings-app-tabs-run.mjs";
 
 test("Team alerts shows its title, the wake rule, then one section per project with a removed project named so", async () => {
-  const seen = await onTab("alerts", {}, async (page) => ({ ...(await shown(page)), noteInset: await page.evaluate("(() => { const note = document.querySelector('.set-body [role=note]'); return note ? note.getBoundingClientRect().left - note.closest('.set-body').getBoundingClientRect().left : null; })()") }));
+  const seen = await onTab("alerts", {}, async (page) => ({ ...(await shown(page)), noteInset: await page.evaluate("(() => { const note = document.querySelector('.set-body [role=note]'); if (!note) return null; const words = document.createRange(); words.selectNodeContents(note); return words.getBoundingClientRect().left - note.closest('.set-body').getBoundingClientRect().left; })()") }));
   assert.equal(seen.top?.heading, "Team alerts", JSON.stringify(seen.top));
   assert.ok(seen.top.purpose.length > 0, JSON.stringify(seen.top));
   assert.equal(seen.noteInset, 16, "the note lines up with the rule's switches");
