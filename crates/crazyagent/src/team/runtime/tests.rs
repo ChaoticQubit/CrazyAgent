@@ -19868,6 +19868,29 @@ fn an_agent_with_a_queued_pinned_task_stays_when_an_idle_agent_makes_room() {
     team.shutdown().unwrap();
 }
 
+/// A lead whose own child task is queued stays at a full limit (DEC-119 addendum): stopping
+/// it for that child would leave the child's result with nobody to deliver it to. The other
+/// idle agent makes room and the child runs under its lead.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_with_a_queued_child_task_stays_when_an_idle_agent_makes_room() {
+    let fixture = Fixture::new(2);
+    committed_project(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = done_and_idle(&fixture, &mut team, "Write a.md");
+    let other = done_and_idle(&fixture, &mut team, "Write b.md");
+    lead_spawns(&fixture, lead, "Write the child page.");
+    fixture.until(&mut team, "the child task is done", |f| {
+        task_of(f, "Write the child page.").0 == "done"
+    });
+    let child = task_and_agent(&fixture, "Write the child page.").1.unwrap();
+    assert_eq!(parent_of(&fixture, child), Some(lead));
+    assert_eq!(fixture.agent_status(lead).0, AgentStatus::Idle);
+    assert_eq!(fixture.agent_status(other).0, AgentStatus::Stopped);
+    team.shutdown().unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn one_idle_agent_stops_at_a_time_to_make_room() {
