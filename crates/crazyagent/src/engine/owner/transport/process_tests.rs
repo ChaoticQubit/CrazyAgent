@@ -8,8 +8,8 @@ use std::sync::Barrier;
 /// Makes a temporary engine folder whose `engine.db` is in WAL and written in it, as an engine
 /// leaves it. The macOS system SQLite refuses a writer at once in a rollback journal while a
 /// read-only connection holds a read, and refuses read-only connections on a WAL file never
-/// written in WAL. No real engine meets either.
-/// Output: the folder's guard and its canonical path.
+/// written in WAL. No engine on a disk that takes WAL meets either; the engine does not check
+/// that WAL took. Output: the folder's guard and its canonical path.
 fn root() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
@@ -92,30 +92,6 @@ fn keep(
         Answer::Saved(saved) => Ok(saved),
         _ => panic!("a save answers saved or stale"),
     }
-}
-
-/// The refusals a store call answers when the store stayed busy past its own wait, as it
-/// can on a loaded machine, and how often a racing test asks again before failing.
-const BUSY_CODES: [&str; 4] = [
-    "process_unavailable",
-    "process_save_unavailable",
-    "instruction_settings_unavailable",
-    "instruction_settings_save_unavailable",
-];
-const BUSY_TRIES: usize = 20;
-
-/// Runs one store call of a racing test until the store takes it, asking again each time
-/// the call is refused only because the store stayed busy; such a refusal changes nothing,
-/// so the race still ends only in the answers the test checks. Input: the call. Output:
-/// its first answer that is not a busy refusal; it fails after `BUSY_TRIES` of them.
-fn when_free<T>(mut call: impl FnMut() -> Result<T, EngineError>) -> Result<T, EngineError> {
-    for _ in 0..BUSY_TRIES {
-        match call() {
-            Err(problem) if BUSY_CODES.contains(&problem.0.as_str()) => {}
-            answer => return answer,
-        }
-    }
-    panic!("the store stayed busy through {BUSY_TRIES} tries");
 }
 
 fn answered(answer: Answer) -> String {
@@ -434,7 +410,7 @@ fn stale_process_text_save_is_refused() {
                 let (root, start) = (&root, &start);
                 threads.spawn(move || {
                     start.wait();
-                    when_free(|| save(root, None, &format!("Racer {index}.\n"), 2)).unwrap()
+                    save(root, None, &format!("Racer {index}.\n"), 2).unwrap()
                 })
             })
             .collect();
@@ -646,9 +622,6 @@ fn stale_agent_instructions_save_is_refused() {
     );
 }
 
-/// Saves made at once from six screens each name the version they read: a save lands only
-/// on the version it read and reads back what it stored at the next one, every other save
-/// is refused as stale, and the stored version counts exactly the saves that landed (Q35).
 #[test]
 fn the_store_under_test_runs_the_journal_mode_the_engine_keeps_it_in() {
     let (_directory, root) = root();
@@ -659,6 +632,9 @@ fn the_store_under_test_runs_the_journal_mode_the_engine_keeps_it_in() {
     assert_eq!(mode, "wal");
 }
 
+/// Saves made at once from six screens each name the version they read: a save lands only
+/// on the version it read and reads back what it stored at the next one, every other save
+/// is refused as stale, and the stored version counts exactly the saves that landed (Q35).
 #[test]
 fn saves_at_once_land_only_on_the_version_they_read() {
     use crate::instruction_files::{EditDelivery, Mode};
@@ -697,14 +673,12 @@ fn saves_at_once_land_only_on_the_version_they_read() {
                     start.wait();
                     let mut landed = 0_u64;
                     for _ in 0..100 {
-                        let read = when_free(|| instruction_settings(root, project, None)).unwrap();
-                        match when_free(|| {
-                            instruction_settings(
-                                root,
-                                project,
-                                Some((settings, Some(read.version))),
-                            )
-                        }) {
+                        let read = instruction_settings(root, project, None).unwrap();
+                        match instruction_settings(
+                            root,
+                            project,
+                            Some((settings, Some(read.version))),
+                        ) {
                             Ok(saved) => {
                                 assert_eq!(
                                     saved,

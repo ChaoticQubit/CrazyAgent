@@ -11,6 +11,7 @@ const CHROME = process.env.CRAZYAGENT_CHROME || "/Applications/Google Chrome.app
 const STARTUP_MS = 15000;
 const CALL_MS = 15000;
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
+const PAGE = '<!doctype html><html lang="en"><head></head><body></body></html>';
 
 /** Bundles one test fixture and the production modules it imports into a script that defines
  * `Fixture` in the page. Input: the fixture path. Output: the script text. */
@@ -122,7 +123,8 @@ const chrome = await launch();
  * so no storage, permission or cache crosses tests, and always closes that context afterwards.
  * Input: the check, given `evaluate(expression)` for page scripts (awaited, returned by value),
  * `send(method, params)` for DevTools commands, `on(method, listener)` for DevTools events such
- * as `Network.loadingFailed` and `context`, the browser context id. Output: what the check
+ * as `Network.loadingFailed` and `context`, the browser context id. The page has the doctype
+ * the app's page has, so a check measures the layout the app shows. Output: what the check
  * returns. */
 export async function withPage(check) {
   const browser = await connect(chrome.browser);
@@ -138,6 +140,8 @@ export async function withPage(check) {
           if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
           return reply.result.value;
         };
+        await evaluate(`document.open(); document.write(${JSON.stringify(PAGE)}); document.close();`);
+        assert.equal(await evaluate("document.compatMode"), "CSS1Compat", "the page is in standards mode, as the app's page is");
         await page.send("Emulation.setFocusEmulationEnabled", { enabled: true });
         assert.equal(await evaluate("document.hasFocus()"), true, "the page has focus, as the app window does");
         return await check({ evaluate, send: page.send, on: page.on, context: browserContextId });
