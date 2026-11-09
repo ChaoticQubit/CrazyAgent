@@ -175,11 +175,48 @@ test("the tab sends one place at a time, so the last box it measured is the last
   });
 });
 
-test("a place reads the window's size before it takes the views lock, as an open does", () => {
-  const ide = read("src-tauri/src/ide.rs");
-  const place = ide.slice(ide.indexOf("pub fn place<R: Runtime>"), ide.indexOf("pub fn hide<R: Runtime>"));
-  assert.ok(place.includes("in_window(") && place.indexOf("in_window(") < place.indexOf("views.lock()"), place);
-});
+/** Opens the real IDE tab in a fresh page and runs a row's steps on it. Inputs: the arguments
+ * for the fixture's mount and the steps. Output: what the steps return. */
+async function withOpenTab(mountArgs, steps) {
+  const { bundle, withPage } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/ide-tab-failures.mjs", import.meta.url).pathname);
+  return withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(${mountArgs})`);
+    assert.equal(await evaluate(`Fixture.called("desktop_ide_place")`), true, "the opened IDE is placed");
+    return steps(evaluate);
+  });
+}
+
+test("a refused place still sends the box waiting behind it, and tells the owner", () => withOpenTab("[], [], true", async (evaluate) => {
+  const [first] = await evaluate("Fixture.placed()");
+  await evaluate("Fixture.moveTo(20)");
+  assert.equal((await evaluate("Fixture.placed()")).length, 1, "the new box waits behind the held place");
+  await evaluate("Fixture.refusePlace()");
+  const sent = await evaluate("Fixture.placed()");
+  assert.equal(sent.length, 2, "a refusal does not drop the waiting box");
+  assert.equal(sent[1].y, first.y + 20, "the box sent is the one that waited");
+  assert.match((await evaluate("Fixture.seen()")).alert, /couldn't move to fit/, "the refusal shows on the tab");
+  await evaluate("Fixture.answerPlace()");
+  assert.equal((await evaluate("Fixture.seen()")).alert, null, "the next good place clears it");
+}));
+
+test("a refused place with nothing waiting lets the next box go out", () => withOpenTab('["desktop_ide_place"]', async (evaluate) => {
+  await evaluate("Fixture.frames()");
+  const before = (await evaluate("Fixture.placed()")).length;
+  await evaluate("Fixture.moveTo(10)");
+  const after = (await evaluate("Fixture.placed()")).length;
+  assert.ok(after > before, `a refusal must not stop the IDE following its panel: ${before} then ${after}`);
+}));
+
+test("leaving the tab while a place is held sends no box after it, and still hides the IDE", () => withOpenTab("[], [], true", async (evaluate) => {
+  await evaluate("Fixture.moveTo(20)");
+  assert.equal((await evaluate("Fixture.placed()")).length, 1, "the new box waits behind the held place");
+  await evaluate("Fixture.leave()");
+  await evaluate("Fixture.answerPlace()");
+  assert.equal((await evaluate("Fixture.placed()")).length, 1, "the waiting box ends with the tab");
+  assert.equal(await evaluate(`Fixture.called("desktop_ide_hide")`), true, "leaving still hides the IDE");
+}));
 
 test("an open dialog, drawer or menu hides the IDE webview until the last one closes", async () => {
   const overlay = await import("../src/ui/overlay.tsx");
@@ -209,7 +246,7 @@ test("an open the tab gave up on is refused quietly instead of showing a problem
   const lib = read("src-tauri/src/lib.rs");
   const open = lib.slice(lib.indexOf("async fn desktop_ide_open"), lib.indexOf("async fn desktop_ide_place"));
   assert.ok(open.indexOf("views.begin(&project)") >= 0 && open.indexOf("views.begin(&project)") < open.indexOf("ide_open(project"), "the ticket is taken before the engine call");
-  assert.match(open, /ide::show\(\s*&app,\s*&webview\.window\(\),\s*&views,\s*&project,\s*workbench,\s*bounds,\s*ticket,?\s*\)/);
+  assert.match(open, /ide::show\(\s*&app,\s*&window,\s*&views,\s*&project,\s*workbench,\s*bounds,\s*ticket,?\s*\)/);
 });
 
 test("the TUI focus poll reaches the engine only while a project's IDE webview is loaded", () => {
