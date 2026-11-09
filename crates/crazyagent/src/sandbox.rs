@@ -1665,7 +1665,7 @@ impl ProjectSandbox {
     }
 
     /// The Seatbelt profile text for this agent. Reading another process's arguments through
-    /// sysctl is refused only with both the named sysctl deny and the `process-info-pidinfo`
+    /// sysctl is refused only with both the named sysctl deny and the explicit `process-info*`
     /// deny; a process of the same sandbox stays readable, and `nohup`, which asks that of a
     /// process outside to detach from the console, keeps it by its own path. Output: the text.
     pub fn profile(&self) -> String {
@@ -1678,7 +1678,7 @@ impl ProjectSandbox {
         text.push_str("(allow signal (target same-sandbox))\n");
         text.push_str("(allow sysctl-read)\n");
         text.push_str("(deny sysctl-read (sysctl-name-prefix \"kern.procargs\"))\n");
-        text.push_str("(deny process-info-pidinfo)\n");
+        text.push_str("(deny process-info*)\n");
         text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow process-info-pidinfo (process-path \"/usr/bin/nohup\"))\n");
         text.push_str("(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n");
