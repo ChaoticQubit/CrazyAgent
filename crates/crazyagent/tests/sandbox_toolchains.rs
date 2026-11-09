@@ -2025,3 +2025,87 @@ fn native_team_refuses_a_teammates_home_in_the_lead_s_or_a_lead_home_the_project
     assert!(team(&case.home, &beside).is_ok());
     toolchains::remove_tmp(&case.home).unwrap();
 }
+
+/// SECAUDIT team-mailbox-reply-forgery-shared-native-lead: no agent of a native team makes or
+/// changes an answer in the tool mailbox the team shares, by any route or spelling, so the
+/// answer another agent reads is the engine's. Reading and listing stay open.
+#[test]
+fn no_agent_of_a_native_team_can_forge_or_change_an_answer_in_the_tool_mailbox() {
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let attempts = |id: u32| {
+        let at = |suffix: &str| quoted(&mailbox.join(format!("{id:032x}{suffix}")));
+        let (reply, upper, side, part) =
+            (at(".reply"), at(".REPLY"), at(".side"), at(".reply-part"));
+        let engine = quoted(&mailbox.join(format!("{:032x}.reply", id + 1)));
+        format!(
+            "printf forged > {reply}; echo forge=$?\n\
+             printf forged > {upper}; echo upper=$?\n\
+             printf forged > {side}; /bin/mv {side} {reply}; echo moved=$?\n\
+             printf forged > {side}; /bin/ln {side} {reply}; echo linked=$?\n\
+             /bin/ln -s {side} {reply}; echo symlinked=$?\n\
+             printf forged >> {engine}; echo changed=$?\n\
+             /usr/bin/touch {part}; echo plant=$?\n\
+             /bin/cat {engine} > /dev/null; echo read=$?\n"
+        )
+    };
+    for (who, id) in [("teammate", 20_u32), ("lead", 30_u32)] {
+        let engine = mailbox.join(format!("{:032x}.reply", id + 1));
+        fs::write(&engine, b"engine").unwrap();
+        let script = attempts(id);
+        let output = if who == "lead" {
+            team.as_lead(&script)
+        } else {
+            team.teammate(&script)
+        };
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&output.stderr);
+        for name in [
+            "forge",
+            "upper",
+            "moved",
+            "linked",
+            "symlinked",
+            "changed",
+            "plant",
+        ] {
+            assert_ne!(status_of(&text, name), "0", "{who} {name}: {errors}");
+        }
+        assert_eq!(status_of(&text, "read"), "0", "{who}: {errors}");
+        for name in [".reply", ".reply-part"] {
+            let made = mailbox.join(format!("{id:032x}{name}"));
+            assert!(fs::symlink_metadata(&made).is_err(), "{who} {name}");
+        }
+        assert_eq!(fs::read(&engine).unwrap(), b"engine", "{who}");
+    }
+}
+
+/// What a teammate's tool server does stays open beside that rule: it sends a call and
+/// removes the answer it has read.
+#[test]
+fn a_native_teammate_still_sends_a_call_and_removes_the_answer_it_read() {
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let id = format!("{:032x}", 40);
+    let answer = mailbox.join(format!("{id}.reply"));
+    fs::write(&answer, b"{}").unwrap();
+    let call = mailbox.join(format!("{id}.call"));
+    let (part, sent, reply) = (
+        quoted(&mailbox.join(format!("{id}.part"))),
+        quoted(&call),
+        quoted(&answer),
+    );
+    let output = team.teammate(&format!(
+        "/usr/bin/touch {part}; echo part=$?\n\
+         /bin/mv {part} {sent}; echo call=$?\n\
+         /bin/cat {reply} > /dev/null; echo read=$?\n\
+         /bin/rm {reply}; echo removed=$?\n"
+    ));
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&output.stderr);
+    for name in ["part", "call", "read", "removed"] {
+        assert_eq!(status_of(&text, name), "0", "{name}: {errors}");
+    }
+    assert!(call.exists());
+    assert!(!answer.exists());
+}
