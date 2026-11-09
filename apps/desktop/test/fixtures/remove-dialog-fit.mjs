@@ -51,8 +51,9 @@ function seen(node, dialog) {
 
 /** Measures the open dialog, its body and its top choice, rounded to whole pixels. Output: the
  * window height, the dialog's, its body's and its folder and loss lists' visible and full
- * heights and scroll offsets, the top choice's edges against the dialog's visible edges, and
- * whether the loss list and the Delete everything button are wholly in view. */
+ * heights and scroll offsets, the top choice's edges against the dialog's visible edges,
+ * whether the loss list, the name box and the Delete everything button are wholly in view, and
+ * the folder list's tab index. */
 export function fit() {
   const dialog = document.querySelector("dialog[open]");
   const remove = [...dialog.querySelectorAll("button")].find((button) => button.textContent.trim() === "Delete everything");
@@ -65,5 +66,6 @@ export function fit() {
     window: innerHeight, dialog: box(dialog), body: box(body), details: details ? box(details) : null,
     cardTop: Math.round(card.top - frame.top), cardBottom: Math.round(card.bottom - frame.top), frame: Math.round(frame.height),
     losses: seen(dialog.querySelector("[aria-label='What would be lost']"), dialog), remove: seen(remove, dialog),
+    name: seen(dialog.querySelector("input[aria-label='Type the project name']"), dialog), detailsTab: details?.tabIndex ?? null,
   };
 }
