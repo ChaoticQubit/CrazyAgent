@@ -11,10 +11,16 @@ export function toolState(tool: ToolView, projectId?: string): ToolSwitch {
   return projectId ? tool.here ?? tool.global : tool.global;
 }
 
+/** Whether this tool has a switch stored in this scope. Inputs: the tool and the project id,
+ * if any. Output: the answer. */
+export function toolChanged(tool: ToolView, projectId?: string): boolean {
+  return projectId ? tool.here !== null : tool.global !== "on";
+}
+
 /** Whether any of these tools has a switch stored in this scope, so Restore defaults has
  * something to clear. Inputs: the tools and the project id, if any. Output: the answer. */
 export function toolsChanged(tools: ToolView[], projectId?: string): boolean {
-  return tools.some((tool) => projectId ? tool.here !== null : tool.global !== "on");
+  return tools.some((tool) => toolChanged(tool, projectId));
 }
 
 /** One server's tools as a pure view: a switch per tool, Delete for a built-in tool, and
@@ -39,7 +45,7 @@ export function ToolSwitchesView({ tools, projectId, failure, busy, onToggle, on
   return <>
     {failure && <div className="set-body"><Notice tone="danger" alert>{failure}</Notice></div>}
     {shown.length === 0 ? <p className="set-body secondary">{tools.value.length === 0 ? "No tools yet. Check the server to list its tools." : "Every tool here is deleted."}</p>
-      : shown.map((tool) => <SettingLine key={`${tool.server}/${tool.tool}`} label={tool.tool} shown={<span className="mono">{tool.tool}</span>} help={tool.description || undefined}>
+      : shown.map((tool) => <SettingLine key={`${tool.server}/${tool.tool}`} label={tool.tool} shown={<span className="mono">{tool.tool}</span>} help={tool.description || undefined} changed={toolChanged(tool, projectId)}>
         <Switch id={`tool-${tool.server}-${tool.tool}`} label={label} checked={toolState(tool, projectId) === "on"} onChecked={(next) => onToggle(tool, next)}
           disabledReason={busy === tool.tool ? "Saving the last change." : undefined} />
         {tool.builtin && <Button variant="quiet" aria-label={`Delete ${tool.tool}`} onClick={() => onHide(tool)}>Delete</Button>}

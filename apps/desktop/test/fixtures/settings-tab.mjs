@@ -75,7 +75,7 @@ export function sections() {
       actions: [...group.querySelectorAll(".set-head button, .set-head a")].map(words), left: box.left, right: box.right, top: box.top,
       rows: [...group.querySelectorAll(".set-row")].map((row) => {
         const label = row.querySelector(".set-label");
-        const named = label.querySelector("a, button");
+        const named = label.querySelector("a, button, .mono");
         return {
           label: named ? words(named) : firstText(label).trim(), words: words(label), mark: words(row.querySelector(".set-changed")) || null, help: words(row.querySelector(".set-help")),
           labelRight: label.getBoundingClientRect().right, labelSpills: label.scrollWidth > label.clientWidth, controlLeft: row.querySelector(".set-ctl").getBoundingClientRect().left,

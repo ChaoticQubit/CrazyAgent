@@ -90,6 +90,13 @@ test("the longest status word stays whole inside its column at 1180 px", async (
   assert.ok(seen.bottom <= seen.rowBottom + 0.5, JSON.stringify(seen));
 });
 
+test("at 1180 px a provider or sign-in word that is cut keeps all its words in the cell's title", async () => {
+  const cells = await onAccounts({}, (page) => page.evaluate(`[...document.querySelectorAll(".account-row .ellipsis.secondary")].map((cell) => ({ words: cell.textContent, title: cell.title, cut: cell.scrollWidth > cell.clientWidth }))`), 1180);
+  assert.equal(cells.length, 6, JSON.stringify(cells));
+  assert.ok(cells.some((cell) => cell.cut), JSON.stringify(cells));
+  for (const cell of cells) assert.equal(cell.title, cell.words, JSON.stringify(cell));
+});
+
 test("at 700 px the rows scroll sideways with the head and the menu stays in view over them", async () => {
   const seen = await onAccounts({}, (page) => page.evaluate(`(() => {
     const list = document.querySelector(".windowed");
