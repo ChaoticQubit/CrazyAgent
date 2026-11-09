@@ -255,3 +255,41 @@ test("the app page has All and the project tab does not", () => {
   assert.match(text(render()), /Today 7 days 30 days All/);
   assert.doesNotMatch(text(render({ filter: undefined, projectId: "alpha", by: "agent" })), /Today 7 days 30 days All/);
 });
+
+test("Account limits and its reset controls stay when only the metrics read failed (r1 L1)", () => {
+  const next = createElement("p", null, "Next accounts here");
+  const failed = { kind: "error", code: "usage_outcome_unknown", message: "" };
+  const markup = render({ ...withUsage({ limits: [limitsFor()] }), metrics: failed, filter: { ...FILTER, limits: { ...LIMITS, next } } });
+  const words = text(markup);
+  assert.match(words, /Account limits/);
+  assert.match(words, /Set reset time/);
+  assert.match(words, /Next accounts here/);
+  assert.match(words, /Try again/);
+  assert.equal(markup.split("Check limits now").length - 1, 1, "one Check limits now");
+  assert.doesNotMatch(text(render({ usage: failed })), /Account limits/, "no usage read, no limits to show");
+});
+
+test("Account limits stays while the metrics read loads or is not ready (r1 L1)", () => {
+  const notReady = { kind: "error", code: "usage_unavailable", message: "" };
+  for (const metrics of [{ kind: "loading" }, { kind: "not_ready" }, notReady]) {
+    const markup = render({ ...withUsage({ limits: [limitsFor()] }), metrics });
+    assert.match(text(markup), /Account limits/, JSON.stringify(metrics));
+    assert.match(text(markup), /Set reset time/, JSON.stringify(metrics));
+    assert.equal(markup.split("Check limits now").length - 1, 1, JSON.stringify(metrics));
+  }
+  assert.match(text(render({ ...withUsage({ limits: [limitsFor()] }), metrics: notReady })), /isn't ready yet/);
+});
+
+test("a refused Check limits says why on the failed-read page (r1 L2)", () => {
+  const failed = { kind: "error", code: "usage_outcome_unknown", message: "" };
+  const filter = { ...FILTER, limits: { ...LIMITS, failure: "The check failed." } };
+  assert.match(text(render({ usage: failed, filter })), /The check failed\./);
+  assert.match(text(render({ metrics: failed, filter })), /The check failed\./);
+});
+
+test("a picked project keeps the app page's notice and Account limits (r1 L3)", () => {
+  const words = text(render({ projectId: "alpha", ...withUsage({ limits: [limitsFor()] }) }));
+  assert.match(words, /These numbers still use the old counting\./);
+  assert.match(words, /Account limits/);
+  assert.match(words, /Set reset time/);
+});
