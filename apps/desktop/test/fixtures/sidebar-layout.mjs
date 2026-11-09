@@ -56,6 +56,19 @@ export function layout() {
   };
 }
 
+/** Reads the footer. Output: the initial and whether it is hidden from screen readers, the
+ * profile and engine words and where each one sits. */
+export function foot() {
+  const avatar = document.querySelector(".sidebar-foot .avatar");
+  const name = document.querySelector(".sidebar-foot .me");
+  const engine = document.querySelector(".sidebar-foot .engine-state");
+  return {
+    initial: avatar?.textContent ?? null, hidden: avatar?.getAttribute("aria-hidden") ?? null, name: name.textContent, engine: engine.textContent,
+    initialRight: avatar?.getBoundingClientRect().right ?? null, nameLeft: name.getBoundingClientRect().left,
+    nameBottom: name.getBoundingClientRect().bottom, engineTop: engine.getBoundingClientRect().top,
+  };
+}
+
 /** The words of the focused element. Output: the text. */
 export function focused() {
   return document.activeElement?.textContent?.trim() ?? "";

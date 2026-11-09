@@ -47,6 +47,16 @@ test("a very short window still reaches the footer through the sidebar's own scr
   assert.ok(shown.list.bottom - shown.list.top >= 60, `the list keeps some room: ${JSON.stringify(shown)}`);
 });
 
+test("the footer shows the profile's initial beside its name, with the engine state under the name", async () => {
+  const foot = await onSidebar("1", 800, ({ evaluate }) => evaluate("Fixture.foot()"));
+  assert.equal(foot.initial, "M", JSON.stringify(foot));
+  assert.equal(foot.hidden, "true", "the initial is decoration");
+  assert.equal(foot.name, "Mira Okafor");
+  assert.equal(foot.engine, "Engine running");
+  assert.ok(foot.initialRight <= foot.nameLeft, JSON.stringify(foot));
+  assert.ok(foot.engineTop >= foot.nameBottom - 1, JSON.stringify(foot));
+});
+
 test("real Tab keys walk the projects, then the bottom group, then the profile and Try again, and Shift+Tab walks back", async () => {
   const walked = await onSidebar('2, { name: "home" }, "down"', 800, async ({ evaluate, send }) => {
     const press = async (modifiers) => {
