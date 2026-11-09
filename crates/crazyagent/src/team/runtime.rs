@@ -5249,7 +5249,9 @@ impl TeamRuntime {
             .collect();
         idle.sort_by_key(|id| self.workers[id].harness != harness);
         for id in idle {
-            if (self.workers[&id].kept_session && self.lead_waits(id)?) || self.queued_work(id)? {
+            if (self.workers[&id].kept_session && self.lead_waits(id)?)
+                || self.queued_work(project, id)?
+            {
                 continue;
             }
             let worker = self.workers.get_mut(&id).expect("worker exists");
@@ -5260,16 +5262,18 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Whether a queued task waits for this agent: one pinned to it, or one naming it as its
-    /// lead, whose result only a running lead receives. Takes the agent. Returns the answer,
-    /// or any SQLite failure.
-    fn queued_work(&self, id: i64) -> Result<bool, EngineError> {
+    /// Whether a task of the project not yet started, queued or waiting for a pool, waits for
+    /// this agent: one pinned to it, or one naming it as its lead, whose result only a running
+    /// lead receives. Takes the project and the agent. Returns the answer, or any SQLite
+    /// failure.
+    fn queued_work(&self, project: &ProjectId, id: i64) -> Result<bool, EngineError> {
         self.connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM team_tasks t
                                LEFT JOIN team_task_pins p ON p.task=t.id
-                               WHERE t.status='queued' AND (t.parent=?1 OR p.agent=?1))",
-                [id],
+                               WHERE t.project=?2 AND t.status IN ('queued','needs_pool')
+                               AND (t.parent=?1 OR p.agent=?1))",
+                params![id, project.as_str()],
                 |row| row.get(0),
             )
             .map_err(error)
