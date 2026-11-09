@@ -49,15 +49,16 @@ test("deleting accounts in pools names the pools they leave and the pools delete
   assert.equal(many.confirmLabel, "Remove from pools and delete");
   assert.deepEqual(many.lines, [
     "Claude a, Claude b and Claude c and their saved sign-ins or keys are removed from CrazyAgent. A running sign-in is cancelled first.",
+    "An agent using one of these accounts keeps running. Its sign-in goes after that agent stops and the app restarts.",
     "They leave pools Main and Spare. Main has no other account, so it is deleted too and its projects have no pool.",
   ]);
   const one = deleteDialog([accounts[1]], [pool("Spare", ["b", "x"])]);
   assert.equal(one.title, "Delete Claude b?");
   assert.equal(one.confirmLabel, "Remove from pools and delete");
-  assert.deepEqual(one.lines.slice(1), ["It leaves pool Spare."]);
+  assert.deepEqual(one.lines.slice(1), ["An agent using this account keeps running. Its sign-in goes after that agent stops and the app restarts.", "It leaves pool Spare."]);
   assert.equal(deleteDialog([accounts[0]], pools).confirmLabel, "Delete account");
   assert.equal(deleteDialog(accounts, undefined).confirmLabel, "Delete 3 accounts");
-  assert.equal(deleteDialog(accounts, undefined).lines.length, 1);
+  assert.equal(deleteDialog(accounts, undefined).lines.length, 2);
   assert.equal(poolEffect(["a"], pools), undefined);
   assert.equal(poolEffect(["b", "x"], pools), "They leave pools Main and Spare. Main and Spare have no other account, so they are deleted too and their projects have no pool.");
   assert.equal(api.knownError("account_in_pool"), undefined, "account_in_pool is no longer a refusal, so it has no sentence of its own");
