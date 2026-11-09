@@ -15,6 +15,7 @@ import { SandboxSettingsTab } from "./sandbox";
 import { TeamAlertsSettings } from "./team-alerts";
 import { UpdatesSettings } from "./updates";
 import { UsageSettings } from "./usage";
+import "../project/projects.css";
 import "./settings.css";
 
 interface SettingsGroup {

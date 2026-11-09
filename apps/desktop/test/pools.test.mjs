@@ -100,13 +100,12 @@ test("a new pool starts empty and windows a long account list", () => {
   assert.match(none, /href="#\/settings\/accounts\?action=add"/);
 });
 
-test("the pool list shows count, readiness and use with Edit and Delete in a menu", () => {
+test("the pool list shows count, readiness and use with Edit and Delete on the row", () => {
   const markup = renderToStaticMarkup(createElement(PoolsView, { pools: { kind: "ok", value: [pool(4, { project_count: 1 })] },
     onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden }));
-  assert.match(markup, />4 of 15</);
-  assert.match(markup, />4 ready</);
-  assert.match(markup, />Used by 1 project</);
-  assert.match(markup, /aria-label="More for Main"/);
+  assert.match(markup, />4 ChatGPT\. 4 of 15, 4 ready\. Used by 1 project\.</);
+  assert.match(markup, /aria-label="Edit pool Main"[^>]*>Edit pool</);
+  assert.match(markup, /aria-label="Delete pool Main"[^>]*>Delete pool</);
   const empty = renderToStaticMarkup(createElement(PoolsView, { pools: { kind: "ok", value: [] }, onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden }));
   assert.match(empty, /<h2>No pools yet<\/h2>/);
   assert.match(empty, /A pool groups up to 15 accounts for your projects to use\./);

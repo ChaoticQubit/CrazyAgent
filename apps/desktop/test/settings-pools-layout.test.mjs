@@ -44,6 +44,15 @@ test("the list shows the title, its purpose and New pool, then Your pools with o
   assert.deepEqual(spare.visible, ["Edit pool", "Delete pool"], "only a pool with keyed members can be set up for agents");
 });
 
+test("a 60-letter pool name wraps inside its label and leaves the actions alone", async () => {
+  const [section] = await onPools({ pools: "long" }, read);
+  const [row] = section.rows;
+  assert.equal(row.label.length, 60);
+  assert.equal(row.labelSpills, false, JSON.stringify(row));
+  assert.ok(row.controlLeft >= row.labelRight, JSON.stringify(row));
+  assert.deepEqual(row.visible, ["Edit pool", "Delete pool"]);
+});
+
 test("real Tab keys walk New pool, then each pool's actions in row order", async () => {
   const walked = await onPools({}, async ({ evaluate, send }) => {
     await evaluate("[...document.querySelectorAll('.settings-nav a')].at(-1).focus()");
@@ -183,9 +192,10 @@ test("a full pool refuses another account on its own row and in the notice", asy
   const seen = await onPools({ pools: "full" }, async (page) => {
     await press(page, EDIT_MAIN);
     await press(page, ".pick:has(input:not(:checked))");
-    return { says: await say(page), blocked: await page.evaluate("Fixture.count('.pick.blocked')"), members: await page.evaluate("Fixture.count('.member')"), focused: await page.evaluate("Fixture.focused()") };
+    return { says: await say(page), blocked: await page.evaluate("Fixture.count('.pick.blocked')"), line: await page.evaluate("Fixture.wordsOf('.pick.blocked')"), members: await page.evaluate("Fixture.count('.member')"), focused: await page.evaluate("Fixture.focused()") };
   });
   assert.equal(seen.blocked, 1);
+  assert.ok(seen.line.includes("A pool can hold up to 15 accounts."), seen.line);
   assert.equal(seen.members, 15);
   assert.equal(seen.focused.id, "pool-full-notice");
   assert.ok(seen.says.includes("15 of 15"), seen.says);

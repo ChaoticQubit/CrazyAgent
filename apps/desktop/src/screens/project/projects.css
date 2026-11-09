@@ -288,6 +288,7 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .set-row:not(.wide):has(> .tg-terminal-note:not(.set-ctl), > .field > .helper) > :is(.segmented, .set-ctl), .set-row:not(.wide):has(> .field > .helper) > .field > .select { grid-row: 1 / span 2; }
 .set-row > .field > .select { width: auto; max-width: 100%; }
 .set-row > .set-help { color: var(--text-2); font-size: 12px; line-height: 16px; }
+.set-row > .set-label, .set-row > .set-help { overflow-wrap: anywhere; }
 .set-row:not(.wide):has(> .set-help) > .set-ctl { grid-row: 1 / span 2; }
 .set-line-ctl { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
 .set-row.wide > .set-line-ctl { display: block; }

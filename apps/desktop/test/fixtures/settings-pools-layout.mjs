@@ -18,7 +18,7 @@ const SPARE = { id: "pool-spare", name: "Spare", summary: "1 ChatGPT", members: 
 const FULL = { ...MAIN, members: Array.from({ length: 15 }, (_, index) => member(index)) };
 const LATE = { status: "not_signed_in", status_label: "Not signed in" };
 const WAITING = { ...MAIN, members: [member(0, "api_key"), { ...member(1), ...LATE }, member(2)] };
-const POOLS = { ok: [MAIN, SPARE], full: [FULL], waiting: [WAITING], empty: [] };
+const POOLS = { ok: [MAIN, SPARE], full: [FULL], waiting: [WAITING], long: [{ ...SPARE, name: "W".repeat(60) }], empty: [] };
 const SIGNED_IN = Array.from({ length: 18 }, (_, index) => account(index));
 const ACCOUNTS = { ok: SIGNED_IN, waiting: SIGNED_IN.map((item, index) => (index === 1 ? { ...item, ...LATE } : item)), empty: [] };
 let root = null;
@@ -48,7 +48,7 @@ function answer(scene, command) {
 }
 
 /** Mounts the real Settings page on Pools against a fake engine. Inputs: the scene, naming the
- * pools and accounts reads as ok, full, waiting, empty, error, missing or pending, and the theme.
+ * pools and accounts reads as ok, full, waiting, long, empty, error, missing or pending, and the theme.
  * Output: nothing. */
 export async function mount(scene = {}, theme = "light") {
   sent = [];
@@ -93,7 +93,7 @@ export function sections() {
       left: box.left, right: box.right, top: box.top,
       rows: [...group.querySelectorAll(".set-row")].map((row) => ({
         label: firstText(row.querySelector(".set-label")).trim(), mark: words(row.querySelector(".set-changed")) || null, help: words(row.querySelector(".set-help")),
-        labelRight: row.querySelector(".set-label").getBoundingClientRect().right, controlLeft: row.querySelector(".set-ctl").getBoundingClientRect().left,
+        labelRight: row.querySelector(".set-label").getBoundingClientRect().right, labelSpills: row.querySelector(".set-label").scrollWidth > row.querySelector(".set-label").clientWidth, controlLeft: row.querySelector(".set-ctl").getBoundingClientRect().left,
         buttons: [...row.querySelectorAll("button")].map(nameOf), visible: [...row.querySelectorAll("button")].map(words),
       })),
     };
@@ -113,6 +113,11 @@ export function commands() {
 /** Counts what a selector finds. Input: the selector. Output: the count. */
 export function count(selector) {
   return document.querySelectorAll(selector).length;
+}
+
+/** Reads one element's words. Input: the selector. Output: the words, empty when not there. */
+export function wordsOf(selector) {
+  return words(document.querySelector(selector));
 }
 
 /** Reads the first account line. Output: its words and the edges of its name and checkbox. */
