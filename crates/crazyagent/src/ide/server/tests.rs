@@ -1614,3 +1614,29 @@ async fn a_full_table_keeps_the_slot_a_leftover_still_holds() {
         "a retry must wait on the leftover's lock"
     );
 }
+
+/// A recorded server behind a start lock that stays held must still end with the engine. Its
+/// group goes, and its record, token and group file are removed once the wait runs out, so a
+/// leftover cannot make an IDE server outlive the engine (ide-10 r1, rv-code L1 and sec F1).
+#[tokio::test]
+async fn stop_all_ends_a_recorded_server_behind_a_held_start_lock() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let id = project("behind-lock");
+    servers
+        .open(&id, checkout.path(), &cached_build(), false)
+        .await
+        .unwrap();
+    let group = servers.group(&id).unwrap();
+    let folder = servers.project_folder(&id).unwrap();
+    assert!(folder.join(token::FILE).is_file());
+    assert!(folder.join(GROUP).is_file());
+    let held = servers.slot(&id).unwrap().start.clone().lock_owned().await;
+    servers.stop_all().await;
+    gone(group).await;
+    assert_eq!(servers.group(&id), None, "the server stays on record");
+    assert!(!folder.join(token::FILE).exists(), "token left behind");
+    assert!(!folder.join(GROUP).exists(), "group file left behind");
+    drop(held);
+}
