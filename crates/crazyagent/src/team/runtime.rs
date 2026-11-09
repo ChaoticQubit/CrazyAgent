@@ -4907,7 +4907,8 @@ impl TeamRuntime {
                         || self.capped(project, parent, harness_cap)
                     {
                         if !reuse {
-                            self.stop_idle_for(project, &harness, parent, &reserved)?;
+                            let counted = |w: &Worker| w.harness == harness && w.parent == parent;
+                            self.stop_idle_for(project, &harness, counted, &reserved)?;
                         }
                         continue;
                     }
@@ -5211,16 +5212,16 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Makes room at a limit for a task that may not reuse an idle agent: stops the idle
-    /// sub-agent of that harness and lead that would have taken it, one at a time. A live
-    /// agent, one with agents of its own, one reserved for recovery and a kept lead with
-    /// work around it stay. Takes the project, the harness, the lead and the reserved
-    /// agents. Returns any SQLite failure.
+    /// Makes room at a limit for a task that may not reuse an idle agent: stops one idle
+    /// sub-agent the full limits count, one at a time. A live agent, one with agents of its
+    /// own, one reserved for recovery and a kept lead with work around it stay. Takes the
+    /// project, the harness, which agents the full limits count and the reserved agents.
+    /// Returns any SQLite failure.
     fn stop_idle_for(
         &mut self,
         project: &ProjectId,
         harness: &str,
-        parent: Option<i64>,
+        counted: impl Fn(&Worker) -> bool,
         reserved: &BTreeSet<i64>,
     ) -> Result<(), EngineError> {
         let sub = |w: &Worker| &w.project == project && w.role == AgentRole::Sub;
@@ -5232,8 +5233,8 @@ impl TeamRuntime {
             .iter()
             .filter(|(id, w)| {
                 sub(w)
+                    && counted(w)
                     && w.harness == harness
-                    && w.parent == parent
                     && w.busy.is_none()
                     && w.own_turn.is_none()
                     && !w.live
