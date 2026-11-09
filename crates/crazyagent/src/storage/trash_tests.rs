@@ -8,7 +8,7 @@ use crate::storage::plugins::{
     CHECK_FOLDER, Command, ResultValue, SECRETS, STORE, execute, move_check_folder_aside,
     new_secret_reference, store_secret,
 };
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
 fn database() -> (tempfile::TempDir, Connection) {
@@ -341,4 +341,267 @@ fn the_next_engine_start_sweeps_what_a_crash_left_behind() {
     assert!(!secret_file(dir.path(), &secret).exists());
     assert!(!checked.exists());
     assert!(notes(&connection).is_empty());
+}
+
+const DUMMY: &[u8] = b"dummy";
+
+fn private_folder(path: &Path) {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .unwrap();
+}
+
+fn private_file(path: &Path) {
+    std::fs::write(path, DUMMY).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+fn digest_of(name: &str) -> String {
+    format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(name.as_bytes())
+    )
+}
+
+struct Slot {
+    folder: PathBuf,
+    home: PathBuf,
+    files: [PathBuf; 3],
+}
+
+/// A synthetic managed profile slot under `root` holding dummy sign-in files, a manifest and
+/// one other file of its home. Inputs: the root and the profile reference. Output: its paths.
+fn slot(root: &Path, name: &str) -> Slot {
+    let folder = root.join("native-profiles").join(digest_of(name));
+    let home = folder.join("home");
+    private_folder(&home.join("Library/Keychains"));
+    private_file(&folder.join("identity.json"));
+    private_file(&home.join("keep.txt"));
+    let files = [
+        home.join("auth.json"),
+        home.join(".credentials.json"),
+        home.join("Library/Keychains/login.keychain-db"),
+    ];
+    for file in &files {
+        private_file(file);
+    }
+    Slot {
+        folder,
+        home,
+        files,
+    }
+}
+
+/// A synthetic generated SDK home under `root` holding a dummy key.
+/// Inputs: the root and the credential reference. Output: the home's path.
+fn generated(root: &Path, name: &str) -> PathBuf {
+    let home = root.join("configured-sdk-homes").join(digest_of(name));
+    private_folder(&home.join(".backboard"));
+    private_file(&home.join(".backboard/config.json"));
+    private_file(&home.join(".backboard/keys.json"));
+    home
+}
+
+/// SECAUDIT account-removal-leaves-native-managed-profile-credentials: a removed native
+/// account loses each sign-in file, and the rest of its slot stays.
+#[test]
+fn a_removed_native_account_loses_its_sign_in_files_and_keeps_the_rest_of_its_slot() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    let slot = slot(root, "lab-profile");
+    put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
+
+    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    for file in &slot.files {
+        assert!(!file.exists(), "{}", file.display());
+    }
+    assert!(slot.folder.join("identity.json").exists());
+    assert!(slot.home.join("keep.txt").exists());
+    assert!(notes(&connection).is_empty());
+}
+
+/// SECAUDIT configured-rcli-home-keeps-provider-key: a removed API key account's generated
+/// home goes whole, and a sibling home stays.
+#[test]
+fn a_removed_api_key_accounts_generated_home_goes_whole_and_a_sibling_stays() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    let removed = generated(root, "lab-key");
+    let sibling = generated(root, "lab-other");
+    put(&connection, GENERATED_HOME, "lab-key").unwrap();
+
+    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert!(!removed.exists());
+    assert!(sibling.join(".backboard/keys.json").exists());
+    assert!(notes(&connection).is_empty());
+}
+
+/// Condition 1: a sign-in name that is a link goes, and what it points at is untouched.
+#[test]
+fn a_sign_in_file_that_is_a_link_goes_and_its_target_stays() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    let slot = slot(root, "lab-profile");
+    let outside = root.join("outside-target");
+    private_file(&outside);
+    std::fs::remove_file(&slot.files[0]).unwrap();
+    std::os::unix::fs::symlink(&outside, &slot.files[0]).unwrap();
+    put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
+
+    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert!(std::fs::symlink_metadata(&slot.files[0]).is_err());
+    assert_eq!(std::fs::read(&outside).unwrap(), DUMMY);
+}
+
+/// Condition 1: a folder of the walk that is a link is not followed, and the note stays.
+#[test]
+fn a_keychains_folder_that_is_a_link_is_not_followed_and_stays_noted() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    let slot = slot(root, "lab-profile");
+    let outside = root.join("outside");
+    private_folder(&outside);
+    private_file(&outside.join("login.keychain-db"));
+    let keychains = slot.home.join("Library/Keychains");
+    std::fs::remove_dir_all(&keychains).unwrap();
+    std::os::unix::fs::symlink(&outside, &keychains).unwrap();
+    put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
+
+    assert_eq!(sweep(&connection, root).unwrap(), 1);
+    assert!(outside.join("login.keychain-db").exists());
+    assert_eq!(
+        notes(&connection),
+        vec![(NATIVE_SIGN_IN.to_string(), "lab-profile".to_string())]
+    );
+}
+
+/// Condition 1: a generated home that is a link is not followed, and the note stays.
+#[test]
+fn a_generated_home_that_is_a_link_is_not_followed_and_stays_noted() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    let outside = root.join("outside");
+    private_folder(&outside.join(".backboard"));
+    private_file(&outside.join(".backboard/keys.json"));
+    private_folder(&root.join("configured-sdk-homes"));
+    std::os::unix::fs::symlink(
+        &outside,
+        root.join("configured-sdk-homes").join(digest_of("lab-key")),
+    )
+    .unwrap();
+    put(&connection, GENERATED_HOME, "lab-key").unwrap();
+
+    assert_eq!(sweep(&connection, root).unwrap(), 1);
+    assert!(outside.join(".backboard/keys.json").exists());
+}
+
+/// The removal's bound: a generated home at the file limit goes whole; one file more keeps
+/// the folder and the note, and its key is gone all the same.
+#[test]
+fn a_generated_home_past_its_bound_loses_its_key_and_stays_noted() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    for (name, extra, kept) in [("lab-at", 7, false), ("lab-past", 8, true)] {
+        let home = generated(root, name);
+        for index in 0..extra {
+            private_file(&home.join(format!(".backboard/extra-{index}")));
+        }
+        put(&connection, GENERATED_HOME, name).unwrap();
+        sweep(&connection, root).unwrap();
+        assert!(!home.join(".backboard/keys.json").exists(), "{name}");
+        assert_eq!(home.exists(), kept, "{name}");
+    }
+    assert_eq!(notes(&connection).len(), 1);
+}
+
+/// Condition 2: an API key account added again under the same reference before the sweep
+/// keeps its new home and key.
+#[test]
+fn an_api_key_account_added_again_before_the_sweep_keeps_its_generated_home() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    let home = generated(root, "lab-key");
+    put(&connection, GENERATED_HOME, "lab-key").unwrap();
+    saved_account(&connection, "lab-again", "lab-key");
+
+    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert!(home.join(".backboard/keys.json").exists());
+    assert!(notes(&connection).is_empty());
+}
+
+/// Condition 3: a slot another account row still names is not touched.
+#[test]
+fn a_slot_another_account_still_names_is_not_touched() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    let slot = slot(root, "lab-profile");
+    put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
+    saved_account(&connection, "lab-other", "lab-profile");
+
+    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    for file in &slot.files {
+        assert!(file.exists(), "{}", file.display());
+    }
+    assert!(notes(&connection).is_empty());
+}
+
+/// A profile an agent holds keeps its sign-in and its note, and loses both once it is free.
+#[test]
+fn a_profile_in_use_stays_noted_and_loses_its_sign_in_once_free() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    let slot = slot(root, "lab-profile");
+    let lease = std::fs::File::open(slot.folder.join("identity.json")).unwrap();
+    rustix::fs::flock(&lease, rustix::fs::FlockOperation::NonBlockingLockShared).unwrap();
+    put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
+
+    assert_eq!(sweep(&connection, root).unwrap(), 1);
+    assert!(slot.files[0].exists());
+    drop(lease);
+    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert!(!slot.files[0].exists());
+}
+
+/// A profile being renewed keeps its sign-in and its note, and loses both once it is free.
+#[test]
+fn a_profile_being_renewed_stays_noted_and_loses_its_sign_in_once_free() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    let slot = slot(root, "lab-profile");
+    let renewal = std::fs::File::open(&slot.folder).unwrap();
+    rustix::fs::flock(
+        &renewal,
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+    .unwrap();
+    put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
+
+    assert_eq!(sweep(&connection, root).unwrap(), 1);
+    assert!(slot.files[0].exists());
+    drop(renewal);
+    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert!(!slot.files[0].exists());
+}
+
+/// Condition 4: files a crash left between the note and the delete go at the next start.
+#[test]
+fn the_next_engine_start_removes_the_account_files_a_crash_left_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.path().join("engine.db");
+    let home = generated(dir.path(), "lab-key");
+    let slot = slot(dir.path(), "lab-profile");
+    {
+        let super::super::OpenedDatabase { connection, .. } =
+            super::super::open_actor_database(&path, false, None).unwrap();
+        put(&connection, GENERATED_HOME, "lab-key").unwrap();
+        put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
+    }
+    let super::super::OpenedDatabase { connection, .. } =
+        super::super::open_actor_database(&path, false, None).unwrap();
+    assert!(notes(&connection).is_empty());
+    assert!(!home.exists());
+    assert!(!slot.files[0].exists());
 }

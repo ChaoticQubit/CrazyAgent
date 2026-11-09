@@ -10,13 +10,17 @@ pub(crate) const MCP_CHECKS: &str = "mcp_checks";
 pub(crate) const SKILL_FOLDER: &str = "skill_folder";
 pub(crate) const HOOK_FOLDER: &str = "hook_folder";
 #[cfg(unix)]
+pub(crate) const NATIVE_SIGN_IN: &str = "native_sign_in";
+#[cfg(unix)]
+pub(crate) const GENERATED_HOME: &str = "generated_home";
+#[cfg(unix)]
 const SWEEP_MAX: i64 = 10_000;
 
 #[cfg(unix)]
 macro_rules! trash_columns {
     () => {
         "(
-    kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder','hook_folder')),
+    kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder','hook_folder','native_sign_in','generated_home')),
     name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
     PRIMARY KEY(kind, name)
 ) WITHOUT ROWID"
@@ -76,27 +80,41 @@ pub(crate) fn sweep(connection: &Connection, root: &Path) -> Result<usize, Engin
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
     for (kind, name) in notes {
-        let gone = if referenced(connection, &kind, &name)? {
-            Ok(())
-        } else {
-            delete(root, &kind, &name)
-        };
-        match gone {
-            Ok(()) => {
-                connection
-                    .execute(
-                        "DELETE FROM file_trash WHERE kind=?1 AND name=?2",
-                        params![kind, name],
-                    )
-                    .map_err(error)?;
-            }
-            Err(problem) => eprintln!("file_trash_not_removed kind={kind} cause={}", problem.0),
-        }
+        settle(connection, root, &kind, &name)?;
     }
     let left: i64 = connection
         .query_row("SELECT count(*) FROM file_trash", [], |row| row.get(0))
         .map_err(error)?;
     usize::try_from(left).map_err(error)
+}
+
+/// Deletes one noted file unless a live record still names it, and forgets the note once
+/// the file is gone; a file that cannot be deleted stays noted for the next sweep.
+/// Inputs: the engine connection and root, the kind and the name. Output: any SQLite failure.
+#[cfg(unix)]
+pub(crate) fn settle(
+    connection: &Connection,
+    root: &Path,
+    kind: &str,
+    name: &str,
+) -> Result<(), EngineError> {
+    let gone = if referenced(connection, kind, name)? {
+        Ok(())
+    } else {
+        delete(root, kind, name)
+    };
+    match gone {
+        Ok(()) => {
+            connection
+                .execute(
+                    "DELETE FROM file_trash WHERE kind=?1 AND name=?2",
+                    params![kind, name],
+                )
+                .map_err(error)?;
+        }
+        Err(problem) => eprintln!("file_trash_not_removed kind={kind} cause={}", problem.0),
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -105,7 +123,7 @@ fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, E
     let scoped = format!("project:{name}");
     let stored = format!("/{name}\"");
     let (query, value) = match kind {
-        ACCOUNT_KEY => (
+        ACCOUNT_KEY | NATIVE_SIGN_IN | GENERATED_HOME => (
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE instr(CAST(body AS TEXT), ?1) > 0)",
             quoted.as_str(),
         ),
@@ -140,6 +158,7 @@ fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
         MCP_CHECKS => super::plugins::remove_check_folder(root, name),
         SKILL_FOLDER => super::plugins::remove_skill_project_folder(root, name),
         HOOK_FOLDER => super::plugins::remove_hook_folder(root, name),
+        NATIVE_SIGN_IN | GENERATED_HOME => Ok(()),
         _ => Err(error("file_trash_kind_unknown")),
     }
 }

@@ -963,3 +963,40 @@ fn migration_8_adds_parent_to_team_tasks_and_agents() {
         .unwrap();
     assert_eq!(tables, 0, "the step makes no team table of its own");
 }
+
+/// Step 9: a version 8 trash takes the two account file kinds, keeps each pending note and
+/// still refuses a kind it does not know.
+#[test]
+fn an_upgrade_from_eight_lets_the_trash_hold_account_files_keeping_every_note() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE file_trash (
+             kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder','hook_folder')),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+             PRIMARY KEY(kind, name)) WITHOUT ROWID;",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO file_trash VALUES ('account_key','pending-key')",
+        [],
+    )
+    .unwrap();
+    let home = "INSERT INTO file_trash VALUES ('generated_home','lab-key')";
+    let sign_in = "INSERT INTO file_trash VALUES ('native_sign_in','lab-key')";
+    assert!(db.execute(home, []).is_err());
+    assert!(db.execute(sign_in, []).is_err());
+    let before = rows(&db);
+    db.execute_batch("PRAGMA user_version = 8").unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    assert_eq!(rows(&db)["file_trash"], before["file_trash"]);
+    db.execute(home, []).unwrap();
+    db.execute(sign_in, []).unwrap();
+    assert!(
+        db.execute("INSERT INTO file_trash VALUES ('widget','x')", [])
+            .is_err()
+    );
+}

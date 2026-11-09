@@ -298,9 +298,49 @@ pub(super) fn execute(
             if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
                 super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential_ref.as_str())?;
             }
+            #[cfg(unix)]
+            let left = account_files(&connection.auth);
+            #[cfg(unix)]
+            if let Some((kind, name)) = left {
+                super::trash::put(&tx, kind, name)?;
+            }
             tx.commit().map_err(error)?;
+            #[cfg(unix)]
+            if let Some((kind, name)) = left {
+                settle_removed(db, kind, name);
+            }
             Ok(ResultValue::Removed(Box::new(connection)))
         }
+    }
+}
+
+/// Names the files a removed account leaves to delete beside its key: a native account's
+/// sign-in or an API key account's generated SDK home. Input: the account's authentication.
+/// Output: the trash kind and reference, none for an account with neither.
+#[cfg(unix)]
+fn account_files(auth: &ModelAuthentication) -> Option<(&'static str, &str)> {
+    match auth {
+        ModelAuthentication::ApiKey { credential_ref } => {
+            Some((super::trash::GENERATED_HOME, credential_ref.as_str()))
+        }
+        ModelAuthentication::NativeManaged { profile_ref } => {
+            Some((super::trash::NATIVE_SIGN_IN, profile_ref.as_str()))
+        }
+        _ => None,
+    }
+}
+
+/// Deletes a removed account's files straight after its removal commits; what cannot go
+/// now stays noted for the next start. Inputs: the connection, the kind and the reference.
+#[cfg(unix)]
+fn settle_removed(db: &Connection, kind: &str, name: &str) {
+    let settled = db
+        .path()
+        .and_then(|path| std::path::Path::new(path).parent())
+        .ok_or_else(|| error("account_file_root_unknown"))
+        .and_then(|root| super::trash::settle(db, root, kind, name));
+    if let Err(problem) = settled {
+        eprintln!("file_trash_not_removed kind={kind} cause={}", problem.0);
     }
 }
 
