@@ -119,6 +119,7 @@ mod wire {
     const HEAD_BYTES_MAX: usize = 4096;
     const MESSAGE_BYTES_MAX: usize = 1024 * 1024;
     const READ_BYTES_MAX: usize = 8 * MESSAGE_BYTES_MAX;
+    const CONTROL_BYTES_MAX: usize = 125;
     const CHUNK_BYTES: usize = 8192;
     const THREADS_MAX: usize = 16;
     const ATTEMPTS_MAX: usize = 2;
@@ -339,7 +340,7 @@ mod wire {
                     }
                     short => (usize::from(short), 2),
                 };
-                if length > READ_BYTES_MAX {
+                if length > READ_BYTES_MAX || (head & 0x08 != 0 && length > CONTROL_BYTES_MAX) {
                     return Err("codex_bridge_reply_too_large");
                 }
                 self.fill(start + length)?;
