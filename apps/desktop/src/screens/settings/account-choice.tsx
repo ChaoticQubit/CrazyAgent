@@ -64,7 +64,7 @@ export function NextAccountsView({ ranking, pool, names, nowMs }: { ranking: Loa
   </div>;
 }
 
-/** Settings, Usage: every pool's next accounts under its name. Inputs: the ranking and pools
+/** Metrics: every pool's next accounts under its name. Inputs: the ranking and pools
  * read, account names and now. */
 export function NextAccountsPanel({ ranking, pools, names, nowMs }: { ranking: Loaded<PoolRanking[]>; pools: Loaded<PoolSummary[]>; names: Map<string, string>; nowMs: number }) {
   if (ranking.kind === "not_ready") return null;

@@ -11,6 +11,7 @@ pub(super) const IDE_EXTENSIONS_TIMEOUT: Duration = Duration::from_secs(7 * 60);
 pub const IDE_EXTENSIONS_CODES: &[&str] = &[
     "changes_unavailable",
     "ide_entropy_unavailable",
+    "ide_extension_ai_locked",
     "ide_extension_ask_missing",
     "ide_extension_download_failed",
     "ide_extension_hash_invalid",

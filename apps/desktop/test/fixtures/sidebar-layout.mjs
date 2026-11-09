@@ -7,8 +7,8 @@ import { AppShell, Sidebar } from "../../src/ui/shell.tsx";
 let root = null;
 
 /** Mounts the real shell and sidebar with the real stylesheet. Inputs: how many projects, the
- * route, the engine state and the theme. */
-export function mount(count, route = { name: "home" }, engine = "running", theme = "light") {
+ * route, the engine state, the theme, the profile name and the first project's flag. */
+export function mount(count, route = { name: "home" }, engine = "running", theme = "light", profile = "Mira Okafor", flag = undefined) {
   root?.unmount();
   document.head.innerHTML = "";
   const style = document.createElement("style");
@@ -20,8 +20,8 @@ export function mount(count, route = { name: "home" }, engine = "running", theme
   document.body.style.margin = "0";
   document.body.innerHTML = '<div id="root" style="height:100%"></div>';
   root = createRoot(document.getElementById("root"));
-  const projects = Array.from({ length: count }, (_, at) => ({ id: `p${at}`, name: `Project ${at}` }));
-  const sidebar = h(Sidebar, { route, projects, profileName: "Mira Okafor", engine, onRetry: () => {} });
+  const projects = Array.from({ length: count }, (_, at) => ({ id: `p${at}`, name: `Project ${at}`, flag: at === 0 ? flag : undefined }));
+  const sidebar = h(Sidebar, { route, projects, profileName: profile, engine, onRetry: () => {} });
   flushSync(() => root.render(h(AppShell, { sidebar }, h("p", null, "Body"))));
 }
 
@@ -31,7 +31,7 @@ const box = (selector) => {
 };
 
 /** Reads the sidebar's structure. Output: each nav's label and links, the direct children's
- * classes and the links marked as the current page. */
+ * classes, the links marked as the current page and every link's address by its words. */
 export function structure() {
   const aside = document.querySelector("aside.sidebar");
   return {
@@ -41,6 +41,7 @@ export function structure() {
       links: [...nav.querySelectorAll("a")].map((link) => link.textContent),
     })),
     current: [...aside.querySelectorAll('a[aria-current="page"]')].map((link) => link.textContent),
+    hrefs: Object.fromEntries([...aside.querySelectorAll("a")].map((link) => [link.textContent, link.getAttribute("href")])),
   };
 }
 
@@ -57,21 +58,42 @@ export function layout() {
 }
 
 /** Reads the footer. Output: the initial and whether it is hidden from screen readers, the
- * profile and engine words and where each one sits. */
+ * profile and engine words, where each one sits, the footer's height and right edge, whether
+ * the name is cut off and the Try again button's box, null when it is not shown. */
 export function foot() {
   const avatar = document.querySelector(".sidebar-foot .avatar");
   const name = document.querySelector(".sidebar-foot .me");
   const engine = document.querySelector(".sidebar-foot .engine-state");
+  const footer = document.querySelector(".sidebar-foot").getBoundingClientRect();
+  const retry = document.querySelector(".sidebar-foot button")?.getBoundingClientRect() ?? null;
   return {
     initial: avatar?.textContent ?? null, hidden: avatar?.getAttribute("aria-hidden") ?? null, name: name.textContent, engine: engine.textContent,
     initialRight: avatar?.getBoundingClientRect().right ?? null, nameLeft: name.getBoundingClientRect().left,
-    nameBottom: name.getBoundingClientRect().bottom, engineTop: engine.getBoundingClientRect().top,
+    nameRight: name.getBoundingClientRect().right, nameBottom: name.getBoundingClientRect().bottom,
+    nameCut: name.scrollWidth > name.clientWidth, engineTop: engine.getBoundingClientRect().top,
+    engineHeight: engine.getBoundingClientRect().height, footHeight: footer.height, footRight: footer.right,
+    retry: retry && { left: retry.left, right: retry.right, width: retry.width, height: retry.height },
   };
 }
 
 /** The words of the focused element. Output: the text. */
 export function focused() {
   return document.activeElement?.textContent?.trim() ?? "";
+}
+
+/** Reads the focused link's ring against the scrolling list that would clip it. Output: the
+ * link's words, the ring's style and width, and how far it reaches past each side of the
+ * list, zero or less when it stays inside. */
+export function ring() {
+  const node = document.activeElement;
+  const style = getComputedStyle(node);
+  const reach = parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset);
+  const link = node.getBoundingClientRect();
+  const list = node.closest(".nav-group").getBoundingClientRect();
+  return {
+    text: node.textContent.trim(), style: style.outlineStyle, width: parseFloat(style.outlineWidth),
+    past: [list.left - (link.left - reach), link.right + reach - list.right, list.top - (link.top - reach), link.bottom + reach - list.bottom],
+  };
 }
 
 const channels = (color) => color.match(/[\d.]+/g).slice(0, 3).map(Number);

@@ -93,8 +93,10 @@ const ADDED_COLUMNS: [(&str, &str); 7] = [
 /// an engine start can finish or undo it. `Land` moves the owner's `reference` from
 /// `old` to the squash commit `new`, `master` when it is the master landing its own set;
 /// `Reset` points the agent's worktree at `target` only while its HEAD is still `from`
-/// (an intent stored before `from` existed never moves a worktree); `Undo` moves
-/// `reference` from `old` to the commit `new` that reverts the set's landed commit.
+/// (an intent stored before `from` existed moves it only to finish a step whose files
+/// already moved), and `earlier` is what an open set goes back to when it does not happen;
+/// `Undo` moves `reference` from `old` to the commit `new` that reverts the set's landed
+/// commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Intent {
@@ -109,12 +111,70 @@ pub(super) enum Intent {
         #[serde(default)]
         from: Option<String>,
         target: String,
+        #[serde(default)]
+        earlier: Option<Earlier>,
     },
     Undo {
         reference: String,
         old: String,
         new: String,
     },
+}
+
+/// What a change set held before a reset that may never happen: the fields an update, a
+/// restore or a regeneration changes, so an engine start can put them back as the step's
+/// own refusal does. An open state means the set's pending ref named `head`, any other
+/// state that it had none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Earlier {
+    state: ChangeState,
+    waiting: bool,
+    base: String,
+    head: String,
+    conflicts: Vec<String>,
+    files: u32,
+    added: u32,
+    removed: u32,
+    updated_ms: u64,
+    restorable_until_ms: Option<u64>,
+    #[serde(default)]
+    restored: bool,
+}
+
+impl Earlier {
+    /// Copies what a change set holds now. Input: the set. Output: the copy.
+    pub(super) fn of(record: &Record) -> Self {
+        Self {
+            state: record.state,
+            waiting: record.waiting,
+            base: record.base.clone(),
+            head: record.head.clone(),
+            conflicts: record.conflicts.clone(),
+            files: record.files,
+            added: record.added,
+            removed: record.removed,
+            updated_ms: record.updated_ms,
+            restorable_until_ms: record.restorable_until_ms,
+            restored: record.restored,
+        }
+    }
+
+    /// Writes the copy back onto a change set, for the caller to save. Input: the set.
+    /// Output: none.
+    pub(super) fn put_back(self, record: &mut Record) {
+        record.state = self.state;
+        record.waiting = self.waiting;
+        record.base = self.base;
+        record.head = self.head;
+        record.conflicts = self.conflicts;
+        record.files = self.files;
+        record.added = self.added;
+        record.removed = self.removed;
+        record.updated_ms = self.updated_ms;
+        record.restorable_until_ms = self.restorable_until_ms;
+        record.restored = self.restored;
+    }
 }
 
 /// One stored change set with everything the engine needs to act on it. `made` says the

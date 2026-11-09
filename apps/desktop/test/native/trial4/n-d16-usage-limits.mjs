@@ -26,7 +26,7 @@ async function accountNames() {
   throw new Error(`there are more than ${PAGES_MAX * 200} accounts to name`);
 }
 
-/** The limit cards Settings, Usage shows, in screen order. Output: [{ notice, windows }]. */
+/** The limit cards Metrics shows, in screen order. Output: [{ notice, windows }]. */
 function limitCards() {
   return browser.execute(() => [...document.querySelectorAll("section.usage-limits")].map((card) => ({
     notice: card.querySelector(".notice")?.innerText.trim() ?? "",
@@ -51,13 +51,13 @@ function shownNext(label) {
 export const checks = [{
   id: "N-D16",
   op: ["OP-17"],
-  title: "Settings, Usage shows each account's 5-hour and weekly use and reset, and Use it or lose it tries the soonest weekly reset first",
+  title: "Metrics shows each account's 5-hour and weekly use and reset, and Use it or lose it tries the soonest weekly reset first",
   why: "owner: where are the usage limits ... there is no usage pane in the settings",
   after: "end",
   run: async (kit) => {
-    await kit.go("#/settings/usage");
+    await kit.go("#/metrics");
     await kit.until(() => browser.execute(() => document.querySelector("section.usage-limits") !== null || document.body.innerText.includes("No limits read yet")),
-      UI_MS, "Settings, Usage never showed the account limits");
+      UI_MS, "Metrics never showed the account limits");
     const limits = limitsVerdict(await limitCards());
     await kit.inView("section.usage-limits");
     await kit.screen();
