@@ -21888,6 +21888,25 @@ fn a_left_native_lead_s_end_is_not_confirmed_while_a_process_it_started_on_its_o
     assert_eq!(ended, Ok(false));
 }
 
+/// T23-R1-F2: the status column a project's delete waits on is written after the lead's stop
+/// returns, so that stop must already have ended the lead's running native teammate, a real
+/// process in a pane of the teammates' own server.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_stop_has_ended_its_running_teammate_when_it_returns() {
+    let script = SPLITTING_CLAUDE.replace(
+        "  exec /bin/sleep 300\n  ;;",
+        "  echo $$ > left.pid\n  exec /bin/sleep 300\n  ;;",
+    );
+    assert_ne!(script, SPLITTING_CLAUDE, "the teammate records its own id");
+    let (stopped, running) = ended_native_lead(&script, |session, _, _| session.stop());
+    assert!(
+        !running,
+        "the teammate outlived its lead's stop: {stopped:?}"
+    );
+    assert!(matches!(stopped, Ok(None)), "{stopped:?}");
+}
+
 /// A native lead's stop that leaves nothing it started running is confirmed by a listing of
 /// the lead's processes, so its account is not kept held.
 #[cfg(target_os = "macos")]
