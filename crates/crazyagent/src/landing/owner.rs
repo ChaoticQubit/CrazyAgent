@@ -35,10 +35,12 @@ const BUSY_STATE: [&str; 11] = [
 ];
 const BUILT_IN_MERGES: [&str; 6] = ["unspecified", "unset", "set", "text", "binary", "union"];
 
-/// A point inside an Accept or an undo after which a test can stop it, as an engine stop
-/// would.
+/// A point inside an Accept, an undo or the master's own land after which a test can stop
+/// it, as an engine stop would. `Gated` comes after the master's set has passed the checks
+/// that let it land and before the land starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Step {
+    Gated,
     Recorded,
     FilesWritten,
     BranchMoved,
@@ -942,12 +944,13 @@ pub(super) enum By<'a> {
 /// the project (DEC-117 addendum, 2026-11-07). Lands it as an Accept onto the Land on
 /// branch, then [`master_merged`] closes those sets and lists the merge. Any other set, or
 /// Waits, is left for the owner's Accept, and a conflict changes nothing. Inputs: the
-/// store, the owner's home and the change set. Output: the outcome, or None when nothing
-/// was tried.
+/// store, the owner's home, the change set and where a test stops it. Output: the outcome,
+/// or None when nothing was tried.
 pub(super) fn land_master(
     db: &Connection,
     home: &Path,
     id: &ChangeSetId,
+    stopped: &dyn Fn(Step) -> bool,
 ) -> Result<Option<AcceptOutcome>, EngineError> {
     store::initialize(db)?;
     let record = store::load(db, id)?;
@@ -963,6 +966,9 @@ pub(super) fn land_master(
         if covered(db, &record)?.is_empty() {
             return Ok(None);
         }
+    }
+    if stopped(Step::Gated) {
+        return Err(failure("changes_git_failed"));
     }
     let outcome = accept_to(db, home, id, &record.head, None, None, By::Master, &|_| {
         false

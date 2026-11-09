@@ -7934,6 +7934,19 @@ fn activity_of(case: &Case, id: &ChangeSetId) -> Vec<crate::activity::ActivityIt
 /// set's head and keeps both lines in its own turn. Input: the case. Output: the conflicted
 /// set, the master's fix and the README the fix holds.
 fn master_fixing_a_conflict(case: &Case) -> (ChangeSetId, ChangeSetId, &'static str) {
+    let (sub, sub_head, master) = conflicted_set_and_master(case);
+    master_resolves(case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    let fix = turn_of(case, &master, "Resolve the README conflict");
+    (sub, fix, BOTH_FOURTH_LINES)
+}
+
+/// The README a master's fix of the fourth-line conflict holds.
+const BOTH_FOURTH_LINES: &str = "one\ntwo\nthree\nfour from the owner\nfour from the agent\n";
+
+/// Makes the case's agent's set conflict with the owner's fourth line on main and brings
+/// in the master, at Full access with Merge into main itself. Input: the case. Output: the
+/// conflicted set, its head and the master's workspace.
+fn conflicted_set_and_master(case: &Case) -> (ChangeSetId, String, Workspace) {
     use crate::sandbox::policy::AgentAccess;
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
@@ -7950,11 +7963,19 @@ fn master_fixing_a_conflict(case: &Case) -> (ChangeSetId, ChangeSetId, &'static 
     let master = master_at_work(case);
     master_may_land(case, AgentAccess::Full, crate::team::MasterLands::Merges);
     let sub_head = case.view(&sub).head;
-    let resolved = "one\ntwo\nthree\nfour from the owner\nfour from the agent\n";
+    (sub, sub_head, master)
+}
+
+/// Ends a merge in the master's worktree the way a resolved merge ends: the merge is left
+/// open, the files are written over it and it is committed as the master. Inputs: the
+/// case, the master's workspace, the head it merges and the files it writes.
+fn master_resolves(case: &Case, master: &Workspace, head: &str, files: &[(&str, &str)]) {
     let in_master = |args: &[&str]| git_in(&case.home, &master.worktree, args);
-    in_master(&["merge", "--no-commit", "-s", "ours", &sub_head]);
-    write(&master.worktree.join("README"), resolved);
-    in_master(&["add", "README"]);
+    in_master(&["merge", "--no-commit", "-s", "ours", head]);
+    for (path, text) in files {
+        write(&master.worktree.join(path), text);
+        in_master(&["add", path]);
+    }
     in_master(&[
         "-c",
         "user.name=Master",
@@ -7965,8 +7986,33 @@ fn master_fixing_a_conflict(case: &Case) -> (ChangeSetId, ChangeSetId, &'static 
         "-m",
         "Take both fourth lines",
     ]);
-    let fix = turn_of(case, &master, "Resolve the README conflict");
-    (sub, fix, resolved)
+}
+
+/// Shows a master's set waits for the owner: nothing lands, it stays pending, the other
+/// set keeps its state, main does not move and no merge row is written. Inputs: the case,
+/// the master's set, the other set, its state and what the row is about.
+fn master_set_waits(
+    case: &Case,
+    fix: &ChangeSetId,
+    other: &ChangeSetId,
+    state: ChangeState,
+    about: &str,
+) {
+    let tip = case.tip();
+    assert_eq!(
+        land_master_set(&case.db, &case.home, fix).unwrap(),
+        None,
+        "{about}: the set waits"
+    );
+    assert_eq!(case.view(fix).state, ChangeState::Pending, "{about}");
+    assert_eq!(case.view(other).state, state, "{about}");
+    assert_eq!(case.tip(), tip, "{about}: main does not move");
+    assert!(
+        activity_of(case, fix)
+            .iter()
+            .all(|row| row.kind != crate::activity::ActivityKind::MergedIntoMain),
+        "{about}: nothing merged, so no merge row"
+    );
 }
 
 #[test]
@@ -8070,11 +8116,10 @@ fn an_ordinary_master_set_waits_for_the_owner_under_merges() {
     );
 }
 
-/// What the merge choice's words promise: a master set lands whole. An ordinary edit from
-/// an earlier turn waits, then lands with the later turn that merged in another open set,
-/// and that merge needs no conflict.
+/// MASTER-LAND-SPLIT: an ordinary edit from an earlier turn never lands unaccepted, so a
+/// later turn that merges in another open set leaves the whole master set waiting.
 #[test]
-fn a_later_turn_merging_in_another_set_lands_the_earlier_turns_edit_with_the_master_set() {
+fn a_later_turn_merging_in_another_set_leaves_the_earlier_turns_edit_waiting() {
     use crate::sandbox::policy::AgentAccess;
     let case = Case::new();
     case.start();
@@ -8123,26 +8168,391 @@ fn a_later_turn_merging_in_another_set_lands_the_earlier_turns_edit_with_the_mas
     let later = record_turn_end(&case.db, &master, &turn).unwrap().unwrap();
     assert_eq!(later, earlier, "the later turn joins the master's open set");
 
-    let outcome = land_master_set(&case.db, &case.home, &later).unwrap();
-    let Some(AcceptOutcome::Landed { commit, branch }) = outcome else {
-        panic!("the set that merged in another lands: {outcome:?}");
+    master_set_waits(
+        &case,
+        &later,
+        &sub,
+        ChangeState::Pending,
+        "an earlier turn's edit shares the set",
+    );
+}
+
+/// MASTER-LAND-SPLIT: holding another open set's head is not enough. A clean merge, or a
+/// fast-forward onto that head, resolves no conflict, so the set waits.
+#[test]
+fn a_master_set_bringing_in_another_set_with_no_conflict_waits_for_the_owner() {
+    use crate::sandbox::policy::AgentAccess;
+    for how in ["--no-ff", "--ff-only"] {
+        let case = Case::new();
+        case.start();
+        case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+        let sub = case.turn(TurnOutcome::Succeeded).unwrap();
+        let sub_head = case.view(&sub).head;
+        let master = master_at_work(&case);
+        master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
+        git_in(
+            &case.home,
+            &master.worktree,
+            &[
+                "-c",
+                "user.name=Master",
+                "-c",
+                "user.email=master@example.invalid",
+                "merge",
+                "-q",
+                "--no-edit",
+                how,
+                &sub_head,
+            ],
+        );
+        let fix = turn_of(&case, &master, "Merge the agent's work");
+        master_set_waits(&case, &fix, &sub, ChangeState::Pending, how);
+    }
+}
+
+/// MASTER-LAND-SPLIT: a real conflict fix in a later turn does not carry an ordinary edit
+/// from an earlier turn of the same set onto main.
+#[test]
+fn a_conflict_fix_in_a_later_turn_leaves_the_earlier_turns_edit_waiting() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    write(&master.worktree.join("NOTES"), "from the earlier turn\n");
+    let earlier = turn_of(&case, &master, "Write notes");
+    master_set_waits(
+        &case,
+        &earlier,
+        &sub,
+        ChangeState::Conflict,
+        "the ordinary edit alone",
+    );
+
+    record_worktree_start(
+        &case.db,
+        &master.repository,
+        &master.worktree,
+        &master.git_dir,
+    )
+    .unwrap();
+    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-master-later".into(),
+        prompt_line: "Resolve the README conflict".into(),
     };
-    assert_eq!((branch.as_str(), case.tip()), ("main", commit));
-    assert_eq!(
-        case.owner(&["show", "main:NOTES"]),
-        "from the earlier turn\n",
-        "the earlier turn's edit landed with the set, unaccepted"
+    let later = record_turn_end(&case.db, &master, &turn).unwrap().unwrap();
+    assert_eq!(later, earlier, "the later turn joins the master's open set");
+
+    master_set_waits(
+        &case,
+        &later,
+        &sub,
+        ChangeState::Conflict,
+        "a two-turn set with a real conflict fix",
     );
-    assert_eq!(
-        case.owner(&["show", "main:README"]),
-        "one\ntwo\nthree\nfour from the agent\n",
-        "the merged-in set's work landed too"
+    assert!(
+        !case
+            .owner(&["ls-tree", "--name-only", "main"])
+            .contains("NOTES"),
+        "the earlier turn's edit is not on main"
     );
+}
+
+/// MASTER-LAND-SPLIT: an edit hidden inside the merge commit, on a path the merge did not
+/// conflict on, is an ordinary edit too.
+#[test]
+fn a_master_merge_with_an_extra_edit_inside_it_waits_for_the_owner() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[("README", BOTH_FOURTH_LINES), ("NOTES", "an extra edit\n")],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "an extra edit in the merge",
+    );
+}
+
+/// MASTER-LAND-SPLIT: a commit list with a follow-up commit after the fix is not only a
+/// fix, so a master that keeps working after its merge waits.
+#[test]
+fn a_master_commit_after_its_conflict_fix_leaves_the_set_waiting() {
+    let case = Case::new();
+    let (sub, sub_head, master) = conflicted_set_and_master(&case);
+    master_resolves(&case, &master, &sub_head, &[("README", BOTH_FOURTH_LINES)]);
+    write(&master.worktree.join("NOTES"), "after the fix\n");
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Conflict,
+        "a commit after the fix",
+    );
+}
+
+/// MASTER-LAND-SPLIT: with criss-cross history a merge has more than one merge base, so
+/// the engine cannot tell what the merge would have been and the set waits.
+#[test]
+fn a_master_merge_with_more_than_one_merge_base_waits_for_the_owner() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    let sub = case.turn(TurnOutcome::Succeeded).unwrap();
+    let first = case.view(&sub).head;
+    let owner = case.owner_commit(
+        "README",
+        "one\ntwo\nthree\nfour from the owner\n",
+        "Owner adds four",
+    );
+    case.start();
+    let in_agent = |args: &[&str]| git_in(&case.home, &case.workspace.worktree, args);
+    in_agent(&["merge", "--no-commit", "-s", "ours", &owner]);
+    case.edit("README", "one\ntwo\nthree\nfour from both, agent first\n");
+    in_agent(&["add", "README"]);
+    in_agent(&[
+        "-c",
+        "user.name=Agent",
+        "-c",
+        "user.email=agent@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Take main in",
+    ]);
+    assert_eq!(case.turn(TurnOutcome::Succeeded).unwrap(), sub);
+    let second = case.view(&sub).head;
+    assert_ne!(first, second, "the agent's second turn moved its set");
+
+    let master = master_at_work(&case);
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
+    master_resolves(
+        &case,
+        &master,
+        &first,
+        &[("README", "one\ntwo\nthree\nfour from both, owner first\n")],
+    );
+    master_resolves(&case, &master, &second, &[("README", BOTH_FOURTH_LINES)]);
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    let parents = case.owner(&["log", "-1", "--format=%P", &case.view(&fix).head]);
+    let parents: Vec<&str> = parents.split_whitespace().collect();
+    assert_eq!(
+        case.owner(&["merge-base", "--all", parents[0], parents[1]])
+            .lines()
+            .count(),
+        2,
+        "the fixture makes a criss-cross merge"
+    );
+
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Pending,
+        "more than one merge base",
+    );
+}
+
+/// MASTER-LAND-SPLIT: one set brought in by a real conflict does not excuse another set
+/// the master fast-forwarded onto first; that one had no conflict.
+#[test]
+fn a_set_fast_forwarded_in_beside_a_conflict_fix_leaves_the_master_set_waiting() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    let other = numbered_agent(&case, 3);
+    record_worktree_start(&case.db, &other.repository, &other.worktree, &other.git_dir).unwrap();
+    write(
+        &other.worktree.join("README"),
+        "one\ntwo\nthree\nfour from the other\n",
+    );
+    let clashing = turn_of(&case, &other, "Add the other four");
+    let clashing_head = case.view(&clashing).head;
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    let sub = case.turn(TurnOutcome::Succeeded).unwrap();
+    let sub_head = case.view(&sub).head;
+
+    let master = master_at_work(&case);
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Merges);
+    git_in(
+        &case.home,
+        &master.worktree,
+        &["merge", "-q", "--ff-only", &sub_head],
+    );
+    master_resolves(
+        &case,
+        &master,
+        &clashing_head,
+        &[("README", "one\ntwo\nthree\nfour from both\n")],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+
+    master_set_waits(
+        &case,
+        &fix,
+        &sub,
+        ChangeState::Pending,
+        "a set that came in by fast-forward",
+    );
+    assert_eq!(case.view(&clashing).state, ChangeState::Pending);
+}
+
+/// MASTER-LAND-SPLIT: the owner's "Ask me before merging" stops a master's conflict fix
+/// the way it stops the merge tool, and with it off the same set lands, the other set's
+/// clean files with it.
+#[test]
+fn a_pure_conflict_fix_waits_with_ask_on_and_lands_with_ask_off() {
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour from the agent\n");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let sub = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit(
+        "README",
+        "one\ntwo\nthree\nfour from the owner\n",
+        "Owner adds four",
+    );
+    assert!(matches!(
+        case.accept(&sub).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    let master = master_at_work(&case);
+    master_may_land(
+        &case,
+        crate::sandbox::policy::AgentAccess::Full,
+        crate::team::MasterLands::Merges,
+    );
+    let sub_head = case.view(&sub).head;
+    master_resolves(
+        &case,
+        &master,
+        &sub_head,
+        &[
+            ("README", BOTH_FOURTH_LINES),
+            ("src/new.rs", "fn main() {}\n"),
+        ],
+    );
+    let fix = turn_of(&case, &master, "Resolve the README conflict");
+    let project = case.workspace.project.as_str();
+
+    case.db
+        .execute("INSERT INTO team_merge_ask VALUES (?1,1)", [project])
+        .unwrap();
+    master_set_waits(&case, &fix, &sub, ChangeState::Conflict, "Ask on");
+
+    case.db
+        .execute(
+            "UPDATE team_merge_ask SET ask=0 WHERE project=?1",
+            [project],
+        )
+        .unwrap();
+    let outcome = land_master_set(&case.db, &case.home, &fix).unwrap();
+    assert!(
+        matches!(&outcome, Some(AcceptOutcome::Landed { branch, .. }) if branch == "main"),
+        "with Ask off the pure fix lands: {outcome:?}"
+    );
+    assert_eq!(case.owner(&["show", "main:README"]), BOTH_FOURTH_LINES);
+    assert_eq!(case.owner(&["show", "main:src/new.rs"]), "fn main() {}\n");
+    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+}
+
+/// MASTER-LAND-SPLIT: when the fix waits and the owner Accepts it, the sets it holds close
+/// with it. Left open, a second Accept conflicts again, because a squash on main is not an
+/// ancestor of that set's head, and only Discard would clear it.
+#[test]
+fn an_owner_accept_of_a_master_set_closes_the_sets_it_holds_and_a_second_accept_is_not_stuck() {
+    use crate::sandbox::policy::AgentAccess;
+    let case = Case::new();
+    let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+    let sub_head = case.view(&sub).head;
+    master_may_land(&case, AgentAccess::Full, crate::team::MasterLands::Waits);
+    master_set_waits(&case, &fix, &sub, ChangeState::Conflict, "Waits");
+
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&fix).unwrap() else {
+        panic!("the owner's Accept of the fix conflicted");
+    };
+    assert_eq!(case.owner(&["show", "main:README"]), resolved);
     assert_eq!(
         case.view(&sub).state,
         ChangeState::Accepted,
-        "the merged-in set closes"
+        "the set the fix holds closes with the owner's Accept"
     );
+    assert_eq!(
+        store::load(&case.db, &sub).unwrap().landed.as_deref(),
+        Some(commit.as_str()),
+        "it landed with the owner's commit"
+    );
+
+    let tip = case.tip();
+    assert_eq!(
+        refused(accept(&case.db, &case.home, &sub, &sub_head, None)),
+        "changes_stale",
+        "a second Accept finds the set closed, not a new conflict"
+    );
+    assert_eq!(case.tip(), tip, "main does not move for the second Accept");
+    assert!(
+        store::open_of(&case.db, Some(&case.workspace.project))
+            .unwrap()
+            .is_empty(),
+        "no set is left open to Discard"
+    );
+}
+
+/// T3-R2-L1: the gate, the land and the close are one step on the repository. An owner
+/// Discard of the covered set that races the master's land either comes first, so nothing
+/// lands, or finds the set already closed. It must not leave the master's edit on main with
+/// the set it was justified by thrown away.
+#[test]
+fn an_owner_discard_racing_a_master_land_cannot_slip_between_the_check_and_the_land() {
+    let case = Case::new();
+    let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+    let sub_head = case.view(&sub).head;
+    let repository = case.workspace.repository.clone();
+    let engine = case.repo.parent().unwrap().join("engine");
+    let racer = std::cell::RefCell::new(None);
+    let paused = |step: owner::Step| {
+        if step == owner::Step::Gated {
+            let (engine, home, set, head) = (
+                engine.clone(),
+                case.home.clone(),
+                sub.clone(),
+                sub_head.clone(),
+            );
+            let handle = std::thread::spawn(move || {
+                git::OWNER_HOME.with(|owner| *owner.borrow_mut() = Some(home));
+                let db = open(&engine).unwrap();
+                db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+                discard(&db, &set, &head, NOW_MS).map_err(|error| error.0)
+            });
+            while !handle.is_finished() && !flow::busy(&repository) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            *racer.borrow_mut() = Some(handle);
+        }
+        false
+    };
+
+    let outcome = owner::land_master(&case.db, &case.home, &fix, &paused).unwrap();
+
+    let raced = racer.into_inner().unwrap().join().unwrap();
+    assert!(
+        matches!(&outcome, Some(AcceptOutcome::Landed { .. })),
+        "the master's fix lands: {outcome:?}"
+    );
+    assert_eq!(
+        raced,
+        Err("changes_stale".to_owned()),
+        "the Discard waits for the land and finds the set closed"
+    );
+    assert_eq!(case.owner(&["show", "main:README"]), resolved);
+    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
 }
 
 #[test]

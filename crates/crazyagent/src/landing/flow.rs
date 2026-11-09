@@ -57,6 +57,15 @@ pub(super) fn hold(repository: &Path) -> Held {
     Held(repository.to_path_buf())
 }
 
+/// Tells whether someone holds the engine's hold on one owner repository right now.
+/// Input: the repository root. Output: the answer.
+#[cfg(test)]
+pub(super) fn busy(repository: &Path) -> bool {
+    BUSY.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(repository)
+}
+
 fn invalid() -> EngineError {
     failure("changes_workspace_invalid")
 }

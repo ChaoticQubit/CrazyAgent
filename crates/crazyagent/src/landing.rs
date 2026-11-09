@@ -1329,7 +1329,7 @@ pub fn land_master_set(
     id: &ChangeSetId,
 ) -> Result<Option<AcceptOutcome>, EngineError> {
     #[cfg(unix)]
-    return owner::land_master(db, owner_home, id);
+    return owner::land_master(db, owner_home, id, &|_| false);
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id);
