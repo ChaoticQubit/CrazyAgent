@@ -51,4 +51,7 @@ with tempfile.TemporaryDirectory() as folder:
     assert rc == 0
     assert json.loads(out.read_text(encoding="utf-8"))["models"]["gpt-t"]["tier"]["fast_milli"] == 1000
     assert run(root, GOOD, "last week")[0] != 0
+    rc, out = run(root, {"claude-c": [5e-06, 2.5e-05, None, None], "claude-4-opus": [5e-06, 2.5e-05, None, 5e-07]})
+    assert rc == 0
+    assert list(json.loads(out.read_text(encoding="utf-8"))["models"]) == ["claude-c"]
 print("ok")
