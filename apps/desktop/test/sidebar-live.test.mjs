@@ -112,19 +112,19 @@ test("a screen reader hears the project and how many agents are working, as one 
     const { nodes } = await send("Accessibility.getFullAXTree", {});
     return nodes.filter((node) => node.role?.value === "link").map((node) => node.name?.value);
   });
-  assert.ok(names.includes("Larkspur 2 agents working 3 unseen alerts"), JSON.stringify(names));
+  assert.ok(names.includes("Larkspur 2 agents working 3 alerts"), JSON.stringify(names));
   assert.ok(names.includes("Harbor"), JSON.stringify(names));
 });
 
-test("a screen reader hears what the unseen count counts, for one alert and for several", async () => {
+test("a screen reader hears what the flag counts, for one alert and for several", async () => {
   const projects = JSON.stringify([{ id: "a", name: "Cedar", flag: "1" }, { id: "b", name: "Harbor", flag: "12" }]);
   const names = await onSidebar(`${projects}, "light"`, 1180, async ({ send }) => {
     await send("Accessibility.enable", {});
     const { nodes } = await send("Accessibility.getFullAXTree", {});
     return nodes.filter((node) => node.role?.value === "link").map((node) => node.name?.value);
   });
-  assert.ok(names.includes("Cedar 1 unseen alert"), JSON.stringify(names));
-  assert.ok(names.includes("Harbor 12 unseen alerts"), JSON.stringify(names));
+  assert.ok(names.includes("Cedar 1 alert"), JSON.stringify(names));
+  assert.ok(names.includes("Harbor 12 alerts"), JSON.stringify(names));
 });
 
 test("one events read per look gives every project its count, and no read is added for each project", async () => {
