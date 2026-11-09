@@ -4310,6 +4310,24 @@ mod tests {
     }
 
     #[test]
+    fn a_wall_title_shows_hidden_characters_as_their_escapes_and_stays_bounded() {
+        assert_eq!(
+            wall_name("Lark\u{202e}spur\u{200b} \u{e0041}Booking"),
+            "Lark\\u202espur\\u200b \\u{e0041}Booking"
+        );
+        assert_eq!(wall_name("Lark\n\tspur\u{1}"), "Larkspur");
+        assert_eq!(wall_name("\u{200b}"), "\\u200b");
+        assert_eq!(wall_name(" \u{1} "), "Project");
+        assert_eq!(wall_name(&wall_name("Lark\u{202e}spur")), "Lark\\u202espur");
+        assert_eq!(
+            wall_name("Larkspur \u{2764}\u{fe0f}"),
+            "Larkspur \u{2764}\u{fe0f}"
+        );
+        let long = wall_name(&"\u{200b}x".repeat(WALL_NAME_CHARS_MAX * 4));
+        assert_eq!(long.chars().count(), WALL_NAME_CHARS_MAX);
+    }
+
+    #[test]
     fn the_app_page_keeps_its_commands_and_the_ide_page_gets_none_once_the_ide_is_in_the_window() {
         let app = mock_builder()
             .manage(NativeState(BridgeQueue::new(NativeBridge::new(None))))
