@@ -613,3 +613,199 @@ async fn an_engine_start_forgets_a_delete_plan_left_behind() {
     );
     engine.stop().await;
 }
+
+/// Makes an agent's folder and profile files and a research run on disk, as a project's
+/// engine files. Inputs: the engine root, the agent and the run's folder name. Output: every
+/// path made.
+fn engine_files(root: &std::path::Path, agent: i64, run: &str) -> Vec<PathBuf> {
+    let team = root.join("team");
+    let profiles = team.join("profiles");
+    let folders = [
+        team.join("agents").join(format!("agent-{agent}")),
+        root.join("research").join("agents").join(run),
+    ];
+    for folder in &folders {
+        std::fs::create_dir_all(folder.join("home")).unwrap();
+    }
+    std::fs::create_dir_all(&profiles).unwrap();
+    let files = [
+        format!("agent-{agent}.sb"),
+        format!("agent-{agent}-teammates.sb"),
+        format!("agent-{agent}-teammates-setup.sb"),
+        format!("agent-{agent}-teammates.socket"),
+        format!("agent-{agent}-teammates-server.pid"),
+    ]
+    .map(|name| profiles.join(name));
+    for file in &files {
+        std::fs::write(file, "kept until a record names it").unwrap();
+    }
+    folders.into_iter().chain(files).collect()
+}
+
+/// Writes the rows of a finished agent and a finished research job of the test project, each
+/// with no process behind it. Input: the engine.
+fn engine_file_rows(engine: &Engine) {
+    write_db(
+        engine,
+        "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+         VALUES (9,'setup-pooled','sub','codex',1,'stopped',0,0);
+         INSERT INTO research_jobs(id,project,kind,harness,tools,status,created_ms)
+         VALUES (41,'setup-pooled','market_research','codex',1,'done',0);",
+    );
+}
+
+fn recorded(engine: &Engine) -> i64 {
+    engine.rows("SELECT count(*) FROM projects_delete_files")
+}
+
+/// A delete whose reply never arrived leaves its record behind, so the next engine start
+/// removes exactly the files it names and clears it.
+#[tokio::test]
+async fn an_engine_start_finishes_the_files_a_delete_recorded() {
+    let mut engine = Engine::start().await;
+    let made = engine_files(engine.root.path(), 9, "job-41-1");
+    write_db(
+        &engine,
+        "INSERT INTO projects_delete_files(name) VALUES ('agent-9'),('job-41-1')",
+    );
+    engine.restart().await;
+    for path in &made {
+        assert!(!path.exists(), "{} goes", path.display());
+    }
+    assert_eq!(recorded(&engine), 0, "the record is cleared last");
+    engine.stop().await;
+}
+
+/// Absence is not intent: a start removes nothing a record does not name exactly, so a
+/// folder with no row and no record survives it, and a name shaped like a path is dropped
+/// unused.
+#[tokio::test]
+async fn an_engine_start_keeps_every_engine_file_no_record_names_exactly() {
+    let mut engine = Engine::start().await;
+    let made = engine_files(engine.root.path(), 77, "job-88-1");
+    write_db(
+        &engine,
+        "INSERT INTO projects_delete_files(name)
+         VALUES ('../agents/agent-77'),('job-88-1/home'),('agent-077'),('job-88')",
+    );
+    engine.restart().await;
+    for path in &made {
+        assert!(path.exists(), "{} stays", path.display());
+    }
+    assert_eq!(recorded(&engine), 0, "a name that is no engine file is dropped");
+    engine.stop().await;
+}
+
+/// A delete records its engine files with the rows it drops and removes every one, the
+/// lead's teammate files too, so only a failed clear leaves the record behind.
+#[tokio::test]
+async fn a_delete_records_its_engine_files_and_removes_every_one() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    engine_file_rows(&engine);
+    write_db(
+        &engine,
+        "CREATE TRIGGER record_stays BEFORE DELETE ON projects_delete_files
+         BEGIN SELECT RAISE(FAIL, 'record stays'); END;",
+    );
+    let made = engine_files(engine.root.path(), 9, "job-41-1");
+    std::fs::remove_dir_all(&folder).unwrap();
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while made.iter().any(|path| path.exists()) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for path in &made {
+        assert!(!path.exists(), "{} goes", path.display());
+    }
+    assert_eq!(
+        engine.rows(
+            "SELECT count(*) FROM projects_delete_files WHERE name IN ('agent-9','job-41-1')"
+        ),
+        2
+    );
+    assert_eq!(recorded(&engine), 2, "the record names nothing else");
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A delete refused after its plan was written drops no rows, so it records nothing and a
+/// later start removes nothing.
+#[tokio::test]
+async fn a_delete_refused_after_its_plan_records_and_removes_nothing() {
+    let mut engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    engine_file_rows(&engine);
+    let made = engine_files(engine.root.path(), 9, "job-41-1");
+    let home = engine.home();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(result(response), rejected("home_trash_failed"));
+    assert_eq!(recorded(&engine), 0);
+    drop(owner);
+    engine.restart().await;
+    for path in &made {
+        assert!(path.exists(), "{} stays", path.display());
+    }
+    assert!(folder.is_dir());
+    engine.stop().await;
+}
+
+/// A replayed delete records and removes nothing twice: files that appear under the same
+/// names after the first delete stay through the replay and a start.
+#[tokio::test]
+async fn a_replayed_delete_records_and_removes_nothing_twice() {
+    let mut engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    engine_file_rows(&engine);
+    let made = engine_files(engine.root.path(), 9, "job-41-1");
+    std::fs::remove_dir_all(&folder).unwrap();
+    let revision = engine.rows("SELECT revision FROM state WHERE id=1");
+    let request = OwnerRequest {
+        protocol_version: crate::protocol::PROTOCOL_VERSION,
+        request_id: crate::protocol::RequestId::new("delete-replay-1".to_owned()).unwrap(),
+        expected_revision: crate::protocol::Cursor::new(u64::try_from(revision).unwrap()),
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::DeleteProject {
+                project_id: project.clone(),
+                name: NAME.into(),
+            },
+        },
+    };
+    let client = owner.shared_client().unwrap();
+    assert_eq!(
+        result(client.request(request.clone()).await.unwrap().response),
+        OwnerResult::Applied
+    );
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while (made[0].exists() || recorded(&engine) != 0) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!made[0].exists(), "the first delete removes the files");
+    assert_eq!(recorded(&engine), 0, "the first delete clears its record");
+    let again = engine_files(engine.root.path(), 9, "job-41-1");
+    let replayed = client.request(request).await.unwrap().response;
+    assert!(
+        matches!(&replayed, OwnerResponse::Applied { operation } if operation.historical_replay),
+        "{replayed:?}"
+    );
+    assert_eq!(recorded(&engine), 0, "a replay records nothing");
+    drop(client);
+    drop(owner);
+    engine.restart().await;
+    for path in &again {
+        assert!(path.exists(), "{} stays through the replay", path.display());
+    }
+    engine.stop().await;
+}
