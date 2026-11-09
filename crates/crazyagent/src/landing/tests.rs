@@ -6851,6 +6851,142 @@ fn a_change_set_the_owner_landed_in_part_by_hand_shows_only_the_rest_until_all_o
     case.landed_outside(&id, &head);
 }
 
+/// A case whose agent turn changed the README's second line, with the activity tables the
+/// rows of its closing need. Output: the case, its change set and that set's head.
+fn taken_case() -> (Case, ChangeSetId, String) {
+    let case = Case::new();
+    case.db
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+        )
+        .unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    crate::activity::initialize(&case.db).unwrap();
+    case.edit("README", "one\nagent\nthree\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    (case, id, head)
+}
+
+/// Lands the agent's README line on the owner's branch in a commit of its own, then moves
+/// that line on, so a merge of the set's head conflicts. Input: the case.
+fn take_and_move_on(case: &Case) {
+    case.owner_commit("README", "one\nagent\nthree\n", "Port the agent work");
+    case.owner_commit("README", "one\nowner\nthree\n", "Build on the port");
+}
+
+/// The activity rows of a change set as actor, kind and text. Inputs: the case and the set.
+fn set_rows(case: &Case, id: &ChangeSetId) -> Vec<(String, &'static str, String)> {
+    let record = super::store::load(&case.db, id).unwrap();
+    crate::activity::list(&case.db, &record.project, crate::activity::LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.change_set.as_deref() == Some(id.as_str()))
+        .map(|item| (item.actor, item.kind.name(), item.text))
+        .collect()
+}
+
+#[test]
+fn a_change_set_main_took_and_moved_on_from_closes_restorably_by_the_engine() {
+    let (case, id, head) = taken_case();
+    take_and_move_on(&case);
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.outside),
+        (ChangeState::Discarded, false),
+        "{view:?}"
+    );
+    assert!(view.restorable_until_ms.is_some(), "{view:?}");
+    assert_eq!(view.conflicts, Vec::<String>::new());
+    assert_eq!(
+        refused(discard(&case.db, &id, &head, NOW_MS)),
+        "changes_stale"
+    );
+    assert_eq!(case.agent_head(), case.tip());
+    let record = super::store::load(&case.db, &id).unwrap();
+    assert_eq!(
+        set_rows(&case, &id),
+        vec![(
+            crate::activity::ENGINE_ACTOR.to_owned(),
+            "discarded",
+            format!(
+                "Closed the changes of {}: the branch they land on already took every file they change. {}",
+                record.agent.label, record.prompt_line
+            ),
+        )]
+    );
+}
+
+#[test]
+fn a_change_set_the_owner_brought_back_stays_open_though_main_took_it() {
+    let (case, id, _) = taken_case();
+    take_and_move_on(&case);
+    case.observe();
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+    restore(&case.db, &id, NOW_MS).unwrap();
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.restorable_until_ms),
+        (ChangeState::Pending, None),
+        "{view:?}"
+    );
+}
+
+#[test]
+fn a_change_set_main_took_only_in_part_stays_open_with_its_whole_change() {
+    let case = Case::new();
+    case.edit("README", "one\nagent\nthree\n");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    take_and_move_on(&case);
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!((view.state, view.files), (ChangeState::Pending, 2), "{view:?}");
+}
+
+#[test]
+fn a_change_set_that_conflicts_with_work_main_never_took_stays_open() {
+    let case = Case::new();
+    case.edit("README", "one\nagent\nthree\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\nowner\nthree\n", "Owner work on the line");
+    case.observe();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
+
+#[test]
+fn a_deletion_main_took_and_moved_on_from_closes_too() {
+    let case = Case::new();
+    std::fs::remove_file(case.workspace.worktree.join("README")).unwrap();
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner(&["rm", "-q", "README"]);
+    case.owner(&["commit", "-q", "-m", "Port the removal"]);
+    case.owner_commit("README", "written again\n", "Write it again");
+    case.observe();
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+}
+
+#[test]
+fn a_discard_by_the_master_is_recorded_as_the_master_s() {
+    let (case, id, head) = taken_case();
+    super::discard_as(
+        &case.db,
+        &id,
+        &head,
+        NOW_MS,
+        crate::activity::MASTER_ACTOR,
+    )
+    .unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+    let actors: Vec<String> = set_rows(&case, &id)
+        .into_iter()
+        .map(|(actor, _, _)| actor)
+        .collect();
+    assert_eq!(actors, vec![crate::activity::MASTER_ACTOR.to_owned()]);
+}
+
 #[test]
 fn a_change_set_whose_worktree_was_deleted_outside_the_app_closes_as_removed_outside() {
     for removal in ["git worktree remove", "rm -rf"] {

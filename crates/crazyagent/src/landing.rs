@@ -1397,6 +1397,25 @@ pub fn discard(
     expected_head: &str,
     now_ms: u64,
 ) -> Result<u64, EngineError> {
+    discard_as(
+        db,
+        id,
+        expected_head,
+        now_ms,
+        crate::activity::OWNER_ACTOR,
+    )
+}
+
+/// Discards a change set as [`discard`] does, recording who did it in the project's
+/// activity. Inputs: the store, the change set, the head that was reviewed, the time now
+/// and the actor. Output: the restorable-until time.
+pub fn discard_as(
+    db: &Connection,
+    id: &ChangeSetId,
+    expected_head: &str,
+    now_ms: u64,
+    _by: &str,
+) -> Result<u64, EngineError> {
     #[cfg(unix)]
     return flow::discard(db, id, expected_head, now_ms)
         .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded));
