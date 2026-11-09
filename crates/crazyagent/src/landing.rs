@@ -1001,7 +1001,7 @@ pub fn commit_deletions(
 /// the agent made itself land too. A failed or cancelled turn commits too. Owner edits
 /// waiting in the worktree settle on the change set the turn end leaves open; when they
 /// cannot, they keep waiting for the next turn end and the recorded set is still returned.
-/// A sub-agent's claims on its ended work then hold for that set, or are released when
+/// An agent's claims on its ended work then hold for that set, or are released when
 /// nothing is pending. Whether the set then goes back to its agent is the turn-end caller's,
 /// through [`conflicts_with_main`] (OS-8). Inputs: the store, the workspace and the turn end.
 /// Output: the change set the work now belongs to, None when nothing is pending.
