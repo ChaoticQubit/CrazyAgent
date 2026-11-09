@@ -190,8 +190,9 @@ fn counting_rows_again_takes_no_write_lock() {
     let (root, db) = store();
     let second = crate::usage::open(root.path()).unwrap();
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
-    count_rows(&second).unwrap();
+    let counted = count_rows(&second);
     db.execute_batch("COMMIT").unwrap();
+    assert!(counted.is_ok(), "{counted:?}");
 }
 
 #[test]
@@ -295,4 +296,53 @@ fn a_rows_first_estimate_is_capped_like_its_later_ones() {
         .query_row("SELECT cost_nanos FROM usage_tokens", [], |row| row.get(0))
         .unwrap();
     assert_eq!(cost, ROW_TOKENS_MAX);
+}
+
+#[test]
+fn a_lower_line_in_one_read_leaves_the_largest() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(&file, &line("msg_low", 1, 40));
+    append(&file, &line("msg_low", 1, 10));
+    assert_eq!(scan_it(&db, root.path()), expected(1, 40));
+}
+
+#[test]
+fn a_lower_line_on_a_later_scan_adds_nothing_and_neither_does_its_return() {
+    let (root, db) = store();
+    let file = transcript(root.path(), "s1");
+    append(&file, &line("msg_low", 1, 40));
+    assert_eq!(scan_it(&db, root.path()), expected(1, 40));
+    append(&file, &line("msg_low", 1, 10));
+    assert_eq!(scan_it(&db, root.path()), expected(0, 0));
+    append(&file, &line("msg_low", 1, 40));
+    assert_eq!(scan_it(&db, root.path()), expected(0, 0));
+}
+
+#[test]
+fn a_message_id_past_the_bound_stores_no_key_and_each_line_counts() {
+    let (root, db) = store();
+    let huge = "a".repeat(3 * 1024 * 1024);
+    let file = transcript(root.path(), "s1");
+    append(&file, &line(&huge, 5, 1));
+    assert_eq!(scan_it(&db, root.path()), expected(5, 1));
+    append(&file, &line(&huge, 5, 1));
+    assert_eq!(scan_it(&db, root.path()), expected(5, 1));
+    let keys: i64 = db
+        .query_row("SELECT COUNT(*) FROM usage_messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(keys, 0);
+}
+
+#[test]
+fn one_scan_stops_reading_files_at_its_bound_and_the_next_goes_on() {
+    let (root, db) = store();
+    for session in 0..3 {
+        let lines: String = (0..USAGES_PER_READ_MAX)
+            .map(|index| line(&format!("msg_{session}_{index}"), 1, 0))
+            .collect();
+        append(&transcript(root.path(), &format!("s{session}")), &lines);
+    }
+    assert_eq!(scan_it(&db, root.path()), expected(8192, 0));
+    assert_eq!(scan_it(&db, root.path()), expected(4096, 0));
 }
