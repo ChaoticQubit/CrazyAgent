@@ -8842,6 +8842,7 @@ fn a_tools_on_sub_agent_s_task_turn_carries_the_task_start_reminder_only_while_i
     approve_skills(&fixture, &["meal-tips"]);
     let host = fixture.host();
     let mut team = live_runtime(&fixture, &host, &recording_codex());
+    reuse_idle_on(&fixture);
     owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
     fixture.until(&mut team, "the first task is done", |f| {
         task_of(f, "Write page.md").0 == "done"
@@ -19387,6 +19388,19 @@ fn handle_of(fixture: &Fixture, agent: i64) -> Option<String> {
         .and_then(|name| name.handle)
 }
 
+/// Turns the owner's "Reuse idle agents" setting on, for a row about an idle agent taking
+/// the next task. Takes the fixture.
+#[cfg(target_os = "macos")]
+fn reuse_idle_on(fixture: &Fixture) {
+    owner(
+        fixture,
+        &[crate::team::TeamAction::ReuseIdle {
+            project_id: fixture.setup.project_id.clone(),
+            mode: crate::team::ReuseIdle::On,
+        }],
+    );
+}
+
 /// Hands off one task and waits until it is done and its agent idle. Takes the fixture,
 /// the team and the prompt. Returns the agent that ran it.
 #[cfg(target_os = "macos")]
@@ -19476,6 +19490,7 @@ fn idle_worker_reused_only_within_its_lead() {
     let home = committed_project(&fixture);
     let host = fixture.host();
     let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    reuse_idle_on(&fixture);
     let (lead, _, _, worker) = lead_with_worker(&fixture, &mut team, &home);
     let idle = |f: &Fixture, agent: i64| f.agent_status(agent).0 == AgentStatus::Idle;
     fixture.until(&mut team, "the lead and its worker are idle", |f| {
@@ -21562,6 +21577,7 @@ fn a_task_passes_an_idle_agent_past_its_session_and_goes_to_another_idle_agent_a
     let fixture = Fixture::new(2);
     let host = fixture.host();
     let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    reuse_idle_on(&fixture);
     owner(
         &fixture,
         &[

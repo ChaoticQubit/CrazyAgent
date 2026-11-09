@@ -4794,6 +4794,8 @@ impl TeamRuntime {
             .into_iter()
             .map(|run| run.agent)
             .collect();
+        let reuse = super::reuse_idle(&self.connection, project)? == super::ReuseIdle::On
+            || super::keep_warm(&self.connection, project)?;
         for (task, harness, prompt, pin, by_master, parent, mode) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
@@ -4823,7 +4825,7 @@ impl TeamRuntime {
                             && !w.stopping
                             && !reserved.contains(*id)
                             && !paused.contains(&w.connection)
-                            && pin.map_or(w.parent == parent, |pin| pin == **id)
+                            && pin.map_or(reuse && w.parent == parent, |pin| pin == **id)
                             && mode.as_deref().is_none_or(|mode| {
                                 self.stored_mode(**id).ok().flatten().as_deref() == Some(mode)
                             })
@@ -4904,6 +4906,9 @@ impl TeamRuntime {
                         || self.panes(project) >= PANES_PER_PROJECT_MAX
                         || self.capped(project, parent, harness_cap)
                     {
+                        if !reuse {
+                            self.stop_idle_for(project, &harness, parent, &reserved)?;
+                        }
                         continue;
                     }
                     let Ok(Some(account)) = self.account_for(access, project, &harness, paused)
@@ -5202,6 +5207,50 @@ impl TeamRuntime {
             }
             worker.stopping = true;
             let _ = worker.orders.send(Order::Stop);
+        }
+        Ok(())
+    }
+
+    /// Makes room at a limit for a task that may not reuse an idle agent: stops the idle
+    /// sub-agent of that harness and lead that would have taken it, one at a time. A live
+    /// agent, one with agents of its own, one reserved for recovery and a kept lead with
+    /// work around it stay. Takes the project, the harness, the lead and the reserved
+    /// agents. Returns any SQLite failure.
+    fn stop_idle_for(
+        &mut self,
+        project: &ProjectId,
+        harness: &str,
+        parent: Option<i64>,
+        reserved: &BTreeSet<i64>,
+    ) -> Result<(), EngineError> {
+        let sub = |w: &Worker| &w.project == project && w.role == AgentRole::Sub;
+        if self.workers.values().any(|w| sub(w) && w.stopping) {
+            return Ok(());
+        }
+        let idle: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(id, w)| {
+                sub(w)
+                    && w.harness == harness
+                    && w.parent == parent
+                    && w.busy.is_none()
+                    && w.own_turn.is_none()
+                    && !w.live
+                    && !reserved.contains(*id)
+                    && !self.workers.values().any(|c| c.parent == Some(**id))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(idle.len() <= self.workers.len());
+        for id in idle {
+            if self.workers[&id].kept_session && self.lead_waits(id)? {
+                continue;
+            }
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            worker.stopping = true;
+            let _ = worker.orders.send(Order::Stop);
+            return Ok(());
         }
         Ok(())
     }
