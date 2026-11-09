@@ -17,9 +17,9 @@ pub struct Charged {
     pub fast: bool,
 }
 
-/// Not written yet. Input: the JSON text. Output: the refusal.
+/// Not written yet. Input: the JSON text. Output: an empty table.
 pub fn parse(_text: &str) -> Result<Prices, String> {
-    Err(String::new())
+    Ok(Prices {})
 }
 
 /// Not written yet. Output: an empty table.

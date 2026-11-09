@@ -44,7 +44,7 @@ fn a_dated_or_at_suffixed_name_finds_its_model() {
 }
 
 #[test]
-fn the_longest_name_wins_and_a_new_version_has_no_price() {
+fn the_longest_name_wins() {
     let prices = sample();
     assert_eq!(
         prices.cost_nanos("claude-x-1-mini-preview", charged(input(1000))),
@@ -54,6 +54,11 @@ fn the_longest_name_wins_and_a_new_version_has_no_price() {
         prices.cost_nanos("claude-x-1-preview", charged(input(1000))),
         Some(5_000_000)
     );
+}
+
+#[test]
+fn a_new_version_or_unknown_name_has_no_price() {
+    let prices = sample();
     assert_eq!(
         prices.cost_nanos("claude-x-1-2", charged(input(1000))),
         None
@@ -157,4 +162,19 @@ fn the_bundled_snapshot_is_dated_and_prices_the_harness_models() {
     assert_eq!(prices.as_of().len(), 10);
     assert!(prices.has("claude-opus-4-5-20251101"));
     assert!(prices.has("gpt-5-codex"));
+}
+
+#[test]
+fn a_cost_rounds_to_the_nearest_nanodollar() {
+    let prices = parse(
+        r#"{"as_of":"2026-11-08","source_sha256":"aa","models":{
+        "half":{"input":1500,"output":1400,"cache_write":null,"cache_read":null}}}"#,
+    )
+    .unwrap();
+    assert_eq!(prices.cost_nanos("half", charged(input(1))), Some(2));
+    let output = Tokens {
+        output: 1,
+        ..Tokens::default()
+    };
+    assert_eq!(prices.cost_nanos("half", charged(output)), Some(1));
 }
