@@ -19,12 +19,15 @@ pub(crate) use agent_copy::AgentCredential;
 mod configured_rcli;
 mod generated_configured_rcli;
 mod renewal;
+mod retire;
 mod staging;
 pub(crate) use configured_rcli::ConfiguredRcliProfileMetadata;
 use configured_rcli::lock;
 use staging::{ROOT_STAGING, STAGING, Staging, step};
 
 const ROOT: &str = "native-profiles";
+pub(crate) use retire::{remove_generated_home, remove_sign_in};
+
 const MANIFEST: &str = "identity.json";
 const MAX_MANIFEST: usize = 4096;
 pub(crate) const MAX_PROFILES: usize = 1024;

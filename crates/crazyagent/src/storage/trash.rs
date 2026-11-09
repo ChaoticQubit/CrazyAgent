@@ -1,4 +1,7 @@
 use super::error;
+use crate::config::ModelAccess;
+#[cfg(unix)]
+use crate::config::ModelAuthentication;
 use crate::engine::EngineError;
 use rusqlite::{Connection, params};
 #[cfg(unix)]
@@ -10,13 +13,17 @@ pub(crate) const MCP_CHECKS: &str = "mcp_checks";
 pub(crate) const SKILL_FOLDER: &str = "skill_folder";
 pub(crate) const HOOK_FOLDER: &str = "hook_folder";
 #[cfg(unix)]
+pub(crate) const NATIVE_SIGN_IN: &str = "native_sign_in";
+#[cfg(unix)]
+pub(crate) const GENERATED_HOME: &str = "generated_home";
+#[cfg(unix)]
 const SWEEP_MAX: i64 = 10_000;
 
 #[cfg(unix)]
 macro_rules! trash_columns {
     () => {
         "(
-    kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder','hook_folder')),
+    kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder','hook_folder','native_sign_in','generated_home')),
     name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
     PRIMARY KEY(kind, name)
 ) WITHOUT ROWID"
@@ -60,12 +67,42 @@ pub(crate) fn put(tx: &Connection, kind: &str, name: &str) -> Result<(), EngineE
     Ok(())
 }
 
-/// Deletes every file the trash names under the engine root, at most `SWEEP_MAX` a start,
-/// and forgets each one that is gone. A name a live record still refers to is forgotten
-/// without deleting it. A file that cannot be deleted stays noted for the next start.
-/// Inputs: the engine connection and root. Output: how many notes are left.
+/// Deletes what the removals left noted when the engine starts, after a settings write a
+/// crash left pending is recovered, so the catalog it checks is the one the engine runs on.
+/// Inputs: the engine connection and the catalog. Output: any failure.
 #[cfg(unix)]
-pub(crate) fn sweep(connection: &Connection, root: &Path) -> Result<usize, EngineError> {
+pub(crate) fn sweep_at_start(
+    connection: &Connection,
+    catalog: Option<&ModelAccess>,
+) -> Result<(), EngineError> {
+    let root = connection
+        .path()
+        .and_then(|path| Path::new(path).parent())
+        .ok_or_else(|| error("file_trash_root_unknown"))?;
+    sweep(connection, root, catalog).map(|_| ())
+}
+
+/// Leaves the trash alone where engine storage does not open.
+/// Inputs: the engine connection and the catalog, both unused. Output: always done.
+#[cfg(not(unix))]
+pub(crate) fn sweep_at_start(
+    _connection: &Connection,
+    _catalog: Option<&ModelAccess>,
+) -> Result<(), EngineError> {
+    Ok(())
+}
+
+/// Deletes every file the trash names under the engine root, at most `SWEEP_MAX` a start,
+/// and forgets each one that is gone. A name a live record or a catalog connection still
+/// refers to is forgotten without deleting it. A file that cannot be deleted stays noted
+/// for the next start. Inputs: the engine connection, root and catalog. Output: how many
+/// notes are left.
+#[cfg(unix)]
+pub(crate) fn sweep(
+    connection: &Connection,
+    root: &Path,
+    catalog: Option<&ModelAccess>,
+) -> Result<usize, EngineError> {
     let notes = connection
         .prepare("SELECT kind,name FROM file_trash ORDER BY kind,name LIMIT ?1")
         .map_err(error)?
@@ -76,22 +113,7 @@ pub(crate) fn sweep(connection: &Connection, root: &Path) -> Result<usize, Engin
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
     for (kind, name) in notes {
-        let gone = if referenced(connection, &kind, &name)? {
-            Ok(())
-        } else {
-            delete(root, &kind, &name)
-        };
-        match gone {
-            Ok(()) => {
-                connection
-                    .execute(
-                        "DELETE FROM file_trash WHERE kind=?1 AND name=?2",
-                        params![kind, name],
-                    )
-                    .map_err(error)?;
-            }
-            Err(problem) => eprintln!("file_trash_not_removed kind={kind} cause={}", problem.0),
-        }
+        settle(connection, root, catalog, &kind, &name)?;
     }
     let left: i64 = connection
         .query_row("SELECT count(*) FROM file_trash", [], |row| row.get(0))
@@ -99,13 +121,70 @@ pub(crate) fn sweep(connection: &Connection, root: &Path) -> Result<usize, Engin
     usize::try_from(left).map_err(error)
 }
 
+/// Deletes one noted file unless a live record or a catalog connection still names it, and
+/// forgets the note once the file is gone; a file that cannot be deleted stays noted for the
+/// next sweep. Inputs: the engine connection, root and catalog, the kind and the name.
+/// Output: any SQLite failure.
 #[cfg(unix)]
-fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, EngineError> {
+pub(crate) fn settle(
+    connection: &Connection,
+    root: &Path,
+    catalog: Option<&ModelAccess>,
+    kind: &str,
+    name: &str,
+) -> Result<(), EngineError> {
+    let gone = if referenced(connection, catalog, kind, name)? {
+        Ok(())
+    } else {
+        delete(root, kind, name)
+    };
+    match gone {
+        Ok(()) => {
+            connection
+                .execute(
+                    "DELETE FROM file_trash WHERE kind=?1 AND name=?2",
+                    params![kind, name],
+                )
+                .map_err(error)?;
+        }
+        Err(problem) => eprintln!("file_trash_not_removed kind={kind} cause={}", problem.0),
+    }
+    Ok(())
+}
+
+/// Tells whether a connection left in the catalog still names a reference, the one name of
+/// an account's key, generated home or native profile. Inputs: the catalog and the name.
+/// Output: true when one does.
+#[cfg(unix)]
+fn in_catalog(catalog: Option<&ModelAccess>, name: &str) -> bool {
+    catalog.is_some_and(|access| {
+        access
+            .connections
+            .iter()
+            .any(|connection| match &connection.auth {
+                ModelAuthentication::ApiKey { credential_ref }
+                | ModelAuthentication::Oauth { credential_ref } => credential_ref.as_str() == name,
+                ModelAuthentication::NativeManaged { profile_ref } => profile_ref.as_str() == name,
+                ModelAuthentication::None {} => false,
+            })
+    })
+}
+
+#[cfg(unix)]
+fn referenced(
+    connection: &Connection,
+    catalog: Option<&ModelAccess>,
+    kind: &str,
+    name: &str,
+) -> Result<bool, EngineError> {
+    if matches!(kind, ACCOUNT_KEY | NATIVE_SIGN_IN | GENERATED_HOME) && in_catalog(catalog, name) {
+        return Ok(true);
+    }
     let quoted = format!("\"{name}\"");
     let scoped = format!("project:{name}");
     let stored = format!("/{name}\"");
     let (query, value) = match kind {
-        ACCOUNT_KEY => (
+        ACCOUNT_KEY | NATIVE_SIGN_IN | GENERATED_HOME => (
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE instr(CAST(body AS TEXT), ?1) > 0)",
             quoted.as_str(),
         ),
@@ -132,6 +211,13 @@ fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, E
         .map_err(error)
 }
 
+/// Reads a note's name as a credential reference. Input: the name. Output: the reference,
+/// or `account_key_reference_invalid`.
+#[cfg(unix)]
+fn reference(name: &str) -> Result<crate::protocol::CredentialRef, EngineError> {
+    crate::protocol::CredentialRef::new(name).map_err(|_| error("account_key_reference_invalid"))
+}
+
 #[cfg(unix)]
 fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
     match kind {
@@ -140,6 +226,8 @@ fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
         MCP_CHECKS => super::plugins::remove_check_folder(root, name),
         SKILL_FOLDER => super::plugins::remove_skill_project_folder(root, name),
         HOOK_FOLDER => super::plugins::remove_hook_folder(root, name),
+        NATIVE_SIGN_IN => crate::engine::bootstrap::remove_sign_in(root, &reference(name)?),
+        GENERATED_HOME => crate::engine::bootstrap::remove_generated_home(root, &reference(name)?),
         _ => Err(error("file_trash_kind_unknown")),
     }
 }
