@@ -3,11 +3,11 @@ import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, setTe
 import { loadTeamStatus } from "../../api-projects";
 import { OVERLAP_CHOICES } from "../../engine-client";
 import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, IntentReceipt, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
-import { useLoad, type Loaded } from "../../state";
+import { sameJson, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
-import { SettingRow, changeNote } from "./controls";
+import { SettingRow, useChange } from "./controls";
 import { McpServersSetting } from "./setup-rows";
 
 export const COUNTED_TOOLS_MAX = 32;
@@ -132,8 +132,7 @@ export function countedToolsInput(text: string): { kind: "ok"; tools: string[] }
   return { kind: "ok", tools };
 }
 
-const OVERLAP_LABELS: Record<Overlaps, string> = { warn: "Warn both (default)", block: "Block the later one", off: "Off", wait: "Wait until the first lands" };
-const OVERLAP_ORDER: readonly Overlaps[] = ["warn", "wait", "block", "off"];
+const OVERLAP_LABELS: Record<Overlaps, string> = { warn: "Warn both (default)", wait: "Wait until the first lands", block: "Block the later one", off: "Off" };
 
 function knownOverlap(value: string): value is Overlaps {
   return (OVERLAP_CHOICES as readonly string[]).includes(value);
@@ -143,7 +142,7 @@ function knownOverlap(value: string): value is Overlaps {
  * the engine's value as it is when this app does not know it, so it is never dropped or
  * remapped. Input: the engine's value. Output: the options. */
 export function overlapOptions(current: string): { value: string; label: string }[] {
-  const known = OVERLAP_ORDER.filter((value) => (OVERLAP_CHOICES as readonly string[]).includes(value)).map((value) => ({ value: value as string, label: OVERLAP_LABELS[value] }));
+  const known = (Object.keys(OVERLAP_LABELS) as Overlaps[]).map((value) => ({ value: value as string, label: OVERLAP_LABELS[value] }));
   return knownOverlap(current) ? known : [...known, { value: current, label: displayText(current) }];
 }
 
@@ -166,22 +165,6 @@ export function saveCoordSettings(projectId: string, patch: Partial<CoordSetting
   return run;
 }
 
-/** A coordination change's busy flag and note, and the call that saves one change, shows its
- * note and reads the team again. Input: the reload. Output: the state and the call. */
-function useChange(reload: () => void) {
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
-  async function run(change: () => Promise<Parameters<typeof changeNote>[0]>, what: string) {
-    if (busy) return;
-    setBusy(true);
-    const message = changeNote(await change(), what);
-    setBusy(false);
-    setNote(message);
-    reload();
-  }
-  return { busy, note, run };
-}
-
 function ChangeNote({ note }: { note: string }) {
   return note ? <p className="pj-note warn" role="alert">{displayText(note)}</p> : null;
 }
@@ -189,11 +172,11 @@ function ChangeNote({ note }: { note: string }) {
 /** Where sub-agent questions go, as one row, on Agent settings and in the master's settings.
  * Inputs: the project id, the team status and a reload. Output: the row. */
 export function QuestionsSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
-  const view = coordination(status);
-  const { note, run } = useChange(reload);
+  const { note, change } = useChange(reload);
+  const [questionsTo, hold] = useHeld<QuestionsTo>(coordination(status).settings.questions_to);
   return <SettingRow label="Sub-agent questions go to">
     <span className="set-label" aria-hidden="true">Sub-agent questions go to</span>
-    <Segmented label="Sub-agent questions go to" value={view.settings.questions_to} onValue={(value: QuestionsTo) => void run(() => saveCoordSettings(projectId, { questions_to: value }), "where questions go")}
+    <Segmented label="Sub-agent questions go to" value={questionsTo} onValue={(value: QuestionsTo) => void change(() => saveCoordSettings(projectId, { questions_to: value }), "where questions go", () => hold(value))}
       options={[{ value: "lead", label: "Their lead" }, { value: "me", label: "Me directly" }]} />
     <span className="tg-terminal-note">A question an agent marks For: Me always reaches you; no lead or master can answer it.</span>
     <ChangeNote note={note} />
@@ -204,11 +187,12 @@ export function QuestionsSetting({ projectId, status, reload }: { projectId: str
  * master's settings. Inputs: the project id, the harness kind's row and a reload. Output: the
  * row. */
 export function DeliverySetting({ projectId, row, reload }: { projectId: string; row: HarnessCoordination; reload: () => void }) {
-  const { note, run } = useChange(reload);
+  const { note, change } = useChange(reload);
+  const [delivery, hold] = useHeld<Delivery>(row.delivery);
   const label = `Messages to ${HARNESS_NAMES[row.harness]} agents`;
   return <SettingRow label={label}>
-    <Select id={`tg-delivery-${row.harness}-${projectId}`} label={label} value={row.delivery} options={DELIVERY_OPTIONS}
-      onValue={(value) => { if (value === "auto" || value === "native_only" || value === "typing_only") void run(() => setHarnessDelivery(projectId, row.harness, value as Delivery), "message delivery"); }} />
+    <Select id={`tg-delivery-${row.harness}-${projectId}`} label={label} value={delivery} options={DELIVERY_OPTIONS}
+      onValue={(value) => { if (value === "auto" || value === "native_only" || value === "typing_only") void change(() => setHarnessDelivery(projectId, row.harness, value as Delivery), "message delivery", () => hold(value as Delivery)); }} />
     <ChangeNote note={note} />
   </SettingRow>;
 }
@@ -218,15 +202,15 @@ export function DeliverySetting({ projectId, row, reload }: { projectId: string;
  * defaults show for an older engine. Inputs: the project id, the latest team status and a
  * reload. Output: the rows. */
 export function ToolsControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
-  const view = coordination(status);
+  const [settings, hold] = useHeld(coordination(status).settings, sameJson);
   const [skills] = useLoad(() => listSkills(projectId), [projectId], "skills");
-  const { busy, note, run } = useChange(reload);
+  const { busy, note, change } = useChange(reload);
   const [counted, setCounted] = useState<string | null>(null);
-  const countedText = counted ?? view.settings.counted_tools.join("\n");
+  const countedText = counted ?? settings.counted_tools.join("\n");
   const countedCheck = countedToolsInput(countedText);
 
   const save = (patch: Partial<CoordSettings>, what: string) =>
-    run(() => saveCoordSettings(projectId, patch), what);
+    change(() => saveCoordSettings(projectId, patch), what, () => hold({ ...settings, ...patch }));
 
   async function saveCounted() {
     if (countedCheck.kind !== "ok") return;
@@ -237,19 +221,19 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
   return <>
     <SettingRow label="Skills per role" wide>
       <span className="set-label" aria-hidden="true">Skills per role</span>
-      <RoleSkillsControls settings={view.settings} skills={skills} busy={busy}
-        onChoose={(role, chosen) => void save({ role_skills: { ...view.settings.role_skills, [role]: chosen } }, `the ${role} skills`)} />
+      <RoleSkillsControls settings={settings} skills={skills} busy={busy}
+        onChoose={(role, chosen) => void save({ role_skills: { ...settings.role_skills, [role]: chosen } }, `the ${role} skills`)} />
     </SettingRow>
     <McpServersSetting projectId={projectId} />
     <SettingRow label="Workflow nudges">
       <span className="set-label" aria-hidden="true">Workflow nudges</span>
-      <Segmented label="Workflow nudges" value={view.settings.nudges} onValue={(value: Nudges) => void save({ nudges: value }, "workflow nudges")}
+      <Segmented label="Workflow nudges" value={settings.nudges} onValue={(value: Nudges) => void save({ nudges: value }, "workflow nudges")}
         options={[{ value: "off", label: "Off" }, { value: "ten_minutes", label: "Every 10 minutes" }, { value: "first_edit", label: "First edit" }]} />
       <span className="tg-terminal-note">Every 10 minutes sends an agent one reminder when it edits without start_work, or works 10 minutes without graphify or ctx tools. First edit reminds an agent once when it edits a file before any graphify query; the edit still runs.</span>
     </SettingRow>
     <SettingRow label="Task-start reminder">
       <span className="set-label" aria-hidden="true">Task-start reminder</span>
-      <Segmented label="Task-start reminder" value={view.settings.task_start} onValue={(value: TaskStart) => void save({ task_start: value }, "the task-start reminder")}
+      <Segmented label="Task-start reminder" value={settings.task_start} onValue={(value: TaskStart) => void save({ task_start: value }, "the task-start reminder")}
         options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
       <span className="tg-terminal-note">On adds a short reminder to the first turn of each task of every sub-agent and teammate with tools on: load the context-mode tools (Claude Code runs ToolSearch with their select string) and use the approved skills that fit. Off adds nothing. It is advice; nothing is blocked.</span>
     </SettingRow>
@@ -268,6 +252,20 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
   </>;
 }
 
+/** One harness kind's sub-agent mode as a row: Native agent teams only where that kind has them.
+ * Inputs: the project id, the harness kind's row and a reload. Output: the row. */
+function SubAgentModeSetting({ projectId, row, reload }: { projectId: string; row: HarnessCoordination; reload: () => void }) {
+  const { note, change } = useChange(reload);
+  const [mode, hold] = useHeld<SubagentMode>(row.mode);
+  return <SettingRow label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
+    <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={mode} options={modeOptions(row.native)}
+      onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void change(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode", () => hold(value as SubagentMode)); }}
+      helper={row.native ? "Native agent teams run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch."
+        : `${HARNESS_NAMES[row.harness]} has no native agent teams, so its sub-agents are CrazyAgent workers.`} />
+    <ChangeNote note={note} />
+  </SettingRow>;
+}
+
 /** The Coordination rows of Agent settings in the approved mockup's order: each harness kind's
  * sub-agent mode, then the rows handed in, where sub-agent questions go, what overlapping claims
  * do and the terminals per window, with the engine's choices and any value it holds that this
@@ -276,29 +274,24 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
  * rows. Output: the rows. */
 export function CoordinationControls({ projectId, status, reload, children }: { projectId: string; status: TeamStatus; reload: () => void; children?: ReactNode }) {
   const view = coordination(status);
-  const { note, run } = useChange(reload);
-  const save = (patch: Partial<CoordSettings>, what: string) =>
-    run(() => saveCoordSettings(projectId, patch), what);
+  const { note, change } = useChange(reload);
+  const [overlaps, holdOverlaps] = useHeld<string>(view.settings.overlaps);
+  const [perWindow, holdPerWindow] = useHeld(String(status.terminals_per_window ?? 6));
 
   return <>
-    {view.harnesses.map((row) => <SettingRow key={row.harness} label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
-      <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={row.mode} options={modeOptions(row.native)}
-        onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void run(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode"); }}
-        helper={row.native ? "Native agent teams run inside the lead's own session. CrazyAgent workers get their own terminal, worktree and branch."
-          : `${HARNESS_NAMES[row.harness]} has no native agent teams, so its sub-agents are CrazyAgent workers.`} />
-    </SettingRow>)}
+    {view.harnesses.map((row) => <SubAgentModeSetting key={row.harness} projectId={projectId} row={row} reload={reload} />)}
     {children}
     <QuestionsSetting projectId={projectId} status={status} reload={reload} />
     <SettingRow label="Overlapping edits" wide>
       <span className="set-label" aria-hidden="true">Overlapping edits</span>
       <span className="tg-terminal-note">Warn tells both agents and their leads when their claimed files overlap. Block also refuses the edit. Wait holds back an agent starting on a file another agent is on, and tells it when the file is free.</span>
-      <Segmented label="Overlapping edits" value={view.settings.overlaps as string} options={overlapOptions(view.settings.overlaps)}
-        onValue={(value) => { if (knownOverlap(value)) void save({ overlaps: value }, "overlapping edits"); }} />
+      <Segmented label="Overlapping edits" value={overlaps} options={overlapOptions(overlaps)}
+        onValue={(value) => { if (knownOverlap(value)) void change(() => saveCoordSettings(projectId, { overlaps: value }), "overlapping edits", () => holdOverlaps(value)); }} />
     </SettingRow>
     <SettingRow label="Terminals per window">
       <span className="set-label" aria-hidden="true">Terminals per window</span>
-      <Segmented label="Terminals per window" value={String(status.terminals_per_window ?? 6)}
-        onValue={(value) => { if (value === "4" || value === "6" || value === "9") void run(() => setTerminalsPerWindow(projectId, Number(value) as 4 | 6 | 9), "terminals per window"); }}
+      <Segmented label="Terminals per window" value={perWindow}
+        onValue={(value) => { if (value === "4" || value === "6" || value === "9") void change(() => setTerminalsPerWindow(projectId, Number(value) as 4 | 6 | 9), "terminals per window", () => holdPerWindow(value)); }}
         options={[{ value: "4", label: "4" }, { value: "6", label: "6 (default)" }, { value: "9", label: "9" }]} />
       <span className="tg-terminal-note">How many terminals Open all terminals puts in one window. More agents open more windows.</span>
     </SettingRow>
@@ -312,14 +305,15 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
  * team status and a reload. Output: one group per harness kind. */
 export function PerHarnessControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
   const view = coordination(status);
-  const { note, run } = useChange(reload);
+  const { note, change } = useChange(reload);
+  const [display, holdDisplay] = useHeld<ClaudeDisplay>(view.settings.claude_display);
   return <>
     {view.harnesses.map((row) => <div className="set-harness" role="group" aria-label={HARNESS_NAMES[row.harness]} key={row.harness}>
       <DeliverySetting projectId={projectId} row={row} reload={reload} />
       {row.harness === "claude-code" && <SettingRow label="Claude Code terminal display">
-        <Select id={`tg-display-claude-code-${projectId}`} label="Claude Code terminal display" value={view.settings.claude_display} options={DISPLAY_OPTIONS}
-          onValue={(value) => { if (value === "classic" || value === "fullscreen") void run(() => saveCoordSettings(projectId, { claude_display: value }), "the Claude Code terminal display"); }}
-          helper={DISPLAY_HELPER[view.settings.claude_display]} />
+        <Select id={`tg-display-claude-code-${projectId}`} label="Claude Code terminal display" value={display} options={DISPLAY_OPTIONS}
+          onValue={(value) => { if (value === "classic" || value === "fullscreen") void change(() => saveCoordSettings(projectId, { claude_display: value }), "the Claude Code terminal display", () => holdDisplay(value)); }}
+          helper={DISPLAY_HELPER[display]} />
       </SettingRow>}
     </div>)}
     <ChangeNote note={note} />

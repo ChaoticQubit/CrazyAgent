@@ -30,18 +30,26 @@ let running = 0;
 let most = 0;
 let coordSaved = null;
 let policy = POLICY;
+let saveAnswer = null;
+let saveDelay = SAVE_MS;
+let render = null;
+let poolAssigned = "pool-a";
+const poolRecord = (id) => ({ kind: "pool", pool: { id, projects: poolAssigned === id ? ["alpha"] : [] } });
 
 /** Answers the app's engine calls as a quick engine does: the reads these screens make, the
  * team read with the coordination settings saved since, an agent access save that the policy
  * read then shows, and a coordination save that takes a moment, counting how many run at once;
- * any other command is not in this build. Input: the team status. Output: nothing; it installs
- * the answers on the window. */
+ * any other command is not in this build, unless `answerSaves` gave the team saves an answer.
+ * Input: the team status. Output: nothing; it installs the answers on the window. */
 function engine(status) {
   sent = [];
   running = 0;
   most = 0;
   coordSaved = null;
   policy = POLICY;
+  saveAnswer = null;
+  saveDelay = SAVE_MS;
+  poolAssigned = "pool-a";
   window.__TAURI_INTERNALS__ = {
     plugins: {},
     transformCallback: () => 0,
@@ -60,14 +68,66 @@ function engine(status) {
       if (command === "desktop_team_coordination") {
         running += 1;
         most = Math.max(most, running);
-        await new Promise((done) => setTimeout(done, SAVE_MS));
+        await new Promise((done) => setTimeout(done, saveDelay));
         running -= 1;
+        if (saveAnswer !== null) return saveAnswer;
         coordSaved = { ...args.settings };
         return RECEIPT;
+      }
+      if (saveAnswer !== null) {
+        if (command.startsWith("desktop_team_") || command === "desktop_update_project_setup") return saveAnswer;
+        if (command === "desktop_project_setup") return { ...SETUP, pool: poolAssigned, revision: 5 };
+        if (command === "desktop_open_project") return { fresh: true, project_id: "alpha" };
+        if (command === "desktop_model_access_page") return { writable: true, ticket: "ticket", has_more: false, items: [poolRecord("pool-a"), poolRecord("pool-b")] };
+        if (command === "desktop_edit_model_access") {
+          poolAssigned = Object.values(args).find((value) => value?.kind === "assign_project_pool").pool;
+          return saveAnswer;
+        }
       }
       throw `Command ${command} not found`;
     },
   };
+}
+
+/** Gives every team save this answer until the next mount. Inputs: the receipt and how long a
+ * coordination save takes, in milliseconds. Output: nothing. */
+export function answerSaves(receipt, delay = SAVE_MS) {
+  saveAnswer = receipt;
+  saveDelay = delay;
+}
+
+/** Puts the focus on a segmented row's checked option, as Tab does. Input: the row's label.
+ * Output: whether it took the focus. */
+export function focusChecked(row) {
+  const radio = document.querySelector(`[data-setting="${row}"] [role="radio"][aria-checked="true"]`);
+  radio?.focus();
+  return radio !== null && document.activeElement === radio;
+}
+
+/** What a segmented row says to the keyboard. Input: the row's label. Output: the checked
+ * option's words and the focused option's words, null when the focus is outside the row. */
+export function keyboard(row) {
+  const group = document.querySelector(`[data-setting="${row}"] [role="radiogroup"]`);
+  return { checked: group?.querySelector('[aria-checked="true"]')?.textContent.trim() ?? null, focused: group?.contains(document.activeElement) ? document.activeElement.textContent.trim() : null };
+}
+
+/** Puts the focus on a select and marks that element, so a later check can tell it is the same
+ * one and not a remounted copy. Input: its id. Output: whether it took the focus. */
+export function markFocus(id) {
+  const select = document.getElementById(id);
+  select?.focus();
+  select?.setAttribute("data-marked", "yes");
+  return select !== null && document.activeElement === select;
+}
+
+/** Says whether the element markFocus marked still has the focus. Output: true or false. */
+export function markedHasFocus() {
+  return document.activeElement?.getAttribute("data-marked") === "yes";
+}
+
+/** Reads the help line under one select. Input: its id. Output: the words, or null. */
+export function helperOf(id) {
+  return document.getElementById(id)?.closest(".field")?.querySelector(".helper")?.textContent ?? null;
 }
 
 /** Changes the coordination settings the fake engine holds, as the TUI or another window
@@ -105,12 +165,75 @@ export async function mount(css, view, status, section) {
   };
   const [component, props] = views[view];
   if (typeof component !== "function") return false;
+  render = (next) => root.render(createElement(component, next === undefined ? props : { ...props, status: next }));
   await act(async () => {
-    root.render(createElement(component, props));
+    render();
     await new Promise((done) => setTimeout(done, 0));
   });
   await settle(20);
   return true;
+}
+
+/** Hands the mounted Agent settings a newer team read, as a reload or poll does. Input: the
+ * team status. Output: nothing. */
+export async function reread(status) {
+  await act(async () => { render(status); });
+  await settle(20);
+}
+
+function shownIn(found) {
+  if (found.select) return found.select.value;
+  if (found.radio) return found.radio.closest("[role=radiogroup]").querySelector('[aria-checked="true"]')?.textContent.trim() ?? null;
+  return found.card.closest("[role=radiogroup]").querySelector("input:checked")?.value ?? null;
+}
+
+function controlOf(row) {
+  const shell = document.querySelector(`[data-setting="${row}"]`);
+  const select = shell?.querySelector("select");
+  if (select) return { select };
+  const radios = [...(shell?.querySelectorAll('[role="radio"]') ?? [])];
+  if (radios.length > 0) return { radio: radios.find((radio) => radio.getAttribute("aria-checked") !== "true") };
+  const card = shell?.querySelector('input[type="radio"]:not(:checked)');
+  return card ? { card } : null;
+}
+
+/** Picks a value in one Agent settings row as the owner does and lets its save run, while the
+ * row's team read stays as it was. Inputs: the row's label and, for a select, the value to pick;
+ * without one it picks the first other value. Output: the value shown before, the one picked
+ * and the one shown after, or null when the row has no other value. */
+export async function pickOther(row, wanted) {
+  const found = controlOf(row);
+  if (found === null) return null;
+  const before = shownIn(found);
+  const other = found.select ? wanted ?? [...found.select.options].find((option) => !option.disabled && option.value !== before)?.value : null;
+  if (found.select && other === undefined) return null;
+  const picked = found.select ? other : found.radio ? found.radio.textContent.trim() : found.card.value;
+  await act(async () => {
+    if (found.select) {
+      found.select.value = picked;
+      found.select.dispatchEvent(new Event("change", { bubbles: true }));
+    } else (found.radio ?? found.card).click();
+  });
+  await settle(SAVE_MS * 2);
+  return { before, picked, shown: shownIn(controlOf(row) ?? found) };
+}
+
+/** Types a value into a text setting and presses its Save. Inputs: the input's id and the text.
+ * Output: the input's text after the save ran. */
+export async function saveText(id, text) {
+  const input = document.getElementById(id);
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => { input.form.requestSubmit(); });
+  await settle(SAVE_MS * 2);
+  return document.getElementById(id).value;
+}
+
+/** Reads the value one select shows now. Input: its id. Output: the value, or null. */
+export function selected(id) {
+  return document.getElementById(id)?.value ?? null;
 }
 
 /** Lets the engine's answers and the renders they cause land. Input: how long to wait, in

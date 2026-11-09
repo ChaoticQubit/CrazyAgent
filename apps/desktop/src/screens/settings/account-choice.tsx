@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { accountRanking, accountSchedule, setAccountSchedule, type AccountPin, type AccountPlan, type AccountSchedule, type AccountStanding, type AccountStrategy, type AccountView, type PoolRanking, type PoolSummary, type Result, type ScheduleChange } from "../../api";
-import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, LoadError, Notice, NotReady, Panel, Select, Skeleton, TextField } from "../../ui";
+import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
+import { Button, LoadError, Notice, NotReady, Panel, Select, Skeleton, TextField, type SelectOption } from "../../ui";
 
 export const STRATEGIES: { value: AccountStrategy; label: string; hint: string }[] = [
   { value: "use_it_or_lose_it", label: "Use it or lose it", hint: "The account whose weekly limit resets soonest goes first, then your rank." },
@@ -168,6 +168,24 @@ function PlanRow({ id, name, plan, onSave }: { id: string; name: string; plan: A
   </li>;
 }
 
+/** One account order select: it keeps the owner's pick while its save and the read after it run,
+ * and shows the saved value again after a refused save. Inputs: the select's parts, the help line
+ * for a value and the change action. Output: the select. */
+function StrategySelect({ id, label, value, options, hint, save }: {
+  id: string;
+  label: string;
+  value: string;
+  options: SelectOption[];
+  hint?: (value: string) => string | undefined;
+  save: (value: string) => Promise<Result<void>>;
+}) {
+  const [shown, hold] = useHeld(value);
+  return <Select id={id} label={label} value={shown} options={options} helper={hint?.(shown)} onValue={(next) => {
+    const settled = hold(next);
+    void save(next).then((result) => settled(result.kind === "ok" ? "" : result.kind));
+  }} />;
+}
+
 /** The account choice panel as a pure view: the app strategy, each pool's strategy and each
  * member's rank, reserve and pin. Inputs: the schedule and pools read, account names and the
  * change action. */
@@ -190,17 +208,16 @@ export function AccountChoiceView({ schedule, pools, names, ranking, nowMs, onCh
     setError(result.kind === "ok" ? undefined : result.kind === "not_ready" ? "Account choice isn't ready in this build." : result.message);
     return result;
   };
-  const app = STRATEGIES.find((item) => item.value === current.strategy);
   return <Panel title="Account choice">
     <div className="stack">
-      <Select id="schedule-app" label="How every pool picks an account" value={current.strategy}
+      <StrategySelect id="schedule-app" label="How every pool picks an account" value={current.strategy}
         options={STRATEGIES.map((item) => ({ value: item.value, label: item.label }))}
-        helper={app?.hint} onValue={(value) => void send({ kind: "app_strategy", strategy: value as AccountStrategy })} />
+        hint={(value) => STRATEGIES.find((item) => item.value === value)?.hint} save={(value) => send({ kind: "app_strategy", strategy: value as AccountStrategy })} />
       {error && <Notice tone="danger" alert>{error}</Notice>}
       {pools.value.map((pool) => <div className="stack-small" key={pool.id}>
-        <Select id={`schedule-${pool.id}`} label={`${pool.name}: account order`} value={poolStrategy(current, pool.id) ?? ""}
+        <StrategySelect id={`schedule-${pool.id}`} label={`${pool.name}: account order`} value={poolStrategy(current, pool.id) ?? ""}
           options={strategyOptions(strategyLabel(current.strategy))}
-          onValue={(value) => void send({ kind: "pool_strategy", pool: pool.id, strategy: value === "" ? null : value as AccountStrategy })} />
+          save={(value) => send({ kind: "pool_strategy", pool: pool.id, strategy: value === "" ? null : value as AccountStrategy })} />
         {pool.members.length === 0 ? <p className="secondary">No accounts in this pool.</p>
           : <ul className="plain-list">{pool.members.map((member) => {
             const plan = planFor(current, member.id);
@@ -241,11 +258,12 @@ export function ProjectAccountOrderView({ schedule, project, pool, onChange }: {
   if (schedule.kind !== "ok") return null;
   const inherited = (pool === null ? null : poolStrategy(schedule.value, pool)) ?? schedule.value.strategy;
   return <div className="stack-small">
-    <Select id="project-account-order" label="Account order for this project" value={projectStrategy(schedule.value, project) ?? ""}
-      options={strategyOptions(strategyLabel(inherited))} onValue={(value) => void (async () => {
+    <StrategySelect id="project-account-order" label="Account order for this project" value={projectStrategy(schedule.value, project) ?? ""}
+      options={strategyOptions(strategyLabel(inherited))} save={async (value) => {
         const result = await onChange({ kind: "project_strategy", project, strategy: value === "" ? null : value as AccountStrategy });
         setError(result.kind === "ok" ? undefined : result.kind === "not_ready" ? "Account choice isn't ready in this build." : result.message);
-      })()} />
+        return result;
+      }} />
     {error && <Notice tone="danger" alert>{error}</Notice>}
   </div>;
 }

@@ -5,6 +5,7 @@ import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Icon, RadioCard, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { IconName, SelectOption } from "../../ui";
+import { afterSave, shownChoice, useHeld } from "../../state";
 import { displayText } from "../conversation";
 import { savedStale } from "../project/settings";
 import { CoordinationControls, PerHarnessControls, ToolsControls } from "./coordination";
@@ -186,31 +187,42 @@ export function settingsVersion(status: Pick<TeamStatus, "settings_version">): n
   return status.settings_version ?? 0;
 }
 
-/** A choice the owner saved on a team control and the status value it replaced. */
-export interface Held<T> {
-  choice: T;
-  from: T;
-}
-
-/** What a team control keeps after a save: the choice once the engine applied it, so the
- * control never flips back to the old value while the reload is on its way, and nothing after
- * a refused or unconfirmed save, so the status shows again. Inputs: the held choice and the
- * save's note, empty when the engine applied it. Output: the choice to keep, or null. */
-export function afterSave<T>(held: Held<T>, note: string): Held<T> | null {
-  return note === "" ? held : null;
-}
-
-/** The value a team control shows: the held choice while the status still holds the value it
- * replaced, otherwise the status, once a reload or another window moved it. Inputs: the held
- * choice or null, the status value and how two values compare. Output: the value. */
-export function shownChoice<T>(held: Held<T> | null, current: T, same: (a: T, b: T) => boolean = Object.is): T {
-  return held !== null && same(held.from, current) ? held.choice : current;
-}
+export { afterSave, shownChoice };
 
 type Limits = { turn: number | null; session: number | null; idle: number | null };
 
 function sameLimits(a: Limits, b: Limits): boolean {
   return a.turn === b.turn && a.session === b.session && a.idle === b.idle;
+}
+
+function sameBackground(a: BackgroundAtEnd, b: BackgroundAtEnd): boolean {
+  return a.mode === b.mode && (a.mode !== "grace" || b.mode !== "grace" || a.secs === b.secs);
+}
+
+function capValue(value: number | null | undefined): string {
+  return value == null ? NO_LIMIT : String(value);
+}
+
+/** A control group's busy flag and note, and the calls that save one change, keep the pick
+ * shown while it saves, show the save's note and read the team again. `run` takes a save that
+ * answers a note; `change` a save that answers an engine result, worded by `what`. Input: the
+ * reload. Output: the state and the calls. */
+export function useChange(reload: () => void) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  async function run(send: () => Promise<string>, hold?: () => (message: string) => void) {
+    if (busy) return;
+    const settled = hold?.();
+    setBusy(true);
+    const message = await send();
+    setBusy(false);
+    settled?.(message);
+    setNote(message);
+    reload();
+  }
+  const change = (send: () => Promise<Result<IntentReceipt>>, what: string, hold?: () => (message: string) => void) =>
+    run(async () => changeNote(await send(), what), hold);
+  return { busy, note, setNote, run, change };
 }
 
 /** One group of settings: an id, its heading, an optional purpose line, an icon and the label
@@ -298,24 +310,13 @@ async function teamSave(status: Pick<TeamStatus, "settings_version">, send: (ver
  * settings: it names the team settings version shown, and a stale save says so and reads the
  * team again. Inputs: the project id, the team status and a reload. Output: the row. */
 export function OnSwitchSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
-  const [onSwitch, setOnSwitch] = useState<Held<SwitchMode> | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
-  const save = (send: (version: number) => Promise<Result<IntentReceipt>>, missing: string) => teamSave(status, send, missing);
+  const { busy, note, run } = useChange(reload);
+  const [shown, hold] = useHeld<SwitchMode>(switchMode(status));
 
-  async function chooseSwitch(mode: SwitchMode) {
-    const held = { choice: mode, from: switchMode(status) };
-    setOnSwitch(held);
-    setBusy(true);
-    const message = await save((version) => setOnHarnessSwitch(projectId, mode, version), "the On harness switch setting");
-    setBusy(false);
-    setOnSwitch(afterSave(held, message));
-    setNote(message);
-    reload();
-  }
+  const chooseSwitch = (mode: SwitchMode) => run(() => teamSave(status, (version) => setOnHarnessSwitch(projectId, mode, version), "the On harness switch setting"), () => hold(mode));
 
   return <SettingRow label="On master harness switch">
-    <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={shownChoice(onSwitch, switchMode(status))} options={SWITCH_OPTIONS}
+    <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={shown} options={SWITCH_OPTIONS}
       onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </SettingRow>;
@@ -324,23 +325,14 @@ export function OnSwitchSetting({ projectId, status, reload }: { projectId: stri
 /** The Re-ask a sub-agent's empty reply setting as one row, on Agent settings and in the
  * master's settings. Inputs: the project id, the team status and a reload. Output: the row. */
 export function ReaskSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
-  const [reask, setReask] = useState<"off" | "on" | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
+  const { busy, note, change } = useChange(reload);
+  const [reask, hold] = useHeld<"off" | "on">(status.reask_empty_reply === false ? "off" : "on");
 
-  async function chooseReask(choice: "off" | "on") {
-    setReask(choice);
-    setBusy(true);
-    const message = changeNote(await setReaskEmptyReply(projectId, choice === "on"), "the empty reply setting");
-    setBusy(false);
-    setReask(null);
-    setNote(message);
-    reload();
-  }
+  const chooseReask = (choice: "off" | "on") => change(() => setReaskEmptyReply(projectId, choice === "on"), "the empty reply setting", () => hold(choice));
 
   return <SettingRow label="Re-ask a sub-agent's empty reply">
     <span className="set-label" aria-hidden="true">Re-ask a sub-agent's empty reply</span>
-    <Segmented label="Re-ask a sub-agent's empty reply" value={reask ?? (status.reask_empty_reply === false ? "off" : "on")} onValue={(choice) => { if (!busy) void chooseReask(choice); }}
+    <Segmented label="Re-ask a sub-agent's empty reply" value={reask} onValue={(choice) => { if (!busy) void chooseReask(choice); }}
       options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
     <span className="tg-terminal-note">On asks a sub-agent once more when its task ends with no reply text, and reports the empty reply if the second answer is empty too. Off reports the empty reply at once.</span>
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
@@ -460,29 +452,29 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   data?: TeamProject;
   group?: SettingGroupId | null;
 }) {
-  const [warm, setWarm] = useState<Held<boolean> | null>(null);
-  const [limits, setLimits] = useState<Held<Limits> | null>(null);
-  const [finished, setFinished] = useState<Held<"hide" | "show"> | null>(null);
-  const [depth, setDepth] = useState<number | null>(null);
-  const [lands, setLands] = useState<ChildLanding | null>(null);
-  const [branchMode, setBranchMode] = useState<BranchMode | null>(null);
-  const [spread, setSpread] = useState<"off" | "on" | null>(null);
   const [masterBranch, setMasterBranchText] = useState<string | null>(null);
   const [landOn, setLandOnText] = useState<string | null>(null);
-  const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
-  const [masterLandsHeld, setMasterLandsHeld] = useState<MasterLands | null>(null);
-  const [catchUp, setCatchUp] = useState<"off" | "on" | null>(null);
-  const [newFolder, setNewFolder] = useState<number | null>(null);
-  const [background, setBackground] = useState<BackgroundAtEnd | null>(null);
   const [graceText, setGraceText] = useState<string | null>(null);
   const [find, setFind] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
+  const { busy, note, setNote, run, change } = useChange(reload);
   const saved: Limits = { turn: status.turn_limit_secs ?? null, session: status.session_limit_secs ?? null, idle: status.idle_stop_secs ?? null };
-  const listed: "hide" | "show" = status.show_finished === true ? "show" : "hide";
-  const checked = shownChoice(warm, status.keep_warm);
-  const shown = shownChoice(limits, saved, sameLimits);
-  const backgroundShown = background ?? backgroundChoice(status);
+  const [checked, holdWarm] = useHeld(status.keep_warm);
+  const [shown, holdLimits] = useHeld(saved, sameLimits);
+  const [listed, holdFinished] = useHeld<"hide" | "show">(status.show_finished === true ? "show" : "hide");
+  const [depth, holdDepth] = useHeld(status.sub_agent_depth ?? DEPTH_DEFAULT);
+  const [lands, holdLands] = useHeld<ChildLanding>(status.child_landing ?? "lead");
+  const [branchMode, holdBranchMode] = useHeld<BranchMode>(status.agent_branches ?? "named");
+  const [spread, holdSpread] = useHeld<"off" | "on">(status.spread_accounts === true ? "on" : "off");
+  const [askMerge, holdAskMerge] = useHeld<"off" | "on">(status.ask_before_merge === true ? "on" : "off");
+  const [masterLands, holdMasterLands] = useHeld<MasterLands>(status.master_lands ?? "waits");
+  const [catchUp, holdCatchUp] = useHeld<"off" | "on">(status.catch_up_main === "off" ? "off" : "on");
+  const [newFolder, holdNewFolder] = useHeld(status.new_folder_files_max ?? NEW_FOLDER_DEFAULT);
+  const [maxHarnesses, holdMaxHarnesses] = useHeld(capValue(status.max_harnesses));
+  const [maxTeammates, holdMaxTeammates] = useHeld(capValue(status.max_teammates));
+  const [tokenBudget, holdTokenBudget] = useHeld(capValue(status.token_budget));
+  const [backgroundShown, holdBackground] = useHeld(backgroundChoice(status), sameBackground);
+  const [masterBranchSaved, holdMasterBranch] = useHeld(status.master_branch ?? null);
+  const [landOnSaved, holdLandOn] = useHeld(status.land_on ?? null);
   const graceTyped = backgroundShown.mode === "grace" ? graceText ?? String(backgroundShown.secs) : null;
   const words = findWords(find);
   const kept = matchingGroups(find);
@@ -497,174 +489,54 @@ export function TeamControls({ projectId, status, reload, data, group }: {
 
   useEffect(() => { if (group) jump(group); }, [group, projectId]);
 
-  async function toggle(on: boolean) {
-    const held = { choice: on, from: status.keep_warm };
-    setWarm(held);
-    setBusy(true);
-    const message = await save((version) => keepTeamWarm(projectId, on, version), "keeping agents ready");
-    setBusy(false);
-    setWarm(afterSave(held, message));
-    setNote(message);
-    reload();
-  }
+  const toggle = (on: boolean) => run(() => save((version) => keepTeamWarm(projectId, on, version), "keeping agents ready"), () => holdWarm(on));
 
-  async function limit(changed: "turn" | "session" | "idle", value: string) {
-    if (busy) return;
+  function limit(changed: "turn" | "session" | "idle", value: string) {
     const secs = value === NO_LIMIT ? null : Number(value);
     const next = changed === "idle" ? { ...shown, idle: secs } : { ...limitPair(shown.turn, shown.session, changed, secs), idle: shown.idle };
-    const held = { choice: next, from: saved };
-    setLimits(held);
-    setBusy(true);
-    const message = await save((version) => setTeamTimeLimits(projectId, next.turn, next.session, next.idle, version), "team time limits");
-    setBusy(false);
-    setLimits(afterSave(held, message));
-    setNote(message);
-    reload();
+    return run(() => save((version) => setTeamTimeLimits(projectId, next.turn, next.session, next.idle, version), "team time limits"), () => holdLimits(next));
   }
 
-  async function chooseDepth(value: number) {
-    setDepth(value);
-    setBusy(true);
-    const message = changeNote(await setSubAgentDepth(projectId, value), "the Sub-agent depth setting");
-    setBusy(false);
-    setDepth(null);
-    setNote(message);
-    reload();
-  }
-
-  async function chooseLanding(mode: ChildLanding) {
-    setLands(mode);
-    setBusy(true);
-    const message = changeNote(await setChildLanding(projectId, mode), "the worker landing setting");
-    setBusy(false);
-    setLands(null);
-    setNote(message);
-    reload();
-  }
-
-  async function view(choice: "hide" | "show") {
-    const held = { choice, from: listed };
-    setFinished(held);
-    setBusy(true);
-    const message = await save((version) => showFinishedAgents(projectId, choice === "show", version), "choosing where finished agents show");
-    setBusy(false);
-    setFinished(afterSave(held, message));
-    setNote(message);
-    reload();
-  }
-
-  async function branches(choice: BranchMode) {
-    setBranchMode(choice);
-    setBusy(true);
-    const message = changeNote(await setAgentBranches(projectId, choice), "choosing where new agents commit");
-    setBusy(false);
-    setBranchMode(null);
-    setNote(message);
-    reload();
-  }
+  const chooseDepth = (value: number) => change(() => setSubAgentDepth(projectId, value), "the Sub-agent depth setting", () => holdDepth(value));
+  const chooseLanding = (mode: ChildLanding) => change(() => setChildLanding(projectId, mode), "the worker landing setting", () => holdLands(mode));
+  const view = (choice: "hide" | "show") => run(() => save((version) => showFinishedAgents(projectId, choice === "show", version), "choosing where finished agents show"), () => holdFinished(choice));
+  const branches = (choice: BranchMode) => change(() => setAgentBranches(projectId, choice), "choosing where new agents commit", () => holdBranchMode(choice));
 
   async function saveMasterBranch(branch: string | null) {
     if (busy) return;
-    setBusy(true);
-    const message = changeNote(await setMasterBranch(projectId, branch), "the Master's branch");
-    setBusy(false);
+    await change(() => setMasterBranch(projectId, branch), "the Master's branch", () => holdMasterBranch(branch));
     setMasterBranchText(null);
-    setNote(message);
-    reload();
   }
 
   async function saveLandOn(branch: string | null) {
     if (busy) return;
-    setBusy(true);
-    const message = changeNote(await setLandOn(projectId, branch), "the Land on branch");
-    setBusy(false);
+    await change(() => setLandOn(projectId, branch), "the Land on branch", () => holdLandOn(branch));
     setLandOnText(null);
-    setNote(message);
-    reload();
   }
 
-  async function cap(which: "harnesses" | "teammates", value: string) {
+  function cap(which: "harnesses" | "teammates", value: string) {
     const max = chosen(value, CAP_CHOICES);
-    if (busy || max === undefined) return;
-    setBusy(true);
-    const message = which === "harnesses"
-      ? changeNote(await setMaxHarnesses(projectId, max), "the Max harnesses setting")
-      : changeNote(await setMaxTeammates(projectId, max), "the Max teammates setting");
-    setBusy(false);
-    setNote(message);
-    reload();
+    if (max === undefined) return;
+    if (which === "harnesses") void change(() => setMaxHarnesses(projectId, max), "the Max harnesses setting", () => holdMaxHarnesses(value));
+    else void change(() => setMaxTeammates(projectId, max), "the Max teammates setting", () => holdMaxTeammates(value));
   }
 
-  async function chooseSpread(choice: "off" | "on") {
-    setSpread(choice);
-    setBusy(true);
-    const message = changeNote(await setSpreadAccounts(projectId, choice === "on"), "the account spread setting");
-    setBusy(false);
-    setSpread(null);
-    setNote(message);
-    reload();
-  }
+  const chooseSpread = (choice: "off" | "on") => change(() => setSpreadAccounts(projectId, choice === "on"), "the account spread setting", () => holdSpread(choice));
 
-  async function budget(value: string) {
+  function budget(value: string) {
     const tokens = chosen(value, BUDGET_CHOICES);
-    if (busy || tokens === undefined) return;
-    setBusy(true);
-    const message = changeNote(await setTokenBudget(projectId, tokens), "the token budget");
-    setBusy(false);
-    setNote(message);
-    reload();
+    if (tokens !== undefined) void change(() => setTokenBudget(projectId, tokens), "the token budget", () => holdTokenBudget(value));
   }
 
-  async function chooseMasterLands(choice: MasterLands) {
-    setMasterLandsHeld(choice);
-    setBusy(true);
-    const message = changeNote(await setMasterLands(projectId, choice), "what the master does with its conflict fixes");
-    setBusy(false);
-    setMasterLandsHeld(null);
-    setNote(message);
-    reload();
-  }
-
-  async function chooseAskMerge(choice: "off" | "on") {
-    setAskMerge(choice);
-    setBusy(true);
-    const message = changeNote(await setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting");
-    setBusy(false);
-    setAskMerge(null);
-    setNote(message);
-    reload();
-  }
-
-  async function chooseCatchUp(choice: "off" | "on") {
-    setCatchUp(choice);
-    setBusy(true);
-    const message = changeNote(await setCatchUpMain(projectId, choice), "the catch up with main setting");
-    setBusy(false);
-    setCatchUp(null);
-    setNote(message);
-    reload();
-  }
-
-  async function chooseNewFolder(files: number) {
-    setNewFolder(files);
-    setBusy(true);
-    const message = changeNote(await setNewFolderLimit(projectId, files), "the new folder limit");
-    setBusy(false);
-    setNewFolder(null);
-    setNote(message);
-    reload();
-  }
+  const chooseMasterLands = (choice: MasterLands) => change(() => setMasterLands(projectId, choice), "what the master does with its conflict fixes", () => holdMasterLands(choice));
+  const chooseAskMerge = (choice: "off" | "on") => change(() => setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting", () => holdAskMerge(choice));
+  const chooseCatchUp = (choice: "off" | "on") => change(() => setCatchUpMain(projectId, choice), "the catch up with main setting", () => holdCatchUp(choice));
+  const chooseNewFolder = (files: number) => change(() => setNewFolderLimit(projectId, files), "the new folder limit", () => holdNewFolder(files));
 
   async function saveBackground(choice: BackgroundAtEnd) {
     if (busy) return;
-    setBackground(choice);
-    setBusy(true);
-    const message = changeNote(await setBackgroundAtEnd(projectId, choice), "the Background commands setting");
-    setBusy(false);
-    setBackground(null);
+    await change(() => setBackgroundAtEnd(projectId, choice), "the Background commands setting", () => holdBackground(choice));
     setGraceText(null);
-    setNote(message);
-    reload();
   }
 
   function chooseBackground(mode: string) {
@@ -694,17 +566,17 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           <OnSwitchSetting projectId={projectId} status={status} reload={reload} />
           <SettingRow label="Spread harnesses across accounts">
             <span className="set-label" aria-hidden="true">Spread harnesses across accounts</span>
-            <Segmented label="Spread harnesses across accounts" value={spread ?? (status.spread_accounts === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseSpread(choice); }}
+            <Segmented label="Spread harnesses across accounts" value={spread} onValue={(choice) => { if (!busy) void chooseSpread(choice); }}
               options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
             <span className="tg-terminal-note">On, a new harness or sub-agent takes a signed-in pool account no running agent of this project uses, when there is one. Off, your account strategy picks. Teammates run on their harness's account.</span>
           </SettingRow>
           <SettingRow label="Max harnesses per project">
-            <Select id={`tg-max-harnesses-${projectId}`} label="Max harnesses per project" value={status.max_harnesses == null ? NO_LIMIT : String(status.max_harnesses)} options={capOptions()}
+            <Select id={`tg-max-harnesses-${projectId}`} label="Max harnesses per project" value={maxHarnesses} options={capOptions()}
               onValue={(value) => void cap("harnesses", value)}
               helper="How many harnesses the master's work runs at once. More tasks wait until one finishes." />
           </SettingRow>
           <SettingRow label="Max teammates per harness">
-            <Select id={`tg-max-teammates-${projectId}`} label="Max teammates per harness" value={status.max_teammates == null ? NO_LIMIT : String(status.max_teammates)} options={capOptions()}
+            <Select id={`tg-max-teammates-${projectId}`} label="Max teammates per harness" value={maxTeammates} options={capOptions()}
               onValue={(value) => void cap("teammates", value)}
               helper="How many sub-agents each harness runs at once: app-spawned sub-agents and native teammates alike. A new sub-agent waits at the limit; the engine ends the newest native teammates past it and tells the harness." />
           </SettingRow>
@@ -715,11 +587,11 @@ export function TeamControls({ projectId, status, reload, data, group }: {
             <span className="set-label" aria-hidden="true">{MERGE_INTO_MAIN}</span>
             <span className="tg-terminal-note">Each merge shows in Activity and can be undone. Sandboxed keeps today's limits.</span>
             <div className="radio-cards" role="radiogroup" aria-label={MERGE_INTO_MAIN}>
-              <RadioCard name={`${prefix}-merge`} value="merges" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "merges"} disabled={!status.master_lands}
+              <RadioCard name={`${prefix}-merge`} value="merges" checked={masterLands === "merges"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("merges"); }}
                 title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
                 details={["Of the master's own change sets, only one that merges in another open change set lands on main by itself, with everything in that set. The others wait for your Accept."]} />
-              <RadioCard name={`${prefix}-merge`} value="waits" checked={(masterLandsHeld ?? status.master_lands ?? "waits") === "waits"} disabled={!status.master_lands}
+              <RadioCard name={`${prefix}-merge`} value="waits" checked={masterLands === "waits"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("waits"); }}
                 title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
             </div>
@@ -727,14 +599,14 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           </SettingRow>
           <SettingRow label="Ask me before merging into the master's branch">
             <span className="set-label" aria-hidden="true">Ask me before merging into the master's branch</span>
-            <Segmented label="Ask me before merging into the master's branch" value={askMerge ?? (status.ask_before_merge === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
+            <Segmented label="Ask me before merging into the master's branch" value={askMerge} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
               options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
             <span className="tg-terminal-note">On stops the master's merge tool: each finished harness's work waits in Changes for your Accept. At Full access, a master change set that merges it in can still land by itself.</span>
           </SettingRow>
           <h3 className="set-sub" hidden={!access.rows.slice(3).some((row) => matches(row, words))}>Branches</h3>
           <SettingRow label="Agent branches">
             <span className="set-label" aria-hidden="true">Agent branches</span>
-            <Segmented label="Agent branches" value={branchMode ?? status.agent_branches ?? "named"} onValue={(choice) => { if (!busy) void branches(choice); }}
+            <Segmented label="Agent branches" value={branchMode} onValue={(choice) => { if (!busy) void branches(choice); }}
               options={[{ value: "named", label: "Named branch" }, { value: "detached", label: "Detached" }]} />
             <span className="tg-terminal-note">Named branch gives each new agent its own branch: a harness's is named after its task, crazyagent/&lt;task&gt;. Detached keeps the older detached HEAD.</span>
           </SettingRow>
@@ -743,31 +615,31 @@ export function TeamControls({ projectId, status, reload, data, group }: {
             <span className="set-ctl"><span className="badge">Always</span></span>
           </SettingRow>
           <SettingRow label="Master's branch" wide>
-            <form className="pj-row" aria-label="Master's branch" onSubmit={(event) => { event.preventDefault(); void saveMasterBranch((masterBranch ?? status.master_branch ?? "").trim() || null); }}>
+            <form className="pj-row" aria-label="Master's branch" onSubmit={(event) => { event.preventDefault(); void saveMasterBranch((masterBranch ?? masterBranchSaved ?? "").trim() || null); }}>
               <label htmlFor={`tg-master-branch-${projectId}`}>Master's branch</label>
-              <input id={`tg-master-branch-${projectId}`} className="pj-input" value={masterBranch ?? status.master_branch ?? ""} placeholder="Repository default"
+              <input id={`tg-master-branch-${projectId}`} className="pj-input" value={masterBranch ?? masterBranchSaved ?? ""} placeholder="Repository default"
                 onChange={(event) => setMasterBranchText(event.target.value)} aria-describedby={`tg-master-branch-help-${projectId}`} />
               <Button type="submit" size="small" disabled={busy || masterBranch === null} pending={busy && masterBranch !== null} pendingLabel="Saving...">Save</Button>
-              <Button type="button" size="small" disabled={busy || !status.master_branch} onClick={() => void saveMasterBranch(null)}>Use default</Button>
+              <Button type="button" size="small" disabled={busy || !masterBranchSaved} onClick={() => void saveMasterBranch(null)}>Use default</Button>
               <span className="tg-terminal-note" id={`tg-master-branch-help-${projectId}`}>The master works on this branch and merges finished harnesses into it, locally; nothing is pushed. Empty uses the repository's default branch.</span>
             </form>
           </SettingRow>
           <SettingRow label="Land on" wide>
-            <form className="pj-row" aria-label="Land on" onSubmit={(event) => { event.preventDefault(); void saveLandOn((landOn ?? status.land_on ?? "").trim() || null); }}>
+            <form className="pj-row" aria-label="Land on" onSubmit={(event) => { event.preventDefault(); void saveLandOn((landOn ?? landOnSaved ?? "").trim() || null); }}>
               <label htmlFor={`tg-land-on-${projectId}`}>Land on</label>
-              <input id={`tg-land-on-${projectId}`} className="pj-input" value={landOn ?? status.land_on ?? ""} placeholder="The master's branch"
+              <input id={`tg-land-on-${projectId}`} className="pj-input" value={landOn ?? landOnSaved ?? ""} placeholder="The master's branch"
                 onChange={(event) => setLandOnText(event.target.value)} aria-describedby={`tg-land-on-help-${projectId}`} />
               <Button type="submit" size="small" disabled={busy || landOn === null} pending={busy && landOn !== null} pendingLabel="Saving...">Save</Button>
-              <Button type="button" size="small" disabled={busy || !status.land_on} onClick={() => void saveLandOn(null)}>Use the master's branch</Button>
+              <Button type="button" size="small" disabled={busy || !landOnSaved} onClick={() => void saveLandOn(null)}>Use the master's branch</Button>
               <span className="tg-terminal-note" id={`tg-land-on-help-${projectId}`}>The master's merges and your Accept in Changes land on this branch, and each change set counts only what this branch lacks. It can be a branch checked out nowhere: then your project folder's files stay as they are. Empty uses the master's branch. New agents start from its tip.</span>
             </form>
           </SettingRow>
           <SettingRow label="Sub-agent work lands on its lead's branch">
-            <Select id={`tg-lands-${projectId}`} label="Sub-agent work lands on its lead's branch" value={lands ?? status.child_landing ?? "lead"} options={LANDING_OPTIONS}
+            <Select id={`tg-lands-${projectId}`} label="Sub-agent work lands on its lead's branch" value={lands} options={LANDING_OPTIONS}
               onValue={(value) => { if (!busy && (value === "lead" || value === "owner")) void chooseLanding(value); }} />
           </SettingRow>
           <SettingRow label="Refuse a change set when one new folder adds more than">
-            <Select id={`tg-new-folder-${projectId}`} label="Refuse a change set when one new folder adds more than" value={String(newFolder ?? status.new_folder_files_max ?? NEW_FOLDER_DEFAULT)} options={NEW_FOLDER_OPTIONS}
+            <Select id={`tg-new-folder-${projectId}`} label="Refuse a change set when one new folder adds more than" value={String(newFolder)} options={NEW_FOLDER_OPTIONS}
               onValue={(value) => { const chosen = Number(value); if (!busy && NEW_FOLDER_OPTIONS.some((option) => option.value === value)) void chooseNewFolder(chosen); }}
               helper="Counts the files a change set adds in one new top-level folder your branch does not have, such as a scratch folder an agent committed. The agent is told the folder to remove and finishes again." />
           </SettingRow>
@@ -779,20 +651,20 @@ export function TeamControls({ projectId, status, reload, data, group }: {
         <SettingGroup group={coord} prefix={prefix}>
           <CoordinationControls projectId={projectId} status={status} reload={reload}>
             <SettingRow label="Sub-agent depth">
-              <Select id={`tg-depth-${projectId}`} label="Sub-agent depth" value={String(depth ?? status.sub_agent_depth ?? DEPTH_DEFAULT)} options={DEPTH_OPTIONS}
+              <Select id={`tg-depth-${projectId}`} label="Sub-agent depth" value={String(depth)} options={DEPTH_OPTIONS}
                 onValue={(value) => { const chosen = Number(value); if (!busy && [1, 2, 3].includes(chosen)) void chooseDepth(chosen); }}
                 helper="Every agent counts against the team's running agent limit. Each one works in its own worktree and branch." />
             </SettingRow>
           </CoordinationControls>
           <SettingRow label="Catch up with main">
             <span className="set-label" aria-hidden="true">Catch up with main</span>
-            <Segmented label="Catch up with main" value={catchUp ?? (status.catch_up_main === "off" ? "off" : "on")} onValue={(choice) => { if (!busy) void chooseCatchUp(choice); }}
+            <Segmented label="Catch up with main" value={catchUp} onValue={(choice) => { if (!busy) void chooseCatchUp(choice); }}
               options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
             <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off refuses that merge. Merging another agent's branch stays refused either way.</span>
           </SettingRow>
           <SettingRow label="Finished agents">
             <span className="set-label" aria-hidden="true">Finished agents</span>
-            <Segmented label="Finished agents" value={shownChoice(finished, listed)} onValue={(choice) => { if (!busy) void view(choice); }}
+            <Segmented label="Finished agents" value={listed} onValue={(choice) => { if (!busy) void view(choice); }}
               options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
             <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
           </SettingRow>
@@ -821,16 +693,16 @@ export function TeamControls({ projectId, status, reload, data, group }: {
             {graceTyped !== null && <form className="pj-row" aria-label="Grace time" onSubmit={(event) => { event.preventDefault(); const secs = graceSecs(graceTyped); if (secs === null) setNote(failureCopy("team_background_grace_invalid")); else void saveBackground({ mode: "grace", secs }); }}>
               <label htmlFor={`tg-grace-${projectId}`}>Grace time in seconds</label><input id={`tg-grace-${projectId}`} className="pj-input" inputMode="numeric" value={graceTyped}
                 onChange={(event) => setGraceText(event.target.value)} aria-describedby={`tg-grace-help-${projectId}`} />
-              <Button type="submit" size="small" disabled={busy || graceText === null} pending={busy && background !== null} pendingLabel="Saving...">Save</Button>
+              <Button type="submit" size="small" disabled={busy || graceText === null} pending={busy && graceText !== null} pendingLabel="Saving...">Save</Button>
               <span className="tg-terminal-note" id={`tg-grace-help-${projectId}`}>From 10 to 3600 seconds.</span>
             </form>}
           </SettingRow>
           <SettingRow label="Token budget">
-            <Select id={`tg-token-budget-${projectId}`} label="Token budget" value={status.token_budget == null ? NO_LIMIT : String(status.token_budget)} options={budgetOptions()}
+            <Select id={`tg-token-budget-${projectId}`} label="Token budget" value={tokenBudget} options={budgetOptions()}
               onValue={(value) => void budget(value)}
-              helper={status.token_budget == null
+              helper={tokenBudget === NO_LIMIT
                 ? "Off lets the agents use tokens as their accounts allow. A budget counts new input, cache writes and output; re-reads from cache are not counted. It counts from when you set it or start the team again."
-                : `Used ${tokenWords(status.budget_used ?? 0)} of ${tokenWords(status.token_budget)}. At the budget the engine stops every agent and notifies you.`} />
+                : `Used ${tokenWords(status.budget_used ?? 0)} of ${tokenWords(Number(tokenBudget))}. At the budget the engine stops every agent and notifies you.`} />
           </SettingRow>
         </SettingGroup>
         {note && <p className="pj-note warn set-note" role="alert">{displayText(note)}</p>}
