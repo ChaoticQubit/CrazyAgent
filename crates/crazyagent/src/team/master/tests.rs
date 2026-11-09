@@ -5111,3 +5111,41 @@ fn log_activity_switched_off_is_refused_from_the_mailbox_and_logs_nothing() {
         .count();
     assert_eq!(logged, 0, "a switched-off call logs nothing");
 }
+
+/// SECAUDIT team-recall-newline-expansion-panics-runtime: notes full of line feeds grow when
+/// recall quotes them, and the reply still fits instead of panicking the shared runtime.
+#[test]
+fn recall_of_notes_full_of_line_feeds_fits_the_reply_without_a_panic() {
+    let mut fixture = Fixture::new();
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "INSERT INTO projects(id,body) VALUES ('{PROJECT}','{{}}');"
+        ))
+        .unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    for n in 0..6 {
+        let saved = memory_answer(
+            &mut fixture.connection,
+            &project,
+            "Dummy agent",
+            Call::Remember {
+                text: format!("{n}{}z", "\n".repeat(1990)),
+                scope: tool::MemoryReach::Project,
+            },
+        );
+        assert!(matches!(saved, Some(Ok((_, false)))), "{saved:?}");
+    }
+    let (text, failed) = memory_answer(
+        &mut fixture.connection,
+        &project,
+        "Dummy agent",
+        Call::Recall {
+            query: String::new(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!failed, "{text}");
+    assert!(text.len() <= tool::REPLY_TEXT_MAX, "{}", text.len());
+}
