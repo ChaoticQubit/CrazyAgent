@@ -9,7 +9,6 @@ import { AgentsTab } from "../../src/screens/project/agents.tsx";
 import { LiveMasterView } from "../../src/screens/project/live-master.tsx";
 import { TeamActivity } from "../../src/screens/project/team-activity.tsx";
 import { WallGrid } from "../../src/screens/terminals/index.tsx";
-import { saveMasterInput } from "../../src/state.ts";
 import { teamStatus } from "./team-status.mjs";
 
 let root = null;
@@ -378,15 +377,15 @@ export function drawer() {
 }
 
 /** Gives the page the app's local storage, which this blank test page lacks, holding the
- * owner's Master input as Settings saves it, or nothing for an app that never saved one.
- * Input: the choice, or null. */
+ * owner's Terminal input under the key a saved choice has always used, or nothing for an
+ * app that never saved one. Input: the choice, or null. */
 export function saveInput(choice) {
   kept.clear();
   Object.defineProperty(window, "localStorage", {
     configurable: true,
     value: { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) },
   });
-  if (choice !== null) saveMasterInput(choice);
+  if (choice !== null) kept.set("crazyagent.master-input", choice);
 }
 
 /** Opens one agent's terminal through one real door of the app: "agents" clicks its graph
@@ -415,7 +414,8 @@ export async function activityNames() {
 }
 
 /** What one agent's terminal offers once it is live: how many message boxes and Send buttons
- * it has, the Message buttons in its head, or null with no head, and its status line.
+ * it has, the Message buttons in its head, or null with no head, its status line and how many
+ * text areas the whole page shows besides the terminals' own.
  * Input: the agent's name. Output: those, or null when no such terminal is on the page. */
 export async function doorShown(name) {
   const panel = () => [...document.querySelectorAll("section.tg-terminal")].find((item) => item.getAttribute("aria-label") === `${name} terminal`);
@@ -427,6 +427,7 @@ export async function doorShown(name) {
     boxes: found.querySelectorAll("textarea.tg-composer-input").length,
     sends: found.querySelectorAll("button[type=submit]").length,
     messages: head ? [...head.querySelectorAll("button")].filter((item) => item.textContent.trim() === "Message" || item.getAttribute("aria-label") === `Message ${name}`).length : null,
+    onPage: [...document.querySelectorAll("textarea:not(.xterm-helper-textarea)")].filter((item) => item.getClientRects().length > 0).length,
     note: found.querySelector(".tg-terminal-note [role=status]")?.textContent ?? null,
   };
 }
