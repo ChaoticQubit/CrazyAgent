@@ -407,6 +407,31 @@ test("the relay refuses a malformed command without asking the engine", { timeou
   });
 });
 
+test("a process without the relay's secret gets no git command to the engine", { timeout: 20_000 }, async () => {
+  await withRelay(async (server, env, project) => {
+    let asked = 0;
+    server.on("connection", (connection) => {
+      asked += 1;
+      connection.destroy();
+    });
+    const args = ["push", "--force", "origin", "main"];
+    for (const call of [
+      { args, folder: project },
+      { args, folder: project, secret: 7 },
+      { args, folder: project, secret: "00".repeat(32) },
+    ]) {
+      const connection = createConnection(env[GIT_SOCKET_ENV]);
+      await once(connection, "connect");
+      connection.write(encodeFrame(call));
+      const reader = new FrameReader();
+      const [chunk] = await once(connection, "data");
+      assert.deepEqual(reader.push(chunk), [{ kind: "rejected", code: "ide_git_refused" }], JSON.stringify(call));
+      connection.destroy();
+    }
+    assert.equal(asked, 0);
+  });
+});
+
 test("forwarded commands and answers are bounded", () => {
   assert.deepEqual(gitCall({ args: ["push", "origin", "main"], folder: "/p" }), { args: ["push", "origin", "main"], folder: "/p" });
   for (const value of [
