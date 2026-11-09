@@ -159,6 +159,7 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry, onNewPoo
   const running = chosen.filter((account) => account.method === "subscription" && account.status === "signing_in");
   const selectable = Boolean(onNewPool || onDeleteSelected);
   const classes = [selectable ? "accounts-selectable" : "", onAction ? "accounts-actions" : ""].filter(Boolean).join(" ");
+  const head = <div className="list-head" aria-hidden="true"><span>Name</span><span>Provider</span><span>Sign-in method</span><span>Status</span><span>Pools</span></div>;
   return <div className={classes || undefined}>
     <SettingSection title="Your accounts">
       <div className="set-bar">
@@ -177,10 +178,9 @@ export function AccountsView({ accounts, pools, onAdd, onOpen, onRetry, onNewPoo
         {fromSelection.kind === "blocked" && <span className="small secondary" role="status">{fromSelection.reason}</span>}
       </div>}
       <div className="account-table">
-      <div className="list-head" aria-hidden="true"><span>Name</span><span>Provider</span><span>Sign-in method</span><span>Status</span><span>Pools</span></div>
-      {shown.length === 0 ? <p className="item-row">No accounts match.
-        <Button variant="quiet" onClick={() => { setSearch(""); setProvider(""); setStatus(""); }}>Clear filters</Button></p>
-        : <WindowedList label="Accounts" count={shown.length} renderRow={(index) => {
+      {shown.length === 0 ? <>{head}<p className="item-row">No accounts match.
+        <Button variant="quiet" onClick={() => { setSearch(""); setProvider(""); setStatus(""); }}>Clear filters</Button></p></>
+        : <WindowedList label="Accounts" head={head} count={shown.length} renderRow={(index) => {
           const account = shown[index];
           const row = <button type="button" className="account-row" onClick={() => onOpen(account)}>
             <span className="cell"><ProviderMark provider={account.provider} name={account.provider_name} /><span className="ellipsis">{account.name}</span></span>
