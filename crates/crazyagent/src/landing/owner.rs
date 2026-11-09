@@ -166,6 +166,23 @@ pub(super) fn merge(
     ours: &str,
     theirs: &str,
 ) -> Result<(String, Vec<String>), EngineError> {
+    let (tree, conflicts) = merge_raw(repo, base, ours, theirs)?;
+    let conflicts = conflicts
+        .iter()
+        .map(|path| diff::plain(&String::from_utf8_lossy(path)))
+        .collect();
+    Ok((tree, conflicts))
+}
+
+/// As [`merge`], with the conflicting paths exactly as git printed them, for comparing
+/// with another git listing. Inputs: the repository, the merge base and both sides.
+/// Output: the merged tree and the conflicting paths.
+pub(super) fn merge_raw(
+    repo: &Repo,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+) -> Result<(String, Vec<Vec<u8>>), EngineError> {
     let output = repo.exec(
         &[
             "merge-tree",
@@ -190,9 +207,7 @@ pub(super) fn merge(
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty());
     let tree = super::git::object_id(fields.next().ok_or_else(|| failure("changes_git_failed"))?)?;
-    let conflicts: Vec<String> = fields
-        .map(|path| diff::plain(&String::from_utf8_lossy(path)))
-        .collect();
+    let conflicts: Vec<Vec<u8>> = fields.map(<[u8]>::to_vec).collect();
     if (output.code == 1) == conflicts.is_empty() {
         return Err(failure("changes_git_failed"));
     }
@@ -848,6 +863,9 @@ fn finish(
     flow::release_agent_claims(db, record);
     if let By::Named(by) = by {
         super::note_change(db, record, ActivityKind::Accepted, by);
+        if record.agent.kind == AgentKind::Master {
+            close_covered(db, record, landed);
+        }
     }
     if let Err(error) = super::subagent::close_with_lead(db, record) {
         eprintln!(
@@ -939,13 +957,14 @@ pub(super) enum By<'a> {
     Master,
 }
 
-/// Lands the master's own pending change set when `team::master_lands` says Merges, read
-/// now, and only when it fixes a conflict: its head holds at least one other open set of
-/// the project (DEC-117 addendum, 2026-11-07). Lands it as an Accept onto the Land on
-/// branch, then [`master_merged`] closes those sets and lists the merge. Any other set, or
-/// Waits, is left for the owner's Accept, and a conflict changes nothing. Inputs: the
-/// store, the owner's home, the change set and where a test stops it. Output: the outcome,
-/// or None when nothing was tried.
+/// Lands the master's own pending change set when `team::master_lands` says Merges and
+/// "Ask me before merging" is off, both read now, and only when the set holds nothing but
+/// fixes of real conflicts with other open sets of the project (MASTER-LAND-SPLIT). Lands
+/// it as an Accept onto the Land on branch, then [`master_merged`] closes those sets and
+/// lists the merge. Any other set is left for the owner's Accept, and a conflict changes
+/// nothing. The checks, the land and the close run under one hold, so an owner action
+/// cannot come between them (T3-R2-L1). Inputs: the store, the owner's home, the change set
+/// and where a test stops it. Output: the outcome, or None when nothing was tried.
 pub(super) fn land_master(
     db: &Connection,
     home: &Path,
@@ -953,31 +972,43 @@ pub(super) fn land_master(
     stopped: &dyn Fn(Step) -> bool,
 ) -> Result<Option<AcceptOutcome>, EngineError> {
     store::initialize(db)?;
+    let repository = store::load(db, id)?.repository;
+    let _held = hold(&repository);
     let record = store::load(db, id)?;
     if record.agent.kind != AgentKind::Master
         || record.state != ChangeState::Pending
         || record.intent.is_some()
         || crate::team::master_lands(db, &record.project)? != crate::team::MasterLands::Merges
+        || crate::team::ask_before_merge(db, &record.project)?
     {
         return Ok(None);
     }
-    {
-        let _held = hold(&record.repository);
-        if covered(db, &record)?.is_empty() {
-            return Ok(None);
-        }
+    let sets = covered(db, &record)?;
+    if sets.is_empty() || !only_fixes(db, &record, &sets)? {
+        return Ok(None);
     }
     if stopped(Step::Gated) {
         return Err(failure("changes_git_failed"));
     }
-    let outcome = accept_to(db, home, id, &record.head, None, None, By::Master, &|_| {
-        false
-    })?;
+    let outcome = accept_held(db, home, id, &record.head, None, None, By::Master, stopped)?;
     if let AcceptOutcome::Landed { commit, branch } = &outcome {
-        let _held = hold(&record.repository);
         master_merged(db, &record, commit, branch);
     }
     Ok(Some(outcome))
+}
+
+/// Tells whether the master's set holds nothing but conflict fixes, against the branch it
+/// would land on, after the checks an Accept makes before reading objects an agent could
+/// have planted. The caller holds [`hold`]. Inputs: the store, the master's set and the
+/// sets its head holds. Output: the answer.
+fn only_fixes(db: &Connection, master: &Record, sets: &[Record]) -> Result<bool, EngineError> {
+    let repository = &master.repository;
+    flow::check_places(repository, &master.worktree, &master.git_dir)?;
+    let owner = Repo::open(repository, &repository.join(".git"), Some(repository))?;
+    let named = land_on(db, &owner, &master.project)?.map(|(branch, _)| branch);
+    let (_, tip, _) = landing_target(db, &owner, repository, named.as_deref())?;
+    verify_objects(repository, &[&master.head, &tip], &[&master.base])?;
+    super::merges::only_conflict_fixes(&owner, master, sets, &tip)
 }
 
 /// Records a landed master set the way the project lists it: closes every other open set
@@ -1123,7 +1154,25 @@ pub(super) fn accept_to(
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
     let _held = hold(&repository);
+    accept_held(db, home, id, expected_head, edited, target, by, stopped)
+}
+
+/// The body of [`accept_to`], for a caller that already holds [`hold`] on the repository.
+/// Inputs: as [`accept_to`], with the message already checked. Output: the landed commit
+/// and branch, or the conflicts.
+#[allow(clippy::too_many_arguments)]
+fn accept_held(
+    db: &Connection,
+    home: &Path,
+    id: &ChangeSetId,
+    expected_head: &str,
+    edited: Option<String>,
+    target: Option<&str>,
+    by: By<'_>,
+    stopped: &dyn Fn(Step) -> bool,
+) -> Result<AcceptOutcome, EngineError> {
     let mut record = settled(db, id)?;
+    let repository = record.repository.clone();
     if !matches!(record.state, ChangeState::Pending | ChangeState::Conflict)
         || record.head != expected_head
         || record.intent.is_some()

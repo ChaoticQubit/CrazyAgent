@@ -1,5 +1,6 @@
 use super::flow::{check_places, clone_branch, open_agent};
-use super::git::{Repo, failure, is_object_id};
+use super::git::{OUTPUT_BYTES_MAX, Repo, failure, is_object_id};
+use super::store::Record;
 use super::{AgentKind, Workspace, clone, store, subagent};
 use crate::agent_git::Layout;
 use crate::engine::EngineError;
@@ -16,6 +17,9 @@ const PARENTS_MAX: usize = 16;
 const ID_FIELD_BYTES_MAX: usize = 65;
 const LISTING_BYTES_MAX: usize = (MERGES_MAX + 1) * (PARENTS_MAX + 1) * ID_FIELD_BYTES_MAX;
 const UNCOVERED_BYTES_MAX: usize = ID_FIELD_BYTES_MAX;
+/// The most commits of its own a master set may hold and still land by itself: one fix per
+/// conflicted set, well past the two sets of the HackerBlog case.
+const OWN_COMMITS_MAX: usize = 32;
 
 /// Refuses a change set whose own commits merge in work from another branch (DEC-107
 /// rule 2), which the agent git wrapper alone cannot stop, since an agent can run git by
@@ -76,6 +80,157 @@ pub(super) fn refuse_outside_merges(
         return Ok(());
     }
     Err(failure("changes_outside_merge"))
+}
+
+/// Tells whether a master's set holds nothing but fixes of real conflicts with the other
+/// open sets its head holds, so it may land with no Accept (MASTER-LAND-SPLIT). Every own
+/// commit must be such a fix, and every one of those sets must come in through one. Any
+/// doubt is false and the set waits for the owner. The caller holds the repository hold
+/// and has verified the objects. Inputs: the owner repository, the master's set, the sets
+/// its head holds and the Land on tip. Output: the answer.
+pub(super) fn only_conflict_fixes(
+    owner: &Repo,
+    master: &Record,
+    covered: &[Record],
+    tip: &str,
+) -> Result<bool, EngineError> {
+    assert!(!covered.is_empty());
+    assert!(is_object_id(&master.head) && is_object_id(&master.base) && is_object_id(tip));
+    let Some(merges) = own_merges(owner, master, covered, tip)? else {
+        return Ok(false);
+    };
+    for [commit, ours, theirs] in &merges {
+        if !fixes_conflict(owner, commit, ours, theirs)? {
+            return Ok(false);
+        }
+    }
+    for set in covered {
+        if !brought_in(owner, &set.head, &merges)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Lists the master set's own commits, leaving out its base, the Land on tip and the sets
+/// its head holds, as commit, first parent and second parent. Inputs: the owner repository,
+/// the master's set, the sets and the tip. Output: the merges, or None when there are no
+/// own commits, too many, or one is not a merge of exactly two parents.
+fn own_merges(
+    owner: &Repo,
+    master: &Record,
+    covered: &[Record],
+    tip: &str,
+) -> Result<Option<Vec<[String; 3]>>, EngineError> {
+    let count = format!("--max-count={}", OWN_COMMITS_MAX + 1);
+    let mut arguments = vec![
+        "rev-list",
+        "--parents",
+        &count,
+        &master.head,
+        "--not",
+        &master.base,
+        tip,
+    ];
+    arguments.extend(covered.iter().map(|set| set.head.as_str()));
+    let listed = owner.exec(&arguments, None, &[], LISTING_BYTES_MAX)?;
+    if listed.code != 0 || listed.overflow {
+        return Err(failure("changes_git_failed"));
+    }
+    let text = std::str::from_utf8(&listed.stdout).map_err(|_| failure("changes_git_failed"))?;
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() || lines.len() > OWN_COMMITS_MAX {
+        return Ok(None);
+    }
+    let mut merges = Vec::with_capacity(lines.len());
+    for line in lines {
+        let ids: Vec<&str> = line.split(' ').collect();
+        if !ids.iter().all(|id| is_object_id(id)) {
+            return Err(failure("changes_git_failed"));
+        }
+        let [commit, ours, theirs] = ids[..] else {
+            return Ok(None);
+        };
+        merges.push([commit.to_owned(), ours.to_owned(), theirs.to_owned()]);
+    }
+    assert!(!merges.is_empty() && merges.len() <= OWN_COMMITS_MAX);
+    Ok(Some(merges))
+}
+
+/// Tells whether a merge commit is only the fix of a real conflict: its parents have one
+/// merge base, need no configured command, really conflict, and its tree differs from what
+/// git merged only at the conflicted paths. Paths are compared as git printed them.
+/// Inputs: the owner repository, the commit and its two parents. Output: the answer.
+fn fixes_conflict(
+    owner: &Repo,
+    commit: &str,
+    ours: &str,
+    theirs: &str,
+) -> Result<bool, EngineError> {
+    let bases = owner.exec(
+        &["merge-base", "--all", ours, theirs],
+        None,
+        &[],
+        ID_FIELD_BYTES_MAX * 3,
+    )?;
+    if bases.code == 1 || bases.overflow {
+        return Ok(false);
+    }
+    if bases.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    let text = std::str::from_utf8(&bases.stdout).map_err(|_| failure("changes_git_failed"))?;
+    let [base] = text.lines().collect::<Vec<&str>>()[..] else {
+        return Ok(false);
+    };
+    if !is_object_id(base) {
+        return Err(failure("changes_git_failed"));
+    }
+    let paths = super::owner::merge_paths(owner, base, ours, theirs)?;
+    if super::owner::uses_configured_commands(owner, &paths, &[base, ours, theirs])? {
+        return Ok(false);
+    }
+    let (merged, conflicts) = super::owner::merge_raw(owner, base, ours, theirs)?;
+    if conflicts.is_empty() {
+        return Ok(false);
+    }
+    let tree = owner.tree_of(commit)?;
+    let changed = owner.exec(
+        &[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            &merged,
+            &tree,
+        ],
+        None,
+        &[],
+        OUTPUT_BYTES_MAX,
+    )?;
+    if changed.code != 0 || changed.overflow {
+        return Err(failure("changes_git_failed"));
+    }
+    Ok(changed
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .all(|path| conflicts.iter().any(|conflict| conflict == path)))
+}
+
+/// Tells whether one of the merges brought a set's head in through its second parent, so
+/// a set the master fast-forwarded onto does not count. Inputs: the owner repository, the
+/// set's head and the merges. Output: the answer.
+fn brought_in(owner: &Repo, head: &str, merges: &[[String; 3]]) -> Result<bool, EngineError> {
+    for [_, ours, theirs] in merges {
+        if owner.test(&["merge-base", "--is-ancestor", head, theirs])?
+            && !owner.test(&["merge-base", "--is-ancestor", head, ours])?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Lists the parents after the first of every merge commit the head holds above the known

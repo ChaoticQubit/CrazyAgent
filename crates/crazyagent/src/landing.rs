@@ -1316,13 +1316,13 @@ pub fn accept_into_as(
     }
 }
 
-/// Lands the change set the project's master made, such as its fix of a conflicted set, the
-/// way an Accept does, when `team::master_lands` says Merges at that moment: one squash
-/// commit on the Land on branch, every open set of the project the master's head holds
-/// closed with it, and one MergedIntoMain activity row naming them. Any other set, a set
-/// that is not pending, or Waits leaves everything as it was. Inputs: the store, the
-/// owner's home and the change set. Output: the outcome of the land, or None when nothing
-/// was tried.
+/// Lands the change set the project's master made the way an Accept does, when it holds
+/// nothing but fixes of real conflicts with other open sets, `team::master_lands` says
+/// Merges and "Ask me before merging" is off at that moment: one squash commit on the Land
+/// on branch, every open set of the project the master's head holds closed with it, and
+/// one MergedIntoMain activity row naming them. Anything else leaves everything as it was.
+/// Inputs: the store, the owner's home and the change set. Output: the outcome of the
+/// land, or None when nothing was tried.
 pub fn land_master_set(
     db: &Connection,
     owner_home: &Path,
