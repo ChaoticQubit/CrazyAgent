@@ -15,17 +15,18 @@ const CSS = [
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const NOW = Date.now();
-const none = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
 const windowOf = (used_percent, hours) => ({ used_percent, resets_at_ms: NOW + hours * HOUR });
 const LIMITS = {
   account: "acct-a", plan: "Max", source: "poll", observed_ms: NOW - 120_000, failure: null, five_hour: windowOf(84, 2), weekly: windowOf(12, 72),
   five_hour_reset_override_ms: null, weekly_reset_override_ms: null, five_hour_left_out_label: null, weekly_left_out_label: null,
 };
-const REPORT = { since_ms: NOW - 6 * DAY, total: none, runs: 0, projects: [], pools: [], accounts: [], agents: [], days: [], lines: [], agent_lines: [], limits: [LIMITS], partial_homes: 0 };
+const USED = { input: 900, output: 300, cache_read: 100, cache_write: 200 };
+const DAYS = Array.from({ length: 30 }, (_, index) => ({ day_ms: NOW - index * DAY, tokens: USED }));
+const REPORT = { since_ms: NOW - 6 * DAY, total: USED, runs: 1, projects: [], pools: [], accounts: [], agents: [], days: DAYS, lines: [], agent_lines: [], limits: [LIMITS], partial_homes: 0 };
 const SHIFT = -new Date(NOW).getTimezoneOffset() * 60_000;
 const TODAY = Math.floor((NOW + SHIFT) / DAY) * DAY - SHIFT;
 const SERIES = [{ start_ms: TODAY - 3 * DAY, tokens: { input: 900, output: 300, cache_read: 100, cache_write: 200 } }];
-const METRICS = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: SERIES, runs: [], projects: [], agents: [], accounts: [], harnesses: [] };
+const METRICS = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: SERIES, runs: [], projects: [{ key: "alpha", tokens: USED, agents: 1, runs: 1, projects: ["alpha"], merges: 0 }], agents: [], accounts: [], harnesses: [] };
 const ANSWERS = {
   desktop_usage_report: REPORT, desktop_usage_metrics: METRICS, desktop_usage_refresh: null, desktop_usage_set_reset: null,
   desktop_list_accounts: { accounts: [{ id: "acct-a", name: "Pool A, Claude 1" }], next: null }, desktop_pool_summaries: [], desktop_account_ranking: [],
@@ -144,6 +145,36 @@ for (const width of [1440, 760]) {
       await open(page, "light", width);
       assert.equal(await page.evaluate("document.querySelector('.mx-lead') !== null"), true);
       assert.equal(await page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
+    });
+  });
+}
+
+test("Enter opens a panel's All columns and a real click shows every day", async () => {
+  await withPage(async (page) => {
+    await open(page);
+    await page.evaluate(`document.querySelector(".mx-panels details summary").focus()`);
+    await key(page, "Enter", 13);
+    assert.equal(await page.evaluate(`document.querySelector(".mx-panels details").open`), true);
+    await clickOn(page, "button", "Show all 30 days");
+    assert.equal(await page.evaluate(`document.querySelectorAll(".mx-days tbody tr").length`), 30);
+    await clickOn(page, "button", "Show last 7 days");
+    assert.equal(await page.evaluate(`document.querySelectorAll(".mx-days tbody tr").length`), 7);
+  });
+});
+
+for (const theme of ["light", "dark"]) {
+  test(`the panels' bars and words are readable in ${theme}`, async () => {
+    await withPage(async (page) => {
+      await open(page, theme);
+      const seen = await page.evaluate(`(() => {
+        const row = document.querySelector(".mx-panels .mx-row");
+        const bar = getComputedStyle(row.querySelector(".mx-bar i")).backgroundColor;
+        const words = getComputedStyle(row.querySelector(".mx-row-name")).color;
+        const panel = getComputedStyle(row.closest(".panel")).backgroundColor;
+        return { bar, words, panel };
+      })()`);
+      assert.notEqual(seen.bar, seen.panel, JSON.stringify(seen));
+      assert.notEqual(seen.words, seen.panel, JSON.stringify(seen));
     });
   });
 }
