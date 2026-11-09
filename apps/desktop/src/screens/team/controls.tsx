@@ -647,7 +647,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
             <span className="set-label" aria-hidden="true">Catch up with main</span>
             <Segmented label="Catch up with main" value={catchUp} onValue={(choice) => { if (!busy) void chooseCatchUp(choice); }}
               options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
-            <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off refuses that merge. Merging another agent's branch stays refused either way.</span>
+            <span className="tg-terminal-note">For agents started from now on: On lets each agent bring the landed main into its own branch with git merge crazyagent/main and tells it to before it finishes; Off makes the git each agent is given refuse that merge. A master at Full access, or a git run by its full path, can still bring in the landed main. Merging another agent's branch stays refused either way.</span>
           </SettingRow>
           <SettingRow label="Finished agents">
             <span className="set-label" aria-hidden="true">Finished agents</span>

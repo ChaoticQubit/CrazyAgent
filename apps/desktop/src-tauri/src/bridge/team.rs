@@ -459,7 +459,8 @@ impl NativeBridge {
 
     /// Sets a project's "Catch up with main" setting: `on` lets every agent merge
     /// `crazyagent/main` into its own branch and tells it to, `off` keeps every merge
-    /// refused (OS-8). Takes the project id, the mode and the client generation. Returns the
+    /// refused by the git an agent is given, which a master at Full access or a git run by
+    /// its full path does not meet (OS-8). Takes the project id, the mode and the client generation. Returns the
     /// actual commit receipt, or `team_action_invalid` for any other mode.
     pub async fn team_catch_up_main(
         &mut self,
