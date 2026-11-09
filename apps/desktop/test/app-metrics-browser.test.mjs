@@ -11,7 +11,6 @@ const CSS = [
   readFileSync(new URL("../src/ui/tokens.css", import.meta.url), "utf8"),
   readFileSync(new URL("../src/style.css", import.meta.url), "utf8").replace(/@import[^;]*;/g, ""),
   readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8"),
-  readFileSync(new URL("../src/screens/settings/usage.css", import.meta.url), "utf8"),
   readFileSync(new URL("../src/screens/metrics/metrics.css", import.meta.url), "utf8"),
 ].join("\n");
 const HOUR = 3_600_000;

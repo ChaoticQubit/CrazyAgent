@@ -44,6 +44,12 @@ pub(crate) const SHIPPED: &str = concat!(
     "\n",
     r#"super({id:"_manageAccountPreferencesForMcpServer",title:H(6310,"Manage MCP Server Account Preferences"),category:H(6308,"Accounts"),f1:!1})"#,
     "\n",
+    r#"Xs({id:"workbench.action.terminal.selectDefaultShell",title:H(19950,"Select Default Profile"),run:o=>o.service.showProfileQuickPick("setDefault")})"#,
+    "\n",
+    r#"{id:F.TerminalNewDropdownContext,item:{command:{id:"workbench.action.terminal.selectDefaultShell",title:H(20028,"Select Default Profile")},group:"3_configure"}}"#,
+    "\n",
+    r#"_createProfileQuickPickItem(o){let e=[{iconClass:J.asClassName(KMn),tooltip:d(20038,null)}],i=o.icon}"#,
+    "\n",
 );
 
 /// [`SHIPPED`] once every edit applied.
@@ -87,6 +93,12 @@ pub(crate) const HIDDEN: &str = concat!(
     r#"super({id:ib.CLOSE_REMOTE_COMMAND_ID,category:e,title:H(18550,"Close Remote Connection"),f1:!0,precondition:D.and(D.or(SC,mF),Jo.negate())})"#,
     "\n",
     r#"super({id:"_manageAccountPreferencesForMcpServer",title:H(6310,"Manage MCP Server Account Preferences"),category:H(6308,"Accounts"),f1:!1})"#,
+    "\n",
+    r#"Xs({id:"workbench.action.terminal.selectDefaultShell",title:H(19950,"Select Default Profile"),f1:!1,run:o=>o.service.showProfileQuickPick("setDefault")})"#,
+    "\n",
+    r#"{id:F.TerminalNewDropdownContext,item:{command:{id:"workbench.action.terminal.selectDefaultShell",title:H(20028,"Select Default Profile")},when:D.false(),group:"3_configure"}}"#,
+    "\n",
+    r#"_createProfileQuickPickItem(o){let e=[],i=o.icon}"#,
     "\n",
 );
 
@@ -214,7 +226,7 @@ fn a_link_or_leftover_at_the_staged_name_is_replaced_and_never_followed() {
 /// Every hiding revision, oldest first, with the digest of the edits a build installed under
 /// it carries. Changing [`EDITS`] or [`WINDOW`] changes the digest, so it needs a new row
 /// and a new [`REVISION`], or installed builds would keep the old edits.
-const REVISIONS: [(&str, &str); 3] = [
+const REVISIONS: [(&str, &str); 4] = [
     (
         "h1",
         "257622519e4a1a7d3a7bee30f97186083c9a4e14b1f5cdaaf83e3ef33347430b",
@@ -226,6 +238,10 @@ const REVISIONS: [(&str, &str); 3] = [
     (
         "h3",
         "97a8ce21fc87e75d1d93eb37df327c3b7bacc2e7539634e94e383a5a3e906984",
+    ),
+    (
+        "h4",
+        "662587e356846db83b228b5b64e84472d8c5e74496a69408c614f782d6e99eb4",
     ),
 ];
 
@@ -247,6 +263,7 @@ fn every_change_to_the_edits_names_a_new_revision() {
     assert_eq!(REVISIONS.last(), Some(&(REVISION, current.as_str())));
     assert_eq!(digest(&EDITS[..9]), REVISIONS[0].1);
     assert_eq!(digest(&EDITS[..16]), REVISIONS[1].1);
+    assert_eq!(digest(&EDITS[..18]), REVISIONS[2].1);
     for (n, (name, sum)) in REVISIONS.iter().enumerate() {
         for (other, other_sum) in &REVISIONS[n + 1..] {
             assert_ne!(name, other);

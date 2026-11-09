@@ -6,7 +6,9 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const client = await import("../src/api-usage.ts");
-const usage = await import("../src/screens/settings/usage.tsx");
+const usage = await import("../src/screens/metrics/usage-model.tsx");
+const limitsView = await import("../src/screens/metrics/limits.tsx");
+const view = await import("../src/screens/metrics/view.tsx");
 const router = await import("../src/ui/router.ts");
 
 const MINUTE = 60_000;
@@ -28,14 +30,21 @@ const report = (patch = {}) => ({
   lines: [{ project: "project-harbor", change_sets: 3, added: 90, removed: 57, commits: 2, committed_added: 80, committed_removed: 55 }],
   limits: [limits()], partial_homes: 0, ...patch,
 });
-const names = {
-  projects: new Map([["project-harbor", "Harbor Notes"]]),
-  pools: new Map([["pool-main", "Main pool"]]),
-  accounts: new Map([["acct-claude", "Work Claude"]]),
-};
-const render = (patch = {}) => renderToStaticMarkup(createElement(usage.UsageView, {
-  report: { kind: "ok", value: report() }, range: "7d", names, nowMs: NOW, failure: "", busy: null,
-  onRange: forbidden, onRefresh: forbidden, onSetReset: forbidden, onRetry: forbidden, ...patch,
+const names = { agents: new Map(), accounts: new Map([["acct-claude", "Work Claude"]]) };
+const PROJECTS = [{ id: "project-harbor", name: "Harbor Notes" }];
+const LIMITS = { pools: new Map([["pool-main", "Main pool"]]), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
+const counted = (rows) => rows.filter((item) => !item.not_reported_by || usage.headlineTokens(item.tokens) > 0);
+const metricsFor = (value) => ({
+  running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: [], runs: [], harnesses: [],
+  projects: counted(value.projects).map((item) => ({ key: item.key, tokens: item.tokens, agents: 1, runs: item.runs, projects: [item.key], merges: 0 })),
+  agents: counted(value.agents).map((item) => ({ project: "project-harbor", agent: item.key, harnesses: ["codex"], accounts: ["acct-claude"], tokens: item.tokens })),
+  accounts: counted(value.accounts).map((item) => ({ key: item.key, tokens: item.tokens, agents: 1, runs: item.runs, projects: ["project-harbor"] })),
+});
+const render = ({ report: read = { kind: "ok", value: report() }, nowMs = NOW, failure = "" } = {}) => renderToStaticMarkup(createElement(view.MetricsPage, {
+  projectId: null, usage: read, metrics: { kind: "ok", value: metricsFor(read.kind === "ok" ? read.value : report()) }, adoption: null,
+  range: "7d", by: "project", names, sinceMs: nowMs - 7 * DAY, nowMs, updatedMs: nowMs, offset: usage.offsetMinutes(new Date(nowMs)),
+  filter: { projects: PROJECTS, onProject: forbidden, limits: { ...LIMITS, failure } },
+  onRange: forbidden, onBy: forbidden, onRetry: forbidden,
 }));
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
 
@@ -66,8 +75,8 @@ test("ranges and day labels follow the engine's fixed-offset days across a dayli
     const label = (date) => new Date(Date.UTC(2026, 2, date)).toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
     assert.deepEqual(days.map((day) => usage.dayLabel(day.day_ms, offset)), dates.map(label));
     const words = text(render({ nowMs: spring.getTime(), report: { kind: "ok", value: report({ days }) } }));
-    const at = dates.map((date) => words.indexOf(`${label(date)} `));
-    assert.ok(at.every((index, place) => index >= 0 && (place === 0 || index > at[place - 1])), `every day keeps its own date, in order: ${words}`);
+    const at = [...dates].reverse().map((date) => words.indexOf(`${label(date)} `));
+    assert.ok(at.every((index, place) => index >= 0 && (place === 0 || index > at[place - 1])), `every day keeps its own date, newest first: ${words}`);
     assert.equal(words.split(label(7)).length, 2, "the Saturday before the change is listed once");
     assert.ok(!words.includes(new Date(Date.UTC(2026, 2, 4)).toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" })), "no day before the range is listed");
   } finally {
@@ -99,11 +108,12 @@ test("a limit window ages like the engine's: a manual reset wins and a passed re
 });
 
 test("reset countdowns, read times and agent names are plain words", () => {
-  assert.equal(usage.resetText(null, NOW), "Next reset not known yet");
-  assert.equal(usage.resetText(NOW + 30_000, NOW), "Resets in under a minute");
-  assert.equal(usage.resetText(NOW + 14 * MINUTE + 59_000, NOW), "Resets in 14 min");
-  assert.equal(usage.resetText(NOW + 2 * HOUR + 14 * MINUTE, NOW), "Resets in 2 h 14 min");
-  assert.equal(usage.resetText(NOW + 3 * DAY + 4 * HOUR, NOW), "Resets in 3 d 4 h");
+  assert.equal(limitsView.resetAtText(null, NOW), "Next reset not known yet");
+  assert.equal(usage.resetText, undefined, "no caller is left for the old words");
+  assert.equal(usage.untilText(NOW + 30_000, NOW), "in under a minute");
+  assert.equal(usage.untilText(NOW + 14 * MINUTE + 59_000, NOW), "in 14 min");
+  assert.equal(usage.untilText(NOW + 2 * HOUR + 14 * MINUTE, NOW), "in 2 h 14 min");
+  assert.equal(usage.untilText(NOW + 3 * DAY + 4 * HOUR, NOW), "in 3 d 4 h");
   assert.equal(usage.agoText(NOW - 10_000, NOW), "just now");
   assert.equal(usage.agoText(NOW + 10_000, NOW), "just now");
   assert.equal(usage.agoText(NOW - 5 * MINUTE, NOW), "5 min ago");
@@ -194,10 +204,10 @@ test("a sign-in the limits check cannot use says on the card what it is and what
 test("the usage page shows totals, limits with countdowns, named groups and lines changed", () => {
   const markup = render();
   const words = text(markup);
-  assert.match(words, /Tokens 2\.3K 1\.2K input, 800 cache write, 300 output/);
+  assert.match(words, /Tokens 2\.3K Input 1\.2K Cache write 800 Output 300/);
   assert.match(words, /Re-read from cache 4K 67% of everything read; billed far lower, not in Tokens/);
   assert.match(words, /Runs 3/);
-  assert.match(words, /Lines changed \+90 -57/);
+  assert.match(words, /Lines \+90 −57 across 3 change sets/);
   assert.match(words, /Work Claude max/);
   assert.match(words, /Read from the provider 3 min ago/);
   assert.match(words, /5-hour 34% used/);
@@ -208,7 +218,7 @@ test("the usage page shows totals, limits with countdowns, named groups and line
   assert.match(words, /Set reset time/);
   assert.doesNotMatch(words, /Use provider's time/);
   for (const title of ["By project", "By pool", "By account", "By agent", "By day", "Lines changed by project"]) assert.match(words, new RegExp(title));
-  assert.match(words, /Harbor Notes 1\.5K 1\.2K 0 300 4K 2 5 min ago/);
+  assert.match(words, /Harbor Notes 1\.5K 1\.2K 0 300 4K 1 2 0 5 min ago/);
   assert.match(words, /Main pool/);
   assert.match(words, /Agent 7/);
   assert.match(words, /Research scout/);
@@ -225,9 +235,10 @@ test("the Tokens tile shows the headline with its three parts, the re-reads have
     days: [{ day_ms: NOW - 9 * HOUR, tokens: parts }],
   }) } });
   const words = text(markup);
-  assert.match(words, /Tokens 2\.3K 1\.2K input, 800 cache write, 300 output Re-read from cache 4K 67% of everything read; billed far lower, not in Tokens/);
+  assert.match(words, /Tokens 2\.3K Input 1\.2K Cache write 800 Output 300/);
+  assert.match(words, /Re-read from cache 4K 67% of everything read; billed far lower, not in Tokens/);
   assert.doesNotMatch(words, /counted apart|Cache 67%/, "the budget meter's wording stays on the budget meter and the cache share moves into the re-read tile");
-  assert.match(words, /By project Name Tokens Input Cache write Output Cache read Runs Last used Harbor Notes 2\.2K 1\.2K 700 300 9K 2 5 min ago/);
+  assert.match(words, /Project Tokens Input Cache write Output Cache read Agents Runs Merges Last used Share of tokens Harbor Notes 2\.2K 1\.2K 700 300 9K 1 2 0 5 min ago/);
   assert.match(words, /By day Day Tokens Input Cache write Output Cache read .*? 2\.2K 1\.2K 700 300 9K/);
   assert.match(markup, /<th scope="col" class="muted">Cache read<\/th>/);
 });
@@ -236,8 +247,8 @@ test("runs tied to no project or account show as Unattributed and the master as 
   const words = text(render({ report: { kind: "ok", value: report({
     projects: [row("project-harbor"), row("")], accounts: [row("")], agents: [row("master-project-harbor"), row("onboarding")],
   }) } }));
-  assert.match(words, /By project Name Tokens Input Cache write Output Cache read Runs Last used Harbor Notes .* Unattributed 1\.5K/);
-  assert.match(words, /By account Name Tokens Input Cache write Output Cache read Runs Last used Unattributed 1\.5K/);
+  assert.match(words, /Project Tokens Input Cache write Output Cache read Agents Runs Merges Last used Share of tokens Harbor Notes .* Unattributed 1\.5K/);
+  assert.match(words, /By account Unattributed 1\.5K/);
   assert.match(words, /Master, Harbor Notes 1\.5K/);
   assert.match(words, /Onboarding 1\.5K/);
 });
@@ -304,18 +315,16 @@ test("the usage page has empty, loading, error and not-ready states", () => {
   const error = text(render({ report: { kind: "error", code: "usage_outcome_unknown", message: "" } }));
   assert.match(error, /CrazyAgent couldn't confirm what happened\./);
   assert.match(error, /Try again/);
-  assert.match(text(render({ report: { kind: "not_ready" } })), /Usage isn't ready yet/);
-  assert.match(text(render({ report: { kind: "error", code: "usage_unavailable", message: "" } })), /Usage isn't ready yet/);
+  assert.match(text(render({ report: { kind: "not_ready" } })), /Metrics isn't ready yet/);
+  assert.match(text(render({ report: { kind: "error", code: "usage_unavailable", message: "" } })), /Metrics isn't ready yet/);
   assert.match(text(render({ failure: "That reset time isn't valid. Pick a time in the future." })), /That reset time isn't valid/);
 });
 
-test("Settings has a Usage tab", () => {
-  assert.ok(router.SETTINGS_TABS.includes("usage"));
-  assert.deepEqual(router.parseRoute("#/settings/usage"), { name: "settings", tab: "usage" });
-  assert.equal(router.formatRoute({ name: "settings", tab: "usage" }), "#/settings/usage");
+test("Settings has no Usage entry and the old link opens Metrics", () => {
+  assert.ok(!router.SETTINGS_TABS.includes("usage"));
+  assert.deepEqual(router.parseRoute("#/settings/usage"), { name: "metrics" });
   const settings = readFileSync(new URL("../src/screens/settings/index.tsx", import.meta.url), "utf8");
-  assert.match(settings, /\{ id: "usage", label: "Usage" \}/);
-  assert.match(settings, /tab === "usage" \? <UsageSettings \/>/);
+  assert.doesNotMatch(settings, /UsageSettings|id: "usage"/);
 });
 
 test("a harness without a reader reads as usage not reported, never as zero", () => {
@@ -325,8 +334,8 @@ test("a harness without a reader reads as usage not reported, never as zero", ()
     projects: [unreported("project-harbor", "RCLI")], agents: [unreported("master-project-harbor", "RCLI")], not_reported_by: ["RCLI"],
   }) } }));
   assert.match(only, /Tokens Not reported Usage not reported by RCLI/);
-  assert.match(only, /By project Name Tokens Input Cache write Output Cache read Runs Last used Harbor Notes Usage not reported by RCLI 5 min ago/);
-  assert.match(only, /By agent .* Usage not reported by RCLI 5 min ago/);
+  assert.match(only, /Project Tokens Input Cache write Output Cache read Agents Runs Merges Last used Share of tokens Harbor Notes Usage not reported by RCLI 5 min ago/);
+  assert.match(only, /By agent .* Usage not reported by RCLI 0 5 min ago/);
   assert.doesNotMatch(only, /No usage in this range/);
   assert.doesNotMatch(only, /Harbor Notes 0 /);
 
@@ -334,9 +343,9 @@ test("a harness without a reader reads as usage not reported, never as zero", ()
     projects: [row("project-harbor", { not_reported_by: "Gemini CLI" }), unreported("project-docs", "OpenCode")],
     not_reported_by: ["Gemini CLI", "OpenCode"],
   }) } }));
-  assert.match(mixed, /Tokens 2\.3K 1\.2K input, 800 cache write, 300 output/);
+  assert.match(mixed, /Tokens 2\.3K Input 1\.2K Cache write 800 Output 300/);
   assert.match(mixed, /Not in these totals: usage not reported by Gemini CLI, OpenCode\./);
-  assert.match(mixed, /Harbor Notes 1\.5K \+ usage not reported by Gemini CLI 1\.2K 0 300 4K 2 5 min ago/);
+  assert.match(mixed, /Harbor Notes 1\.5K \+ usage not reported by Gemini CLI 1\.2K 0 300 4K 1 2 0 5 min ago/);
   assert.match(mixed, /project-docs Usage not reported by OpenCode 5 min ago/);
 
   const older = text(render({ report: { kind: "ok", value: report() } }));

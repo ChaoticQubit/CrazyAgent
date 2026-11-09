@@ -1447,10 +1447,10 @@ pub(super) fn undo(
 }
 
 /// Records a finished undo: every set the undone merge closed (a master's merge closes the
-/// sets its head holds) is marked undone with it, then the set keeps the reverting commit
-/// and drops its intent, its merge rows show Undone and one Undone row names the closed
-/// sets whose work it reverted too. Inputs: the store, the undone set, the reverting commit
-/// and who undid it. Output: Ok once saved.
+/// sets its head holds) whose files it changed is marked undone with it, then the set keeps
+/// the reverting commit and drops its intent, its merge rows show Undone and one Undone row
+/// names the closed sets whose work it reverted too. Inputs: the store, the undone set, the
+/// reverting commit and who undid it. Output: Ok once saved.
 fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Result<(), EngineError> {
     let landed = record
         .landed
@@ -1458,6 +1458,9 @@ fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Resul
         .ok_or_else(|| failure("changes_undo_unavailable"))?;
     let mut closed = Vec::new();
     for mut other in store::closed_in(db, &record.project, &landed, &record.id)? {
+        if !reverts_closed_set(record, &landed, &other) {
+            continue;
+        }
         other.undone = Some(commit.to_owned());
         store::save(db, &other)?;
         closed.push(other.agent.label);
@@ -1469,6 +1472,26 @@ fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Resul
     crate::activity::mark_undone(db, &record.project, record.id.as_str());
     super::note_undo(db, record, &closed, by);
     Ok(())
+}
+
+/// Tells whether reverting a landed commit reverts a set recorded as landed in it: the
+/// commit changed a file the set changed. An Accept that made no commit records whatever
+/// commit was the tip, which may hold none of the set's work. A set git can no longer read
+/// counts, since the branch has already moved. Inputs: the undone set, its landed commit
+/// and the other set. Output: the answer.
+fn reverts_closed_set(record: &Record, landed: &str, closed: &Record) -> bool {
+    let overlap = shared(&record.repository).and_then(|owner| {
+        let reverted = diff::changed_paths(&owner, &format!("{landed}^1"), landed)?;
+        let changed = diff::changed_paths(&owner, &closed.base, &closed.head)?;
+        Ok(changed.iter().any(|path| reverted.contains(path)))
+    });
+    overlap.unwrap_or_else(|error| {
+        eprintln!(
+            "landing_undo_closed_set_unread cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+        true
+    })
 }
 
 /// Moves an owner ref an Accept or an undo left in flight: by compare and swap when the
