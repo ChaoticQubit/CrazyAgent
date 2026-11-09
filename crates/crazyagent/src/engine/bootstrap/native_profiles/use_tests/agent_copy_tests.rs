@@ -221,6 +221,32 @@ fn scripted_codex(case: &UseCase, name: &str, script: &str, next: &[u8]) -> Path
     harness
 }
 
+/// CA-SEC-003: a running keeper leases the profile itself, so once the turn's own lease ends
+/// a sign-out or sign-in still waits for every renewal that could write the account's
+/// record, and stopping the keeper ends that lease.
+#[test]
+fn a_running_keeper_keeps_the_profile_leased_after_the_turn_s_lease_ended() {
+    let mut case = UseCase::new();
+    private_file(&case.home().join("auth.json"), &codex_auth(now() + 600));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    drop(guard);
+    assert_busy(&case.manifest());
+    drop(copy);
+    let file = File::open(case.manifest()).unwrap();
+    let waited = Instant::now();
+    while flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "the profile stayed leased after its keeper stopped"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn dropping_a_copy_mid_renewal_returns_at_once_and_the_renewal_still_keeps_the_rotated_token() {
     let mut case = UseCase::new();
