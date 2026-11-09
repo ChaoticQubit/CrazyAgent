@@ -1239,8 +1239,8 @@ pub(super) struct Added {
     pub(super) cost_nanos: i64,
 }
 
-/// Adds a session's new tokens to the usage hour that holds `now_ms`, after recording
-/// `now_ms` as when that run was last counted. Inputs: the store, the time, the
+/// Adds a session's new tokens and dollars to the usage hour that holds `now_ms`, after
+/// recording `now_ms` as when that run was last counted. Inputs: the store, the time, the
 /// attribution, the session, the model and what it added. Output: done, or
 /// `usage_unavailable`.
 fn add_tokens(
@@ -1251,7 +1251,7 @@ fn add_tokens(
     model: &str,
     added: Added,
 ) -> Result<(), EngineError> {
-    if added.tokens.is_empty() {
+    if added.tokens.is_empty() && added.cost_nanos == 0 {
         return Ok(());
     }
     let hour_ms = now_ms - now_ms.rem_euclid(HOUR_MS);
