@@ -614,6 +614,82 @@ async fn an_engine_start_forgets_a_delete_plan_left_behind() {
     engine.stop().await;
 }
 
+/// While a projects home move is pending, the owner can neither pick another home nor move it
+/// without its projects, so the move's own pick is never overwritten. Both go once the move
+/// is forgotten.
+#[tokio::test]
+async fn a_pending_home_move_holds_a_home_switch_until_it_is_forgotten() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    project(&mut owner).await;
+    let next = tempfile::Builder::new()
+        .prefix("ca-next-home-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let target = std::fs::canonicalize(next.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let home = engine.home();
+    set(
+        &engine,
+        "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"meal-planner\"]')",
+        [home.to_str().unwrap(), target.as_str()],
+    );
+    let refused = rejected("home_move_in_progress");
+    let picked = owner.set_projects_home(target.clone(), 2).await.unwrap();
+    assert_eq!(result(picked), refused);
+    let moved = owner
+        .move_projects_home(target.clone(), false, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(moved), refused);
+    write_db(&engine, "DELETE FROM projects_home_move");
+    let picked = owner.set_projects_home(target, 4).await.unwrap();
+    assert_eq!(result(picked), OwnerResult::Applied);
+    drop(owner);
+    engine.stop().await;
+}
+
+/// When every settle before the reply fails the reply still goes, and the settle after it
+/// forgets the plan, so a home move is not refused until a restart.
+#[tokio::test]
+async fn a_delete_plan_is_forgotten_after_the_reply_when_every_settle_before_it_failed() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    std::fs::remove_dir_all(&folder).unwrap();
+    write_db(
+        &engine,
+        "CREATE TABLE settle_fault(n);
+         CREATE TRIGGER settle_fails_thrice BEFORE DELETE ON projects_delete_pending
+         WHEN (SELECT count(*) FROM settle_fault) < 3
+         BEGIN
+           INSERT INTO settle_fault VALUES (1);
+           SELECT RAISE(FAIL, 'settle fails');
+         END;",
+    );
+    let response = owner
+        .delete_project(project.clone(), NAME.into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let planned = || engine.rows("SELECT count(*) FROM projects_delete_pending");
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while planned() != 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(planned(), 0, "the settle after the reply forgets the plan");
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM settle_fault"),
+        3,
+        "every settle before the reply really failed"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
 /// Makes an agent's folder and profile files and a research run on disk, as a project's
 /// engine files. Inputs: the engine root, the agent and the run's folder name. Output: every
 /// path made.

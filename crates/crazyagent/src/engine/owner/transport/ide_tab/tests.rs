@@ -416,22 +416,37 @@ async fn an_ide_opened_while_delete_everything_waits_is_refused_until_the_delete
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o555)).unwrap();
     let client = open.controller.shared_client().unwrap();
     let (project, group) = (open.project.clone(), open.group);
+    let folder = open
+        .controller
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .project_folder();
+    let exclude = folder.join(".git/info/exclude");
+    std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    let _ = std::fs::remove_file(&exclude);
     let deleting = open
         .controller
         .delete_project(project.clone(), "IDE stop".into(), 3);
     let opening = async {
         gone(group).await;
         let reopened = client.ide_tab_open(project.clone()).await;
+        let wrote = exclude.exists();
         write("UPDATE team_agents SET status='stopped' WHERE id=7");
-        reopened
+        (reopened, wrote)
     };
-    let (deleted, reopened) = tokio::join!(deleting, opening);
+    let (deleted, (reopened, wrote)) = tokio::join!(deleting, opening);
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
     let after = client.ide_tab_open(project.clone()).await;
     open.service.shutdown().await.unwrap();
     assert_eq!(
         reopened.map(|server| server.url).map_err(|e| e.0),
         Err("ide_project_deleting".to_owned())
+    );
+    assert!(
+        !wrote,
+        "a refused open writes nothing to the project folder"
     );
     assert!(
         matches!(

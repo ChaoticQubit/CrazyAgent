@@ -17,29 +17,48 @@ const ONE_TAB = [{ id: "overview", label: "Overview", href: "#/projects/p1/overv
 
 let root = null;
 
-/** A project page as the app draws one: the real head and its scroll hook over a long body.
- * Inputs: the head's meta line, or null, and its tabs. Output: the page element. */
-function Page({ meta, tabs }) {
+const ABOUT = "A booking system for a small flower shop, with online orders, delivery slots and a calendar the staff can edit from the counter. ".repeat(4);
+
+/** A project page as the app draws one: the real head and its scroll hook over a body.
+ * Inputs: the head's meta line, or null, its tabs, its description and the body's height in
+ * px. Output: the page element. */
+function Page({ meta, tabs, about = "", body = 2000 }) {
   const page = useRef(null);
   const scrolled = useProjectHead(page, "p1");
   return h("div", { className: "pj pj-project", ref: page },
-    h(ProjectHead, { title: "Larkspur Booking", about: "", actions: null, meta, tabs, current: "overview", scrolled }),
-    h("div", { style: { height: "2000px" } }, "Overview"));
+    h(ProjectHead, { title: "Larkspur Booking", about, actions: null, meta, tabs, current: "overview", scrolled }),
+    h("div", { id: "page-body", style: { height: `${body}px` } }, "Overview"));
+}
+
+function start(sheets, page) {
+  root?.unmount();
+  document.head.innerHTML = "";
+  const style = document.createElement("style");
+  style.textContent = sheets.join("\n");
+  document.head.append(style);
+  document.body.innerHTML = '<div id="root"></div>';
+  root = createRoot(document.getElementById("root"));
+  const sidebar = h(Sidebar, { route: { name: "home" }, projects: [{ id: "p1", name: "Project 1" }], profileName: "Mira Okafor", engine: "running", onRetry: () => {} });
+  flushSync(() => root.render(h(AppShell, { sidebar }, page)));
 }
 
 /** Mounts the real app shell with the real stylesheets around a project page whose head
  * takes its scrolled form with no transition and no change of size. Inputs: the head's meta
  * line, or none, and its tabs, one by default. */
 export function mountStill(meta = null, tabs = ONE_TAB) {
-  root?.unmount();
-  document.head.innerHTML = "";
-  const style = document.createElement("style");
-  style.textContent = [shell, projects, STILL].join("\n");
-  document.head.append(style);
-  document.body.innerHTML = '<div id="root"></div>';
-  root = createRoot(document.getElementById("root"));
-  const sidebar = h(Sidebar, { route: { name: "home" }, projects: [{ id: "p1", name: "Project 1" }], profileName: "Mira Okafor", engine: "running", onRetry: () => {} });
-  flushSync(() => root.render(h(AppShell, { sidebar }, h(Page, { meta, tabs }))));
+  start([shell, projects, STILL], h(Page, { meta, tabs }));
+}
+
+/** Mounts the project page with its real styles and a description that wraps, on a page only a
+ * little taller than the window. Input: how many px taller. Output: how far the page scrolls. */
+export async function mountShort(over) {
+  start([shell, projects], h(Page, { meta: null, tabs: ONE_TAB, about: ABOUT }));
+  await frames(3);
+  const main = document.querySelector(".main");
+  const body = document.getElementById("page-body");
+  body.style.height = `${body.offsetHeight + over - (main.scrollHeight - main.clientHeight)}px`;
+  await frames(2);
+  return main.scrollHeight - main.clientHeight;
 }
 
 /** Mounts the project page with every tab the real page lists. */

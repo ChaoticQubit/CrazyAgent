@@ -408,7 +408,7 @@ fn unavailable() -> EngineError {
 /// changed, with its sub-agent for the goal; a failure is logged by its plain code, so the
 /// action itself never fails on it. A Discarded set closed outside the app says so, and
 /// ChangesReady is a discarded set brought back. Inputs: the store, the change set, the
-/// kind of event (Accepted, Conflict, Discarded, SentBack or ChangesReady) and who acted.
+/// kind of event (Conflict, Discarded, SentBack or ChangesReady) and who acted.
 #[cfg(unix)]
 fn note_change(
     db: &Connection,
@@ -420,7 +420,6 @@ fn note_change(
     let label = &record.agent.label;
     let line = &record.prompt_line;
     let text = match kind {
-        ActivityKind::Accepted => crate::activity::accepted_text(by, &named(db, record)),
         ActivityKind::Conflict => {
             format!("The changes of {label} conflict with the branch they land on: {line}")
         }
@@ -435,6 +434,32 @@ fn note_change(
         _ => unreachable!("note_change takes a change set action"),
     };
     note_text(db, record, kind, by, &text);
+}
+
+/// Records an Accept in its project's activity, naming the agents whose sets it closed.
+/// Inputs: the store, the accepted change set, who acted and the agents' labels. Output:
+/// none.
+#[cfg(unix)]
+fn note_accepted(db: &Connection, record: &store::Record, by: &str, closed: &[String]) {
+    let mut text = crate::activity::accepted_text(by, &named(db, record));
+    text.push_str(&closed_words(closed));
+    note_text(
+        db,
+        record,
+        crate::activity::ActivityKind::Accepted,
+        by,
+        &text,
+    );
+}
+
+/// The words a landing's activity row ends with when it closed other sets. Input: the
+/// labels of their agents. Output: the words, empty when it closed none.
+#[cfg(unix)]
+fn closed_words(closed: &[String]) -> String {
+    if closed.is_empty() {
+        return String::new();
+    }
+    format!(". It closed the changes of {}", closed.join(", "))
 }
 
 /// The words an activity row names a change set by, with its number once it has one; a
@@ -1063,8 +1088,9 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
 
 /// Lists one project's change sets as the owner's Changes and the master's brief show
 /// them: as [`list`], without the sets of a lead's workers while the owner's Lands setting
-/// is Lead, since that lead merges them (F3). Inputs: the store and the project. Output:
-/// the change sets.
+/// is Lead, since that lead merges them (F3), but with a worker's open set whose lead's
+/// copy was removed outside the app, since no lead will. Inputs: the store and the project.
+/// Output: the change sets.
 pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
     let sets = list(db, project)?;
     assert!(sets.len() <= LIST_MAX);
@@ -1072,7 +1098,13 @@ pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetV
     if subagent::leads_merge(db, project)? {
         let mut kept = Vec::with_capacity(sets.len());
         for set in sets {
-            if !subagent::is_lead_worker(db, project, &set.agent)? {
+            let open = matches!(
+                set.state,
+                ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
+            );
+            if !subagent::is_lead_worker(db, project, &set.agent)?
+                || (open && subagent::lead_copy_removed(db, project, &set.agent)?)
+            {
                 kept.push(set);
             }
         }
@@ -1294,6 +1326,14 @@ pub fn accept_into(
     )
 }
 
+/// The refusal of a land the owner did not press while a worker below the set's agent
+/// holds an open change set (HB-S4-LANDED).
+pub const WORKER_OPEN: &str = "changes_worker_open";
+
+/// What the agent refused with [`WORKER_OPEN`] reads, after "Not merged" or "Not accepted".
+pub const WORKER_OPEN_TEXT: &str =
+    "a worker's work under that agent is still open. Land that work first, then merge again.";
+
 /// Lands a change set on a chosen local branch as [`accept_into`] does, for an Accept the
 /// owner did not make: the project's activity names who accepted it, the master or the
 /// engine. Inputs: as [`accept_into`], plus who accepts. Output: the landed commit and
@@ -1333,20 +1373,20 @@ pub fn accept_into_as(
     }
 }
 
-/// Lands the change set the project's master made, such as its fix of a conflicted set, the
-/// way an Accept does, when `team::master_lands` says Merges at that moment: one squash
-/// commit on the Land on branch, every open set of the project the master's head holds
-/// closed with it, and one MergedIntoMain activity row naming them. Any other set, a set
-/// that is not pending, or Waits leaves everything as it was. Inputs: the store, the
-/// owner's home and the change set. Output: the outcome of the land, or None when nothing
-/// was tried.
+/// Lands the change set the project's master made the way an Accept does, when it holds
+/// nothing but fixes of real conflicts with other open sets, `team::master_lands` says
+/// Merges and "Ask me before merging" is off at that moment: one squash commit on the Land
+/// on branch, every open set of the project the master's head holds closed with it, and
+/// one MergedIntoMain activity row naming them. Anything else leaves everything as it was.
+/// Inputs: the store, the owner's home and the change set. Output: the outcome of the
+/// land, or None when nothing was tried.
 pub fn land_master_set(
     db: &Connection,
     owner_home: &Path,
     id: &ChangeSetId,
 ) -> Result<Option<AcceptOutcome>, EngineError> {
     #[cfg(unix)]
-    return owner::land_master(db, owner_home, id);
+    return owner::land_master(db, owner_home, id, &|_| false);
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id);

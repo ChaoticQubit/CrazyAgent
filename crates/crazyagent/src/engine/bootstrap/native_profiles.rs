@@ -366,10 +366,10 @@ fn take_lock(file: &File, operation: FlockOperation) -> Result<(), EngineError> 
     })
 }
 
-/// An exclusive lock one custody step holds on a profile file, taken through its own
-/// duplicate of the open file description and unlocked when dropped, so a child that
+/// A lock one custody step or renewal holds on a profile file, taken through its own open
+/// file description or a duplicate of one and unlocked when dropped, so a child that
 /// another thread is starting, and that briefly shares the description, cannot keep it.
-/// Holds the duplicate. Dropping it ends the lock for every descriptor of the file.
+/// Holds that file. Dropping it ends the lock for every descriptor that shares it.
 #[must_use = "the lock ends as soon as this guard is dropped"]
 pub(crate) struct HeldLock(File);
 

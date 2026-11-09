@@ -258,7 +258,7 @@ impl Servers {
         if self.closed.load(Ordering::SeqCst) {
             return Err(failure("ide_servers_closed"));
         }
-        if locked(&self.deleting).contains_key(project) {
+        if self.deleting(project) {
             return Err(failure("ide_project_deleting"));
         }
         if let Some(info) = reuse(&slot).await {
@@ -397,6 +397,13 @@ impl Servers {
             finish(running).await;
         }
         stopped
+    }
+
+    /// Whether a Delete everything holds this project's IDE refused. Asked before an open does
+    /// any work, so a refused open writes nothing; [`Servers::open`] asks again under the
+    /// start lock. Input: the project. Output: true while a hold lives.
+    pub fn deleting(&self, project: &ProjectId) -> bool {
+        locked(&self.deleting).contains_key(project)
     }
 
     /// Stops a project's server for Delete everything and refuses its opens while the returned

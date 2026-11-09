@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { extendTerminalWindows, focusTerminalWindow, loadTerminalsPerWindow, nextGeneration, type Result } from "../../api";
+import { closeProjectWalls, extendTerminalWindows, focusTerminalWindow, loadTerminalsPerWindow, nextGeneration, type Result } from "../../api";
 import { stopTeamAgent, stopTeammate } from "../../api-projects";
 import type { GraphNode } from "../../engine-client";
 import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, Segmented, Skeleton } from "../../ui";
@@ -82,8 +82,9 @@ export function WallTools({ page, pages, onFocus }: { page: number; pages: numbe
 
 /** A terminal wall window of one project: its page of the team's terminals, the master
  * first, side by side, read again with the team graph. It reaches only the terminal, graph,
- * Stop, Terminals per window and window growth commands, and asks for the windows a growing
- * team needs itself, whatever the main window shows. Its tools row, there on every page,
+ * Stop, Terminals per window and window growth commands, asks for the windows a growing
+ * team needs itself, whatever the main window shows, and closes its project's windows once a
+ * read finds the project removed, however it was removed. Its tools row, there on every page,
  * brings the main window forward on Agents or another of its wall windows forward; its
  * heading shows the project name through displayText. Inputs: the project id, the window's
  * page and the project name its address carries. Output: the window's page. */
@@ -100,6 +101,10 @@ export function TerminalWall({ projectId, page, name }: { projectId: string; pag
     void loadTerminalsPerWindow(projectId).then((result) => { if (current) setSetting(result); });
     return () => { current = false; };
   }, [projectId, graph]);
+
+  useEffect(() => {
+    if (read.gone) void closeProjectWalls(projectId);
+  }, [projectId, read.gone]);
 
   async function focus(target: "main" | number) {
     const result = await focusTerminalWindow(projectId, target);

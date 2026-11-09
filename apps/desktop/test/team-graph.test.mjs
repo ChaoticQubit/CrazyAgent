@@ -280,7 +280,7 @@ test("a failed background read keeps the last graph, so an open terminal stays m
   const ok = { kind: "ok", value: team };
   const busy = { kind: "error", code: "busy", message: "The engine is busy. Try again." };
   let state = view.graphRead(view.GRAPH_UNREAD, ok);
-  assert.deepEqual(state, { shown: ok, stale: null });
+  assert.deepEqual(state, { shown: ok, stale: null, gone: false });
   state = view.graphRead(state, busy);
   assert.equal(state.shown, ok, "the graph that holds the open terminal is still shown");
   assert.equal(state.stale, "The engine is busy. Try again.");
@@ -288,8 +288,22 @@ test("a failed background read keeps the last graph, so an open terminal stays m
   assert.equal(state.shown, ok);
   assert.equal(state.stale, "The team graph isn't ready in this build.");
   state = view.graphRead(state, ok);
-  assert.deepEqual(state, { shown: ok, stale: null });
-  assert.deepEqual(view.graphRead(view.GRAPH_UNREAD, busy), { shown: busy, stale: null }, "with no graph yet the error is the view");
+  assert.deepEqual(state, { shown: ok, stale: null, gone: false });
+  assert.deepEqual(view.graphRead(view.GRAPH_UNREAD, busy), { shown: busy, stale: null, gone: false }, "with no graph yet the error is the view");
+});
+
+test("a read that finds the project removed is marked gone, and no other read is", () => {
+  const ok = { kind: "ok", value: team };
+  for (const code of ["project_missing", "project_setup_missing"]) {
+    const removed = { kind: "error", code, message: "Gone." };
+    assert.equal(view.graphRead(view.GRAPH_UNREAD, removed).gone, true, code);
+    const after = view.graphRead(view.graphRead(view.GRAPH_UNREAD, ok), removed);
+    assert.equal(after.gone, true, `${code} after a good read`);
+    assert.equal(after.shown, ok, "the last graph stays on screen");
+  }
+  assert.equal(view.graphRead(view.GRAPH_UNREAD, ok).gone, false);
+  assert.equal(view.graphRead(view.GRAPH_UNREAD, { kind: "not_ready" }).gone, false);
+  assert.equal(view.graphRead(view.GRAPH_UNREAD, { kind: "error", code: "owner_read_failed", message: "No." }).gone, false);
 });
 
 test("the one terminal panel is kept by the agent's number, so a Questions node and its graph card share it", () => {
