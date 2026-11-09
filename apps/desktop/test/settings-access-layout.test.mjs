@@ -49,23 +49,104 @@ test("Your accounts holds the search, the filters, the count and every account",
   assert.equal(seen.old, 0);
 });
 
-for (const width of [1180, 700]) {
-  test(`at ${width} px the list stays in its column and its last control can be reached`, async () => {
+for (const width of [1180, 760, 700]) {
+  test(`at ${width} px the list stays in its column and every row's menu is in view`, async () => {
     const seen = await onAccounts({}, (page) => page.evaluate(`(() => {
       const main = document.querySelector("#main");
       const column = document.querySelector(".settings-content").getBoundingClientRect();
       const add = document.querySelector(".settings-top button").getBoundingClientRect();
       const group = document.querySelector(".set-group").getBoundingClientRect();
-      const menu = document.querySelector('button[aria-label="More for Account 0"]');
-      menu.focus();
-      return { sideways: main.scrollWidth - main.clientWidth, columnRight: column.right, addRight: add.right, groupRight: group.right, menuRight: menu.getBoundingClientRect().right };
+      const list = document.querySelector(".windowed").getBoundingClientRect();
+      const menu = document.querySelector('button[aria-label="More for Account 0"]').getBoundingClientRect();
+      return { sideways: main.scrollWidth - main.clientWidth, columnRight: column.right, addRight: add.right, groupRight: group.right, table: document.querySelector(".account-table").getBoundingClientRect().right, listRight: list.right, menuRight: menu.right };
     })()`), width);
     assert.equal(seen.sideways, 0, JSON.stringify(seen));
     assert.ok(seen.addRight <= seen.columnRight + 0.5, JSON.stringify(seen));
     assert.ok(seen.groupRight <= seen.columnRight + 0.5, JSON.stringify(seen));
-    assert.ok(seen.menuRight <= seen.groupRight + 0.5, JSON.stringify(seen));
+    assert.ok(seen.listRight <= seen.groupRight + 0.5, JSON.stringify(seen));
+    assert.ok(seen.menuRight <= seen.listRight + 0.5, JSON.stringify(seen));
   });
 }
+
+test("at 1180 px, the size the app opens at, the list needs no sideways scroll", async () => {
+  const seen = await onAccounts({}, (page) => page.evaluate(`(() => {
+    const table = document.querySelector(".account-table");
+    const list = document.querySelector(".windowed");
+    return { table: table.scrollWidth - table.clientWidth, list: list.scrollWidth - list.clientWidth };
+  })()`), 1180);
+  assert.deepEqual(seen, { table: 0, list: 0 });
+});
+
+test("the longest status word stays whole inside its column at 1180 px", async () => {
+  const seen = await onAccounts({ accounts: "long_status" }, (page) => page.evaluate(`(() => {
+    const badge = document.querySelector(".account-row .badge");
+    const cell = badge.parentElement.getBoundingClientRect();
+    const row = document.querySelector(".account-row").getBoundingClientRect();
+    const box = badge.getBoundingClientRect();
+    return { clipped: badge.scrollWidth - badge.clientWidth, right: box.right, cellRight: cell.right, bottom: box.bottom, rowBottom: row.bottom };
+  })()`), 1180);
+  assert.ok(seen.clipped <= 0, JSON.stringify(seen));
+  assert.ok(seen.right <= seen.cellRight + 0.5, JSON.stringify(seen));
+  assert.ok(seen.bottom <= seen.rowBottom + 0.5, JSON.stringify(seen));
+});
+
+test("at 700 px the rows scroll sideways with the head and the menu stays in view over them", async () => {
+  const seen = await onAccounts({}, (page) => page.evaluate(`(() => {
+    const list = document.querySelector(".windowed");
+    const overflow = list.scrollWidth - list.clientWidth;
+    list.scrollLeft = 60;
+    const head = list.querySelector(".list-head span");
+    const name = list.querySelector(".account-row .cell");
+    const menu = list.querySelector('button[aria-label="More for Account 0"]');
+    return { overflow, scrolled: list.scrollLeft, headLeft: head?.getBoundingClientRect().left, nameLeft: name?.getBoundingClientRect().left,
+      listRight: list.getBoundingClientRect().right, menuRight: menu.getBoundingClientRect().right, filled: getComputedStyle(menu.closest(".menu")).backgroundColor };
+  })()`), 700);
+  assert.ok(seen.overflow > 0, JSON.stringify(seen));
+  assert.equal(seen.scrolled, 60, JSON.stringify(seen));
+  assert.ok(Math.abs(seen.headLeft - seen.nameLeft) <= 1, JSON.stringify(seen));
+  assert.ok(seen.menuRight <= seen.listRight + 0.5, JSON.stringify(seen));
+  assert.notEqual(seen.filled, "rgba(0, 0, 0, 0)", JSON.stringify(seen));
+});
+
+test("the head stays in view while a long list scrolls down", async () => {
+  const seen = await onAccounts({ accounts: "many" }, (page) => page.evaluate(`(async () => {
+    const list = document.querySelector(".windowed");
+    list.scrollTop = 400;
+    await Fixture.settle(40);
+    return { scrolled: list.scrollTop, listTop: list.getBoundingClientRect().top, headTop: document.querySelector(".list-head").getBoundingClientRect().top };
+  })()`), 1180);
+  assert.equal(seen.scrolled, 400, JSON.stringify(seen));
+  assert.ok(seen.headTop <= seen.listTop + 1, JSON.stringify(seen));
+});
+
+test("a row given focus is not left under the head", async () => {
+  const seen = await onAccounts({ accounts: "many" }, (page) => page.evaluate(`(async () => {
+    const list = document.querySelector(".windowed");
+    const head = document.querySelector(".list-head");
+    list.scrollTop = 482;
+    await Fixture.settle(40);
+    const row = [...list.querySelectorAll(".account-row")].find((item) => item.textContent.includes("Account 10"));
+    row.focus();
+    await Fixture.settle(40);
+    return { rowTop: row.getBoundingClientRect().top, headBottom: head.getBoundingClientRect().bottom };
+  })()`), 1180);
+  assert.ok(seen.rowTop >= seen.headBottom - 0.5, JSON.stringify(seen));
+});
+
+test("a row's open menu shows over the rows below it", async () => {
+  await onAccounts({}, async (page) => {
+    await press(page, 'button[aria-label="More for Account 0"]');
+    await page.evaluate("Fixture.settle(40)");
+    const seen = await page.evaluate(`(() => {
+      const items = [...document.querySelectorAll('[role="menuitem"]')];
+      const last = items.at(-1)?.getBoundingClientRect();
+      if (!last) return { items: 0, hit: false };
+      return { items: items.length, hit: document.elementFromPoint(last.x + last.width / 2, last.y + last.height / 2)?.closest('[role="menuitem"]') !== null };
+    })()`);
+    assert.ok(seen.items > 0, JSON.stringify(seen));
+    assert.equal(seen.hit, true, JSON.stringify(seen));
+  });
+});
 
 test("Add account opens its dialog, also straight from the add route", async () => {
   await onAccounts({}, async (page) => {

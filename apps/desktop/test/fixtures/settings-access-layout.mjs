@@ -7,7 +7,12 @@ export * from "./settings-tab.mjs";
 const FAILURE = { code: "engine_failed" };
 const account = (index, patch = {}) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT", method: "subscription", method_label: "Subscription",
   url: null, model: null, status: "signed_in", status_label: "Signed in", ...patch });
-const ACCOUNTS = { ok: [account(0), account(1), account(2, { provider: "claude", provider_name: "Claude" })], empty: [] };
+const ACCOUNTS = {
+  ok: [account(0), account(1), account(2, { provider: "claude", provider_name: "Claude" })],
+  empty: [],
+  many: Array.from({ length: 30 }, (_, index) => account(index)),
+  long_status: [account(0, { status_label: "Can't reach this URL" })],
+};
 const SIGNED_IN = { signed_in: true, login: "mira", method: "device", waiting: false, problem: null };
 const GITHUB = { in: SIGNED_IN, out: { signed_in: false, login: null, method: "none", waiting: false, problem: null }, cli: { ...SIGNED_IN, method: "cli" }, trouble: { ...SIGNED_IN, problem: "The sign-in expired." } };
 const OWNER = { name: "Mira", role: "Founder", bio: "Builds things.", preferred_stack: ["Rust"], working_style: { detail: "terse", initiative: "ask_first" } };
