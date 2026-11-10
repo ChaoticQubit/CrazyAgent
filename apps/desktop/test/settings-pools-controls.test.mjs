@@ -323,6 +323,29 @@ test("a stale_revision reads the schedule again and says so", async () => {
   assert.equal(seen.shown, "None");
 });
 
+test("the minute tick leaves the order alone while a change waits, and the drain reads it", async () => {
+  const seen = await onPools({ ranking: "live" }, async (page) => {
+    await page.evaluate(`Fixture.gate("${SAVE}")`);
+    await press(page, PIN("Account 0"), "Use last");
+    const before = await commandCount(page, RANKING);
+    await page.evaluate("Fixture.fireTimer(60000)");
+    const tick = await commandCount(page, RANKING);
+    await page.evaluate("Fixture.openGate()");
+    return { before, tick, after: await commandCount(page, RANKING) };
+  });
+  assert.equal(seen.tick, seen.before, "no order read while a change waits");
+  assert.equal(seen.after, seen.before + 1);
+});
+
+test("the app order hint follows the pick while its save waits", async () => {
+  const seen = await onPools({ ranking: "live" }, async (page) => {
+    await page.evaluate(`Fixture.gate("${SAVE}")`);
+    await press(page, APP, "Balanced");
+    return { hint: await page.evaluate("Fixture.wordsOf('.pool-app-hint')"), shown: await checked(page, APP_LABEL), saves: (await sent(page)).length };
+  });
+  assert.deepEqual(seen, { hint: "The account with the least weekly use goes first.", shown: "Balanced", saves: 0 });
+});
+
 test("a burst of changes reads the order once, after the last one", async () => {
   const seen = await onPools({ ranking: "live" }, async (page) => {
     const before = await commandCount(page, RANKING);

@@ -357,10 +357,11 @@ test("pressing Add on one account twice on a draft puts it in once", async () =>
     await press(page, NEW, "New pool");
     await page.evaluate(`{ const add = document.querySelector('${ADD("Account 3")}'); add.click(); add.click(); }`);
     await page.evaluate("Fixture.settle(120)");
-    return { edits: await edits(page), rows: await rowNames(page) };
+    return { edits: await edits(page), rows: await rowNames(page), says: await alert(page) };
   });
   assert.deepEqual(seen.edits.map((edit) => [edit.kind, members(edit)]), [["create_pool", ["acct-3"]]]);
   assert.deepEqual(seen.rows, ["Account 3"]);
+  assert.equal(seen.says, "", "the second press is no refusal");
 });
 
 test("a refused first Add keeps the draft and shows the engine's sentence", async () => {
