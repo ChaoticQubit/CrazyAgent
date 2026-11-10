@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { encodeFrame, FrameReader, type Reply } from "./engine.js";
-import { GIT_OUTCOME_UNKNOWN, GIT_REQUEST_MS, GIT_SECRET_ENV, GIT_SOCKET_ENV, gitOutcome, type GitOutcome } from "./git.js";
+import { GIT_OUTCOME_UNKNOWN, GIT_REQUEST_MS, GIT_SECRET_ENV, GIT_SHIM_ENV, GIT_SOCKET_ENV, gitOutcome, type GitOutcome } from "./git.js";
 import { unconfirmed } from "./scm-model.js";
 
 const ANSWER_GRACE_MS = 5_000;
@@ -28,7 +28,9 @@ export interface Printer {
  * rebase of the branch's upstream runs here, in the IDE sandbox, where the sandbox's write
  * denies apply. A pull with no upstream to take is refused before anything is fetched.
  * The script hands this a copy of its environment and removes the relay's secret from its
- * own, so no git it starts, and no hook of that git, holds the secret.
+ * own, so no git it starts, and no hook of that git, holds the secret; only the shim
+ * named in `GIT_SHIM_ENV` gets it for a pull's local step, and takes it off its own
+ * environment before git starts.
  * Inputs: the environment naming the relay, git's arguments, the folder git runs in and
  * the two streams. Output: the exit code.
  */
@@ -46,7 +48,7 @@ export async function forward(
   }
   const code = await ask(env, args, folder, stdout, stderr);
   if (step === undefined || code !== 0) return code;
-  return local(step.argv, folder, stdout, stderr);
+  return local(env, step.argv, folder, stdout, stderr);
 }
 
 /**
@@ -109,13 +111,26 @@ function setting(folder: string, args: string[]): Promise<string | undefined> {
 }
 
 /**
- * Runs git in the folder inside the IDE sandbox, printing on the same streams. Inputs:
- * git's arguments, the folder and the two streams. Output: git's exit code, or 128 with a
- * `fatal:` line when it cannot start or was ended by a signal.
+ * Runs git in the folder inside the IDE sandbox, through the engine's shim when one is
+ * named, since only the shim can record the index, printing on the same streams. Inputs:
+ * the environment naming the shim, git's arguments, the folder and the two streams.
+ * Output: git's exit code, or 128 with a `fatal:` line when it cannot start or was ended
+ * by a signal.
  */
-function local(args: string[], folder: string, stdout: Printer, stderr: Printer): Promise<number> {
+function local(
+  env: Record<string, string | undefined>,
+  args: string[],
+  folder: string,
+  stdout: Printer,
+  stderr: Printer,
+): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn("git", args, { cwd: folder, stdio: ["ignore", "pipe", "pipe"] });
+    const shim = env[GIT_SHIM_ENV];
+    const child = spawn(shim ?? "git", args, {
+      cwd: folder,
+      env: shim === undefined ? process.env : { ...process.env, [GIT_SECRET_ENV]: env[GIT_SECRET_ENV] },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     child.stdout.setEncoding("utf8").on("data", (text: string) => stdout.write(text));
     child.stderr.setEncoding("utf8").on("data", (text: string) => stderr.write(text));
     child.on("error", () => {

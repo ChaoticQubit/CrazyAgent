@@ -480,6 +480,10 @@ pub(crate) struct Grants {
     terminals: std::sync::Arc<Mutex<terminal::Terminals>>,
     #[cfg(unix)]
     git_calls: std::sync::Arc<Mutex<remote_git::GitCalls>>,
+    #[cfg(unix)]
+    index_calls: std::sync::Arc<Mutex<remote_git::GitCalls>>,
+    #[cfg(unix)]
+    index_gates: remote_git::index::Gates,
 }
 
 /// One project's capability for one IDE server launch. Until `taken`, the token is the
@@ -1118,7 +1122,9 @@ async fn change_call(
 
 /// Runs one git network command of the IDE in the project folder outside the IDE sandbox
 /// ([`remote_git::answer`]) once it has a place among the running ones
-/// ([`remote_git::place`]); where the engine has no IDE sandbox it is unavailable.
+/// ([`remote_git::place`]); where the engine has no IDE sandbox it is unavailable. The shim's
+/// [`remote_git::index::VERB`] call carries staged changes instead, with places of its own, so
+/// a long push cannot fail a stage.
 /// Inputs: the owner runtime, the project, git's arguments and the folder git ran in.
 /// Output: the reply data, or `ide_git_busy` when the places are taken.
 async fn git_call(
@@ -1130,6 +1136,13 @@ async fn git_call(
     #[cfg(unix)]
     {
         let root = runtime.ide()?.root;
+        if args.first().map(String::as_str) == Some(remote_git::index::VERB) {
+            let grants = runtime.ide_grants();
+            let place = remote_git::place(&grants.index_calls, project)?;
+            let gate = remote_git::index::gate(&grants.index_gates, project)?;
+            return remote_git::index::answer(root, project.clone(), args, folder, place, gate)
+                .await;
+        }
         let place = remote_git::place(&runtime.ide_grants().git_calls, project)?;
         remote_git::answer(root, project.clone(), args, folder, place).await
     }
@@ -1148,6 +1161,10 @@ pub(crate) fn carry_index(private: &Path, engine: &Path, project: &Path, slot: &
         .unwrap()
         .code
 }
+
+/// The first argument of the shim's index call.
+#[cfg(unix)]
+pub(super) const INDEX_VERB: &str = remote_git::index::VERB;
 
 /// Writes the project's generated workspace file on a blocking thread, setting the
 /// show-all switch first when given. Inputs: the owner runtime, project and switch.

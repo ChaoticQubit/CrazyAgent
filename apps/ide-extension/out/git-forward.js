@@ -24,7 +24,7 @@ async function forward(env, args, folder, stdout, stderr) {
     const code = await ask(env, args, folder, stdout, stderr);
     if (step === undefined || code !== 0)
         return code;
-    return local(step.argv, folder, stdout, stderr);
+    return local(env, step.argv, folder, stdout, stderr);
 }
 async function pullStep(args, folder) {
     const branch = await setting(folder, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
@@ -70,9 +70,14 @@ function setting(folder, args) {
         });
     });
 }
-function local(args, folder, stdout, stderr) {
+function local(env, args, folder, stdout, stderr) {
     return new Promise((resolve) => {
-        const child = (0, node_child_process_1.spawn)("git", args, { cwd: folder, stdio: ["ignore", "pipe", "pipe"] });
+        const shim = env[git_js_1.GIT_SHIM_ENV];
+        const child = (0, node_child_process_1.spawn)(shim ?? "git", args, {
+            cwd: folder,
+            env: shim === undefined ? process.env : { ...process.env, [git_js_1.GIT_SECRET_ENV]: env[git_js_1.GIT_SECRET_ENV] },
+            stdio: ["ignore", "pipe", "pipe"],
+        });
         child.stdout.setEncoding("utf8").on("data", (text) => stdout.write(text));
         child.stderr.setEncoding("utf8").on("data", (text) => stderr.write(text));
         child.on("error", () => {

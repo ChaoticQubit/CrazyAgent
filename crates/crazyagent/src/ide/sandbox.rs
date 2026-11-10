@@ -48,10 +48,9 @@ pub fn qualified() -> bool {
 /// file directly in a folder of the data root (the owner keys) and the engine database are
 /// denied again, then every locked folder is denied for writing, case-insensitively as APFS
 /// matches names, with its folders up to its grant kept from being moved, then agent IDE
-/// config and agent git folders in the project are denied for reading ([`agent_config`]),
-/// and last the project's own git index and its lock are given back for writing, so the IDE
-/// stages and commits in the Project section while agents never write that index (IN1-F1).
-/// Network:
+/// config and agent git folders in the project are denied for reading ([`agent_config`]).
+/// The project's own git index and its lock stay denied: the IDE stages on a private index
+/// the engine carries across ([`super::git::shim_text`], SECAUDIT-IDE-SERVER-INDEX). Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, and connect to an owner socket.
 /// Inputs: the grants and the server port. Output: the profile text, or
 /// `ide_sandbox_invalid` for an unsafe place.
@@ -141,12 +140,6 @@ pub fn profile(grants: &Grants, port: u16) -> Result<String, EngineError> {
     ));
     text.push_str(&locks(&held));
     text.push_str(&agent_config(grants.root));
-    let index = grants.root.join(".git").join("index");
-    text.push_str(&format!(
-        "(allow file-write*\n  (literal \"{}\")\n  (literal \"{}.lock\"))\n",
-        index.display(),
-        index.display()
-    ));
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"
     ));
