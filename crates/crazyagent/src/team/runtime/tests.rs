@@ -22541,7 +22541,7 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
         mate,
         PendingEnd {
             reason: stopped_teammate(StoppedBy::Owner),
-            stopped: Some((project.clone(), StoppedBy::Owner)),
+            told: Told::Stop(project.clone(), StoppedBy::Owner),
         },
     );
     let sender = team.unmanaged_ends.0.clone();
@@ -22570,6 +22570,125 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
         error.as_deref(),
         Some("The owner stopped this teammate. (harness_cleanup_uncertain)")
     );
+    team.shutdown().unwrap();
+}
+
+/// S4B-B1-L1 r1: a teammate's row stopped elsewhere while its end ran, as by its lead's
+/// end, keeps that first mark, and the finished end reports no stop for it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_row_stopped_elsewhere_while_its_end_ran_reports_no_stop() {
+    use crate::team::StoppedBy;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    let project = fixture.setup.project_id.clone();
+    team.unmanaged_ending.insert(
+        mate,
+        PendingEnd {
+            reason: stopped_teammate(StoppedBy::Owner),
+            told: Told::Stop(project, StoppedBy::Owner),
+        },
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='stopped', error=?2 WHERE id=?1",
+            params![mate, LEAD_ENDED_TEAMMATE],
+        )
+        .unwrap();
+    team.unmanaged_ends.0.send((mate, Ok(false))).unwrap();
+
+    assert_eq!(team.stop_unmanaged().unwrap(), Vec::new());
+    assert!(team.unmanaged_ending.is_empty());
+    let error: Option<String> = fixture
+        .connection
+        .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(error.as_deref(), Some(LEAD_ENDED_TEAMMATE));
+    team.shutdown().unwrap();
+}
+
+/// S4B-B1-L1 r1: a lead over its cap is noted once its teammate's end is marked, not when
+/// the end is handed over: an end the host failed leaves the row running and the lead
+/// unnoted, and the next end that finishes notes it once.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_over_cap_lead_is_noted_once_its_teammates_end_is_marked() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    let project = fixture.setup.project_id.clone();
+    let label = names::label(
+        AgentRole::Sub,
+        mate,
+        names::name(&fixture.connection, mate).unwrap().as_ref(),
+    );
+    let note = over_cap_note(1, &[label]);
+    let notes = || -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT count(*) FROM coord_messages WHERE to_agent=?1 AND body=?2",
+                params![lead, note],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let hand = |team: &mut TeamRuntime, outcome: Result<bool, crate::terminal::HostError>| {
+        team.unmanaged_ending.insert(
+            mate,
+            PendingEnd {
+                reason: OVER_TEAMMATE_CAP,
+                told: Told::Lead {
+                    project: project.clone(),
+                    lead,
+                    cap: 1,
+                },
+            },
+        );
+        team.unmanaged_ends.0.send((mate, outcome)).unwrap();
+        assert_eq!(team.stop_unmanaged().unwrap(), Vec::new());
+        assert!(team.unmanaged_ending.is_empty());
+    };
+
+    hand(
+        &mut team,
+        Err(crate::terminal::HostError("terminal_host_failed".into())),
+    );
+    assert_eq!(notes(), 0, "a failed end noted the lead");
+    let status: String = fixture
+        .connection
+        .query_row(
+            "SELECT status FROM team_agents WHERE id=?1",
+            [mate],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "working");
+
+    hand(&mut team, Ok(true));
+    assert_eq!(notes(), 1, "the marked end noted the lead once");
     team.shutdown().unwrap();
 }
 

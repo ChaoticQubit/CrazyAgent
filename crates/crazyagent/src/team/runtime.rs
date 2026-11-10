@@ -1806,7 +1806,8 @@ impl TeamRuntime {
                 continue;
             };
             let by = StoppedBy::named(&by);
-            let end = self.end_unmanaged(id, stopped_teammate(by), Some((project.clone(), by)))?;
+            let end =
+                self.end_unmanaged(id, stopped_teammate(by), Told::Stop(project.clone(), by))?;
             if end == UnmanagedEnd::Marked {
                 stopped.push((id, project, by));
             }
@@ -1818,17 +1819,20 @@ impl TeamRuntime {
     /// left pane ends. That end can wait seconds on a pane that ignores terminate, so it runs
     /// on a thread of its own and the tick goes on (S4B-B1-L1); [`Self::unmanaged_ended`] marks
     /// the row once it finished. With no terminal host the row is marked at once. Takes the
-    /// agent, the reason and who stopped it, if the owner's side did. Returns how it was taken.
+    /// agent, the reason and who is told once it is marked. Returns how it was taken.
     fn end_unmanaged(
         &mut self,
         id: i64,
         reason: &'static str,
-        stopped: Option<(ProjectId, StoppedBy)>,
+        told: Told,
     ) -> Result<UnmanagedEnd, EngineError> {
         assert!(!self.workers.contains_key(&id) && !self.unmanaged_ending.contains_key(&id));
         let Some(host) = self.terminal.clone() else {
-            self.mark_unmanaged(id, reason, true)?;
-            return Ok(UnmanagedEnd::Marked);
+            return Ok(if self.mark_unmanaged(id, reason, true)? {
+                UnmanagedEnd::Marked
+            } else {
+                UnmanagedEnd::Untouched
+            });
         };
         let name = AgentId::team(id).map_err(EngineError::from)?;
         let sender = self.unmanaged_ends.0.clone();
@@ -1838,20 +1842,21 @@ impl TeamRuntime {
                 end_reported(id, sender, || end_left_pane(host.as_ref(), &name, "team"));
             });
         if spawned.is_err() {
-            return Ok(UnmanagedEnd::Retry);
+            return Ok(UnmanagedEnd::Untouched);
         }
         self.unmanaged_ending
-            .insert(id, PendingEnd { reason, stopped });
+            .insert(id, PendingEnd { reason, told });
         Ok(UnmanagedEnd::Handed)
     }
 
     /// Marks stopped each native teammate whose end a thread finished since the last call,
-    /// with its reason, plus the uncertain cleanup code when the host could not prove its
-    /// processes gone (S4B-B1). A pane the host does not know counts as gone; any other host
-    /// failure leaves the row to a later tick. Returns the owner's side stops among them and
-    /// who made each, or a SQLite failure.
+    /// with the uncertain cleanup code when the end was not proven (S4B-B1); an unknown pane
+    /// counts as gone, any other host failure leaves the row to a later tick. Only rows it
+    /// marked are told: their owner's side stops are returned, and each over-cap lead gets one
+    /// note naming its ended teammates. Returns those stops, or a SQLite or store failure.
     fn unmanaged_ended(&mut self) -> Result<Vec<(i64, ProjectId, StoppedBy)>, EngineError> {
         let mut stopped = Vec::new();
+        let mut capped: BTreeMap<(ProjectId, i64, u8), Vec<String>> = BTreeMap::new();
         while let Ok((id, outcome)) = self.unmanaged_ends.1.try_recv() {
             let pending = self
                 .unmanaged_ending
@@ -1862,29 +1867,46 @@ impl TeamRuntime {
                 Err(problem) if problem.0 == "terminal_agent_unknown" => true,
                 Err(_) => continue,
             };
-            self.mark_unmanaged(id, pending.reason, confirmed)?;
-            stopped.extend(pending.stopped.map(|(project, by)| (id, project, by)));
+            if !self.mark_unmanaged(id, pending.reason, confirmed)? {
+                continue;
+            }
+            match pending.told {
+                Told::Stop(project, by) => stopped.push((id, project, by)),
+                Told::Lead { project, lead, cap } => {
+                    let name = names::name(&self.connection, id)?;
+                    capped
+                        .entry((project, lead, cap))
+                        .or_default()
+                        .push(names::label(AgentRole::Sub, id, name.as_ref()));
+                }
+            }
+        }
+        for ((project, lead, cap), ended) in capped {
+            self.note_lead(&project, lead, over_cap_note(cap, &ended))?;
         }
         Ok(stopped)
     }
 
     /// Marks one native teammate's row stopped with the reason, plus the uncertain cleanup
     /// code when its end was not proven. Takes the agent, the reason and whether the end was
-    /// proven. Returns any SQLite failure.
-    fn mark_unmanaged(&self, id: i64, reason: &str, confirmed: bool) -> Result<(), EngineError> {
+    /// proven. Returns whether it marked the row, false for one already stopped elsewhere, or
+    /// any SQLite failure.
+    fn mark_unmanaged(&self, id: i64, reason: &str, confirmed: bool) -> Result<bool, EngineError> {
         let note = if confirmed {
             reason.to_owned()
         } else {
             with_code(reason, Some(crate::harnesses::leftovers::UNCERTAIN))
         };
-        self.connection
+        let marked = self
+            .connection
             .execute(
                 "UPDATE team_agents SET status='stopped', task=NULL, error=?2, stopped_ms=?3
                  WHERE id=?1 AND status IN ('starting','idle','working')",
                 params![id, note, now_ms()],
             )
             .map_err(error)?;
-        Ok(())
+        assert!(marked <= 1);
+        Ok(marked == 1)
     }
 
     /// Marks stopped the native teammates of a lead that just ended. They run on their own
@@ -1925,7 +1947,7 @@ impl TeamRuntime {
     /// Ends a running lead's newest native teammates past the owner's Max teammates per
     /// harness, counted with its app-spawned sub-agents (DEC-104 K8), an end still running off
     /// the tick counted as made. App-spawned ones are never ended here: the engine admits them
-    /// against the cap before they start. The lead gets a note naming the ones ended. Takes the
+    /// against the cap before they start. The lead is noted once their rows are marked. Takes the
     /// project, the lead and the cap. Returns any SQLite or coordination store failure.
     fn cap_native(&mut self, project: &ProjectId, lead: i64, cap: u8) -> Result<(), EngineError> {
         let running = super::caps::running_sub_agents(&self.connection, project, lead)?;
@@ -1967,7 +1989,12 @@ impl TeamRuntime {
             .collect();
         let mut ended = Vec::new();
         for id in picked {
-            if self.end_unmanaged(id, OVER_TEAMMATE_CAP, None)? != UnmanagedEnd::Retry {
+            let told = Told::Lead {
+                project: project.clone(),
+                lead,
+                cap,
+            };
+            if self.end_unmanaged(id, OVER_TEAMMATE_CAP, told)? == UnmanagedEnd::Marked {
                 let name = names::name(&self.connection, id)?;
                 ended.push(names::label(AgentRole::Sub, id, name.as_ref()));
             }
@@ -1976,14 +2003,7 @@ impl TeamRuntime {
         if ended.is_empty() {
             return Ok(());
         }
-        self.note_lead(
-            project,
-            lead,
-            format!(
-                "The owner allows at most {cap} sub-agents per harness, so the engine ended your newest teammates: {}. Keep at most {cap}.",
-                ended.join(", ")
-            ),
-        )
+        self.note_lead(project, lead, over_cap_note(cap, &ended))
     }
 
     /// Sends a lead, or any team agent, an engine note through the coordination layer
@@ -9706,20 +9726,41 @@ const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;
 /// answer, whether its pane was proven gone, or the host's failure.
 type PaneEnd = (i64, Result<bool, crate::terminal::HostError>);
 
-/// What the row of a native teammate whose end runs on a thread gets once it finished: the
-/// reason, and the project and who stopped it when the owner's side did.
+/// Who learns of a native teammate's end once its row is marked: the owner's side stop, by
+/// its project and maker, or the lead whose cap it was over, by project, lead and cap.
+enum Told {
+    Stop(ProjectId, StoppedBy),
+    Lead {
+        project: ProjectId,
+        lead: i64,
+        cap: u8,
+    },
+}
+
+/// What a native teammate whose end runs on a thread gets once it finished: the reason its
+/// row is marked with, and who is told.
 struct PendingEnd {
     reason: &'static str,
-    stopped: Option<(ProjectId, StoppedBy)>,
+    told: Told,
 }
 
 /// How one native teammate's end was taken: its row marked stopped now, its end handed to a
-/// thread whose answer a later tick marks, or left to the next tick.
+/// thread whose answer a later tick marks, or neither, as for a row already stopped
+/// elsewhere or a thread that did not start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UnmanagedEnd {
     Marked,
     Handed,
-    Retry,
+    Untouched,
+}
+
+/// The note a lead gets for its newest teammates the engine ended over the owner's Max
+/// teammates per harness. Takes the cap and the ended teammates' labels. Returns the note.
+fn over_cap_note(cap: u8, ended: &[String]) -> String {
+    format!(
+        "The owner allows at most {cap} sub-agents per harness, so the engine ended your newest teammates: {}. Keep at most {cap}.",
+        ended.join(", ")
+    )
 }
 
 /// Runs one native teammate's end on its thread and sends what it found, also when the end
