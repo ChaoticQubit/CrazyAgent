@@ -31,6 +31,7 @@ const ENCRYPTED_SERVER_NAME: u16 = 0xffce;
 const BIND_TRIES: usize = 16;
 const REFUSALS_SHOWN: u64 = 20;
 const REFUSAL_TOTAL_EVERY: Duration = Duration::from_secs(60);
+const OWN_ADDRESS: &str = "resolves to this machine";
 
 /// One host a model proxy lets an agent reach: a DNS name, never an IP literal, and its
 /// port. Names are kept in lower case, as hosts compare.
@@ -737,6 +738,10 @@ fn on_this_machine(address: IpAddr) -> bool {
         IpAddr::V6(ip) => held(IpAddr::V6(ip)) || ip.to_ipv4().is_some_and(|v4| held(v4.into())),
         v4 => held(v4),
     }
+}
+
+fn own_address_reason(_values: &[Option<String>; 2]) -> &'static str {
+    OWN_ADDRESS
 }
 
 /// Passes bytes both ways until either side closes, the proxy stops or nothing moved for

@@ -2108,3 +2108,36 @@ fn ide_sandboxed_code_cannot_plant_a_case_variant_commondir() {
     assert!(!wrote, "the write ran: {planted:?}");
     assert!(planted.is_empty(), "{planted:?}");
 }
+
+/// An intent-to-add entry has no form the carry can bring across, so the shim stops every
+/// spelling of it in the project folder with a plain line before git runs, and nothing is
+/// staged (SECAUDIT-14-L1).
+#[test]
+fn an_intent_to_add_from_the_ide_stops_with_a_plain_line() {
+    let s = server();
+    fs::write(s.root.join("new.txt"), "eight by").unwrap();
+    let spellings: [&[&str]; 6] = [
+        &["add", "-N", "new.txt"],
+        &["add", "--intent-to-add", "new.txt"],
+        &["add", "-vN", "new.txt"],
+        &["stage", "--inten", "new.txt"],
+        &["reset", "-N"],
+        &["apply", "-N", "none.patch"],
+    ];
+    for args in spellings {
+        let (ran, said) = s.git(args);
+        assert!(!ran, "{args:?}");
+        assert!(
+            said.contains("does not mark files as intent to add from the IDE"),
+            "{args:?}: {said}"
+        );
+    }
+    assert!(s.no_private_files());
+    let (ran, said) = s.git(&["add", "--", "-N"]);
+    assert!(
+        !said.contains("intent to add"),
+        "a path after -- is a path: {said}"
+    );
+    assert!(!ran, "git finds no file named -N: {said}");
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
