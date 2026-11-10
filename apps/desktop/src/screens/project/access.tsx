@@ -1,4 +1,4 @@
-import type { AgentAccess, AgentNetwork, AgentPolicy, PolicyView } from "../../api-projects";
+import type { AgentAccess, AgentNetwork, AgentPolicy, PolicyView, ToolCacheScope } from "../../api-projects";
 import { Switch } from "../../ui";
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -54,17 +54,32 @@ export function networkLabel(network: AgentNetwork): string {
   return NETWORK_CHOICES.find((choice) => choice.network === network)?.label ?? network;
 }
 
+/** Every tool cache choice, the default first, with the engine's label and what it means
+ * for the uv cache and pnpm store a sandboxed agent's tools write (T8). */
+export const TOOL_CACHE_CHOICES: { scope: ToolCacheScope; label: string; help: string }[] = [
+  { scope: "shared", label: "Shared by agents with the same access", help: "Agents at the same level working in the same kind of folder (the project folder, a worktree, their own copy or a lead's teammates) share one uv cache and pnpm store, so a package downloads once." },
+  { scope: "per_agent", label: "One per agent", help: "Each agent gets its own uv cache and pnpm store, so no agent sees what another downloaded. Each downloads its own packages." },
+];
+
+/** What an agent's uv cache clean does, and when CrazyAgent removes the caches. */
+export const TOOL_CACHE_CLEAN = "uv cache clean fails inside an agent's sandbox. CrazyAgent removes a project's caches when you delete the project, and an agent's own cache when you remove the agent.";
+
+/** Why the tool cache choice has no effect under Full access. */
+export const TOOL_CACHE_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so their tools use their own caches.";
+
 /** The policy Save sends: the level, the network choice, a choice only for each toolchain
  * whose switch differs from the project's own use, so the others keep following the project,
- * and the IDE hooks switch. Inputs: the engine's view, the chosen level and network, one
- * switch per view toolchain and the IDE hooks switch. Output: the policy. */
-export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[], ideGitHooks: boolean): AgentPolicy {
+ * the IDE hooks switch and the tool cache choice. Inputs: the engine's view, the chosen level
+ * and network, one switch per view toolchain, the IDE hooks switch and the tool cache choice,
+ * the saved one when left out. Output: the policy. */
+export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[], ideGitHooks: boolean, toolCache: ToolCacheScope = view.tool_cache): AgentPolicy {
   assert(allowed.length === view.toolchains.length, "one switch per toolchain");
   return {
     access,
     network,
     toolchains: view.toolchains.flatMap((row, index) => row.used === allowed[index] ? [] : [{ toolchain: row.toolchain, allowed: allowed[index] }]),
     ide_git_hooks: ideGitHooks,
+    tool_cache: toolCache,
   };
 }
 
@@ -132,6 +147,28 @@ export function NetworkChoices({ name, value, access, onChange }: {
       </label>)}
     </div>
     {access === "full" && <p className="pj-note" role="note">{NETWORK_IGNORED_UNDER_FULL}</p>}
+  </fieldset>;
+}
+
+/** The tool cache choice as radio cards, with what uv cache clean does and a note when Full
+ * access makes it moot. Inputs: the radio group name, the chosen scope, the chosen access
+ * level and the change handler. Output: the fieldset. */
+export function ToolCacheChoices({ name, value, access, onChange }: {
+  name: string; value: ToolCacheScope; access: AgentAccess; onChange: (scope: ToolCacheScope) => void;
+}) {
+  return <fieldset className="pj-field">
+    <legend>Tool cache for uv and pnpm</legend>
+    <div className="pj-radio-cards" role="radiogroup" aria-label="Agent tool cache">
+      {TOOL_CACHE_CHOICES.map((choice) => <label className={`pj-radio-card ${value === choice.scope ? "selected" : ""}`} key={choice.scope}>
+        <input type="radio" name={name} value={choice.scope} checked={value === choice.scope} onChange={() => onChange(choice.scope)} />
+        <span className="pj-radio-body">
+          <strong>{choice.label}</strong>
+          <span className="pj-secondary">{choice.help}</span>
+        </span>
+      </label>)}
+    </div>
+    <p className="pj-help">{TOOL_CACHE_CLEAN}</p>
+    {access === "full" && <p className="pj-note" role="note">{TOOL_CACHE_IGNORED_UNDER_FULL}</p>}
   </fieldset>;
 }
 
