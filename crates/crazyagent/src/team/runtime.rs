@@ -10960,15 +10960,30 @@ fn expose_graph(root: &Path, worktree: &Path, hidden: &[PathBuf]) {
 
 /// Whether git keeps the graph folder out of a worktree's changes, by one of its usual
 /// spellings: the last line about it in the worktree's `.gitignore` decides, and with none
-/// there the repository's `info/exclude` does, a clone's own where `.git` is a folder and
-/// the project repository's, which the engine writes, for a linked worktree. Takes the
-/// project folder and the worktree. Returns the answer; an unreadable file names nothing.
+/// there the repository's `info/exclude` does: a clone's own where `.git` is a folder, and
+/// for a linked worktree the one of the nearest folder above it in the project whose `.git`
+/// is a folder, so an own-clone lead's teammates follow the clone's file (DEC123B-L2), else
+/// the project repository's, which the engine writes. Takes the project folder and the
+/// worktree. Returns the answer; an unreadable file names nothing.
 #[cfg(unix)]
 fn ignores_graph(root: &Path, worktree: &Path) -> bool {
     let git = worktree.join(".git");
+    let repository = |folder: &&Path| {
+        std::fs::symlink_metadata(folder.join(".git")).is_ok_and(|metadata| metadata.is_dir())
+    };
     let exclude = match std::fs::symlink_metadata(&git) {
         Ok(metadata) if metadata.is_dir() => Some(git.join("info").join("exclude")),
-        Ok(metadata) if metadata.is_file() => Some(root.join(".git").join("info").join("exclude")),
+        Ok(metadata) if metadata.is_file() => Some(
+            worktree
+                .ancestors()
+                .skip(1)
+                .take_while(|folder| folder.starts_with(root))
+                .find(repository)
+                .unwrap_or(root)
+                .join(".git")
+                .join("info")
+                .join("exclude"),
+        ),
         _ => None,
     };
     match plain_text(&worktree.join(".gitignore"))
