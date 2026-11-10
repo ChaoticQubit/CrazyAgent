@@ -587,9 +587,9 @@ const REGENERATE_CACHE: &str = "regenerate";
 /// secrets, written to the given worktree only beside its own home and temp folders and,
 /// when the tool's PATH finds a uv the engine may run, a tool cache primed for this run in
 /// the scratch folder, so uv's `.git` cache markers are the engine's `/dev/null` links the
-/// SM1-R rule allows (T8), and installs its profile. Inputs: the store, the change set, the owner checkout's canonical
-/// root, the engine runtime folder, the temporary worktree and the scratch folders. Output:
-/// the sandbox, or the plain code of what refused it.
+/// SM1-R rule allows (T8), and installs its profile. Inputs: the store, the change set, the
+/// owner checkout's canonical root, the engine runtime folder, the temporary worktree and
+/// the scratch folders. Output: the sandbox, or the plain code of what refused it.
 fn confined(
     db: &Connection,
     record: &Record,

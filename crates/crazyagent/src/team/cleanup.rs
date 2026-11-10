@@ -752,7 +752,7 @@ pub fn remove(
 /// one kept.
 fn retire_claimed(
     db: &Connection,
-    runtime: &Path,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] runtime: &Path,
     project: &ProjectId,
     claimed: &[Target],
     now: u64,

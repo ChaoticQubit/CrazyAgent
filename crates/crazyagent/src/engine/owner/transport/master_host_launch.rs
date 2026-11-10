@@ -902,13 +902,14 @@ pub(super) fn master_sandbox(
     )
 }
 
-/// Builds and installs the Seatbelt boundary for one master turn with its tools on (DEC-093).
-/// The master writes only in its leased worktree, its turn home, the turn's temp folder and,
-/// on macOS, its tool cache (T8); it reads the project repository, the harness install
-/// folder, the turn directory and the folder of the engine executable that serves its
-/// `delegate` tool, and reaches only its model endpoint. Under the None network a model off loopback is refused with
-/// `network_none_master_tools`, since a master turn has no model proxy and its tools would
-/// reach every host on that port (S4B-M1). Output: the installed sandbox, or the refusal.
+/// Builds and installs the Seatbelt boundary for one master turn with its tools on
+/// (DEC-093). The master writes only in its leased worktree, its turn home, the turn's temp
+/// folder and, on macOS, its tool cache (T8); it reads the project repository, the harness
+/// install folder, the turn directory and the folder of the engine executable that serves
+/// its `delegate` tool, and reaches only its model endpoint. Under the None network a model
+/// off loopback is refused with `network_none_master_tools`, since a master turn has no
+/// model proxy and its tools would reach every host on that port (S4B-M1). Output: the
+/// installed sandbox, or the refusal.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn master_tools_sandbox(

@@ -752,8 +752,9 @@ impl DeletePlan {
 
     /// Names the engine's own files of this deleted project for the record its row removal
     /// writes: each agent, each research run of its jobs and, on macOS, the tool caches of
-    /// its folders (T8), with the identity of the folder that holds it. A folder that is no real run, or that is not there, is left out. Input:
-    /// the project's research jobs. Output: the records.
+    /// its folders (T8), with the identity of the folder that holds it. A folder that is no
+    /// real run, or that is not there, is left out. Input: the project's research jobs.
+    /// Output: the records.
     pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
         let Some(root) = self.database.parent() else {
             return Vec::new();
@@ -869,12 +870,12 @@ fn folder_inode(folder: &Path) -> Option<i64> {
     i64::try_from(number).ok()
 }
 
-/// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles and
-/// teammates' records, a research run's folder, or a project's tool caches. Only the folder the record was written for
-/// goes: under any other identity it stays, logged as `project_files_kept`, and the record is
-/// finished. A name that is no engine file removes nothing. A file left behind is logged as
-/// `project_files_left` and keeps its record. Inputs: the engine database path and the
-/// records. Output: the names that are finished.
+/// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles
+/// and teammates' records, a research run's folder, or a project's tool caches. Only the
+/// folder the record was written for goes: under any other identity it stays, logged as
+/// `project_files_kept`, and the record is finished. A name that is no engine file removes
+/// nothing. A file left behind is logged as `project_files_left` and keeps its record.
+/// Inputs: the engine database path and the records. Output: the names that are finished.
 pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<String> {
     let Some(root) = database.parent() else {
         return Vec::new();
