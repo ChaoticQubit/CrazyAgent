@@ -309,8 +309,9 @@ impl Tmux {
     /// Keeps the panes whose first process the kernel reports as a child of the listener at
     /// this host's socket. tmux forks each pane's first process from its server, while a pane
     /// listing is only what the server says, and a native lead can swap in a listener of its
-    /// own at that socket, so a stand-in can name no process it did not start. Takes the
-    /// panes. Returns those kept, none when the listener or the process table cannot be read.
+    /// own at that socket, so a stand-in can name no process outside the server bound at
+    /// this address. Takes the panes. Returns those kept, none when the listener or the
+    /// process table cannot be read.
     fn served(&self, panes: &[PaneInfo]) -> Vec<PaneInfo> {
         assert!(panes.len() <= PANES_LISTED_MAX);
         let (Some(server), Some(parents)) =
