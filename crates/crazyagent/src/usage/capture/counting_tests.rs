@@ -298,6 +298,43 @@ fn a_rows_first_estimate_is_capped_like_its_later_ones() {
     assert_eq!(cost, ROW_TOKENS_MAX);
 }
 
+/// A row's estimate stops at `ROW_TOKENS_MAX` when a later add would pass it: at the hour's
+/// upsert, and when a removed project's rows add into the rows kept under removed projects.
+/// The usage report reads the capped rows back (COUNT-6-F2).
+#[test]
+fn a_rows_estimate_stops_at_the_cap_when_an_add_or_a_move_would_pass_it() {
+    let (_root, db) = store();
+    let near = Added {
+        tokens: expected(1, 0),
+        cost_nanos: ROW_TOKENS_MAX - 1,
+    };
+    let costs = |db: &Connection| -> Vec<(String, i64)> {
+        db.prepare("SELECT project,cost_nanos FROM usage_tokens ORDER BY project")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    add_tokens(&db, NOW, &who(), "s1", MODEL, near).unwrap();
+    add_tokens(&db, NOW, &who(), "s1", MODEL, near).unwrap();
+    assert_eq!(
+        costs(&db),
+        vec![("alpha".to_owned(), ROW_TOKENS_MAX)],
+        "the hour's upsert stops at the cap"
+    );
+    super::super::forget_project(&db, "alpha").unwrap();
+    add_tokens(&db, NOW, &who(), "s1", MODEL, near).unwrap();
+    super::super::forget_project(&db, "alpha").unwrap();
+    assert_eq!(
+        costs(&db),
+        vec![(super::super::REMOVED_PROJECTS.to_owned(), ROW_TOKENS_MAX)],
+        "the move into removed projects stops at the cap"
+    );
+    let report = super::super::report::report(&db, None, None, 0, NOW + 1, &[]).unwrap();
+    assert_eq!(report.total.input, 3);
+}
+
 const T0: &str = "2026-11-09T03:00:00.000Z";
 const T0_1: &str = "2026-11-09T03:00:00.200Z";
 const T0_2: &str = "2026-11-09T03:00:00.400Z";
