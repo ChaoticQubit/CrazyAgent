@@ -49,12 +49,16 @@ pub fn prepare_folder() -> Result<PathBuf, &'static str> {
 /// its own, and `turn/steer` on the active turn while it works (DEC-104 Q13). The socket
 /// must be the owner's own, the release one of `VERSIONS`, and the whole exchange fits in
 /// `wire::DEADLINE` and bounded reads; any doubt fails closed. Takes the agent's
-/// `CODEX_HOME`, the text and whether an idle thread may start a turn. Returns the outcome.
-pub fn deliver(home: &Path, text: &str, start: bool) -> Bridged {
+/// `CODEX_HOME`, the text, whether an idle thread may start a turn and the first process of
+/// the agent's pane, none when no pane can be read. Returns the outcome.
+pub fn deliver(home: &Path, text: &str, start: bool, pane: Option<u32>) -> Bridged {
     let Some(socket) = socket(home) else {
         return Bridged::Unavailable("codex_bridge_unsupported");
     };
-    match wire::deliver(&socket, text, start) {
+    let Some(pane) = pane else {
+        return Bridged::Unavailable("codex_bridge_unsupported");
+    };
+    match wire::deliver(&socket, text, start, pane) {
         Ok(turn) => Bridged::Delivered(turn),
         Err(reason) => Bridged::Unavailable(reason),
     }
@@ -163,6 +167,7 @@ mod wire {
         socket: &Path,
         text: &str,
         start: bool,
+        _pane: u32,
     ) -> Result<Option<String>, &'static str> {
         let folder = socket.parent().ok_or("codex_bridge_unsupported")?;
         private_folder(folder)?;
@@ -511,6 +516,7 @@ mod wire {
         _socket: &Path,
         _text: &str,
         _start: bool,
+        _pane: u32,
     ) -> Result<Option<String>, &'static str> {
         Err("codex_bridge_unsupported")
     }

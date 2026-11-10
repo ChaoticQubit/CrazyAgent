@@ -101,7 +101,7 @@ fn an_oversized_ping_from_the_socket_is_refused_without_a_panic() {
         let mut rest = Vec::new();
         let _ = stream.read_to_end(&mut rest);
     });
-    let answer = super::wire::deliver(&socket, "dummy", true);
+    let answer = super::wire::deliver(&socket, "dummy", true, own_group());
     assert_eq!(answer, Err("codex_bridge_reply_too_large"));
     server.join().unwrap();
 }
@@ -157,7 +157,7 @@ fn ping_of(length: usize) -> (Result<Option<String>, &'static str>, Option<Vec<u
             }
         }
     });
-    let answer = super::wire::deliver(&socket, "dummy", true);
+    let answer = super::wire::deliver(&socket, "dummy", true, own_group());
     (answer, server.join().unwrap())
 }
 
@@ -171,6 +171,90 @@ fn a_ping_at_the_control_limit_is_answered_and_one_byte_more_is_refused() {
         (Err("codex_bridge_closed"), Some(vec![b'p'; 125]))
     );
     assert_eq!(ping_of(126), (Err("codex_bridge_reply_too_large"), None));
+}
+
+/// A pane's script that starts a stand-in app-server in its background, as the bridge
+/// script starts the real one. The stand-in listens on the socket named by `$1`, takes two
+/// connections in turn and writes the length of each one's first read to `$1.got`.
+#[cfg(target_os = "macos")]
+const BACKGROUND_LISTENER: &str = r#"/usr/bin/perl -MIO::Socket::UNIX -e '
+alarm 30;
+my $listener = IO::Socket::UNIX->new(Local => $ARGV[0], Listen => 2) or die;
+open(my $got, ">", "$ARGV[0].got") or die;
+$got->autoflush(1);
+for (1, 2) {
+    my $peer = $listener->accept or die;
+    my $size = sysread($peer, my $first, 4096);
+    print $got (($size // 0), "\n");
+    close $peer;
+}
+' "$1" </dev/null >/dev/null 2>&1 &
+wait
+"#;
+
+/// The process group this test process runs in, the one a listener it binds is seen in.
+#[cfg(target_os = "macos")]
+fn own_group() -> u32 {
+    u32::try_from(rustix::process::getpgrp().as_raw_nonzero().get()).unwrap()
+}
+
+/// SECAUDIT codex-bridge-socket-check-then-connect-follows-swapped-link: an agent whose
+/// pane cannot be read is not reached through the bridge at all.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_with_no_pane_to_compare_is_not_reached_through_its_bridge() {
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        deliver(home.path(), "dummy", true, None),
+        Bridged::Unavailable("codex_bridge_peer_unknown")
+    );
+}
+
+/// SECAUDIT codex-bridge-socket-check-then-connect-follows-swapped-link: a real pane's
+/// background listener passes for that pane, though its own pid is not the pane's, and is
+/// refused with no byte sent when compared with another agent's pane, the redirect a
+/// swapped link makes.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_bridge_is_used_only_when_its_listener_runs_in_the_agents_pane() {
+    use crate::terminal::Host;
+    let mut fixture = super::super::tests::Fixture::new();
+    let host = fixture.host();
+    let owner = fixture.agent("sub", "codex", "idle", None);
+    let other = fixture.agent("sub", "codex", "idle", None);
+    let socket = fixture.base.join("p");
+    let got = fixture.base.join("p.got");
+    fixture.pane(&host, owner, BACKGROUND_LISTENER, &socket);
+    fixture.pane(
+        &host,
+        other,
+        "exec /bin/sleep 60\n",
+        &fixture.base.join("other"),
+    );
+    super::super::tests::until("the stand-in listening", || got.exists());
+    let pane_of = |agent| {
+        host.pane_pid(&crate::terminal::AgentId::team(agent).unwrap())
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(
+        super::wire::deliver(&socket, "dummy", true, pane_of(other)),
+        Err("codex_bridge_peer_unknown")
+    );
+    assert_eq!(
+        super::wire::deliver(&socket, "dummy", true, pane_of(owner)),
+        Err("codex_bridge_closed")
+    );
+    super::super::tests::until("both connections read", || {
+        std::fs::read_to_string(&got).is_ok_and(|text| text.lines().count() == 2)
+    });
+    let sizes: Vec<usize> = std::fs::read_to_string(&got)
+        .unwrap()
+        .lines()
+        .map(|line| line.parse().unwrap())
+        .collect();
+    assert_eq!(sizes[0], 0, "the refused connection got no byte");
+    assert!(sizes[1] > 0, "the accepted connection got the upgrade");
 }
 
 /// Takes the one connection a peer makes, polling a non-blocking listener so the spawn gate
