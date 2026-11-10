@@ -2786,6 +2786,9 @@ pub fn wake_refusal(
 /// The refusal code for a master's wake of a sub-agent the owner stopped (AW-1).
 pub const OWNER_STOPPED: &str = "team_agent_owner_stopped";
 
+/// The refusal code for the engine's own update in a team the owner paused (T8-R2-S3).
+pub const TEAM_PAUSED: &str = "team_paused";
+
 /// The refusal code for a lead's wake of a sub-agent the master stopped (HB-S5-B).
 pub const MASTER_STOPPED: &str = "team_agent_master_stopped";
 
