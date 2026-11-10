@@ -40,9 +40,8 @@ async function newPool(kit, name, member) {
   await kit.go("#/settings/pools");
   await click("button=New pool");
   await type("#pool-name", name);
-  await type("main input[type=\"search\"][placeholder=\"Search accounts\"]", member);
-  await click(`//label[contains(concat(" ", normalize-space(@class), " "), " pick ")][.//span[normalize-space(.)=${kit.lit(member)}]]`);
-  await click("button=Save pool");
+  await type(".pool-add input[type=\"search\"]", member);
+  await click(`//button[@aria-label=${kit.lit(`Add ${member}`)}]`);
   await kit.until(async () => (await poolNames()).includes(name), kit.UI_MS, `Settings, Pools never listed the new pool ${name}`);
 }
 
