@@ -26422,10 +26422,11 @@ fn a_native_lead_that_exits_on_its_own_has_its_stop_end_what_it_started() {
 }
 
 /// TEAM-8-R2-L1: a live harness whose pane closes while a process it started in a group of
-/// its own, still in the pane's session where the stop's listing finds it, runs on reports
-/// both through `live_serve`, with the close last, so the agent reads as failed and the owner
-/// still sees what runs. The stop never reports the agent as only having left commands
-/// running, so nothing keeps it from failing (TEAM-8-L1).
+/// its own, still in the pane's session where the session's follow found it while the pane
+/// lived, runs on reports both through `live_serve`, with the close last, so the agent reads
+/// as failed and the owner still sees what runs. The stop never reports the agent as only
+/// having left commands running, so nothing keeps it from failing (TEAM-8-L1). The lead runs
+/// on a server with no keeper, the one place a close can leave such a process (KEEPER (b)).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_last() {
@@ -26435,9 +26436,13 @@ fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_la
     );
     assert_ne!(script, LEAVING_CLAUDE);
     let ((problem, left), running) = ended_native_lead(&script, true, |session, host, lead| {
-        let AgentSession::Terminal(session) = session else {
+        let AgentSession::Terminal(mut session) = session else {
             panic!("the native lead runs in a terminal");
         };
+        let followed = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < followed {
+            session.next_event(Duration::from_millis(200)).unwrap();
+        }
         host.kill(lead).unwrap();
         let (_orders, receive) = std::sync::mpsc::channel();
         let (reports, reported) = std::sync::mpsc::channel();
