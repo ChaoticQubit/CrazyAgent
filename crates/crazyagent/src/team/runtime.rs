@@ -431,6 +431,9 @@ enum Report {
     Ended {
         problem: Option<String>,
     },
+    /// The harness's own stop left commands it started running, listed, and nothing else
+    /// ended it (TEAM-8-L1); sent just before `Ended`.
+    LeftRunning,
     Turn {
         end: Option<TurnEnd>,
         text: String,
@@ -518,6 +521,7 @@ struct Worker {
     warm: bool,
     worked: bool,
     ended_well: bool,
+    left_running: bool,
     managed: bool,
     tools: bool,
     team_tool: bool,
@@ -6160,6 +6164,7 @@ impl TeamRuntime {
                 warm: false,
                 worked: false,
                 ended_well: false,
+                left_running: false,
                 managed,
                 tools: seat.tools,
                 team_tool,
@@ -7802,6 +7807,13 @@ impl TeamRuntime {
                 self.hold_unconfirmed(id)?;
                 Ok(false)
             }
+            Report::LeftRunning => {
+                self.workers
+                    .get_mut(&id)
+                    .expect("worker exists")
+                    .left_running = true;
+                Ok(false)
+            }
             Report::ResumeRefused => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 worker.stopping = true;
@@ -8068,9 +8080,7 @@ impl TeamRuntime {
                         TurnEnd::Closed,
                     )?;
                 }
-                let outlived = worker.busy.is_none()
-                    && worker.ended_well
-                    && problem.as_deref().is_some_and(only_left_running);
+                let outlived = worker.busy.is_none() && worker.ended_well && worker.left_running;
                 let status = if problem.is_some() && !worker.stopping && !outlived {
                     AgentStatus::Failed
                 } else {
@@ -9124,7 +9134,7 @@ fn live_serve(
         drop(held);
         return None;
     }
-    ended_with(settle_stop(session.stop(), held), problem)
+    settle_end(session.stop(), held, problem, reports)
 }
 
 /// What a harness's end reports: what its stop left to say and the problem that ended it,
@@ -9136,6 +9146,26 @@ fn ended_with(stopped: Option<String>, problem: Option<String>) -> Option<String
         (Some(stopped), Some(problem)) => Some(format!("{stopped} {problem}")),
         (stopped, problem) => stopped.or(problem),
     }
+}
+
+/// Settles a harness's final stop as [`settle_stop`] does and reports what ended it as
+/// [`ended_with`] does, first telling the runtime with `Report::LeftRunning` when the stop
+/// listed commands still running and nothing else ended it, so the agent's status is
+/// decided from the stop itself and never from the problem's text (TEAM-8-L1). Inputs: the
+/// stop's outcome, what the harness held, the ending problem and the worker's reports.
+/// Output: the report, if any.
+fn settle_end(
+    stopped: Result<Option<i32>, Unstopped>,
+    held: Option<Held>,
+    problem: Option<String>,
+    reports: &Sender<Report>,
+) -> Option<String> {
+    use crate::harnesses::leftovers::{LEFT, SANDBOX_LEFT};
+    let listed = matches!(&stopped, Err(Unstopped::Left(left)) if matches!(left.code(), LEFT | SANDBOX_LEFT));
+    if listed && problem.is_none() {
+        let _ = reports.send(Report::LeftRunning);
+    }
+    ended_with(settle_stop(stopped, held), problem)
 }
 
 /// The account's credential copy and lease an agent's harness holds while it runs.
@@ -9655,7 +9685,7 @@ fn serve(
         let _ = session.interrupt();
         session.leave();
     } else {
-        return ended_with(settle_stop(session.stop(), held), problem);
+        return settle_end(session.stop(), held, problem, reports);
     }
     drop(held);
     problem
@@ -9763,15 +9793,17 @@ fn per_turn(
             let _ = reports.send(Report::Conversation(recorded.clone()));
             resume = Some(recorded);
         }
-        let stopped = settle_stop(session.stop(), Some((credential, profile)));
-        let reusable = stopped.is_none()
+        let stopped = session.stop();
+        let reusable = stopped.is_ok()
             && matches!(
                 end,
                 TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
             );
-        let closed = ended_with(
+        let closed = settle_end(
             stopped,
+            Some((credential, profile)),
             (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref())),
+            reports,
         );
         if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
             return closed;
@@ -10233,16 +10265,6 @@ fn with_code(sentence: &str, cause: Option<&str>) -> String {
         }
         None => sentence.to_owned(),
     }
-}
-
-/// Whether a closing problem says only that commands an agent started were still running
-/// when it ended, which says nothing against its finished work. Input: the problem, worded
-/// by [`with_code`]. Output: true when its code is `LEFT` or `SANDBOX_LEFT`.
-fn only_left_running(problem: &str) -> bool {
-    use crate::harnesses::leftovers::{LEFT, SANDBOX_LEFT};
-    [LEFT, SANDBOX_LEFT]
-        .iter()
-        .any(|code| problem.ends_with(&format!(" ({code})")))
 }
 
 /// Ends an owner line with one full stop, leaving a line that already ends with a sentence
