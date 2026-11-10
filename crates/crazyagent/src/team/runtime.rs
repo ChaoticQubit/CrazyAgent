@@ -6279,17 +6279,24 @@ impl TeamRuntime {
                     profile: &profile,
                 };
                 for name in &wanted {
-                    if let Err(problem) = crate::landing::add_teammate_worktree(
+                    match crate::landing::add_teammate_worktree(
                         &self.connection,
                         &worktree,
                         &git_dir,
                         name,
                         &git,
                     ) {
-                        eprintln!(
+                        #[cfg(unix)]
+                        Ok(()) => expose_graph(
+                            Path::new(&repository),
+                            &worktree.join(crate::agent_git::TEAMMATES_FOLDER).join(name),
+                        ),
+                        #[cfg(not(unix))]
+                        Ok(()) => {}
+                        Err(problem) => eprintln!(
                             "teammate_worktree_failed cause={}",
                             crate::protocol::plain_code(&problem.0)
-                        );
+                        ),
                     }
                 }
             }
@@ -10573,12 +10580,6 @@ pub fn agent_home(state: &Path, id: i64) -> PathBuf {
         .join("home")
 }
 
-/// The project folder graphify keeps its graph in, and the entries of it an agent's
-/// worktree shows: the graph the CLI queries, its report and its wiki.
-#[cfg(unix)]
-const GRAPH_FOLDER: &str = "graphify-out";
-#[cfg(unix)]
-const GRAPH_ENTRIES: [&str; 3] = ["graph.json", "GRAPH_REPORT.md", "wiki"];
 /// The most bytes of a worktree's `.gitignore` read to see whether it ignores the graph.
 #[cfg(unix)]
 const GITIGNORE_BYTES_MAX: u64 = 256 * 1024;
@@ -10595,58 +10596,21 @@ fn expose_graph(_root: &Path, _worktree: &Path) -> Result<(), String> {
     ))
 }
 
-/// Shows the project's graphify graph read-only in an agent's worktree (I3): a real
-/// `graphify-out` folder there holds links to the project's graph, report and wiki, which the
-/// agent's sandbox reads but never writes, so `graphify query` and the graphify reminder hook
-/// find the graph from the worktree. Only when git ignores the folder there (see
-/// [`ignores_graph`]), so it never shows as a change; anything the agent made there itself
-/// is left alone, and every step works through the folder's own descriptor without following
-/// a link. A
-/// failure leaves the agent without the graph, never without its start. Takes the project
-/// folder and the worktree.
+/// Gives an agent's worktree its own copy of the project's main graph (DEC-123): the graph
+/// the engine last published, copied into the worktree's `graphify-out` as APFS clones on
+/// macOS ([`crate::onboarding::main_graph::copy_into`]), so `graphify query` and the
+/// graphify reminder hook find it and the agent may update it. Only when git ignores the
+/// folder there (see [`ignores_graph`]), so it never shows as a change; anything the agent
+/// made there itself is left alone, and the read-only links an older engine placed there
+/// (I3) give way to the copy. No link is followed. A missing or unreadable graph leaves the
+/// agent without one, never without its start. Takes the project folder and the worktree.
 #[cfg(unix)]
 fn expose_graph(root: &Path, worktree: &Path) {
-    use rustix::fs::{
-        AtFlags, CWD, FileType, Mode, OFlags, mkdirat, openat, readlinkat, statat, symlinkat,
-        unlinkat,
-    };
-    let source = root.join(GRAPH_FOLDER);
-    let shared = std::fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_dir());
-    if !shared || !ignores_graph(root, worktree) {
+    if !ignores_graph(root, worktree) {
         return;
     }
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let Ok(tree) = openat(CWD, worktree, flags, Mode::empty()) else {
-        return;
-    };
-    match mkdirat(&tree, GRAPH_FOLDER, Mode::from_raw_mode(0o755)) {
-        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-        Err(_) => return,
-    }
-    let Ok(folder) = openat(&tree, GRAPH_FOLDER, flags, Mode::empty()) else {
-        return;
-    };
-    for entry in GRAPH_ENTRIES {
-        let target = source.join(entry);
-        if std::fs::symlink_metadata(&target).is_err() {
-            continue;
-        }
-        match statat(&folder, entry, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) if FileType::from_raw_mode(stat.st_mode) != FileType::Symlink => continue,
-            Ok(_) => {
-                let current = readlinkat(&folder, entry, Vec::new());
-                if current
-                    .is_ok_and(|named| named.as_bytes() == target.as_os_str().as_encoded_bytes())
-                {
-                    continue;
-                }
-                if unlinkat(&folder, entry, AtFlags::empty()).is_err() {
-                    continue;
-                }
-            }
-            Err(_) => {}
-        }
-        let _ = symlinkat(target.as_path(), &folder, entry);
+    if let Err(error) = crate::onboarding::main_graph::copy_into(root, worktree) {
+        eprintln!("graph_copy_failed cause={:?}", error.kind());
     }
 }
 

@@ -703,6 +703,28 @@ pub fn land_on(
     }
 }
 
+/// The tip of a project's main branch, which its main graph is built at and refreshed for
+/// (DEC-123): the Land on branch's tip ([`land_on`]), else the owner's HEAD commit, which
+/// new agents start from then. Inputs: the engine database, the owner checkout root and the
+/// project. Output: the tip, None while the owner's HEAD names no commit, or the refusal
+/// [`land_on`] gives.
+pub fn main_tip(
+    db: &Connection,
+    repository: &Path,
+    project: &ProjectId,
+) -> Result<Option<String>, EngineError> {
+    #[cfg(unix)]
+    return match land_on(db, repository, project)? {
+        Some((_, tip)) => Ok(Some(tip)),
+        None => flow::shared(repository)?.commit_of("HEAD"),
+    };
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, project);
+        Err(unavailable())
+    }
+}
+
 /// Points `refs/crazyagent/main` at the tip of the project's Land on branch in every agent
 /// worktree the team records for it, so each agent brings main into its own branch with
 /// `git merge crazyagent/main` (OS-8), under each owner repository's hold, which it waits
