@@ -1126,6 +1126,7 @@ fn a_repeat_charges_the_one_hour_rate_only_on_one_hour_growth() {
             &file,
             &priced_line("msg_a", SONNET, written(first.0, first.1)),
         );
+        scan_it(&db, root.path());
         append(
             &file,
             &priced_line("msg_a", SONNET, written(second.0, second.1)),
