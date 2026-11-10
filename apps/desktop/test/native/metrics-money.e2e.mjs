@@ -137,5 +137,9 @@ test("A refused money switch says so on the page", OPTIONS, async (t) => {
     const shown = await figures(page);
     assert.ok(shown.every(([main]) => /^<?\$/u.test(main)), JSON.stringify(shown));
     await me.capture("metrics-money-refused");
+    onStore(runtime, (store) => store.exec("DROP TRIGGER refuse_money_insert; DROP TRIGGER refuse_money_update;"));
+    await me.click("Tokens", MAIN);
+    await eventually("the refusal gone after a good switch", () => page.evaluate(`document.querySelector(".mx-page [role=alert]") === null`));
+    await eventually("tokens leading after the good switch", async () => (await figures(page)).every(([main]) => !main.includes("$")));
   });
 });
