@@ -399,6 +399,33 @@ fn a_short_window_keeps_the_plan_line_while_a_harness_cannot_run() {
 }
 
 #[test]
+fn a_short_window_keeps_the_line_saying_there_is_no_master() {
+    use crate::team::events::WaitingAgent;
+    let mut status = team();
+    status
+        .harnesses
+        .retain(|harness| harness.role != AgentRole::Master);
+    status.events.waiting = vec![WaitingAgent {
+        agent: 2,
+        text: "Do you want to proceed?".into(),
+    }];
+    status.events.paused = true;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let rows = frame(&view, 80, 24);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("No master yet."))
+            .count(),
+        1,
+        "{}",
+        rows.join("\n")
+    );
+    assert!(rows.iter().all(|row| row.chars().count() <= 80));
+}
+
+#[test]
 fn a_sub_agent_has_one_name_in_the_team_list_and_the_team_graph() {
     let graph = crate::team::graph(&team(), &Default::default());
     let working = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();

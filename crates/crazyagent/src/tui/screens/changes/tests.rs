@@ -1475,6 +1475,40 @@ fn a_set_closed_outside_the_app_says_how_keeps_its_note_and_takes_no_action_keys
 /// back to the top of the new head; Accept and Discard wait for its last page and then
 /// name that head (RV-DS-79).
 #[test]
+fn a_drawing_no_one_said_was_painted_leaves_a_moved_diff_unread() {
+    let second = "2".repeat(40);
+    let page = |text: &str, next: Option<u16>| ChangeDiff {
+        files: Vec::new(),
+        text: text.into(),
+        next,
+        truncated: false,
+    };
+    let mut moved = set('1', ChangeState::Pending);
+    moved.head = second;
+    let mut view = ProjectChanges::new(project());
+    reply(
+        &mut view,
+        Ok(ChangesView::List(vec![set('1', ChangeState::Pending)])),
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    reply(&mut view, Ok(ChangesView::Diff(page("+one", Some(1)))));
+    reply(&mut view, Err("changes_stale".into()));
+    reply(&mut view, Ok(ChangesView::List(vec![moved])));
+    reply(&mut view, Ok(ChangesView::Diff(page("+two", None))));
+    let offered = |view: &ProjectChanges| {
+        let _ = view.rows(100, 40, NOW, &Look::plain());
+        let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+        help.contains(&("a", "Accept"))
+    };
+    assert!(
+        !offered(&view),
+        "a drawing nobody marked as painted does not count as the owner reading the last line"
+    );
+    view.painting(true);
+    assert!(offered(&view), "a painted drawing does");
+}
+
+#[test]
 fn a_diff_that_moves_on_is_read_again_from_the_top_before_accept_or_discard() {
     let (first, second, third) = ("1".repeat(40), "2".repeat(40), "3".repeat(40));
     let page = |text: &str, next: Option<u16>| ChangeDiff {

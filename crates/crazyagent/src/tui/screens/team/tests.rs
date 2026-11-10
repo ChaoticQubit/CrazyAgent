@@ -284,6 +284,7 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
         relation("agent-2", "agent-3", Relation::TeammateOf, None),
         relation("master", "agent-5", Relation::DelegatedTo, None),
     ];
+    let wider = team.clone();
     let mut shell = fresh(80, 24);
     shell.arrive(Arrival::TeamGraph {
         project: project(),
@@ -294,10 +295,10 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     for line in [
         "> ▸ Master  Working",
         "  │  ChatGPT Pro - main",
-        "  ├─ ▸ claude-1  • handing …",
-        "  │  │  Claude Max - work",
+        "  ├─ ▸ claude-1  Working",
+        "  │  │  • handing off: Fix …",
         "  │  └─ ◌ claude-2  Waiting…",
-        "  └─ ▸ codex-1  Starting  d…",
+        "  └─ ▸ codex-1  Starting",
         "     ChatGPT Plus",
         "",
         "  Tasks",
@@ -312,7 +313,7 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     let drawn: Vec<String> = rows[3..17].iter().map(|row| chars(row, 2, 32)).collect();
     assert_eq!(
         drawn, expected,
-        "each agent's line names its relation on that same line, so 80x24 shows as many agents as with no labels: the live action right after the name, cut to the width left, and the standing word after the status word"
+        "at 80x24 each agent's line keeps its status word: a live action whose first word does not fit moves to the agent's detail row, and a standing word shows whole or not at all"
     );
     let mut bare = graph();
     bare.relations.clear();
@@ -332,6 +333,40 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
         drawn_lines(&render(&mut plain_shell)),
         "the labels take no row of their own"
     );
+    for (columns, lines) in [(80, 24), (100, 30), (120, 36), (160, 40), (200, 50)] {
+        let mut sized = fresh(columns, lines);
+        sized.arrive(Arrival::TeamGraph {
+            project: project(),
+            result: Ok(wider.clone()),
+        });
+        let shown = render(&mut sized);
+        let line = |name: &str| {
+            shown
+                .iter()
+                .find(|row| row.contains(name))
+                .unwrap_or_else(|| panic!("{name} at {columns}x{lines}:\n{}", shown.join("\n")))
+                .clone()
+        };
+        let lead = line("├─ ▸ claude-1");
+        assert!(lead.contains("Working"), "{columns}x{lines}: {lead}");
+        assert!(
+            !lead.contains("•") || lead.contains("• handing"),
+            "{columns}x{lines}: {lead}"
+        );
+        let standing = line("└─ ▸ codex-1");
+        assert!(standing.contains("Starting"), "{columns}x{lines}: {standing}");
+        assert!(
+            !standing.contains("  d") || standing.contains("delegated to"),
+            "{columns}x{lines}: {standing}"
+        );
+        if columns == 200 {
+            assert!(
+                lead.contains("• handing off: Fix the login bug  Working"),
+                "{lead}"
+            );
+            assert!(standing.contains("Starting  delegated to"), "{standing}");
+        }
+    }
     let label = |relation, live| {
         super::edge_label(&RelationEdge {
             from: "a".into(),
@@ -343,6 +378,15 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     assert_eq!(label(Relation::Leads, None), "leads");
     assert_eq!(label(Relation::DelegatedTo, None), "delegated to");
     assert_eq!(label(Relation::TeammateOf, None), "teammate of");
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::Reviewing {
+                agent: " \n\t ".into()
+            })
+        ),
+        "reviewing: change set"
+    );
     assert_eq!(
         label(
             Relation::DelegatedTo,
