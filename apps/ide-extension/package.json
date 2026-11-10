@@ -18,6 +18,11 @@
     "onTerminalProfile:crazyagent.ownBranch"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
   "contributes": {
     "terminal": {
       "profiles": [
@@ -84,11 +89,13 @@
     "commands": [
       {
         "command": "crazyagent.terminal.sandboxed",
-        "title": "Sandboxed"
+        "title": "Sandboxed",
+        "category": "New terminal at access level"
       },
       {
         "command": "crazyagent.terminal.ownBranch",
-        "title": "Own branch"
+        "title": "Own branch",
+        "category": "New terminal at access level"
       },
       {
         "command": "crazyagent.terminal.ownBranchRaise",
@@ -96,13 +103,24 @@
         "enablement": "false"
       },
       {
+        "command": "crazyagent.terminal.ownBranchAbove",
+        "title": "Own branch - Raise project access to use this",
+        "category": "New terminal at access level"
+      },
+      {
         "command": "crazyagent.terminal.full",
-        "title": "Full access"
+        "title": "Full access",
+        "category": "New terminal at access level"
       },
       {
         "command": "crazyagent.terminal.fullRaise",
         "title": "Full access - Raise project access to use this",
         "enablement": "false"
+      },
+      {
+        "command": "crazyagent.terminal.fullAbove",
+        "title": "Full access - Raise project access to use this",
+        "category": "New terminal at access level"
       },
       {
         "command": "crazyagent.extensions.request",
@@ -282,6 +300,22 @@
         {
           "command": "crazyagent.terminal.fullRaise",
           "when": "false"
+        },
+        {
+          "command": "crazyagent.terminal.ownBranch",
+          "when": "crazyagent.ideAccess != sandboxed"
+        },
+        {
+          "command": "crazyagent.terminal.ownBranchAbove",
+          "when": "crazyagent.ideAccess == sandboxed"
+        },
+        {
+          "command": "crazyagent.terminal.full",
+          "when": "crazyagent.ideAccess == full"
+        },
+        {
+          "command": "crazyagent.terminal.fullAbove",
+          "when": "crazyagent.ideAccess != full"
         },
         {
           "command": "crazyagent.memories.approve",

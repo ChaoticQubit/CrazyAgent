@@ -50,6 +50,7 @@ const OFFERED = [
 ];
 const ACCESS_KEY = "crazyagent.ideAccess";
 const FULL_COMMAND = "crazyagent.terminal.full";
+const ABOVE = ["crazyagent.terminal.ownBranchAbove", "crazyagent.terminal.fullAbove"];
 function engineTerminal(engine, name, level) {
     return { name, pty: new pty_js_1.SandboxedPty((call, args) => engine.stream(call, args), level) };
 }
@@ -61,6 +62,11 @@ function terminalMenu(context, engine) {
         }));
     }
     context.subscriptions.push(vscode.commands.registerCommand(FULL_COMMAND, () => vscode.commands.executeCommand("workbench.action.terminal.newWithProfile", { profileName: exports.FULL_TITLE })));
+    for (const command of ABOVE) {
+        context.subscriptions.push(vscode.commands.registerCommand(command, () => {
+            void vscode.window.showInformationMessage(pty_js_1.ABOVE_PROJECT);
+        }));
+    }
 }
 function terminalGit(context) {
     (0, pty_js_1.gitFirstOnPath)(context.environmentVariableCollection, vscode.workspace.getConfiguration("git").get("path"));

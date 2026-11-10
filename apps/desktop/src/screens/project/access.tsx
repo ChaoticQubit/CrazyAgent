@@ -8,6 +8,9 @@ function assert(condition: boolean, message: string): asserts condition {
 /** The plain warning the owner sees before giving a project's agents Full access. */
 export const FULL_ACCESS_WARNING = "Agents run with your user's permissions: they can read your keys and change any file. Processes an agent starts outside its terminal can keep running after it stops.";
 
+/** What Full access means for the IDE, the same in the TUI. */
+export const FULL_ACCESS_IDE = "The IDE runs with your user's permissions. The project's network choice does not limit it. The AI lock and extension approvals are written at each IDE start, and anything inside the IDE can change them until the next one. Workspace trust is on. Until you trust the folder, IDE git and extensions that need trust stay off.";
+
 /** What a lower saved level does to agents already running: the engine stops each one that started above it,
  * but not what a Full access agent started outside its terminal. */
 export const LOWERING_STOPS_AGENTS = "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.";
@@ -22,7 +25,7 @@ export const TOOLCHAIN_OFF_STOPS_AGENTS = "Turning a toolchain off stops agents,
 export const IDE_GIT_HOOKS = "IDE git runs the project's hooks";
 
 /** What the IDE hooks switch does and never does, the same in the TUI. */
-export const IDE_GIT_HOOKS_LINE = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. Applies when the IDE next starts.";
+export const IDE_GIT_HOOKS_LINE = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. No effect at Full access: git runs as yours. Applies when the IDE next starts.";
 
 /** Every access level from the most to the least confined, with what it lets agents do. */
 export const ACCESS_LEVELS: { access: AgentAccess; label: string; help: string }[] = [
@@ -107,7 +110,7 @@ export function AccessLevels({ name, value, unavailable, onChange }: {
         </label>;
       })}
     </div>
-    {value === "full" && <p className="pj-note warn" role="alert">{FULL_ACCESS_WARNING}</p>}
+    {value === "full" && <p className="pj-note warn" role="alert">{FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}</p>}
   </fieldset>;
 }
 

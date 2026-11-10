@@ -4,7 +4,7 @@ import { failureCopy, loadAgentPolicy, loadSetup, type AgentAccess, type PolicyV
 import { useHeld, useLoad } from "../../state";
 import { Button, ConfirmDialog, Icon, Segmented, Select, Switch, type SelectOption } from "../../ui";
 import { displayText } from "../conversation";
-import { ACCESS_LEVELS, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, POLICY_RESTARTS_IDE, accessLabel, confirmFirst, policyOf } from "../project/access";
+import { ACCESS_LEVELS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, POLICY_RESTARTS_IDE, accessLabel, confirmFirst, policyOf } from "../project/access";
 import { NO_POOL, accessSaved, saveAccess, savePool, saveTeam } from "../project/settings";
 import { valueOf, type ProjectData } from "../project/shared";
 import { harnessName } from "../new-project/team-editor";
@@ -220,7 +220,7 @@ export function AgentAccessSetting({ projectId, notify, reload }: { projectId: s
     </div>}
     <ConfirmDialog open={asked} title="Give this project's agents Full access?" confirmLabel="Allow Full access" cancelLabel="Keep current access" pending={busy}
       onCancel={() => setAsked(false)} onConfirm={() => { if (chosen !== null) void save(chosen); }}>
-      {FULL_ACCESS_WARNING}
+      {FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}
     </ConfirmDialog>
     <RowNote note={note} />
   </SettingRow>;

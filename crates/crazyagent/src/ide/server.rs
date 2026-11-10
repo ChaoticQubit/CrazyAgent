@@ -943,7 +943,13 @@ fn command(
         home,
     };
     let mut command = launcher_command(&launch, info, &places)?;
-    server_arguments(&mut command, info, &places);
+    server_arguments(&mut command, info, &places, policy.access);
+    assert_eq!(
+        command
+            .get_args()
+            .any(|arg| arg == "--disable-workspace-trust"),
+        policy.access != AgentAccess::Full
+    );
     let git = ceiling.as_deref().map(|ceiling| env::ServerGit {
         ceiling,
         config: &places.git_config,
@@ -1042,10 +1048,17 @@ fn launcher_command(
 
 /// Adds the server's command line: 127.0.0.1 at the server port, the token file (never the
 /// token), its own server data folder, the user data folder inside it, the extensions folder,
-/// license accepted, telemetry off, workspace trust off and a 30 s reconnection grace, with
-/// its server data folder as the working directory, since a profile lets it read no folder
-/// above. Inputs: the command, the server's info and the launch's places.
-fn server_arguments(command: &mut Command, info: &ServerInfo, places: &Places<'_>) {
+/// license accepted, telemetry off, workspace trust off below Full access and a 30 s
+/// reconnection grace, with its server data folder as the working directory, since a profile
+/// lets it read no folder above. At Full access no sandbox limits the project's code, so
+/// workspace trust asks the owner first. Inputs: the command, the server's info, the launch's
+/// places and the project's level.
+fn server_arguments(
+    command: &mut Command,
+    info: &ServerInfo,
+    places: &Places<'_>,
+    access: AgentAccess,
+) {
     command
         .args(["--host", "127.0.0.1", "--port"])
         .arg(info.server_port.to_string())
@@ -1058,8 +1071,11 @@ fn server_arguments(command: &mut Command, info: &ServerInfo, places: &Places<'_
         .arg("--extensions-dir")
         .arg(&places.extensions)
         .arg("--accept-server-license-terms")
-        .args(["--telemetry-level", "off"])
-        .arg("--disable-workspace-trust")
+        .args(["--telemetry-level", "off"]);
+    if access != AgentAccess::Full {
+        command.arg("--disable-workspace-trust");
+    }
+    command
         .arg("--reconnection-grace-time")
         .arg(RECONNECTION_GRACE.as_secs().to_string())
         .current_dir(&places.home);
