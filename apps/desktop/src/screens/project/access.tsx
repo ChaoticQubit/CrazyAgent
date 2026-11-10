@@ -57,7 +57,7 @@ export function networkLabel(network: AgentNetwork): string {
 /** Every tool cache choice, the default first, with the engine's label and what it means
  * for the uv cache and pnpm store a sandboxed agent's tools write (T8). */
 export const TOOL_CACHE_CHOICES: { scope: ToolCacheScope; label: string; help: string }[] = [
-  { scope: "shared", label: "Shared by agents with the same access", help: "Agents at the same level working in the same kind of folder (the project folder, a worktree, their own copy or a lead's teammates) share one uv cache and pnpm store, so a package downloads once." },
+  { scope: "shared", label: "Shared by agents with the same access", help: "Agents at the same level working in the same kind of folder (the project folder, a worktree, their own copy or a lead's teammates) share one uv cache and pnpm store, so a package downloads once. One agent can change what the other agents at its level install." },
   { scope: "per_agent", label: "One per agent", help: "Each agent gets its own uv cache and pnpm store, so no agent sees what another downloaded. Each downloads its own packages." },
 ];
 

@@ -155,6 +155,7 @@ test("the tool cache choice is saved with the policy, the saved one unless the o
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
   for (const choice of access.TOOL_CACHE_CHOICES) assert.ok(engine.includes(`"${choice.label}"`), `${choice.label} is the engine's label`);
   assert.match(access.TOOL_CACHE_CLEAN, /^uv cache clean fails inside an agent's sandbox\./);
+  assert.match(access.TOOL_CACHE_CHOICES.find((choice) => choice.scope === "shared").help, /One agent can change what the other agents at its level install\./, "Shared says one agent can change what the others install");
   assert.match(access.TOOL_CACHE_IGNORED_UNDER_FULL, /^Full access runs agents without a sandbox/);
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.ok(page.includes("setToolCache(next.tool_cache)"));
