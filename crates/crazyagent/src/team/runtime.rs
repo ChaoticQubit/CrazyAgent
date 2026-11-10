@@ -577,6 +577,7 @@ pub struct TeamRuntime {
     state: PathBuf,
     executables: BTreeMap<&'static str, PathBuf>,
     access: AccessSource,
+    settings: Option<(PathBuf, PathBuf)>,
     limits: TeamLimits,
     workers: BTreeMap<i64, Worker>,
     custody: Result<NativeProfileCustody, EngineError>,
@@ -876,6 +877,7 @@ impl TeamRuntime {
             state: state.to_path_buf(),
             executables,
             access,
+            settings: None,
             limits,
             workers: BTreeMap::new(),
             custody,
@@ -943,6 +945,15 @@ impl TeamRuntime {
     /// that team messaging is not available.
     pub fn with_events(mut self, events: super::master::TeamEvents) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    /// Reads the owner's configured local model ports from these two settings files at each
+    /// tools-on launch, so the agent cannot bind them, and refuses the launch when they do
+    /// not read (OWNER-PORTS-FAIL-OPEN). Without them the ports come from the model access
+    /// source. Takes the global and project settings files. Returns the runtime.
+    pub fn with_settings(mut self, global: &Path, project: &Path) -> Self {
+        self.settings = Some((global.to_path_buf(), project.to_path_buf()));
         self
     }
 
@@ -6632,7 +6643,9 @@ impl TeamRuntime {
                 prompt_line: format!("Work of teammate {name}"),
             };
             let tries = self.teammate_turn_tries.entry(lead).or_default();
-            if let Err(problem) = crate::landing_turns::record(&db, &workspace, &ended) {
+            if let Err(problem) =
+                crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref())
+            {
                 let code = crate::landing::refusal_code(&problem).to_owned();
                 eprintln!("teammate_turn_failed cause={code}");
                 let tried = tries.entry(teammate).or_insert(0);
@@ -7183,10 +7196,22 @@ impl TeamRuntime {
         }
         toolchains::prepare_cargo_home(&home, &homes)
             .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
-        let kept = if tools {
-            (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
-        } else {
-            Vec::new()
+        let kept = match (tools, &self.settings) {
+            (true, Some((global, project))) => crate::sandbox::settings_owner_ports(global, project)
+                .map_err(|code| {
+                    with_code(
+                        &format!(
+                            "the settings files {} and {} do not read, so the owner's model ports cannot be kept from the agent",
+                            global.display(),
+                            project.display()
+                        ),
+                        Some(code),
+                    )
+                })?,
+            (true, None) => {
+                (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
+            }
+            (false, _) => Vec::new(),
         };
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
             .and_then(|sandbox| sandbox.keep_ports(&kept))
@@ -8304,7 +8329,8 @@ impl TeamRuntime {
             prompt_line: line.lines().next().unwrap_or_default().to_owned(),
         };
         let landed = crate::landing::open(&self.root).and_then(|db| {
-            let landed = crate::landing_turns::record(&db, &workspace, &ended);
+            let landed =
+                crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref());
             if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
                 eprintln!(
                     "landing_settle_failed cause={}",
@@ -10296,12 +10322,20 @@ fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, Tur
     }
 }
 
+/// The owner's line for a Codex launch refused because skills an earlier run locked into its
+/// home could not be removed (CTX-M1 r2 I3).
+const SKILLS_KEPT_PROBLEM: &str = "The agent could not start: an earlier run locked skills into \
+     its Codex home, so CrazyAgent could not remove them and Codex would have loaded them";
+
 /// The owner's line for an agent whose harness could not start: a command that would hold
-/// an MCP secret names its server and secret, any other refusal names its plain code.
-/// Input: the launch error. Output: the line.
+/// an MCP secret names its server and secret, skills left in a Codex home say so, and any
+/// other refusal names its plain code. Input: the launch error. Output: the line.
 fn start_problem(problem: &LaunchError) -> String {
     match crate::launch_context::secret_in_command_text(problem) {
         Some(sentence) => format!("The agent could not start. {sentence}"),
+        None if problem.0 == crate::launch_context::SKILLS_KEPT => {
+            with_code(SKILLS_KEPT_PROBLEM, Some(&problem.0))
+        }
         None => with_code("The agent could not start", Some(&problem.0)),
     }
 }
@@ -11043,7 +11077,8 @@ pub fn start_for_engine(
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
-    let (global, project) = (global.to_path_buf(), project.to_path_buf());
+    let settings = (global.to_path_buf(), project.to_path_buf());
+    let (global, project) = settings.clone();
     let access: AccessSource = Box::new(move || {
         crate::config::resolve_config(&global, &project)
             .ok()?
@@ -11058,7 +11093,8 @@ pub fn start_for_engine(
         TeamLimits::default(),
     )
     .map_err(|e| e.0)?
-    .with_events(super::master::EVENTS);
+    .with_events(super::master::EVENTS)
+    .with_settings(&settings.0, &settings.1);
     let runtime = match engine {
         Some(engine) => runtime.with_delegation_tool(engine).map_err(|e| e.0)?,
         None => runtime,

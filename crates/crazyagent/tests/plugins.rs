@@ -855,6 +855,45 @@ async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
     case.close().await;
 }
 
+/// OWNER-PORTS-FAIL-OPEN (rv-secreview IDE-6 note): a settings file that stops reading
+/// after the engine started leaves the configured local model port unknown, so the check
+/// is refused with `owner_ports_settings_unreadable` and never listens on that port.
+#[tokio::test]
+async fn a_server_check_with_unreadable_settings_is_refused_not_run_without_kept_ports() {
+    let kept = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let case = Case::with_settings(&local_model_settings(kept)).await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    let spec = ServerSpec::Stdio {
+        command: fixture(&root),
+        args: vec!["listen".into(), kept.to_string()],
+    };
+    let server = controller
+        .add_mcp_server(Scope::Global, "kept".into(), spec.clone(), vec![])
+        .await
+        .unwrap();
+    controller
+        .approve_mcp_server(server.id.clone(), spec)
+        .await
+        .unwrap();
+    fs::write(root.join("global.toml"), "[[[\n").unwrap();
+    let checked = check(&controller, server.id.clone()).await.unwrap();
+    assert!(
+        !checked.tools.iter().any(|tool| tool == "listened"),
+        "port {kept}: {:?}",
+        checked.tools
+    );
+    assert_eq!(
+        checked.problem.as_deref(),
+        Some("owner_ports_settings_unreadable")
+    );
+    case.close().await;
+}
+
 /// A checked server cannot swap its own check folder for a link that would widen its next
 /// check: the engine refuses a check folder that is not the plain folder it made.
 #[tokio::test]

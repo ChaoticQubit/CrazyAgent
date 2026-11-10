@@ -777,6 +777,42 @@ async fn cancelling_a_full_access_claude_master_names_what_it_left_running_and_k
     }
 }
 
+/// SETSID-L2: a Full access master's process that left its session and lost its parent
+/// before the cancel, running a program whose environment macOS hides, is still named: the
+/// follow from the start kept it.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn cancelling_a_full_access_claude_master_names_what_left_its_session_and_parent() {
+    use crate::engine::master_host_fixture::{MasterFixture, ORPHANING_HARNESS, Orphan};
+    use crate::harnesses::leftovers;
+
+    let mut fixture = MasterFixture::new("claude");
+    let body = format!("{ORPHANING_HARNESS}exec /bin/sleep 30\n");
+    let mut claude = stand_in_master_at(&mut fixture, &body, true).await;
+    let orphan = Orphan::wait(&fixture.project);
+    let cancelled = claude.cancel().await;
+    assert_eq!(
+        cancelled.map_err(|error| error.0),
+        Err(leftovers::LEFT.to_owned()),
+        "a Full access master turn ended clean while the orphan it started ran"
+    );
+    let named = format!("{} perl", orphan.0.as_raw_nonzero());
+    let reports = leftovers::held_by(&fixture.connection.id);
+    assert!(
+        reports.iter().any(|report| report.contains(&named)),
+        "{reports:?}"
+    );
+    drop(orphan);
+    let started = std::time::Instant::now();
+    while fixture.sign_in("claude-orphan-next", 3).is_err() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the account lease stayed held after the orphan ended"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_claude_master_that_ends_on_its_own_leaves_nothing_its_shells_detached() {

@@ -23,6 +23,16 @@
 .main { scroll-padding-top: var(--pj-head-h, 0px); }
 .main:has(.pj-project) { overflow-anchor: none; }
 .pj-project::after { content: ""; display: block; height: var(--pj-head-room, 0px); }
+.main:has(> .page > .pj-fixed) { overflow: hidden; }
+.main:has(> .page > .pj-fixed) > .page { display: flex; flex-direction: column; height: 100%; padding-bottom: var(--space-4); }
+.pj-fixed { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.pj-fixed::after { display: none; }
+.pj-fixed > .pj-head { flex: none; }
+.pj-fixed > .pj-banners { flex: 0 1 auto; min-height: 0; overflow: auto; }
+.pj-fixed > .pj-tab-panel { display: flex; flex-direction: column; flex: 1 1 0; min-height: 240px; }
+.pj-fixed .ta-split { flex: 1; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+.pj-fixed .ta-main { display: flex; flex-direction: column; min-height: 0; }
+.pj-fixed .ta-main > :is(.pj-master-live, .pj-convo) { flex: 1; height: auto; min-height: 0; }
 .pj-head { position: sticky; top: 0; z-index: var(--z-sticky); margin: 0 calc(var(--space-6) * -1) var(--space-5); padding: 0 var(--space-6); background: var(--bg); transition: box-shadow var(--dur-base) var(--ease); }
 .pj-head.scrolled { box-shadow: var(--elev-1); }
 .pj-head .tabs { margin-bottom: 0; }

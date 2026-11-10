@@ -397,6 +397,42 @@ async fn closing_a_full_access_codex_host_names_what_it_left_running_and_keeps_t
     }
 }
 
+/// SETSID-L2: a Full access Codex host's process that left its session and lost its parent
+/// before the close, running a program whose environment macOS hides, is still named: the
+/// follow from the start kept it.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn closing_a_full_access_codex_host_names_what_left_its_session_and_parent() {
+    use crate::engine::master_host_fixture::{MasterFixture, ORPHANING_HARNESS, Orphan};
+    use crate::harnesses::leftovers;
+
+    let mut fixture = MasterFixture::new("codex");
+    let body = format!("{ORPHANING_HARNESS}exec /bin/sleep 30\n");
+    let mut process = stand_in_host_at(&mut fixture, &body, true).await;
+    let orphan = Orphan::wait(&fixture.project);
+    let closed = process.close().await;
+    assert_eq!(
+        closed.map_err(|error| error.0),
+        Err(leftovers::LEFT.to_owned()),
+        "a Full access Codex host ended clean while the orphan it started ran"
+    );
+    let named = format!("{} perl", orphan.0.as_raw_nonzero());
+    let reports = leftovers::held_by(&fixture.connection.id);
+    assert!(
+        reports.iter().any(|report| report.contains(&named)),
+        "{reports:?}"
+    );
+    drop(orphan);
+    let started = Instant::now();
+    while fixture.sign_in("codex-orphan-next", 3).is_err() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the account lease stayed held after the orphan ended"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_codex_host_runs_in_the_home_its_command_names_and_never_in_another() {

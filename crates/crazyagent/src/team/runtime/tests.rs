@@ -2487,6 +2487,69 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
     );
 }
 
+/// OWNER-PORTS-FAIL-OPEN r1 L2: a tools-on launch of a team runtime whose settings files
+/// do not read is refused with `owner_ports_settings_unreadable` instead of starting with
+/// the owner's model ports unknown, and the next launch prepares once they read again.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_launch_whose_settings_do_not_read_is_refused() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let (global, project) = (
+        fixture.base.join("global.toml"),
+        fixture.base.join("project.toml"),
+    );
+    std::fs::write(&global, "[[[\n").unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_settings(&global, &project);
+    for id in [1, 2] {
+        assert_eq!(
+            fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+            id
+        );
+    }
+    let launch = |id| {
+        runtime.prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "codex",
+            true,
+            &account,
+            false,
+            crate::agent_git::Layout::Linked,
+        )
+    };
+    let Err(refused) = launch(1) else {
+        panic!("a tools-on agent was prepared with the owner's model ports unknown");
+    };
+    assert!(
+        refused.contains(crate::sandbox::OWNER_PORTS_UNREADABLE),
+        "{refused}"
+    );
+    std::fs::write(&global, "version = 1\n").unwrap();
+    assert!(launch(2).is_ok());
+}
+
 /// The master's own `git` follows the project's access (DEC-117 Q2): at Full access it is
 /// the free copy that runs every merge, and at Sandboxed and Own branch it stays the
 /// worker copy with its DEC-107 refusal.
@@ -25019,6 +25082,18 @@ fn an_agent_refused_for_an_mcp_secret_in_its_command_names_the_server_and_the_se
     assert_eq!(
         start_problem(&LaunchError("launch_deadline".into(), None)),
         "The agent could not start. (launch_deadline)"
+    );
+}
+
+/// CTX-M1 residual (rv-secreview r2 I3): a Codex launch refused because skills an earlier run
+/// locked into its home could not be removed says so in words, with its code kept.
+#[test]
+fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
+    assert_eq!(
+        start_problem(&LaunchError("launch_context_skills_kept".into(), None)),
+        "The agent could not start: an earlier run locked skills into its Codex home, so \
+         CrazyAgent could not remove them and Codex would have loaded them. \
+         (launch_context_skills_kept)"
     );
 }
 

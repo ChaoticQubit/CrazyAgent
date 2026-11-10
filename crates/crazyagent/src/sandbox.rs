@@ -67,6 +67,26 @@ pub fn owner_ports(access: &crate::config::ModelAccess) -> Vec<u16> {
     ports
 }
 
+/// Why a tools-on launch does not start: the engine's settings files exist but do not read,
+/// so the owner's configured local model ports are known nowhere (OWNER-PORTS-FAIL-OPEN).
+pub const OWNER_PORTS_UNREADABLE: &str = "owner_ports_settings_unreadable";
+
+/// The owner's configured local model ports, read from the engine's two settings files at
+/// each tools-on launch, as [`owner_ports`] lists them; none when no file exists. A file that
+/// does not read fails closed and logs only the code, since its error text can carry the
+/// file's lines. Inputs: the global and project settings files. Output: the ports, or
+/// [`OWNER_PORTS_UNREADABLE`].
+pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &'static str> {
+    let Ok(config) = crate::config::resolve_config(global, project) else {
+        eprintln!("{OWNER_PORTS_UNREADABLE}");
+        return Err(OWNER_PORTS_UNREADABLE);
+    };
+    Ok(config
+        .settings
+        .model_access
+        .map_or_else(Vec::new, |access| owner_ports(&access)))
+}
+
 /// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
@@ -2725,7 +2745,7 @@ fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
 /// only other letters that fold to ASCII; those two are spelled as groups, so each matches
 /// its whole UTF-8 sequence (LL2S-2). Input: text without a quote or backslash. Output: the
 /// pattern text, without anchors.
-fn any_case(text: &str) -> String {
+pub(crate) fn any_case(text: &str) -> String {
     regex_escape(text)
         .chars()
         .map(|character| {

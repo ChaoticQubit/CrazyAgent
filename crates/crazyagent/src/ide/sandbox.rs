@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::sandbox::policy::AgentFilesRule;
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
-use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, seatbelt_pattern};
+use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, any_case, seatbelt_pattern};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -50,8 +50,10 @@ pub fn qualified() -> bool {
 /// denied again, then every locked folder is denied for writing, case-insensitively as APFS
 /// matches names, with its folders up to its grant kept from being moved, then agent IDE
 /// config and agent git folders in the project are denied for reading ([`agent_config`]),
-/// then the owner's agent folders choice is held ([`AgentFilesRule::seatbelt`], DEC-124).
-/// The project's own git index and its lock stay denied: the IDE stages on a private index
+/// then the project's `.git/worktrees`, its agents' admin folders, for writing
+/// ([`agent_admin`]), then the owner's agent folders choice is held
+/// ([`AgentFilesRule::seatbelt`], DEC-124). The project's own git index and its lock stay
+/// denied: the IDE stages on a private index
 /// the engine carries across ([`super::git::shim_text`], SECAUDIT-IDE-SERVER-INDEX). Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
 /// reach what `network` allows ([`crate::sandbox::policy::ide_network`]).
@@ -147,6 +149,7 @@ pub fn profile(
     ));
     text.push_str(&locks(&held));
     text.push_str(&agent_config(grants.root));
+    text.push_str(&agent_admin(grants.root));
     text.push_str(&agent_files.seatbelt(grants.root));
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"
@@ -258,38 +261,42 @@ fn agent_config(root: &Path) -> String {
     let agents = format!(
         "^{}({})?/{}/[^/]+/",
         caseless(root),
-        anycase("/\\.crazyagent"),
-        anycase("worktrees")
+        any_case("/.crazyagent"),
+        any_case("worktrees")
     );
-    let folder = anycase("\\.vscode");
-    let workspace = anycase("\\.code-workspace");
-    let git = anycase("\\.git");
+    let folder = any_case(".vscode");
+    let workspace = any_case(".code-workspace");
+    let git = any_case(".git");
     format!(
         "(deny file-read*\n  (regex #\"{agents}(.*/)?{folder}(/.*)?$\")\n  (regex #\"{agents}(.*/)?[^/]*{workspace}$\")\n  (regex #\"{agents}{git}(/.*)?$\"))\n"
     )
 }
 
-/// A Seatbelt regex matching `path` in any letter case, as APFS matches names, so a case
-/// variant of a locked name cannot be created or written. Input: a plain absolute path.
-/// Output: the pattern text, without anchors.
-fn caseless(path: &Path) -> String {
-    anycase(&seatbelt_pattern(path))
+/// The rule that keeps the IDE out of its agents' git state (IDE-SANDBOX-AGENT-FOLDERS (a)):
+/// nothing it runs writes at or under the project's `.git/worktrees`, in any letter case,
+/// where each linked agent's and teammate's admin folder holds its `HEAD`, `index`, refs
+/// and reflog, so no shell, real git or alias rewrites an agent's `HEAD` or plants an admin
+/// folder. Under an own clone's `.git` the base profile's nested `.git` rule already
+/// refuses every write. Input: the project folder. Output: the rule text.
+fn agent_admin(root: &Path) -> String {
+    let admins = format!(
+        "^{}/{}/{}(/.*)?$",
+        caseless(root),
+        any_case(".git"),
+        any_case("worktrees")
+    );
+    format!("(deny file-write*\n  (regex #\"{admins}\"))\n")
 }
 
-/// Makes a Seatbelt pattern match in any letter case: each ASCII letter becomes a class of
-/// both its cases. Input: the pattern. Output: the caseless pattern.
-fn anycase(text: &str) -> String {
-    let mut pattern = String::new();
-    for character in text.chars() {
-        if character.is_ascii_alphabetic() {
-            pattern.push('[');
-            pattern.push(character.to_ascii_lowercase());
-            pattern.push(character.to_ascii_uppercase());
-            pattern.push(']');
-        } else {
-            pattern.push(character);
-        }
-    }
+/// A Seatbelt regex matching `path` in any letter case, as APFS matches names, the Kelvin
+/// sign for `k` and the long s for `s` included ([`any_case`], LL2S-2), so a case variant of
+/// a locked or denied name cannot be created or written. Input: a plain absolute path.
+/// Output: the pattern text, without anchors.
+fn caseless(path: &Path) -> String {
+    let text = path.display().to_string();
+    assert!(text.starts_with('/'));
+    let pattern = any_case(&text);
+    assert!(pattern.starts_with('/'));
     pattern
 }
 

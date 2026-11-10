@@ -1565,26 +1565,30 @@ pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), Eng
 /// never with an owner-configured filter or merge driver on a path it changes. A clash in
 /// known lockfiles only is rewritten by their tools on top of the set instead, which then
 /// waits for it, not its agent, when `after` is given: the rewrite then runs off this
-/// thread and `after` runs once it lands nothing. Inputs: the store, the change set and
-/// what runs after. Output: the answer, or the plain code of a check that could not run.
+/// thread and `after` runs once it lands nothing. Inputs: the store, the change set, what
+/// runs after and the owner's settings files, whose model ports the tools never listen on.
+/// Output: the answer, or the plain code of a check that could not run.
 pub(crate) fn conflicts_with_main(
     db: &Connection,
     id: &ChangeSetId,
     after: Option<AfterRegeneration>,
+    settings: Option<&(PathBuf, PathBuf)>,
 ) -> Result<bool, EngineError> {
     #[cfg(unix)]
-    return owner::conflicts_with_main(db, id, after);
+    return owner::conflicts_with_main(db, id, after, settings);
     #[cfg(not(unix))]
     {
-        let _ = (db, id, after);
+        let _ = (db, id, after, settings);
         Err(unavailable())
     }
 }
 
 /// What runs after a lockfile regeneration that landed nothing, on its own thread with its
-/// own store: the set, and whether another regeneration may start, which is false once
-/// one refused the clash and true when the set or main moved meanwhile.
-pub(crate) type AfterRegeneration = fn(&Connection, &ChangeSetId, bool);
+/// own store: the set, whether another regeneration may start, which is false once one
+/// refused the clash and true when the set or main moved meanwhile, and the owner's
+/// settings files the regeneration was given.
+pub(crate) type AfterRegeneration =
+    fn(&Connection, &ChangeSetId, bool, Option<&(PathBuf, PathBuf)>);
 
 /// Removes what lockfile regenerations a stopped engine left behind (OS-8): their
 /// temporary worktrees with their admin folders and the engine's scratch folders. Input:
