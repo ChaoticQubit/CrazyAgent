@@ -3250,12 +3250,7 @@ impl TeamRuntime {
             true => None,
             false => self.next_message_edit(project, id, &home),
         };
-        if let Some(edit) = &edit {
-            prompt.insert_str(
-                0,
-                &crate::instruction_files::changed_message(&edit.sections),
-            );
-        }
+        let edit = edit_in_front(&mut prompt, edit, self.turn_prompt_max(id));
         if team_tool {
             tool::clear(&self.tool_record(id));
         }
@@ -4625,6 +4620,21 @@ impl TeamRuntime {
             .filter(|edit| edit.delivery == crate::instruction_files::EditDelivery::NextMessage)
     }
 
+    /// The most bytes one turn's prompt may take on an agent: what its session accepts, a pane
+    /// app's paste or a piped session's frame, less the line `told` may add at its end. Takes
+    /// the agent. Returns the bytes.
+    fn turn_prompt_max(&self, agent: i64) -> usize {
+        let pane = self.terminal.is_some()
+            && crate::harnesses::interactive::support(&self.workers[&agent].harness)
+                == crate::harnesses::interactive::Support::Terminal;
+        let session = if pane {
+            crate::harnesses::terminal_session::PROMPT_BYTES_MAX
+        } else {
+            crate::harnesses::launch::PROMPT_BYTES_MAX
+        };
+        session - BACKGROUND_STOPS_LINE.len() - 1
+    }
+
     /// Applies the project's Restart or Badge choice for owner instruction edits (DEC-111
     /// QR1), checking its agents whose process reported ready at most once each
     /// `INSTRUCTION_CHECK_EVERY`: under Restart an idle agent whose instructions changed
@@ -5066,12 +5076,7 @@ impl TeamRuntime {
             prompt.push_str(&waiting);
             let home = agent_home(&self.state, agent);
             let edit = self.next_message_edit(project, agent, &home);
-            if let Some(edit) = &edit {
-                prompt.insert_str(
-                    0,
-                    &crate::instruction_files::changed_message(&edit.sections),
-                );
-            }
+            let edit = edit_in_front(&mut prompt, edit, self.turn_prompt_max(agent));
             let bound = turn_bound(
                 super::time_limits(&self.connection, &stored.project_id)?,
                 self.workers[&agent].ran(),
@@ -10155,6 +10160,22 @@ fn told(prompt: String, rules: TurnRules, stops: bool) -> String {
     } else {
         prompt
     }
+}
+
+/// Puts an owner's instruction edit at the front of a turn's prompt, cut to what the turn's
+/// limit leaves; with no room the edit stays out and a later turn carries it. Inputs: the
+/// prompt, the edit and the limit in bytes. Output: the edit that went in, or none.
+fn edit_in_front(
+    prompt: &mut String,
+    edit: Option<crate::instruction_files::Edit>,
+    limit: usize,
+) -> Option<crate::instruction_files::Edit> {
+    assert!(limit > 0);
+    let edit = edit?;
+    let block = edit.message_within(limit.saturating_sub(prompt.len()))?;
+    prompt.insert_str(0, &block);
+    assert!(prompt.len() <= limit);
+    Some(edit)
 }
 
 /// How a turn ends on a launch error: the deadline and the output limits keep their own

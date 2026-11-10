@@ -411,11 +411,10 @@ pub fn changed_message(sections: &[String]) -> String {
 }
 
 /// An owner edit one running agent has not had yet: the project's choice of how it reaches
-/// the agent, the changed parts, the text the agent has, and the engine data folder and the
-/// text now, which become the agent's record once the change reached it.
+/// the agent, the text the agent has, and the engine data folder and the text now, which
+/// become the agent's record once the change reached it.
 pub struct Edit {
     pub delivery: EditDelivery,
-    pub sections: Vec<String>,
     started: String,
     data: PathBuf,
     now: String,
@@ -495,13 +494,11 @@ pub fn edit_for(
             }
         }
     };
-    let sections = changed_sections(&started, &now);
-    if sections.is_empty() {
+    if changed_sections(&started, &now).is_empty() {
         return Ok(None);
     }
     Ok(Some(Edit {
         delivery,
-        sections,
         started,
         data: agent.data,
         now,
