@@ -6,6 +6,7 @@ import { CONTRAST_MIN, press, tabRunner } from "./settings-tab-steps.mjs";
 const fixture = await bundle(new URL("./fixtures/settings-pools-layout.mjs", import.meta.url).pathname);
 const onPools = tabRunner(fixture);
 const LIVE = { pools: "live", ranking: "pools" };
+const THREE = { pools: "live-new", ranking: "pools" };
 const POOL_FULL = "A pool can hold up to 15 accounts. Remove one to add another.";
 const LAST_ACCOUNT = "A pool needs at least one account. Add another account first, or delete the pool.";
 const DRAFT_EMPTY = "No accounts yet. This pool is created with its first account.";
@@ -461,7 +462,18 @@ test("a rename the engine refuses puts the saved name back and shows its sentenc
   assert.equal(seen.section, "Main pool");
 });
 
-test("deleting a pool selects the next one in the list", async () => {
+test("deleting a pool in the middle selects the next one in the list", async () => {
+  const seen = await onPools(THREE, async (page) => {
+    await press(page, ITEM(2));
+    await press(page, 'button[aria-label="Delete pool New pool"]');
+    await press(page, "dialog[open] button", "Delete pool");
+    return { items: await items(page), section: await heading(page) };
+  });
+  assert.deepEqual(seen.items.map((item) => [item.name, item.current]), [["Main pool", null], ["New pool 2", "true"]]);
+  assert.equal(seen.section, "New pool 2");
+});
+
+test("deleting a pool projects use unassigns it and selects the next one", async () => {
   const seen = await onPools(LIVE, async (page) => {
     await press(page, 'button[aria-label="Delete pool Main pool"]');
     await press(page, "dialog[open] button", "Unassign and delete");
@@ -473,12 +485,12 @@ test("deleting a pool selects the next one in the list", async () => {
 });
 
 test("deleting the last pool in the list selects the one before it", async () => {
-  const seen = await onPools(LIVE, async (page) => {
-    await press(page, ITEM(2));
-    await press(page, 'button[aria-label="Delete pool Spare"]');
+  const seen = await onPools(THREE, async (page) => {
+    await press(page, ITEM(3));
+    await press(page, 'button[aria-label="Delete pool New pool 2"]');
     await press(page, "dialog[open] button", "Delete pool");
     return { items: await items(page), section: await heading(page) };
   });
-  assert.deepEqual(seen.items.map((item) => [item.name, item.current]), [["Main pool", "true"]]);
-  assert.equal(seen.section, "Main pool");
+  assert.deepEqual(seen.items.map((item) => [item.name, item.current]), [["Main pool", null], ["New pool", "true"]]);
+  assert.equal(seen.section, "New pool");
 });
