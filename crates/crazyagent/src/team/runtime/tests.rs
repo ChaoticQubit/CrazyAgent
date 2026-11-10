@@ -2937,13 +2937,11 @@ fn a_team_agent_on_linux_stops_with_the_plain_unavailable_line() {
     assert!(team.shutdown().unwrap().is_empty());
 }
 
-/// A sub-agent edits a file in its worktree and the owner stops it before it finishes:
-/// the engine commits the edit into that worktree's change set at the task's end, the
-/// owner sees one pending change set for that sub-agent, and the team chat says so.
+/// Starts one sub-agent that writes page.md and stops it as the owner does, through the
+/// agent register, once `before_stop` has run. Inputs: the fixture and what runs before the
+/// stop. Output: the runtime and the agent's id, once the agent is stopped.
 #[cfg(target_os = "macos")]
-#[test]
-fn a_sub_agent_task_that_edits_a_file_ends_with_a_pending_change_set_and_a_team_note() {
-    let fixture = Fixture::new(1);
+fn stopped_page_writer(fixture: &Fixture, before_stop: &dyn Fn()) -> (TeamRuntime, i64) {
     let host = fixture.host();
     let bin = fixture.base.join("bin");
     std::fs::create_dir(&bin).unwrap();
@@ -3007,6 +3005,7 @@ fn a_sub_agent_task_that_edits_a_file_ends_with_a_pending_change_set_and_a_team_
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    before_stop();
     let listed = agents
         .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
         .unwrap();
@@ -3014,6 +3013,17 @@ fn a_sub_agent_task_that_edits_a_file_ends_with_a_pending_change_set_and_a_team_
     fixture.until(&mut team, "the stopped sub-agent's task ends", |f| {
         f.agent_status(member.id).0 == AgentStatus::Stopped
     });
+    (team, member.id)
+}
+
+/// A sub-agent edits a file in its worktree and the owner stops it before it finishes:
+/// the engine commits the edit into that worktree's change set at the task's end, the
+/// owner sees one pending change set for that sub-agent, and the team chat says so.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sub_agent_task_that_edits_a_file_ends_with_a_pending_change_set_and_a_team_note() {
+    let fixture = Fixture::new(1);
+    let (mut team, member) = stopped_page_writer(&fixture, &|| {});
     let task: i64 = fixture
         .connection
         .query_row(
@@ -3024,7 +3034,7 @@ fn a_sub_agent_task_that_edits_a_file_ends_with_a_pending_change_set_and_a_team_
         .unwrap();
     let waiting = format!(
         "The edits from task {task} (codex, sub-agent {}) are waiting for you in Changes.",
-        member.id
+        member
     );
     assert!(fixture.note(&waiting), "{:#?}", fixture.status().messages);
     let landing = crate::landing::open(&fixture.base).unwrap();
@@ -3032,9 +3042,73 @@ fn a_sub_agent_task_that_edits_a_file_ends_with_a_pending_change_set_and_a_team_
     assert_eq!(sets.len(), 1, "{sets:#?}");
     assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
     assert_eq!(sets[0].agent.kind, crate::landing::AgentKind::Sub);
-    assert_eq!(sets[0].agent.id, member.id.to_string());
+    assert_eq!(sets[0].agent.id, member.to_string());
     assert_eq!(sets[0].files, 1);
     assert_ne!(sets[0].last_outcome, crate::landing::TurnOutcome::Succeeded);
+    assert!(team.shutdown().unwrap().is_empty());
+}
+
+/// T7-R2-F2: the owner's Stop of a sub-agent whose work clashes with main, through the real
+/// stop and turn end. The stop stays, no resolve task is queued, and the set waits for the
+/// owner in Changes.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_stop_of_a_clashing_sub_agent_leaves_its_set_for_the_owner() {
+    let fixture = Fixture::new(1);
+    let project = fixture.base.join("project");
+    let owner_git = |arguments: &[&str]| {
+        let done = level_git(&project, &fixture.base, arguments);
+        assert!(done.status.success(), "{done:?}");
+    };
+    let (mut team, member) = stopped_page_writer(&fixture, &|| {
+        std::fs::write(project.join("page.md"), "Written by the owner.\n").unwrap();
+        owner_git(&["add", "page.md"]);
+        owner_git(&[
+            "-c",
+            "user.name=Owner",
+            "-c",
+            "user.email=owner@crazyagent.invalid",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "Owner page",
+        ]);
+    });
+    let count = |query: &str| -> i64 {
+        fixture
+            .connection
+            .query_row(query, [member], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM team_owner_stops WHERE agent=?1"),
+        1,
+        "the owner's stop stays"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM team_task_pins WHERE agent=?1"),
+        0,
+        "no resolve task is queued"
+    );
+    let task: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_tasks WHERE prompt='Write page.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let waiting = format!(
+        "The edits from task {task} (codex, sub-agent {member}) are waiting for you in Changes."
+    );
+    assert!(fixture.note(&waiting), "{:#?}", fixture.status().messages);
+    let landing = crate::landing::open(&fixture.base).unwrap();
+    let sets = crate::landing::list(&landing, &fixture.setup.project_id).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
     assert!(team.shutdown().unwrap().is_empty());
 }
 
