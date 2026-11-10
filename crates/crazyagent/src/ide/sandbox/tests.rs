@@ -793,7 +793,14 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         ));
     };
 
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(
+        &mine,
+        &home,
+        &data,
+        None,
+        crate::sandbox::policy::AgentAccess::Sandboxed,
+    )
+    .unwrap();
     assert_eq!(
         fs::read_to_string(&shim).unwrap(),
         crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
@@ -872,7 +879,14 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     assert!(!ran("project-sign"));
     refuse_agents("Off");
 
-    crate::ide::settings::write(&mine, &home, &data, Some(&root)).unwrap();
+    crate::ide::settings::write(
+        &mine,
+        &home,
+        &data,
+        Some(&root),
+        crate::sandbox::policy::AgentAccess::Sandboxed,
+    )
+    .unwrap();
     assert_ne!(
         fs::read_to_string(&shim).unwrap(),
         crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
@@ -1002,7 +1016,14 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
         locked: &[],
     };
     let profile = install(&mine, &grants, PORT, closed()).unwrap();
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(
+        &mine,
+        &home,
+        &data,
+        None,
+        crate::sandbox::policy::AgentAccess::Sandboxed,
+    )
+    .unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
 
     let before = ide_git_output(
@@ -1112,7 +1133,14 @@ fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder
         locked: &[],
     };
     let profile = install(&mine, &grants, PORT, closed()).unwrap();
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(
+        &mine,
+        &home,
+        &data,
+        None,
+        crate::sandbox::policy::AgentAccess::Sandboxed,
+    )
+    .unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let top = |older_agents: bool, dir: &Path| {
         ide_git_recorded(
@@ -1215,7 +1243,14 @@ fn a_research_worktree_keeps_its_git_stop_after_the_project_gains_a_crazyagent_f
         locked: &[],
     };
     let profile = install(&mine, &grants, PORT, closed()).unwrap();
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(
+        &mine,
+        &home,
+        &data,
+        None,
+        crate::sandbox::policy::AgentAccess::Sandboxed,
+    )
+    .unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let top = |dir: &Path| {
         ide_git_recorded(
@@ -1302,7 +1337,14 @@ fn ide_git_never_prunes_an_agent_worktree() {
         locked: &[],
     };
     let profile = install(&mine, &grants, PORT, closed()).unwrap();
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(
+        &mine,
+        &home,
+        &data,
+        None,
+        crate::sandbox::policy::AgentAccess::Sandboxed,
+    )
+    .unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let said = |output: &std::process::Output| {
         format!(
@@ -1390,7 +1432,14 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
         locked: &[],
     };
     let profile = install(&mine, &grants, PORT, closed()).unwrap();
-    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    crate::ide::settings::write(
+        &mine,
+        &home,
+        &data,
+        None,
+        crate::sandbox::policy::AgentAccess::Sandboxed,
+    )
+    .unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let ide = |args: &[&str]| {
         let mut command = server_git(&profile, &shim, &home, &root, false, "/usr/bin:/bin");

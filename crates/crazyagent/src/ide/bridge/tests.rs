@@ -5,6 +5,7 @@ use crate::engine::Engine;
 use crate::engine::owner::OwnerServer;
 use crate::landing::{AcceptOutcome, ChangeState};
 use crate::protocol::FRAME_BYTES_MAX;
+use crate::sandbox::policy::AgentAccess;
 use serde_json::json;
 use std::ffi::OsStr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -445,7 +446,7 @@ async fn ide_session_takes_the_capability_file_once() {
     let calls = [
         workspace(),
         json!({ "name": "ide.events", "args": {} }),
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
     ];
     for call in &calls {
         assert_eq!(
@@ -646,7 +647,14 @@ fn ide_terminal_frames_match_the_extension_fixture() {
     let open = unhex(terminal["open"]["frame"].as_str().unwrap());
     let request: IdeRequest = serde_json::from_slice(&open[4..]).unwrap();
     request.validate().unwrap();
-    assert_eq!(request.call, IdeCall::Terminal { cols: 80, rows: 24 });
+    assert_eq!(
+        request.call,
+        IdeCall::Terminal {
+            cols: 80,
+            rows: 24,
+            level: AgentAccess::Sandboxed
+        }
+    );
     assert_eq!(
         serde_json::to_value(&request).unwrap(),
         terminal["open"]["value"]
@@ -695,8 +703,8 @@ fn ide_request_bounds_are_refused() {
         json!({ "name": "ide.accept", "args": { "id": id, "head": "a".repeat(40), "message": "m".repeat(TEXT_BYTES_MAX + 1) } }),
         json!({ "name": "ide.extension_request", "args": { "id": "../evil", "version": "1.0.0" } }),
         json!({ "name": "ide.extension_request", "args": { "id": "pub.name", "version": "1.0.0/x" } }),
-        json!({ "name": "ide.terminal", "args": { "cols": SIZE_MIN - 1, "rows": 24 } }),
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": SIZE_MAX + 1 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": SIZE_MIN - 1, "rows": 24, "level": "sandboxed" } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": SIZE_MAX + 1, "level": "sandboxed" } }),
         json!({ "name": "ide.git", "args": { "args": [], "folder": "/tmp/project" } }),
         json!({ "name": "ide.git", "args": { "args": vec!["fetch"; GIT_ARGS_MAX + 1], "folder": "/tmp/project" } }),
         json!({ "name": "ide.git", "args": { "args": ["push", ""], "folder": "/tmp/project" } }),
@@ -722,7 +730,7 @@ fn ide_request_bounds_are_refused() {
     fine.validate().unwrap();
     let terminal: IdeRequest = serde_json::from_slice(&request(
         "alpha",
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
     ))
     .unwrap();
     terminal.validate().unwrap();
@@ -734,9 +742,19 @@ fn ide_request_bounds_are_refused() {
     git.validate().unwrap();
     let elsewhere = request(
         "alpha",
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "cwd": "/tmp" } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed", "cwd": "/tmp" } }),
     );
     assert!(serde_json::from_slice::<IdeRequest>(&elsewhere).is_err());
+    for args in [
+        json!({ "cols": 80, "rows": 24 }),
+        json!({ "cols": 80, "rows": 24, "level": "root" }),
+    ] {
+        let unlevelled = request("alpha", json!({ "name": "ide.terminal", "args": args }));
+        assert!(
+            serde_json::from_slice::<IdeRequest>(&unlevelled).is_err(),
+            "{args}"
+        );
+    }
 }
 
 /// Every file tsc compiled into the extension's `out` folder ships in the embedded
@@ -1634,7 +1652,7 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     let secret = std::fs::read_to_string(&unread).unwrap();
     let body = request(
         "alpha",
-        json!({ "name": "ide.terminal", "args": { "cols": 100, "rows": 30 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 100, "rows": 30, "level": "sandboxed" } }),
     );
     let mut stream = send(&socket, ide, &body).await;
     let opened = read_value(&mut stream).await.unwrap();
@@ -1727,7 +1745,7 @@ async fn input_after_its_capability_was_revoked_never_reaches_the_terminal() {
     let ide = packet(MAGIC, 0, &session(&socket, &path).await);
     let body = request(
         "alpha",
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
     );
     let (mut stream, name) = open_terminal(&socket, ide, &body).await;
     let host = case.runtime.terminal().unwrap();
@@ -1753,6 +1771,54 @@ async fn input_after_its_capability_was_revoked_never_reaches_the_terminal() {
     case.stop().await;
 }
 
+/// A terminal asked for above the project's level is refused before any pane starts.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_terminal_asked_above_the_projects_level_never_starts_a_pane() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "own_branch" } }),
+    );
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    assert_eq!(
+        exchange(&socket, ide, &body).await,
+        rejected("ide_terminal_above_project")
+    );
+    assert!(!case.root.path().join("ide-shell").exists());
+    case.stop().await;
+}
+
+/// A level above the project's is refused.
+#[test]
+fn a_terminal_above_the_projects_level_is_refused() {
+    assert_eq!(
+        terminal::terminal_level(AgentAccess::Sandboxed, AgentAccess::OwnBranch),
+        Err("ide_terminal_above_project")
+    );
+}
+
+/// The engine never starts a Full access terminal, even for a Full access project.
+#[test]
+fn an_engine_terminal_is_never_full_access() {
+    assert_eq!(
+        terminal::terminal_level(AgentAccess::Full, AgentAccess::Full),
+        Err("ide_terminal_level_refused")
+    );
+}
+
+/// A Full access project may still open a narrower terminal.
+#[test]
+fn a_full_access_project_can_open_a_narrower_terminal() {
+    assert_eq!(
+        terminal::terminal_level(AgentAccess::Full, AgentAccess::Sandboxed),
+        Ok(AgentAccess::Sandboxed)
+    );
+}
+
 /// Where no sandbox is qualified for the Sandboxed terminal, the call is refused before
 /// any pane starts.
 #[cfg(target_os = "linux")]
@@ -1764,7 +1830,7 @@ async fn sandboxed_terminal_is_refused_where_the_sandbox_is_not_qualified() {
     let socket = case.socket(&path);
     let body = request(
         "alpha",
-        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
     );
     let ide = packet(MAGIC, 0, &session(&socket, &path).await);
     assert_eq!(

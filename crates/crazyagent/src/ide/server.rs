@@ -877,7 +877,7 @@ fn command(
     let home = folder.join(SERVER_DATA);
     let confined = policy.access != AgentAccess::Full;
     let hooks = (confined && project_hooks).then_some(launch.root);
-    let written = settings::write(folder, &home, data, hooks)?;
+    let written = settings::write(folder, &home, data, hooks, policy.access)?;
     let ceiling = confined.then(|| confined_git(data, &launch)).transpose()?;
     let places = Places {
         data,

@@ -1,4 +1,5 @@
 use super::SandboxError;
+use super::policy::{AgentAccess, AgentNetwork};
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::protocol::ProjectId;
 use std::ffi::{OsStr, OsString};
@@ -46,17 +47,20 @@ const SHELLS: &str = "/etc/shells";
 #[cfg(target_os = "macos")]
 const SHELLS_BYTES_MAX: u64 = 16 * 1024;
 
-/// Where a project lives for its IDE terminal: its canonical folder and the extra
-/// read-only folders the owner saved for its agents.
+/// Where a project lives for its IDE terminal: its canonical folder, the extra read-only
+/// folders the owner saved for its agents, and the level and network choice it saved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     pub folder: PathBuf,
     pub extra_reads: Vec<PathBuf>,
+    pub access: AgentAccess,
+    pub network: AgentNetwork,
 }
 
 /// One Sandboxed IDE terminal launch: the engine data root, the project and its folder,
 /// where the terminal starts, the shell and its arguments (none starts a login shell), the
-/// terminal variables the engine passes and the project's extra read-only folders.
+/// terminal variables the engine passes, the project's extra read-only folders, the level
+/// the terminal runs at and the project's network choice.
 #[derive(Debug, Clone, Copy)]
 pub struct Launch<'a> {
     pub root: &'a Path,
@@ -67,6 +71,8 @@ pub struct Launch<'a> {
     pub arguments: &'a [OsString],
     pub incoming: &'a [(OsString, OsString)],
     pub extra_reads: &'a [PathBuf],
+    pub level: AgentAccess,
+    pub network: AgentNetwork,
 }
 
 /// Reads the project's folder and its extra read-only folders from the engine database,
@@ -100,6 +106,8 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
     Ok(Place {
         folder,
         extra_reads,
+        access: AgentAccess::default(),
+        network: AgentNetwork::default(),
     })
 }
 

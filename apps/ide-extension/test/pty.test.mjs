@@ -44,7 +44,7 @@ function watched(pty) {
 }
 
 async function opened(engine, server, size) {
-  const pty = new SandboxedPty((name, args) => engine.stream(name, args));
+  const pty = new SandboxedPty((name, args) => engine.stream(name, args), "sandboxed");
   const seen = watched(pty);
   const accepted = once(server, "connection");
   pty.open(size);
@@ -136,5 +136,19 @@ test("sizes stay in the engine's bounds and stop reasons stay plain", () => {
   assert.equal(stopped("ide_terminals_busy"), BUSY);
   assert.equal(stopped("ide_capability_revoked"), "The Sandboxed terminal stopped (ide_capability_revoked).");
   assert.equal(stopped("x\u001b[2J"), "The Sandboxed terminal stopped (unknown).");
-  assert.ok(UNAVAILABLE.includes('"IDE shell"'));
+  assert.ok(!UNAVAILABLE.includes("IDE shell"), UNAVAILABLE);
+  assert.equal(stopped("ide_terminal_above_project"), "Raise project access to use this");
+});
+
+test("a terminal asks the engine for its profile's level and shows a refusal to raise access", LIMIT, async () => {
+  const asked = [];
+  const pty = new SandboxedPty((name, args) => {
+    asked.push([name, args]);
+    return Promise.reject(new Error("ide_terminal_above_project"));
+  }, "own_branch");
+  const seen = watched(pty);
+  pty.open({ columns: 80, rows: 24 });
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(asked, [["ide.terminal", { cols: 80, rows: 24, level: "own_branch" }]]);
+  assert.ok(seen.shown.join("").includes("Raise project access to use this"), seen.shown.join(""));
 });

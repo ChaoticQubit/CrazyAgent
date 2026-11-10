@@ -3,6 +3,7 @@ use super::*;
 use crate::protocol::ProjectId;
 #[cfg(unix)]
 use crate::sandbox::ide_shell;
+use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use serde_json::json;
 #[cfg(unix)]
 use std::ffi::OsString;
@@ -88,10 +89,23 @@ fn setup_git(folder: &std::path::Path, args: &[&str]) {
     );
 }
 
-/// Runs a script in a Sandboxed terminal of the project through the real launch and the real
-/// `sandbox-exec`. Inputs: the case and the script. Output: the finished process.
+/// Runs a script in a Sandboxed terminal of the project. Inputs: the case and the script.
+/// Output: the finished process.
 #[cfg(target_os = "macos")]
 fn in_terminal(case: &Case, script: &str) -> std::process::Output {
+    in_terminal_at(case, script, AgentAccess::Sandboxed, AgentNetwork::Open)
+}
+
+/// Runs a script in a terminal of the project through the real launch and the real
+/// `sandbox-exec`. Inputs: the case, the script, the level and the network choice. Output:
+/// the finished process.
+#[cfg(target_os = "macos")]
+fn in_terminal_at(
+    case: &Case,
+    script: &str,
+    level: AgentAccess,
+    network: AgentNetwork,
+) -> std::process::Output {
     let project = ProjectId::new(PROJECT).unwrap();
     let shell_arguments = arguments(&["-c", script]);
     let launch = ide_shell::Launch {
@@ -103,6 +117,8 @@ fn in_terminal(case: &Case, script: &str) -> std::process::Output {
         arguments: &shell_arguments,
         incoming: &[],
         extra_reads: &[],
+        level,
+        network,
     };
     let mut command = ide_shell::command(&launch).unwrap();
     command
@@ -110,6 +126,111 @@ fn in_terminal(case: &Case, script: &str) -> std::process::Output {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     crate::spawn_gate::output(&mut command).unwrap()
+}
+
+/// Listens on a free port of this machine for the network rows. Output: the listener, which
+/// must stay alive, and its port.
+#[cfg(target_os = "macos")]
+fn local_listener() -> (std::net::TcpListener, u16) {
+    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
+}
+
+/// The script that connects to a port of this machine and exits 0 only if it could. Input:
+/// the port. Output: the script.
+#[cfg(target_os = "macos")]
+fn connects(port: u16) -> String {
+    format!("/usr/bin/nc -z -G 5 127.0.0.1 {port}")
+}
+
+/// An Own branch terminal on the Open choice reaches a listener on this machine.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_own_branch_terminal_on_open_reaches_a_local_listener() {
+    let case = Case::new();
+    let (_held, port) = local_listener();
+    let output = in_terminal_at(
+        &case,
+        &connects(port),
+        AgentAccess::OwnBranch,
+        AgentNetwork::Open,
+    );
+    assert!(output.status.success(), "{output:?}");
+}
+
+/// An Own branch terminal on Port 443 only is refused any other port and holds the 443 rule.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_own_branch_terminal_on_port_443_refuses_another_port_and_renders_the_443_rule() {
+    let case = Case::new();
+    let (_held, port) = local_listener();
+    let output = in_terminal_at(
+        &case,
+        &connects(port),
+        AgentAccess::OwnBranch,
+        AgentNetwork::Https,
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let profile = case.root.join("ide-shell").join(PROJECT).join("shell.sb");
+    let rules = std::fs::read_to_string(profile).unwrap();
+    assert!(rules.contains(r#"(remote ip "*:443")"#), "{rules}");
+}
+
+/// An Own branch terminal on None has no network.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_own_branch_terminal_on_none_has_no_network() {
+    let case = Case::new();
+    let (_held, port) = local_listener();
+    let output = in_terminal_at(
+        &case,
+        &connects(port),
+        AgentAccess::OwnBranch,
+        AgentNetwork::None,
+    );
+    assert!(!output.status.success(), "{output:?}");
+}
+
+/// A Sandboxed terminal has no network, whatever network choice the project saved.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_terminal_has_no_network_even_on_open() {
+    let case = Case::new();
+    let (_held, port) = local_listener();
+    let output = in_terminal_at(
+        &case,
+        &connects(port),
+        AgentAccess::Sandboxed,
+        AgentNetwork::Open,
+    );
+    assert!(!output.status.success(), "{output:?}");
+}
+
+/// The engine never runs a Full access terminal: that one is the IDE server's own shell.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_engine_terminal_launch_at_full_access_is_refused() {
+    let case = Case::new();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let launch = ide_shell::Launch {
+        root: &case.root,
+        project: &project,
+        folder: &case.folder,
+        cwd: &case.folder,
+        shell: std::path::Path::new("/bin/sh"),
+        arguments: &[],
+        incoming: &[],
+        extra_reads: &[],
+        level: AgentAccess::Full,
+        network: AgentNetwork::Open,
+    };
+    let refused = ide_shell::command(&launch).unwrap_err();
+    assert!(
+        matches!(refused, crate::sandbox::SandboxError::Invalid(_)),
+        "{refused:?}"
+    );
+    assert!(!case.root.join("ide-shell").exists());
 }
 
 /// A Sandboxed terminal is refused a new file in the project's git hooks.
@@ -214,6 +335,8 @@ fn the_sandboxed_terminal_pane_says_it_cannot_stage_before_its_shell_starts() {
         arguments: &[],
         incoming: &[],
         extra_reads: &[],
+        level: AgentAccess::Sandboxed,
+        network: AgentNetwork::Open,
     })
     .unwrap();
     let mut command = std::process::Command::new(&pane.argv[0]);
@@ -323,6 +446,8 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         arguments: &shell_arguments,
         incoming: &incoming,
         extra_reads: &[],
+        level: AgentAccess::Sandboxed,
+        network: AgentNetwork::Open,
     };
     let mut command = ide_shell::command(&launch).unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
@@ -414,6 +539,8 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         arguments: &shell_arguments,
         incoming: &[],
         extra_reads: &[],
+        level: AgentAccess::Sandboxed,
+        network: AgentNetwork::Open,
     };
     match ide_shell::command(&launch) {
         Err(crate::sandbox::SandboxError::Unavailable(reason)) => {
@@ -428,6 +555,46 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         other => panic!("expected the unavailable refusal, got {other:?}"),
     }
     assert!(!base.join("ide-shell").exists());
+}
+
+/// A Sandboxed or Own branch project offers no shell hosted in the IDE server, which holds
+/// the git index grant, and still runs tasks there. A Full access project's own shell is the
+/// owner's login shell.
+#[test]
+fn only_a_full_access_project_offers_a_shell_hosted_in_the_ide_server() {
+    let owner_shell = PathBuf::from("/bin/zsh");
+    for (access, default) in [
+        (AgentAccess::Sandboxed, SANDBOXED),
+        (AgentAccess::OwnBranch, OWN_BRANCH),
+    ] {
+        let settings = profiles(Platform::MacOs, &owner_shell, access);
+        let listed = settings["terminal.integrated.profiles.osx"]
+            .as_object()
+            .unwrap();
+        assert!(
+            listed.values().all(Value::is_null),
+            "{access:?}: {listed:?}"
+        );
+        assert_eq!(
+            settings["terminal.integrated.defaultProfile.osx"],
+            json!(default)
+        );
+        assert_eq!(
+            settings["terminal.integrated.automationProfile.osx"]["path"],
+            json!("/bin/zsh")
+        );
+        assert_eq!(shell_label(access), None);
+    }
+    let settings = profiles(Platform::MacOs, &owner_shell, AgentAccess::Full);
+    let label = shell_label(AgentAccess::Full).unwrap();
+    assert_eq!(label, "Full access");
+    let shell = &settings["terminal.integrated.profiles.osx"][label];
+    assert_eq!(shell["path"], json!("/bin/zsh"));
+    assert_eq!(shell["args"], json!(["-l"]));
+    assert_eq!(
+        settings["terminal.integrated.defaultProfile.osx"],
+        json!(label)
+    );
 }
 
 /// The terminal settings hide every detected shell, offer only the labelled IDE shell as a
@@ -454,7 +621,7 @@ fn terminal_profiles_label_the_ide_shell_and_default_to_the_extension_sandboxed_
             json!({"source": "PowerShell", "icon": "terminal", "overrideName": true}),
         ),
     ] {
-        let settings = profiles(platform, &owner_shell);
+        let settings = profiles(platform, &owner_shell, AgentAccess::Sandboxed);
         assert_eq!(
             settings[&format!("terminal.integrated.defaultProfile.{os}")],
             json!(SANDBOXED)
@@ -494,7 +661,7 @@ fn terminal_profiles_label_the_ide_shell_and_default_to_the_extension_sandboxed_
     let unavailable = crate::sandbox::ide_shell::UNAVAILABLE;
     assert!(unavailable.contains("\"IDE shell\""), "{unavailable}");
     assert!(IDE_SHELL.contains("IDE sandbox"), "{IDE_SHELL}");
-    let windows = profiles(Platform::Windows, &owner_shell);
+    let windows = profiles(Platform::Windows, &owner_shell, AgentAccess::Sandboxed);
     assert_eq!(windows["terminal.integrated.useWslProfiles"], json!(false));
     let (name, manifest) = crate::ide::bridge::EXTENSION_FILES[0];
     assert_eq!(name, "package.json");
@@ -545,9 +712,12 @@ fn machine_profiles_use_this_platform_and_the_owners_login_shell() {
     let shell = ide_shell::owner_shell().unwrap();
     assert!(shell.is_absolute(), "{}", shell.display());
 
-    let settings = machine_profiles().unwrap();
+    let settings = machine_profiles(AgentAccess::Sandboxed).unwrap();
 
-    assert_eq!(settings, profiles(Platform::CURRENT, &shell));
+    assert_eq!(
+        settings,
+        profiles(Platform::CURRENT, &shell, AgentAccess::Sandboxed)
+    );
     assert_eq!(
         settings[&format!("terminal.integrated.defaultProfile.{os}")],
         json!(SANDBOXED)
@@ -558,6 +728,59 @@ fn machine_profiles_use_this_platform_and_the_owners_login_shell() {
         &settings[&format!("terminal.integrated.profiles.{os}")][IDE_SHELL],
         automation
     );
+}
+
+/// Makes an engine root with one project whose saved policy is the given one, for the rows
+/// that read a terminal's level. Input: the folder to build in and the policy. Output: the
+/// engine root.
+#[cfg(unix)]
+fn saved_policy(base: &std::path::Path, policy: &AgentPolicy) -> PathBuf {
+    let root = base.join("engine");
+    let folder = base.join("project");
+    for path in [&root, &folder] {
+        std::fs::create_dir(path).unwrap();
+    }
+    let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    crate::ide::workspace::tests::add_project(&db, PROJECT, &folder);
+    crate::sandbox::policy::save(&db, PROJECT, policy).unwrap();
+    root
+}
+
+/// A terminal's level and network choice are the ones the owner saved for the project.
+#[cfg(unix)]
+#[test]
+fn ide_shell_reads_the_level_and_network_the_owner_saved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let policy = AgentPolicy {
+        access: AgentAccess::OwnBranch,
+        network: AgentNetwork::Https,
+        ..AgentPolicy::default()
+    };
+    let root = saved_policy(&base, &policy);
+    let place = ide_shell::project_place(&root, &ProjectId::new(PROJECT).unwrap()).unwrap();
+    assert_eq!(place.access, AgentAccess::OwnBranch);
+    assert_eq!(place.network, AgentNetwork::Https);
+}
+
+/// A saved policy that cannot be read stops the terminal instead of picking a level.
+#[cfg(unix)]
+#[test]
+fn a_saved_policy_that_cannot_be_read_stops_the_terminal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let root = saved_policy(&base, &AgentPolicy::default());
+    let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let tampered = db
+        .execute(
+            "UPDATE project_agent_policy SET body='tampered' WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    assert_eq!(tampered, 1);
+    drop(db);
+    assert!(ide_shell::project_place(&root, &ProjectId::new(PROJECT).unwrap()).is_err());
 }
 
 #[cfg(unix)]

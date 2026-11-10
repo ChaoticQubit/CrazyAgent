@@ -1,5 +1,6 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
+use crate::sandbox::policy::AgentAccess;
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
@@ -58,13 +59,15 @@ pub struct Written {
 /// ([`machine_folder`]), so the server can never write, add, remove or move anything there.
 /// Inputs: the project's IDE folder, the server data folder inside it, the engine's data
 /// folder above both and, when the owner lets the IDE run the project's hooks, the project
-/// folder. Output: the written files, or a plain refusal.
+/// folder, and the project's level, which picks the terminal profiles. Output: the written
+/// files, or a plain refusal.
 #[cfg(unix)]
 pub fn write(
     folder: &Path,
     server_data: &Path,
     data: &Path,
     project_hooks: Option<&Path>,
+    access: AgentAccess,
 ) -> Result<Written, EngineError> {
     if !folder.is_absolute()
         || !folder.starts_with(data)
@@ -93,7 +96,7 @@ pub fn write(
     let target = machine.join(SETTINGS);
     let locked = locked();
     let mut settings = locked.clone();
-    settings.extend(super::terminal::machine_profiles()?);
+    settings.extend(super::terminal::machine_profiles(access)?);
     settings.extend(super::extensions::allowed_setting(data));
     settings.extend(super::git::machine_settings(&shim)?);
     let aside = match owner_settings(&target)? {
@@ -139,6 +142,7 @@ pub fn write(
     _server_data: &Path,
     _data: &Path,
     _project_hooks: Option<&Path>,
+    _access: AgentAccess,
 ) -> Result<Written, EngineError> {
     Err(failure("ide_unavailable"))
 }

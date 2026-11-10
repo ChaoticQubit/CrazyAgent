@@ -351,7 +351,7 @@ async fn ide_terminal_sandboxed_is_the_default_and_runs_the_owner_shell_in_the_a
     let mut terminal = send(
         &socket,
         &token,
-        serde_json::json!({ "name": "ide.terminal", "args": { "cols": 200, "rows": 40 } }),
+        serde_json::json!({ "name": "ide.terminal", "args": { "cols": 200, "rows": 40, "level": "sandboxed" } }),
     )
     .await;
     let started = frame(&mut terminal).await;

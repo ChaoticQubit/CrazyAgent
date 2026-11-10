@@ -6,6 +6,7 @@ use crate::platform::unix_socket::{OwnedWriteHalf, UnixStream};
 use crate::protocol::{ProjectId, encode_frame};
 use crate::sandbox::SandboxError;
 use crate::sandbox::ide_shell::{self, Launch, TERMINAL_VARIABLES};
+use crate::sandbox::policy::AgentAccess;
 use crate::terminal::{
     AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame,
     TerminalRequest, TerminalStream,
@@ -42,15 +43,16 @@ pub(super) struct Terminals {
 /// sends `ok` with its name and size, its screen, then its output, and types and resizes
 /// what the extension sends, until the extension detaches, the shell ends or the
 /// capability stops working. The pane ends with the connection. Inputs: the stream, the
-/// handshake packet, the owner runtime, the project and the size.
+/// handshake packet, the owner runtime, the project, the size and the level asked for.
 pub(super) async fn serve(
     mut stream: UnixStream,
     packet: [u8; 37],
     runtime: OwnerRuntimeHandle,
     project: ProjectId,
     size: (u16, u16),
+    level: AgentAccess,
 ) {
-    let opened = open(&runtime, &project, size).await;
+    let opened = open(&runtime, &project, size, level).await;
     let (host, registry, mut viewer) = match opened {
         Ok(opened) => opened,
         Err(error) => {
@@ -87,7 +89,7 @@ pub(super) async fn serve(
 
 /// Builds the shell's sandboxed command, then claims a terminal slot and starts it, on a
 /// blocking thread, so a system with no qualified sandbox refuses before the terminal host
-/// is touched. Inputs: the owner runtime, the project and the size.
+/// is touched. Inputs: the owner runtime, the project, the size and the level asked for.
 /// Output: the host, the registry the pane is recorded in and the attached viewer, or
 /// `ide_terminal_unavailable`, `ide_terminal_refused`, `ide_terminals_busy` or the host's
 /// code.
@@ -95,6 +97,7 @@ async fn open(
     runtime: &OwnerRuntimeHandle,
     project: &ProjectId,
     size: (u16, u16),
+    level: AgentAccess,
 ) -> Result<(Arc<dyn Host>, Arc<Mutex<Terminals>>, TerminalStream), EngineError> {
     let root = runtime.ide()?.root;
     let host = runtime.terminal()?;
@@ -103,7 +106,7 @@ async fn open(
     let project = project.clone();
     let (started_host, started_registry) = (host.clone(), registry.clone());
     let started = tokio::task::spawn_blocking(move || {
-        let command = prepare(&root, &project)?;
+        let command = prepare(&root, &project, level)?;
         claim(&started_registry, started_host.as_ref(), &name)?;
         let viewer = start(started_host.as_ref(), &name, &command, size);
         if viewer.is_err() {
@@ -168,13 +171,30 @@ fn ended(killed: Result<(), HostError>) -> Result<(), EngineError> {
     }
 }
 
+/// The level a terminal the extension asked for runs at. The engine decides from the level it
+/// read itself, since the extension's ask is untrusted input. Inputs: the project's level and
+/// the level asked. Output: the level, or `ide_terminal_above_project` for a wider ask, or
+/// `ide_terminal_level_refused` for Full, which only the IDE server's own shell runs.
+pub(super) fn terminal_level(
+    _project: AgentAccess,
+    _asked: AgentAccess,
+) -> Result<AgentAccess, &'static str> {
+    Err("ide_terminal_level_refused")
+}
+
 /// Builds the pane command for the owner's login shell under the project's agent sandbox,
-/// starting in the project folder. Inputs: the engine root and the project. Output: the
-/// command, or `ide_terminal_project_unavailable`, `ide_terminal_shell_unknown`,
+/// starting in the project folder. Inputs: the engine root, the project and the level asked
+/// for. Output: the command, or `ide_terminal_project_unavailable`,
+/// `ide_terminal_above_project`, `ide_terminal_level_refused`, `ide_terminal_shell_unknown`,
 /// `ide_terminal_unavailable` or `ide_terminal_refused`.
-fn prepare(root: &Path, project: &ProjectId) -> Result<InteractiveCommand, EngineError> {
+fn prepare(
+    root: &Path,
+    project: &ProjectId,
+    asked: AgentAccess,
+) -> Result<InteractiveCommand, EngineError> {
     let place = ide_shell::project_place(root, project)
         .map_err(|_| failure("ide_terminal_project_unavailable"))?;
+    let level = terminal_level(place.access, asked).map_err(failure)?;
     let shell = ide_shell::owner_shell().map_err(|_| failure("ide_terminal_shell_unknown"))?;
     let incoming: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(variable, _)| {
@@ -192,6 +212,8 @@ fn prepare(root: &Path, project: &ProjectId) -> Result<InteractiveCommand, Engin
         arguments: &[],
         incoming: &incoming,
         extra_reads: &place.extra_reads,
+        level,
+        network: place.network,
     })
     .map_err(|error| match error {
         SandboxError::Unavailable(_) => failure("ide_terminal_unavailable"),
