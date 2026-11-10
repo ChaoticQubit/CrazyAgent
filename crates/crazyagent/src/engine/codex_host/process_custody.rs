@@ -3,7 +3,7 @@ use super::process::{
 };
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
-use crate::harnesses::leftovers::{LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use crate::sandbox::warden::{self, Warden};
 #[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -37,8 +37,7 @@ struct PendingWrite {
 struct OwnedChild {
     child: Child,
     warden: Option<Warden>,
-    unconfined: bool,
-    token: LineageToken,
+    follower: Option<Follower>,
     lineage: Option<Result<Lineage, Unstopped>>,
     profile: Option<NativeProfileUse>,
     stdin: Option<ChildStdin>,
@@ -127,11 +126,11 @@ fn start(
             .stderr(Stdio::piped()),
     )
     .map_err(|_| "codex_host_spawn_failed")?;
+    let follower = unconfined.then(|| Follower::start(child.id(), Some(token)));
     let mut custody = Custody(Some(OwnedChild {
         child,
         warden,
-        unconfined,
-        token,
+        follower,
         lineage: None,
         profile,
         stdin: None,
@@ -292,11 +291,11 @@ impl OwnedChild {
     }
 
     /// Stops the harness: closes its input and kills its group and itself. At Full access it
-    /// first finds the harness's lineage, once, so what left the group can be checked when
-    /// the run completes. Takes nothing.
+    /// first takes the harness's lineage, followed from its start, once, so what left the
+    /// group can be checked when the run completes. Takes nothing.
     fn stop(&mut self) {
-        if self.unconfined && self.lineage.is_none() {
-            self.lineage = Some(Lineage::of(self.child.id(), Some(self.token.clone())));
+        if let Some(follower) = self.follower.take() {
+            self.lineage = Some(follower.stop());
         }
         self.stopped_at.get_or_insert_with(Instant::now);
         self.stdin = None;
@@ -436,7 +435,7 @@ impl OwnedChild {
     }
 
     /// Publishes the run's end and releases the account lease. At Full access, no warden
-    /// reaches what left the group, so the lineage found at the stop, or now when the harness
+    /// reaches what left the group, so the lineage taken at the stop, or now when the harness
     /// ended on its own, is checked first; while some of it still runs the run ends with that
     /// code and the lease stays held until it ends or the owner signs the account out.
     /// Takes nothing.
@@ -449,19 +448,17 @@ impl OwnedChild {
             self.shared.fail("codex_host_profile_invalid");
         }
         let mut left = None;
-        if self.unconfined {
-            let lineage = self
-                .lineage
-                .take()
-                .unwrap_or_else(|| Lineage::of(self.child.id(), Some(self.token.clone())));
-            if let Err(unstopped) = lineage.and_then(Lineage::settle) {
-                left = Some(unstopped.code());
-                self.shared.fail(unstopped.code());
-                if let (Unstopped::Left(leftovers), Some(profile)) =
-                    (unstopped, self.profile.take())
-                {
-                    leftovers.hold(Some(profile.account().clone()), profile);
-                }
+        let lineage = match self.follower.take() {
+            Some(follower) => Some(follower.stop()),
+            None => self.lineage.take(),
+        };
+        if let Some(lineage) = lineage
+            && let Err(unstopped) = lineage.and_then(Lineage::settle)
+        {
+            left = Some(unstopped.code());
+            self.shared.fail(unstopped.code());
+            if let (Unstopped::Left(leftovers), Some(profile)) = (unstopped, self.profile.take()) {
+                leftovers.hold(Some(profile.account().clone()), profile);
             }
         }
         self.profile = None;

@@ -4,7 +4,7 @@ use super::launch::{
     Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id,
     route, validate,
 };
-use super::leftovers::{FOLLOW_EVERY, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use super::leftovers::{FOLLOWER_PACE, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
@@ -813,7 +813,7 @@ impl TerminalSession {
             }
         }
         if !self.exited
-            && self.followed.elapsed() >= FOLLOW_EVERY
+            && self.followed.elapsed() >= FOLLOWER_PACE
             && let Some(Ok(lineage)) = &mut self.lineage
         {
             lineage.follow();
