@@ -66,7 +66,7 @@ type Folder = std::os::fd::OwnedFd;
 #[cfg(not(unix))]
 type Folder = PathBuf;
 
-/// One entry of a folder a copy is reading, opened without following a link.
+/// One entry of a folder a copy is reading. On Unix it is opened without following a link.
 enum Opened {
     Folder(Folder),
     File(fs::File),
@@ -172,9 +172,10 @@ pub fn read(folder: &Path) -> Result<Found, &'static str> {
 
 /// Copies the parts of a plugin folder its hooks run from into a new folder of the plugin
 /// store: its `hooks` and `skills` folders and each other top-level entry a hook command
-/// names, never following a link and leaving out `.git` and `.DS_Store`. Files keep their
-/// owner execute bit. Inputs: the plugin folder, a destination that must not exist yet and
-/// the hooks read from the folder. Output: unit, or `hooks_too_large` or
+/// names, leaving out `.git` and `.DS_Store`. On Unix no link is followed, at any part of
+/// the folder's path or inside it. Files keep their owner execute bit. Inputs: the plugin
+/// folder's canonical path, a destination that must not exist yet and the hooks read from
+/// the folder. Output: unit, or `skill_folder_not_found`, `hooks_too_large` or
 /// `plugin_store_unavailable` after removing any partial copy.
 pub fn copy(source: &Path, destination: &Path, hooks: &[HookSpec]) -> Result<(), &'static str> {
     if fs::symlink_metadata(destination).is_ok() {
@@ -183,7 +184,7 @@ pub fn copy(source: &Path, destination: &Path, hooks: &[HookSpec]) -> Result<(),
     folder(destination)?;
     let mut tally = Tally::default();
     let result = (|| {
-        let root = open_folder(source).map_err(|_| "skill_folder_not_found")?;
+        let root = open_root(source).map_err(|_| "skill_folder_not_found")?;
         for name in names(&root, "skill_folder_not_found")? {
             if wanted(&name, hooks) {
                 copy_child(
@@ -375,7 +376,24 @@ fn copy_child(
     }
 }
 
-/// Opens a folder a copy starts from, refusing a link. Input: the path. Output: the folder.
+/// Opens a plugin folder one part at a time from the filesystem root, through no link at any
+/// part, so a parent swapped for a link after the folder was read cannot redirect the copy.
+/// Input: the canonical path. Output: the folder.
+#[cfg(unix)]
+fn open_root(path: &Path) -> std::io::Result<Folder> {
+    Ok(super::skill_folder::open_real(
+        path,
+        super::skill_folder::FOLDER,
+    )?)
+}
+
+#[cfg(not(unix))]
+fn open_root(path: &Path) -> std::io::Result<Folder> {
+    open_folder(path)
+}
+
+/// Opens a folder a copy starts from, refusing a link at its last part. Input: the path.
+/// Output: the folder.
 #[cfg(unix)]
 fn open_folder(path: &Path) -> std::io::Result<Folder> {
     Ok(rustix::fs::open(
