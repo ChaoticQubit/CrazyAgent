@@ -10886,6 +10886,44 @@ fn a_team_agent_that_only_fast_forwarded_to_main_opens_no_change_set() {
     );
 }
 
+/// LAND-8-L2: a team agent that only fast-forwarded to main across owner commits that the
+/// change checks refuse in an agent's own work, a gitlink and a link out of the tree, opens
+/// no set and its turn end does not fail: those commits are on main already, so nothing of
+/// the agent's is there to check.
+#[test]
+fn a_fast_forward_across_owner_commits_the_change_checks_refuse_opens_no_set() {
+    for owner_change in ["gitlink", "link out of the tree"] {
+        let case = Case::new();
+        case.start();
+        let agent = numbered_agent(&case, 3);
+        record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir)
+            .unwrap();
+        if owner_change == "gitlink" {
+            let tip = case.tip();
+            case.owner(&[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{tip},vendor"),
+            ]);
+        } else {
+            std::os::unix::fs::symlink("/etc", case.repo.join("outside")).unwrap();
+            case.owner(&["add", "outside"]);
+        }
+        case.owner(&["commit", "-q", "-m", "Owner adds one"]);
+        git_in(
+            &case.home,
+            &agent.worktree,
+            &["merge", "-q", "--ff-only", "main"],
+        );
+        assert_eq!(
+            record_turn_end(&case.db, &agent, &merge_turn()).map_err(|problem| problem.0),
+            Ok(None),
+            "{owner_change}"
+        );
+    }
+}
+
 /// T3-R2-S4: an ordinary Accept's stored intent keeps the shape an older engine reads, and a
 /// master's still carries its mark.
 #[test]
