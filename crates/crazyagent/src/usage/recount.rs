@@ -108,11 +108,13 @@ const CLEAR_STAGING: &str = "DELETE FROM usage_recount_rows; DELETE FROM usage_r
     DELETE FROM usage_recount_files; DELETE FROM usage_recount_homes;
     DELETE FROM usage_recount_sessions; DELETE FROM usage_recount_live;";
 
-/// One agent home the recount reads, and who its tokens count against.
+/// One agent home the recount reads, and who its tokens count against. `removed` marks a run
+/// of a removed project, whose name no project id can hold.
 pub(super) struct Home {
     pub path: PathBuf,
     pub format: Format,
     pub attribution: Attribution,
+    pub removed: bool,
 }
 
 /// What the owner sees once: the totals as they stand and as they would be, and how many
@@ -175,7 +177,11 @@ pub(super) fn begin(db: &Connection, homes: &[Home], now_ms: i64) -> Result<(), 
                     home.path.to_string_lossy(),
                     if home.format == Format::Claude { "claude" } else { "codex" },
                     who.kind.name(),
-                    who.project.as_ref().map_or("", ProjectId::as_str),
+                    if home.removed {
+                        super::REMOVED_PROJECTS
+                    } else {
+                        who.project.as_ref().map_or("", ProjectId::as_str)
+                    },
                     who.pool.as_ref().map_or("", CredentialRef::as_str),
                     who.account.as_ref().map_or("", CredentialRef::as_str),
                     who.agent,
@@ -251,15 +257,16 @@ fn line_time(at_ms: Option<i64>, fallback_ms: i64, now_ms: i64) -> i64 {
 
 /// Reads one chunk of one record into the staging tables, in one write with its cursor, so a
 /// restart repeats no line. The try is counted first, so a record that panics or fails is
-/// given up on after `ATTEMPTS_MAX`. Inputs: the store, the record and the time. Output: the
-/// budget the read costs.
+/// given up on after `ATTEMPTS_MAX`. Who it counts against is read inside that write, so a
+/// project removed during the read files under its removed name. Inputs: the store, the record
+/// and the time. Output: the budget the read costs.
 fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineError> {
-    type Who = (String, String, String, String, String, String, String);
-    let (format, kind, project, pool, account, agent, harness): Who = db
+    type Who = (String, String, String, String, String, String);
+    let format: String = db
         .query_row(
-            "SELECT format,kind,project,pool,account,agent,harness FROM usage_recount_homes WHERE home=?1",
+            "SELECT format FROM usage_recount_homes WHERE home=?1",
             [&file.home],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+            |row| row.get(0),
         )
         .map_err(storage)?;
     let format = if format == "claude" {
@@ -280,6 +287,22 @@ fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineE
         now_ms,
     );
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    let (kind, project, pool, account, agent, harness): Who = tx
+        .query_row(
+            "SELECT kind,project,pool,account,agent,harness FROM usage_recount_homes WHERE home=?1",
+            [&file.home],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(storage)?;
     for usage in &read.usages {
         let hour_of = line_time(usage.at_ms, file.fallback_ms, now_ms);
         let hour_ms = hour_of - hour_of.rem_euclid(HOUR_MS);
