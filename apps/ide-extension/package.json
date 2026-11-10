@@ -74,7 +74,36 @@
         }
       ]
     },
+    "submenus": [
+      {
+        "id": "crazyagent.terminalLevels",
+        "label": "New terminal at access level",
+        "icon": "$(shield)"
+      }
+    ],
     "commands": [
+      {
+        "command": "crazyagent.terminal.sandboxed",
+        "title": "Sandboxed"
+      },
+      {
+        "command": "crazyagent.terminal.ownBranch",
+        "title": "Own branch"
+      },
+      {
+        "command": "crazyagent.terminal.ownBranchRaise",
+        "title": "Own branch - Raise project access to use this",
+        "enablement": "false"
+      },
+      {
+        "command": "crazyagent.terminal.full",
+        "title": "Full access"
+      },
+      {
+        "command": "crazyagent.terminal.fullRaise",
+        "title": "Full access - Raise project access to use this",
+        "enablement": "false"
+      },
       {
         "command": "crazyagent.extensions.request",
         "title": "Install Extension from Open VSX",
@@ -170,6 +199,32 @@
       }
     ],
     "menus": {
+      "crazyagent.terminalLevels": [
+        {
+          "command": "crazyagent.terminal.sandboxed",
+          "group": "levels@1"
+        },
+        {
+          "command": "crazyagent.terminal.ownBranch",
+          "when": "crazyagent.ideAccess != sandboxed",
+          "group": "levels@2"
+        },
+        {
+          "command": "crazyagent.terminal.ownBranchRaise",
+          "when": "crazyagent.ideAccess == sandboxed",
+          "group": "levels@2"
+        },
+        {
+          "command": "crazyagent.terminal.full",
+          "when": "crazyagent.ideAccess == full",
+          "group": "levels@3"
+        },
+        {
+          "command": "crazyagent.terminal.fullRaise",
+          "when": "crazyagent.ideAccess != full",
+          "group": "levels@3"
+        }
+      ],
       "view/item/context": [
         {
           "command": "crazyagent.memories.approve",
@@ -194,6 +249,11 @@
       ],
       "view/title": [
         {
+          "submenu": "crazyagent.terminalLevels",
+          "when": "view == terminal",
+          "group": "navigation"
+        },
+        {
           "command": "crazyagent.memories.refresh",
           "when": "view == crazyagent.memories",
           "group": "navigation"
@@ -215,6 +275,14 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "crazyagent.terminal.ownBranchRaise",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.terminal.fullRaise",
+          "when": "false"
+        },
         {
           "command": "crazyagent.memories.approve",
           "when": "false"

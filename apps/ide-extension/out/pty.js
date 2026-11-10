@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SandboxedPty = exports.ABOVE_PROJECT = exports.BUSY = exports.UNAVAILABLE = exports.INPUT_BYTES_MAX = exports.SIZE_MAX = exports.SIZE_MIN = void 0;
+exports.SandboxedPty = exports.ACCESS_ENV = exports.ABOVE_PROJECT = exports.BUSY = exports.UNAVAILABLE = exports.INPUT_BYTES_MAX = exports.SIZE_MAX = exports.SIZE_MIN = void 0;
+exports.accessOf = accessOf;
 exports.gitFirstOnPath = gitFirstOnPath;
 exports.clampSize = clampSize;
 exports.stopped = stopped;
@@ -14,6 +15,10 @@ exports.BUSY = "This terminal can't start: too many are open. Close one, then op
 exports.ABOVE_PROJECT = "Raise project access to use this";
 const SIZE_DEFAULT = { columns: 80, rows: 24 };
 const CODE = /^[a-z0-9_]{1,64}$/;
+exports.ACCESS_ENV = "CRAZYAGENT_IDE_ACCESS";
+function accessOf(value) {
+    return value === "own_branch" || value === "full" ? value : "sandboxed";
+}
 function gitFirstOnPath(collection, gitPath) {
     if (typeof gitPath !== "string" || !(0, node_path_1.isAbsolute)(gitPath))
         return;

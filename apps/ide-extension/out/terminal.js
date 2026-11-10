@@ -33,7 +33,8 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.OWN_BRANCH_TITLE = exports.OWN_BRANCH_PROFILE = exports.TITLE = exports.PROFILE = void 0;
+exports.FULL_TITLE = exports.OWN_BRANCH_TITLE = exports.OWN_BRANCH_PROFILE = exports.TITLE = exports.PROFILE = void 0;
+exports.terminalMenu = terminalMenu;
 exports.terminalGit = terminalGit;
 exports.sandboxedTerminal = sandboxedTerminal;
 const vscode = __importStar(require("vscode"));
@@ -42,20 +43,32 @@ exports.PROFILE = "crazyagent.sandboxed";
 exports.TITLE = "Sandboxed";
 exports.OWN_BRANCH_PROFILE = "crazyagent.ownBranch";
 exports.OWN_BRANCH_TITLE = "Own branch";
+exports.FULL_TITLE = "Full access";
 const OFFERED = [
-    { id: exports.PROFILE, name: exports.TITLE, level: "sandboxed" },
-    { id: exports.OWN_BRANCH_PROFILE, name: exports.OWN_BRANCH_TITLE, level: "own_branch" },
+    { id: exports.PROFILE, name: exports.TITLE, level: "sandboxed", command: "crazyagent.terminal.sandboxed" },
+    { id: exports.OWN_BRANCH_PROFILE, name: exports.OWN_BRANCH_TITLE, level: "own_branch", command: "crazyagent.terminal.ownBranch" },
 ];
+const ACCESS_KEY = "crazyagent.ideAccess";
+const FULL_COMMAND = "crazyagent.terminal.full";
+function engineTerminal(engine, name, level) {
+    return { name, pty: new pty_js_1.SandboxedPty((call, args) => engine.stream(call, args), level) };
+}
+function terminalMenu(context, engine) {
+    void vscode.commands.executeCommand("setContext", ACCESS_KEY, (0, pty_js_1.accessOf)(process.env[pty_js_1.ACCESS_ENV]));
+    for (const { command, name, level } of OFFERED) {
+        context.subscriptions.push(vscode.commands.registerCommand(command, () => {
+            vscode.window.createTerminal(engineTerminal(engine, name, level));
+        }));
+    }
+    context.subscriptions.push(vscode.commands.registerCommand(FULL_COMMAND, () => vscode.commands.executeCommand("workbench.action.terminal.newWithProfile", { profileName: exports.FULL_TITLE })));
+}
 function terminalGit(context) {
     (0, pty_js_1.gitFirstOnPath)(context.environmentVariableCollection, vscode.workspace.getConfiguration("git").get("path"));
 }
 function sandboxedTerminal(context, engine) {
     for (const { id, name, level } of OFFERED) {
         context.subscriptions.push(vscode.window.registerTerminalProfileProvider(id, {
-            provideTerminalProfile: () => new vscode.TerminalProfile({
-                name,
-                pty: new pty_js_1.SandboxedPty((call, args) => engine.stream(call, args), level),
-            }),
+            provideTerminalProfile: () => new vscode.TerminalProfile(engineTerminal(engine, name, level)),
         }));
     }
     context.subscriptions.push(vscode.window.onDidOpenTerminal((terminal) => {

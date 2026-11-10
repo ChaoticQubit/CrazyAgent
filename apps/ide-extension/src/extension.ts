@@ -12,7 +12,7 @@ import { sidebarChanges } from "./sidebar/changes.js";
 import { sidebarContext } from "./sidebar/context.js";
 import { sidebarMemories } from "./sidebar/memories.js";
 import { registerChanges } from "./scm.js";
-import { sandboxedTerminal, terminalGit } from "./terminal.js";
+import { sandboxedTerminal, terminalGit, terminalMenu } from "./terminal.js";
 import { registerTrust } from "./trust.js";
 
 /**
@@ -33,6 +33,7 @@ const features: Feature[] = [
   extensions,
   reveal,
   sandboxedTerminal,
+  terminalMenu,
   terminalGit,
   registerTrust,
   remoteGit,

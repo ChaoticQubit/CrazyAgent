@@ -1,3 +1,4 @@
+use crate::sandbox::policy::AgentAccess;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
@@ -8,6 +9,11 @@ pub const CAPABILITY_VARIABLE: &str = super::bridge::CAPABILITY_ENV;
 /// The variable that hands the IDE server's extension host the owner socket path its
 /// engine bridge connects to; without it the built-in extension starts none of its features.
 pub const SOCKET_VARIABLE: &str = super::bridge::SOCKET_ENV;
+
+/// The variable that tells the IDE server's extension host the project's access level, for
+/// the terminal menu to grey the levels above it. The engine decides what a terminal may do
+/// from the level it read itself, so this only shapes the menu.
+pub const ACCESS_VARIABLE: &str = "CRAZYAGENT_IDE_ACCESS";
 
 /// Every variable the IDE server may inherit from the engine, besides the `LC_` locale
 /// variables: what an owner shell needs, and nothing a provider, pool or engine secret or
@@ -23,7 +29,7 @@ const LOCALES_MAX: usize = 16;
 const VALUE_BYTES_MAX: usize = 16 * 1024;
 
 /// The most variables the IDE server's environment holds.
-pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 6 + super::git::CONFIG_ENV.len();
+pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 7 + super::git::CONFIG_ENV.len();
 
 /// Tells whether the IDE server may inherit a variable of this name: one of [`ALLOWED`], or
 /// `LC_` followed by capital letters. Input: the name. Output: the answer.
@@ -48,22 +54,32 @@ pub struct ServerGit<'a> {
     pub config: &'a Path,
 }
 
+/// The word the extension reads for a level. Input: the level. Output: the word.
+fn access_name(access: AgentAccess) -> &'static str {
+    match access {
+        AgentAccess::Sandboxed => "sandboxed",
+        AgentAccess::OwnBranch => "own_branch",
+        AgentAccess::Full => "full",
+    }
+}
+
 /// Builds the IDE server's whole environment from the engine's own: only the variables
 /// [`allowed`] passes, each value at most 16 KiB, at most 16 locale variables, then
 /// [`CAPABILITY_VARIABLE`] naming the capability file, [`SOCKET_VARIABLE`] naming the owner
-/// socket and the AI lock's [`super::settings::LOCKED_VARIABLE`] naming the locked-keys file,
-/// then with `git` git's search ceiling [`super::git::CEILING_VARIABLE`], the IDE git
+/// socket, the AI lock's [`super::settings::LOCKED_VARIABLE`] naming the locked-keys file and
+/// [`ACCESS_VARIABLE`] naming the project's level, then with `git` git's search ceiling [`super::git::CEILING_VARIABLE`], the IDE git
 /// configuration [`super::git::CONFIG_ENV`] and the config path of
 /// [`super::git::global_env`]; none is ever taken from the engine's own variables. The server
 /// starts from a cleared environment holding exactly this. Inputs: the engine's variables,
 /// such as `std::env::vars_os()`, the capability file path, the owner socket path, the
-/// locked-keys file path and the [`ServerGit`], or None for a Full access server. Output: the
-/// variables in order.
+/// locked-keys file path, the project's level and the [`ServerGit`], or None for a Full access
+/// server. Output: the variables in order.
 pub fn server_env(
     source: impl IntoIterator<Item = (OsString, OsString)>,
     capability: &Path,
     socket: &Path,
     locked: &Path,
+    access: AgentAccess,
     git: Option<ServerGit<'_>>,
 ) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = Vec::new();
@@ -95,6 +111,10 @@ pub fn server_env(
         OsString::from(super::settings::LOCKED_VARIABLE),
         locked.as_os_str().to_owned(),
     ));
+    env.push((
+        OsString::from(ACCESS_VARIABLE),
+        OsString::from(access_name(access)),
+    ));
     let global = git.map(|git| super::git::global_env(git.config));
     if let (Some(git), Some(global)) = (git, &global) {
         env.push((
@@ -118,6 +138,7 @@ pub fn server_env(
         allowed(name)
             || name == CAPABILITY_VARIABLE
             || name == SOCKET_VARIABLE
+            || name == ACCESS_VARIABLE
             || name == super::settings::LOCKED_VARIABLE
             || name == super::git::CEILING_VARIABLE
             || global.iter().flatten().any(|(fixed, _)| name == fixed)
