@@ -243,9 +243,26 @@ function menuNames() {
   return onApp("get name of every menu bar item of menu bar 1").split(", ");
 }
 
-/** Sends one Command key combination to the front window of the test app. Input: the key. */
-function commandKey(key) {
+/** Brings the test app forward and fails the row, with nothing sent, unless it is the frontmost
+ * app, because a real key goes to whichever app is in front and Cmd+W could close an owner's
+ * window. Output: once the test app is in front; throws when it never gets there. */
+async function testAppInFront() {
   onApp("set frontmost to true");
+  const mine = appProcess();
+  let front = "";
+  for (const deadline = Date.now() + FRONT_MS; ; await pause(POLL_MS / 4)) {
+    const asked = spawnSync("/usr/bin/osascript", ["-e", 'tell application "System Events" to get unix id of first process whose frontmost is true'], { encoding: "utf8" });
+    assert.equal(asked.status, 0, `reading the frontmost app: ${asked.stderr}`);
+    front = asked.stdout.trim();
+    if (front === mine) return;
+    assert.ok(Date.now() < deadline, `process ${front} is in front, not the test app ${mine}, so no key or click was sent`);
+  }
+}
+
+/** Sends one Command key combination to the front window of the test app, only when the test app
+ * is the frontmost app. Input: the key. Output: once it was sent. */
+async function commandKey(key) {
+  await testAppInFront();
   onApp(`keystroke "${key}" using command down`);
 }
 
@@ -255,8 +272,10 @@ function raise(title) {
   onApp(`perform action "AXRaise" of (first window whose title contains "${title}")`);
 }
 
-/** Presses the close button of the app's window with this title. Input: the title's words. */
-function closeTitled(title) {
+/** Presses the close button of the app's window with this title, only when the test app is the
+ * frontmost app. Input: the title's words. Output: once it was pressed. */
+async function closeTitled(title) {
+  await testAppInFront();
   onApp(`click (first button of (first window whose title contains "${title}") whose subrole is "AXCloseButton")`);
 }
 
@@ -264,6 +283,7 @@ const OWN_WINDOW = /^ide-window-[0-9a-f]+$/;
 const OPEN_WINDOW = "Open in its own window";
 const WORKBENCH_MS = 90;
 const OWN_WINDOW_MS = 30000;
+const FRONT_MS = 5000;
 
 /** Opens a project's IDE tab, waits for the workbench and presses the window button, all on the
  * page's timers because the webdriver session cannot see the main window meanwhile. Input: the
@@ -319,9 +339,9 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     await browser.saveScreenshot(join(evidence, "tab-while-out.png"));
     assert.ok(!menuNames().includes("File"), `the IDE window's menu owns none of the editor's keys: ${menuNames()}`);
     const before = (await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.focused && row.look !== null, "the IDE window never had the focus", OWN_WINDOW_MS)).look.editors;
-    commandKey("n");
+    await commandKey("n");
     const opened = await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.look?.editors === before + 1, "Cmd+N opened no editor in the IDE window", OWN_WINDOW_MS);
-    commandKey("w");
+    await commandKey("w");
     await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.look?.editors === before, "Cmd+W closed no editor in the IDE window", OWN_WINDOW_MS, opened.at);
     assert.ok(windowRows().at(-1).windows.some((label) => OWN_WINDOW.test(label)), "Cmd+W left the window itself open");
 
@@ -334,7 +354,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
 
     await startPlan([[20, "go", `#/`]]);
     const closing = Date.now();
-    closeTitled("IDE");
+    await closeTitled("IDE");
     const home = await rowWhere((row) => row.view?.window === "main", "closing the window did not return the IDE to the main window", OWN_WINDOW_MS, closing);
     assert.equal(home.look?.origin, inMain.look.origin, "the same page came back");
     assert.ok(!home.windows.some((label) => OWN_WINDOW.test(label)), "and the window has gone");
@@ -350,7 +370,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
 
     await go(`#/projects/${encodeURIComponent(third)}/overview`);
     await moveOut(third);
-    closeTitled("CrazyAgent");
+    await closeTitled("CrazyAgent");
     for (const deadline = Date.now() + OWN_WINDOW_MS; spawnSync("/usr/bin/pgrep", ["-f", `^${app}`], { encoding: "utf8" }).stdout.trim() !== ""; await pause(POLL_MS)) {
       assert.ok(Date.now() < deadline, `closing the main window left a window open: ${JSON.stringify(windowRows().at(-1))}`);
     }
