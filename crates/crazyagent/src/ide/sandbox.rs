@@ -1,6 +1,6 @@
 use crate::engine::EngineError;
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
-use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, seatbelt_pattern};
+use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, any_case, seatbelt_pattern};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -255,12 +255,12 @@ fn agent_config(root: &Path) -> String {
     let agents = format!(
         "^{}({})?/{}/[^/]+/",
         caseless(root),
-        anycase("/\\.crazyagent"),
-        anycase("worktrees")
+        any_case("/.crazyagent"),
+        any_case("worktrees")
     );
-    let folder = anycase("\\.vscode");
-    let workspace = anycase("\\.code-workspace");
-    let git = anycase("\\.git");
+    let folder = any_case(".vscode");
+    let workspace = any_case(".code-workspace");
+    let git = any_case(".git");
     format!(
         "(deny file-read*\n  (regex #\"{agents}(.*/)?{folder}(/.*)?$\")\n  (regex #\"{agents}(.*/)?[^/]*{workspace}$\")\n  (regex #\"{agents}{git}(/.*)?$\"))\n"
     )
@@ -276,33 +276,21 @@ fn agent_admin(root: &Path) -> String {
     let admins = format!(
         "^{}/{}/{}(/.*)?$",
         caseless(root),
-        anycase("\\.git"),
-        anycase("worktrees")
+        any_case(".git"),
+        any_case("worktrees")
     );
     format!("(deny file-write*\n  (regex #\"{admins}\"))\n")
 }
 
-/// A Seatbelt regex matching `path` in any letter case, as APFS matches names, so a case
-/// variant of a locked name cannot be created or written. Input: a plain absolute path.
+/// A Seatbelt regex matching `path` in any letter case, as APFS matches names, the Kelvin
+/// sign for `k` and the long s for `s` included ([`any_case`], LL2S-2), so a case variant of
+/// a locked or denied name cannot be created or written. Input: a plain absolute path.
 /// Output: the pattern text, without anchors.
 fn caseless(path: &Path) -> String {
-    anycase(&seatbelt_pattern(path))
-}
-
-/// Makes a Seatbelt pattern match in any letter case: each ASCII letter becomes a class of
-/// both its cases. Input: the pattern. Output: the caseless pattern.
-fn anycase(text: &str) -> String {
-    let mut pattern = String::new();
-    for character in text.chars() {
-        if character.is_ascii_alphabetic() {
-            pattern.push('[');
-            pattern.push(character.to_ascii_lowercase());
-            pattern.push(character.to_ascii_uppercase());
-            pattern.push(']');
-        } else {
-            pattern.push(character);
-        }
-    }
+    let text = path.display().to_string();
+    assert!(text.starts_with('/'));
+    let pattern = any_case(&text);
+    assert!(pattern.starts_with('/'));
     pattern
 }
 

@@ -2695,7 +2695,7 @@ fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
 /// only other letters that fold to ASCII; those two are spelled as groups, so each matches
 /// its whole UTF-8 sequence (LL2S-2). Input: text without a quote or backslash. Output: the
 /// pattern text, without anchors.
-fn any_case(text: &str) -> String {
+pub(crate) fn any_case(text: &str) -> String {
     regex_escape(text)
         .chars()
         .map(|character| {
