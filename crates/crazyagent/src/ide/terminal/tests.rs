@@ -783,6 +783,7 @@ fn terminal_profiles_hide_every_shell_and_default_to_the_extension_sandboxed_pro
         ("TITLE", SANDBOXED),
         ("OWN_BRANCH_PROFILE", OWN_BRANCH_PROFILE),
         ("OWN_BRANCH_TITLE", OWN_BRANCH),
+        ("FULL_TITLE", FULL_ACCESS),
     ] {
         let line = format!(
             "exports.{export} = {};",
