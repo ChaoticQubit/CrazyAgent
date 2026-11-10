@@ -156,9 +156,10 @@ impl AgentNetwork {
 /// model port. A Full access process has no Seatbelt for a choice to limit, so it never
 /// asks. Inputs: the level and the choice. Output: the sandbox's network.
 pub fn ide_network(level: AgentAccess, choice: AgentNetwork) -> super::SandboxNetwork {
+    assert_ne!(level, AgentAccess::Full);
     match level {
-        AgentAccess::OwnBranch => super::SandboxNetwork::Only(Vec::new()),
-        AgentAccess::Sandboxed | AgentAccess::Full => choice.sandbox(None),
+        AgentAccess::OwnBranch => choice.sandbox(None),
+        AgentAccess::Sandboxed | AgentAccess::Full => super::SandboxNetwork::Only(Vec::new()),
     }
 }
 

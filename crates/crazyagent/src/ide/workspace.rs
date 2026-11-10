@@ -164,8 +164,9 @@ impl IdePolicy {
     /// Tells whether a server launched under this policy still honours the saved one: the
     /// same level, and at Own branch the same network choice, which no other level reads.
     /// Input: the saved policy. Output: true when the server may keep running.
-    pub fn holds(self, _saved: Self) -> bool {
-        true
+    pub fn holds(self, saved: Self) -> bool {
+        self.access == saved.access
+            && (saved.access != AgentAccess::OwnBranch || self.network == saved.network)
     }
 }
 
@@ -174,11 +175,13 @@ impl IdePolicy {
 /// `ide_workspace_unavailable` for one that cannot be read, so a tampered one never widens
 /// the IDE.
 pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineError> {
-    let _ = (root, project);
-    Ok(IdePolicy {
-        access: AgentAccess::default(),
-        network: AgentNetwork::default(),
-    })
+    let db = open(root)?;
+    crate::sandbox::policy::load(&db, project.as_str())
+        .map(|policy| IdePolicy {
+            access: policy.access,
+            network: policy.network,
+        })
+        .map_err(unavailable)
 }
 
 /// Whether an engine-made worktree of the project is inside the older agents root
