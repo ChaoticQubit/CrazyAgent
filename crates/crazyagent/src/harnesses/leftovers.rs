@@ -25,6 +25,8 @@ pub const LINEAGE_VARIABLE: &str = "CRAZYAGENT_LINEAGE";
 /// How often a lineage that follows a running agent reads the process table, through one
 /// read shared by every lineage of the engine.
 pub(crate) const FOLLOW_EVERY: Duration = Duration::from_secs(2);
+/// What [`Leftovers::names`] says when no process of a stop could be listed.
+pub const UNLISTED: &str = "unknown, the process list could not be read";
 /// The longest time between two tables a lineage takes, or the last and its stop's own read,
 /// with nothing missed: shared reads up to [`FOLLOW_EVERY`] old, taken up to that far apart
 /// (SECAUDIT-SETSID-LEFTOVER r2 L2).
@@ -325,6 +327,26 @@ impl Leftovers {
                 UNCHECKED_HOLD_MAX.as_secs() / 60
             );
         }
+        let running = if self.0.sandboxed {
+            "No warden empties this agent's sandbox, so what it started outside its terminal outlived its stop; still running in its sandbox"
+        } else {
+            "Full access cannot stop what the agent started outside its terminal; still running"
+        };
+        format!(
+            "{running}: {}. Its account stays held until they end or you sign it out",
+            self.names()
+        )
+    }
+
+    /// Names what still runs, for a stop that holds no account as well as in [`Self::plain`]:
+    /// at most `NAMED_MAX` by id and program, counting the rest and saying when more may run
+    /// unlisted, or [`UNLISTED`] when none could be listed. Input: the leftovers. Output: the
+    /// names.
+    pub fn names(&self) -> String {
+        assert!(!self.0.known.is_empty() || self.0.unchecked);
+        if self.0.known.is_empty() {
+            return UNLISTED.to_owned();
+        }
         let named: Vec<String> = self
             .0
             .known
@@ -343,15 +365,7 @@ impl Leftovers {
         } else {
             ""
         };
-        let running = if self.0.sandboxed {
-            "No warden empties this agent's sandbox, so what it started outside its terminal outlived its stop; still running in its sandbox"
-        } else {
-            "Full access cannot stop what the agent started outside its terminal; still running"
-        };
-        format!(
-            "{running}: {}{counted}{unlisted}. Its account stays held until they end or you sign it out",
-            named.join(", ")
-        )
+        format!("{}{counted}{unlisted}", named.join(", "))
     }
 
     /// Keeps `kept`, such as the agent's credential copy and account lease, listed under
@@ -914,7 +928,7 @@ fn parse(listing: &str, user: u32, own: i32) -> Result<Vec<(Process, i32)>, Unst
 }
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const LISTING: &str = "  501   1 501 Ss   Wed Oct 28 03:10:00 2026     /usr/bin/perl\n\
@@ -1357,7 +1371,7 @@ mod tests {
     /// that exits at once, so no parent or session leads to it. Inputs: the folder, the id
     /// file's name, the token and one more variable. Output: the shell's id and the sleeper's.
     #[cfg(target_os = "macos")]
-    fn detached(
+    pub(crate) fn detached(
         folder: &std::path::Path,
         name: &str,
         token: &LineageToken,

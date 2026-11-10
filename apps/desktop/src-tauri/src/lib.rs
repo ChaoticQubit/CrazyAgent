@@ -3503,7 +3503,7 @@ async fn desktop_ide_open(
     views: State<'_, ide::IdeViews>,
     project_id: String,
     bounds: ide::Bounds,
-) -> Result<bool, BridgeError> {
+) -> Result<ide::Opened, BridgeError> {
     main_window(&webview)?;
     let project = bridge::ide::ide_project(&project_id)?;
     let bounds = bounds.checked()?;
@@ -3513,10 +3513,12 @@ async fn desktop_ide_open(
         let call = read(&state).await?.ide_open(project.clone())?;
         call.await?
     };
+    let left = opened.left.clone();
     let workbench = ide::workbench(&opened)?;
     let window = webview.window();
     let bounds = bounds.in_window(&window)?;
-    ide::show(&app, &window, &views, &project, workbench, bounds, ticket)
+    let own_window = ide::show(&app, &window, &views, &project, workbench, bounds, ticket)?;
+    Ok(ide::Opened { own_window, left })
 }
 
 #[tauri::command]

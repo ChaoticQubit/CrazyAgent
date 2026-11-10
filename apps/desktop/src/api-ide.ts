@@ -185,10 +185,15 @@ export function ideView(retry = false): Promise<Result<IdeView>> {
   return call<IdeView>("desktop_ide_state", { retry });
 }
 
+/** What an open tells the tab: whether the IDE stays in its own window, and what the
+ * project's last Full access IDE left running after it stopped, named once. */
+export type IdeOpened = { ownWindow: boolean; left: string | null };
+
 /** Opens a project's IDE and shows it over the panel. Inputs: the project and the panel.
- * Output: true when the IDE stays in its own window instead, or the refusal. */
-export function openIde(projectId: string, panel: IdeBounds): Promise<Result<boolean | null>> {
-  return call<boolean | null>("desktop_ide_open", { projectId, bounds: panel });
+ * Output: whether the IDE stays in its own window instead and what the last one left
+ * running, or the refusal. */
+export function openIde(projectId: string, panel: IdeBounds): Promise<Result<IdeOpened | null>> {
+  return call<IdeOpened | null>("desktop_ide_open", { projectId, bounds: panel });
 }
 
 /** Moves a project's loaded IDE into a window of its own. Input: the project. Output: done, or

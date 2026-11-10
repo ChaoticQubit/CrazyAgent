@@ -62,6 +62,7 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
   const panel = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<IdeTabState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [left, setLeft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [outProject, setOutProject] = useState<string | null>(null);
   const [moving, setMoving] = useState(false);
@@ -158,7 +159,8 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
         setProblem(failureLine(result, openFailure));
         return;
       }
-      if (result.value === true) {
+      setLeft(result.value?.left ?? null);
+      if (result.value?.ownWindow === true) {
         setOutProject(projectId);
         return;
       }
@@ -216,6 +218,7 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
 
   return <div className="ide-tab">
     {problem && <p className="ide-problem" role="alert">{problem}</p>}
+    {left && <p className="ide-left" role="status">Still running after this IDE stopped: {left}</p>}
     {state && !ready && <IdeStatus state={state} busy={busy} onAction={() => void act()} />}
     {!state && !problem && <p className="ide-status" role="status">Checking the IDE.</p>}
     {ready && !out && <div className="ide-bar"><Button size="small" disabled={moving} onClick={() => void moveOut()}>Open in its own window</Button></div>}

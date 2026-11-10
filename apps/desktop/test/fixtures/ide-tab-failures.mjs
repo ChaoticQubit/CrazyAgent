@@ -16,12 +16,14 @@ let reported = [];
 let places = [];
 let heldPlaces = null;
 let out = false;
+let leftOver = null;
 let held = {};
 let windowAsks = [];
 
 function answer(command) {
   if (command === "desktop_ide_window_open") out = true;
-  if (command === "desktop_ide_window_out" || command === "desktop_ide_open") return out;
+  if (command === "desktop_ide_window_out") return out;
+  if (command === "desktop_ide_open") return { ownWindow: out, left: leftOver };
   return command === "desktop_ide_state" ? READY : null;
 }
 
@@ -45,9 +47,11 @@ function Page() {
 
 /** Opens the real IDE tab with its stylesheet and the native answers stubbed. Inputs: the
  * commands that refuse, the commands this build does not have, whether each place waits
- * for [`answerPlace`] and whether the IDE already sits in its own window. */
-export function mount(refusing, missing = [], holdPlaces = false, startsOut = false) {
+ * for [`answerPlace`], whether the IDE already sits in its own window and what the open says
+ * the last IDE left running. */
+export function mount(refusing, missing = [], holdPlaces = false, startsOut = false, left = null) {
   refused = refusing;
+  leftOver = left;
   absent = missing;
   calls = [];
   reported = [];

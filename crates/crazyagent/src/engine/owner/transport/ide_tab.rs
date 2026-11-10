@@ -88,7 +88,8 @@ pub struct IdeTabState {
 
 /// Where one project's IDE is reached: the workbench URL on 127.0.0.1, the port its
 /// webview hosts answer on, the per-launch token file the desktop reads the session token
-/// from, and the workspace file the workbench opens.
+/// from, the workspace file the workbench opens, and what the project's last Full access
+/// server left running after its stop, handed out once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdeTabServer {
@@ -96,6 +97,8 @@ pub struct IdeTabServer {
     pub webview_port: u16,
     pub token_path: PathBuf,
     pub workspace: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -346,6 +349,7 @@ async fn open(
             webview_port: info.port,
             token_path: info.token_path,
             workspace: written.path,
+            left: authority.ide_servers.left(&project),
         },
     })
 }

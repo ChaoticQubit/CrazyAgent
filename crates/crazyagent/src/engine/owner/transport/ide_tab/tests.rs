@@ -459,3 +459,25 @@ async fn an_ide_opened_while_delete_everything_waits_is_refused_until_the_delete
     );
     assert!(after.is_ok(), "{after:?}");
 }
+
+/// An open's reply carries what the project's last Full access server left running, and a
+/// reply without it, as an older engine sends, still reads.
+#[test]
+fn an_open_reply_carries_what_the_last_server_left_and_reads_without_it() {
+    let server = IdeTabServer {
+        url: "http://127.0.0.1:47963/".to_owned(),
+        webview_port: 47_963,
+        token_path: PathBuf::from("/tmp/ca-ide/token"),
+        workspace: PathBuf::from("/tmp/ca-ide/workspace.code-workspace"),
+        left: Some("4242 /opt/homebrew/bin/node".to_owned()),
+    };
+    let text = serde_json::to_string(&server).unwrap();
+    assert_eq!(serde_json::from_str::<IdeTabServer>(&text).unwrap(), server);
+    let none = IdeTabServer {
+        left: None,
+        ..server
+    };
+    let older = serde_json::to_string(&none).unwrap();
+    assert!(!older.contains("left"), "{older}");
+    assert_eq!(serde_json::from_str::<IdeTabServer>(&older).unwrap(), none);
+}

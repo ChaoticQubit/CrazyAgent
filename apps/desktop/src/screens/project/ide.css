@@ -46,6 +46,11 @@
   color: var(--danger);
 }
 
+.ide-left {
+  margin: 0;
+  color: var(--text-2);
+}
+
 .ide-panel {
   flex: 1;
   min-height: 240px;
