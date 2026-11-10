@@ -1,3 +1,4 @@
+use crate::file_lock::HeldLock;
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use rustix::fs::{AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags};
 use rustix::io::Errno;
@@ -281,9 +282,9 @@ fn store(root: &Path, make: bool) -> io::Result<Option<OwnedFd>> {
 }
 
 /// Takes the store's lock, trying `LOCK_TRIES` times `LOCK_WAIT` apart. Inputs: the store
-/// and the non-blocking shared or exclusive operation. Output: the held lock file, released
-/// when dropped, or `WouldBlock` when another holder kept it.
-fn hold(store: &OwnedFd, operation: FlockOperation) -> io::Result<OwnedFd> {
+/// and the non-blocking shared or exclusive operation. Output: the held lock, unlocked when
+/// dropped, or `WouldBlock` when another holder kept it.
+fn hold(store: &OwnedFd, operation: FlockOperation) -> io::Result<HeldLock> {
     assert!(matches!(
         operation,
         FlockOperation::NonBlockingLockShared | FlockOperation::NonBlockingLockExclusive
@@ -292,7 +293,7 @@ fn hold(store: &OwnedFd, operation: FlockOperation) -> io::Result<OwnedFd> {
     let lock = rustix::fs::openat(store, LOCK, flags, Mode::from_raw_mode(0o600))?;
     for _ in 0..LOCK_TRIES {
         match rustix::fs::flock(&lock, operation) {
-            Ok(()) => return Ok(lock),
+            Ok(()) => return Ok(HeldLock(std::fs::File::from(lock))),
             Err(Errno::WOULDBLOCK) => std::thread::sleep(LOCK_WAIT),
             Err(error) => return Err(error.into()),
         }

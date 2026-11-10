@@ -573,6 +573,28 @@ fn a_profile_being_renewed_stays_noted_and_loses_its_sign_in_once_free() {
     assert!(!slot.files[0].exists());
 }
 
+/// RETIRE-WHILE-FREE-LOCK: the sweep's manifest and renewal locks are free the moment it
+/// returns, so a sign-in or check that starts right after it is not refused as in use.
+#[test]
+fn a_swept_profile_is_free_to_lock_right_after_the_sweep() {
+    let (dir, connection) = database();
+    let root = dir.path();
+    let slot = slot(root, "lab-profile");
+    put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
+
+    assert_eq!(sweep(&connection, root, None).unwrap(), 0);
+    assert!(!slot.files[0].exists());
+    for path in [slot.folder.join("identity.json"), slot.folder.clone()] {
+        let probe = std::fs::File::open(&path).unwrap();
+        let exclusive = rustix::fs::FlockOperation::NonBlockingLockExclusive;
+        assert!(
+            rustix::fs::flock(&probe, exclusive).is_ok(),
+            "{}",
+            path.display()
+        );
+    }
+}
+
 /// Condition 4: files a crash left between the note and the delete go at the next start.
 #[tokio::test]
 async fn the_next_engine_start_removes_the_account_files_a_crash_left_behind() {

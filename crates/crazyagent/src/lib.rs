@@ -18,6 +18,8 @@ pub mod coordination;
 pub mod credentials;
 pub mod engine;
 pub mod file_identity;
+#[cfg(unix)]
+pub mod file_lock;
 pub mod github;
 pub mod harnesses;
 /// The engine side of the IDE tab: per-project loopback IDE servers, their tokens, ports
