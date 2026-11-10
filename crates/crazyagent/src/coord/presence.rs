@@ -1,4 +1,4 @@
-use super::store::{MESSAGE_COLUMNS, agent, failure, message_from_row, party_of, state};
+use super::store::{Change, MESSAGE_COLUMNS, agent, failure, message_from_row, party_of, state};
 use super::{
     AgentId, AgentState, Message, Party, Presence, Receipt, Snapshot, TOOL_BYTES_MAX, Waiting,
 };
@@ -15,6 +15,11 @@ const AWAY_MS: i64 = 60 * 60_000;
 const AGENTS_SHOWN_MAX: usize = 256;
 const QUESTIONS_SHOWN_MAX: usize = 100;
 const UNREAD_SCAN_MAX: usize = 4096;
+const HOUR_MS: i64 = 60 * 60 * 1000;
+/// The most different tools one agent keeps rows for in one hour.
+pub(crate) const TOOLS_PER_HOUR_MAX: i64 = 64;
+/// The most rows the tools chart keeps.
+pub(crate) const TOOL_HOURS_MAX: i64 = 1 << 20;
 
 const _: () =
     assert!(LIVE_MS < IDLE_MS && IDLE_MS < AWAY_MS && super::adoption::UNGROUNDED_MS < IDLE_MS);
@@ -50,8 +55,9 @@ pub fn set_waiting(
     Ok(())
 }
 
-/// Counts one tool call of an agent for the adoption counts (Q18) and as activity.
-/// Takes the database, the agent, the tool name as its harness reported it (1 to
+/// Counts one tool call of an agent for the adoption counts (Q18) and as activity, the
+/// count and its chart hour in one change, nested in the caller's transaction if it holds
+/// one. Takes the database, the agent, the tool name as its harness reported it (1 to
 /// `TOOL_BYTES_MAX` bytes, no space or control character) and the time in ms.
 /// Returns Ok, `coord_tool_invalid` or `coord_agent_unknown`.
 pub fn record_tool(
@@ -60,20 +66,59 @@ pub fn record_tool(
     tool: &str,
     now: i64,
 ) -> Result<(), EngineError> {
+    count_tool(db, agent_id, tool, now, true)
+}
+
+/// Counts one tool call as `record_tool` does, and in the hour of `now` only when `chart` is
+/// true, for a caller that leaves the call's hour to the recount. Takes the database, the
+/// agent, the tool name, the time in ms and whether to chart it. Returns Ok,
+/// `coord_tool_invalid` or `coord_agent_unknown`.
+pub(crate) fn count_tool(
+    db: &Connection,
+    agent_id: AgentId,
+    tool: &str,
+    now: i64,
+    chart: bool,
+) -> Result<(), EngineError> {
     if tool.is_empty()
         || tool.len() > TOOL_BYTES_MAX
         || tool.chars().any(|c| c.is_control() || c.is_whitespace())
     {
         return Err(failure("coord_tool_invalid"));
     }
-    touch(db, agent_id, now)?;
+    let change = Change::begin(db)?;
+    touch(change.db(), agent_id, now)?;
+    change
+        .db()
+        .execute(
+            "INSERT INTO coord_tool_use(agent,tool,count,last) VALUES (?1,?2,1,?3)
+             ON CONFLICT(agent,tool) DO UPDATE SET count=MIN(count+1, 4294967295), last=?3",
+            params![agent_id, tool, now],
+        )
+        .map_err(state)?;
+    if chart {
+        add_tool_hour(change.db(), now - now.rem_euclid(HOUR_MS), agent_id, tool).map_err(state)?;
+    }
+    change.commit()
+}
+
+/// Counts one tool call in its hour. A new row needs room under both caps; past them the call
+/// is left out of the chart only. Inputs: the store, the hour, the agent and the tool. Output:
+/// the rows written.
+pub(crate) fn add_tool_hour(
+    db: &Connection,
+    hour_ms: i64,
+    agent: AgentId,
+    tool: &str,
+) -> rusqlite::Result<usize> {
     db.execute(
-        "INSERT INTO coord_tool_use(agent,tool,count,last) VALUES (?1,?2,1,?3)
-         ON CONFLICT(agent,tool) DO UPDATE SET count=MIN(count+1, 4294967295), last=?3",
-        params![agent_id, tool, now],
+        "INSERT INTO coord_tool_hours(hour_ms,agent,tool,count)
+         SELECT ?1,?2,?3,1 WHERE EXISTS (SELECT 1 FROM coord_tool_hours WHERE hour_ms=?1 AND agent=?2 AND tool=?3)
+            OR (COALESCE((SELECT rows FROM coord_tool_hours_rows),0)<?4
+                AND (SELECT COUNT(*) FROM coord_tool_hours WHERE hour_ms=?1 AND agent=?2)<?5)
+         ON CONFLICT(hour_ms,agent,tool) DO UPDATE SET count=MIN(count+1, 4294967295)",
+        params![hour_ms, agent, tool, TOOL_HOURS_MAX, TOOLS_PER_HOUR_MAX],
     )
-    .map_err(state)?;
-    Ok(())
 }
 
 /// Stores activity without checking the agent, for callers that already did.

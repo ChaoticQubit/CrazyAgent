@@ -4,6 +4,12 @@ use std::io::Write;
 const HOUR: i64 = 60 * 60 * 1000;
 const NOW: i64 = 1_793_000_000_000;
 
+fn tokens_of(usages: &[Usage]) -> Tokens {
+    usages
+        .iter()
+        .fold(Tokens::default(), |sum, usage| sum.plus(usage.tokens))
+}
+
 fn attribution(kind: RunKind, pool: Option<&str>) -> Attribution {
     Attribution {
         kind,
@@ -277,8 +283,7 @@ fn codex_count(input: u64, cached: u64, output: u64) -> String {
                         "output_tokens": output,
                         "reasoning_output_tokens": 0,
                         "total_tokens": input + output
-                    },
-                    "last_token_usage": {"input_tokens": 1, "output_tokens": 1}
+                    }
                 },
                 "rate_limits": null
             }
@@ -421,7 +426,7 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
     let opened = open_record(&record).unwrap();
     let length = opened.2;
     append(&record, &claude_assistant("g2", 3, 1, 0, 0, "end_turn"));
-    let (growth, _) = read_opened(opened, Format::Claude, &mut progress, NOW);
+    let growth = tokens_of(&read_opened(opened, Format::Claude, &mut progress, NOW, "").0);
     assert_eq!(
         growth,
         Tokens {
@@ -432,7 +437,7 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
         }
     );
     assert_eq!(progress.offset, length);
-    let (growth, _) = read_record(&record, Format::Claude, &mut progress, NOW + 1);
+    let growth = tokens_of(&read_record(&record, Format::Claude, &mut progress, NOW + 1).0);
     assert_eq!(
         growth,
         Tokens {
@@ -450,14 +455,14 @@ fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan()
     append(&record, head);
     let opened = open_record(&record).unwrap();
     append(&record, tail);
-    let (growth, _) = read_opened(opened, Format::Claude, &mut progress, NOW + 2);
+    let growth = tokens_of(&read_opened(opened, Format::Claude, &mut progress, NOW + 2, "").0);
     assert_eq!(growth, Tokens::default());
     assert_eq!(progress.offset, grown);
-    let (growth, _) = read_record(&record, Format::Claude, &mut progress, NOW + 3);
+    let growth = tokens_of(&read_record(&record, Format::Claude, &mut progress, NOW + 3).0);
     assert_eq!((growth.input, growth.output), (5, 5));
     assert_eq!(progress.offset, std::fs::metadata(&record).unwrap().len());
     assert_eq!(
-        read_record(&record, Format::Claude, &mut progress, NOW + 4).0,
+        tokens_of(&read_record(&record, Format::Claude, &mut progress, NOW + 4).0),
         Tokens::default()
     );
 }
@@ -695,7 +700,7 @@ fn a_record_that_is_a_fifo_is_skipped_without_waiting_for_a_writer() {
     });
     assert_eq!(
         read.recv_timeout(std::time::Duration::from_secs(5)),
-        Ok(((Tokens::default(), None), Progress::default())),
+        Ok(((Vec::new(), None), Progress::default())),
         "a FIFO record is skipped without waiting for a writer"
     );
 }
@@ -897,9 +902,11 @@ fn a_run_past_its_day_is_forgotten_with_its_records_once_its_home_is_gone() {
     let homes = tempfile::tempdir().unwrap();
     let gone = homes.path().join("run");
     let kept = homes.path().join("run-2");
-    for home in [&gone, &kept] {
+    for (home, thread) in [(&gone, "a"), (&kept, "b")] {
         append(
-            &home.join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-r.jsonl"),
+            &home.join(format!(
+                "sessions/2026/10/27/rollout-2026-10-27T03-00-00-{thread}.jsonl"
+            )),
             &codex_count(400, 100, 20),
         );
         register_run(&db, home, &unattributed("codex"), NOW).unwrap();
@@ -1621,7 +1628,10 @@ fn claude_transcript_tool_calls_count_only_for_an_agent_launched_without_hooks()
         let home = tempfile::tempdir().unwrap();
         let record = home.path().join("projects/-repo/s1.jsonl");
         for line in &lines {
-            append(&record, line);
+            append(
+                &record,
+                &line.replace("\"id\":\"m", &format!("\"id\":\"{agent}-m")),
+            );
         }
         (agent, home)
     });
@@ -1655,6 +1665,71 @@ fn claude_transcript_tool_calls_count_only_for_an_agent_launched_without_hooks()
         Vec::new(),
         "the agent with hooks counts its calls through them"
     );
+}
+
+#[test]
+fn one_harness_name_holds_claude_and_claude_code_rows() {
+    let (_root, db) = store();
+    let mut alias = attribution(RunKind::Agent, None);
+    alias.harness = "claude".into();
+    let named = attribution(RunKind::Agent, None);
+    let mut unknown = attribution(RunKind::Agent, None);
+    unknown.harness = "mystery-cli".into();
+    let tokens = Tokens {
+        input: 10,
+        output: 5,
+        ..Tokens::default()
+    };
+    count_reported(&db, &alias, tokens, "s1", NOW).unwrap();
+    count_reported(&db, &named, tokens, "s1", NOW).unwrap();
+    count_reported(&db, &unknown, tokens, "s1", NOW).unwrap();
+    let rows: Vec<(String, i64)> = db
+        .prepare("SELECT harness,input FROM usage_tokens ORDER BY harness")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("claude-code".to_owned(), 20),
+            ("mystery-cli".to_owned(), 10)
+        ]
+    );
+}
+
+#[test]
+fn a_tool_filed_before_a_rewind_is_not_collected_again() {
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("s1.jsonl");
+    let line = |name: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": name, "input": {}}
+            ]}})
+        )
+    };
+    append(&record, &line("Bash"));
+    let filed = std::fs::metadata(&record).unwrap().len();
+    append(&record, &line("Read"));
+    let mut progress = Progress {
+        identity: file_identity(&std::fs::metadata(&record).unwrap()),
+        filed_to: filed,
+        ..Progress::default()
+    };
+    let mut tools = Vec::new();
+    read_record_with(
+        &record,
+        Format::Claude,
+        &mut progress,
+        NOW,
+        Some(&mut tools),
+        None,
+    );
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(names, ["Read"]);
 }
 
 /// SECAUDIT usage/capture/progress-message-id-unbounded: a message id in an agent-written

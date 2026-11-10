@@ -8,7 +8,10 @@ use crate::tui::keys::Key;
 use crate::tui::seam::Arrival;
 use crate::tui::text::{indent, row, styled, wrap};
 use crate::tui::theme::{Role, Theme};
+use crate::usage::RecountStatus;
 use crate::usage::health::{StepHealth, UsageStep};
+use crate::usage::metrics::{ActivityRow, ModelRow};
+use crate::usage::money::{MainNumber, MoneyView, PriceSource};
 use crate::usage::report::{UsageReport, UsageRow};
 use crate::usage::{AccountLimits, LimitSource, LimitWindow};
 use ratatui::Frame;
@@ -19,6 +22,29 @@ use std::collections::HashMap;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const ROWS_SHOWN: usize = 5;
 const UNITS: [(f64, &str); 3] = [(1e3, "K"), (1e6, "M"), (1e9, "B")];
+
+/// One dollar figure with its label. Input: nanodollars. Output: the text every TUI dollar uses.
+pub fn money_text(cost_nanos: i64) -> String {
+    let cents = cost_nanos.saturating_add(5_000_000) / 10_000_000;
+    let amount = if cost_nanos > 0 && cost_nanos < 5_000_000 {
+        "<$0.01".to_owned()
+    } else {
+        format!("${}.{:02}", cents / 100, cents % 100)
+    };
+    format!("{amount} (Estimated cost at API prices)")
+}
+
+/// One row's figures in the order the owner chose. Inputs: the tokens text, the row's dollars
+/// and the view. Output: the text. With no price date only the tokens are shown.
+pub fn figures_text(tokens: &str, cost_nanos: i64, money: &MoneyView) -> String {
+    if money.as_of.is_none() {
+        return tokens.to_owned();
+    }
+    match money.shown {
+        MainNumber::Dollars => format!("{}  {tokens}", money_text(cost_nanos)),
+        MainNumber::Tokens => format!("{tokens}  {}", money_text(cost_nanos)),
+    }
+}
 
 /// The range the Usage summary covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +189,7 @@ pub fn health_line(health: &StepHealth, now_ms: i64, offset: i64) -> String {
             "Counting research run tokens",
             "research token totals may be low",
         ),
+        UsageStep::Recount => ("Recounting history", "the comparison may arrive later"),
     };
     let times = match health.panics {
         1 => "once".to_owned(),
@@ -178,12 +205,78 @@ pub fn health_line(health: &StepHealth, now_ms: i64, offset: i64) -> String {
     }
 }
 
+/// The recount offer, shown until the owner chooses. Inputs: the comparison and whether
+/// dollars are shown. Output: its lines.
+fn recount_lines(status: &RecountStatus, priced: bool) -> Vec<Line<'static>> {
+    let money = |text: String| {
+        if priced {
+            format!("  {text}")
+        } else {
+            String::new()
+        }
+    };
+    let mut lines = vec![
+        Line::raw("We recounted your history."),
+        Line::raw(format!(
+            "Old  {} tokens  {} cache read{}",
+            compact(status.old.headline()),
+            compact(status.old.cache_read),
+            money("Not estimated".to_owned())
+        )),
+        Line::raw(format!(
+            "New  {} tokens  {} cache read{}",
+            compact(status.new.headline()),
+            compact(status.new.cache_read),
+            money(money_text(status.new_cost_nanos))
+        )),
+        Line::raw(format!(
+            "{} sessions recounted, {} keep their old numbers because their transcripts are gone or could not be read to the end.",
+            status.sessions_recounted, status.sessions_kept_old
+        )),
+        Line::raw("Recounted sessions count under the account their agent last used."),
+    ];
+    if status.homes_partial > 0 {
+        lines.push(Line::raw(format!(
+            "{} agent folders held more than one pass reads, and part of their history keeps its old numbers.",
+            status.homes_partial
+        )));
+    }
+    if priced {
+        lines.push(Line::raw("New dollars cover recounted sessions only. Sessions that keep their old numbers have no estimate."));
+    }
+    lines.push(Line::raw(
+        "Press n to use the new numbers, o to keep the old ones.",
+    ));
+    lines
+}
+
+/// The lines above the usage rows: how the numbers were counted and, until the owner chooses,
+/// the recount offer, each wrapped to the screen. Inputs: the report and the width. Output:
+/// the lines.
+fn recount_head(report: &UsageReport, limit: usize) -> Vec<Line<'static>> {
+    let priced = report.money.settings.prices != PriceSource::Off;
+    report
+        .counting_notice
+        .iter()
+        .map(|notice| Line::raw(notice.clone()))
+        .chain(
+            report
+                .recount
+                .iter()
+                .flat_map(|status| recount_lines(status, priced)),
+        )
+        .flat_map(|line| wrap(&line.to_string(), limit.max(8)))
+        .map(Line::raw)
+        .collect()
+}
+
 fn refusal(code: &str) -> &'static str {
     match code {
         "usage_unavailable" => "Usage isn't available in this engine yet.",
         "usage_outcome_unknown" => {
             "CrazyAgent couldn't confirm what happened. Press r to read again."
         }
+        "usage_recount_not_ready" => "This recount was already decided. Press r to read again.",
         other => plain(other),
     }
 }
@@ -321,6 +414,8 @@ fn group(
     title: &str,
     rows: &[UsageRow],
     name: impl Fn(&str) -> String,
+    money: &MoneyView,
+    limit: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     if rows.is_empty() {
@@ -338,25 +433,117 @@ fn group(
         let label: String = name(&row.key).chars().take(width).collect();
         let runs = if row.runs == 1 { "run" } else { "runs" };
         let counted = format!(
-            "  {label:<width$}  {:>6} tokens  {} {runs}",
-            compact(row.tokens.headline()),
+            "  {label:<width$}  {}  {} {runs}",
+            figures_text(
+                &format!("{:>6} tokens", compact(row.tokens.headline())),
+                row.cost_nanos,
+                money
+            ),
             row.runs
         );
-        lines.push(Line::raw(match &row.not_reported_by {
+        let shown = match &row.not_reported_by {
             None => counted,
             Some(harness) if row.tokens.headline() == 0 => {
                 format!("  {label:<width$}  usage not reported by {harness}")
             }
             Some(harness) => format!("{counted}  + usage not reported by {harness}"),
-        }));
+        };
+        lines.extend(row_lines(&shown, limit));
     }
-    if rows.len() > ROWS_SHOWN {
-        lines.push(styled(
-            format!("  and {} more", rows.len() - ROWS_SHOWN),
+    lines.extend(and_more(rows.len(), theme));
+    lines
+}
+
+/// One row wrapped under its heading. Inputs: the text and the content width. Output: the
+/// lines, two columns in.
+fn row_lines(text: &str, limit: usize) -> impl Iterator<Item = Line<'static>> {
+    wrap(text.trim_start(), limit.saturating_sub(2).max(8))
+        .into_iter()
+        .map(|part| Line::raw(format!("  {part}")))
+}
+
+/// Says how many rows did not fit. Inputs: the row count and the theme. Output: the line, none
+/// when all fit.
+fn and_more(rows: usize, theme: &Theme) -> Option<Line<'static>> {
+    (rows > ROWS_SHOWN).then(|| {
+        styled(
+            format!("  and {} more", rows - ROWS_SHOWN),
             Role::Muted,
             theme,
+        )
+    })
+}
+
+/// An activity's name as this screen shows it. Input: the stored name. Output: the words.
+fn activity_name(activity: &str) -> String {
+    if activity == "build_deploy" {
+        return "Build/deploy".to_owned();
+    }
+    let mut letters = activity.chars();
+    letters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(letters).collect()
+    })
+}
+
+/// The activity lines: one per activity up to `ROWS_SHOWN`, then the first-try rate over every
+/// activity. Inputs: the rows, the content width and the theme. Output: the lines, none for no
+/// rows.
+fn activity_lines(rows: &[ActivityRow], limit: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for row in rows.iter().take(ROWS_SHOWN) {
+        let word = if row.turns == 1 { "turn" } else { "turns" };
+        let name = activity_name(&row.activity);
+        lines.extend(row_lines(
+            &format!("{name:<14} {} {word}", row.turns),
+            limit,
         ));
     }
+    lines.extend(and_more(rows.len(), theme));
+    let edited: u64 = rows.iter().map(|row| row.edit_turns).sum();
+    let first: u64 = rows.iter().map(|row| row.first_try_turns).sum();
+    if let Some(percent) = (first * 100 + edited / 2).checked_div(edited) {
+        let word = if edited == 1 { "turn" } else { "turns" };
+        let rate = format!("{percent}% of {edited} editing {word} worked first try");
+        lines.extend(
+            wrap(&rate, limit.saturating_sub(2).max(8))
+                .into_iter()
+                .map(Line::raw),
+        );
+    }
+    lines
+}
+
+/// The model lines: one per model up to `ROWS_SHOWN`. Inputs: the rows, the money view, the
+/// content width and the theme. Output: the lines, none for no rows.
+fn model_lines(
+    rows: &[ModelRow],
+    money: &MoneyView,
+    limit: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for row in rows.iter().take(ROWS_SHOWN) {
+        let name = if row.model.is_empty() {
+            "Model not recorded"
+        } else {
+            row.model.as_str()
+        };
+        let tokens = format!("{} tokens", compact(row.tokens.headline()));
+        let figures = figures_text(&tokens, row.cost_nanos, money);
+        lines.extend(row_lines(&format!("{name}  {figures}"), limit));
+    }
+    lines.extend(and_more(rows.len(), theme));
+    lines
+}
+
+/// A titled block of lines. Inputs: the title, its lines and the theme. Output: a blank line,
+/// the heading and the lines, or nothing when there are none.
+fn section(title: &str, body: Vec<Line<'static>>, theme: &Theme) -> Vec<Line<'static>> {
+    if body.is_empty() {
+        return body;
+    }
+    let mut lines = vec![Line::default(), styled(title, Role::Heading, theme)];
+    lines.extend(body);
     lines
 }
 
@@ -376,8 +563,8 @@ pub fn partial_line(homes: u64) -> Option<String> {
     }
 }
 
-/// The Usage summary's lines: totals, each account's limits with reset countdowns, and
-/// tokens by project, pool and account. Inputs: the report, its range, names by id, now,
+/// The Usage summary's lines: totals, each account's limits with reset countdowns, tokens by
+/// project, pool, account and model, and turns by activity. Inputs: the report, its range, names by id, now,
 /// the local offset in seconds, the content width and the theme. Output: the lines.
 pub fn summary(
     report: &UsageReport,
@@ -409,6 +596,9 @@ pub fn summary(
             compact(removed)
         )));
     } else {
+        if report.money.as_of.is_some() {
+            lines.push(Line::raw(money_text(report.money.cost_nanos)));
+        }
         lines.push(Line::raw(format!(
             "Tokens {} ({} input, {} cache write, {} output)",
             compact(total.headline()),
@@ -475,18 +665,34 @@ pub fn summary(
         "By project",
         &report.projects,
         |key| shown(&names.projects, key).to_owned(),
+        &report.money,
+        limit,
         theme,
     ));
     lines.extend(group(
         "By pool",
         &report.pools,
         |key| shown(&names.pools, key).to_owned(),
+        &report.money,
+        limit,
         theme,
     ));
     lines.extend(group(
         "By account",
         &report.accounts,
         |key| shown(&names.accounts, key).to_owned(),
+        &report.money,
+        limit,
+        theme,
+    ));
+    lines.extend(section(
+        "By model",
+        model_lines(&report.models, &report.money, limit, theme),
+        theme,
+    ));
+    lines.extend(section(
+        "By activity",
+        activity_lines(&report.activity, limit, theme),
         theme,
     ));
     lines
@@ -518,6 +724,21 @@ impl UsagePage {
             load: Load::Idle,
             waiting: false,
         }
+    }
+
+    /// Whether the main number can be changed: a report is shown and prices are on, as on the
+    /// page. Output: the answer.
+    fn offers_main_number(&self) -> bool {
+        self.report
+            .as_ref()
+            .is_some_and(|(_, report)| report.money.settings.prices != PriceSource::Off)
+    }
+
+    /// Whether the page is offering the recount. Output: the answer.
+    fn offers_recount(&self) -> bool {
+        self.report
+            .as_ref()
+            .is_some_and(|(_, report)| report.recount.is_some())
     }
 
     fn reload(&mut self, ctx: &mut Ctx) {
@@ -562,7 +783,17 @@ impl UsagePage {
                 Line::raw("Press r to try again."),
             ],
             (_, Some((range, report))) => {
-                summary(report, *range, &Names::of(ctx), now_ms, offset, limit, ctx)
+                let mut shown = recount_head(report, limit);
+                shown.extend(summary(
+                    report,
+                    *range,
+                    &Names::of(ctx),
+                    now_ms,
+                    offset,
+                    limit,
+                    ctx,
+                ));
+                shown
             }
             _ => vec![
                 title,
@@ -608,12 +839,17 @@ impl Screen for UsagePage {
     }
 
     fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
-        vec![
+        let mut hints = vec![
             hint("t", "Range"),
             hint("r", "Read again"),
             hint("c", "Check limits now"),
-            hint("Esc", "Back"),
-        ]
+        ];
+        if self.offers_main_number() {
+            hints.push(hint("m", "Dollars or tokens"));
+        }
+        hints.push(hint("p", "Prices on or off"));
+        hints.push(hint("Esc", "Back"));
+        hints
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -625,6 +861,28 @@ impl Screen for UsagePage {
             }
             Key::Char('r') => self.reload(ctx),
             Key::Char('c') => send(ctx, SettingsJob::RefreshUsage),
+            Key::Char('m') if self.offers_main_number() => {
+                if let Some((_, report)) = &self.report {
+                    let mut settings = report.money.settings;
+                    settings.main_number = match settings.main_number {
+                        MainNumber::Dollars => MainNumber::Tokens,
+                        MainNumber::Tokens => MainNumber::Dollars,
+                    };
+                    send(ctx, SettingsJob::SetMoney(settings));
+                }
+            }
+            Key::Char('p') => {
+                if let Some((_, report)) = &self.report {
+                    let mut settings = report.money.settings;
+                    settings.prices = match settings.prices {
+                        PriceSource::Bundled => PriceSource::Off,
+                        PriceSource::Off => PriceSource::Bundled,
+                    };
+                    send(ctx, SettingsJob::SetMoney(settings));
+                }
+            }
+            Key::Char('n') if self.offers_recount() => send(ctx, SettingsJob::DecideRecount(true)),
+            Key::Char('o') if self.offers_recount() => send(ctx, SettingsJob::DecideRecount(false)),
             _ => return Flow::Ignored,
         }
         Flow::Handled
@@ -640,6 +898,16 @@ impl Screen for UsagePage {
             Some(SettingsEvent::UsageRefreshed(Err(code))) => {
                 ctx.say(Message::error("Could not check limits.", refusal(code)))
             }
+            Some(SettingsEvent::RecountDecided(Ok(()))) => self.reload(ctx),
+            Some(SettingsEvent::RecountDecided(Err(code))) => ctx.say(Message::error(
+                "Could not apply that choice.",
+                refusal(code),
+            )),
+            Some(SettingsEvent::MoneySet(Ok(()))) => self.reload(ctx),
+            Some(SettingsEvent::MoneySet(Err(code))) => ctx.say(Message::error(
+                "Could not change the setting.",
+                refusal(code),
+            )),
             _ => {}
         }
         Flow::Handled

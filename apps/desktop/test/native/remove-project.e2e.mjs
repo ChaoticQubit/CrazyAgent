@@ -201,7 +201,7 @@ test("Delete everything lists the loss, waits for the typed name, then moves the
   const { id, folder } = await made(name);
   assert.ok(folder.startsWith(`${run.projects}/`), `the project sits on the test disk image: ${folder}`);
   await value(run.bridge, "desktop_usage_metrics", { projectId: null, sinceMs: 0 });
-  execFileSync(SQLITE, [run.database, `INSERT INTO usage_tokens VALUES ((strftime('%s','now')/3600)*3600000,'agent','${id}','local-pool','local-account','1','rcli','s1',1200,300,8000,0)`]);
+  execFileSync(SQLITE, [run.database, `INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write) VALUES ((strftime('%s','now')/3600)*3600000,'agent','${id}','local-pool','local-account','1','rcli','s1',1200,300,8000,0)`]);
   await onPage("delete", async (page, me) => {
     await page.send("Emulation.setDeviceMetricsOverride", { width: 760, height: 560, deviceScaleFactor: 1, mobile: false });
     await openRemove(page, me, id, name);

@@ -92,6 +92,22 @@ CREATE TABLE IF NOT EXISTS coord_tool_use (
     last INTEGER NOT NULL,
     PRIMARY KEY(agent, tool)
 );
+CREATE TABLE IF NOT EXISTS coord_tool_hours (
+    hour_ms INTEGER NOT NULL,
+    agent INTEGER NOT NULL,
+    tool TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (hour_ms, agent, tool)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS coord_tool_hours_rows (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    rows INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS coord_tool_hours_added AFTER INSERT ON coord_tool_hours
+    BEGIN INSERT INTO coord_tool_hours_rows (singleton,rows) VALUES (1,1)
+        ON CONFLICT(singleton) DO UPDATE SET rows=rows+1; END;
+CREATE TRIGGER IF NOT EXISTS coord_tool_hours_gone AFTER DELETE ON coord_tool_hours
+    BEGIN UPDATE coord_tool_hours_rows SET rows=rows-1; END;
 CREATE TABLE IF NOT EXISTS coord_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,
@@ -170,7 +186,7 @@ pub fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), Engine
         )
         .map_err(state)?;
     }
-    for table in ["coord_activity", "coord_tool_use"] {
+    for table in ["coord_activity", "coord_tool_use", "coord_tool_hours"] {
         db.execute(
             &format!(
                 "DELETE FROM {table} WHERE agent IN (SELECT id FROM team_agents

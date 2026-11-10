@@ -17,12 +17,21 @@
 .mx-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 .mx-table-wrap { border: 0; border-radius: 0; }
 .mx-table .num { text-align: right; font-family: var(--mono); white-space: nowrap; }
+.mx-table thead th.num { white-space: normal; }
 .mx-table .mx-headline { font-weight: 600; }
 .mx-table .muted { color: var(--text-3); }
 .mx-total th, .mx-total td { border-top: 2px solid var(--border); }
-.mx-share { display: inline-flex; align-items: center; gap: 6px; }
+.mx-share { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .mx-bar { width: 70px; height: 6px; border-radius: var(--radius-pill); background: var(--surface-2); overflow: hidden; }
 .mx-bar i { display: block; height: 100%; background: var(--accent); }
+.mx-figure small { font-weight: 400; color: var(--text-2); }
+.mx-money { gap: var(--space-2); }
+.mx-credit { font-size: 12px; color: var(--text-3); }
+.mx-credit pre { max-height: 240px; overflow: auto; white-space: pre-wrap; font: 11px/16px var(--mono); }
+.mx-models .num, .mx-activity .num, .mx-tools-time .num { text-align: right; font-family: var(--mono); white-space: nowrap; }
+.mx-models tbody th { white-space: normal; overflow-wrap: anywhere; }
+.mx-tools-time td { overflow-wrap: anywhere; }
+.mx-first-try, .mx-tools-note { margin: var(--space-2) 0 0; color: var(--text-2); font-size: 13px; }
 .mx-lead { --mx-in: var(--brand); --mx-cw: #2a78d6; --mx-out: #149a6a; }
 .mx-lead .mx-chart .in, .mx-lead .mx-legend i.in { fill: var(--mx-in); background: var(--mx-in); }
 .mx-lead .mx-chart .cw, .mx-lead .mx-legend i.cw { fill: var(--mx-cw); background: var(--mx-cw); }

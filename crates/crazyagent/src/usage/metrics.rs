@@ -1,4 +1,5 @@
 use super::capture::Tokens;
+use super::money::PriceSource;
 use super::report::{REPORT_BYTES_MAX, ROWS_MAX, SHARES, count, has_table, tokens};
 use super::{failure, storage};
 use crate::engine::EngineError;
@@ -12,6 +13,8 @@ use std::collections::HashMap;
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 const SERIES_MAX: usize = 64;
+const TOOLS_PER_BAR_MAX: usize = 8;
+const TOOL_ROWS_MAX: usize = SERIES_MAX * TOOLS_PER_BAR_MAX;
 const TITLE_BYTES_MAX: usize = 120;
 const NAMES_MAX: usize = 8;
 
@@ -21,6 +24,8 @@ const NAMES_MAX: usize = 8;
 pub struct Bucket {
     pub start_ms: i64,
     pub tokens: Tokens,
+    #[serde(default)]
+    pub cost_nanos: i64,
 }
 
 /// One run: one agent session, with its tokens in the range, when they were last counted
@@ -39,6 +44,8 @@ pub struct RunRow {
     pub status: Option<String>,
     pub last_ms: i64,
     pub tokens: Tokens,
+    #[serde(default)]
+    pub cost_nanos: i64,
 }
 
 /// The tokens one project, account or harness used in the range, with how many agents and
@@ -56,6 +63,8 @@ pub struct GroupRow {
     pub more_projects: u64,
     #[serde(default)]
     pub merges: u64,
+    #[serde(default)]
+    pub cost_nanos: i64,
 }
 
 /// The tokens one agent used in the range, with the name clients show for it when the store
@@ -75,12 +84,43 @@ pub struct AgentRow {
     pub tokens: Tokens,
     #[serde(default)]
     pub turns: Option<u64>,
+    #[serde(default)]
+    pub cost_nanos: i64,
+}
+
+/// One model's tokens and estimated dollars over the range.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRow {
+    pub model: String,
+    pub tokens: Tokens,
+    pub cost_nanos: i64,
+}
+
+/// Tool calls in one chart bar.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolBucket {
+    pub start_ms: i64,
+    pub tool: String,
+    pub count: u64,
+}
+
+/// One activity's turns over the range.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityRow {
+    pub activity: String,
+    pub turns: u64,
+    pub edit_turns: u64,
+    pub first_try_turns: u64,
 }
 
 /// What the Metrics page counts besides the usage report: team tasks running now, waiting
 /// now, and done or failed in the range; the merges in the range, those into main and those
-/// undone; the tokens chart in bars of `bucket_ms`; and the breakdown by run, project, agent,
-/// account and harness.
+/// undone; the tokens chart in bars of `bucket_ms`; the breakdown by run, project, agent,
+/// account, harness and model, each with its estimated dollars; the tool calls per bar with
+/// the hour that counting began; and the turns per activity with the hour that counting began.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metrics {
@@ -101,6 +141,16 @@ pub struct Metrics {
     pub agents: Vec<AgentRow>,
     pub accounts: Vec<GroupRow>,
     pub harnesses: Vec<GroupRow>,
+    #[serde(default)]
+    pub models: Vec<ModelRow>,
+    #[serde(default)]
+    pub tools: Vec<ToolBucket>,
+    #[serde(default)]
+    pub tools_since_ms: Option<i64>,
+    #[serde(default)]
+    pub activity: Vec<ActivityRow>,
+    #[serde(default)]
+    pub activity_since_ms: Option<i64>,
 }
 
 /// The chart bar width for a range: two hours for up to a day, a day for up to eight days,
@@ -237,7 +287,7 @@ fn series(
     let mut statement = db
         .prepare(
             "SELECT ?2+((hour_ms-?2)/?3)*?3 AS start,TOTAL(input),TOTAL(output),\
-                TOTAL(cache_read),TOTAL(cache_write)
+                TOTAL(cache_read),TOTAL(cache_write),TOTAL(cost_nanos)
              FROM usage_tokens WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
              GROUP BY start ORDER BY start DESC LIMIT ?4",
         )
@@ -249,6 +299,7 @@ fn series(
                 Ok(Bucket {
                     start_ms: row.get(0)?,
                     tokens: tokens(row, 1)?,
+                    cost_nanos: row.get::<_, f64>(5)? as i64,
                 })
             },
         )
@@ -342,7 +393,7 @@ fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<Run
             "SELECT u.project,u.agent,u.session,\
                 MAX(MAX(u.hour_ms),COALESCE(MAX(s.last_ms),0)) AS last,MIN(u.hour_ms),\
                 TOTAL(u.input),TOTAL(u.output),TOTAL(u.cache_read),TOTAL(u.cache_write),\
-                MAX(s.last_ms)
+                MAX(s.last_ms),TOTAL(u.cost_nanos)
              FROM usage_tokens u LEFT JOIN usage_seen s
                 ON s.project=u.project AND s.agent=u.agent AND s.session=u.session
              WHERE u.hour_ms>=?2 AND (?1 IS NULL OR u.project=?1)
@@ -364,6 +415,7 @@ fn runs(db: &Connection, project: Option<&str>, since_ms: i64) -> Result<Vec<Run
                     status: None,
                     last_ms,
                     tokens: tokens(row, 5)?,
+                    cost_nanos: row.get::<_, f64>(10)? as i64,
                 },
                 row.get(4)?,
                 seen.map_or(last_ms.saturating_add(HOUR_MS - 1), |_| last_ms),
@@ -407,7 +459,7 @@ fn groups(
     let mut statement = db
         .prepare(&format!(
             "SELECT {column},TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),\
-                COUNT(DISTINCT agent),COUNT(DISTINCT agent||'/'||session)
+                COUNT(DISTINCT agent),COUNT(DISTINCT agent||'/'||session),TOTAL(cost_nanos)
              FROM usage_tokens WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
              GROUP BY {column}
              ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_write) DESC,{column} LIMIT ?3"
@@ -423,6 +475,7 @@ fn groups(
                 projects: Vec::new(),
                 more_projects: 0,
                 merges: 0,
+                cost_nanos: row.get::<_, f64>(7)? as i64,
             })
         })
         .map_err(storage)?
@@ -506,7 +559,7 @@ fn agents(
 ) -> Result<Vec<AgentRow>, EngineError> {
     let mut statement = db
         .prepare(
-            "SELECT project,agent,TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write)
+            "SELECT project,agent,TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),TOTAL(cost_nanos)
              FROM usage_tokens WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
              GROUP BY project,agent
              ORDER BY TOTAL(input)+TOTAL(output)+TOTAL(cache_write) DESC,project,agent LIMIT ?3",
@@ -524,6 +577,7 @@ fn agents(
                 more_accounts: 0,
                 tokens: tokens(row, 2)?,
                 turns: None,
+                cost_nanos: row.get::<_, f64>(6)? as i64,
             })
         })
         .map_err(storage)?
@@ -577,6 +631,7 @@ fn agents(
                 more_accounts: 0,
                 tokens: Tokens::default(),
                 turns: None,
+                cost_nanos: 0,
             }),
     );
     assert!(rows.len() <= ROWS_MAX);
@@ -594,9 +649,163 @@ fn agents(
     Ok(rows)
 }
 
+/// Reads each model's tokens and dollars, largest dollars first, or largest tokens first with
+/// prices off so the order keeps no hidden dollars. Inputs: the store, the project, the range
+/// start and the price source. Output: at most `ROWS_MAX` rows, or `usage_unavailable`.
+pub(super) fn models(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+    prices: PriceSource,
+) -> Result<Vec<ModelRow>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT model,TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),TOTAL(cost_nanos)
+             FROM usage_tokens WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
+             GROUP BY model
+             ORDER BY CASE WHEN ?4 THEN 0 ELSE TOTAL(cost_nanos) END DESC,TOTAL(input)+TOTAL(output)+TOTAL(cache_write) DESC,model LIMIT ?3",
+        )
+        .map_err(storage)?;
+    statement
+        .query_map(
+            params![
+                project,
+                since_ms,
+                ROWS_MAX as i64,
+                prices == PriceSource::Off
+            ],
+            |row| {
+                Ok(ModelRow {
+                    model: row.get(0)?,
+                    tokens: tokens(row, 1)?,
+                    cost_nanos: row.get::<_, f64>(5)? as i64,
+                })
+            },
+        )
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)
+}
+
+/// Reads tool calls per bar and when that counting began for the project. Inputs: the store,
+/// the project, the range start and the bar width. Output: the `TOOLS_PER_BAR_MAX` most-used
+/// tools of each of the newest `SERIES_MAX` bars, newest bar first and most-used first, and
+/// the earliest hour held; both empty on a store without team tables.
+fn tools(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+    bucket_ms: i64,
+) -> Result<(Vec<ToolBucket>, Option<i64>), EngineError> {
+    if !has_table(db, "coord_tool_hours")? || !has_table(db, "team_agents")? {
+        return Ok((Vec::new(), None));
+    }
+    let mut statement = db
+        .prepare(
+            "WITH bars AS (
+                 SELECT ?2+((h.hour_ms-?2)/?3)*?3 AS start,h.tool AS tool,SUM(h.count) AS calls
+                 FROM coord_tool_hours h JOIN team_agents a ON a.id=h.agent
+                 WHERE h.hour_ms>=?2 AND (?1 IS NULL OR a.project=?1)
+                 GROUP BY start,h.tool
+             ), ranked AS (
+                 SELECT start,tool,calls,
+                     ROW_NUMBER() OVER (PARTITION BY start ORDER BY calls DESC,tool) AS place,
+                     DENSE_RANK() OVER (ORDER BY start DESC) AS bar
+                 FROM bars
+             )
+             SELECT start,tool,calls FROM ranked WHERE place<=?4 AND bar<=?5
+             ORDER BY start DESC,place",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(
+            params![
+                project,
+                since_ms,
+                bucket_ms,
+                TOOLS_PER_BAR_MAX as i64,
+                SERIES_MAX as i64
+            ],
+            |row| {
+                Ok(ToolBucket {
+                    start_ms: row.get(0)?,
+                    tool: row.get(1)?,
+                    count: count(row.get(2)?),
+                })
+            },
+        )
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    let since = db
+        .query_row(
+            "SELECT h.hour_ms FROM coord_tool_hours h JOIN team_agents a ON a.id=h.agent
+             WHERE ?1 IS NULL OR a.project=?1 ORDER BY h.hour_ms LIMIT 1",
+            params![project],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    Ok((rows, since))
+}
+
+/// Reads each activity's turns, largest first, and when that counting began for the project.
+/// Inputs: the store, the project and the range start. Output: at most `ROWS_MAX` rows and the
+/// earliest hour held, or `usage_unavailable`.
+pub(super) fn activity(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+) -> Result<(Vec<ActivityRow>, Option<i64>), EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT activity,SUM(turns),SUM(edit_turns),SUM(first_try_turns) FROM usage_activity
+             WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
+             GROUP BY activity ORDER BY SUM(turns) DESC,activity LIMIT ?3",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![project, since_ms, ROWS_MAX as i64], |row| {
+            Ok(ActivityRow {
+                activity: row.get(0)?,
+                turns: count(row.get(1)?),
+                edit_turns: count(row.get(2)?),
+                first_try_turns: count(row.get(3)?),
+            })
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?;
+    let since = db
+        .query_row(
+            "SELECT MIN(hour_ms) FROM usage_activity WHERE ?1 IS NULL OR project=?1",
+            params![project],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    Ok((rows, since))
+}
+
+/// Totals the range's dollars and the headline tokens that have no price. Inputs: the
+/// store, the project and the range start. Output: nanodollars and tokens.
+pub(super) fn money_totals(
+    db: &Connection,
+    project: Option<&str>,
+    since_ms: i64,
+) -> Result<(i64, u64), EngineError> {
+    db.query_row(
+        "SELECT TOTAL(cost_nanos),TOTAL(CASE WHEN cost_nanos=0 THEN input+output+cache_write ELSE 0 END)
+         FROM usage_tokens WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)",
+        params![project, since_ms],
+        |row| Ok((row.get::<_, f64>(0)? as i64, row.get::<_, f64>(1)?.max(0.0) as u64)),
+    )
+    .map_err(storage)
+}
+
 /// Keeps the metrics within `REPORT_BYTES_MAX` encoded bytes so their reply fits one frame:
-/// while they are larger, runs, projects, agents, accounts and harnesses each keep a smaller
-/// share of `ROWS_MAX`, losing the oldest runs and the least-used rows first.
+/// while they are larger, runs, projects, agents, accounts, harnesses and models each keep a
+/// smaller share of `ROWS_MAX` and tools of `TOOL_ROWS_MAX`, losing the oldest runs and tool
+/// bars and the least-used rows first.
 /// Input: the metrics. Output: the metrics that fit, or `usage_unavailable`.
 fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
     for share in (0..=SHARES).rev() {
@@ -606,6 +815,8 @@ fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
         metrics.agents.truncate(kept);
         metrics.accounts.truncate(kept);
         metrics.harnesses.truncate(kept);
+        metrics.models.truncate(kept);
+        metrics.tools.truncate(TOOL_ROWS_MAX * share / SHARES);
         let encoded = serde_json::to_vec(&metrics).map_err(|_| failure("usage_unavailable"))?;
         if encoded.len() <= REPORT_BYTES_MAX {
             return Ok(metrics);
@@ -617,8 +828,9 @@ fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
 /// Reads the Metrics page's counts for one project, None for every project, over the range
 /// from `since_ms` to `now_ms`: tasks running and waiting now, done and failed in the range,
 /// the tokens chart in bars `bucket_for` the range, anchored at its start, the newest
-/// `ROWS_MAX` runs, and the largest `ROWS_MAX` projects, agents, accounts and harnesses by the
-/// headline, fewer of each when they would not fit one reply (`fit`).
+/// `ROWS_MAX` runs, the largest `ROWS_MAX` projects, agents, accounts and harnesses by the
+/// headline, the models by dollars, the most-used tools of the newest bars (`tools`), fewer of
+/// each when they would not fit one reply (`fit`), and the turns per activity (`activity`).
 /// Inputs: the store, the project, the range start and now. Output: the metrics;
 /// `usage_request_invalid` for a range that starts before the epoch or after now.
 pub fn read(
@@ -639,7 +851,10 @@ pub fn read(
     let bucket_ms = bucket_for(span_ms);
     let mut projects = groups(db, "project", project, since_ms)?;
     project_merges(db, project, since_ms, &mut projects)?;
-    let metrics = fit(Metrics {
+    let prices = super::money::read(db)?.prices;
+    let (tool_rows, tools_since_ms) = tools(db, project, since_ms, bucket_ms)?;
+    let (activity_rows, activity_since_ms) = activity(db, project, since_ms)?;
+    let mut metrics = fit(Metrics {
         running,
         tasks_waiting,
         tasks_done,
@@ -654,9 +869,16 @@ pub fn read(
         agents: agents(db, project, since_ms)?,
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,
+        models: models(db, project, since_ms, prices)?,
+        tools: tool_rows,
+        tools_since_ms,
+        activity: activity_rows,
+        activity_since_ms,
     })?;
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);
+    assert!(metrics.tools.len() <= TOOL_ROWS_MAX);
+    assert!(metrics.activity.len() <= ROWS_MAX);
     assert!(metrics.accounts.len() <= ROWS_MAX && metrics.harnesses.len() <= ROWS_MAX);
     assert!(metrics.projects.len() <= ROWS_MAX && metrics.agents.len() <= ROWS_MAX);
     assert!(metrics.agents.iter().all(|row| {
@@ -683,6 +905,18 @@ pub fn read(
             .as_ref()
             .is_none_or(|title| title.len() <= TITLE_BYTES_MAX)
     }));
+    if prices == PriceSource::Off {
+        metrics.series.iter_mut().for_each(|row| row.cost_nanos = 0);
+        metrics.runs.iter_mut().for_each(|row| row.cost_nanos = 0);
+        metrics
+            .projects
+            .iter_mut()
+            .chain(metrics.accounts.iter_mut())
+            .chain(metrics.harnesses.iter_mut())
+            .for_each(|row| row.cost_nanos = 0);
+        metrics.agents.iter_mut().for_each(|row| row.cost_nanos = 0);
+        metrics.models.iter_mut().for_each(|row| row.cost_nanos = 0);
+    }
     Ok(metrics)
 }
 

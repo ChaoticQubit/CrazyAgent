@@ -56,8 +56,8 @@ test("the next accounts panel shows each pool's next accounts in order with why 
 
 test("the Metrics page's account section carries the next accounts panel", () => {
   const panel = createElement(NextAccountsPanel, { ranking: { kind: "ok", value: ranking }, pools: { kind: "ok", value: [pool] }, names, nowMs: monday });
-  const report = { total: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, runs: 0, limits: [], projects: [], pools: [], accounts: [], agents: [], days: [], lines: [], partial_homes: 0 };
-  const metrics = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: 86_400_000, series: [], runs: [], projects: [], agents: [], accounts: [], harnesses: [] };
+  const report = { total: { input: 0, output: 0, cache_read: 0, cache_write: 0 }, runs: 0, limits: [], projects: [], pools: [], accounts: [], agents: [], days: [], lines: [], partial_homes: 0, money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 } };
+  const metrics = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: 86_400_000, series: [], runs: [], projects: [], agents: [], accounts: [], harnesses: [], models: [], activity: [], activity_since_ms: null, tools: [], tools_since_ms: null };
   const limits = { pools: new Map(), failure: "", busy: null, next: panel, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
   const html = renderToStaticMarkup(createElement(MetricsPage, {
     projectId: null, usage: { kind: "ok", value: report }, metrics: { kind: "ok", value: metrics }, adoption: null, range: "7d", by: "project",

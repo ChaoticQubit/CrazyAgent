@@ -31,10 +31,11 @@ const usage = (patch = {}) => ({
   ],
   days: [],
   lines: [{ project: "alpha", change_sets: 3, added: 90, removed: 57, commits: 2, committed_added: 80, committed_removed: 55 }],
-  agent_lines: [], limits: [limits()], partial_homes: 0, ...patch,
+  agent_lines: [], limits: [limits()], partial_homes: 0,
+  money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 }, ...patch,
 });
 const metrics = (patch = {}) => ({
-  running: 2, tasks_waiting: 4, tasks_done: 5, tasks_failed: 1, merges: 12, merges_into_main: 3, merges_undone: 0, bucket_ms: 2 * HOUR,
+  running: 2, tasks_waiting: 4, tasks_done: 5, tasks_failed: 1, merges: 12, merges_into_main: 3, merges_undone: 0, bucket_ms: 2 * HOUR, models: [], activity: [], activity_since_ms: null, tools: [], tools_since_ms: null, projects: [],
   series: [
     { start_ms: SINCE, tokens: tokens({ input: 100, cache_write: 50, output: 20, cache_read: 999 }) },
     { start_ms: SINCE + 4 * HOUR, tokens: tokens({ input: 300, cache_write: 10, output: 40 }) },
@@ -43,14 +44,14 @@ const metrics = (patch = {}) => ({
     { project: "alpha", agent: "team-8", session: "rollout-2026-11-07-abc", task: 142, title: "Calendar API endpoints", status: "running", last_ms: NOW - 5 * MINUTE, tokens: tokens({ input: 700, output: 200, cache_read: 3000, cache_write: 500 }) },
     { project: "alpha", agent: "master-alpha", session: "m-1", task: null, title: null, status: null, last_ms: NOW - 11 * MINUTE, tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }) },
   ],
-  accounts: [{ key: "acct-a", tokens: tokens({ input: 1200, output: 300, cache_read: 4000, cache_write: 800 }), agents: 2, runs: 2 }],
+  accounts: [{ key: "acct-a", tokens: tokens({ input: 1200, output: 300, cache_read: 4000, cache_write: 800 }), agents: 2, runs: 2, projects: ["alpha"], more_projects: 0 }],
   agents: [
     { project: "alpha", agent: "team-8", label: "Juniper", harnesses: ["codex"], more_harnesses: 0, accounts: ["acct-a"], more_accounts: 0, tokens: tokens({ input: 700, output: 200, cache_read: 3000, cache_write: 500 }), turns: 12 },
     { project: "alpha", agent: "master-alpha", label: "Master", harnesses: ["claude-code"], more_harnesses: 0, accounts: ["acct-a"], more_accounts: 0, tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }), turns: 9 },
   ],
   harnesses: [
-    { key: "codex", tokens: tokens({ input: 700, output: 200, cache_read: 3000, cache_write: 500 }), agents: 1, runs: 1 },
-    { key: "claude-code", tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }), agents: 1, runs: 1 },
+    { key: "codex", tokens: tokens({ input: 700, output: 200, cache_read: 3000, cache_write: 500 }), agents: 1, runs: 1, projects: ["alpha"], more_projects: 0 },
+    { key: "claude-code", tokens: tokens({ input: 500, output: 100, cache_read: 1000, cache_write: 300 }), agents: 1, runs: 1, projects: ["alpha"], more_projects: 0 },
   ],
   ...patch,
 });
@@ -198,6 +199,172 @@ test("both Metrics views open on 7 days, as the mockup does", () => {
     const markup = renderToStaticMarkup(createElement(view.MetricsView, props));
     assert.match(markup, /aria-checked="true"[^>]*>7 days</, JSON.stringify(props));
   }
+});
+
+test("one project on the app page is named in the singular", () => {
+  const markup = render({ projectId: null, filter: { projects: [{ id: "alpha", name: "Alpha" }], onProject: forbidden, limits: { pools: new Map(), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden } } });
+  assert.match(text(markup), /1 project · Updated/u);
+});
+
+const LABEL = "Estimated cost at API prices";
+const bundled = (patch = {}) => ({ settings: { main_number: "dollars", prices: "bundled" }, shown: "dollars", as_of: "2026-11-08", cost_nanos: 5_000_000_000, unpriced_tokens: 0, ...patch });
+const tokensLead = () => bundled({ settings: { main_number: "tokens", prices: "bundled" }, shown: "tokens" });
+const off = () => ({ settings: { main_number: "dollars", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 });
+const priced = (money) => render({
+  usage: { kind: "ok", value: usage({ money, agents: usage().agents.map((one) => ({ ...one, cost_nanos: 2_000_000_000 })) }) },
+  metrics: { kind: "ok", value: metrics({ series: metrics().series.map((bar) => ({ ...bar, cost_nanos: 1_000_000_000 })) }) },
+  notices: "the notice text",
+});
+
+test("a chart bar keeps its dollars, an empty bar has none", () => {
+  const bars = chartModule.chartBars(metrics({ bucket_ms: HOUR, series: [{ start_ms: SINCE, tokens: tokens({ input: 1 }), cost_nanos: 7 }] }), SINCE, SINCE + HOUR);
+  assert.deepEqual(bars.map((bar) => bar.cost_nanos), [7, 0]);
+});
+
+test("dollars lead the first tile, the chart and the table, each with its label", () => {
+  const markup = priced(bundled());
+  assert.match(markup, new RegExp(`<span class="mx-tile-key">${LABEL}</span><span class="mx-tile-value">\\$5\\.00</span>`, "u"));
+  assert.match(markup, new RegExp(`${LABEL} over time`, "u"));
+  assert.match(markup, new RegExp(`<title>[^<]*\\$1\\.00 \\(${LABEL}, prices as of 2026-11-08\\)</title>`, "u"));
+  assert.match(markup, new RegExp(`<th scope="col" class="num">${LABEL}</th>`, "u"));
+  assert.match(markup, new RegExp(`title="${LABEL}, prices as of 2026-11-08"><b>\\$2\\.00</b>`, "u"));
+  assert.doesNotMatch(markup, /mx-legend/u);
+});
+
+test("tokens lead when chosen and the dollars beside them still carry the label", () => {
+  const markup = priced(tokensLead());
+  assert.match(markup, /<span class="mx-tile-key">Tokens<\/span><span class="mx-tile-value">2\.3K<\/span>/u);
+  assert.match(markup, new RegExp(`<div class="mx-tile" title="${LABEL}, prices as of 2026-11-08"><span class="mx-tile-key">Tokens</span>`, "u"));
+  assert.match(markup, new RegExp(`<span class="mx-tile-detail">\\$5\\.00 ${LABEL} · `, "u"));
+  assert.match(markup, /Tokens over time/u);
+  assert.match(markup, /mx-legend/u);
+  assert.match(markup, new RegExp(`title="${LABEL}, prices as of 2026-11-08"><b>[0-9.]+K?</b><small> \\$2\\.00</small>`, "u"));
+  assert.match(markup, /aria-label="Tokens per two hours/u);
+});
+
+test("the chart names its dollars for a screen reader when dollars lead", () => {
+  assert.match(priced(bundled()), new RegExp(`aria-label="${LABEL} per two hours"`, "u"));
+});
+
+test("with prices off the page has no dollar, no label and no main number switch", () => {
+  const markup = priced(off());
+  assert.doesNotMatch(markup, /\$\d/u);
+  assert.doesNotMatch(markup, new RegExp(LABEL, "u"));
+  assert.doesNotMatch(markup, /Prices as of/u);
+  assert.doesNotMatch(markup, /aria-label="Main number"/u);
+  assert.match(markup, /aria-label="Prices"/u);
+});
+
+test("both money switches show while prices are on", () => {
+  const markup = priced(bundled());
+  assert.match(markup, /aria-label="Main number"/u);
+  assert.match(markup, /aria-label="Prices"/u);
+});
+
+test("the page says the price date, what has no price and credits CodeBurn", () => {
+  const markup = priced(bundled({ unpriced_tokens: 1200 }));
+  assert.match(markup, /Prices as of 2026-11-08\. Off hides every dollar\. Tokens keep counting\./u);
+  assert.match(markup, /1\.2K tokens have no price, so they are left out of the dollars\./u);
+  assert.match(markup, /<details class="mx-credit"><summary>Counting rules adapted from CodeBurn \(MIT\)<\/summary><pre>the notice text<\/pre><\/details>/u);
+});
+
+test("an Other row holds the dollars a capped list leaves out", () => {
+  const value = usage({ money: bundled(), agents: [{ ...usage().agents[0], cost_nanos: 2_000_000_000 }] });
+  const markup = render({ usage: { kind: "ok", value } });
+  assert.match(tableText(markup), /Other, not listed \$3\.00/u);
+});
+
+test("a chart of under a cent repeats no axis figure", () => {
+  const shown = render({
+    usage: { kind: "ok", value: usage({ money: bundled() }) },
+    metrics: { kind: "ok", value: metrics({ series: metrics().series.map((bar) => ({ ...bar, cost_nanos: 1_000_000 })) }) },
+  });
+  const figures = [...shown.matchAll(/class="ax"[^>]*>([^<]*)</gu)].map((found) => found[1]).filter((figure) => figure.includes("$"));
+  assert.deepEqual(figures, ["&lt;$0.01"]);
+});
+
+test("with Tokens leading the dollar's label is visible in the tile and the table heading", () => {
+  const markup = priced(bundled({ settings: { main_number: "tokens", prices: "bundled" }, shown: "tokens" }));
+  const tile = markup.slice(markup.indexOf('class="mx-tiles"'), markup.indexOf("Re-read from cache"));
+  assert.match(text(tile), /Estimated cost at API prices/u);
+  assert.match(markup, /<th scope="col" class="num">Tokens<small> Estimated cost at API prices<\/small><\/th>/u);
+  assert.doesNotMatch(text(priced(off())), /Estimated cost at API prices/u);
+});
+
+test("the old-counting notice shows above the tiles and only when the report has one", () => {
+  const sentence = "These numbers still use the old counting.";
+  const shown = render({ usage: { kind: "ok", value: usage({ counting_notice: sentence }) } });
+  assert.ok(text(shown).includes(sentence));
+  assert.ok(shown.indexOf(sentence) < shown.indexOf('class="mx-tiles"'), "above the tiles");
+  assert.doesNotMatch(text(render()), /old counting/u);
+  assert.doesNotMatch(text(render({ usage: { kind: "ok", value: usage({ counting_notice: null }) } })), /old counting/u);
+});
+
+const turn = (activity, turns, edit_turns, first_try_turns) => ({ activity, turns, edit_turns, first_try_turns });
+const panels = (patch = {}, usagePatch = {}) => render({
+  usage: { kind: "ok", value: usage(usagePatch) },
+  metrics: { kind: "ok", value: metrics({
+    models: [{ model: "gpt-5", tokens: tokens({ input: 1200 }), cost_nanos: 0 }, { model: "", tokens: tokens({ input: 900 }), cost_nanos: 0 }],
+    activity: [turn("build_deploy", 5, 2, 1), turn("coding", 4, 4, 3)],
+    activity_since_ms: SINCE,
+    tools: [{ start_ms: SINCE + 2 * HOUR, tool: "Edit", count: 12 }, { start_ms: SINCE + 2 * HOUR, tool: "Bash", count: 3 }, { start_ms: SINCE, tool: "Read", count: 1500 }],
+    tools_since_ms: SINCE,
+    ...patch,
+  }) },
+});
+
+test("the page shows models, activities, the first-try rate and tools over time", () => {
+  const shown = text(panels());
+  for (const words of ["By model", "gpt-5", "Model not recorded", "By activity", "Build/deploy", "Coding", "67% of 6 editing turns worked first try", "Tools over time", `Since ${chartModule.barLabel(SINCE, DAY, 0)}`]) assert.ok(shown.includes(words), words);
+  assert.equal(shown.split("Since ").length - 1, 2);
+  assert.ok(shown.indexOf("By model") < shown.indexOf("By activity"));
+  assert.ok(shown.indexOf("By activity") < shown.indexOf("Tools over time"));
+});
+
+test("tools over time has one row per bar, newest first and most-used first", () => {
+  const markup = panels();
+  const table = markup.slice(markup.indexOf("mx-tools-time"));
+  const rows = table.slice(0, table.indexOf("</table>")).split("<tr>").slice(2).map((row) => text(row).trim());
+  assert.deepEqual(rows, [`${chartModule.barLabel(SINCE + 2 * HOUR, 2 * HOUR, 0)} Edit 12, Bash 3`, `${chartModule.barLabel(SINCE, 2 * HOUR, 0)} Read 1.5K`]);
+});
+
+test("a range with nothing counted shows none of the three panels", () => {
+  const shown = text(render());
+  assert.ok(shown.includes("Tokens over time"));
+  for (const words of ["By model", "By activity", "Tools over time"]) assert.ok(!shown.includes(words), words);
+});
+
+test("no first-try sentence shows when no turn edited", () => {
+  const shown = text(panels({ activity: [turn("git", 9, 0, 0)] }));
+  assert.ok(shown.includes("Git"));
+  assert.ok(!shown.includes("worked first try"));
+});
+
+test("hidden characters in model and tool names show as escapes", () => {
+  const markup = panels({ models: [{ model: "gpt‮5", tokens: tokens({ input: 1 }), cost_nanos: 0 }], tools: [{ start_ms: SINCE, tool: "Ed​it", count: 1 }] });
+  assert.ok(text(markup).includes("By model"));
+  assert.ok(text(markup).includes("Tools over time"));
+  assert.ok(!markup.includes("‮"));
+  assert.ok(!markup.includes("​"));
+});
+
+test("the model table's head says what its number is", () => {
+  const head = (money) => {
+    const markup = panels({}, { money });
+    const start = markup.indexOf("<thead>", markup.indexOf("mx-models"));
+    return text(markup.slice(start, markup.indexOf("</thead>", start))).trim();
+  };
+  const view_ = (main, prices) => ({ settings: { main_number: main, prices }, shown: main, as_of: prices === "off" ? null : "2026-11-08", cost_nanos: 0, unpriced_tokens: 0 });
+  assert.equal(head(view_("dollars", "bundled")), "Model Estimated cost at API prices");
+  assert.equal(head(view_("tokens", "bundled")), "Model Tokens Estimated cost at API prices");
+  assert.equal(head(view_("tokens", "off")), "Model Tokens");
+});
+
+test("tools over time says a time shows at most its eight most-used tools", () => {
+  const note = "Each time shows at most its 8 most-used tools.";
+  const eight = Array.from({ length: 8 }, (_, n) => ({ start_ms: SINCE, tool: `T${n}`, count: 8 - n }));
+  assert.ok(text(panels({ tools: eight })).includes(note));
+  assert.ok(!text(panels()).includes(note));
 });
 
 test("All starts the chart at the oldest bar the engine kept, not at the epoch", async () => {

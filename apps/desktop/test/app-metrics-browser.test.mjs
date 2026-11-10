@@ -23,13 +23,13 @@ const LIMITS = {
 };
 const USED = { input: 900, output: 300, cache_read: 100, cache_write: 200 };
 const DAYS = Array.from({ length: 30 }, (_, index) => ({ day_ms: NOW - (29 - index) * DAY, tokens: USED }));
-const REPORT = { since_ms: NOW - 6 * DAY, total: USED, runs: 1, projects: [], pools: [], accounts: [], agents: [], days: DAYS, lines: [], agent_lines: [], limits: [LIMITS], partial_homes: 0 };
+const REPORT = { since_ms: NOW - 6 * DAY, total: USED, runs: 1, projects: [], pools: [], accounts: [], agents: [], days: DAYS, lines: [], agent_lines: [], limits: [LIMITS], partial_homes: 0, money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 } };
 const SHIFT = -new Date(NOW).getTimezoneOffset() * 60_000;
 const TODAY = Math.floor((NOW + SHIFT) / DAY) * DAY - SHIFT;
 const SERIES = [{ start_ms: TODAY - 3 * DAY, tokens: { input: 900, output: 300, cache_read: 100, cache_write: 200 } }];
-const METRICS = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: SERIES, runs: [], projects: [{ key: "alpha", tokens: USED, agents: 1, runs: 1, projects: ["alpha"], merges: 0 }], agents: [], accounts: [], harnesses: [] };
+const METRICS = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: SERIES, models: [], activity: [], activity_since_ms: null, tools: [], tools_since_ms: null, runs: [], projects: [{ key: "alpha", tokens: USED, agents: 1, runs: 1, projects: ["alpha"], merges: 0 }], agents: [], accounts: [], harnesses: [] };
 const ANSWERS = {
-  desktop_usage_report: REPORT, desktop_usage_metrics: METRICS, desktop_usage_refresh: null, desktop_usage_set_reset: null,
+  desktop_usage_report: REPORT, desktop_usage_metrics: METRICS, desktop_usage_notices: "", desktop_usage_refresh: null, desktop_usage_set_reset: null,
   desktop_list_accounts: { accounts: [{ id: "acct-a", name: "Pool A, Claude 1" }], next: null }, desktop_pool_summaries: [], desktop_account_ranking: [],
 };
 

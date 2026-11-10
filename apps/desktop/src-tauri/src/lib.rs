@@ -53,6 +53,7 @@ use crazyagent::team::cleanup::FinishedAgent;
 use crazyagent::team::{TeamGraph, TeamStatus, TerminalsPerWindow};
 use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
+use crazyagent::usage::money::MoneySettings;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
@@ -3130,6 +3131,34 @@ async fn desktop_usage_refresh(
 }
 
 #[tauri::command]
+fn desktop_usage_notices(webview: Webview) -> Result<&'static str, BridgeError> {
+    main_window(&webview)?;
+    Ok(crazyagent::usage::THIRD_PARTY_NOTICES)
+}
+
+#[tauri::command]
+async fn desktop_usage_set_money(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: MoneySettings,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_set_money(settings)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_decide_recount(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    use_new: bool,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_decide_recount(use_new)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_ide_focus(
     webview: Webview,
     app: AppHandle,
@@ -4296,6 +4325,9 @@ native_commands! {
     desktop_usage_report,
     desktop_usage_metrics,
     desktop_usage_refresh,
+    desktop_usage_notices,
+    desktop_usage_set_money,
+    desktop_usage_decide_recount,
     desktop_usage_set_reset,
     desktop_ide_extension_asks,
     desktop_ide_extension_approve,

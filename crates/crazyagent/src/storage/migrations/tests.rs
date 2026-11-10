@@ -964,6 +964,91 @@ fn migration_8_adds_parent_to_team_tasks_and_agents() {
     assert_eq!(tables, 0, "the step makes no team table of its own");
 }
 
+/// Step 10 through the real upgrade: an old usage store keeps every total under the new shape,
+/// and a database that never opened the usage store is stamped with no usage table made.
+#[test]
+fn step_10_gives_usage_rows_a_model_through_the_upgrade() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE usage_tokens (
+            hour_ms INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('master','agent','research')),
+            project TEXT NOT NULL,
+            pool TEXT NOT NULL,
+            account TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            harness TEXT NOT NULL,
+            session TEXT NOT NULL,
+            input INTEGER NOT NULL,
+            output INTEGER NOT NULL,
+            cache_read INTEGER NOT NULL,
+            cache_write INTEGER NOT NULL,
+            PRIMARY KEY (hour_ms, kind, project, pool, account, agent, harness, session)
+         );
+         CREATE TABLE usage_files (path TEXT PRIMARY KEY, progress TEXT NOT NULL);
+         INSERT INTO usage_tokens VALUES
+            (3600000,'agent','alpha','','acct','team-7','claude','s1',10,1,100,2),
+            (3600000,'agent','alpha','','acct','team-7','claude-code','s1',5,1,50,2),
+            (3600000,'agent','alpha','','acct','team-7','codex','s2',7,1,70,2);
+         PRAGMA user_version = 8;",
+    )
+    .unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    let shaped: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('usage_tokens') WHERE name='model')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(shaped, "step 10 gave the rows a model");
+    let totals: Vec<(String, String, [i64; 4])> = db
+        .prepare(
+            "SELECT harness,model,input,output,cache_read,cache_write FROM usage_tokens ORDER BY harness",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                [row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?],
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        totals,
+        vec![
+            ("claude-code".to_owned(), String::new(), [15, 2, 150, 4]),
+            ("codex".to_owned(), String::new(), [7, 1, 70, 2]),
+        ]
+    );
+
+    let bare = Root::new();
+    let mut other = bare.connection();
+    other
+        .execute_batch("CREATE TABLE unrelated (id INTEGER); PRAGMA user_version = 8;")
+        .unwrap();
+    upgrade(&mut other, &bare.database(), None, STEPS).unwrap();
+    assert_eq!(version(&other).unwrap(), latest(STEPS));
+    let tables: i64 = other
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name='usage_tokens'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        tables, 0,
+        "no usage table is made for a store that had none"
+    );
+}
+
 /// Step 9: a version 8 trash takes the two account file kinds, keeps each pending note and
 /// still refuses a kind it does not know.
 #[test]
