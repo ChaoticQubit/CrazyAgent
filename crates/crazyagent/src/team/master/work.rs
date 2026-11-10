@@ -656,8 +656,7 @@ pub(super) fn finish_work(
             }
         }
         match unsaved_teammates(connection, answering, agent) {
-            Ok(unsaved) if unsaved.is_empty() => {}
-            Ok(unsaved) => {
+            Ok((unsaved, _)) if !unsaved.is_empty() => {
                 return Ok((
                     format!(
                         "Not finished: the edits of these teammates are not saved on their own branches yet: {}. CrazyAgent saves a teammate's work each time it rests and tells you when it cannot; ask that teammate to work and rest again, then finish again.",
@@ -666,6 +665,17 @@ pub(super) fn finish_work(
                     true,
                 ));
             }
+            Ok((_, unreadable)) if !unreadable.is_empty() => {
+                return Ok((
+                    format!(
+                        "Not finished: CrazyAgent could not read the worktree of these teammates, so it cannot tell whether their edits are saved: {}. Ask the owner to look at each one's folder in {}, then finish again.",
+                        bound_text(&unreadable.join(", "), CLAIMS_SHOWN_MAX),
+                        crate::agent_git::TEAMMATES_FOLDER
+                    ),
+                    true,
+                ));
+            }
+            Ok(_) => {}
             Err(problem) => {
                 return Ok((
                     format!(
@@ -836,14 +846,16 @@ fn waiting_teammates(
 /// The names of a linked lead's resting native teammates whose worktree holds edits not
 /// committed on their own branch yet (OP9B-C4): the engine saves a teammate's work each time
 /// it rests and, once its tries fail, leaves it uncommitted there, where Complete would strand
-/// it. Takes the database, what the answers need and the lead. Returns the names among the
+/// it. A teammate whose folder cannot be read as the worktree the engine made is named with
+/// the reason apart, and the others are still read (team-20 r1 L1). Takes the database, what
+/// the answers need and the lead. Returns the unsaved names and the unreadable ones among the
 /// first `UNSAVED_TEAMMATES_CHECKED_MAX` resting ones, none for a lead in its own clone, or
-/// the failure that kept one unread.
+/// a SQLite or store failure.
 fn unsaved_teammates(
     connection: &Connection,
     answering: &Answering<'_>,
     lead: i64,
-) -> Result<Vec<String>, EngineError> {
+) -> Result<(Vec<String>, Vec<String>), EngineError> {
     let project = &answering.stored.project_id;
     let place: Option<(String, String)> = connection
         .query_row(
@@ -854,11 +866,11 @@ fn unsaved_teammates(
         .optional()
         .map_err(state)?;
     let Some((worktree, git_dir)) = place else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let (worktree, git_dir) = (Path::new(&worktree), Path::new(&git_dir));
     if git_dir == crate::agent_git::git_dir(worktree) {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let mut statement = connection
         .prepare(
@@ -877,19 +889,26 @@ fn unsaved_teammates(
         .map_err(state)?;
     assert!(resting.len() <= UNSAVED_TEAMMATES_CHECKED_MAX);
     if resting.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let db = crate::landing::open(answering.landing)?;
     let mut unsaved = Vec::new();
+    let mut unreadable = Vec::new();
     for name in resting {
-        if crate::agent_git::worktree_name_valid(&name)
-            && crate::landing::teammate_unsaved(&db, worktree, git_dir, &name)?
-        {
-            unsaved.push(name);
+        if !crate::agent_git::worktree_name_valid(&name) {
+            continue;
+        }
+        match crate::landing::teammate_unsaved(&db, worktree, git_dir, &name) {
+            Ok(true) => unsaved.push(name),
+            Ok(false) => {}
+            Err(problem) => {
+                let code = crate::protocol::plain_code(&problem.0);
+                unreadable.push(format!("{name} ({})", bound_text(code, 120)));
+            }
         }
     }
-    assert!(unsaved.len() <= UNSAVED_TEAMMATES_CHECKED_MAX);
-    Ok(unsaved)
+    assert!(unsaved.len() + unreadable.len() <= UNSAVED_TEAMMATES_CHECKED_MAX);
+    Ok((unsaved, unreadable))
 }
 
 /// The branches of agents a lead leads that are not merged into its own branch yet, which

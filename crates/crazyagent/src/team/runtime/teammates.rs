@@ -311,6 +311,39 @@ pub(super) fn resting(
     Ok(rows)
 }
 
+/// Lists a lead's teammate rows that stopped or failed, the newest row of each name only
+/// and only while no running row of the lead holds that name, so the engine saves once the
+/// edits such a teammate left in its worktree, which no rest commits (team-20 r1 M1).
+/// Inputs: the connection, the project and the lead. Output: at most `MEMBERS_MAX` rows,
+/// newest first, or a SQLite failure.
+pub(super) fn ended(
+    connection: &Connection,
+    project: &ProjectId,
+    lead: i64,
+) -> Result<Vec<i64>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT a.id FROM team_agents a JOIN team_teammate_names n ON n.agent=a.id
+             WHERE a.project=?1 AND a.parent=?2 AND a.role='teammate'
+             AND a.status IN ('stopped','failed')
+             AND NOT EXISTS (
+                 SELECT 1 FROM team_agents b JOIN team_teammate_names m ON m.agent=b.id
+                 WHERE b.project=?1 AND b.parent=?2 AND b.role='teammate' AND m.name=n.name
+                 AND (b.status IN ('starting','idle','working') OR b.id>a.id))
+             ORDER BY a.id DESC LIMIT ?3",
+        )
+        .map_err(error)?;
+    let rows: Vec<i64> = statement
+        .query_map(params![project.as_str(), lead, MEMBERS_MAX as i64], |row| {
+            row.get(0)
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= MEMBERS_MAX);
+    Ok(rows)
+}
+
 /// Lists a lead's running teammate rows with their pane ids, so the terminal host learns
 /// each teammate's own name for its pane (`Host::adopt_pane`) on every discovery pass.
 /// Inputs: the connection, the project and the lead. Output: the rows, or a SQLite failure.
