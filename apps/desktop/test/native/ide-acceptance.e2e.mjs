@@ -437,6 +437,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await ide.until("the project's terminal in the panel", `document.querySelectorAll(".part.panel .xterm").length > 0`);
         await me.capture("sandboxed-terminal");
         assert.equal(await page.evaluate(`document.querySelectorAll(".terminal-initial-hint").length`), 0, "the open terminal shows no AI hint");
+        const started = await ran("sandboxed-terminal-started.txt", "echo started");
+        assert.match(started, /^started$/m, `the login shell starts after the pane's line: ${started}`);
         await answers("sandboxed-terminal-git.txt");
         const refused = await ran("sandboxed-terminal-refused-git.txt", `echo staged > terminal-refused.txt; git add terminal-refused.txt; echo "add=$?"; git -c user.name=o -c user.email=o@example.invalid commit -q -m no; echo "commit=$?"; git status --porcelain`);
         assert.match(refused, /^add=[1-9]/m, refused);
