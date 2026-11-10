@@ -946,6 +946,7 @@ export interface TeamStatus {
   terminals_per_window?: 4 | 6 | 9;
   live_master?: boolean | null;
   live_problem?: string | null;
+  live_idle_stopped?: boolean;
   settings_version?: number;
   min_agents: number;
   max_agents: number;
