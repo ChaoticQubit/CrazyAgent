@@ -40,6 +40,12 @@ const LEVELS = [
   { access: "full", label: "Full access", confined: false, report: ["net-yes", "outside-yes", "config-yes", "hooks-yes"], menu: [["Sandboxed", false], ["Own branch", false], ["Full access", false]] },
 ];
 
+const PICKS = [
+  ["Sandboxed", ["net-no", "outside-no", "config-no", "hooks-no"]],
+  ["Own branch", ["net-yes", "outside-no", "config-no", "hooks-no"]],
+  ["Full access", ["net-yes", "outside-yes", "config-yes", "hooks-yes"]],
+];
+
 /** A git repository with one commit by the owner and a hooks folder. Input: the folder.
  * Output: none. */
 function seedRepo(folder) {
@@ -213,12 +219,23 @@ async function atLevel(t, level, shared) {
         await keys.key("Escape");
         return;
       }
-      await keys.click(rows.find((row) => row.label === "Own branch").at);
-      await pause(SETTLE_MS);
-      if ((await page.evaluate(ide.rows))?.length) await ide.pick(FOLDER);
-      const said = await ran("level-menu.txt", probe(port, join(root, "outside-menu")));
-      writeFileSync(join(evidence, "level-menu.txt"), said);
-      for (const word of ["net-yes", "outside-no", "config-no", "hooks-no"]) assert.match(said, new RegExp(`^${word}$`, "m"), said);
+      await keys.key("Escape");
+      const prompts = `document.querySelectorAll(".part.panel .terminal-command-decoration").length`;
+      for (const [picked, report] of PICKS) {
+        const before = await page.evaluate(prompts);
+        await keys.click(await ide.until("the terminal menu in the panel's title", MENU_ACTION));
+        const offered = await ide.until("the terminal menu's levels", MENU_ROWS);
+        await keys.hover(offered.find((row) => row.label === picked).at);
+        await pause(SETTLE_MS);
+        await keys.key("Enter");
+        await pause(SETTLE_MS);
+        if ((await page.evaluate(ide.rows))?.length) await ide.pick(FOLDER);
+        if (picked === "Full access") await ide.until("the new Full access shell's prompt", `${prompts} > ${before}`);
+        const name = picked.split(" ")[0].toLowerCase();
+        const said = await ran(`level-menu-${name}.txt`, probe(port, join(root, `outside-menu-${name}`)));
+        writeFileSync(join(evidence, `level-menu-${name}.txt`), said);
+        for (const word of report) assert.match(said, new RegExp(`^${word}$`, "m"), `${picked}: ${said}`);
+      }
     });
   });
 }
