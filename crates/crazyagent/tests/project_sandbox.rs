@@ -70,9 +70,11 @@ fn quoted(path: &Path) -> String {
     format!("'{text}'")
 }
 
-/// land-19 r2 M1: in a project with no `.git/info`, as a clone or `init --template=` leaves
-/// it, no confined process makes `.git/info` or `.git/shallow` in any letter case, from which
-/// the owner's git would read grafts or shallow cuts through the case-insensitive volume.
+/// land-19 r2 M1 and L1: in a project with no `.git/info` or `.git/objects/info`, as a clone
+/// or `init --template=` leaves it, no confined process makes `.git/info`, `.git/shallow` or
+/// an alternates file in any letter case, the long s included, from which the owner's git
+/// would read grafts, shallow cuts or other object stores through the case-insensitive
+/// volume.
 #[test]
 fn sandboxed_child_cannot_make_git_info_or_shallow_in_any_letter_case() {
     let case = case();
@@ -89,11 +91,22 @@ fn sandboxed_child_cannot_make_git_info_or_shallow_in_any_letter_case() {
             "echo x > {}",
             quoted(&case.project.join(".GIT").join("Shallow"))
         ),
+        format!("echo x > {}", quoted(&git.join("\u{17f}hallow"))),
+        format!(
+            "mkdir -p {0} && echo x > {0}/ALTERNATES",
+            quoted(&git.join("objects").join("INFO"))
+        ),
+        format!(
+            "mkdir -p {0} && echo x > {0}/Http-Alternates",
+            quoted(&git.join("objects").join("Info"))
+        ),
     ] {
         let output = run(&sandbox, &profile, &script);
         assert!(!output.status.success(), "{script}");
     }
     assert_eq!(fs::read_dir(&git).unwrap().count(), 1);
+    let info = git.join("objects").join("info");
+    assert!(!info.join("alternates").exists() && !info.join("http-alternates").exists());
 }
 
 /// land-19 r1 M1: no confined process writes a commit-graph file into the project's object
