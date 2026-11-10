@@ -84,7 +84,7 @@ test("closing detaches, and long typing goes in frames the engine accepts", LIMI
   await withSession(async (engine, server) => {
     const { pty, seen, connection, gone, peer } = await opened(engine, server, { columns: 1, rows: 5000 });
     const open = JSON.parse((await peer.frame()).subarray(4).toString("utf8"));
-    assert.deepEqual(open.call, { name: "ide.terminal", args: { cols: 2, rows: 1000 } });
+    assert.deepEqual(open.call, { name: "ide.terminal", args: { cols: 2, rows: 1000, level: "sandboxed" } });
     connection.write(bytes(terminal.frames[0]));
     pty.handleInput("x".repeat(INPUT_BYTES_MAX + 1));
     for (const length of [INPUT_BYTES_MAX, 1]) {
@@ -105,7 +105,7 @@ test("a refused or broken terminal stays open and says why", LIMIT, async () => 
   await withSession(async (engine, server, socket) => {
     const refused = await opened(engine, server, undefined);
     const open = JSON.parse((await refused.peer.frame()).subarray(4).toString("utf8"));
-    assert.deepEqual(open.call.args, { cols: 80, rows: 24 });
+    assert.deepEqual(open.call.args, { cols: 80, rows: 24, level: "sandboxed" });
     refused.connection.write(encodeFrame({ kind: "rejected", code: "ide_terminal_unavailable" }));
     await until(() => refused.seen.shown.length === 1);
     assert.deepEqual(refused.seen, { shown: [`\r\n${UNAVAILABLE}\r\n`], closed: 0 });
