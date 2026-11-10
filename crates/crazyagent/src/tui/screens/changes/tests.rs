@@ -59,6 +59,7 @@ fn reply(view: &mut ProjectChanges, result: Result<ChangesView, String>) -> Chan
 
 fn listed(sets: Vec<ChangeSetView>) -> ProjectChanges {
     let mut view = ProjectChanges::new(project());
+    view.painting(true);
     let query = reply(&mut view, Ok(ChangesView::List(sets)));
     assert_eq!(query, ChangesQuery::List { project: project() });
     view

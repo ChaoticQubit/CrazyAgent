@@ -252,14 +252,14 @@ impl ProjectChanges {
             read_ms: 0,
             edit: None,
             reveal: None,
-            painting: Cell::new(true),
+            painting: Cell::new(false),
         }
     }
 
     /// Says whether the next drawings of this tab are painted on screen. Only a painted
     /// drawing records that a moved diff's last line was seen, so a taller drawing that is
-    /// never shown cannot unlock Accept (RVA-1). Input: false while drawing a view that is
-    /// not painted. Output: none.
+    /// never shown cannot unlock Accept (RVA-1), and a drawing counts only when its caller says
+    /// so. Input: true around the drawing that reaches the screen, false after it. Output: none.
     pub(in crate::tui) fn painting(&self, painted: bool) {
         self.painting.set(painted);
     }

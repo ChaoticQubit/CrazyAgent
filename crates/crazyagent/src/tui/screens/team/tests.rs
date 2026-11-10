@@ -354,7 +354,10 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
             "{columns}x{lines}: {lead}"
         );
         let standing = line("└─ ▸ codex-1");
-        assert!(standing.contains("Starting"), "{columns}x{lines}: {standing}");
+        assert!(
+            standing.contains("Starting"),
+            "{columns}x{lines}: {standing}"
+        );
         assert!(
             !standing.contains("  d") || standing.contains("delegated to"),
             "{columns}x{lines}: {standing}"

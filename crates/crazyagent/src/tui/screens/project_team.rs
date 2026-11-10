@@ -2888,8 +2888,12 @@ impl TeamView {
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
         let over = (fixed + 2).saturating_sub(room);
         let spacers = over.min(2);
-        let every_harness_runs = status.harnesses.iter().all(|harness| harness.runnable);
-        let plan_gives_way = usize::from(every_harness_runs && over > spacers);
+        let plan_can_go = status.harnesses.iter().all(|harness| harness.runnable)
+            && status
+                .harnesses
+                .iter()
+                .any(|harness| harness.role == AgentRole::Master);
+        let plan_gives_way = usize::from(plan_can_go && over > spacers);
         let folded = (over - spacers - plan_gives_way).min(summary_rows.saturating_sub(1));
         assert!(
             folded < summary_rows.max(1),
@@ -2897,7 +2901,7 @@ impl TeamView {
         );
         assert!(folded == 0 || spacers == 2, "blank rows go before settings");
         assert!(
-            folded == 0 || plan_gives_way == 1 || !every_harness_runs,
+            folded == 0 || plan_gives_way == 1 || !plan_can_go,
             "the plan line goes before settings"
         );
         if plan_gives_way == 1 {

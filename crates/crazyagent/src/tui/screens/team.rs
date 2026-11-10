@@ -98,6 +98,7 @@ enum Body {
     Detail {
         account: Option<String>,
         branch: Option<String>,
+        live: Option<String>,
     },
     Note(String),
     Heading(&'static str),
@@ -1093,8 +1094,9 @@ impl Team {
             .skip(self.offset)
             .take(height)
             .map(|(index, row)| {
+                let room = limit.saturating_sub(2).saturating_sub(width(&row.prefix));
                 list_row(
-                    join([Line::raw(row.prefix.clone()), body(row, graph, ctx)]),
+                    join([Line::raw(row.prefix.clone()), body(row, graph, ctx, room)]),
                     limit,
                     row.item.is_some() && index == selected,
                     focused,
@@ -1760,6 +1762,7 @@ fn tree(graph: &TeamGraph, glyphs: &Glyphs, width: usize) -> Vec<TreeRow> {
             &graph.nodes[*master],
             stem(glyphs, kids.is_empty()),
             width,
+            None,
         );
         lead_rows(graph, glyphs, &kids, "", width, &mut seen, &mut out);
     }
@@ -1839,9 +1842,12 @@ fn lead_rows(
             continue;
         }
         let last = index + 1 == members.len();
+        let prefix = format!("{indent}{}", branch_glyph(glyphs, last));
+        let room = width.saturating_sub(crate::tui::text::width(&prefix));
+        let moved = moved_action(graph, &graph.nodes[*member], glyphs, room);
         out.push(TreeRow {
             item: Some(Item::Node(*member)),
-            prefix: format!("{indent}{}", branch_glyph(glyphs, last)),
+            prefix,
             body: Body::Agent(*member),
         });
         let base = format!("{indent}{}", stem(glyphs, last));
@@ -1854,7 +1860,7 @@ fn lead_rows(
         } else {
             format!("{base}{}", stem(glyphs, false))
         };
-        detail_row(out, &graph.nodes[*member], detail, width);
+        detail_row(out, &graph.nodes[*member], detail, width, moved);
         lead_rows(graph, glyphs, &kids, &base, width, seen, out);
     }
 }
@@ -1873,12 +1879,63 @@ fn relation_of(graph: &TeamGraph, node: &GraphNode) -> Option<usize> {
         .position(|edge| edge.from == parent && edge.to == node.id)
 }
 
+/// The cells an agent's line takes around its relation words: its status glyph and label,
+/// then two spaces and its status word. Inputs: the node and the glyphs. Output: the two
+/// widths; the second is 0 for a node with no status word.
+fn line_cells(node: &GraphNode, glyphs: &Glyphs) -> (usize, usize) {
+    let glyph = node
+        .status
+        .map_or(0, |status| width(glyphs.status(agent_status(status))) + 1);
+    let word = node
+        .status_label
+        .as_deref()
+        .or(node.status.map(|status| status.label()));
+    (
+        glyph + width(&node.label),
+        word.map_or(0, |word| 2 + width(word)),
+    )
+}
+
+/// Says whether a live action stays on its agent's own line: the status word keeps its place
+/// and at least the action's first word shows. Inputs: the node, the action's words, the
+/// glyphs and the cells left after the row's prefix. Output: true to show it there, cut to
+/// fit.
+fn live_fits(node: &GraphNode, label: &str, glyphs: &Glyphs, room: usize) -> bool {
+    let (head, word) = line_cells(node, glyphs);
+    let lead = 3 + width(glyphs.dot);
+    let first = label.split(' ').next().unwrap_or(label);
+    let least = (lead + width(label)).min(lead + width(first) + width(glyphs.ellipsis));
+    head + word + least <= room
+}
+
+/// The live action an agent's detail row shows because it did not fit on the agent's own
+/// line. Inputs: the graph, the node, the glyphs and the cells left after the agent row's
+/// prefix. Output: the action's words, or None when there is none to move.
+fn moved_action(
+    graph: &TeamGraph,
+    node: &GraphNode,
+    glyphs: &Glyphs,
+    room: usize,
+) -> Option<String> {
+    let edge = &graph.relations[relation_of(graph, node)?];
+    edge.live.as_ref()?;
+    let label = edge_label(edge);
+    (!live_fits(node, &label, glyphs, room)).then_some(label)
+}
+
 /// Adds the rows under an agent: its account and branch on one row, then, for an agent
 /// whose launch fires no hooks, that its receipts are unavailable, then the engine's note
 /// when the Delivery setting leaves it no way to get messages, each wrapped to the width
 /// left after the prefix so the words are never cut. Inputs: the rows, the node, the
-/// prefix and the row width. Output: none; rows are appended.
-fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: usize) {
+/// prefix, the row width and a live action that did not fit on the agent's own line.
+/// Output: none; rows are appended.
+fn detail_row(
+    out: &mut Vec<TreeRow>,
+    node: &GraphNode,
+    prefix: String,
+    width: usize,
+    live: Option<String>,
+) {
     if node.account.is_some() || node.branch.is_some() {
         out.push(TreeRow {
             item: None,
@@ -1886,6 +1943,7 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
             body: Body::Detail {
                 account: node.account.clone(),
                 branch: node.branch.clone(),
+                live,
             },
         });
     }
@@ -1909,25 +1967,42 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
 
 /// One tree row's text after its prefix: a master or agent row's status glyph and label, the
 /// live action on the line from its lead, its status word and that line's standing relation;
-/// a task row's status glyph, the agent it went to and its title. Cut from the right with an
-/// ellipsis, so the glyph always shows. Inputs: the row, the graph and the context. Output:
-/// the line.
-fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
+/// a task row's status glyph, the agent it went to and its title. An agent row keeps its
+/// status word: the live action is cut to the cells left or moves to the detail row, and a
+/// standing relation shows whole or not at all. Anything else is cut from the right with an
+/// ellipsis, so the glyph always shows. Inputs: the row, the graph, the context and the cells
+/// left after the prefix. Output: the line.
+fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx, room: usize) -> Line<'static> {
     let theme = &ctx.theme;
     let glyphs = ctx.glyphs;
     match &row.body {
         Body::Master(node) | Body::Agent(node) => {
             let node = &graph.nodes[*node];
             let edge = relation_of(graph, node).map(|pair| &graph.relations[pair]);
-            let live = edge.filter(|edge| edge.live.is_some()).map(|edge| {
-                Span::styled(
-                    format!("  {} {}", glyphs.dot, edge_label(edge)),
-                    theme.style(Role::Accent),
-                )
-            });
+            let (head, word) = line_cells(node, glyphs);
+            let live = edge
+                .filter(|edge| edge.live.is_some())
+                .map(edge_label)
+                .filter(|label| live_fits(node, label, glyphs, room))
+                .map(|label| {
+                    assert!(
+                        head + word < room,
+                        "a live action needs cells beside the status"
+                    );
+                    Span::styled(
+                        cut(
+                            &format!("  {} {label}", glyphs.dot),
+                            room - head - word,
+                            glyphs.ellipsis,
+                        ),
+                        theme.style(Role::Accent),
+                    )
+                });
             let standing = edge
                 .filter(|edge| edge.live.is_none())
-                .map(|edge| Span::styled(format!("  {}", edge_label(edge)), theme.muted));
+                .map(edge_label)
+                .filter(|label| head + word + 2 + width(label) <= room)
+                .map(|label| Span::styled(format!("  {label}"), theme.muted));
             let mut spans = Vec::new();
             match node.status {
                 Some(status) => {
@@ -1954,22 +2029,29 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
             spans.extend(standing);
             Line::from(spans)
         }
-        Body::Detail { account, branch } => {
+        Body::Detail {
+            account,
+            branch,
+            live,
+        } => {
             let account = account.as_ref().map(|account| {
                 account_name(
                     Some(account),
                     ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
                 )
             });
-            styled(
-                account
-                    .into_iter()
-                    .chain(branch.iter().cloned())
-                    .collect::<Vec<_>>()
-                    .join("  "),
-                Role::Muted,
-                theme,
-            )
+            let rest = account
+                .into_iter()
+                .chain(branch.iter().cloned())
+                .collect::<Vec<_>>()
+                .join("  ");
+            let Some(live) = live else {
+                return styled(rest, Role::Muted, theme);
+            };
+            Line::from(vec![
+                Span::styled(format!("{} {live}", glyphs.dot), theme.style(Role::Accent)),
+                Span::styled(format!("  {rest}"), theme.muted),
+            ])
         }
         Body::Note(text) => styled(text.clone(), Role::Muted, theme),
         Body::Heading(text) => styled(*text, Role::Muted, theme),
