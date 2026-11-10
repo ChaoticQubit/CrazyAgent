@@ -122,7 +122,8 @@ impl Staging {
 
 /// Removes every abandoned staging directory with the given prefix from a parent.
 /// Inputs: the parent and the prefix. Output: Ok after removing each one whose creator
-/// no longer holds its lock; a live one is left alone, and one that is not a private
+/// no longer holds its lock, which the sweep unlocks rather than just closes when it
+/// stops with one; a live one is left alone, and one that is not a private
 /// directory of this user, or holds anything a staged change never writes, is refused.
 pub(super) fn sweep(parent: &File, prefix: &str) -> Result<(), EngineError> {
     let mut names = Vec::new();
@@ -137,11 +138,12 @@ pub(super) fn sweep(parent: &File, prefix: &str) -> Result<(), EngineError> {
     }
     for name in names {
         let staged = Directory::open(parent, OsStr::from_bytes(name.to_bytes()))?;
-        match flock(&staged.file, FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => {}
+        let held = staged.file.try_clone().map_err(unsafe_custody)?;
+        let _held = match HeldLock::take(held, FlockOperation::NonBlockingLockExclusive) {
+            Ok(held) => held,
             Err(rustix::io::Errno::WOULDBLOCK) => continue,
             Err(error) => return Err(unsafe_custody(error)),
-        }
+        };
         staged.verify(parent, OsStr::from_bytes(name.to_bytes()))?;
         remove_tree(&staged.file, 1)?;
         rustix::fs::unlinkat(parent, name.as_c_str(), AtFlags::REMOVEDIR)

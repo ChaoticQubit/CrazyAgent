@@ -56,9 +56,10 @@ fn unlink(folder: &File, name: &str) -> Result<(), EngineError> {
 }
 
 /// Runs `action` while no agent, sign-in, check or renewal holds one profile slot, and
-/// refuses when one does, so the note stays for the next sweep. Inputs: the engine root's
-/// folder, the slot's digest name and the action. Output: the action's result, or
-/// `native_profile_in_use` or `native_profile_renewal_busy`.
+/// refuses when one does, so the note stays for the next sweep. Both locks are unlocked,
+/// not just closed, before it returns, so a child another thread is starting cannot keep
+/// the slot busy. Inputs: the engine root's folder, the slot's digest name and the action.
+/// Output: the action's result, or `native_profile_in_use` or `native_profile_renewal_busy`.
 fn while_free(
     anchor: &File,
     key: &str,
@@ -71,27 +72,20 @@ fn while_free(
         return action(None);
     };
     let _renewal = renewal::hold(&profile.file, std::time::Duration::ZERO)?;
-    let manifest = match rustix::fs::openat(
+    let _manifest = match rustix::fs::openat(
         &profile.file,
         MANIFEST,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     ) {
-        Ok(manifest) => Some(File::from(manifest)),
+        Ok(manifest) => {
+            let manifest = File::from(manifest);
+            take_lock(&manifest, FlockOperation::NonBlockingLockExclusive)?;
+            Some(HeldLock(manifest))
+        }
         Err(rustix::io::Errno::NOENT) => None,
         Err(error) => return Err(unsafe_custody(error)),
     };
-    if let Some(manifest) = &manifest {
-        match flock(manifest, FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => {}
-            Err(error)
-                if error == rustix::io::Errno::WOULDBLOCK || error == rustix::io::Errno::AGAIN =>
-            {
-                return Err(failure("native_profile_in_use"));
-            }
-            Err(_) => return Err(failure("native_profile_lock_unavailable")),
-        }
-    }
     action(Some(&profile))
 }
 
