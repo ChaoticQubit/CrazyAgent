@@ -2660,7 +2660,7 @@ fn capital_i_moves_the_master_idle_stop_through_its_choices() {
         view.help()
             .contains(&("I", "Stop the master when idle after"))
     );
-    assert!(shows(&view, "Stop the master when idle after  15 min"));
+    assert!(shows(&view, "Master idle stop  15 min"));
     let steps = [
         (
             FifteenMinutes,
@@ -2679,7 +2679,7 @@ fn capital_i_moves_the_master_idle_stop_through_its_choices() {
         ),
     ];
     for (at, next, words) in steps {
-        let line = format!("Stop the master when idle after  {}", at.label());
+        let line = format!("Master idle stop  {}", at.label());
         assert!(shows(&view, &line), "{line}");
         let reply = view.key(press(KeyCode::Char('I')));
         assert_eq!(

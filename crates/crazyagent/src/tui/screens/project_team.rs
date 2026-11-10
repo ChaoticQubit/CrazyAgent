@@ -3168,12 +3168,12 @@ impl TeamView {
                 .to_owned(),
             ),
             setting(
-                "Stop the master when idle after",
-                status.master_idle_stop.label().to_owned(),
-            ),
-            setting(
                 "New folder limit",
                 format!("{} files", status.new_folder_files_max),
+            ),
+            setting(
+                "Master idle stop",
+                status.master_idle_stop.label().to_owned(),
             ),
             setting(
                 "Terminals per window",
