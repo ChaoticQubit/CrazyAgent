@@ -2682,6 +2682,58 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
     drop(owner);
     engine.stop().await;
 }
+
+/// A live agent keeps its row when its project is removed, and the status it writes after
+/// that logs nothing: the removal already took the project's history (HB-S5-I).
+#[tokio::test]
+async fn a_live_agent_stopped_after_its_project_is_removed_logs_no_status() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) \
+         VALUES ('setup-pooled','sub','codex',0,'working',1,1)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE team_agents SET status='idle' WHERE project='setup-pooled'",
+        [],
+    )
+    .unwrap();
+    let logged = "SELECT count(*) FROM team_status_log WHERE project='setup-pooled'";
+    assert_eq!(engine.rows(logged), 1, "logged while the project exists");
+
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_agents WHERE project='setup-pooled'"),
+        1,
+        "the live agent keeps its row"
+    );
+    assert_eq!(engine.rows(logged), 0, "the removal took the history");
+    db.execute(
+        "UPDATE team_agents SET status='stopped' WHERE project='setup-pooled'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(engine.rows(logged), 0, "no history for a removed project");
+    drop(db);
+    drop(owner);
+    engine.stop().await;
+}
+
 /// The owner reads one sub-agent's Messages timeline through the engine (MSG-B) and saves the
 /// project's Messages settings with a team action (MSG-E): the page carries the speakers the
 /// engine stored and the saved settings, the team status shows them too, and a bad page size,
