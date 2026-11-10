@@ -301,7 +301,7 @@ fn bridge(
     }
     let (text, carried) = batch(db, agent, messages)?;
     let home = crate::team::runtime::agent_home(reach.state, agent);
-    if let Bridged::Delivered(turn) = codex::deliver(&home, &text, !alone) {
+    if let Bridged::Delivered(turn) = codex::deliver(&home, &text, !alone, pane_of(reach, agent)) {
         mark_all(db, &carried, Receipt::Delivered, now)?;
         if let Some(turn) = turn {
             super::messages::delivered_into(db, &carried, &turn)?;
@@ -312,6 +312,13 @@ fn bridge(
         return Ok(Some(false));
     }
     Ok(None)
+}
+
+/// Reads the first process of an agent's pane, whose process group the agent's app-server
+/// runs in. Takes the reach and the agent. Returns its id, none with no host or no pane.
+fn pane_of(reach: &Reach<'_>, agent: AgentId) -> Option<u32> {
+    let pane = crate::terminal::AgentId::team(agent).ok()?;
+    reach.host?.pane_pid(&pane).ok().flatten()
 }
 
 /// What the owner sees on an agent that the project's Delivery setting leaves with no way

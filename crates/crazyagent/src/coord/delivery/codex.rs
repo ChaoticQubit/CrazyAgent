@@ -49,12 +49,16 @@ pub fn prepare_folder() -> Result<PathBuf, &'static str> {
 /// its own, and `turn/steer` on the active turn while it works (DEC-104 Q13). The socket
 /// must be the owner's own, the release one of `VERSIONS`, and the whole exchange fits in
 /// `wire::DEADLINE` and bounded reads; any doubt fails closed. Takes the agent's
-/// `CODEX_HOME`, the text and whether an idle thread may start a turn. Returns the outcome.
-pub fn deliver(home: &Path, text: &str, start: bool) -> Bridged {
+/// `CODEX_HOME`, the text, whether an idle thread may start a turn and the first process of
+/// the agent's pane, none when no pane can be read. Returns the outcome.
+pub fn deliver(home: &Path, text: &str, start: bool, pane: Option<u32>) -> Bridged {
     let Some(socket) = socket(home) else {
         return Bridged::Unavailable("codex_bridge_unsupported");
     };
-    match wire::deliver(&socket, text, start) {
+    let Some(pane) = pane else {
+        return Bridged::Unavailable("codex_bridge_peer_unknown");
+    };
+    match wire::deliver(&socket, text, start, pane) {
         Ok(turn) => Bridged::Delivered(turn),
         Err(reason) => Bridged::Unavailable(reason),
     }
@@ -163,6 +167,7 @@ mod wire {
         socket: &Path,
         text: &str,
         start: bool,
+        pane: u32,
     ) -> Result<Option<String>, &'static str> {
         let folder = socket.parent().ok_or("codex_bridge_unsupported")?;
         private_folder(folder)?;
@@ -174,7 +179,7 @@ mod wire {
         {
             return Err("codex_bridge_socket_unsafe");
         }
-        let mut wire = Wire::open(socket)?;
+        let mut wire = Wire::open(socket, pane)?;
         let started = wire.call(
             "initialize",
             json!({"clientInfo": {"name": "crazyagent", "version": env!("CARGO_PKG_VERSION")}}),
@@ -196,13 +201,34 @@ mod wire {
         Err("codex_bridge_turn_moved")
     }
 
+    /// Tells whether the process listening on a bridge socket runs in the agent's pane. A
+    /// pane's first process leads its process group and the app-server the bridge script
+    /// starts stays in that group, so a socket swapped for another agent's reads as
+    /// elsewhere. Inputs: the connected stream and the pane's first process. Output: true
+    /// only when both can be read and the listener's group is the pane's.
+    fn listens_in_pane(stream: &UnixStream, pane: u32) -> bool {
+        let pid = |raw: u32| {
+            i32::try_from(raw)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+        };
+        match (
+            crate::team::caller::peer_pid(stream).and_then(pid),
+            pid(pane),
+        ) {
+            (Some(peer), Some(leader)) => rustix::process::getpgid(Some(peer)) == Ok(leader),
+            _ => false,
+        }
+    }
+
     impl Wire {
-        fn open(socket: &Path) -> Result<Self, &'static str> {
+        fn open(socket: &Path, pane: u32) -> Result<Self, &'static str> {
             let stream = crate::spawn_gate::connect_unix_std(socket)
                 .map_err(|_| "codex_bridge_not_running")?;
             let (uid, _) =
                 nix::unistd::getpeereid(&stream).map_err(|_| "codex_bridge_peer_unknown")?;
-            if uid.as_raw() != rustix::process::getuid().as_raw() {
+            if uid.as_raw() != rustix::process::getuid().as_raw() || !listens_in_pane(&stream, pane)
+            {
                 return Err("codex_bridge_peer_unknown");
             }
             let mut wire = Self {
@@ -511,6 +537,7 @@ mod wire {
         _socket: &Path,
         _text: &str,
         _start: bool,
+        _pane: u32,
     ) -> Result<Option<String>, &'static str> {
         Err("codex_bridge_unsupported")
     }

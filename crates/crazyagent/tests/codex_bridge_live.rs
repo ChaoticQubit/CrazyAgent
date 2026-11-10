@@ -278,11 +278,12 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
 }
 
 /// Starts the app's first turn through its app server once it takes one, and waits for
-/// the reply. Input: the agent's `CODEX_HOME`. Output: nothing; panics on timeout.
-fn greet(home: &Path) {
+/// the reply. Input: the agent's `CODEX_HOME` and its pane's first process. Output:
+/// nothing; panics on timeout.
+fn greet(home: &Path, pane: Option<u32>) {
     let deadline = Instant::now() + START;
     loop {
-        match codex::deliver(home, GREETING, true) {
+        match codex::deliver(home, GREETING, true, pane) {
             Bridged::Delivered(_) => break,
             Bridged::Unavailable(reason) => {
                 assert!(
@@ -394,17 +395,18 @@ fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() 
     let home = private(&base.join("home"));
     let agent = AgentId::team(1).unwrap();
     let (_server, host) = start_app(&base, &home, &agent);
-    greet(&home);
+    let pane = host.pane_pid(&agent).unwrap();
+    greet(&home, pane);
 
     assert!(matches!(
-        codex::deliver(&home, BUSY_TURN, true),
+        codex::deliver(&home, BUSY_TURN, true, pane),
         Bridged::Delivered(_)
     ));
     until(TURN, "the busy turn to start", || {
         recorded(&home, BUSY_TURN)
     });
     assert!(matches!(
-        codex::deliver(&home, STEER, false),
+        codex::deliver(&home, STEER, false, pane),
         Bridged::Delivered(_)
     ));
     if let Err(problem) =
@@ -450,9 +452,10 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
     assert_eq!(home, agent_home(&state, id));
     let agent = AgentId::team(id).unwrap();
     let (_server, host) = start_app(&base, &home, &agent);
-    greet(&home);
+    let pane = host.pane_pid(&agent).unwrap();
+    greet(&home, pane);
     assert!(matches!(
-        codex::deliver(&home, BUSY_TURN, true),
+        codex::deliver(&home, BUSY_TURN, true, pane),
         Bridged::Delivered(_)
     ));
     until(TURN, "the busy turn to start", || {
@@ -550,8 +553,9 @@ fn a_steer_a_codex_turn_aborted_by_esc_dropped_goes_back_to_sent_and_comes_once_
     let home = private(&agent_home(&state, id));
     let agent = AgentId::team(id).unwrap();
     let (_server, host) = start_app(&base, &home, &agent);
-    greet(&home);
-    let Bridged::Delivered(Some(busy)) = codex::deliver(&home, BUSY_TURN, true) else {
+    let pane = host.pane_pid(&agent).unwrap();
+    greet(&home, pane);
+    let Bridged::Delivered(Some(busy)) = codex::deliver(&home, BUSY_TURN, true, pane) else {
         panic!("the busy turn started with no turn id named");
     };
     until(TURN, "the busy turn to start", || {
