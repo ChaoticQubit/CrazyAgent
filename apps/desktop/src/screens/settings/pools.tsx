@@ -590,6 +590,7 @@ export function Pools({ creating }: { creating: boolean }) {
     const pool = deleting;
     setDeleting(undefined);
     if (result.kind !== "ok") return setRefusal(result.kind === "not_ready" ? "Deleting pools isn't ready yet in this build." : result.message);
+    edits.drop();
     const at = read.findIndex((item) => item.id === pool.id);
     setSelected((read[at + 1] ?? read[at - 1])?.id);
     setAdding(false);
@@ -620,7 +621,7 @@ export function Pools({ creating }: { creating: boolean }) {
     <div>
       {refusal && <div className="pool-refusal"><Notice tone="danger" alert><span className="grow">{refusal}</span></Notice></div>}
       <PoolsScreenView pools={pools} accounts={accounts} schedule={schedule} ranking={ranking} limits={limits} nowMs={nowMs} selected={selected} draft={draft} adding={adding} onRetryOrder={rerank} onRetrySchedule={rereadSchedule} saved={saved} apply={apply}
-        onSelect={(id) => { edits.drop(); setAdding(false); setSelected(id); }} onNew={() => { edits.open(read.map((item) => item.name)); setAdding(true); }}
+        onSelect={(id) => { edits.drop(); setAdding(false); setRefusal(undefined); setSelected(id); }} onNew={() => { edits.open(read.map((item) => item.name)); setAdding(true); }}
         onToggleAdd={() => setAdding(!adding)} onDoneAdd={closeAdd} onAdd={(pool, account) => (draft ? edits.addToDraft(account) : edits.add(pool, account))} onRemove={edits.remove} onRename={edits.rename} onDraftName={edits.setName}
         onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} preparing={preparing} />
     </div>
