@@ -90,7 +90,7 @@ test("the master's settings keep the Account and Apply a master harness change p
   for (const [row, value] of Object.entries(seen)) assert.equal(value.shown, value.picked, `${row} holds the pick`);
 });
 
-const APP_SELECTS = [["schedule", "schedule-app", "balanced"], ["schedule", "schedule-pool-main", "manual_rank"], ["project", "project-account-order", "balanced"], ["memory", "memory-agent-writes", "ask"]];
+const APP_SELECTS = [["project", "project-account-order", "balanced"], ["memory", "memory-agent-writes", "ask"]];
 
 test("the app's own settings selects keep the pick while their reads run, and go back after a refused save", { timeout: 120_000 }, async () => {
   const seen = await withPage(async (page) => {
@@ -189,12 +189,6 @@ test("a help line follows the held pick, not the value the save replaced", { tim
   });
   assert.match(budget.before, /^Off lets the agents/);
   assert.match(budget.after, /^Used /, "the budget's line shows while its pick is held");
-  const strategy = await withPage(async (page) => {
-    await page.evaluate(appFixture);
-    await page.evaluate(`Fixture.mount("schedule", false)`);
-    return page.evaluate(`Fixture.pick("schedule-app", "balanced")`);
-  });
-  assert.equal(strategy.helper, "The account with the least weekly use goes first.");
 });
 
 test("when two picks save at once, the answer to the older one never puts it back on screen", { timeout: 120_000 }, async () => {

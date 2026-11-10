@@ -1,20 +1,29 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { projectsUsing } from "../../api-projects";
-import { accountRanking, accountSchedule, deletePool, listAccounts, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountPlan, type AccountSchedule, type AccountView, type PoolBase, type PoolMember, type PoolRanking, type PoolSummary, type RankedAccount, type Result } from "../../api";
+import { accountRanking, accountSchedule, createPool, deletePool, listAccounts, newPoolId, poolInput, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountPlan, type AccountSchedule, type AccountView, type PoolMember, type PoolRanking, type PoolSummary, type RankedAccount, type Result } from "../../api";
 import { loadUsage, type AccountLimits } from "../../api-usage";
-import { useAppSession, useLoad, type Loaded } from "../../state";
+import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
 import {
-  Button, CapacityMeter, ConfirmDialog, EmptyState, LoadError, Notice, NotReady, SearchField, Select, SettingLine, SettingSection, Skeleton,
-  StatusBadge, TextField, WindowedList, navigate, Checkbox,
+  Button, CapacityMeter, ConfirmDialog, EmptyState, Icon, LoadError, Notice, NotReady, SearchField, Select, SettingSection, Skeleton,
+  StatusBadge, TextField, WindowedList, navigate,
 } from "../../ui";
 import { offsetMinutes } from "../metrics/usage-model";
-import { AccountChoice, planFor, planLine, poolStrategy } from "./account-choice";
+import { planFor, planLine, poolStrategy } from "./account-choice";
 import { andList } from "./account-drawer";
 import { filterAccounts } from "./accounts";
 import { takePoolDraft } from "./pool-draft";
+import { AppOrder, KeepRowFocus, PoolOrderPicker, RowControls, SchedulePanel, applyHeld, usePoolChanges, type ApplyChange, type MadeChange } from "./pool-controls";
 import { HELD_HEAD, heldLine, isNear, orderLine, usageBars, whyLine } from "./pool-order";
 
 export const POOL_FULL = "A pool can hold up to 15 accounts. Remove one to add another.";
+
+const DRAFT_EMPTY = "No accounts yet. This pool is created with its first account.";
+
+/** What takes the focus when the control it was on left the rows. */
+const ROWS_GONE = '[data-control="add-account"]';
+
+/** What takes the focus when the control it was on left the add panel. */
+const PANEL_GONE = ".pool-add input[type=search]";
 
 /** How often the page reads the pools, the accounts, the order and the limits again, in
  * milliseconds, so a row's badge and why line and the left list never disagree for long. */
@@ -124,10 +133,11 @@ function RowUsage({ limits, id, nowMs }: { limits: Loaded<AccountLimits[]>; id: 
   </div>)}</div>;
 }
 
-/** One account in the selected pool's order: where it stands, who it is, why it stands there and
- * its usage. Inputs: the ranked account, its place (null for a held one), what is known of it,
- * its plan when read, the limits read and now. Output: the row. */
-function OrderRow({ item, at, account, member, plan, limits, nowMs }: {
+/** One account in the selected pool's order: where it stands, who it is, why it stands there, its
+ * pin and Schedule panel and its usage. Inputs: the ranked account, its place (null for a held
+ * one), what is known of it, its plan when read, the limits read, now, whether its panel is open,
+ * the toggle, the queue of changes and the removal. Output: the row. */
+function OrderRow({ item, at, account, member, plan, limits, nowMs, open, onToggle, apply, onRemove }: {
   item: RankedAccount;
   at: number | null;
   account: AccountView | undefined;
@@ -135,6 +145,10 @@ function OrderRow({ item, at, account, member, plan, limits, nowMs }: {
   plan: AccountPlan | undefined;
   limits: Loaded<AccountLimits[]>;
   nowMs: number;
+  open: boolean;
+  onToggle: () => void;
+  apply: ApplyChange;
+  onRemove: (id: string, name: string) => void;
 }) {
   const id = item.connection;
   const name = account?.name ?? member?.provider ?? id;
@@ -150,14 +164,21 @@ function OrderRow({ item, at, account, member, plan, limits, nowMs }: {
       <div className="pool-plan">{plan ? `${harness} \u00b7 ${planLine(plan)}` : harness}</div>
       <div className="pool-why">{why}{signIn && <> <a href={`#/settings/accounts?action=sign_in&account=${encodeURIComponent(id)}`} aria-label={`Sign in ${name}`}>Sign in</a></>}</div>
     </div>
-    <div className="pool-right"><RowUsage limits={limits} id={id} nowMs={nowMs} /></div>
+    <div className="pool-right">
+      <div className="pool-ctl">
+        {plan && <RowControls id={id} name={name} plan={plan} open={open} onToggle={onToggle} apply={apply} />}
+        <Button variant="quiet" size="small" icon="x" iconOnly={`Remove ${name}`} data-control={`remove:${id}`} onClick={() => onRemove(id, name)} />
+      </div>
+      <RowUsage limits={limits} id={id} nowMs={nowMs} />
+    </div>
+    {plan && open && <SchedulePanel id={id} name={name} plan={plan} apply={apply} />}
   </li>;
 }
 
-/** The selected pool's accounts in the engine's order, then the held ones; the page never sorts
- * them. Inputs: the pool, the four reads, now and the retry action. Output: the rows, or the
- * state of the order read. */
-function PoolOrder({ pool, ranking, schedule, accounts, limits, nowMs, onRetry }: {
+/** The selected pool's account order and its accounts in the engine's order, then the held ones;
+ * the page never sorts them. Inputs: the pool, the four reads, now, the retry action, the queue of
+ * changes and the removal. Output: the rows, or the state of the order read. */
+function PoolOrder({ pool, ranking, schedule, accounts, limits, nowMs, onRetry, apply, onRemove }: {
   pool: PoolSummary;
   ranking: Loaded<PoolRanking[]>;
   schedule: Loaded<AccountSchedule>;
@@ -165,7 +186,10 @@ function PoolOrder({ pool, ranking, schedule, accounts, limits, nowMs, onRetry }
   limits: Loaded<AccountLimits[]>;
   nowMs: number;
   onRetry: () => void;
+  apply: ApplyChange;
+  onRemove: (id: string, name: string) => void;
 }) {
+  const [open, setOpen] = useState<string | null>(null);
   if (ranking.kind === "loading") return <div className="set-body"><Skeleton shape="row" count={4} /></div>;
   if (ranking.kind === "not_ready") return <div className="set-body"><NotReady what="Account order" compact /></div>;
   if (ranking.kind === "error") return <div className="set-body"><LoadError message="Couldn't load the account order." onRetry={onRetry} /></div>;
@@ -176,25 +200,159 @@ function PoolOrder({ pool, ranking, schedule, accounts, limits, nowMs, onRetry }
   const byId = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account]) : []);
   const members = new Map(pool.members.map((member) => [member.id, member]));
   const row = (item: RankedAccount, at: number | null) => <OrderRow key={item.connection} item={item} at={at} account={byId.get(item.connection)} member={members.get(item.connection)}
-    plan={schedule.kind === "ok" ? planFor(schedule.value, item.connection) : undefined} limits={limits} nowMs={nowMs} />;
+    plan={schedule.kind === "ok" ? planFor(schedule.value, item.connection) : undefined} limits={limits} nowMs={nowMs}
+    open={open === item.connection} onToggle={() => setOpen(open === item.connection ? null : item.connection)} apply={apply} onRemove={onRemove} />;
   return <>
     {found && schedule.kind === "ok" && <div className="pool-order">
-      <span className="pool-order-head">Account order</span>
+      <div className="pool-order-pick"><span className="pool-order-head">Account order</span><PoolOrderPicker key={pool.id} pool={pool} schedule={schedule.value} apply={apply} /></div>
       <p>{orderLine(found.strategy, poolStrategy(schedule.value, pool.id) !== null, found.own_order_projects)}</p>
     </div>}
     {limits.kind === "error" && <div className="set-body"><Notice tone="warn">Couldn't read usage limits.</Notice></div>}
-    {rows.length === 0 && <p className="pool-empty">{pool.members.length === 0 ? "No accounts yet. Use Edit pool to put one in this pool." : "No accounts to rank yet."}</p>}
+    {rows.length === 0 && <p className="pool-empty">{pool.members.length === 0 ? "No accounts yet. Use Add account to put one in this pool." : "No accounts to rank yet."}</p>}
     {rows.length > 0 && ready.length === 0 && <p className="pool-empty">No account can take work now.</p>}
     {ready.length > 0 && <ol role="list" className="pool-rows">{ready.map((item, at) => row(item, at))}</ol>}
     {held.length > 0 && <><p className="pool-held-head">{HELD_HEAD}</p><ul role="list" className="pool-rows">{held.map((item) => row(item, null))}</ul></>}
   </>;
 }
 
-/** Settings, Pools as a pure view: the pools on the left, and on the right the selected pool with
- * its accounts in their real order. Inputs: the five reads, now, the selected pool's id (the first
- * pool when absent or gone), the select, new, edit, delete, retry and set-up actions and the pool
- * being set up. Output: the screen, or the state of the pools read. */
-export function PoolsScreenView({ pools, accounts, schedule, ranking, limits, nowMs, selected, onSelect, onNew, onEdit, onDelete, onRetry, onRetryOrder, onPrepare, preparing = null }: {
+/** Draws a started pool as the pool it will be. Input: the draft. Output: its summary. */
+function draftSummary(draft: NewPool): PoolSummary {
+  return { id: draft.id ?? "new-pool", name: draft.name, summary: "", members: draft.members, project_count: 0 };
+}
+
+/** One pool in the left list. Inputs: the pool, whether it is selected and the select action.
+ * Output: its button. */
+function PoolItem({ pool, on, onSelect }: { pool: PoolSummary; on: boolean; onSelect: () => void }) {
+  return <button type="button" className={on ? "pool-item on" : "pool-item"} aria-current={on ? "true" : undefined} onClick={onSelect}>
+    <span className="pool-item-name"><span className="pool-item-label">{pool.name}</span><span className="pool-item-count">{pool.members.length} of {POOL_MEMBER_MAX}</span></span>
+    <span className="pool-item-about">{`${poolReadiness(pool.members)}. ${poolUse(pool.project_count)}.`}</span>
+  </button>;
+}
+
+/** A saved pool's name, saved on Enter or on leaving the field; a name that fails its rule shows
+ * it and sends nothing. Inputs: the pool, the queue and the rename. Output: the field. */
+function PoolNameField({ pool, apply, onRename }: { pool: PoolSummary; apply: ApplyChange; onRename: (pool: PoolSummary, name: string) => MadeChange }) {
+  const [shown, hold] = useHeld<string>(pool.name);
+  const [typed, setTyped] = useState(shown);
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    setTyped(shown);
+    setError(undefined);
+  }, [shown]);
+  const commit = () => {
+    const input = poolInput(typed, pool.members.map((member) => member.id));
+    if (input.kind !== "ok") return setError(input.kind === "error" ? input.message : undefined);
+    setError(undefined);
+    if (input.value.name === shown) return setTyped(shown);
+    applyHeld(apply, hold, input.value.name, onRename(pool, input.value.name));
+  };
+  return <TextField id="pool-name" label="Pool name" labelOutside aria-label="Pool name" value={typed} onValue={setTyped} error={error} onBlur={commit}
+    onKeyDown={(event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      commit();
+    }} />;
+}
+
+/** The accounts a pool can still take: the search and provider filters, without its members.
+ * Inputs: the accounts, the filters and the members. Output: the accounts to list. */
+export function addableAccounts(accounts: AccountView[], search: string, provider: string, members: readonly string[]): AccountView[] {
+  return filterAccounts(accounts, search, provider, "").filter((account) => !members.includes(account.id));
+}
+
+/** The body of the add panel for each state of the read: loading, not ready, failed, no accounts
+ * at all, nothing shown, or the windowed lines. Inputs: the read, the accounts shown and the line
+ * for one account. Output: the list. */
+function AddableList({ accounts, shown, line }: { accounts: Loaded<AccountView[]>; shown: AccountView[]; line: (account: AccountView) => ReactNode }) {
+  if (accounts.kind === "loading") return <div className="set-body"><Skeleton shape="row" count={3} /></div>;
+  if (accounts.kind === "not_ready") return <div className="set-body"><NotReady what="Accounts" compact /></div>;
+  if (accounts.kind === "error") return <div className="set-body"><Notice tone="danger">Couldn't load accounts.</Notice></div>;
+  if (accounts.value.length === 0) return <div className="set-body"><EmptyState compact icon="key-round" title="No accounts yet"
+    action={<a className="btn" href="#/settings/accounts?action=add">Add account</a>}>Add an account first, then put it in a pool.</EmptyState></div>;
+  if (shown.length === 0) return <p className="set-body secondary">No accounts match.</p>;
+  return <WindowedList className="pool-add-list" label="Accounts you can add" count={shown.length} viewport={176} renderRow={(index) => line(shown[index]!)} />;
+}
+
+/** The panel that puts accounts in the pool: search, provider, Done and every account outside it.
+ * Inputs: the pool, the accounts read, the add and the close actions. Output: the panel. */
+function AddPanel({ pool, accounts, onAdd, onDone }: { pool: PoolSummary; accounts: Loaded<AccountView[]>; onAdd: (account: AccountView) => void; onDone: () => void }) {
+  const [search, setSearch] = useState("");
+  const [provider, setProvider] = useState("");
+  const all = accounts.kind === "ok" ? accounts.value : [];
+  const members = pool.members.map((member) => member.id);
+  const full = members.length >= POOL_MEMBER_MAX;
+  const providers = [...new Map(all.map((account) => [account.provider, account.provider_name])).entries()];
+  const line = (account: AccountView) => <div key={account.id} className="pool-add-row">
+    <span className="pick-words"><span className="ellipsis">{account.name}</span><span className="small secondary ellipsis">{`${account.provider_name}. ${account.status_label}.`}</span></span>
+    <Button size="small" aria-label={`Add ${account.name}`} data-control={`add:${account.id}`} aria-disabled={full || undefined} onClick={() => onAdd(account)}>Add</Button>
+  </div>;
+  return <div className="pool-add">
+    <div className="set-bar">
+      <SearchField label="Search accounts" value={search} onValue={setSearch} />
+      <Select id="pool-provider" label="Provider" hideLabel value={provider} onValue={setProvider}
+        options={[{ value: "", label: "All providers" }, ...providers.map(([value, label]) => ({ value, label }))]} />
+      <Button variant="quiet" size="small" onClick={onDone}>Done</Button>
+    </div>
+    {full && <div className="set-body"><Notice>{POOL_FULL}</Notice></div>}
+    <AddableList accounts={accounts} shown={addableAccounts(all, search, provider, members)} line={line} />
+  </div>;
+}
+
+/** The selected pool on the right: its name, what it is used for, its actions, Add account and its
+ * accounts in their real order. A pool that is not created yet has no order and no delete yet.
+ * Inputs: the pool, whether it is a draft, the reads, now, the panel state, the pool being set up,
+ * the saved line, the queue and the actions. Output: the pane. */
+function PoolDetail({ pool, isDraft, accounts, schedule, ranking, limits, nowMs, adding, preparing, saved, apply, onToggleAdd, onDoneAdd, onAdd, onRemove, onRename, onDraftName, onDelete, onRetryOrder, onPrepare }: {
+  pool: PoolSummary;
+  isDraft: boolean;
+  accounts: Loaded<AccountView[]>;
+  schedule: Loaded<AccountSchedule>;
+  ranking: Loaded<PoolRanking[]>;
+  limits: Loaded<AccountLimits[]>;
+  nowMs: number;
+  adding: boolean;
+  preparing: string | null;
+  saved: string | undefined;
+  apply: ApplyChange;
+  onToggleAdd: () => void;
+  onDoneAdd: () => void;
+  onAdd: (pool: PoolSummary, account: AccountView) => void;
+  onRemove: (pool: PoolSummary, id: string, name: string) => void;
+  onRename: (pool: PoolSummary, name: string) => MadeChange;
+  onDraftName: (name: string) => void;
+  onDelete: (pool: PoolSummary) => void;
+  onRetryOrder: () => void;
+  onPrepare?: (pool: PoolSummary) => void;
+}) {
+  const note = notSignedInNote(pool.members.map((member) => member.id), new Map(pool.members.map((member) => [member.id, member.status])));
+  const field = <div className="pool-name-edit">{isDraft
+    ? <TextField id="pool-name" label="Pool name" labelOutside aria-label="Pool name" value={pool.name} onValue={onDraftName} />
+    : <PoolNameField key={pool.id} pool={pool} apply={apply} onRename={onRename} />}</div>;
+  const actions = isDraft ? undefined : <div className="pool-actions">
+    {onPrepare && keyedMembers(pool).length > 0 && <Button icon="refresh-cw" aria-label={`Get ready for agents: ${pool.name}`} pending={preparing === pool.id} pendingLabel="Getting ready..." disabled={preparing !== null} onClick={() => onPrepare(pool)}>Get ready for agents</Button>}
+    <Button variant="quiet" aria-label={`Delete pool ${pool.name}`} onClick={() => onDelete(pool)}>Delete pool</Button>
+  </div>;
+  return <div className="pool-detail">
+    <SettingSection title={pool.name} titleField={field} about={`${poolUse(pool.project_count)}. ${poolReadiness(pool.members)}. Shown on each project's pool picker.`} actions={actions}>
+      <div className="pool-cap">
+        <CapacityMeter count={pool.members.length} />
+        <Button size="small" icon="plus" aria-expanded={adding} data-control="add-account" onClick={onToggleAdd}>Add account</Button>
+        <span className="pool-saved" role="status">{saved && <><Icon name="check" size={14} />{saved}</>}</span>
+      </div>
+      {adding && <KeepRowFocus gone={PANEL_GONE}><AddPanel pool={pool} accounts={accounts} onAdd={(account) => onAdd(pool, account)} onDone={onDoneAdd} /></KeepRowFocus>}
+      {note && <div className="set-body"><Notice tone="warn">{note}</Notice></div>}
+      {isDraft ? <p className="pool-empty">{DRAFT_EMPTY}</p>
+        : <KeepRowFocus gone={ROWS_GONE}><PoolOrder key={pool.id} pool={pool} ranking={ranking} schedule={schedule} accounts={accounts} limits={limits} nowMs={nowMs} onRetry={onRetryOrder} apply={apply} onRemove={(id, name) => onRemove(pool, id, name)} /></KeepRowFocus>}
+    </SettingSection>
+  </div>;
+}
+
+/** Settings, Pools as a pure view: the pools and the app's order on the left, and on the right the
+ * selected pool with its accounts in their real order. Inputs: the five reads, now, the selected
+ * pool's id (the first pool when absent or gone), a started pool, whether the add panel is open,
+ * the select, new, delete, retry, set-up, add, remove and rename actions, the pool being set up,
+ * the saved line and the queue of changes. Output: the screen, or the state of the pools read. */
+export function PoolsScreenView({ pools, accounts, schedule, ranking, limits, nowMs, selected, draft = null, adding = false, onSelect, onNew, onDelete, onRetry, onRetryOrder, onRetrySchedule, onPrepare, onToggleAdd, onDoneAdd, onAdd, onRemove, onRename, onDraftName, preparing = null, saved, apply }: {
   pools: Loaded<PoolSummary[]>;
   accounts: Loaded<AccountView[]>;
   schedule: Loaded<AccountSchedule>;
@@ -202,196 +360,169 @@ export function PoolsScreenView({ pools, accounts, schedule, ranking, limits, no
   limits: Loaded<AccountLimits[]>;
   nowMs: number;
   selected: string | undefined;
+  draft?: NewPool | null;
+  adding?: boolean;
   onSelect: (id: string) => void;
   onNew: () => void;
-  onEdit: (pool: PoolSummary) => void;
   onDelete: (pool: PoolSummary) => void;
   onRetry: () => void;
   onRetryOrder: () => void;
+  onRetrySchedule: () => void;
   onPrepare?: (pool: PoolSummary) => void;
+  onToggleAdd: () => void;
+  onDoneAdd: () => void;
+  onAdd: (pool: PoolSummary, account: AccountView) => void;
+  onRemove: (pool: PoolSummary, id: string, name: string) => void;
+  onRename: (pool: PoolSummary, name: string) => MadeChange;
+  onDraftName: (name: string) => void;
   preparing?: string | null;
+  saved: string | undefined;
+  apply: ApplyChange;
 }) {
   if (pools.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (pools.kind === "not_ready") return <NotReady what="Pools" />;
   if (pools.kind === "error") return <LoadError message="Couldn't load pools." onRetry={onRetry} />;
-  if (pools.value.length === 0) return <EmptyState icon="layers" title="No pools yet"
+  if (pools.value.length === 0 && draft === null) return <EmptyState icon="layers" title="No pools yet"
     action={<Button variant="primary" icon="plus" onClick={onNew}>New pool</Button>}>
     A pool groups up to 15 accounts for your projects to use.
   </EmptyState>;
-  const pool = pools.value.find((item) => item.id === selected) ?? pools.value[0]!;
-  const note = notSignedInNote(pool.members.map((member) => member.id), new Map(pool.members.map((member) => [member.id, member.status])));
+  const started = draft === null ? null : draftSummary(draft);
+  const pool = started ?? pools.value.find((item) => item.id === selected) ?? pools.value[0]!;
   return <div className="pool-screen">
-    <SettingSection title="Your pools" actions={<Button size="small" icon="plus" onClick={onNew}>New pool</Button>}>
-      <div className="pool-items">{pools.value.map((item) => <button key={item.id} type="button" className={item.id === pool.id ? "pool-item on" : "pool-item"} aria-current={item.id === pool.id ? "true" : undefined} onClick={() => onSelect(item.id)}>
-        <span className="pool-item-name"><span className="pool-item-label">{item.name}</span><span className="pool-item-count">{item.members.length} of {POOL_MEMBER_MAX}</span></span>
-        <span className="pool-item-about">{`${poolReadiness(item.members)}. ${poolUse(item.project_count)}.`}</span>
-      </button>)}</div>
-    </SettingSection>
-    <div className="pool-detail">
-      <SettingSection title={pool.name} about={`${poolUse(pool.project_count)}. ${poolReadiness(pool.members)}. Shown on each project's pool picker.`} actions={<div className="pool-actions">
-        {onPrepare && keyedMembers(pool).length > 0 && <Button icon="refresh-cw" aria-label={`Get ready for agents: ${pool.name}`} pending={preparing === pool.id} pendingLabel="Getting ready..." disabled={preparing !== null} onClick={() => onPrepare(pool)}>Get ready for agents</Button>}
-        <Button aria-label={`Edit pool ${pool.name}`} onClick={() => onEdit(pool)}>Edit pool</Button>
-        <Button variant="quiet" aria-label={`Delete pool ${pool.name}`} onClick={() => onDelete(pool)}>Delete pool</Button>
-      </div>}>
-        <div className="pool-cap"><CapacityMeter count={pool.members.length} /></div>
-        {note && <div className="set-body"><Notice tone="warn">{note}</Notice></div>}
-        <PoolOrder pool={pool} ranking={ranking} schedule={schedule} accounts={accounts} limits={limits} nowMs={nowMs} onRetry={onRetryOrder} />
+    <div className="pool-left">
+      <SettingSection title="Your pools" actions={<Button size="small" icon="plus" onClick={onNew}>New pool</Button>}>
+        <div className="pool-items">
+          {pools.value.map((item) => <PoolItem key={item.id} pool={item} on={item.id === pool.id} onSelect={() => onSelect(item.id)} />)}
+          {started && <PoolItem pool={started} on onSelect={() => undefined} />}
+        </div>
       </SettingSection>
+      <AppOrder schedule={schedule} apply={apply} onRetry={onRetrySchedule} />
     </div>
+    <PoolDetail pool={pool} isDraft={draft !== null && draft.id === null} accounts={accounts} schedule={schedule} ranking={ranking} limits={limits} nowMs={nowMs} adding={adding} preparing={preparing} saved={saved} apply={apply}
+      onToggleAdd={onToggleAdd} onDoneAdd={onDoneAdd} onAdd={onAdd} onRemove={onRemove} onRename={onRename} onDraftName={onDraftName} onDelete={onDelete} onRetryOrder={onRetryOrder} onPrepare={onPrepare} />
   </div>;
 }
 
-/** The body of All accounts for each state of the read: loading, not ready, failed, no accounts
- * at all, nothing shown, or the windowed lines. Inputs: the read, the accounts shown, whether
- * Selected only has nothing to show and the line for one account. Output: the list. */
-function AccountList({ accounts, shown, noneSelected, line }: {
-  accounts: Loaded<AccountView[]>;
-  shown: AccountView[];
-  noneSelected: boolean;
-  line: (account: AccountView) => ReactNode;
-}) {
-  if (accounts.kind === "loading") return <div className="set-body"><Skeleton shape="row" count={6} /></div>;
-  if (accounts.kind === "not_ready") return <div className="set-body"><NotReady what="Accounts" compact /></div>;
-  if (accounts.kind === "error") return <div className="set-body"><Notice tone="danger">Couldn't load accounts.</Notice></div>;
-  if (accounts.value.length === 0) return <div className="set-body"><EmptyState compact icon="key-round" title="No accounts yet"
-    action={<a className="btn" href="#/settings/accounts?action=add">Add account</a>}>Add an account first, then put it in a pool.</EmptyState></div>;
-  if (shown.length === 0) return <p className="set-body secondary">{noneSelected ? "No accounts selected yet." : "No accounts match."}</p>;
-  return <WindowedList label="All accounts" count={shown.length} viewport={440} renderRow={(index) => line(shown[index]!)} />;
+/** A pool the owner started and the engine does not hold yet: on screen at once, and created by
+ * its first account. `id` is set once it is created, until the next pools read has it. */
+export interface NewPool {
+  name: string;
+  id: string | null;
+  members: PoolMember[];
 }
 
-/** The members of the pool being edited. Inputs: the member ids, the accounts by id, the saved
- * members by id and the remove action. Output: the list. */
-function MemberLines({ members, byId, known, onRemove }: {
-  members: string[];
-  byId: Map<string, AccountView>;
-  known: Map<string, PoolMember>;
-  onRemove: (id: string) => void;
-}) {
-  return <ul className="plain-list">{members.map((id) => {
-    const account = byId.get(id);
-    const member = known.get(id);
-    const label = account?.name ?? member?.provider ?? "Account";
-    return <li className="member" key={id}>
-      <span className="grow pick-words"><span className="ellipsis">{label}</span>
-        {account && <span className="small secondary ellipsis">{account.provider_name}</span>}</span>
-      <StatusBadge word={account?.status_label ?? member?.status_label ?? ""} />
-      <Button variant="quiet" size="small" aria-label={`Remove ${label}`} onClick={() => onRemove(id)}>Remove</Button>
-    </li>;
-  })}</ul>;
+/** The first of "New pool", "New pool 2" and so on that no pool uses. Input: the names in use.
+ * Output: the free name. */
+export function freePoolName(taken: readonly string[]): string {
+  for (let at = 1; at <= taken.length + 1; at += 1) {
+    const name = at === 1 ? "New pool" : `New pool ${at}`;
+    if (!taken.includes(name)) return name;
+  }
+  throw new Error("one of these names is always free");
 }
 
-/** The accounts the pool editor's left list shows: the search and provider filters, then only
- * the members when "Selected only" is on. Inputs: the accounts, the filters, the members and
- * the switch. Output: the accounts to list. */
-export function editorAccounts(accounts: AccountView[], search: string, provider: string, members: readonly string[], selectedOnly: boolean): AccountView[] {
-  const shown = filterAccounts(accounts, search, provider, "");
-  return selectedOnly ? shown.filter((account) => members.includes(account.id)) : shown;
+/** Draws an account as a member of a pool not read yet. Input: the account. Output: the member. */
+function memberOf(account: AccountView): PoolMember {
+  return { id: account.id, kind: "other", provider: account.provider, status: account.status === "not_signed_in" ? "not_signed_in" : "signed_in", status_label: account.status_label };
 }
 
-/** The pool editor as a view: name, every account as a windowed checkbox list, the members
- * with the 15-cell counter, and Save pool. Inputs: the pool being edited (absent for a new
- * one), the accounts read, the members a new pool starts with, and the save and cancel actions. */
-export function PoolEditorView({ pool, accounts, initialMembers = [], onSave, onCancel }: {
-  pool: PoolSummary | undefined;
-  accounts: Loaded<AccountView[]>;
-  initialMembers?: string[];
-  onSave: (name: string, members: string[]) => Promise<Result<void>>;
-  onCancel: () => void;
-}) {
-  const [name, setName] = useState(pool?.name ?? "");
-  const opened = pool?.members.map((member) => member.id) ?? initialMembers.slice(0, POOL_MEMBER_MAX);
-  const [members, setMembers] = useState<string[]>(opened);
-  const [selectedOnly, setSelectedOnly] = useState(false);
-  const [search, setSearch] = useState("");
-  const [provider, setProvider] = useState("");
-  const [blocked, setBlocked] = useState<string>();
-  const [nameError, setNameError] = useState<string>();
-  const [saveError, setSaveError] = useState<string>();
-  const [saving, setSaving] = useState(false);
-  const all = accounts.kind === "ok" ? accounts.value : [];
-  const byId = new Map(all.map((account) => [account.id, account]));
-  const known = new Map(pool?.members.map((member) => [member.id, member]) ?? []);
-  const status = new Map<string, string>([...pool?.members.map((member) => [member.id, member.status] as [string, string]) ?? [],
-    ...all.map((account) => [account.id, account.status] as [string, string])]);
-  const full = members.length >= POOL_MEMBER_MAX;
-  const shown = editorAccounts(all, search, provider, members, selectedOnly);
-  const providers = [...new Map(all.map((account) => [account.provider, account.provider_name])).entries()];
-  const note = notSignedInNote(members, status);
-  const membersChanged = members.length !== opened.length || members.some((id, index) => id !== opened[index]);
+/** The changes an owner makes to a pool's accounts and name, each through the queue, and the pool
+ * being started. A queued Add on a draft reads whether the draft was created by then, so two quick
+ * Adds create it once. Inputs: the queue, the accounts read, where a refusal is said and the
+ * select. Output: the draft and its actions. */
+function usePoolEdits(apply: ApplyChange, accounts: Loaded<AccountView[]>, refused: (sentence: string) => void, select: (id: string) => void) {
+  const session = useAppSession();
+  const known = accounts.kind === "ok" ? accounts.value : [];
+  const [draft, setDraft] = useState<NewPool | null>(null);
+  const run = useRef<{ id: string | null; name: string; members: string[] } | null>(null);
 
-  const toggle = (id: string) => {
-    const next = toggleMember(members, id);
-    if (next.kind === "full") {
-      setBlocked(id);
-      document.getElementById("pool-full-notice")?.focus();
-      return;
-    }
-    setBlocked(undefined);
-    setMembers(next.members);
+  const sent = async (write: () => Promise<Result<void>>, done: string): Promise<Result<string | null>> => {
+    const result = session.noteResult(await write());
+    if (result.kind === "not_ready") return { kind: "error", code: "not_ready", message: "Saving pools isn't ready yet in this build." };
+    if (result.kind === "ok") return { kind: "ok", value: done };
+    return result.code === "pool_member_limit" ? { ...result, message: POOL_FULL } : result;
   };
 
-  const save = async () => {
-    if (!name.trim()) return setNameError("Enter a pool name.");
-    setNameError(undefined);
-    setSaving(true);
-    const result = await onSave(name, members);
-    setSaving(false);
-    if (result.kind === "ok") return;
-    if (result.kind === "error" && result.code.startsWith("pool_name")) return setNameError(result.message);
-    setSaveError(result.kind === "not_ready" ? "Saving pools isn't ready yet in this build." : `Couldn't save this pool. ${result.message}`);
+  const readyAfter = (answer: Promise<Result<string | null>>, ids: string[]) => {
+    if (setupTargets([], ids, known).length === 0) return;
+    void answer.then((result) => {
+      if (result.kind !== "ok") return;
+      void apply({ send: async () => {
+        const note = await readyAdded([], ids, known, session.noteResult);
+        return note === undefined ? { kind: "ok", value: null } : { kind: "error", code: "account_setup", message: note };
+      } });
+    });
   };
 
-  const accountLine = (account: AccountView) => {
-    const checked = members.includes(account.id);
-    const refused = blocked === account.id;
-    return <label className={`pick${refused ? " blocked" : ""}`} title={full && !checked ? POOL_FULL : undefined}>
-      <span className="pick-words"><span className="ellipsis">{account.name}</span>
-        <span className="small secondary ellipsis">{refused ? POOL_FULL : `${account.provider_name}. ${account.status_label}.`}</span></span>
-      <input type="checkbox" checked={checked} aria-disabled={(full && !checked) || undefined} onChange={() => toggle(account.id)} />
-    </label>;
+  const addedWords = (account: AccountView) => `Added ${account.name}${setupTargets([], [account.id], known).length > 0 ? ". Getting it ready for agents." : "."}`;
+
+  const add = (pool: PoolSummary, account: AccountView) => {
+    const before = pool.members.map((member) => member.id);
+    const next = toggleMember(before, account.id);
+    if (next.kind === "full") return refused(POOL_FULL);
+    readyAfter(apply({ send: () => sent(() => savePool(pool.id, pool.name, next.members, { name: pool.name, members: before }), addedWords(account)) }), [account.id]);
   };
 
-  return <form className="stack" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-    <div className="settings-top">
-      <div><h2>{pool ? `Edit ${pool.name}` : "New pool"}</h2><p>Pick the accounts this pool can use. A pool holds up to {POOL_MEMBER_MAX} accounts.</p></div>
-      <Button icon="arrow-left" onClick={onCancel}>Back to pools</Button>
-    </div>
-    <SettingSection title="Details">
-      <SettingLine label="Pool name" help="Shown on each project's pool picker." htmlFor="pool-name" changed={name !== (pool?.name ?? "")}>
-        <TextField id="pool-name" label="Pool name" labelOutside value={name} onValue={setName} maxLength={60} error={nameError} />
-      </SettingLine>
-    </SettingSection>
-    <div className="settings-two">
-      <SettingSection title="All accounts">
-        <div className="set-bar">
-          <SearchField label="Search accounts" value={search} onValue={setSearch} />
-          <Select id="pool-provider" label="Provider" hideLabel value={provider} onValue={setProvider}
-            options={[{ value: "", label: "All providers" }, ...providers.map(([value, label]) => ({ value, label }))]} />
-          <Checkbox label="Selected only" checked={selectedOnly} onChecked={setSelectedOnly} />
-        </div>
-        <AccountList accounts={accounts} shown={shown} noneSelected={selectedOnly && members.length === 0} line={accountLine} />
-      </SettingSection>
-      <SettingSection title="In this pool" changed={membersChanged}>
-        <div className="set-body">
-          <CapacityMeter count={members.length} />
-          {full && <Notice id="pool-full-notice" alert={blocked !== undefined}>{POOL_FULL}</Notice>}
-          {note && <Notice tone="info">{note}</Notice>}
-          {members.length === 0 && <p className="secondary">No accounts yet. Check accounts on the left to add them.</p>}
-        </div>
-        {members.length > 0 && <MemberLines members={members} byId={byId} known={known} onRemove={toggle} />}
-      </SettingSection>
-    </div>
-    {saveError && <Notice tone="danger" alert>{saveError}</Notice>}
-    <div className="row">
-      <Button type="submit" variant="primary" icon="check" pending={saving} pendingLabel="Saving...">Save pool</Button>
-      <Button onClick={onCancel}>Cancel</Button>
-    </div>
-  </form>;
+  const addToDraft = (account: AccountView) => {
+    const target = run.current;
+    if (target === null || draft === null) throw new Error("only an open draft takes an account");
+    const name = draft.name;
+    readyAfter(apply({ send: async () => {
+      if (target.members.includes(account.id)) return { kind: "ok", value: null };
+      const first = target.id === null;
+      const id = target.id ?? newPoolId();
+      const before = target.members;
+      const made = first ? await sent(() => createPool(id, name, [account.id]), `${name.trim()} created.`)
+        : await sent(() => savePool(id, target.name, [...before, account.id], { name: target.name, members: before }), addedWords(account));
+      if (made.kind !== "ok") return made;
+      target.id = id;
+      if (first) target.name = name.trim();
+      target.members = [...before, account.id];
+      if (run.current !== target) return made;
+      setDraft((now) => now && { ...now, id, members: [...now.members, memberOf(account)] });
+      if (first) select(id);
+      return made;
+    } }), [account.id]);
+  };
+
+  const createWith = (ids: string[], taken: readonly string[]) => {
+    const id = newPoolId();
+    const name = freePoolName(taken);
+    readyAfter(apply({ send: async () => {
+      const made = await sent(() => createPool(id, name, ids), `${name} created.`);
+      if (made.kind === "ok") select(id);
+      return made;
+    } }), ids);
+  };
+
+  const remove = (pool: PoolSummary, id: string, name: string) => {
+    const before = pool.members.map((member) => member.id);
+    void apply({ send: () => sent(() => savePool(pool.id, pool.name, before.filter((item) => item !== id), { name: pool.name, members: before }), `Removed ${name}. It stays in your list.`) });
+  };
+
+  const rename = (pool: PoolSummary, name: string): MadeChange => {
+    const members = pool.members.map((member) => member.id);
+    return { send: () => sent(() => savePool(pool.id, name, members, { name: pool.name, members }), "Pool name saved.") };
+  };
+
+  const open = (taken: readonly string[]) => {
+    if (run.current?.id === null) return;
+    run.current = { id: null, name: "", members: [] };
+    setDraft({ name: freePoolName(taken), id: null, members: [] });
+  };
+
+  const drop = () => {
+    run.current = null;
+    setDraft(null);
+  };
+
+  return { draft, open, drop, setName: (name: string) => setDraft((now) => now && { ...now, name }), add, addToDraft, createWith, remove, rename };
 }
 
-/** Settings, Pools: the one screen, the pool editor and Delete pool; the pools, the accounts, the
- * order and the limits are read again once a minute. Input: whether a new pool editor opens on
- * arrival. */
+/** Settings, Pools: the one screen, adding, removing, renaming, a new pool and Delete pool; the
+ * pools, the accounts and the limits are read again once a minute, and the order too unless a
+ * change waits, since the queue reads it when it drains. Input: whether the page was opened to
+ * start a new pool. */
 export function Pools({ creating }: { creating: boolean }) {
   const session = useAppSession();
   const [pools, reload] = useLoad(poolSummaries, [], "pool-summaries");
@@ -401,21 +532,40 @@ export function Pools({ creating }: { creating: boolean }) {
   const [usage, rereadUsage] = useLoad(() => loadUsage(Date.now() - LIMITS_RANGE_MS, offsetMinutes(new Date()), null), [], "pool-usage");
   const [selected, setSelected] = useState<string>();
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [editing, setEditing] = useState<{ id?: string; opened?: PoolBase } | undefined>(creating ? {} : undefined);
-  const [draft, setDraft] = useState<string[]>([]);
+  const [adding, setAdding] = useState(false);
   const [deleting, setDeleting] = useState<PoolSummary>();
   const [users, setUsers] = useState<string[]>();
   const [removing, setRemoving] = useState(false);
   const [preparing, setPreparing] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string>();
+  const { saved, apply, changing } = usePoolChanges((poolsMoved) => {
+    rereadSchedule();
+    rerank();
+    if (poolsMoved) { reload(); rereadAccounts(); }
+  }, setRefusal);
+  const edits = usePoolEdits(apply, accounts, setRefusal, setSelected);
+  const read = pools.kind === "ok" ? pools.value : [];
+  const draft = edits.draft?.id && read.some((item) => item.id === edits.draft?.id) ? null : edits.draft;
   useEffect(() => {
-    if (!creating) return;
-    setEditing({});
+    if (edits.draft !== null && draft === null) edits.drop();
+  }, [draft, edits.draft]);
+  useEffect(() => {
+    if (!creating || pools.kind !== "ok" || accounts.kind === "loading") return;
     const taken = takePoolDraft();
-    if (taken.length) setDraft(taken);
-  }, [creating]);
+    navigate({ name: "settings", tab: "pools" }, true);
+    const names = pools.value.map((item) => item.name);
+    if (taken.length > 0) return edits.createWith(taken, names);
+    edits.open(names);
+    setAdding(true);
+  }, [creating, pools.kind, accounts.kind]);
   useEffect(() => {
-    const timer = setInterval(() => { setNowMs(Date.now()); reload(); rereadAccounts(); rerank(); rereadUsage(); }, REREAD_MS);
+    const timer = setInterval(() => {
+      setNowMs(Date.now());
+      reload();
+      rereadAccounts();
+      if (!changing()) rerank();
+      rereadUsage();
+    }, REREAD_MS);
     return () => clearInterval(timer);
   }, []);
   const limits: Loaded<AccountLimits[]> = usage.kind === "ok" ? { kind: "ok", value: usage.value.limits } : usage;
@@ -432,25 +582,6 @@ export function Pools({ creating }: { creating: boolean }) {
     if (failures.length === 0) session.showToast(`${pool.name} is ready for agents.`);
   };
 
-  const leave = () => {
-    setEditing(undefined);
-    if (creating) navigate({ name: "settings", tab: "pools" }, true);
-  };
-
-  if (editing) {
-    const pool = editing.id && pools.kind === "ok" ? pools.value.find((item) => item.id === editing.id) : undefined;
-    return <PoolEditorView key={editing.id ?? `new-${draft.join(",")}`} pool={pool} accounts={accounts} initialMembers={editing.id ? [] : draft} onCancel={() => { setDraft([]); leave(); }} onSave={async (name, members) => {
-      const saved = session.noteResult(await savePool(editing.id, name, members, editing.opened));
-      if (saved.kind !== "ok") return saved;
-      setRefusal(await readyAdded(pool?.members.map((member) => member.id) ?? [], members, accounts.kind === "ok" ? accounts.value : [], session.noteResult));
-      session.showToast(`${name.trim()} saved.`);
-      reread();
-      setDraft([]);
-      leave();
-      return saved;
-    }} />;
-  }
-
   const remove = async () => {
     if (!deleting) return;
     setRemoving(true);
@@ -458,8 +589,12 @@ export function Pools({ creating }: { creating: boolean }) {
     setRemoving(false);
     const pool = deleting;
     setDeleting(undefined);
-    if (result.kind === "ok") { session.showToast(deleteCopy(pool, users).done); reread(); }
-    else setRefusal(result.kind === "not_ready" ? "Deleting pools isn't ready yet in this build." : result.message);
+    if (result.kind !== "ok") return setRefusal(result.kind === "not_ready" ? "Deleting pools isn't ready yet in this build." : result.message);
+    const at = read.findIndex((item) => item.id === pool.id);
+    setSelected((read[at + 1] ?? read[at - 1])?.id);
+    setAdding(false);
+    session.showToast(deleteCopy(pool, users).done);
+    reread();
   };
 
   const askDelete = async (pool: PoolSummary) => {
@@ -471,21 +606,27 @@ export function Pools({ creating }: { creating: boolean }) {
     if (names.kind === "ok") setUsers(names.value);
   };
 
+  const closeAdd = () => {
+    document.querySelector<HTMLElement>(ROWS_GONE)?.focus();
+    setAdding(false);
+  };
+
   const copy = deleting && deleteCopy(deleting, users);
 
   return <div className="stack">
     <div className="settings-top">
       <div><h2>Pools</h2><p>A pool is a group of accounts for a project. When one account runs out, agents move to the next one in the pool.</p></div>
     </div>
-    {refusal && <Notice tone="danger" alert><span className="grow">{refusal}</span></Notice>}
-    <PoolsScreenView pools={pools} accounts={accounts} schedule={schedule} ranking={ranking} limits={limits} nowMs={nowMs} selected={selected} onSelect={setSelected} onRetryOrder={rerank}
-      onNew={() => setEditing({})} onEdit={(pool) => setEditing({ id: pool.id, opened: { name: pool.name, members: pool.members.map((member) => member.id) } })}
-      onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} preparing={preparing} />
-    {pools.kind === "ok" && pools.value.length > 0 && <AccountChoice pools={pools} accounts={accounts} schedule={schedule} ranking={ranking} reload={rereadSchedule} rerank={rerank} />}
+    <div>
+      {refusal && <div className="pool-refusal"><Notice tone="danger" alert><span className="grow">{refusal}</span></Notice></div>}
+      <PoolsScreenView pools={pools} accounts={accounts} schedule={schedule} ranking={ranking} limits={limits} nowMs={nowMs} selected={selected} draft={draft} adding={adding} onRetryOrder={rerank} onRetrySchedule={rereadSchedule} saved={saved} apply={apply}
+        onSelect={(id) => { edits.drop(); setAdding(false); setSelected(id); }} onNew={() => { edits.open(read.map((item) => item.name)); setAdding(true); }}
+        onToggleAdd={() => setAdding(!adding)} onDoneAdd={closeAdd} onAdd={(pool, account) => (draft ? edits.addToDraft(account) : edits.add(pool, account))} onRemove={edits.remove} onRename={edits.rename} onDraftName={edits.setName}
+        onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} preparing={preparing} />
+    </div>
     <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel={copy?.confirmLabel ?? "Delete pool"} pending={removing}
       onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}>
       {copy?.body}
     </ConfirmDialog>
   </div>;
 }
-

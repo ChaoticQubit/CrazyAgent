@@ -68,3 +68,27 @@
 .pool-limit.full .pool-bar i { background: var(--danger); }
 .pool-limit-none { font: 11px/16px var(--mono); color: var(--text-3); text-align: right; }
 @container (max-width: 560px) { .pool-row { grid-template-columns: 24px minmax(0, 1fr); } .pool-right { grid-column: 2; margin-top: 6px; } .pool-limit-none { text-align: left; } }
+.pool-left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.pool-app-order { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
+.pool-app-order h3 { margin: 0; font-size: 13px; line-height: 18px; font-weight: 600; }
+.pool-app-order .segmented { display: flex; flex-direction: column; }
+.pool-app-order .segmented button { justify-content: flex-start; }
+.pool-app-hint { font-size: 12px; line-height: 16px; color: var(--text-2); }
+.pool-saved { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; min-height: 20px; font-size: 12px; line-height: 16px; color: var(--ok); }
+.pool-order-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pool-order-pick .segmented button, .pool-ctl .segmented button { height: 22px; padding: 0 7px; font-size: 12px; }
+.pool-right { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pool-ctl { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.pool-sched { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.pool-sched .field { width: 88px; font-size: 12px; }
+.pool-sched .input { height: 28px; }
+.pool-sched-text { flex: 1 1 220px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--text-2); }
+.pool-sched-text b { display: block; font-weight: 600; color: var(--text); }
+.pool-refusal { position: sticky; top: 8px; z-index: 3; margin-bottom: var(--space-4); border-radius: var(--radius-panel); background: var(--bg); }
+@container (max-width: 560px) { .pool-ctl { justify-content: flex-start; } }
+
+.pool-name-edit .input { width: min(320px, 100%); font-weight: 600; font-size: 14px; }
+.pool-add { display: flex; flex-direction: column; border-top: 1px solid var(--border); background: var(--bg); }
+.pool-add .set-bar { border-top: 0; padding: 8px 16px; }
+.pool-add-list.windowed { height: auto; min-height: 0; max-height: 176px; }
+.pool-add-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 100%; padding: 0 16px; border-top: 1px solid var(--border); }

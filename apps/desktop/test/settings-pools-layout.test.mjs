@@ -5,7 +5,6 @@ import { doublePress, CONTRAST_MIN, press, tabRunner, tabWalk } from "./settings
 
 const fixture = await bundle(new URL("./fixtures/settings-pools-layout.mjs", import.meta.url).pathname);
 const onPools = tabRunner(fixture);
-const EDIT_MAIN = 'button[aria-label="Edit pool Main pool"]';
 
 const read = (page) => page.evaluate("Fixture.sections()");
 const say = (page) => page.evaluate("Fixture.text()");
@@ -24,10 +23,10 @@ test("the screen shows the title and purpose, Your pools with New pool on the le
   assert.deepEqual(seen.top?.heading, "Pools", JSON.stringify(seen.top));
   assert.match(seen.top.purpose, /A pool is a group of accounts for a project\. When one account runs out, agents move to the next one in the pool\./);
   assert.deepEqual(seen.top.actions, []);
-  assert.deepEqual(seen.sections.map((section) => [section.heading, section.actions]), [["Your pools", ["New pool"]], ["Main pool", ["Get ready for agents", "Edit pool", "Delete pool"]]]);
+  assert.deepEqual(seen.sections.map((section) => [section.heading, section.actions]), [["Your pools", ["New pool"]], ["Main pool", ["Get ready for agents", "Delete pool"]]]);
   assert.equal(seen.sections[1].about, "Used by 2 projects. 3 ready. Shown on each project's pool picker.");
   assert.deepEqual(seen.items.map((item) => [item.name, item.count, item.about, item.current]), [["Main pool", "3 of 15", "3 ready. Used by 2 projects.", "true"], ["Spare", "1 of 15", "1 ready. Not used.", null]]);
-  assert.equal(seen.cap, "3 of 15");
+  assert.equal(seen.cap, "3 of 15Add account");
 });
 
 test("pressing a pool selects it and shows its own accounts, actions and order, and the focus stays on it", async () => {
@@ -37,7 +36,7 @@ test("pressing a pool selects it and shows its own accounts, actions and order, 
   });
   assert.deepEqual(seen.items.map((item) => item.current), [null, "true"]);
   assert.equal(seen.sections[1].heading, "Spare");
-  assert.deepEqual(seen.sections[1].actions, ["Edit pool", "Delete pool"], "only a pool with keyed members can be set up for agents");
+  assert.deepEqual(seen.sections[1].actions, ["Delete pool"], "only a pool with keyed members can be set up for agents");
   assert.deepEqual(seen.rows.map((row) => row.name), ["Account 3"]);
   assert.equal(seen.head, "Account order");
   assert.match(seen.order, /^Order comes from Balanced, this pool: /);
@@ -49,18 +48,19 @@ test("a 60-letter pool name wraps in the list and in the pane and nothing moves 
   const seen = await onPools({ pools: "long" }, async (page) => ({ items: await items(page), sections: await read(page), panes: await page.evaluate("Fixture.panes()") }), 1440);
   assert.equal(seen.items[0].name.length, 60);
   assert.equal(seen.items[0].spills, false, JSON.stringify(seen.items[0]));
-  assert.deepEqual(seen.sections[1].actions, ["Edit pool", "Delete pool"]);
+  assert.deepEqual(seen.sections[1].actions, ["Delete pool"]);
   assert.equal(seen.panes.sideways, false, JSON.stringify(seen.panes));
 });
 
-test("real Tab keys walk New pool, each pool in the list, then the selected pool's actions", async () => {
-  const walked = await onPools({}, (page) => tabWalk(page, 6));
+test("real Tab keys walk New pool, each pool in the list, the app's order, then the selected pool's actions", async () => {
+  const walked = await onPools({}, (page) => tabWalk(page, 7));
   const from = walked.indexOf("New pool");
   assert.notEqual(from, -1, JSON.stringify(walked));
-  const names = walked.slice(from, from + 6);
+  const names = walked.slice(from, from + 7);
   assert.match(names[1], /^Main pool/);
   assert.match(names[2], /^Spare/);
-  assert.deepEqual(names.slice(3), ["Get ready for agents: Main pool", "Edit pool Main pool", "Delete pool Main pool"]);
+  assert.equal(names[3], "Use it or lose it");
+  assert.deepEqual(names.slice(4), ["Pool name", "Get ready for agents: Main pool", "Delete pool Main pool"]);
 });
 
 test("the rows stand exactly as the ranking gives them, each with its place, name, state, plan, why and usage", async () => {
@@ -145,7 +145,7 @@ test("with the schedule not read, a row keeps its harness and drops only the pla
 
 test("a pool with no accounts says how to add one", async () => {
   const says = await onPools({ pools: "hollow", ranking: "bare" }, pane);
-  assert.ok(says.includes("No accounts yet. Use Edit pool to put one in this pool."), says);
+  assert.ok(says.includes("No accounts yet. Use Add account to put one in this pool."), says);
   assert.ok(!says.includes("No accounts to rank yet."), says);
 });
 
@@ -220,16 +220,6 @@ test("the page asks usage for a short range, since it reads only the limits", as
   assert.ok(since >= Date.now() - 2 * 60 * 60 * 1000, new Date(since).toISOString());
 });
 
-test("a change saved in Account choice reads the order on the right again", async () => {
-  const seen = await onPools({}, async (page) => {
-    const before = await commandCount(page, RANKING);
-    await press(page, 'form.row button[type="submit"]');
-    return { before, after: await commandCount(page, RANKING), saved: await commandCount(page, "desktop_set_account_schedule") };
-  });
-  assert.equal(seen.saved, 1);
-  assert.equal(seen.after, seen.before + 1);
-});
-
 for (const [state, expected, absent] of [
   ["empty", ["No pools yet", "A pool groups up to 15 accounts for your projects to use.", "New pool"], "Your pools"],
   ["error", ["Couldn't load pools.", "Try again"], "New pool"],
@@ -244,67 +234,6 @@ for (const [state, expected, absent] of [
   });
 }
 
-test("Edit pool opens the editor with Details, then All accounts beside In this pool, and Back to pools returns", async () => {
-  const seen = await onPools({}, async (page) => {
-    await press(page, EDIT_MAIN);
-    const editor = { top: await page.evaluate("Fixture.top()"), sections: await read(page) };
-    await press(page, ".settings-top button", "Back to pools");
-    return { editor, back: await read(page) };
-  });
-  assert.equal(seen.editor.top?.heading, "Edit Main pool", JSON.stringify(seen.editor.top));
-  assert.match(seen.editor.top.purpose, /Pick the accounts this pool can use\. A pool holds up to 15 accounts\./);
-  assert.deepEqual(seen.editor.top.actions, ["Back to pools"]);
-  assert.deepEqual(seen.editor.sections.map((section) => section.heading), ["Details", "All accounts", "In this pool"]);
-  const [, all, pool] = seen.editor.sections;
-  assert.equal(all.top, pool.top, "the two lists start level");
-  assert.ok(all.right <= pool.left, JSON.stringify([all, pool]));
-  assert.deepEqual(seen.back.map((section) => section.heading).slice(0, 1), ["Your pools"]);
-});
-
-test("under 980 px the two lists stack", async () => {
-  const sections = await onPools({}, async (page) => { await press(page, EDIT_MAIN); return read(page); }, 900);
-  const [, all, pool] = sections;
-  assert.ok(pool.top > all.top, JSON.stringify([all.top, pool.top]));
-  assert.equal(pool.left, all.left);
-});
-
-test("Pool name is marked changed against the saved name, and In this pool against the saved members", async () => {
-  const seen = await onPools({}, async (page) => {
-    await press(page, EDIT_MAIN);
-    const first = await read(page);
-    await press(page, 'label[for="pool-name"]');
-    const focused = await page.evaluate("Fixture.focused()");
-    await page.send("Input.insertText", { text: "x" });
-    await page.evaluate("Fixture.settle(40)");
-    const named = await read(page);
-    await press(page, '.member button[aria-label="Remove Account 1"]');
-    return { first, focused, named, removed: await read(page) };
-  });
-  assert.equal(seen.focused.id, "pool-name", "a real click on the label focuses the field");
-  assert.deepEqual([seen.first[0].rows[0].label, seen.first[0].rows[0].mark, seen.first[2].mark], ["Pool name", null, null]);
-  assert.equal(seen.named[0].rows[0].mark, "changed");
-  assert.equal(seen.removed[2].mark, "changed");
-});
-
-test("the editor keeps its name error, its full-pool notice and its save failure", async () => {
-  const named = await onPools({}, async (page) => {
-    await press(page, ".set-head button", "New pool");
-    await press(page, 'button[type="submit"]');
-    const empty = { says: await say(page), invalid: await page.evaluate("Fixture.invalid('#pool-name')") };
-    await page.evaluate("document.getElementById('pool-name').focus()");
-    await page.send("Input.insertText", { text: "Fresh" });
-    await page.evaluate("Fixture.settle(40)");
-    await press(page, 'button[type="submit"]');
-    return { empty, failed: await say(page) };
-  });
-  assert.ok(named.empty.says.includes("Enter a pool name."), named.empty.says);
-  assert.equal(named.empty.invalid, "true");
-  assert.ok(named.failed.includes("Couldn't save this pool."), named.failed);
-  const full = await onPools({ pools: "full" }, async (page) => { await press(page, EDIT_MAIN); return say(page); });
-  assert.ok(full.includes("A pool can hold up to 15 accounts. Remove one to add another."), full);
-  assert.ok(full.includes("15 of 15"), full);
-});
-
 for (const [scene, expected] of [
   [{ accounts: "empty" }, ["No accounts yet", "Add an account first, then put it in a pool.", "Add account"]],
   [{ accounts: "error" }, ["Couldn't load accounts."]],
@@ -316,64 +245,11 @@ for (const [scene, expected] of [
   });
 }
 
-test("the account list keeps Provider, Selected only, search and their empty lines", async () => {
-  const seen = await onPools({}, async (page) => {
-    await press(page, ".set-head button", "New pool");
-    const fresh = await say(page);
-    const provider = await page.evaluate("Fixture.count('#pool-provider')");
-    await press(page, "label.checkbox", "Selected only");
-    const selected = await say(page);
-    await press(page, "label.checkbox", "Selected only");
-    await page.evaluate("document.querySelector('input[type=search]').focus()");
-    await page.send("Input.insertText", { text: "nothing like this" });
-    await page.evaluate("Fixture.settle(40)");
-    return { fresh, provider, selected, searched: await say(page) };
-  });
-  assert.equal(seen.provider, 1);
-  assert.ok(seen.fresh.includes("No accounts yet. Check accounts on the left to add them."), seen.fresh);
-  for (const part of ["Selected only", "Save pool", "Cancel", "0 of 15"]) assert.ok(seen.fresh.includes(part), part);
-  assert.ok(seen.selected.includes("No accounts selected yet."), seen.selected);
-  assert.ok(seen.searched.includes("No accounts match."), seen.searched);
-});
-
-test("an account line shows name, provider and status with its checkbox on the right, and a tick adds a member", async () => {
-  const seen = await onPools({}, async (page) => {
-    await press(page, ".set-head button", "New pool");
-    const pick = await page.evaluate("Fixture.pick()");
-    await press(page, ".pick");
-    return { pick, says: await say(page), members: await page.evaluate("Fixture.count('.member')"), sections: await read(page) };
-  });
-  assert.ok(seen.pick.boxLeft > seen.pick.nameRight, JSON.stringify(seen.pick));
-  for (const part of ["Account 0", "ChatGPT", "Signed in"]) assert.ok(seen.pick.words.includes(part), `${part} in ${seen.pick.words}`);
-  assert.equal(seen.members, 1);
-  assert.ok(seen.says.includes("1 of 15"), seen.says);
-  assert.equal(seen.sections[2].mark, "changed");
-});
-
-test("a full pool refuses another account on its own row and in the notice", async () => {
-  const seen = await onPools({ pools: "full" }, async (page) => {
-    await press(page, EDIT_MAIN);
-    await press(page, ".pick:has(input:not(:checked))");
-    return { says: await say(page), blocked: await page.evaluate("Fixture.count('.pick.blocked')"), line: await page.evaluate("Fixture.wordsOf('.pick.blocked')"), members: await page.evaluate("Fixture.count('.member')"), focused: await page.evaluate("Fixture.focused()") };
-  });
-  assert.equal(seen.blocked, 1);
-  assert.ok(seen.line.includes("A pool can hold up to 15 accounts."), seen.line);
-  assert.equal(seen.members, 15);
-  assert.equal(seen.focused.id, "pool-full-notice");
-  assert.ok(seen.says.includes("15 of 15"), seen.says);
-});
-
-test("a member who is not signed in keeps its note in the editor and in the pane and its count on the list", async () => {
-  const seen = await onPools({ pools: "waiting", accounts: "waiting" }, async (page) => {
-    const listed = await items(page);
-    const pane = await say(page);
-    await press(page, EDIT_MAIN);
-    return { about: listed[0].about, pane, says: await say(page) };
-  });
+test("a member who is not signed in keeps its note in the pane and its count on the list", async () => {
+  const seen = await onPools({ pools: "waiting", accounts: "waiting" }, async (page) => ({ about: (await items(page))[0].about, pane: await say(page) }));
   const note = "1 account isn't signed in. Agents skip it until you sign in again.";
   assert.ok(seen.about.includes("2 ready, 1 not signed in"), seen.about);
   assert.ok(seen.pane.includes(note), seen.pane);
-  assert.ok(seen.says.includes(note), seen.says);
 });
 
 test("Loading draws its skeletons under the title and in the account list", async () => {
@@ -384,7 +260,7 @@ test("Loading draws its skeletons under the title and in the account list", asyn
     await press(page, ".set-head button", "New pool");
     return page.evaluate("Fixture.count('.skeleton')");
   });
-  assert.ok(accounts >= 6, String(accounts));
+  assert.ok(accounts >= 3, String(accounts));
 });
 
 test("Try again reads the pools a second time", async () => {
@@ -395,11 +271,11 @@ test("Try again reads the pools a second time", async () => {
   assert.equal(reads.filter((command) => command === "desktop_pool_summaries").length, 2, JSON.stringify(reads));
 });
 
-test("Account choice stays below a list of pools and only there", async () => {
+test("How every pool picks an account stays under Your pools and only with a list of pools", async () => {
   const listed = await onPools({}, say);
-  assert.ok(listed.indexOf("Account choice") > listed.indexOf("Your pools"), listed);
+  assert.ok(listed.indexOf("How every pool picks an account") > listed.indexOf("Your pools"), listed);
   const none = await onPools({ pools: "empty" }, say);
-  assert.ok(!none.includes("Account choice"), none);
+  assert.ok(!none.includes("How every pool picks an account"), none);
 });
 
 test("Delete pool asks first, and a refused delete shows under the title", async () => {
@@ -476,15 +352,8 @@ for (const theme of ["light", "dark"]) {
     for (const [name, ratio] of Object.entries(seen)) assert.ok(ratio >= CONTRAST_MIN, `${name}: ${ratio}`);
   });
 
-  test(`help and the changed mark read at 4.5 to 1 in ${theme}`, async () => {
-    const seen = await onPools({}, async (page) => {
-      const help = await page.evaluate('Fixture.contrast(".set-head p")');
-      await press(page, EDIT_MAIN);
-      await page.evaluate("document.getElementById('pool-name').focus()");
-      await page.send("Input.insertText", { text: "x" });
-      await page.evaluate("Fixture.settle(40)");
-      return { help, mark: await page.evaluate('Fixture.contrast(".set-changed")') };
-    }, 1180, theme);
-    for (const [name, ratio] of Object.entries(seen)) assert.ok(ratio >= CONTRAST_MIN, `${name}: ${ratio}`);
+  test(`help reads at 4.5 to 1 in ${theme}`, async () => {
+    const help = await onPools({}, (page) => page.evaluate('Fixture.contrast(".set-head p")'), 1180, theme);
+    assert.ok(help >= CONTRAST_MIN, String(help));
   });
 }
