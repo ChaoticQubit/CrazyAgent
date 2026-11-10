@@ -277,6 +277,46 @@ pub fn bind_tcp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::ne
     guarded(|| std::net::TcpListener::bind(address))
 }
 
+/// Binds a blocking TCP listener like [`bind_tcp_std`] but without `SO_REUSEADDR`, so the
+/// bind fails with `AddrInUse` while any socket holds the port, including a wildcard
+/// listener of this user that `std`'s bind would sit beside, and a closed connection
+/// still in TIME_WAIT. Input: the address. Output: the close-on-exec listener.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
+    use nix::sys::socket::{
+        AddressFamily, Backlog, SockFlag, SockType, SockaddrIn, SockaddrIn6, bind, listen, socket,
+    };
+    use std::os::fd::AsRawFd;
+    let family = match address {
+        std::net::SocketAddr::V4(_) => AddressFamily::Inet,
+        std::net::SocketAddr::V6(_) => AddressFamily::Inet6,
+    };
+    let socket = guarded(|| -> io::Result<std::os::fd::OwnedFd> {
+        let socket = socket(family, SockType::Stream, SockFlag::empty(), None)?;
+        rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)?;
+        Ok(socket)
+    })?;
+    match address {
+        std::net::SocketAddr::V4(v4) => bind(socket.as_raw_fd(), &SockaddrIn::from(v4))?,
+        std::net::SocketAddr::V6(v6) => bind(socket.as_raw_fd(), &SockaddrIn6::from(v6))?,
+    }
+    listen(&socket, Backlog::new(LISTEN_BACKLOG)?)?;
+    Ok(std::net::TcpListener::from(socket))
+}
+
+/// The [`bind_tcp_std_exclusive`] of a system whose `std` bind sets no `SO_REUSEADDR`.
+/// Input: the address. Output: the listener.
+#[cfg(not(unix))]
+pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
+    bind_tcp_std(address)
+}
+
+/// How many connections a [`bind_tcp_std_exclusive`] listener queues before it accepts
+/// them.
+#[cfg(unix)]
+const LISTEN_BACKLOG: i32 = 128;
+
 /// Binds a blocking UDP socket inside the gate.
 /// Input: the address. Output: the socket.
 #[allow(clippy::disallowed_methods)]

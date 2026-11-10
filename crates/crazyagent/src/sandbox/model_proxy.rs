@@ -1,6 +1,6 @@
 use crate::spawn_gate;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
@@ -16,6 +16,20 @@ pub const TUNNELS_MAX: usize = 16;
 pub const IDLE_TIME: Duration = Duration::from_secs(600);
 /// The most hosts one proxy lets its agent reach.
 pub const HOSTS_MAX: usize = 8;
+/// The loopback ports a model proxy takes when no saved port is given (S4B-2W1). The block is
+/// fixed, so every Open-network sandbox, whenever it started, denies binding all of it: no
+/// sandboxed agent can take a proxy's port, not even while the engine that held it is down.
+/// It lies below macOS's ephemeral ports, which start at 49152.
+pub const PROXY_PORTS: std::ops::RangeInclusive<u16> = 41_300..=41_427;
+const _: () = assert!(*PROXY_PORTS.start() > 1024 && *PROXY_PORTS.end() < 49_152);
+const _: () = {
+    let mut index = 0;
+    while index < super::OWNER_PORTS.len() {
+        let port = super::OWNER_PORTS[index];
+        assert!(port < *PROXY_PORTS.start() || port > *PROXY_PORTS.end());
+        index += 1;
+    }
+};
 
 const RECORD_BYTES_MAX: usize = 5 + 16 * 1024;
 const POLL: Duration = Duration::from_millis(250);
@@ -28,7 +42,6 @@ const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 const SERVER_NAME: u16 = 0x0000;
 const ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
 const ENCRYPTED_SERVER_NAME: u16 = 0xffce;
-const BIND_TRIES: usize = 16;
 const REFUSALS_SHOWN: u64 = 20;
 const REFUSAL_TOTAL_EVERY: Duration = Duration::from_secs(60);
 const OWN_ADDRESS: &str = "resolves to this machine";
@@ -190,11 +203,17 @@ impl std::fmt::Debug for ModelProxy {
 
 impl ModelProxy {
     /// Starts one agent's proxy on 127.0.0.1 and ::1, on `port` when a kept pane needs the
-    /// port its profile names again, otherwise on a port free on both. Inputs: the agent id
-    /// its refusal lines name, its hosts (1 to `HOSTS_MAX`) and the port. Output: the running
-    /// proxy, or the bind error, such as a saved port another process took on either address.
-    pub fn bind(agent: i64, hosts: Vec<ModelHost>, port: Option<u16>) -> io::Result<Self> {
-        Self::start(agent, hosts, port, false)
+    /// port its profile names again, otherwise on a [`PROXY_PORTS`] port that no socket holds
+    /// and that is none of `kept`, or refuses with `AddrInUse` when there is none. Inputs:
+    /// the agent id its refusal lines name, its hosts (1 to `HOSTS_MAX`), the port and the
+    /// owner's model ports. Output: the running proxy, or the bind error.
+    pub fn bind(
+        agent: i64,
+        hosts: Vec<ModelHost>,
+        port: Option<u16>,
+        kept: &[u16],
+    ) -> io::Result<Self> {
+        Self::start(agent, hosts, port, kept, false)
     }
 
     /// The same proxy, except that its tunnels may also dial addresses on this machine, so a
@@ -204,8 +223,9 @@ impl ModelProxy {
         agent: i64,
         hosts: Vec<ModelHost>,
         port: Option<u16>,
+        kept: &[u16],
     ) -> io::Result<Self> {
-        Self::start(agent, hosts, port, true)
+        Self::start(agent, hosts, port, kept, true)
     }
 
     /// How many refusals the proxy has counted. Output: the count.
@@ -215,18 +235,20 @@ impl ModelProxy {
     }
 
     /// Starts the proxy [`ModelProxy::bind`] describes. Inputs: the agent, its hosts, the
-    /// port, and whether its tunnels may dial addresses on this machine. Output: the
-    /// running proxy, or the bind error.
+    /// port, the owner's model ports, and whether its tunnels may dial addresses on this
+    /// machine. Output: the running proxy, or the bind error.
     fn start(
         agent: i64,
         hosts: Vec<ModelHost>,
         port: Option<u16>,
+        kept: &[u16],
         any_address: bool,
     ) -> io::Result<Self> {
         assert!(!hosts.is_empty() && hosts.len() <= HOSTS_MAX);
-        let listeners = loopback_pair(port)?;
+        let listeners = loopback_pair(port, kept)?;
         let bound = listeners[0].local_addr()?.port();
         assert!(bound != 0 && port.is_none_or(|port| port == bound));
+        assert!(port.is_some() || !kept.contains(&bound));
         for listener in &listeners {
             let address = listener.local_addr()?;
             assert!(address.ip().is_loopback() && address.port() == bound);
@@ -259,26 +281,59 @@ impl ModelProxy {
     }
 }
 
-/// Binds 127.0.0.1 and ::1 on one port: `port` when given, otherwise a free port of
-/// 127.0.0.1 that ::1 also has free, trying again up to `BIND_TRIES` times. Input: the port.
-/// Output: the two listeners, 127.0.0.1 first, or the first bind error.
-fn loopback_pair(port: Option<u16>) -> io::Result<[TcpListener; 2]> {
-    let mut tries = 1;
-    loop {
-        let v4 = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, port.unwrap_or(0)))?;
-        let bound = v4.local_addr()?.port();
-        match spawn_gate::bind_tcp_std((Ipv6Addr::LOCALHOST, bound)) {
-            Ok(v6) => return Ok([v4, v6]),
-            Err(error)
-                if port.is_none()
-                    && error.kind() == io::ErrorKind::AddrInUse
-                    && tries < BIND_TRIES =>
-            {
-                tries += 1;
-            }
-            Err(error) => return Err(error),
+/// Where the next proxy of this process starts looking in [`PROXY_PORTS`], so proxies
+/// started one after another do not all try the same taken ports first.
+static NEXT_PROXY_PORT: AtomicUsize = AtomicUsize::new(0);
+
+/// Binds 127.0.0.1 and ::1 on one port: `port` when given, with `std`'s bind so a restarted
+/// engine binds its saved port while the old tunnels' connections sit in TIME_WAIT,
+/// otherwise the [`free_pair`] of [`PROXY_PORTS`] from a start that moves with each proxy and
+/// process. Inputs: the port and the owner's model ports. Output: the two listeners,
+/// 127.0.0.1 first, or the bind error.
+fn loopback_pair(port: Option<u16>, kept: &[u16]) -> io::Result<[TcpListener; 2]> {
+    if let Some(port) = port {
+        return bound_pair(port, spawn_gate::bind_tcp_std);
+    }
+    let block: Vec<u16> = PROXY_PORTS.collect();
+    let start = NEXT_PROXY_PORT
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(usize::try_from(std::process::id()).unwrap_or(0));
+    free_pair(&block, kept, start)
+}
+
+/// Binds 127.0.0.1 and then ::1 on `port` through `bind`. Inputs: the port, not 0, and the
+/// bind. Output: the two listeners, 127.0.0.1 first, or the first bind error.
+fn bound_pair(
+    port: u16,
+    bind: fn(SocketAddr) -> io::Result<TcpListener>,
+) -> io::Result<[TcpListener; 2]> {
+    assert!(port != 0);
+    let v4 = bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))?;
+    let v6 = bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port)))?;
+    Ok([v4, v6])
+}
+
+/// The first of `ports`, going round from `start`, that is none of `kept` and that no
+/// socket holds on 127.0.0.1 or ::1, bound without `SO_REUSEADDR` so a wildcard listener of
+/// this user counts as holding it. Inputs: the ports, at least one, the owner's model ports
+/// and where to start. Output: its two listeners, a bind error other than a taken port, or
+/// `AddrInUse` saying every model proxy port is taken.
+fn free_pair(ports: &[u16], kept: &[u16], start: usize) -> io::Result<[TcpListener; 2]> {
+    assert!(!ports.is_empty());
+    for step in 0..ports.len() {
+        let port = ports[(start % ports.len() + step) % ports.len()];
+        if kept.contains(&port) {
+            continue;
+        }
+        match bound_pair(port, spawn_gate::bind_tcp_std_exclusive) {
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {}
+            bound => return bound,
         }
     }
+    Err(io::Error::new(
+        io::ErrorKind::AddrInUse,
+        "every model proxy port is taken",
+    ))
 }
 
 impl Drop for ModelProxy {

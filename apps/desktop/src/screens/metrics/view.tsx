@@ -236,7 +236,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
     return {
       head: "Agent", extra: ["Harness", "Account"], projectColumn,
       rows: metrics.agents.map((row) => ({
-        key: `${row.project}/${row.agent}`, name: agent(row.agent, row.label), project: projectColumn ? projectName(row.project) : undefined, tokens: row.tokens, cost_nanos: row.cost_nanos,
+        key: `${row.project}/${row.agent}`, agent: row.agent, name: agent(row.agent, row.label), project: projectColumn ? projectName(row.project) : undefined, tokens: row.tokens, cost_nanos: row.cost_nanos,
         extra: [listed(row.harnesses, row.more_harnesses, harness), listed(row.accounts, row.more_accounts, account)],
       })),
     };
@@ -265,20 +265,29 @@ type BreakdownParts = ReturnType<typeof breakdownRows>;
 /** Adds what only the usage read knows to the app page's rows: when each was last used, its
  * runs when asked, and which harness ran for it without reporting usage. An agent's usage row
  * counts one project, so it meets the row of that project and key, and one key used in several
- * projects keeps each project's own Runs and Last used. A usage row the metrics read has no row
- * for stays listed when its harness reported nothing. Inputs: the table, the usage rows,
- * whether to add Runs, the namer, the project namer and now. Output: the table with its added
- * columns. */
+ * projects keeps each project's own Runs and Last used. An older engine names no project on its
+ * agent rows: such a row meets an agent listed once, a key listed in several projects shows no
+ * Runs or Last used it cannot split, and it is never listed a second time. A usage row the
+ * metrics read has no row for stays listed when its harness reported nothing. Inputs: the
+ * table, the usage rows, whether to add Runs, the namer, the project namer and now. Output: the
+ * table with its added columns. */
 function withUsage(table: BreakdownParts, used: UsageRow[], runs: boolean, name: (key: string) => string, project: (key: string) => string, nowMs: number): BreakdownParts {
   const keyOf = (row: UsageRow) => typeof row.project === "string" ? `${row.project}/${row.key}` : row.key;
   const byKey = new Map(used.map((row) => [keyOf(row), row]));
+  const agentRows = new Map<string, number>();
+  for (const row of table.rows) if (row.agent !== undefined) agentRows.set(row.agent, (agentRows.get(row.agent) ?? 0) + 1);
+  const unscoped = (agent: string | undefined) => {
+    const found = agent === undefined ? undefined : byKey.get(agent);
+    return found && typeof found.project !== "string" ? found : undefined;
+  };
   const cells = (row: UsageRow | undefined) => [...(runs ? [row ? String(row.runs) : ""] : []), row ? agoText(row.last_ms, nowMs) : ""];
   const kept = table.rows.map((row) => {
-    const match = byKey.get(row.key);
-    return { ...row, notReportedBy: match?.not_reported_by, extra: [...row.extra, ...cells(match)] };
+    const older = unscoped(row.agent);
+    const match = byKey.get(row.key) ?? (older && agentRows.get(row.agent ?? "") === 1 ? older : undefined);
+    return { ...row, notReportedBy: (match ?? older)?.not_reported_by, extra: [...row.extra, ...cells(match)] };
   });
   const listed = new Set(table.rows.map((row) => row.key));
-  const added = used.filter((row) => row.not_reported_by && !listed.has(keyOf(row))).map((row) => ({
+  const added = used.filter((row) => row.not_reported_by && !listed.has(keyOf(row)) && !(typeof row.project !== "string" && agentRows.has(row.key))).map((row) => ({
     key: keyOf(row), name: name(row.key), project: table.projectColumn && typeof row.project === "string" ? project(row.project) : undefined,
     tokens: row.tokens, cost_nanos: row.cost_nanos, notReportedBy: row.not_reported_by,
     extra: [...table.extra.map(() => ""), ...cells(row)],

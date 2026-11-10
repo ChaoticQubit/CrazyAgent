@@ -333,6 +333,77 @@ fn a_link_file_or_closed_folder_an_agent_left_in_its_cache_is_repaired_at_the_ne
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
+/// Removes a test's cache when dropped, clearing what the test pinned or closed inside
+/// first, so its temporary folder goes whatever the test asserted. Holds the cache root.
+struct Unpinned(PathBuf);
+
+impl Drop for Unpinned {
+    fn drop(&mut self) {
+        let _ = crate::team::cleanup::remove_agent_tree(&self.0);
+    }
+}
+
+/// T8-R2-N1: in the cache agents at a Shared key all write, the cache folder pinned
+/// (`chflags uchg`) after `uv` was moved away, a `uv` folder pinned after its bucket was
+/// moved away, a bucket pinned after its marker was taken, a file pinned where `pnpm-store`
+/// was, a `pnpm-store` made append only and a `uv` folder closed to writes (`chmod 0500`)
+/// keep no later launch at the key from a cache: the next launch clears those flags, gives
+/// the owner rwx back and makes the rest anew.
+#[test]
+fn a_cache_an_agent_pinned_or_closed_to_writes_is_repaired_at_the_next_launch() {
+    use nix::sys::stat::FileFlag;
+    use std::os::macos::fs::MetadataExt as _;
+    let runtime = Runtime::new("");
+    let prepared = runtime.prepare().unwrap();
+    let root = prepared.root.clone();
+    let _unpinned = Unpinned(root.clone());
+    let uv = root.join(UV);
+    let pnpm = root.join(PNPM);
+    let bucket = uv.join("sdists-v10");
+    let pin = |path: &Path, flag: FileFlag| nix::unistd::chflags(path, flag).unwrap();
+    let again = || runtime.prepare().map(|again| (again.root, again.uv));
+    let want = Ok((root.clone(), true));
+    std::fs::rename(&uv, root.join("moved-uv")).unwrap();
+    pin(&root, FileFlag::UF_IMMUTABLE);
+    assert_eq!(again(), want, "pinned cache folder");
+    std::fs::rename(&bucket, uv.join("moved-bucket")).unwrap();
+    pin(&uv, FileFlag::UF_IMMUTABLE);
+    assert_eq!(again(), want, "pinned uv folder");
+    std::fs::remove_file(bucket.join(MARKER)).unwrap();
+    pin(&bucket, FileFlag::UF_IMMUTABLE);
+    assert_eq!(again(), want, "pinned bucket");
+    std::fs::rename(&pnpm, root.join("moved-pnpm")).unwrap();
+    std::fs::write(&pnpm, "left").unwrap();
+    pin(&pnpm, FileFlag::UF_IMMUTABLE);
+    assert_eq!(again(), want, "pinned file in place of pnpm-store");
+    pin(&pnpm, FileFlag::UF_APPEND);
+    assert_eq!(again(), want, "append only pnpm-store");
+    std::fs::rename(&bucket, uv.join("moved-again")).unwrap();
+    std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert_eq!(again(), want, "uv folder closed to writes");
+    let pinning = (FileFlag::UF_IMMUTABLE | FileFlag::UF_APPEND).bits();
+    for folder in [&root, &uv, &pnpm, &bucket] {
+        let found = std::fs::symlink_metadata(folder).unwrap();
+        assert!(found.is_dir(), "{} is a folder", folder.display());
+        assert_eq!(
+            found.st_flags() & pinning,
+            0,
+            "{} is pinned",
+            folder.display()
+        );
+        assert_eq!(
+            found.mode() & 0o700,
+            0o700,
+            "{} is closed",
+            folder.display()
+        );
+    }
+    assert_eq!(
+        std::fs::read_link(marker_of(&prepared)).unwrap(),
+        Path::new(MARKER_TARGET)
+    );
+}
+
 /// T8 r1 L3: a file an agent pinned (`chflags uchg`), a folder it made append only and a
 /// folder it closed (`chmod 0500`) in its own cache keep none of it from Clean up: the
 /// agent's cache goes all the same.

@@ -1892,6 +1892,26 @@ pub fn linked_teammate_place(
     }
 }
 
+/// Says whether one native teammate of a linked lead holds edits not committed in its
+/// worktree `<worktree>/.worktrees/<name>` yet (OP9B-C4), so its lead does not finish over
+/// work the engine could not save. Inputs: the store, the lead's worktree and git folder and
+/// a valid teammate name. Output: the answer, false for a lead in its own clone or a
+/// teammate with no folder there, or the code that kept it unread.
+pub fn teammate_unsaved(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+    name: &str,
+) -> Result<bool, EngineError> {
+    #[cfg(unix)]
+    return retire::teammate_unsaved(db, worktree, git_dir, name);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, worktree, git_dir, name);
+        Err(unavailable())
+    }
+}
+
 /// Makes one native teammate's own worktree inside its lead's worktree (OP-9, OP-9b):
 /// `<worktree>/.worktrees/<name>` on `<task branch>--<name>`, cut from the lead's HEAD for a
 /// new branch and checked out as it stands for one an earlier run left: a worktree of the

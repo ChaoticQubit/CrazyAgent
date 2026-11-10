@@ -463,9 +463,12 @@ pub(super) fn record_files(
 /// Finishes the engine files a delete or a Remove from dashboard recorded and never removed,
 /// at engine start and right after a Remove from dashboard, on a thread of its own so no
 /// owner job waits on a folder, and clears through the job the live path uses: the record's
-/// names starting with `prefix` only, at most `DELETE_FILES_PER_START` a call. Inputs: the
-/// connection, the database path, the storage queue and the prefix. Output: Ok once the
-/// thread started, or at once with nothing recorded.
+/// names starting with `prefix` only, at most `DELETE_FILES_PER_START` a call. A tool cache
+/// record naming the cache of a folder a project still names, such as one added again at
+/// that folder since, removes nothing and is finished, so it never takes a cache that
+/// project's agents use (T8-R2-N3). Inputs: the connection, the database path, the storage
+/// queue and the prefix. Output: Ok once the thread started, or at once with nothing
+/// recorded.
 pub(super) fn delete_files_finish(
     db: &Connection,
     path: &Path,
@@ -488,11 +491,19 @@ pub(super) fn delete_files_finish(
     if files.is_empty() {
         return Ok(());
     }
+    let in_use = caches_in_use(db, path)?;
+    let (kept, files): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|(name, _)| in_use.contains(name));
     let path = path.to_path_buf();
     std::thread::Builder::new()
         .name("crazyagent-delete-files".into())
         .spawn(move || {
-            let done = home::remove_engine_files(&path, &files);
+            let mut done = home::remove_engine_files(&path, &files);
+            for (name, _) in kept {
+                eprintln!("project_files_kept name={name} kind=tool_cache_in_use");
+                done.push(name);
+            }
             let (reply, answer) = oneshot::channel();
             let cleared = jobs
                 .blocking_send(Job::DeleteFilesClear(done, reply))
@@ -504,6 +515,21 @@ pub(super) fn delete_files_finish(
         })
         .map_err(error)?;
     Ok(())
+}
+
+/// The record names of the tool caches (T8) whose folders a project the guards keep names
+/// now, its folder or a repository it declares (T8-R2-N3). Inputs: the connection and the
+/// database path. Output: the names, none for a cache that is not there.
+fn caches_in_use(db: &Connection, path: &Path) -> Result<Vec<String>, EngineError> {
+    let tx = db.unchecked_transaction().map_err(error)?;
+    let folders: Vec<PathBuf> = guarded(&tx)?
+        .into_iter()
+        .flat_map(|project| std::iter::once(project.folder).chain(project.repositories))
+        .collect();
+    Ok(home::tool_cache_files(path, &folders)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect())
 }
 
 /// Clears the record of engine files that are finished, the last step of a delete. Inputs:
