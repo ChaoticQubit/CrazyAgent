@@ -3,7 +3,9 @@ use crate::harnesses::interactive::InteractiveCommand;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+#[cfg(unix)]
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, SystemTime};
 
 pub mod buffer;
 mod kept;
@@ -376,6 +378,14 @@ pub trait Host: Send + Sync {
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
         end_except(self, keep)
     }
+
+    /// Moves the time each server of this host ends at once no engine renews it (FBTMUX-P1),
+    /// so a server whose engine never comes back does not run forever. Takes the deadline.
+    /// Returns the first failure; a host with no server outliving the engine has nothing to
+    /// renew.
+    fn renew(&self, _until: SystemTime) -> Result<(), HostError> {
+        Ok(())
+    }
 }
 
 /// The refusal for a native-mode lead on a host that cannot start a tmux server inside the
@@ -493,6 +503,10 @@ impl Host for OwnServer {
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
         self.0.close(keep)
     }
+
+    fn renew(&self, until: SystemTime) -> Result<(), HostError> {
+        self.0.renew(until)
+    }
 }
 
 /// A view of one pane of an agent terminal's own window, such as a native teammate's, as a
@@ -579,11 +593,13 @@ pub fn end_except(host: &(impl Host + ?Sized), keep: &[AgentId]) -> Result<(), H
     Ok(())
 }
 
-/// Leaves the host as the engine stops: team agent terminals keep running for the next
-/// engine to take over, every other terminal ends, and with no team agent left the host
-/// leaves nothing behind. Takes the host; one that cannot run has nothing to end.
-/// Returns the host's first failure.
-pub fn quit(host: &(impl Host + ?Sized)) -> Result<(), HostError> {
+/// Leaves the host as the engine stops: while the owner keeps team agents running when
+/// CrazyAgent quits, their terminals keep running for the next engine to take over and every
+/// other terminal ends; otherwise every terminal ends. With no team agent kept the host
+/// leaves nothing behind. Takes the host, one that cannot run having nothing to end, and
+/// whether team agents keep running ([`crate::quit_settings::QuitSettings`]). Returns the
+/// host's first failure.
+pub fn quit(host: &(impl Host + ?Sized), keep_team_agents: bool) -> Result<(), HostError> {
     let alive = match host.alive() {
         Ok(alive) => alive,
         Err(problem) if problem.0 == "terminal_unavailable" => return Ok(()),
@@ -594,6 +610,96 @@ pub fn quit(host: &(impl Host + ?Sized)) -> Result<(), HostError> {
         .filter(|agent| agent.team_agent().is_some())
         .collect();
     host.close(&keep)
+}
+
+#[cfg(unix)]
+/// How often a running engine moves its terminal servers' deadlines ahead (FBTMUX-P1).
+pub const RENEW_EVERY: Duration = Duration::from_secs(60);
+
+#[cfg(unix)]
+/// The engine's renewal of its terminal servers' deadlines while it runs (FBTMUX-P1). Each
+/// pass reads the owner's agents on quit setting again and sets every server's deadline that
+/// far ahead, so the holder in a server whose engine never comes back ends it once the time
+/// is up, and an engine that comes back in time renews it before adopting its agents.
+pub struct Renewal {
+    stop: Arc<(Mutex<bool>, Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+/// Starts renewing the deadlines of a host's servers at once and every [`RENEW_EVERY`].
+/// A pass whose setting cannot be read renews nothing and says why, so no guess moves a
+/// deadline. Takes the host and the engine root that holds the engine database. Returns the
+/// running renewal, or None when its thread cannot start.
+pub fn renew_while_running(host: Arc<dyn Host>, root: PathBuf) -> Option<Renewal> {
+    let stop = Arc::new((Mutex::new(false), Condvar::new()));
+    let signal = stop.clone();
+    let thread = std::thread::Builder::new()
+        .name("terminal-renewal".into())
+        .spawn(move || {
+            let (stopped, wake) = &*signal;
+            loop {
+                if let Err(problem) = renew_once(host.as_ref(), &root, SystemTime::now()) {
+                    eprintln!(
+                        "terminal_deadline_not_renewed cause={}",
+                        crate::protocol::plain_code(&problem.0)
+                    );
+                }
+                let guard = stopped
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let (guard, _) = wake
+                    .wait_timeout_while(guard, RENEW_EVERY, |stop| !*stop)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *guard {
+                    return;
+                }
+            }
+        })
+        .ok()?;
+    Some(Renewal {
+        stop,
+        thread: Some(thread),
+    })
+}
+
+#[cfg(unix)]
+/// Renews the deadlines of a host's servers once from the owner's saved setting. Takes the
+/// host, the engine root and the current time. Returns Ok, the database failure, or the
+/// host's first failure.
+pub fn renew_once(host: &dyn Host, root: &Path, now: SystemTime) -> Result<(), EngineError> {
+    let db = crate::landing::open(root)?;
+    crate::quit_settings::initialize(&db)?;
+    let settings = crate::quit_settings::load(&db)?;
+    host.renew(settings.deadline(now))
+        .map_err(|problem| EngineError(problem.0))
+}
+
+#[cfg(unix)]
+impl Renewal {
+    /// Stops renewing and waits for the thread; the deadlines last set stay. Takes the
+    /// renewal.
+    pub fn stop(mut self) {
+        self.halt();
+    }
+
+    fn halt(&mut self) {
+        let (stopped, wake) = &*self.stop;
+        *stopped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        wake.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Renewal {
+    fn drop(&mut self) {
+        self.halt();
+    }
 }
 
 /// Turns a terminal code into the sentence clients show, such as for a refused attach.

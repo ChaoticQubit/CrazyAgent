@@ -205,7 +205,7 @@ impl OwnerEngine {
             .block_on(async { tokio::time::timeout(SHOWN, service.shutdown()).await })
             .unwrap()
             .unwrap();
-        crate::terminal::quit(host.as_ref()).unwrap();
+        crate::terminal::quit(host.as_ref(), true).unwrap();
     }
 }
 

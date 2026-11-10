@@ -23,7 +23,7 @@ test("a grouped list replaces the tab row: Access, Agents and App in the approve
   const shown = await onFrame("pools", 1180, ({ evaluate }) => evaluate("Fixture.structure()"));
   assert.deepEqual(shown.groups, [
     { name: "Access", links: ["Accounts", "Pools", "GitHub", "Profile"] },
-    { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents"] },
+    { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents", "Quitting"] },
     { name: "App", links: ["Projects folder", "Sandbox", "Team alerts", "Updates"] },
   ]);
   assert.deepEqual(shown.current, ["Pools"]);
@@ -73,15 +73,15 @@ test("where the list wraps above the panel it does not stick, so it never rides 
 test("real Tab keys walk every Settings link in list order with a visible ring, then enter the panel", async () => {
   const walked = await onFrame("accounts", 1180, async ({ evaluate, send }) => {
     const seen = [];
-    for (let at = 0; at < 15; at += 1) {
+    for (let at = 0; at < 17; at += 1) {
       for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
       seen.push(await evaluate("Fixture.focused()"));
     }
     return seen;
   });
-  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "GitHub", "Profile", "Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents",
+  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "GitHub", "Profile", "Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents", "Quitting",
     "Projects folder", "Sandbox", "Team alerts", "Updates", "In the panel"]);
-  assert.deepEqual([...new Set(walked.slice(1, 14).map((item) => item.outline))], ["solid"]);
+  assert.deepEqual([...new Set(walked.slice(1, 16).map((item) => item.outline))], ["solid"]);
 });
 
 test("a real Enter on a focused link opens that section's address", async () => {

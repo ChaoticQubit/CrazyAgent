@@ -2376,13 +2376,17 @@ impl TeamRuntime {
     }
 
     /// Ends the engine's hold on every agent as the engine stops and returns running tasks
-    /// to the queue. An agent in a pane a later engine can take over keeps running there with
-    /// its turn stopped, so agent sessions outlive the engine; every other agent process group
-    /// stops. Waits a bounded time for each agent thread. Returns the panes left running.
+    /// to the queue. While the owner keeps team agents running when CrazyAgent quits, the
+    /// default and also when that setting cannot be read, an agent in a pane a later engine
+    /// can take over keeps running there with its turn stopped, so agent sessions outlive the
+    /// engine; with Stop every agent stops as an owner Stop would (FBTMUX-P1). Every other
+    /// agent process group stops. Waits a bounded time for each agent thread. Returns the
+    /// panes left running.
     pub fn shutdown(&mut self) -> Result<Vec<AgentId>, EngineError> {
+        let keep_panes = true;
         let mut kept = BTreeSet::new();
         for (id, worker) in &self.workers {
-            if !worker.stopping && self.has_pane_record(*id)? {
+            if keep_panes && !worker.stopping && self.has_pane_record(*id)? {
                 kept.insert(*id);
             }
         }

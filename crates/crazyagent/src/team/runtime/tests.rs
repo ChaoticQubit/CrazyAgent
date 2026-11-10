@@ -328,6 +328,44 @@ fn a_restarted_engine_takes_over_live_agent_panes_and_ends_every_other_one() {
     assert!(host.alive().unwrap().is_empty());
 }
 
+/// FBTMUX-P1, Stop: with team agents set to stop when CrazyAgent quits, an engine stop ends
+/// an agent's live pane as an owner Stop would and leaves no pane for a next engine, while
+/// keeping them running stays the default.
+#[test]
+fn an_engine_set_to_stop_team_agents_ends_their_panes_at_shutdown() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = fixture.pane(&host, master);
+    fixture.keep(master, &record);
+    assert!(
+        crate::quit_settings::load(&fixture.connection)
+            .unwrap()
+            .keeps_team_agents()
+    );
+    crate::quit_settings::save(
+        &fixture.connection,
+        &crate::quit_settings::QuitSettings {
+            on_quit: crate::quit_settings::OnQuit::Stop,
+            ..crate::quit_settings::QuitSettings::default()
+        },
+    )
+    .unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the adopted master is idle", |f| {
+        f.agent_status(master).0 == AgentStatus::Idle && f.recorded(master)
+    });
+    assert_eq!(team.shutdown().unwrap(), Vec::<AgentId>::new());
+    assert!(
+        host.alive().unwrap().is_empty(),
+        "no agent session outlives the engine"
+    );
+    assert_eq!(fixture.agent_status(master), (AgentStatus::Stopped, None));
+    let mut again = fixture.runtime().with_terminal(host.clone()).unwrap();
+    assert!(host.alive().unwrap().is_empty());
+    assert_eq!(again.shutdown().unwrap(), Vec::<AgentId>::new());
+}
+
 #[test]
 fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_stopped() {
     let fixture = Fixture::new(1);

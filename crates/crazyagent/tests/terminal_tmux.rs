@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const PANE_ENV_ROOT: &str = "PANE_ENV_ROOT";
 const PANE_ENV_OUT: &str = "PANE_ENV_OUT";
@@ -887,7 +887,7 @@ fn an_engine_stop_keeps_the_server_only_while_a_team_agent_lives_on() {
             .unwrap();
         panes.push(pane.pid);
     }
-    quit(&host).unwrap();
+    quit(&host, true).unwrap();
     assert_eq!(
         host.alive().unwrap(),
         std::slice::from_ref(&team),
@@ -904,7 +904,7 @@ fn an_engine_stop_keeps_the_server_only_while_a_team_agent_lives_on() {
     );
     let server = server_pid(&tmux, &socket);
     next.kill(&team).unwrap();
-    quit(&next).unwrap();
+    quit(&next, true).unwrap();
     assert!(
         !socket.exists(),
         "with no team agent left the stop ends the server and removes its socket"
@@ -912,6 +912,75 @@ fn an_engine_stop_keeps_the_server_only_while_a_team_agent_lives_on() {
     assert!(ends(&[server, panes[0]]), "the server process is gone");
     assert!(next.alive().unwrap().is_empty());
     assert!(!socket.exists(), "listing after the stop starts no server");
+}
+
+/// FBTMUX-P1, Stop: with team agents set to stop when CrazyAgent quits, an engine stop ends
+/// every terminal, a team agent's included, and the server.
+#[test]
+fn an_engine_stop_set_to_stop_team_agents_ends_them_and_the_server() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let team = AgentId::team(1).unwrap();
+    let research = AgentId::new("research-7-1").unwrap();
+    let mut pids = Vec::new();
+    for agent in [&team, &research] {
+        let pane = host
+            .spawn(agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+            .unwrap();
+        pids.push(pane.pid);
+    }
+    pids.push(server_pid(&tmux, &socket));
+    quit(&host, false).unwrap();
+    assert!(host.alive().unwrap().is_empty());
+    assert!(
+        !socket.exists(),
+        "with no team agent kept the stop ends the server and removes its socket"
+    );
+    assert!(ends(&pids), "the agents and the server process are gone");
+    let next = Tmux::open(Some(tmux.clone()), &folder);
+    assert!(
+        next.alive().unwrap().is_empty(),
+        "the next engine finds none"
+    );
+}
+
+/// FBTMUX-P1: renewing sets the deadline the server's holder reads, its socket's
+/// modification time, to the time given, and keeps the server and its agent; a host with
+/// no server renews nothing and starts none.
+#[test]
+fn renewing_moves_the_server_deadline_to_the_time_given() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let until = SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000_000);
+    host.renew(until).unwrap();
+    assert!(!socket.exists(), "renewing starts no server");
+    let team = AgentId::team(1).unwrap();
+    host.spawn(&team, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+        .unwrap();
+    for deadline in [until, until + Duration::from_secs(60 * 60)] {
+        host.renew(deadline).unwrap();
+        let modified = std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(modified, deadline);
+    }
+    assert_eq!(host.alive().unwrap(), std::slice::from_ref(&team));
+    quit(&host, false).unwrap();
 }
 
 fn tmux_reply(tmux: &Path, socket: &Path, arguments: &[&str]) -> String {
