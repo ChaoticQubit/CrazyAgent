@@ -1578,7 +1578,8 @@ fn a_sign_in_that_needs_a_check_reads_so_over_a_pause_and_never_use_over_it() {
 #[test]
 fn the_ranking_reads_next_exactly_when_the_real_pick_would_take_the_account() {
     use crate::engine::owner::{NativeAuthAction, NativeAuthMethod, NativeAuthPhase};
-    let cases: [(&str, bool, fn(&Connection)); 7] = [
+    type Case = (&'static str, bool, fn(&Connection));
+    let cases: [Case; 7] = [
         ("proved", true, |store| signed_in(store, "a")),
         ("doubted", false, |store| doubted(store, "a")),
         ("fenced", false, |store| fenced(store, "a")),
