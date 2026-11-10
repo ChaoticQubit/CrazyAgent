@@ -876,6 +876,7 @@ fn custodian_uncertainty_keeps_fence_after_the_real_lock_is_free() {
     assert_eq!(uncertain.phase, NativeAuthPhase::Uncertain);
     drop(guard);
     flock(&probe, FlockOperation::NonBlockingLockExclusive).unwrap();
+    flock(&probe, FlockOperation::Unlock).unwrap();
     drop(probe);
     drop(work);
     let before = case.snapshot();
@@ -910,6 +911,7 @@ fn database_reopen_keeps_old_work_fenced_while_held_and_the_next_begin_recovers_
     );
     assert_eq!(case.snapshot(), held);
     let _child_being_started = probe.try_clone().unwrap();
+    flock(&probe, FlockOperation::Unlock).unwrap();
     drop(probe);
     let (elsewhere, work) = fresh_work(
         case.begin(case.start("released-elsewhere", "connection-z"))
