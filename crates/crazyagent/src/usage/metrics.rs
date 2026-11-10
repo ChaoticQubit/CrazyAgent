@@ -14,6 +14,7 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 const SERIES_MAX: usize = 64;
 const TOOLS_PER_BAR_MAX: usize = 8;
+const TOOL_ROWS_MAX: usize = SERIES_MAX * TOOLS_PER_BAR_MAX;
 const TITLE_BYTES_MAX: usize = 120;
 const NAMES_MAX: usize = 8;
 
@@ -642,9 +643,10 @@ fn models(
         .map_err(storage)
 }
 
-/// Reads tool calls per bar and when that counting began. Inputs: the store, the project,
-/// the range start and the bar width. Output: at most `ROWS_MAX` rows, newest first, and the
-/// earliest hour held; both empty on a store without team tables.
+/// Reads tool calls per bar and when that counting began for the project. Inputs: the store,
+/// the project, the range start and the bar width. Output: the `TOOLS_PER_BAR_MAX` most-used
+/// tools of each of the newest `SERIES_MAX` bars, newest bar first and most-used first, and
+/// the earliest hour held; both empty on a store without team tables.
 fn tools(
     db: &Connection,
     project: Option<&str>,
@@ -656,15 +658,30 @@ fn tools(
     }
     let mut statement = db
         .prepare(
-            "SELECT ?2+((h.hour_ms-?2)/?3)*?3 AS start,h.tool,SUM(h.count)
-             FROM coord_tool_hours h JOIN team_agents a ON a.id=h.agent
-             WHERE h.hour_ms>=?2 AND (?1 IS NULL OR a.project=?1)
-             GROUP BY start,h.tool ORDER BY start DESC,SUM(h.count) DESC,h.tool LIMIT ?4",
+            "WITH bars AS (
+                 SELECT ?2+((h.hour_ms-?2)/?3)*?3 AS start,h.tool AS tool,SUM(h.count) AS calls
+                 FROM coord_tool_hours h JOIN team_agents a ON a.id=h.agent
+                 WHERE h.hour_ms>=?2 AND (?1 IS NULL OR a.project=?1)
+                 GROUP BY start,h.tool
+             ), ranked AS (
+                 SELECT start,tool,calls,
+                     ROW_NUMBER() OVER (PARTITION BY start ORDER BY calls DESC,tool) AS place,
+                     DENSE_RANK() OVER (ORDER BY start DESC) AS bar
+                 FROM bars
+             )
+             SELECT start,tool,calls FROM ranked WHERE place<=?4 AND bar<=?5
+             ORDER BY start DESC,place",
         )
         .map_err(storage)?;
     let rows = statement
         .query_map(
-            params![project, since_ms, bucket_ms, ROWS_MAX as i64],
+            params![
+                project,
+                since_ms,
+                bucket_ms,
+                TOOLS_PER_BAR_MAX as i64,
+                SERIES_MAX as i64
+            ],
             |row| {
                 Ok(ToolBucket {
                     start_ms: row.get(0)?,
@@ -677,9 +694,13 @@ fn tools(
         .collect::<Result<_, _>>()
         .map_err(storage)?;
     let since = db
-        .query_row("SELECT MIN(hour_ms) FROM coord_tool_hours", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT h.hour_ms FROM coord_tool_hours h JOIN team_agents a ON a.id=h.agent
+             WHERE ?1 IS NULL OR a.project=?1 ORDER BY h.hour_ms LIMIT 1",
+            params![project],
+            |row| row.get(0),
+        )
+        .optional()
         .map_err(storage)?;
     Ok((rows, since))
 }
@@ -701,9 +722,9 @@ pub(super) fn money_totals(
 }
 
 /// Keeps the metrics within `REPORT_BYTES_MAX` encoded bytes so their reply fits one frame:
-/// while they are larger, runs, projects, agents, accounts, harnesses, models and tools each
-/// keep a smaller share of `ROWS_MAX`, losing the oldest runs and tool bars and the least-used
-/// rows first.
+/// while they are larger, runs, projects, agents, accounts, harnesses and models each keep a
+/// smaller share of `ROWS_MAX` and tools of `TOOL_ROWS_MAX`, losing the oldest runs and tool
+/// bars and the least-used rows first.
 /// Input: the metrics. Output: the metrics that fit, or `usage_unavailable`.
 fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
     for share in (0..=SHARES).rev() {
@@ -714,7 +735,7 @@ fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
         metrics.accounts.truncate(kept);
         metrics.harnesses.truncate(kept);
         metrics.models.truncate(kept);
-        metrics.tools.truncate(kept);
+        metrics.tools.truncate(TOOL_ROWS_MAX * share / SHARES);
         let encoded = serde_json::to_vec(&metrics).map_err(|_| failure("usage_unavailable"))?;
         if encoded.len() <= REPORT_BYTES_MAX {
             return Ok(metrics);
@@ -727,8 +748,8 @@ fn fit(mut metrics: Metrics) -> Result<Metrics, EngineError> {
 /// from `since_ms` to `now_ms`: tasks running and waiting now, done and failed in the range,
 /// the tokens chart in bars `bucket_for` the range, anchored at its start, the newest
 /// `ROWS_MAX` runs, the largest `ROWS_MAX` projects, agents, accounts and harnesses by the
-/// headline, the models by dollars, and the newest `ROWS_MAX` tool rows per bar, fewer of each
-/// when they would not fit one reply (`fit`).
+/// headline, the models by dollars, and the most-used tools of the newest bars (`tools`), fewer
+/// of each when they would not fit one reply (`fit`).
 /// Inputs: the store, the project, the range start and now. Output: the metrics;
 /// `usage_request_invalid` for a range that starts before the epoch or after now.
 pub fn read(
@@ -772,7 +793,7 @@ pub fn read(
     })?;
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);
-    assert!(metrics.tools.len() <= ROWS_MAX);
+    assert!(metrics.tools.len() <= TOOL_ROWS_MAX);
     assert!(metrics.accounts.len() <= ROWS_MAX && metrics.harnesses.len() <= ROWS_MAX);
     assert!(metrics.projects.len() <= ROWS_MAX && metrics.agents.len() <= ROWS_MAX);
     assert!(metrics.agents.iter().all(|row| {
