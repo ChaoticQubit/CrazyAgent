@@ -1869,9 +1869,9 @@ fn stored() -> crate::project_setup::StoredSetup {
 #[test]
 fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_master() {
     let view = loaded();
-    assert!(find(&frame(&view, 160, 36), "leads.").contains("Codex leads."));
     for (width, height) in [(160, 36), (80, 24)] {
         let rows = frame(&view, width, height);
+        assert!(find(&rows, "leads.").contains("Codex leads."));
         assert!(
             find(&rows, "On harness switch")
                 .contains("On harness switch  Carry over, when the master is idle"),

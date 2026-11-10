@@ -3053,8 +3053,8 @@ impl TeamView {
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
     /// harness change applies, Sub-agent depth,
-    /// Worker lands, Agent branches, Max harnesses, Max teammates, Spread accounts, Token
-    /// budget, Master's branch, Land on, Ask before merge, New folder limit, Background
+    /// Worker lands, Agent branches, Max harnesses, Live terminal, Max teammates, Spread accounts,
+    /// Token budget, Master's branch, Land on, Ask before merge, New folder limit, Background
     /// commands), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
@@ -3146,6 +3146,15 @@ impl TeamView {
                 branch_words(status.agent_branches).to_owned(),
             ),
             setting("Max harnesses", cap_words(status.max_harnesses)),
+            setting(
+                "Live terminal",
+                if status.master_live_terminal {
+                    "On"
+                } else {
+                    "Off"
+                }
+                .to_owned(),
+            ),
             setting("Max teammates", cap_words(status.max_teammates)),
             setting(
                 "Spread accounts",
@@ -3201,15 +3210,6 @@ impl TeamView {
             setting(
                 "Master idle stop",
                 status.master_idle_stop.label().to_owned(),
-            ),
-            setting(
-                "Live terminal",
-                if status.master_live_terminal {
-                    "On"
-                } else {
-                    "Off"
-                }
-                .to_owned(),
             ),
             setting(
                 "Terminals per window",
