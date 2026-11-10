@@ -849,6 +849,25 @@ fn unmerged_for_finish(
     Ok(unmerged)
 }
 
+/// How many tasks pinned to an agent still wait for a slot or a pool, which a stop made now
+/// fails (HB-S5-B-L2). Takes the connection, the project and the agent. Returns the count,
+/// or a SQLite failure.
+fn queued_for(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<i64, EngineError> {
+    let queued: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+             WHERE p.project=?1 AND p.agent=?2 AND t.status IN ('queued','needs_pool')",
+            params![project.as_str(), agent],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    Ok(queued)
+}
+
 /// Stops an agent for the `stop` tool, recording who stopped it (HB-S5-B): the master may
 /// stop any sub-agent, a lead only its own workers, and no agent itself. Its unfinished
 /// tasks fail, and its maker or anyone above can wake it. Takes the database, what the
@@ -900,9 +919,17 @@ pub(super) fn stop(
                     Some(StoppedBy::Owner) => {
                         format!("The owner stopped {label} already. Only the owner can wake it.")
                     }
-                    Some(StoppedBy::Master) if by == StoppedBy::Lead => format!(
-                        "The master stopped {label} already. Only the master or the owner can wake it."
-                    ),
+                    Some(StoppedBy::Master) if by == StoppedBy::Lead => {
+                        let queued = queued_for(&tx, project, target)?;
+                        let fails = if queued > 0 {
+                            format!(" Your stop fails the tasks still queued for it: {queued}.")
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "The master stopped {label} already.{fails} Only the master or the owner can wake it."
+                        )
+                    }
                     _ => format!(
                         "Stopping {label}. Its unfinished tasks fail, and you can wake it again."
                     ),

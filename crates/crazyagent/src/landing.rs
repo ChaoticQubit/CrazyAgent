@@ -1119,9 +1119,9 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
 
 /// Lists one project's change sets as the owner's Changes and the master's brief show
 /// them: as [`list`], without the sets of a lead's workers while the owner's Lands setting
-/// is Lead, since that lead merges them (F3), but with a worker's open set whose lead's
-/// copy was removed outside the app or whose lead's set closed and left it open, since no
-/// lead will. Inputs: the store and the project. Output: the change sets.
+/// is Lead, since that lead merges them (F3), but with a worker's open set the owner
+/// restored, whose lead's copy is gone or whose lead's set closed and left it open, since
+/// no lead will (TEAM-3-F3). Inputs: the store and the project. Output: the change sets.
 pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
     let sets = list(db, project)?;
     assert!(sets.len() <= LIST_MAX);

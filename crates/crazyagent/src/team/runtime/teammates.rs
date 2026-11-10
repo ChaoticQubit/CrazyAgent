@@ -286,6 +286,22 @@ pub(super) fn name(connection: &Connection, teammate: i64) -> Option<String> {
         .flatten()
 }
 
+/// The lead of one team row now, so a teammate's land held for a worker's open change set
+/// is tried again once that worker is re-parented or its row removed (TEST-ROWS-B-R1-L1).
+/// Inputs: the connection and the agent. Output: its lead, None for a row with none or no
+/// row, or a SQLite failure.
+pub(super) fn parent(connection: &Connection, agent: i64) -> Result<Option<i64>, EngineError> {
+    let parent: Option<Option<i64>> = connection
+        .query_row(
+            "SELECT parent FROM team_agents WHERE id=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(parent.flatten())
+}
+
 /// Lists a lead's running teammate rows with whether each rests, so the engine commits a
 /// resting teammate's turn and lands its work on the lead (OP-9b). Inputs: the connection,
 /// the project and the lead. Output: the rows, true for a resting one, or a SQLite failure.

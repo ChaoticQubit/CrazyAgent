@@ -450,9 +450,11 @@ pub(super) fn is_lead_worker(
 }
 
 /// Tells whether a lead's worker has lost the lead that would land its open change set, so
-/// the owner's list must show it: the lead's copy was removed outside the app
-/// (HB-S4-LANDED), or the lead's newest set closed after this one opened and left it open
-/// (fix/v21-team-4). Inputs: the store, the project and the change set. Output: the answer.
+/// the owner's list must show it: the owner restored the set, which the lead's closes leave
+/// alone; the lead's copy is gone, also for a lead with no set of its own (TEAM-3-F3), or
+/// was removed outside the app (HB-S4-LANDED); or the lead's newest set closed after this
+/// one opened and left it open (fix/v21-team-4). Inputs: the store, the project and the
+/// change set. Output: the answer.
 pub(super) fn lead_left(
     db: &Connection,
     project: &ProjectId,
@@ -467,12 +469,25 @@ pub(super) fn lead_left(
     let Some(lead) = sub_agent_lead(db, project, id)? else {
         return Ok(false);
     };
+    if store::load(db, &set.id)?.restored || lead_copy_gone(db, project, lead)? {
+        return Ok(true);
+    }
     let Some(lead_set) = store::newest_of(db, project, &lead.to_string())? else {
         return Ok(false);
     };
     let closed_after =
         !lead_set.is_open() && lead_set.intent.is_none() && set.created_ms <= lead_set.updated_ms;
     Ok(closed_after || removed_outside(&lead_set))
+}
+
+/// Tells whether a lead's copy is gone, so no lead lands its workers' sets: no worktree is
+/// recorded for it now, or its folder cannot be found, read without following a link
+/// (TEAM-3-F3). Inputs: the store, the project and the lead. Output: the answer.
+fn lead_copy_gone(db: &Connection, project: &ProjectId, lead: i64) -> Result<bool, EngineError> {
+    let Some(lead) = place(db, project, lead)? else {
+        return Ok(true);
+    };
+    Ok(std::fs::symlink_metadata(&lead.worktree).is_err())
 }
 
 /// Lists the branches of a lead's sub-agents whose work is not yet in the lead's task

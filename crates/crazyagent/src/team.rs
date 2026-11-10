@@ -1581,7 +1581,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 agent INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
                 stopped_ms INTEGER NOT NULL,
-                stopped_by TEXT NOT NULL DEFAULT 'owner'
+                stopped_by TEXT NOT NULL DEFAULT 'owner',
+                last_by TEXT
             );
             CREATE TABLE IF NOT EXISTS team_status_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2873,6 +2874,26 @@ pub(crate) fn stop_of(
     Ok(row.map(|(by, stopped_ms)| (StoppedBy::named(&by), stopped_ms)))
 }
 
+/// Who made the latest stop of a sub-agent that has not started again since, the stop whose
+/// time fails its earlier tasks (HB-S5-B-L2): a lower stop after a higher one takes the time
+/// while the higher maker keeps the standing. Takes a connection and the agent. Returns the
+/// maker, the holder for a row from before the column, None when no stop holds it, or a
+/// SQLite failure.
+pub(crate) fn last_stopper(
+    connection: &Connection,
+    agent: i64,
+) -> Result<Option<StoppedBy>, EngineError> {
+    let by: Option<String> = connection
+        .query_row(
+            "SELECT COALESCE(last_by,stopped_by) FROM team_owner_stops WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(by.map(|by| StoppedBy::named(&by)))
+}
+
 /// Records the owner's Wake of a finished sub-agent (DEC-102), which the team runtime serves
 /// on its next tick through the same wake as the master's: the agent starts again under its
 /// own id, name and worktree, continuing its harness conversation where it can. A second
@@ -3551,8 +3572,10 @@ const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 /// for a lead's task), `team_agents.hookless` (1 when the agent's launch fires no hooks,
 /// DEC-104 bare-hooks), `team_agents.pane_pid` (the pane process a native teammate was
 /// first named by, PLC (b)), `team_task_pins.held` (1 when a hold pinned the task, not
-/// its own purpose) and `team_owner_stops.stopped_by` (who made the stop; one from before
-/// the column was the owner's). Runs on every open and adds each column once. Takes the
+/// its own purpose), `team_owner_stops.stopped_by` (who made the stop; one from before
+/// the column was the owner's) and `team_owner_stops.last_by` (who made the latest stop,
+/// whose time the row holds; none from before the column, HB-S5-B-L2). Runs on every open
+/// and adds each column once. Takes the
 /// engine connection. Returns any SQLite failure.
 fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
     for (table, column, definition) in [
@@ -3567,6 +3590,7 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
             "stopped_by",
             "TEXT NOT NULL DEFAULT 'owner'",
         ),
+        ("team_owner_stops", "last_by", "TEXT"),
     ] {
         let present: bool = connection
             .query_row(
@@ -4375,8 +4399,9 @@ pub(crate) fn owner_stop(
 
 /// Records a stop of a sub-agent and of every agent it leads, down its whole lead tree. A
 /// stop already there keeps the higher standing of its maker and this one and takes this
-/// one's time, so a wake queued before this stop fails. Takes a connection, the project, the
-/// agent, who stopped it and the time. Returns any SQLite failure.
+/// one's time and maker as the latest, so a wake queued before this stop fails and names
+/// this maker as its cause (HB-S5-B-L2). Takes a connection, the project, the agent, who
+/// stopped it and the time. Returns any SQLite failure.
 fn record_stop(
     connection: &Connection,
     project: &ProjectId,
@@ -4392,9 +4417,10 @@ fn record_stop(
                  SELECT a.id, led.depth + 1 FROM team_agents a JOIN led ON a.parent = led.id
                  WHERE a.project = ?2 AND a.id <> led.id AND led.depth < ?4
              )
-             INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by)
-             SELECT id, ?2, ?3, ?5 FROM led WHERE true
+             INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by,last_by)
+             SELECT id, ?2, ?3, ?5, ?5 FROM led WHERE true
              ON CONFLICT(agent) DO UPDATE SET stopped_ms=excluded.stopped_ms,
+             last_by=excluded.stopped_by,
              stopped_by=CASE WHEN excluded.stopped_by='owner'
              OR (excluded.stopped_by='master' AND team_owner_stops.stopped_by='lead')
              THEN excluded.stopped_by ELSE team_owner_stops.stopped_by END",
