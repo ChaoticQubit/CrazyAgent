@@ -90,6 +90,12 @@ mod own_turns {
     }
 
     fn start(name: &str) -> Pane {
+        start_at(name, false)
+    }
+
+    /// Starts a stand-in pane under the always-allow sandbox profile, or at Full access when
+    /// `unconfined`. Takes the agent name and the access. Returns the pane.
+    fn start_at(name: &str, unconfined: bool) -> Pane {
         let root = tempfile::Builder::new()
             .prefix("ca-own-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -123,8 +129,8 @@ mod own_turns {
             },
             model: None,
             tools: true,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            sandbox_profile: (!unconfined).then_some(profile),
+            unconfined,
             git_identity: None,
             limits: LaunchLimits::default(),
         };
@@ -187,6 +193,29 @@ mod own_turns {
     }
 
     const DONE: TranscriptEvent = TranscriptEvent::TurnFinished { success: true };
+
+    /// SETSID-L2 r1 L1: a Full access pane follows its lineage once `FOLLOWER_PACE` has passed
+    /// since its last follow, not only after `FOLLOW_EVERY`, so beside a follower's 1 s reads
+    /// its stop's own read stays within the gap a stop checks and a clean stop reads checked.
+    #[test]
+    fn a_full_access_pane_follows_its_lineage_every_follower_pace() {
+        use crate::harnesses::leftovers::FOLLOWER_PACE;
+
+        let mut pane = start_at("follow-pace-1", true);
+        assert!(
+            matches!(pane.session.lineage, Some(Ok(_))),
+            "a Full access pane has a lineage to follow"
+        );
+        let due = Instant::now()
+            .checked_sub(FOLLOWER_PACE + Duration::from_millis(50))
+            .unwrap();
+        pane.session.followed = due;
+        pane.session.next_event(Duration::from_millis(100)).unwrap();
+        assert!(
+            pane.session.followed > due,
+            "a pane one follower pace past its last follow did not follow"
+        );
+    }
 
     #[test]
     fn own_turn_facts_kept_between_typed_turns() {

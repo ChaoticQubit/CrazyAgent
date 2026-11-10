@@ -21,8 +21,8 @@ pub const SANDBOX_UNCHECKED: &str = "harness_sandbox_unchecked";
 /// The environment variable that carries a launch's [`LineageToken`] to every process it
 /// starts.
 pub const LINEAGE_VARIABLE: &str = "CRAZYAGENT_LINEAGE";
-/// How often a lineage that follows a running agent reads the process table, through one
-/// read shared by every lineage of the engine.
+/// How long the process table one read shared by every lineage of the engine is reused
+/// before a follow reads a new one.
 pub(crate) const FOLLOW_EVERY: Duration = Duration::from_secs(2);
 /// What [`Leftovers::names`] says when no process of a stop could be listed.
 pub const UNLISTED: &str = "unknown, the process list could not be read";
@@ -31,12 +31,11 @@ pub const UNLISTED: &str = "unknown, the process list could not be read";
 /// (SECAUDIT-SETSID-LEFTOVER r2 L2).
 #[cfg(unix)]
 const FOLLOW_GAP: Duration = FOLLOW_EVERY.saturating_mul(2);
-/// How often a [`Follower`] takes the shared table: half of [`FOLLOW_EVERY`], so with tables
-/// up to [`FOLLOW_EVERY`] old, the last one it took and its stop's own read lie within
-/// [`FOLLOW_GAP`] while those two reads take under a second together.
-#[cfg(unix)]
-const FOLLOWER_PACE: Duration = Duration::from_secs(1);
-#[cfg(unix)]
+/// How often a [`Follower`] or a followed pane takes the shared table: half of
+/// [`FOLLOW_EVERY`], so with tables up to [`FOLLOW_EVERY`] old, the last one it took and its
+/// stop's own read lie within [`FOLLOW_GAP`] while those two reads take under a second
+/// together (SETSID-L2 r1 L1).
+pub(crate) const FOLLOWER_PACE: Duration = Duration::from_secs(1);
 const _: () = assert!(2 * FOLLOWER_PACE.as_nanos() == FOLLOW_EVERY.as_nanos());
 const TOKEN_BYTES: usize = 16;
 /// The most bytes of an environment listing a stop reads, line by line, keeping of each line
@@ -629,9 +628,12 @@ enum Following {
 /// A Full access headless run's processes, followed from its start on a thread of its own,
 /// since such a run has no poll that could follow them while it waits (SETSID-L2): the thread
 /// takes the first read, then the engine's shared table every [`FOLLOWER_PACE`], so a process
-/// that later leaves the run's session and loses its parent stays known. The lineage sits
-/// under a lock taken only to apply a table, so a stop never waits for a read in flight.
-/// Holds the leader, the launch's token, the lineage and the sender whose drop ends the thread.
+/// a table showed in the run stays known once it leaves the run's session and loses its
+/// parent. One that does both between two tables it took, up to the pace plus the table's age
+/// plus the reads, is never seen, and only its token can still find it at the stop: the
+/// SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
+/// apply a table, so a stop never waits for a read in flight. Holds the leader, the launch's
+/// token, the lineage and the sender whose drop ends the thread.
 pub(crate) struct Follower {
     leader: u32,
     token: Option<LineageToken>,
