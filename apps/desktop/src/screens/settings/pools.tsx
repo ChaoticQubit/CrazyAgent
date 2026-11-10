@@ -16,7 +16,8 @@ import { HELD_HEAD, heldLine, isNear, orderLine, usageBars, whyLine } from "./po
 
 export const POOL_FULL = "A pool can hold up to 15 accounts. Remove one to add another.";
 
-/** How often the page reads the order and the limits again, in milliseconds. */
+/** How often the page reads the pools, the accounts, the order and the limits again, in
+ * milliseconds, so a row's badge and why line and the left list never disagree for long. */
 const REREAD_MS = 60_000;
 
 /** The range the page asks usage for, in milliseconds. It reads only the limits, which the range
@@ -184,8 +185,8 @@ function PoolOrder({ pool, ranking, schedule, accounts, limits, nowMs, onRetry }
     {limits.kind === "error" && <div className="set-body"><Notice tone="warn">Couldn't read usage limits.</Notice></div>}
     {rows.length === 0 && <p className="pool-empty">{pool.members.length === 0 ? "No accounts yet. Use Edit pool to put one in this pool." : "No accounts to rank yet."}</p>}
     {rows.length > 0 && ready.length === 0 && <p className="pool-empty">No account can take work now.</p>}
-    {ready.length > 0 && <ol className="pool-rows">{ready.map((item, at) => row(item, at))}</ol>}
-    {held.length > 0 && <><p className="pool-held-head">{HELD_HEAD}</p><ul className="pool-rows">{held.map((item) => row(item, null))}</ul></>}
+    {ready.length > 0 && <ol role="list" className="pool-rows">{ready.map((item, at) => row(item, at))}</ol>}
+    {held.length > 0 && <><p className="pool-held-head">{HELD_HEAD}</p><ul role="list" className="pool-rows">{held.map((item) => row(item, null))}</ul></>}
   </>;
 }
 
@@ -388,12 +389,13 @@ export function PoolEditorView({ pool, accounts, initialMembers = [], onSave, on
   </form>;
 }
 
-/** Settings, Pools: the one screen, the pool editor and Delete pool; the order and the limits are
- * read again once a minute. Input: whether a new pool editor opens on arrival. */
+/** Settings, Pools: the one screen, the pool editor and Delete pool; the pools, the accounts, the
+ * order and the limits are read again once a minute. Input: whether a new pool editor opens on
+ * arrival. */
 export function Pools({ creating }: { creating: boolean }) {
   const session = useAppSession();
   const [pools, reload] = useLoad(poolSummaries, [], "pool-summaries");
-  const [accounts] = useLoad(listAccounts, [], "accounts");
+  const [accounts, rereadAccounts] = useLoad(listAccounts, [], "accounts");
   const [schedule, rereadSchedule] = useLoad(accountSchedule, [], "account-schedule");
   const [ranking, rerank] = useLoad(accountRanking, [], "account-ranking");
   const [usage, rereadUsage] = useLoad(() => loadUsage(Date.now() - LIMITS_RANGE_MS, offsetMinutes(new Date()), null), [], "pool-usage");
@@ -413,7 +415,7 @@ export function Pools({ creating }: { creating: boolean }) {
     if (taken.length) setDraft(taken);
   }, [creating]);
   useEffect(() => {
-    const timer = setInterval(() => { setNowMs(Date.now()); rerank(); rereadUsage(); }, REREAD_MS);
+    const timer = setInterval(() => { setNowMs(Date.now()); reload(); rereadAccounts(); rerank(); rereadUsage(); }, REREAD_MS);
     return () => clearInterval(timer);
   }, []);
   const limits: Loaded<AccountLimits[]> = usage.kind === "ok" ? { kind: "ok", value: usage.value.limits } : usage;
