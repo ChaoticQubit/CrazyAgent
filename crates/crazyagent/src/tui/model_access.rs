@@ -114,7 +114,7 @@ enum RecordAction {
 }
 
 pub(super) struct State {
-    native_auth: native_auth::State,
+    pub(super) native_auth: native_auth::State,
     profile: account_profile::Profile,
     managed_setup: Option<managed_setup::Setup>,
     pool_setup: Option<pool_setup::Setup>,

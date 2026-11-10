@@ -1831,42 +1831,83 @@ async fn real_panel_refuses_a_running_sign_in_whose_own_account_was_replaced_and
     .await;
 }
 
+/// Shapes a reply into a sign-in still awaiting the owner. Input: the reply. Output: none.
+fn unit_still_awaiting(reply: &mut NativeAuthReply) {
+    reply.fact.phase = NativeAuthPhase::AwaitingOwner;
+    reply.account = None;
+}
+
+/// A sign-in awaiting the owner with its panel closed, a recheck started on a moved config and
+/// the reply to that read. Inputs: the basis, the connection and the reply's shape. Output: the
+/// state and the reply's event.
+fn unit_recheck(
+    basis: model_access::Basis,
+    connection: ModelConnection,
+    shape: impl FnOnce(&mut NativeAuthReply),
+) -> (State, Event) {
+    let (mut state, job) = unit_started(basis.clone(), connection);
+    let started = job.clone();
+    let mut reply = unit_signed_out_reply(&job, "unit@example.invalid");
+    unit_still_awaiting(&mut reply);
+    state
+        .apply(Event {
+            job,
+            result: Ok(Output::Auth(Box::new(reply))),
+        })
+        .unwrap();
+    state.hide().unwrap();
+    let mut moved = basis;
+    moved.config_id = ConfigId::new("other-config").unwrap();
+    assert!(state.recheck(Some(&moved)));
+    let read = state.request().unwrap();
+    let Command::Read(query) = &read.command else {
+        panic!("a recheck reads the held sign-in");
+    };
+    let mut answer = unit_signed_out_reply(&started, "unit@example.invalid");
+    answer.request_id = query.request_id.clone();
+    shape(&mut answer);
+    let event = Event {
+        job: read,
+        result: Ok(Output::Auth(Box::new(answer))),
+    };
+    (state, event)
+}
+
 #[tokio::test]
 async fn unit_healthy_recheck_leaves_the_notice_the_owner_was_reading() {
     run(|case| async move {
         let (basis, connection) = case.selected("b-claude").await;
-        let (mut state, job) = unit_started(basis.clone(), connection);
-        let started = job.clone();
-        let mut reply = unit_signed_out_reply(&job, "unit@example.invalid");
-        reply.fact.phase = NativeAuthPhase::AwaitingOwner;
-        reply.account = None;
-        state
-            .apply(Event {
-                job,
-                result: Ok(Output::Auth(Box::new(reply))),
-            })
-            .unwrap();
-        state.hide().unwrap();
+        let (mut state, healthy) = unit_recheck(basis, connection, unit_still_awaiting);
         state.notice = Cow::Borrowed("What the owner was reading");
-        let mut moved = basis.clone();
-        moved.config_id = ConfigId::new("other-config").unwrap();
-        assert!(state.recheck(Some(&moved)));
-        let read = state.request().unwrap();
-        let Command::Read(query) = &read.command else {
-            panic!("a recheck reads the held sign-in");
-        };
-        let mut healthy = unit_signed_out_reply(&started, "unit@example.invalid");
-        healthy.request_id = query.request_id.clone();
-        healthy.fact.phase = NativeAuthPhase::AwaitingOwner;
-        healthy.account = None;
-        state
-            .apply(Event {
-                job: read,
-                result: Ok(Output::Auth(Box::new(healthy))),
-            })
-            .unwrap();
+        state.apply(healthy).unwrap();
         assert_eq!(state.notice.as_ref(), "What the owner was reading");
         assert!(state.has_pending());
+    })
+    .await;
+}
+
+/// The line the owner reads on the page, with the panel closed: a healthy recheck leaves it,
+/// and a result that changes the sign-in still reaches it.
+#[tokio::test]
+async fn unit_page_keeps_its_notice_through_a_healthy_recheck_and_shows_a_changed_result() {
+    const SAVED: &str = "Metadata saved; authentication and execution remain unavailable";
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        let (basis, connection) = case.selected("b-claude").await;
+        let (state, healthy) = unit_recheck(basis.clone(), connection.clone(), unit_still_awaiting);
+        ui.app.model_access.native_auth = state;
+        ui.app.model_access.notice = SAVED.into();
+        ui.apply(healthy);
+        assert_eq!(ui.app.model_access.notice, SAVED);
+        let (state, ended) = unit_recheck(basis, connection, |_| {});
+        ui.app.model_access.native_auth = state;
+        ui.app.model_access.notice = SAVED.into();
+        ui.apply(ended);
+        assert_ne!(ui.app.model_access.notice, SAVED);
+        assert_eq!(
+            ui.app.model_access.notice,
+            ui.app.model_access.native_auth.notice()
+        );
     })
     .await;
 }

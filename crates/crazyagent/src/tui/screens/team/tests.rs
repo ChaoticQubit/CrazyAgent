@@ -269,6 +269,74 @@ fn relation(from: &str, to: &str, relation: Relation, live: Option<LiveAction>) 
     }
 }
 
+/// A graph with the master waiting on the owner over its line to agent-2. Output: the graph.
+fn waiting_on_owner() -> Box<TeamGraph> {
+    let mut team = graph();
+    team.relations = vec![
+        relation(
+            "master",
+            "agent-2",
+            Relation::Leads,
+            Some(LiveAction::WaitingOn { owner: true }),
+        ),
+        relation("agent-2", "agent-3", Relation::TeammateOf, None),
+        relation("master", "agent-5", Relation::DelegatedTo, None),
+    ];
+    team
+}
+
+/// An owner wait keeps its whole words on the agent's line or moves: at 120 columns the line
+/// never reads "waiting on: ...", and the detail row names the owner.
+#[test]
+fn an_owner_wait_stays_whole_or_moves_to_the_detail_row() {
+    let mut shell = fresh(120, 36);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(waiting_on_owner()),
+    });
+    let shown = render(&mut shell);
+    let at = shown
+        .iter()
+        .position(|row| row.contains("├─ ▸ claude-1"))
+        .unwrap_or_else(|| panic!("{}", shown.join("\n")));
+    assert!(!shown[at].contains("waiting"), "{}", shown[at]);
+    assert!(
+        shown[at + 1].contains("waiting on: your answer"),
+        "{}",
+        shown.join("\n")
+    );
+}
+
+/// An agent with no account or branch has no detail row, so a moved owner wait gets a note row.
+#[test]
+fn an_owner_wait_on_an_agent_with_no_detail_row_moves_to_a_note_row() {
+    let mut team = waiting_on_owner();
+    let lead = team
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "agent-2")
+        .unwrap();
+    lead.account = None;
+    lead.branch = None;
+    let mut shell = fresh(80, 24);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    let shown = render(&mut shell);
+    let note = shown
+        .iter()
+        .position(|row| row.contains("waiting on:"))
+        .unwrap_or_else(|| panic!("{}", shown.join("\n")));
+    assert!(
+        shown[note..=note + 1]
+            .iter()
+            .any(|row| row.contains("answer")),
+        "{}",
+        shown.join("\n")
+    );
+}
+
 #[test]
 fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     let mut team = graph();
