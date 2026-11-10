@@ -80,6 +80,12 @@ export function mountArea(master, on, catalog = true) {
   flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, catalog ? CATALOG : undefined) })));
 }
 
+/** Renders the mounted master area again with the engine's live switch read as `on`, as the
+ * team read after an idle stop does. Inputs: the master harness and the switch. Output: none. */
+export function readSwitch(master, on) {
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, CATALOG) })));
+}
+
 /** Mounts the live master view in one of its states: running with the master's terminal,
  * running before the terminal opens, starting, refused with an engine code, or stopped with
  * the engine's reason when the code is given, with the team status read so far, if any. */

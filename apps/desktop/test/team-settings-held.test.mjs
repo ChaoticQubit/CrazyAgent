@@ -86,8 +86,24 @@ test("the master's settings keep the Account and Apply a master harness change p
   const seen = await onSettings(APPLIED, async (page) => ({
     apply: await page.evaluate(`Fixture.pickOther("Apply a master harness change")`),
     account: await page.evaluate(`Fixture.pickOther("Account")`),
+    idle: await page.evaluate(`Fixture.pickOther("Stop the master when idle after")`),
   }), "drawer");
-  for (const [row, value] of Object.entries(seen)) assert.equal(value.shown, value.picked, `${row} holds the pick`);
+  for (const [row, value] of Object.entries(seen)) {
+    assert.notEqual(value, null, `${row} is in the drawer`);
+    assert.equal(value.shown, value.picked, `${row} holds the pick`);
+  }
+});
+
+test("each Stop the master when idle after choice reaches the engine under its own name and stays on screen (DEC-117 Q4)", { timeout: 120_000 }, async () => {
+  const choices = ["one_hour", "off", "fifteen_minutes"];
+  const seen = await onSettings(APPLIED, async (page) => {
+    const picks = [];
+    for (const choice of choices) picks.push(await page.evaluate(`Fixture.pickOther("Stop the master when idle after", ${JSON.stringify(choice)})`));
+    return { picks, sent: await page.evaluate(`Fixture.sentTo("desktop_team_master_idle_stop")`) };
+  }, "drawer");
+  assert.deepEqual(seen.picks.map((pick) => pick?.shown ?? null), choices, "each pick stays shown");
+  assert.deepEqual(seen.sent.args.map((call) => call.choice), choices, "each pick is sent by its name");
+  assert.deepEqual([...new Set(seen.sent.args.map((call) => call.id))], ["alpha"], "the save names the project");
 });
 
 const APP_SELECTS = [["schedule", "schedule-app", "balanced"], ["schedule", "schedule-pool-main", "manual_rank"], ["project", "project-account-order", "balanced"], ["memory", "memory-agent-writes", "ask"]];

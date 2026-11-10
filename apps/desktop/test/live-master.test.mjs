@@ -185,6 +185,19 @@ test("opening the master area starts a stopped or never-set live master once and
   assert.match(seen.again.text, /The master terminal couldn't start\./);
 });
 
+test("a live master that stops while its area is open stays stopped until the owner acts (DEC-117 Q4)", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountArea("codex", true)');
+    await evaluate("Fixture.settle()");
+    await evaluate('Fixture.readSwitch("codex", false)');
+    const view = await evaluate("Fixture.settle()");
+    return { view, starts: await evaluate("Fixture.teamReloads()") };
+  });
+  assert.equal(seen.starts, 0, "the open area did not turn the stopped master on again");
+  assert.equal(seen.view.state, "Stopped");
+  assert.match(seen.view.text, /The live master is stopped\. It starts again when you open this tab or start a new session\./);
+});
+
 test("the live master switch is read from the team status, and a switch never set reads as null", async () => {
   const { liveSwitch } = await import("../src/screens/project/live-master.tsx");
   const status = (patch) => ({ kind: "ok", value: teamStatus(patch) });
