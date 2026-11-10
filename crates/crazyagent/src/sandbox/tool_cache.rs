@@ -82,8 +82,9 @@ pub struct Prepared {
 
 /// The folder name of one launch's tool cache inside its project's folder: none at Full
 /// access, which gets no cache; under Shared the level and the shape; under One per agent
-/// the level and the agent, so an agent's cache does not follow it to a wider level. Inputs: the setting, the level, the shape and the agent's id. Output: a plain
-/// name, or None.
+/// the level and the agent, so an agent's cache does not follow it to a wider level.
+/// Inputs: the setting, the level, the shape and the agent's id. Output: a plain name, or
+/// None.
 pub fn key(
     scope: ToolCacheScope,
     access: AgentAccess,
@@ -130,16 +131,45 @@ fn plain_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-/// Gives a launch's sandbox its tool cache (T8, not written yet). Output: the sandbox.
+/// Gives a launch's sandbox the tool cache its project's policy grants (T8): the cache
+/// [`key`] names under the engine runtime for the project, prepared with the uv the agent's
+/// PATH finds when the engine may run it. A refusal is logged with its code and the sandbox
+/// goes on without a cache, so uv keeps its own default, which the SM1-R rule refuses
+/// (fail closed). Inputs: the sandbox, the engine runtime, the canonical project folder, the
+/// policy, the shape and the agent. Output: the sandbox, with the cache when granted.
 pub fn grant(
     sandbox: ProjectSandbox,
-    _runtime: &Path,
-    _project: &Path,
-    _policy: &AgentPolicy,
-    _shape: CacheShape,
-    _agent: &str,
+    runtime: &Path,
+    project: &Path,
+    policy: &AgentPolicy,
+    shape: CacheShape,
+    agent: &str,
 ) -> ProjectSandbox {
-    sandbox
+    let Some(key) = key(policy.tool_cache, policy.access, shape, agent) else {
+        return sandbox;
+    };
+    let Some(project) = project.to_str() else {
+        eprintln!("agent_tool_cache_unavailable code=tool_cache_project_name");
+        return sandbox;
+    };
+    let uv = sandbox.tool_program(UV);
+    let prepared = match prepare(runtime, project, &key, uv.as_deref()) {
+        Ok(prepared) => prepared,
+        Err(code) => {
+            eprintln!("agent_tool_cache_unavailable code={code}");
+            return sandbox;
+        }
+    };
+    match sandbox
+        .clone()
+        .allow_tool_cache(&prepared.root, prepared.uv)
+    {
+        Ok(granted) => granted,
+        Err(_) => {
+            eprintln!("agent_tool_cache_unavailable code=tool_cache_root_refused");
+            sandbox
+        }
+    }
 }
 
 /// Makes, or finds, the tool cache `<project folder>/<key>` for one launch, with `uv` and
@@ -151,7 +181,8 @@ pub fn grant(
 /// cache and uv binary (C4); with none, or after uv changed, [`prime`] finds them. A launch
 /// with a record only checks each marker and makes one an agent's move of its bucket took
 /// away. Inputs: the engine runtime folder, the project as [`project_folder`] names it, the
-/// key and the canonical uv binary, if any. Output: the prepared cache, or the plain code that refused it.
+/// key and the canonical uv binary, if any. Output: the prepared cache, or the plain code
+/// that refused it.
 pub fn prepare(
     runtime: &Path,
     project: &str,

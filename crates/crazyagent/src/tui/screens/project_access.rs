@@ -118,7 +118,7 @@ impl AccessEdit {
 
     /// The policy the box would save: the chosen level, a choice for each toolchain whose
     /// switch differs from the project's own use, so the others keep following the project,
-    /// and the IDE hooks switch.
+    /// the IDE hooks switch, and the tool cache choice as the project saved it (T8).
     pub fn policy(&self) -> AgentPolicy {
         let toolchains: Vec<ToolchainChoice> = self
             .view
@@ -136,7 +136,7 @@ impl AccessEdit {
             network: self.network,
             toolchains,
             ide_git_hooks: self.ide_git_hooks,
-            tool_cache: Default::default(),
+            tool_cache: self.view.tool_cache,
         };
         assert!(policy.validate().is_ok());
         policy

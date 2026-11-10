@@ -279,7 +279,8 @@ impl AgentPolicy {
 
     /// What a client shows: the level, every level with its availability, each toolchain
     /// family the owner has installed, the project uses or the owner chose, the IDE hooks
-    /// choice and the policy's version, which a save names. Inputs: the project folder, the
+    /// choice, the tool cache choice with every choice, and the policy's version, which a
+    /// save names. Inputs: the project folder, the
     /// owner's tool homes and the version. Output: the view.
     pub fn view(&self, project: &Path, homes: &ToolHomes, version: u64) -> PolicyView {
         let allowed = self.allowed(project);
@@ -317,7 +318,13 @@ impl AgentPolicy {
             version,
             ide_git_hooks: self.ide_git_hooks,
             tool_cache: self.tool_cache,
-            tool_caches: Vec::new(),
+            tool_caches: ToolCacheScope::ALL
+                .into_iter()
+                .map(|scope| ToolCacheView {
+                    scope,
+                    label: scope.label().to_owned(),
+                })
+                .collect(),
         }
     }
 

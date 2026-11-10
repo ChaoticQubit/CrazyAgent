@@ -868,12 +868,13 @@ fn delegate_servers(
 }
 
 /// Builds and installs the Seatbelt boundary for one master turn with its tools off. The
-/// master writes only in its leased worktree, the account's managed home and the turn's own
-/// temp folder; it reads the project repository, never writing its refs, reflogs or other
-/// worktrees' admin folders, since the engine makes every ref move, and it reads the harness
-/// install folder and the turn directory, and reaches only its model endpoint's port, on
-/// loopback for a local model, otherwise on any host (443 for a native account). Output:
-/// the installed sandbox, or `master_sandbox_unavailable` on a refusal.
+/// master writes only in its leased worktree, the account's managed home, the turn's own
+/// temp folder and, on macOS, the tool cache its policy gives a linked worktree (T8); it
+/// reads the project repository, never writing its refs, reflogs or other worktrees' admin
+/// folders, since the engine makes every ref move, and it reads the harness install folder
+/// and the turn directory, and reaches only its model endpoint's port, on loopback for a
+/// local model, otherwise on any host (443 for a native account). Output: the installed
+/// sandbox, or `master_sandbox_unavailable` on a refusal.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
@@ -902,10 +903,10 @@ pub(super) fn master_sandbox(
 }
 
 /// Builds and installs the Seatbelt boundary for one master turn with its tools on (DEC-093).
-/// The master writes only in its leased worktree, its turn home and the turn's temp folder;
-/// it reads the project repository, the harness install folder, the turn directory and the
-/// folder of the engine executable that serves its `delegate` tool, and reaches only its
-/// model endpoint. Under the None network a model off loopback is refused with
+/// The master writes only in its leased worktree, its turn home, the turn's temp folder and,
+/// on macOS, its tool cache (T8); it reads the project repository, the harness install
+/// folder, the turn directory and the folder of the engine executable that serves its
+/// `delegate` tool, and reaches only its model endpoint. Under the None network a model off loopback is refused with
 /// `network_none_master_tools`, since a master turn has no model proxy and its tools would
 /// reach every host on that port (S4B-M1). Output: the installed sandbox, or the refusal.
 #[cfg(unix)]
@@ -1000,6 +1001,15 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
     .map_err(refused)?;
+    #[cfg(target_os = "macos")]
+    let sandbox = crate::sandbox::tool_cache::grant(
+        sandbox,
+        &root.path,
+        &std::fs::canonicalize(repository).map_err(io_error)?,
+        policy,
+        crate::sandbox::tool_cache::CacheShape::Worktree,
+        &worktree.to_string_lossy(),
+    );
     let sandbox = hidden
         .iter()
         .try_fold(sandbox, |sandbox, folder| sandbox.hide(folder))

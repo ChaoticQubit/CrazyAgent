@@ -7344,6 +7344,19 @@ impl TeamRuntime {
                 ));
             }
         }
+        #[cfg(target_os = "macos")]
+        if let Some(runtime) = self.state.parent() {
+            use crate::sandbox::tool_cache::{CacheShape, grant};
+            let shape = match layout {
+                Layout::Linked => CacheShape::Worktree,
+                Layout::Clone => CacheShape::Clone,
+            };
+            let agent = id.to_string();
+            sandbox = grant(sandbox, runtime, &root, &policy, shape, &agent);
+            let mates = format!("{agent}-teammates");
+            teammates = teammates
+                .map(|team| grant(team, runtime, &root, &policy, CacheShape::Teammate, &mates));
+        }
         if let Some(mates) = &teammates {
             mates
                 .install(&agent_teammates_profile(&self.state, id))
