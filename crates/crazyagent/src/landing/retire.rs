@@ -471,10 +471,10 @@ fn check(
     match (head, store::base_of(db, text)?) {
         (Some(head), Some(base)) if head == base => {
             match holds_only_except(&agent.repo, &head, &[agent_git::GRAPH_EXCLUDE]) {
-            Err(refused) if refused.0 == "changes_git_failed" => {
-                Ok(Some("cleanup_worktree_unreadable"))
-            }
-            held => Ok((!held?).then_some("cleanup_worktree_dirty")),
+                Err(refused) if refused.0 == "changes_git_failed" => {
+                    Ok(Some("cleanup_worktree_unreadable"))
+                }
+                held => Ok((!held?).then_some("cleanup_worktree_dirty")),
             }
         }
         _ => Ok(Some("cleanup_commits_unlanded")),

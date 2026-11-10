@@ -604,12 +604,15 @@ pub fn sweep(
         assert!(*id > swept.after);
         swept.after = *id;
         if let Err(problem) = sweep_one(db, project, *id, now, now_ms, &mut swept.removed) {
-            swept
-                .failures
-                .push(format!("agent={id} cause={}", crate::protocol::plain_code(&problem.0)));
+            swept.failures.push(format!(
+                "agent={id} cause={}",
+                crate::protocol::plain_code(&problem.0)
+            ));
         }
     }
-    if candidates.len() < CANDIDATES_MAX && candidates.last().map(|last| last.0) == Some(swept.after) {
+    if candidates.len() < CANDIDATES_MAX
+        && candidates.last().map(|last| last.0) == Some(swept.after)
+    {
         swept.after = 0;
     }
     assert!(swept.removed.len() <= RECLAIMABLE_MAX);

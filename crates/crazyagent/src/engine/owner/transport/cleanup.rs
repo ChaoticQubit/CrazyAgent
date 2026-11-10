@@ -381,15 +381,13 @@ async fn remove(
         tokio::task::spawn_blocking(move || {
             let db = open(&root)?;
             let now = crate::team::now_ms();
-            Ok(
-                match cleanup::remove(&db, &project, &agents, now)? {
-                    Removal {
-                        agents,
-                        kept: Some(code),
-                    } if agents.is_empty() => Reply::Rejected { code },
-                    Removal { agents, kept } => Reply::Removed { agents, kept },
-                },
-            )
+            Ok(match cleanup::remove(&db, &project, &agents, now)? {
+                Removal {
+                    agents,
+                    kept: Some(code),
+                } if agents.is_empty() => Reply::Rejected { code },
+                Removal { agents, kept } => Reply::Removed { agents, kept },
+            })
         })
     };
     work.await.map_err(|_| failure("cleanup_unavailable"))?

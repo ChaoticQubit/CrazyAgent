@@ -200,11 +200,7 @@ impl Cleanup {
     /// Says what a removal did: whose worktrees went and the space freed, how many went and
     /// why one stayed when it stopped part way, or why it removed none. Inputs: the agents the
     /// box removed, the engine's answer and the context.
-    fn removed(
-        agents: &[FinishedAgent],
-        result: &Result<CleanupReply, String>,
-        ctx: &mut Ctx,
-    ) {
+    fn removed(agents: &[FinishedAgent], result: &Result<CleanupReply, String>, ctx: &mut Ctx) {
         let gone: Vec<FinishedAgent> = match result {
             Ok(CleanupReply::Removed(removal)) => agents
                 .iter()
@@ -214,7 +210,11 @@ impl Cleanup {
             _ => Vec::new(),
         };
         let kept = agents.len().saturating_sub(gone.len());
-        let worktrees = if gone.len() == 1 { "worktree" } else { "worktrees" };
+        let worktrees = if gone.len() == 1 {
+            "worktree"
+        } else {
+            "worktrees"
+        };
         match result {
             Ok(CleanupReply::Removed(removal)) => match removal.kept.as_deref() {
                 None => ctx.say(Message::success(
@@ -354,7 +354,11 @@ impl Cleanup {
         let title = if agents.is_empty() {
             "Finished agents".to_owned()
         } else {
-            format!("Worktrees of {} ({})", agents_word(agents.len()), space(agents))
+            format!(
+                "Worktrees of {} ({})",
+                agents_word(agents.len()),
+                space(agents)
+            )
         };
         let tail = self.tail(agents, limit, room, ctx);
         let free = room.saturating_sub(tail.len());
@@ -368,7 +372,10 @@ impl Cleanup {
                 break;
             }
             if agent.kept.is_some() {
-                lines.extend(row.into_iter().map(|text| styled(text, Role::Muted, &ctx.theme)));
+                lines.extend(
+                    row.into_iter()
+                        .map(|text| styled(text, Role::Muted, &ctx.theme)),
+                );
             } else {
                 lines.extend(row.into_iter().map(Line::raw));
             }
