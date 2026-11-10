@@ -124,8 +124,9 @@ const chrome = await launch();
  * Input: the check, given `evaluate(expression)` for page scripts (awaited, returned by value),
  * `send(method, params)` for DevTools commands, `on(method, listener)` for DevTools events such
  * as `Network.loadingFailed` and `context`, the browser context id. The page has the doctype
- * the app's page has, so a check measures the layout the app shows. Output: what the check
- * returns. */
+ * the app's page has, so a check measures the layout the app shows. The DevTools Runtime domain
+ * is on, since with it off DevTools answers "Promise was collected" for a wait that takes real
+ * time. Output: what the check returns. */
 export async function withPage(check) {
   const browser = await connect(chrome.browser);
   try {
@@ -135,6 +136,7 @@ export async function withPage(check) {
       const { targetId } = await browser.send("Target.createTarget", { url: "about:blank", browserContextId });
       const page = await connect(`${chrome.origin}/devtools/page/${targetId}`);
       try {
+        await page.send("Runtime.enable");
         const evaluate = async (expression) => {
           const reply = await page.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
           if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
