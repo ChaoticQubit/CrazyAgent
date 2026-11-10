@@ -1581,3 +1581,43 @@ fn a_pane_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
     );
     toolchains::remove_tmp(&case.home()).unwrap();
 }
+
+#[test]
+fn a_codex_folder_decides_the_trust_setting_on_both_launch_shapes() {
+    let case = Case::new();
+    let work = case.path().join("work");
+    std::fs::create_dir(work.join(".git")).unwrap();
+    let names = |level: &str| {
+        format!(
+            "projects={{\"{}\"={{trust_level=\"{level}\"}}}}",
+            work.display()
+        )
+    };
+    for tools in [false, true] {
+        let request = case.request("codex", case.subscription(), tools);
+        let built = command(&request, None, &run(None)).unwrap();
+        let wanted = names("trusted");
+        assert!(
+            built
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == wanted),
+            "{tools}: {:?}",
+            built.argv
+        );
+    }
+    std::fs::create_dir(work.join(".codex")).unwrap();
+    for tools in [false, true] {
+        let request = case.request("codex", case.subscription(), tools);
+        let built = command(&request, None, &run(None)).unwrap();
+        let wanted = names("untrusted");
+        assert!(
+            built
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == wanted),
+            "{tools}: {:?}",
+            built.argv
+        );
+    }
+}

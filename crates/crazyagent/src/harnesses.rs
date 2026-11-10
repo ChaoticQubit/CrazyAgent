@@ -1,3 +1,4 @@
+pub(crate) mod codex_folder;
 pub mod interactive;
 pub mod launch;
 pub mod leftovers;

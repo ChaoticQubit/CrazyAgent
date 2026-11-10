@@ -292,6 +292,7 @@ impl TerminalSession {
             events,
             ready: true,
             first: None,
+            folder: None,
             turn: false,
             held: false,
             own_held: false,
