@@ -72,6 +72,7 @@ fn token_count((input, cached, output): (u64, u64, u64)) -> String {
                 "input_tokens": input,
                 "cached_input_tokens": cached,
                 "output_tokens": output,
+                "total_tokens": input + output,
             }},
         },
     })

@@ -71,7 +71,7 @@ async function priced(t, prefix, steps) {
     const session = transcript(runtime, "cb-e", 1000);
     await eventually("the engine counting the transcript", () => inputOf(runtime, session) === 1000);
     await me.click("Metrics", ".app-nav a.nav-item");
-    await eventually("a priced figure", async () => (await figures(page)).some(([main]) => main.startsWith("$") && main !== "$0.00"));
+    await eventually("a priced figure", async () => (await figures(page)).some(([main]) => /^<?\$/u.test(main) && main !== "$0.00"));
     await steps({ me, page });
   });
 }
