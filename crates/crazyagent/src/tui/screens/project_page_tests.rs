@@ -669,6 +669,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             "uncommitted",
             "recovery",
             "setup",
+            "team graph",
             "jobs",
             "context",
             "memories"
