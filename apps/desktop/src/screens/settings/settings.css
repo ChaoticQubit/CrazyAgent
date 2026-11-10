@@ -86,3 +86,9 @@
 .pool-sched-text b { display: block; font-weight: 600; color: var(--text); }
 .pool-refusal { position: sticky; top: 8px; z-index: 3; margin-bottom: var(--space-4); border-radius: var(--radius-panel); background: var(--bg); }
 @container (max-width: 560px) { .pool-ctl { justify-content: flex-start; } }
+
+.pool-name-edit .input { width: min(320px, 100%); font-weight: 600; font-size: 14px; }
+.pool-add { display: flex; flex-direction: column; border-top: 1px solid var(--border); background: var(--bg); }
+.pool-add .set-bar { border-top: 0; padding: 8px 16px; }
+.pool-add-list.windowed { height: auto; min-height: 0; max-height: 176px; }
+.pool-add-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 100%; padding: 0 16px; border-top: 1px solid var(--border); }

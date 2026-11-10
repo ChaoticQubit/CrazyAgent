@@ -291,12 +291,6 @@ export function alertInView() {
   return Boolean(box && box.top >= 0 && box.bottom <= window.innerHeight);
 }
 
-/** Reads the first account line. Output: its words and the edges of its name and checkbox. */
-export function pick() {
-  const row = document.querySelector(".pick");
-  return { words: wordsOf(".pick"), nameRight: row.querySelector("span").getBoundingClientRect().right, boxLeft: row.querySelector("input").getBoundingClientRect().left };
-}
-
 /** Reads the left list. Output: each pool button's name, count, line, whether it is the selected
  * one and whether its words spill out of it. */
 export function poolItems() {
