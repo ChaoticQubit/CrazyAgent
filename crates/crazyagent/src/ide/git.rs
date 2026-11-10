@@ -264,7 +264,7 @@ fn private_flow(project: &Path, private: &Path, runner: &str) -> Result<String, 
         "case \"$1\" in\n{READ_ONLY}|{OWN_INDEX})\n  exec {runner} \"$@\"\n  ;;\nesac\n\
 if [ \"$(pwd -P)\" != '{project}' ]; then\n  exec {runner} \"$@\"\nfi\n\
 if [ \"$1\" = rebase ]; then\n  echo \"{REBASE_REFUSED}\" >&2\n  exit 128\nfi\n\
-case \"$1\" in\nadd|stage|reset|apply)\n  for word in \"$@\"; do\n    case \"$word\" in\n    --) break ;;\n    --inten*|-[!-]*N*)\n      echo \"{INTENT_REFUSED}\" >&2\n      exit 128\n      ;;\n    esac\n  done\n  ;;\nesac\n\
+case \"$1\" in\nadd|stage|reset|apply)\n  for word in \"$@\"; do\n    case \"$word\" in\n    --) break ;;\n    --inten*|-N*|-[!-]*N*)\n      echo \"{INTENT_REFUSED}\" >&2\n      exit 128\n      ;;\n    esac\n  done\n  ;;\nesac\n\
 if [ -z \"$CRAZYAGENT_IDE_GIT_NODE\" ] || [ -z \"$CRAZYAGENT_IDE_GIT_FORWARD\" ] || [ -z \"$secret\" ]; then\n  echo \"{NO_FORWARDER}\" >&2\n  exit 128\nfi\n\
 private='{private}'\nbase=\"$private/$$.base\"\nwork=\"$private/$$.work\"\n\
 if [ -e .git/index ]; then\n  if ! /bin/cp .git/index \"$base\" || ! /bin/cp .git/index \"$work\"; then\n    /bin/rm -f \"$base\" \"$work\"\n    echo \"{NOT_COPIED}\" >&2\n    exit 128\n  fi\nfi\n\
