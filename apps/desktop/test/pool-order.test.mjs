@@ -2,7 +2,7 @@ import "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { HELD_HEAD, heldLine, isNear, orderLine, usageBars, whyLine } = await import("../src/screens/settings/pool-order.ts");
+const { HELD_HEAD, heldLine, holdLine, isNear, orderLine, usageBars, whyLine } = await import("../src/screens/settings/pool-order.ts");
 const { atText } = await import("../src/screens/settings/account-choice.tsx");
 
 const NOW = new Date(2026, 10, 9, 12, 0).getTime();
@@ -55,6 +55,10 @@ for (const [why, line] of WHY) {
 for (const [standing, line] of HELD) {
   test(`the held reason ${JSON.stringify(standing)} reads as its sentence`, () => assert.equal(heldLine(standing, NOW), line));
 }
+
+test("a project's hold on an account reads as which project holds it and until when", () => {
+  assert.equal(holdLine({ project: "project-a", name: "Meals for two", until_ms: LATER }, NOW), `Held for Meals for two until ${AT}`);
+});
 
 test("the held list says what it is", () => {
   assert.equal(HELD_HEAD, "Held now, in pool order. Each one rejoins the order when its reason ends.");

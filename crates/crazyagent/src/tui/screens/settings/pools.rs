@@ -1191,6 +1191,53 @@ mod tests {
         assert!(asked[1].contains("Ranking"), "{asked:?}");
     }
 
+    /// An account one project holds after its agent reported a limit keeps its place in the
+    /// order and says, on its own line under it, which project holds it and until when
+    /// (SECAUDIT-RATELIMIT-FORGE).
+    #[test]
+    fn a_project_hold_shows_on_its_own_line_under_the_account_it_holds() {
+        use crate::scheduling::PoolRanking;
+        const HOUR: i64 = 3_600_000;
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.shown(&mut ctx);
+        while ctx.next_request().is_some() {}
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(Schedule::default()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        let ranking: Vec<PoolRanking> = serde_json::from_value(serde_json::json!([{
+            "pool": "pool-main",
+            "strategy": "use_it_or_lose_it",
+            "accounts": [
+                {
+                    "connection": "member-1",
+                    "standing": {"kind": "next", "weekly_resets_ms": null,
+                        "weekly_left_percent": 40, "use_last": false,
+                        "why": {"kind": "no_reading"}},
+                    "held_for": [{"project": "project-a", "name": "Meals for two",
+                        "until_ms": 14 * HOUR + 1_800_000}]
+                },
+                {"connection": "member-9", "standing": {"kind": "never_use"}}
+            ],
+            "own_order_projects": 0
+        }]))
+        .expect("a ranking carries the holds of projects");
+        screen.arrive(&settings(SettingsEvent::Ranking(Ok(ranking))), &mut ctx);
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        let lines: Vec<&str> = shown.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains(" 1. ChatGPT member-1"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert!(
+            lines[at + 1].starts_with("    Held for Meals for two until "),
+            "{shown}"
+        );
+        assert!(lines[at + 2].contains("member-9"), "{shown}");
+    }
+
     #[test]
     fn a_standing_reads_as_one_short_reason_in_local_time() {
         use super::super::account_choice::{at_text, standing_line};

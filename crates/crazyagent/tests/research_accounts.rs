@@ -291,29 +291,57 @@ fn a_paused_pool_account_hands_research_to_the_next_member_or_waits_until_the_fi
     );
 }
 
-#[test]
-fn a_rate_limited_research_run_pauses_its_account_in_the_shared_pause_without_spending_an_attempt()
-{
-    use crazyagent::research::accounts::SettingsResolver;
-    use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
-    let runtime =
-        research_support::EngineRuntime::with_projects(&[("project-a", "Sells house plants.")]);
+/// Writes settings with one local account in one pool serving `projects`, a TOML list, and
+/// opens the resolver research picks through. Takes the engine runtime and the list. Returns
+/// the resolver.
+fn local_pool_resolver(
+    runtime: &research_support::EngineRuntime,
+    projects: &str,
+) -> crazyagent::research::accounts::SettingsResolver {
     let root = runtime.root.clone();
     let global = root.join("research-global.toml");
     let project = root.join("research-project.toml");
     std::fs::write(&project, "").unwrap();
     std::fs::write(
         &global,
-        "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = [\"project-a\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n",
+        format!("version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = {{ kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }}\nmodel = {{ id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }}\nauth = {{ method = \"none\" }}\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\"]\nprojects = {projects}\nroles = [\"project_leader\"]\nfallback_allowed = false\n"),
     )
     .unwrap();
-    let resolver =
-        SettingsResolver::new(&global, &project, &root.join("projects"), &runtime.database)
-            .unwrap();
-    assert!(matches!(
-        resolver.resolve("project-a", "codex").unwrap().1,
-        AccountPick::Account { .. }
-    ));
+    crazyagent::research::accounts::SettingsResolver::new(
+        &global,
+        &project,
+        &root.join("projects"),
+        &runtime.database,
+    )
+    .unwrap()
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// A research run that reports a rate limit goes back to the queue without spending an
+/// attempt. The report comes from what the agent's harness wrote, so its account rests for the
+/// run's own project only: another project in the pool still gets it, and nothing rests it
+/// everywhere (SECAUDIT-RATELIMIT-FORGE). A longer rest already set is kept, and the account
+/// comes back once the rest ends.
+#[test]
+fn a_rate_limited_research_run_holds_its_account_for_its_own_project_without_spending_an_attempt() {
+    use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
+    let runtime = research_support::EngineRuntime::with_projects(&[
+        ("project-a", "Sells house plants."),
+        ("project-b", "Bakes bread."),
+    ]);
+    let resolver = local_pool_resolver(&runtime, "[\"project-a\", \"project-b\"]");
+    for project in ["project-a", "project-b"] {
+        assert!(matches!(
+            resolver.resolve(project, "codex").unwrap().1,
+            AccountPick::Account { .. }
+        ));
+    }
     let jobs = ResearchJobs::open(&runtime.database).unwrap();
     let id = jobs
         .enqueue("project-a", "market_research", "codex", false)
@@ -321,52 +349,103 @@ fn a_rate_limited_research_run_pauses_its_account_in_the_shared_pause_without_sp
     let held = jobs.claim("project-a", "runner-a", 1).unwrap().unwrap();
     assert_eq!(held.attempts, 1);
     let local = CredentialRef::new("local-connection").unwrap();
-    let now = || {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-    };
-    let before = now();
+    let before = now_ms();
     let (status, until) = jobs.rate_limited(&held, &local).unwrap();
     assert_eq!(status, ResearchStatus::Queued);
     assert!(
-        until >= before + 600_000 && until <= now() + 600_000,
+        until >= before + 600_000 && until <= now_ms() + 600_000,
         "{until}"
     );
     let job = jobs.get(id).unwrap().unwrap();
     assert_eq!(job.status, ResearchStatus::Queued);
     assert_eq!(job.attempts, 0);
     assert_eq!(job.claimer, None);
+    assert!(
+        matches!(
+            resolver.resolve("project-b", "codex").unwrap().1,
+            AccountPick::Account { .. }
+        ),
+        "another project in the pool still gets the account"
+    );
+    let database = rusqlite::Connection::open(&runtime.database).unwrap();
+    let everywhere: i64 = database
+        .query_row("SELECT COUNT(*) FROM team_paused_accounts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(everywhere, 0, "nothing rests the account everywhere");
     assert_eq!(
         resolver.resolve("project-a", "codex").unwrap().1,
         AccountPick::Paused { until_ms: until }
     );
     let longer = until + 3_600_000;
-    rusqlite::Connection::open(&runtime.database)
-        .unwrap()
-        .execute(
-            "UPDATE team_paused_accounts SET until_ms=?1 WHERE connection='local-connection'",
-            [longer],
-        )
-        .unwrap();
+    let hold = "UPDATE team_project_pauses SET until_ms=?1 WHERE project='project-a' AND connection='local-connection'";
+    assert_eq!(database.execute(hold, [longer]).unwrap(), 1);
     let held = jobs.claim("project-a", "runner-a", 1).unwrap().unwrap();
     assert_eq!(jobs.rate_limited(&held, &local).unwrap().1, longer);
     assert_eq!(
         resolver.resolve("project-a", "codex").unwrap().1,
         AccountPick::Paused { until_ms: longer }
     );
-    rusqlite::Connection::open(&runtime.database)
-        .unwrap()
-        .execute(
-            "UPDATE team_paused_accounts SET until_ms=?1 WHERE connection='local-connection'",
-            [now() - 1],
-        )
-        .unwrap();
+    assert_eq!(database.execute(hold, [now_ms() - 1]).unwrap(), 1);
     assert!(matches!(
         resolver.resolve("project-a", "codex").unwrap().1,
         AccountPick::Account { .. }
     ));
+}
+
+/// A reported limit asks the usage service for a poll at once, so the provider's own reading
+/// can hold a full account everywhere, but reports within a minute of the last ask add no
+/// poll: a run that keeps reporting cannot make the engine poll more than once a minute
+/// (SECAUDIT-RATELIMIT-FORGE).
+#[test]
+fn a_reported_limit_asks_the_usage_service_for_at_most_one_poll_a_minute() {
+    use crazyagent::research::jobs::ResearchJobs;
+    let runtime =
+        research_support::EngineRuntime::with_projects(&[("project-a", "Sells house plants.")]);
+    let _resolver = local_pool_resolver(&runtime, "[\"project-a\"]");
+    let database = rusqlite::Connection::open(&runtime.database).unwrap();
+    usage::initialize(&database).unwrap();
+    let asked = || -> Option<i64> {
+        database
+            .query_row(
+                "SELECT requested_ms FROM usage_refresh WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .ok()
+    };
+    assert_eq!(asked(), None);
+    let jobs = ResearchJobs::open(&runtime.database).unwrap();
+    jobs.enqueue("project-a", "market_research", "codex", false)
+        .unwrap();
+    let local = CredentialRef::new("local-connection").unwrap();
+    let report = || {
+        let held = jobs.claim("project-a", "runner-a", 1).unwrap().unwrap();
+        jobs.rate_limited(&held, &local).unwrap();
+    };
+    let before = now_ms();
+    report();
+    let first = asked().expect("the first report asks for a poll");
+    assert!(first >= before && first <= now_ms(), "{first}");
+    report();
+    assert_eq!(
+        asked(),
+        Some(first),
+        "a report within the minute asks again for nothing"
+    );
+    database
+        .execute(
+            "UPDATE usage_refresh SET requested_ms=requested_ms-60001 WHERE singleton=1",
+            [],
+        )
+        .unwrap();
+    let later = now_ms();
+    report();
+    assert!(
+        asked().is_some_and(|at| at >= later),
+        "a report a minute after the last ask asks again"
+    );
 }
 
 #[test]

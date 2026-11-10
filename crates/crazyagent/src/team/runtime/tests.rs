@@ -3533,7 +3533,8 @@ done
 
 /// A live master whose turn hits its account's usage limit stops, and the same master row
 /// starts again in its own worktree on another pool account while the limited one rests,
-/// with the live switch still on.
+/// with the live switch still on. The limit comes from the transcript the agent can write,
+/// so the account rests for this project only (SECAUDIT-RATELIMIT-FORGE).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
@@ -3583,7 +3584,7 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
         [master],
         "the same master row"
     );
-    let rested: Vec<String> = fixture
+    let everywhere: Vec<String> = fixture
         .connection
         .prepare("SELECT connection FROM team_paused_accounts")
         .unwrap()
@@ -3591,7 +3592,20 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(rested, [first]);
+    assert_eq!(
+        everywhere,
+        Vec::<String>::new(),
+        "a limit read from the agent's own transcript never rests the account for other projects"
+    );
+    let rested: Vec<(String, String)> = fixture
+        .connection
+        .prepare("SELECT project,connection FROM team_project_pauses")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rested, [(project.as_str().to_owned(), first)]);
     assert!(super::super::master::live(&fixture.connection, &project).unwrap());
     assert!(
         !fixture
