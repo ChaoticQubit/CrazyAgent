@@ -264,6 +264,37 @@ test("with Live terminal off the area shows the conversation and starts nothing,
   assert.equal(seen.starts, 0, "nothing turned the master on");
 });
 
+test("flipping Live terminal leaves the Master settings drawer open with focus on the switch, both ways, and closing it returns to the button of the view now shown (DEC-117 Q4)", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    const flips = [];
+    await evaluate('Fixture.mountArea("codex", true)');
+    await evaluate("Fixture.settle()");
+    for (const terminal of [false, true]) {
+      await evaluate('Fixture.click("Master settings")');
+      await evaluate("Fixture.settle()");
+      const focused = await evaluate("Fixture.focusSwitch()");
+      await evaluate(`Fixture.readSwitch("codex", true, { master_live_terminal: ${terminal} })`);
+      const view = await evaluate("Fixture.settle()");
+      const flipped = await evaluate("Fixture.focusState()");
+      await evaluate("Fixture.closeDrawer()");
+      await evaluate("Fixture.settle()");
+      flips.push({ terminal, focused, live: view.live, conversation: view.conversation, flipped, closed: await evaluate("Fixture.focusState()") });
+    }
+    return flips;
+  });
+  assert.equal(seen.length, 2);
+  for (const flip of seen) {
+    const way = flip.terminal ? "On" : "Off";
+    assert.equal(flip.focused, true, `${way}: the switch took focus`);
+    assert.equal(flip.live, flip.terminal, `${way}: the area swapped`);
+    assert.equal(flip.conversation, !flip.terminal, `${way}: the area swapped`);
+    assert.equal(flip.flipped.drawer, true, `${way}: the drawer stays open`);
+    assert.equal(flip.flipped.id, "tg-live-terminal-alpha", `${way}: focus stays on the switch`);
+    assert.equal(flip.closed.drawer, false, `${way}: Close shuts the drawer`);
+    assert.equal(flip.closed.text, "Master settings", `${way}: focus returns to the new view's button`);
+  }
+});
+
 test("a master harness with no terminal app keeps today's conversation, also when the engine says so", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate('Fixture.mountArea("rcli")');

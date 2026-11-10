@@ -139,6 +139,29 @@ export function click(text) {
   return true;
 }
 
+/** Puts keyboard focus on the drawer's Live terminal switch, as Tab does. Output: whether the
+ * switch holds focus. */
+export function focusSwitch() {
+  const field = document.getElementById("tg-live-terminal-alpha");
+  field?.focus();
+  return field !== null && document.activeElement === field;
+}
+
+/** Where the Master settings drawer and keyboard focus are. Output: whether the drawer is open
+ * and the focused element's id and text. */
+export function focusState() {
+  const active = document.activeElement;
+  return { drawer: document.querySelector("dialog.drawer")?.open === true, id: active?.id ?? "", text: active?.textContent?.trim() ?? "" };
+}
+
+/** Closes the Master settings drawer with its Close button. Output: whether one was open. */
+export function closeDrawer() {
+  const close = document.querySelector('dialog.drawer [aria-label="Close"]');
+  if (!close) return false;
+  flushSync(() => close.click());
+  return true;
+}
+
 /** What the master area shows: which views are mounted, the buttons, how much of the area
  * the terminal fills below the Sessions bar, and how far in from the console's edges the
  * head's title and the Sessions bar's text and last button sit. */
