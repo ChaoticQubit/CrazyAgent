@@ -45,6 +45,8 @@ const WORK_KINDS: [ActivityKind; 4] = [
 /// most one place in this many, so a team that logs fast never crowds the engine's and the
 /// owner's events out of what Overview reads.
 const LISTED_PACED_SHARE: usize = 4;
+/// The words a task that could not finish is told with, after its agent's label.
+const TASK_FAILED_VERB: &str = "could not finish";
 /// The most phases and test runs one caller may log in `LOGGED_WINDOW_MS`.
 pub const LOGGED_PER_WINDOW_MAX: i64 = 30;
 /// The window a caller's logged rows are counted over: one hour.
@@ -102,6 +104,7 @@ pub enum ActivityKind {
     ResearchWaiting,
     TaskStarted,
     TaskFinished,
+    TaskFailed,
     TaskStopped,
     ChangesReady,
     Accepted,
@@ -120,7 +123,7 @@ pub enum ActivityKind {
 }
 
 impl ActivityKind {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Created,
         Self::ResearchStarted,
         Self::ResearchSaved,
@@ -128,6 +131,7 @@ impl ActivityKind {
         Self::ResearchWaiting,
         Self::TaskStarted,
         Self::TaskFinished,
+        Self::TaskFailed,
         Self::TaskStopped,
         Self::ChangesReady,
         Self::Accepted,
@@ -165,6 +169,7 @@ impl ActivityKind {
             Self::ResearchWaiting => "research_waiting",
             Self::TaskStarted => "task_started",
             Self::TaskFinished => "task_finished",
+            Self::TaskFailed => "task_failed",
             Self::TaskStopped => "task_stopped",
             Self::ChangesReady => "changes_ready",
             Self::Accepted => "accepted",
@@ -247,12 +252,19 @@ pub struct NewActivity<'a> {
     pub change_set: Option<&'a str>,
 }
 
-/// Creates the activity tables when they are missing, then brings each project's history
-/// in once (`backfill`); a project whose backfill fails is logged by its plain code and
-/// tried again at the next start, so the engine always starts. Takes the engine database.
-/// Returns Ok, or the SQLite failure of the tables.
+/// Creates the activity tables when they are missing, moves rows stored before their kind
+/// existed (`move_old_kinds`), then brings each project's history in once (`backfill`); a
+/// failed move or backfill is logged by its plain code and tried again at the next start,
+/// so the engine always starts. Takes the engine database. Returns Ok, or the SQLite
+/// failure of the tables.
 pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(state)?;
+    if let Err(error) = move_old_kinds(db) {
+        eprintln!(
+            "activity_kinds_not_moved cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
     let projects: Vec<String> = {
         let mut statement = db.prepare("SELECT id FROM projects").map_err(state)?;
         statement
@@ -272,6 +284,38 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
             );
         }
     }
+    Ok(())
+}
+
+/// Moves rows stored before a task that could not finish and a research run parked for a
+/// pool had kinds of their own to `TaskFailed` and `ResearchWaiting`, matched on the exact
+/// words their writers used after the actor, so a finished task whose title holds those
+/// words stays finished. A moved row no longer matches, so every start may run it. Takes
+/// the database. Returns Ok, or the SQLite failure.
+fn move_old_kinds(db: &Connection) -> Result<(), EngineError> {
+    let failed = format!(" {TASK_FAILED_VERB} ");
+    let waiting = research_line(research_verb(ActivityKind::ResearchWaiting), "");
+    assert!(failed.len() > 2 && waiting.ends_with(": "));
+    db.execute(
+        "UPDATE project_activity SET kind=?1 WHERE kind=?2
+         AND substr(text, 1, length(actor) + length(?3)) = actor || ?3",
+        params![
+            ActivityKind::TaskFailed.name(),
+            ActivityKind::TaskFinished.name(),
+            failed
+        ],
+    )
+    .map_err(state)?;
+    db.execute(
+        "UPDATE project_activity SET kind=?1 WHERE kind=?2
+         AND substr(text, 1, length(?3)) = ?3",
+        params![
+            ActivityKind::ResearchWaiting.name(),
+            ActivityKind::ResearchStopped.name(),
+            waiting
+        ],
+    )
+    .map_err(state)?;
     Ok(())
 }
 
@@ -516,9 +560,9 @@ pub fn note_task_stop(
 }
 
 /// Records that a team agent's task ended, named by its title and never by the agent's
-/// reply or failure text: finished, or could not finish for a failed one; a failure is
-/// logged by its plain code. Takes the database, the project, the agent, the task when the
-/// event names one, whether it failed and the time in ms.
+/// reply or failure text: finished, or could not finish under its own kind for a failed
+/// one; a failure is logged by its plain code. Takes the database, the project, the agent,
+/// the task when the event names one, whether it failed and the time in ms.
 pub fn note_task_end(
     db: &Connection,
     project: &ProjectId,
@@ -527,11 +571,10 @@ pub fn note_task_end(
     failed: bool,
     now_ms: i64,
 ) {
-    let kind = ActivityKind::TaskFinished;
-    let verb = if failed {
-        "could not finish"
+    let (kind, verb) = if failed {
+        (ActivityKind::TaskFailed, TASK_FAILED_VERB)
     } else {
-        "finished"
+        (ActivityKind::TaskFinished, "finished")
     };
     logged(
         kind,
