@@ -451,6 +451,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     await go(`#/projects/${encodeURIComponent(third)}/overview`);
     await moveOut(third);
     await browser.deleteSession();
+    browser.sessionId = undefined;
     await closeTitled("CrazyAgent");
     for (const deadline = Date.now() + OWN_WINDOW_MS; spawnSync("/usr/bin/pgrep", ["-f", `^${app}`], { encoding: "utf8" }).stdout.trim() !== ""; await pause(POLL_MS)) {
       assert.ok(Date.now() < deadline, `closing the main window left a window open: ${JSON.stringify(windowRows().at(-1))}`);
