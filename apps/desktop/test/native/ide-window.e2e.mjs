@@ -202,7 +202,7 @@ function windowRows() {
   } catch {
     return [];
   }
-  return text.trim().split("\n").filter(Boolean).map((line) => {
+  return text.slice(0, text.lastIndexOf("\n") + 1).split("\n").filter(Boolean).map((line) => {
     const row = JSON.parse(line);
     if (row.look !== undefined) {
       const once = JSON.parse(row.look);
