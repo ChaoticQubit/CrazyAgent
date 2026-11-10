@@ -7,7 +7,7 @@ use crazyagent::harnesses::terminal_session::{Resume, TerminalSession};
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{AgentId, FOLDER, Host};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -102,6 +102,8 @@ fn answer(mut stream: TcpStream) {
     let reply = if seen.starts_with(b"POST") {
         let events = [
             serde_json::json!({"type": "response.created", "response": {"id": "r1"}}),
+            serde_json::json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "role": "assistant", "id": "m1", "content": []}}),
+            serde_json::json!({"type": "response.output_text.delta", "item_id": "m1", "output_index": 0, "content_index": 0, "delta": REPLY}),
             serde_json::json!({"type": "response.output_item.done", "item": {"type": "message", "role": "assistant", "id": "m1", "content": [{"type": "output_text", "text": REPLY}]}}),
             serde_json::json!({"type": "response.completed", "response": {"id": "r1", "usage": {"input_tokens": 1, "input_tokens_details": null, "output_tokens": 1, "output_tokens_details": null, "total_tokens": 2}}}),
         ];
@@ -125,10 +127,10 @@ fn answer(mut stream: TcpStream) {
 }
 
 fn model() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
+        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).flatten() {
             std::thread::spawn(move || answer(stream));
         }
     });
@@ -425,11 +427,14 @@ fn an_app_server_turn_runs_with_the_entry_and_trusts_and_starts_nothing() {
         let until = Instant::now() + TURN_WAIT;
         let mut said = String::new();
         let mut finished = false;
+        let mut seen = Vec::new();
         while Instant::now() < until && !finished {
-            match session.next_event(Duration::from_millis(250)).unwrap() {
+            let event = session.next_event(Duration::from_millis(250)).unwrap();
+            seen.extend(event.clone());
+            match event {
                 Some(LaunchEvent::Text { text }) => said.push_str(&text),
                 Some(LaunchEvent::TurnFinished { success }) => {
-                    assert!(success, "{tools}: {said}");
+                    assert!(success, "{tools}: {said}: {seen:?}");
                     finished = true;
                 }
                 _ => {}

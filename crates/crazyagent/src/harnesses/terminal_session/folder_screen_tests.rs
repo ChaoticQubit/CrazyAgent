@@ -54,7 +54,7 @@ fn private(path: &Path) {
 
 fn stand_in(first: &Path, then: &Path, keys: &Path) -> String {
     format!(
-        "#!/bin/sh\n/bin/stty -echo -icanon min 1 time 0\nprintf '\\033[?2004h'\n/bin/cat '{first}'\nwhile :; do\n  c=$(/bin/dd bs=1 count=1 2>/dev/null | /usr/bin/od -An -tx1)\n  printf '%s\\n' $c >> '{keys}'\n  if [ -e '{then}' ]; then printf '\\033[2J\\033[H'; /bin/cat '{then}'; fi\ndone\n",
+        "#!/bin/sh\n/bin/stty -echo -icanon -icrnl min 1 time 0\nprintf '\\033[?2004h'\n/bin/cat '{first}'\nwhile :; do\n  c=$(/bin/dd bs=1 count=1 2>/dev/null | /usr/bin/od -An -tx1)\n  printf '%s\\n' $c >> '{keys}'\n  if [ -e '{then}' ]; then printf '\\033[2J\\033[H'; /bin/cat '{then}'; fi\ndone\n",
         first = first.display(),
         keys = keys.display(),
         then = then.display(),
