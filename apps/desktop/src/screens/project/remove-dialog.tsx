@@ -145,7 +145,7 @@ export function RemoveDialogView({ preview, choice, typed, pending, onChoice, on
         </li>)}</ul>
         : <p className="pj-secondary">No agent is running and no work is unlanded.</p>}
       <label className="pj-field">
-        <span className="pj-label pj-remove-name">Type <ClippedName name={displayText(preview.name)} /> to confirm</span>
+        <span className="pj-label pj-remove-name">Type <span className="pj-mono">{displayText(preview.name)}</span> to confirm</span>
         <input className="pj-input" aria-label="Type the project name" value={typed} disabled={pending} autoComplete="off" spellCheck={false} onChange={(event) => onTyped(event.currentTarget.value)} />
       </label>
     </>}

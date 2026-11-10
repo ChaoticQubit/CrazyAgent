@@ -341,7 +341,7 @@ dialog.drawer .set-row { grid-template-columns: minmax(0, 1fr) minmax(0, max-con
 .pj-remove-who { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pj-remove-what { flex: none; white-space: nowrap; }
 .pj-remove-clip { display: inline-block; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-.pj-remove-name { overflow-wrap: anywhere; }
+.pj-remove-name { overflow-wrap: anywhere; max-height: 80px; overflow-y: auto; }
 @media (max-height: 640px) {
   .pj-remove-deleting { gap: 8px; }
   .pj-remove-deleting .pj-radio-body .pj-secondary { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
