@@ -172,6 +172,11 @@ pub fn grant(
     }
 }
 
+/// Removes an agent's own tool caches (T8, not written yet). Output: Ok.
+pub fn remove_agent(_runtime: &Path, _project: &str, _agent: &str) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Makes, or finds, the tool cache `<project folder>/<key>` for one launch, with `uv` and
 /// `pnpm-store` folders inside, and, when a uv binary is given, a `.git` link to exactly
 /// `/dev/null` in each cache bucket uv makes a `.git` file in, so uv runs under the SM1-R

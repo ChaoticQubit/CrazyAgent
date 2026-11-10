@@ -283,6 +283,51 @@ fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_be
     assert_eq!(*moved.borrow(), vec![web.clone()]);
 }
 
+/// T8 R4: Delete everything records the project's tool cache folder as an engine file and
+/// removes it, unlinking the engine's `.git` links to `/dev/null` in its buckets and leaving
+/// `/dev/null` itself as it was.
+#[cfg(target_os = "macos")]
+#[test]
+fn delete_everything_removes_the_projects_tool_cache_and_leaves_dev_null_alone() {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let web = base.join("home").join("web");
+    std::fs::create_dir_all(&web).unwrap();
+    let cache = crate::sandbox::tool_cache::project_folder(&base, web.to_str().unwrap());
+    let bucket = cache
+        .join("sandboxed-worktree")
+        .join("uv")
+        .join("sdists-v10");
+    std::fs::create_dir_all(&bucket).unwrap();
+    std::os::unix::fs::symlink("/dev/null", bucket.join(".git")).unwrap();
+    std::fs::write(cache.join("sandboxed-worktree.primed"), "record").unwrap();
+    let plan = crate::projects_home::DeletePlan {
+        database: base.join("engine.db"),
+        project: ProjectId::new("demo").unwrap(),
+        home: base.join("home"),
+        folders: vec![web],
+        agents: vec![],
+    };
+    let files = plan.engine_files(&[]);
+    let name = format!(
+        "tool-cache-{}",
+        cache.file_name().unwrap().to_str().unwrap()
+    );
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, [name.as_str()]);
+    let null = std::fs::symlink_metadata("/dev/null").unwrap();
+    assert_eq!(
+        crate::projects_home::remove_engine_files(&plan.database, &files),
+        [name]
+    );
+    assert!(std::fs::symlink_metadata(&cache).is_err());
+    assert!(base.join("tool-cache").is_dir());
+    let after = std::fs::symlink_metadata("/dev/null").unwrap();
+    assert!(after.file_type().is_char_device());
+    assert_eq!((after.ino(), after.mode()), (null.ino(), null.mode()));
+}
+
 /// Delete everything is offered only on macOS in V2, where the move to the Trash is proven;
 /// Windows and Linux offer Remove from dashboard only, and this build answers for its own
 /// platform.
