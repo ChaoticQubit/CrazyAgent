@@ -539,3 +539,23 @@ fn a_write_rate_follows_what_the_source_published() {
         ]
     );
 }
+
+/// A growth too large for i64 nanodollars prices at `i64::MAX`, never wrapping and never
+/// failing, so the row cap that follows holds (COUNT-6-F2).
+#[test]
+fn a_cost_past_the_largest_i64_prices_at_the_largest_i64() {
+    let flood = Tokens {
+        input: u64::MAX,
+        output: u64::MAX,
+        cache_read: u64::MAX,
+        cache_write: u64::MAX,
+    };
+    let priced = Charged {
+        tokens: flood,
+        prompt_tokens: u64::MAX,
+        web_searches: u64::MAX,
+        fast: true,
+        ..Charged::default()
+    };
+    assert_eq!(sample().cost_nanos("claude-x-1", priced), Some(i64::MAX));
+}
