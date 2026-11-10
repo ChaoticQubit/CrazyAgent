@@ -26108,7 +26108,9 @@ fn the_wait_cycle_sweep_takes_the_write_lock_before_it_reads() {
     crate::coord::ensure(&fixture.connection).unwrap();
     let project = fixture.setup.project_id.clone();
     let mut team = fixture.runtime();
-    team.connection.busy_timeout(Duration::from_millis(50)).unwrap();
+    team.connection
+        .busy_timeout(Duration::from_millis(50))
+        .unwrap();
     fixture.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
     assert!(
         team.note_wait_cycles(&project, 1).is_err(),
