@@ -833,17 +833,18 @@ pub(super) fn agent(db: &Connection, record: &Record) -> Result<Agent, EngineErr
 /// config the engine did not write. Inputs: the worktree and the commit. Output: true
 /// when it holds nothing else.
 pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError> {
-    holds_only_except(repo, commit, None)
+    holds_only_except(repo, commit, &[])
 }
 
 /// Says whether an agent worktree holds exactly a commit as [`holds_only`] does, leaving
-/// one more pattern out of its untracked files, such as a harness clone's teammates'
-/// worktree folder, which cleanup checks on its own. Inputs: the worktree, the commit and
-/// the pattern, in git's `--exclude` form, or None. Output: the answer.
+/// more patterns out of its untracked files, such as a harness clone's teammates' worktree
+/// folder, which cleanup checks on its own, or the code graph's copy, which is never the
+/// agent's work. Inputs: the worktree, the commit and the patterns, in git's `--exclude`
+/// form. Output: the answer.
 pub(super) fn holds_only_except(
     repo: &Repo,
     commit: &str,
-    excluded: Option<&str>,
+    excluded: &[&str],
 ) -> Result<bool, EngineError> {
     repo.run(&["update-index", "-q", "--refresh"])?;
     if !repo.test(&[
@@ -855,9 +856,12 @@ pub(super) fn holds_only_except(
     ])? {
         return Ok(false);
     }
-    let exclude = excluded.map(|pattern| format!("--exclude={pattern}"));
+    let exclude: Vec<String> = excluded
+        .iter()
+        .map(|pattern| format!("--exclude={pattern}"))
+        .collect();
     let mut listing = vec!["ls-files", "-z", "--others", "--exclude-standard"];
-    listing.extend(exclude.as_deref());
+    listing.extend(exclude.iter().map(String::as_str));
     let untracked = repo.exec(&listing, None, &[], 1)?;
     if untracked.code != 0 {
         return Err(failure("changes_git_failed"));

@@ -1,7 +1,7 @@
 use super::AgentKind;
 use super::clone;
 use super::flow::{
-    agent_branch, check_places, clone_branch, drop_branch, hold, holds_only, holds_only_except,
+    Agent, agent_branch, check_places, clone_branch, drop_branch, hold, holds_only_except,
     linked_git_dir, open_agent, set_engine_ref, shared,
 };
 use super::git::{Repo, failure};
@@ -288,9 +288,9 @@ pub(super) fn unlanded_teammates(
 /// private index in the owner's git folder filled from the tip the engine fetched, runs
 /// the same checks as for a linked worktree (`holds_only`) once `sizes_match` found no
 /// file of another size, so the clone's config, hooks and index are never read. The
-/// teammates' worktree folder is left out of its untracked files; `teammates_landed`
-/// checks it. Inputs: the owner checkout root, the clone and the tip. Output: true when it
-/// holds nothing else.
+/// teammates' worktree folder is left out of its untracked files, since `teammates_landed`
+/// checks it, and so is the code graph's copy. Inputs: the owner checkout root, the clone
+/// and the tip. Output: true when it holds nothing else.
 fn clone_holds_only(repository: &Path, worktree: &Path, tip: &str) -> Result<bool, EngineError> {
     let metadata = repository.join(".git");
     let folder = metadata.join(format!(
@@ -307,7 +307,10 @@ fn clone_holds_only(repository: &Path, worktree: &Path, tip: &str) -> Result<boo
         holds_only_except(
             &repo,
             tip,
-            Some(&format!("/{}/", agent_git::TEAMMATES_FOLDER)),
+            &[
+                &format!("/{}/", agent_git::TEAMMATES_FOLDER),
+                agent_git::GRAPH_EXCLUDE,
+            ],
         )
     });
     let _ = std::fs::remove_dir_all(&folder);
@@ -466,12 +469,14 @@ fn check(
         return Ok(Some(code));
     }
     match (head, store::base_of(db, text)?) {
-        (Some(head), Some(base)) if head == base => match holds_only(&agent.repo, &head) {
+        (Some(head), Some(base)) if head == base => {
+            match holds_only_except(&agent.repo, &head, &[agent_git::GRAPH_EXCLUDE]) {
             Err(refused) if refused.0 == "changes_git_failed" => {
                 Ok(Some("cleanup_worktree_unreadable"))
             }
             held => Ok((!held?).then_some("cleanup_worktree_dirty")),
-        },
+            }
+        }
         _ => Ok(Some("cleanup_commits_unlanded")),
     }
 }
@@ -538,13 +543,40 @@ fn linked_teammates_landed(
         if !landed {
             return Ok(Some("cleanup_commits_unlanded"));
         }
-        match holds_only(&agent.repo, &head) {
+        match holds_only_except(&agent.repo, &head, &[agent_git::GRAPH_EXCLUDE]) {
             Ok(true) => {}
             Ok(false) => return Ok(Some("cleanup_worktree_dirty")),
             Err(_) => return Ok(Some("cleanup_worktree_unreadable")),
         }
     }
     Ok(None)
+}
+
+/// Deletes the code graph's copy at the top of a linked worktree whose commit holds none, so
+/// git, which never removes a worktree with untracked files unforced, removes the rest; the
+/// copy is never the agent's work (DEC-123). A link there goes as a link, never followed, and
+/// a folder goes without following a link inside it. Inputs: the agent's git and its
+/// worktree. Output: None once no copy is left, or `cleanup_worktree_dirty` when it stays.
+fn drop_graph_copy(agent: &Agent, worktree: &Path) -> Result<Option<&'static str>, EngineError> {
+    let name = agent_git::GRAPH_EXCLUDE.trim_matches('/');
+    assert!(!name.is_empty() && !name.contains('/'));
+    let copy = worktree.join(name);
+    let Ok(found) = std::fs::symlink_metadata(&copy) else {
+        return Ok(None);
+    };
+    let tracked = agent.repo.capture(
+        &["ls-tree", "-z", "--name-only", "HEAD", "--", name],
+        REMOVE_OUTPUT_BYTES_MAX,
+    )?;
+    if !tracked.is_empty() {
+        return Ok(None);
+    }
+    let deleted = if found.is_dir() {
+        std::fs::remove_dir_all(&copy)
+    } else {
+        std::fs::remove_file(&copy)
+    };
+    Ok(deleted.is_err().then_some("cleanup_worktree_dirty"))
 }
 
 /// Removes an agent worktree with git, never forcing it, while holding the repository so
@@ -590,6 +622,9 @@ pub(super) fn remove(
         Some(branch) => Some((branch.to_owned(), agent.head()?)),
         None => None,
     };
+    if let Some(code) = drop_graph_copy(&agent, worktree)? {
+        return Ok(Err(code));
+    }
     let removed = shared(repository)?.exec(
         &["worktree", "remove", "--", path],
         None,
