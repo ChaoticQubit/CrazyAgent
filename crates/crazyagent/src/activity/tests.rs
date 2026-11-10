@@ -847,6 +847,84 @@ fn agent_rows_take_at_most_a_quarter_of_a_listing() {
     }
 }
 
+/// A task that could not finish reads as failed, never with the done check of a finished
+/// one (TEAM-17 note): it is stored under a kind of its own beside task_finished.
+#[test]
+fn a_task_that_could_not_finish_has_its_own_kind() {
+    let (_folder, db) = db();
+    let worker = agent(&db, "sub");
+    note_task_end(&db, &project(), worker, None, true, 10);
+    note_task_end(&db, &project(), worker, None, false, 20);
+    let seen: Vec<(&str, String)> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .map(|item| (item.kind.name(), item.text))
+        .collect();
+    let actor = agent_actor(&db, worker).unwrap();
+    assert_eq!(
+        seen,
+        [
+            ("task_finished", format!("{actor} finished a task")),
+            ("task_failed", format!("{actor} could not finish a task")),
+        ]
+    );
+}
+
+/// Rows stored before a task that could not finish and a research run parked for a pool
+/// had kinds of their own move to them at engine start, matched on the exact words their
+/// writers used, while a finished task whose title holds those words stays finished and a
+/// stopped run stays stopped (TEAM-17 note, T10-R2-L1).
+#[test]
+fn old_rows_move_to_the_failed_and_waiting_kinds_at_start() {
+    let (_folder, db) = db();
+    let rows = [
+        (
+            "task_finished",
+            "Ada (@api)",
+            "Ada (@api) could not finish \u{201c}Login\u{201d}",
+        ),
+        (
+            "task_finished",
+            "Ada (@api)",
+            "Ada (@api) finished \u{201c}Why it could not finish the build\u{201d}",
+        ),
+        (
+            "research_stopped",
+            RESEARCH_ACTOR,
+            "Research waiting for a pool: Design research",
+        ),
+        (
+            "research_stopped",
+            RESEARCH_ACTOR,
+            "Research stopped: Market research",
+        ),
+    ];
+    for (at, (kind, actor, text)) in (1_i64..).zip(rows) {
+        db.execute(
+            "INSERT INTO project_activity(project,at_ms,kind,actor,text) VALUES (?1,?2,?3,?4,?5)",
+            params![PROJECT, at, kind, actor, text],
+        )
+        .unwrap();
+    }
+    initialize(&db).unwrap();
+    let kinds: Vec<String> = db
+        .prepare("SELECT kind FROM project_activity WHERE project=?1 ORDER BY at_ms")
+        .unwrap()
+        .query_map([PROJECT], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        kinds,
+        [
+            "task_failed",
+            "task_finished",
+            "research_waiting",
+            "research_stopped"
+        ]
+    );
+}
+
 /// AL2: an Accept brought in from before the engine recorded events reads as the owner's,
 /// the set named by its number when it has one and by its agent and prompt while not.
 #[test]
