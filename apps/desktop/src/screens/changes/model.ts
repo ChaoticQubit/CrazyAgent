@@ -179,6 +179,14 @@ export function updatingNote(set: ChangeSet): string | null {
     : "The agent is resolving the conflicts with your branch. Review again when it finishes.";
 }
 
+/** Names the lockfiles the project's own tools rebuilt on the agent's work, while the
+ * change set waits for review. Input: the change set. Output: the note, or null when there
+ * are none or it is no longer waiting for review. */
+export function regeneratedNote(set: ChangeSet): string | null {
+  if (set.state !== "pending" || set.regenerated.length === 0) return null;
+  return `Rebuilt with this project's own tools to fit your branch: ${set.regenerated.map(displayText).join(", ")}. They ran on the agent's work, so review the result like the agent's own edits.`;
+}
+
 /** Names the files a conflicting change set clashes on. Input: the change set. Output:
  * the note, or null in any other state. */
 export function conflictNote(set: ChangeSet): string | null {
