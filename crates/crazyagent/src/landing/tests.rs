@@ -12698,26 +12698,12 @@ fn uv_workspace() -> RealTool {
     }
 }
 
-/// A clash in uv.lock alone goes straight back to its agent at the turn end: uv can never
-/// start in the tool sandbox, whose nested-git rule refuses the `.git` marker every uv cache
-/// writes, so no sandboxed run is tried and the owner is never told the edits wait in
-/// Changes (land-14). uv need not be installed.
+/// T8 row 6: a clash in uv.lock alone is rewritten by the real uv in the tool sandbox, on a
+/// cache the engine primes for that run under the SM1-R rule, and the run leaves nothing
+/// behind; land-14 sent it back to its agent unregenerated. Fails without uv.
 #[test]
-fn a_uv_lock_clash_goes_back_to_its_agent_at_the_turn_end_without_a_sandboxed_run() {
-    let mut case = Case::new();
-    let (id, landed) = tool_clash_at_turn_end(&mut case, &uv_workspace());
-    assert_eq!(
-        landed,
-        Some(crate::landing_turns::Landed::Waiting(id.clone())),
-        "the turn end sends it back at once"
-    );
-    let set = case.view(&id);
-    assert_eq!(
-        (set.state, set.conflicts.clone()),
-        (ChangeState::Updating, vec!["uv.lock".to_owned()])
-    );
-    assert!(!lockfiles::is_running(&id), "no regeneration started");
-    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+fn real_uv_rewrites_a_clashing_uv_lock() {
+    a_real_tool_rewrites_its_clashing_lockfile(&uv_workspace());
 }
 
 /// A tool that changes a file other than the clashing lockfiles, here the manifest, lands
