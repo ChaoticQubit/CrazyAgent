@@ -80,15 +80,26 @@ export function mountArea(master, on, catalog = true) {
   flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, catalog ? CATALOG : undefined) })));
 }
 
+/** Renders the mounted master area again with the engine's live switch read as `on`, as the
+ * team read after an idle stop does. Inputs: the master harness, the switch and more fields
+ * of the read. Output: none. */
+export function readSwitch(master, on, patch = {}) {
+  const read = data(master, on, undefined, CATALOG);
+  read.team = { result: { kind: "ok", value: teamStatus({ live_master: on, live_problem: null, ...patch }) }, at: 1 };
+  flushSync(() => root.render(createElement(MasterArea, { data: read })));
+}
+
 /** Mounts the live master view in one of its states: running with the master's terminal,
  * running before the terminal opens, starting, refused with an engine code, or stopped with
- * the engine's reason when the code is given, with the team status read so far, if any. */
+ * the engine's reason when the code is given, idle-stopped when the state says so, with the
+ * team status read so far, if any. */
 export function mountView(state, code = "", team = undefined) {
   const panel = page();
   const live = state === "running" ? { kind: "running", node }
     : state === "waiting" ? { kind: "running", node: null }
     : state === "refused" ? { kind: "refused", code, copy: "The engine refused." }
-    : state === "stopped" ? { kind: "stopped", problem: code || null }
+    : state === "stopped" ? { kind: "stopped", problem: code || null, idle: false }
+    : state === "idle-stopped" ? { kind: "stopped", problem: code, idle: true }
     : { kind: state };
   root = createRoot(panel);
   flushSync(() => root.render(createElement(LiveMasterView, { data: data("codex", undefined, team), harness: "codex", live, onStart: async () => { starts += 1; } })));

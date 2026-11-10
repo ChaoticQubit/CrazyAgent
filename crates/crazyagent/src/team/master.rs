@@ -573,6 +573,28 @@ pub(crate) fn typable(text: &str) -> bool {
             .any(|c| c.is_control() && c != '\n' && c != '\t')
 }
 
+/// How every line about a live master that was turned off starts.
+pub(crate) const LIVE_STOPPED: &str = "The live master was turned off";
+/// What follows `LIVE_STOPPED` on the line a live master stopped as idle leaves.
+const IDLE_WHY: &str = ": it was idle for ";
+
+/// The line a live master stopped as idle leaves. It names no place to go, since the owner
+/// can already be on the master view, and says a new start continues the conversation.
+/// Input: the idle choice's label. Output: the line.
+pub(crate) fn idle_stopped_line(label: &str) -> String {
+    format!(
+        "{LIVE_STOPPED}{IDLE_WHY}{label}. It continues the same conversation when you start it again."
+    )
+}
+
+/// Whether a problem line is the one `idle_stopped_line` leaves. Input: the line. Output:
+/// the answer.
+pub(crate) fn idle_stopped(problem: &str) -> bool {
+    problem
+        .strip_prefix(LIVE_STOPPED)
+        .is_some_and(|rest| rest.starts_with(IDLE_WHY))
+}
+
 /// Whether a project's live master is quiet now: it runs, no turn is open, the engine's last
 /// input settled and the owner holds no recent key or unsent line, so engine input or a
 /// stop cuts nothing short. Takes the engine database, the owner typing signal, the project

@@ -1019,6 +1019,7 @@ fn finished_team() -> crate::team::TeamStatus {
         ask_before_merge: false,
         master_lands: None,
         reask_empty_reply: true,
+        master_idle_stop: crate::team::MasterIdleStop::default(),
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -1027,6 +1028,7 @@ fn finished_team() -> crate::team::TeamStatus {
         paused: false,
         live_master: None,
         live_problem: None,
+        live_idle_stopped: false,
         settings_version: 0,
         min_agents: 1,
         max_agents: 5,
@@ -1732,6 +1734,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         ask_before_merge: false,
         master_lands: None,
         reask_empty_reply: true,
+        master_idle_stop: crate::team::MasterIdleStop::default(),
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -1740,6 +1743,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         paused: false,
         live_master: None,
         live_problem: None,
+        live_idle_stopped: false,
         settings_version: 0,
         min_agents: 1,
         max_agents: 5,
@@ -2164,6 +2168,7 @@ fn master_status(
         ask_before_merge: false,
         master_lands: None,
         reask_empty_reply: true,
+        master_idle_stop: crate::team::MasterIdleStop::default(),
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -2172,6 +2177,7 @@ fn master_status(
         paused: false,
         live_master: on,
         live_problem: problem.map(str::to_owned),
+        live_idle_stopped: false,
         settings_version: 0,
         min_agents: 0,
         max_agents: 1,
@@ -3437,16 +3443,13 @@ fn the_master_view_head_says_the_live_session_switched_harness() {
         sent.iter()
             .filter(|sent| live_master_change(sent, true))
             .count(),
-        1,
-        "{sent:?}"
+        0,
+        "a switch seen on stays off until the owner acts: {sent:?}"
     );
     let rows = render(&mut shell);
     assert_eq!(
         chars(&rows[2], 2, 78),
-        format!(
-            "{:<63}n New session",
-            "Live master on. It starts when you open this view."
-        )
+        format!("{:<51}n New session  l Sessions", "Live master stopped.")
     );
 }
 
@@ -4008,6 +4011,126 @@ fn resume_sent(request: &Request) -> bool {
             ..
         }) if *project_id == project()
     )
+}
+
+const IDLE_LINE: &str = "The live master was turned off: it was idle for 15 min. \
+                         It continues the same conversation when you start it again.";
+
+/// A team read of a switch an idle stop turned off. Output: the arrival.
+fn idle_stopped_read() -> Arrival {
+    let mut status = master_status(Some(false), Some(IDLE_LINE), None);
+    status.live_idle_stopped = true;
+    team_read(status)
+}
+
+/// A master view showing the running live master's terminal. Output: the shell.
+fn open_running_master() -> Shell {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(true), None));
+    requests(&mut shell);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 43,
+            rows: 18,
+        },
+    });
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Output {
+            bytes: b"$ make\r\ndone".to_vec(),
+        },
+    });
+    requests(&mut shell);
+    shell
+}
+
+/// A graph read that shows the master stopped. Output: the arrival.
+fn stopped_master_graph() -> Arrival {
+    let mut stopped = graph();
+    stopped.nodes[0].status = Some(AgentStatus::Stopped);
+    stopped.nodes[0].terminal = None;
+    Arrival::TeamGraph {
+        project: project(),
+        result: Ok(stopped),
+    }
+}
+
+fn starts_asked(shell: &mut Shell) -> usize {
+    requests(shell)
+        .iter()
+        .filter(|sent| live_master_change(sent, true))
+        .count()
+}
+
+/// A master idle-stopped on the open view reads why, stays stopped and says s starts it
+/// again, one start for the key, the terminal's keys included (DEC-117 Q4).
+#[test]
+fn a_master_idle_stopped_on_the_open_view_says_why_and_s_starts_it_again() {
+    let mut shell = open_running_master();
+    shell.arrive(stopped_master_graph());
+    let sent = requests(&mut shell);
+    assert!(sent.iter().any(switch_read), "the view reads why: {sent:?}");
+    shell.arrive(idle_stopped_read());
+    assert_eq!(
+        starts_asked(&mut shell),
+        0,
+        "the stop holds until the owner acts"
+    );
+    let seen = render(&mut shell).join("\n");
+    assert!(seen.contains("The live master was turned off"), "{seen}");
+    assert!(seen.contains("s starts it again"), "{seen}");
+    assert!(seen.contains("Start again"), "{seen}");
+    assert!(!seen.contains("This agent has stopped"), "{seen}");
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 1);
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 0, "one start for one stop");
+}
+
+/// A master that stopped for any other reason keeps today's words and s does nothing.
+#[test]
+fn a_master_stopped_for_another_reason_offers_no_start_again() {
+    let mut shell = open_running_master();
+    shell.arrive(stopped_master_graph());
+    requests(&mut shell);
+    shell.arrive(switch(
+        Some(false),
+        Some("The live master was turned off: its terminal ended. Start it again from the master view."),
+    ));
+    requests(&mut shell);
+    let seen = render(&mut shell).join("\n");
+    assert!(!seen.contains("Start again"), "{seen}");
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 0);
+}
+
+/// A master view with no terminal after an idle stop offers s too (DEC-117 Q4).
+#[test]
+fn a_master_idle_stopped_with_no_terminal_offers_s() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(false), None));
+    assert_eq!(starts_asked(&mut shell), 1, "opening the view starts it");
+    shell.arrive(turned(true, Ok(())));
+    requests(&mut shell);
+    shell.arrive(idle_stopped_read());
+    assert_eq!(starts_asked(&mut shell), 0, "once per open");
+    let seen = render(&mut shell).join("\n");
+    assert!(seen.contains("s starts it again"), "{seen}");
+    assert!(
+        !seen.contains("It starts again when you open this view"),
+        "{seen}"
+    );
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 1);
 }
 
 #[test]
