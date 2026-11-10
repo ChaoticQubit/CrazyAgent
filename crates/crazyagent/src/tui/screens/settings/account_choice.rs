@@ -121,6 +121,7 @@ pub fn standing_line(standing: &Standing, now_ms: i64, offset: i64) -> String {
             weekly_resets_ms,
             weekly_left_percent,
             use_last,
+            ..
         } => {
             let line = match (weekly_resets_ms, weekly_left_percent) {
                 (Some(resets), Some(left)) => format!("resets {}, {left}% left", at(resets)),
@@ -133,6 +134,7 @@ pub fn standing_line(standing: &Standing, now_ms: i64, offset: i64) -> String {
                 line
             }
         }
+        Standing::NotSignedIn => "not signed in".to_owned(),
         Standing::Paused { until_ms } => format!("paused until {}", at(until_ms)),
         Standing::NeverUse => "never use".to_owned(),
         Standing::FiveHourCap {
