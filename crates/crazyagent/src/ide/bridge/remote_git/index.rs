@@ -157,10 +157,11 @@ struct Refused {
     more: bool,
 }
 
-/// The engine's three private files for one call, removed when the call ends.
+/// The engine's four private files for one call, removed when the call ends.
 struct Copies {
     base: PathBuf,
     work: PathBuf,
+    objects: PathBuf,
     delta: PathBuf,
 }
 
@@ -171,6 +172,7 @@ impl Copies {
         Self {
             base: engine.join(format!("carry-{slot}.base")),
             work: engine.join(format!("carry-{slot}.work")),
+            objects: engine.join(format!("carry-{slot}.objects")),
             delta: engine.join(format!("carry-{slot}.delta")),
         }
     }
@@ -178,17 +180,18 @@ impl Copies {
 
 impl Drop for Copies {
     fn drop(&mut self) {
-        for file in [&self.base, &self.work, &self.delta] {
+        for file in [&self.base, &self.work, &self.objects, &self.delta] {
             let _ = fs::remove_file(file);
         }
     }
 }
 
-/// The step under the gate: copies the slot's two files, lists both under Seatbelt, applies
-/// what differs and refreshes the index's stat data, best effort, after any change. An
-/// absent base is an empty index; an absent work file with a base present is refused, so a
-/// lost file never reads as "everything was unstaged". Inputs: as [`carry`]. Output: what
-/// git refused, or a plain failure code.
+/// The step under the gate: copies the slot's two files, lists both under Seatbelt, checks
+/// that every object the changed entries name is stored ([`stored`]), applies what differs
+/// and refreshes the index's stat data, best effort, after any change. An absent base is an
+/// empty index; an absent work file with a base present is refused, so a lost file never
+/// reads as "everything was unstaged". Inputs: as [`carry`]. Output: what git refused, or a
+/// plain failure code.
 fn recorded(
     private: &Path,
     engine: &Path,
@@ -219,10 +222,12 @@ fn recorded(
         Vec::new()
     };
     let work = listing(&git_folder, &copies.work)?;
-    let delta = delta(&entries(&base)?, &entries(&work)?);
+    let (base, work) = (entries(&base)?, entries(&work)?);
+    let delta = delta(&base, &work);
     if delta.is_empty() {
         return Ok(nothing);
     }
+    stored(&git_folder, &copies.objects, &named(&base, &work))?;
     private_write(&copies.delta, &delta)?;
     let refused = applied(&git_folder, &copies.delta)?;
     refresh(project);
@@ -351,15 +356,71 @@ fn differing<'a>(from: &Entries<'a>, to: &Entries<'a>) -> BTreeSet<&'a [u8]> {
         .collect()
 }
 
+/// The paths with any difference between the two listings. Inputs: the two listings.
+/// Output: the paths.
+fn changed<'a>(base: &Entries<'a>, work: &Entries<'a>) -> BTreeSet<&'a [u8]> {
+    let mut paths = differing(base, work);
+    paths.extend(differing(work, base));
+    paths
+}
+
+/// The objects the lines of [`delta`] write: every stage `work` has for a changed path,
+/// except submodule entries, which name a commit in the submodule's own store. Inputs: the
+/// two listings. Output: the object names.
+fn named<'a>(base: &Entries<'a>, work: &Entries<'a>) -> BTreeSet<&'a [u8]> {
+    changed(base, work)
+        .into_iter()
+        .flat_map(|path| work.range((path, 0u8)..=(path, u8::MAX)))
+        .filter(|(_, (mode, _))| *mode != b"160000")
+        .map(|(_, (_, oid))| *oid)
+        .collect()
+}
+
+/// Checks that every named object is in the project's object store as a blob
+/// (IDE-INDEX-MISSING-OBJECT): `--index-info` writes any object name, and an entry naming a
+/// missing object or a tree breaks the owner's status and commit until a reset. Runs
+/// `git cat-file --batch-check` under the listing profile, which reads only the git folder
+/// and the list and writes nothing, with no lazy fetch. Inputs: the git folder, the engine's
+/// file for the list and the names. Output: Ok, or a plain failure code.
+fn stored(git_folder: &Path, list: &Path, names: &BTreeSet<&[u8]>) -> Result<(), &'static str> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let (mut lines, mut expected) = (Vec::new(), Vec::new());
+    for name in names {
+        lines.extend_from_slice(name);
+        lines.push(b'\n');
+        expected.extend_from_slice(name);
+        expected.extend_from_slice(b" blob\n");
+    }
+    private_write(list, &lines)?;
+    let input = fs::File::open(list).map_err(|_| "index_copy_failed")?;
+    let mut command = confined(
+        LIST_PROFILE,
+        &[("GITDIR", git_folder), ("COPY", list)],
+        git_folder,
+        git_folder,
+        Some(("GIT_NO_LAZY_FETCH", Path::new("1"))),
+        &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+    );
+    command.stdin(Stdio::from(input));
+    let done = ran(command, LISTING_BYTES_MAX, LIST_TIME).map_err(|_| "index_git_unavailable")?;
+    match done.status {
+        Some(0) if done.cut => Err("index_too_large"),
+        Some(0) if done.stdout == expected => Ok(()),
+        Some(0) => Err("index_object_missing"),
+        None => Err("index_timed_out"),
+        Some(_) => Err("index_unreadable"),
+    }
+}
+
 /// The `update-index -z --index-info` input that turns `base` into `work`: for each path
 /// with any difference, one line removing it and one line per stage it has in `work`.
 /// Measuring against the command's own base keeps whatever the owner staged meanwhile.
 /// Inputs: the two listings. Output: the lines, empty when nothing differs.
 fn delta(base: &Entries<'_>, work: &Entries<'_>) -> Vec<u8> {
-    let mut paths = differing(base, work);
-    paths.extend(differing(work, base));
     let mut lines = Vec::new();
-    for path in paths {
+    for path in changed(base, work) {
         let range = (path, 0u8)..=(path, u8::MAX);
         let length = work
             .range(range.clone())
