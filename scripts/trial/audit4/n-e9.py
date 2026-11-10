@@ -202,7 +202,7 @@ def check(t):
     scans = {agent_id: scan(t, agent_id) for agent_id in t.agents}
     compared, early, unnamed, late = lead_findings(t, tasks, scans)
     detail = f"leads compared={compared}"
-    detail += f"; late wakes left out={len(late)} (tasks {listed(sorted(late))})" if late else ""
+    detail += f"; late wakes left out={len(late)} (tasks {listed(map(str, sorted(late)))})" if late else ""
     failed = early + unnamed
     exercised = True
     if mode == "wait":
