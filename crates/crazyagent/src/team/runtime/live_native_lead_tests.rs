@@ -466,7 +466,10 @@ fn team_prompt(token: &str) -> String {
 /// engine's own terminal host gets the teammates' server's anchor as `TMUX` and
 /// `TMUX_PANE`. The teammate it creates is split off that anchor's window in the teammates'
 /// server and never appears in the lead's own server, the lead's own tmux client inside its
-/// profile reads that pane, and a turn of the lead ends in success with the run's word.
+/// profile reads that pane, and a turn of the lead ends in success with the run's word. A
+/// wait that fails prints what decides why before it panics: the watcher's view, both
+/// servers' screens, the team folders' files with their sizes and both transcripts' team
+/// calls (row 5, live22).
 #[test]
 #[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_lead_splits_teammates_into_mates_server() {
@@ -516,11 +519,46 @@ fn live_native_lead_splits_teammates_into_mates_server() {
     );
     let (anchor, window) = mates.into_iter().next().unwrap();
     let done = AtomicBool::new(false);
-    let (reports, seen) = std::thread::scope(|scope| {
+    let (waited, seen) = std::thread::scope(|scope| {
         let watcher = scope.spawn(|| servers.watch(&anchor, &token, &done, TEAM_TURN));
-        let reports = team.reports_until(TEAM_TURN, |report| token_turn(report, &token).is_some());
+        let waited = team.reports_within(TEAM_TURN, |report| token_turn(report, &token).is_some());
         done.store(true, Ordering::SeqCst);
-        (reports, watcher.join().unwrap())
+        (waited, watcher.join().unwrap())
+    });
+    let reports = waited.unwrap_or_else(|(why, earlier)| {
+        println!(
+            "watcher own={:?} mates={:?} read={:?} misses={}",
+            seen.own, seen.mates, seen.read, seen.misses
+        );
+        for (socket, pane, text) in servers.screens() {
+            println!("screen {} {pane}:\n{text}", socket.display());
+        }
+        let sized = |files: Vec<PathBuf>| -> Vec<(PathBuf, u64)> {
+            files
+                .into_iter()
+                .map(|file| {
+                    let bytes = std::fs::metadata(&file).map_or(0, |found| found.len());
+                    (file, bytes)
+                })
+                .collect()
+        };
+        let mates = crate::launch_context::mates_home(&team.home);
+        println!(
+            "mates transcripts={:?} teams={:?} tasks={:?}",
+            sized(files_under(&mates.join("projects"), 3)),
+            sized(files_under(&team.home.join("teams"), 3)),
+            sized(files_under(&team.home.join("tasks"), 2))
+        );
+        println!(
+            "lead team calls={:?} teammate team calls={:?}",
+            team_calls(&files_under(&team.home.join("projects"), 3)),
+            team_calls(&files_under(&mates.join("projects"), 3))
+        );
+        panic!(
+            "{why}, after {} others: {:?}",
+            earlier.len(),
+            shown(&earlier)
+        )
     });
     let (end, text) = reports
         .last()
