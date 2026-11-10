@@ -460,3 +460,111 @@ async fn a_ranking_reply_from_before_the_why_lines_is_a_version_mismatch() {
     assert_eq!(refused(client.request(read()).await), MISMATCH);
     skewed.stop().await;
 }
+
+/// PROTO-SKEW-READ-KIND: every exchange's `read_kind` lists exactly the reads named here and
+/// ends in `_ => None`, so an arm dropped turns a read's skew back into an unknown outcome and
+/// fails this row, and a mutation added to a read list, which would turn a mutation's unknown
+/// outcome into a version mismatch, fails it too until it is added here on purpose.
+#[test]
+fn every_exchange_names_its_reads_and_only_its_reads() {
+    let sources = [
+        ("account_profile", include_str!("account_profile.rs")),
+        ("accounts", include_str!("accounts.rs")),
+        ("agents", include_str!("agents.rs")),
+        ("changes", include_str!("changes.rs")),
+        ("cleanup", include_str!("cleanup.rs")),
+        ("github", include_str!("github.rs")),
+        ("ide_extensions", include_str!("ide_extensions.rs")),
+        ("ide_tab", include_str!("ide_tab.rs")),
+        ("plugins", include_str!("plugins.rs")),
+        ("process", include_str!("process.rs")),
+        ("questions", include_str!("questions.rs")),
+        ("recovery", include_str!("recovery.rs")),
+        ("usage", include_str!("usage.rs")),
+    ];
+    let expected: &[(&str, &[&str])] = &[
+        ("account_profile", &["Capabilities"]),
+        ("accounts", &["Catalog", "List", "LocalModels"]),
+        ("agents", &["List", "Using", "Holders"]),
+        ("changes", &["List", "Diff", "Branches", "Waiting"]),
+        ("cleanup", &["Finished", "Removal"]),
+        ("github", &["Status", "Repos"]),
+        ("ide_extensions", &["Asks"]),
+        ("ide_tab", &["State"]),
+        (
+            "plugins",
+            &[
+                "Skills",
+                "SkillDetail",
+                "Servers",
+                "Server",
+                "ImportScan",
+                "Hooks",
+                "Effective",
+                "Tools",
+            ],
+        ),
+        (
+            "process",
+            &[
+                "Read",
+                "PendingImport",
+                "UncommittedImport",
+                "ReadFile",
+                "Default",
+                "Given",
+                "Agent",
+                "AgentText",
+                "Settings",
+                "Adoption",
+            ],
+        ),
+        ("questions", &["List", "Counts"]),
+        ("recovery", &["List"]),
+        ("usage", &["Report", "Metrics"]),
+    ];
+    assert_eq!(sources.len(), expected.len());
+    let head = "fn read_kind(action: &Action) -> Option<&'static str> {\n";
+    for ((module, source), (named, reads)) in sources.iter().zip(expected) {
+        assert_eq!(module, named);
+        assert_eq!(source.matches(head).count(), 1, "{module}");
+        let body = source.split(head).nth(1).unwrap().split("\n}\n").next().unwrap();
+        let arms: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("=>"))
+            .collect();
+        assert_eq!(arms.last(), Some(&"_ => None,"), "{module}");
+        let found: Vec<(String, String)> = arms[..arms.len() - 1]
+            .iter()
+            .map(|arm| {
+                let variant = arm
+                    .strip_prefix("Action::")
+                    .unwrap_or_else(|| panic!("{module}: {arm}"))
+                    .split([' ', '{', '='])
+                    .next()
+                    .unwrap();
+                let kind = arm
+                    .split("=> Some(\"")
+                    .nth(1)
+                    .and_then(|rest| rest.strip_suffix("\"),"))
+                    .unwrap_or_else(|| panic!("{module}: {arm}"));
+                (variant.to_owned(), kind.to_owned())
+            })
+            .collect();
+        let wanted: Vec<(String, String)> = reads
+            .iter()
+            .map(|variant| {
+                let mut kind = String::new();
+                for (at, c) in variant.char_indices() {
+                    if c.is_ascii_uppercase() && at > 0 {
+                        kind.push('_');
+                    }
+                    kind.push(c.to_ascii_lowercase());
+                }
+                ((*variant).to_owned(), format!("{module}.{kind}"))
+            })
+            .collect();
+        assert_eq!(found, wanted, "{module}");
+    }
+}
