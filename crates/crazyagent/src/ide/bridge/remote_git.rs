@@ -708,14 +708,16 @@ fn urls(
 }
 
 /// Builds one engine git process for the IDE: `/usr/bin/git` with [`HARDENING`] before the
-/// arguments, a cleared environment holding only `env`, the project folder as its working
-/// folder, no input, both outputs piped and its own process group. Inputs: the folder, the
+/// arguments, a cleared environment holding only `env` and the folder's `.git` as git's
+/// common folder, so a `commondir` planted after the check in [`config`] redirects nothing,
+/// the project folder as its working folder, no input, both outputs piped and its own process group. Inputs: the folder, the
 /// environment and the arguments. Output: the unspawned command.
 fn git<S: AsRef<OsStr>>(folder: &Path, env: &[(OsString, OsString)], args: &[S]) -> Command {
     let mut command = Command::new(GIT);
     command
         .env_clear()
         .envs(env.iter().cloned())
+        .env("GIT_COMMON_DIR", folder.join(".git"))
         .current_dir(folder)
         .args(HARDENING)
         .args(args)
