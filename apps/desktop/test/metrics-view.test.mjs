@@ -142,7 +142,7 @@ test("By agent lists an agent that ended turns but used no tokens in the range, 
 test("By agent draws once an agent the usage read lists with no tokens and the engine gives turns", () => {
   const ash = { project: "alpha", agent: "team-9", label: "Ash", harnesses: [], more_harnesses: 0, accounts: [], more_accounts: 0, tokens: tokens({}), turns: 5 };
   const markup = render({
-    usage: { kind: "ok", value: { ...usage(), agents: [row("team-9", { tokens: tokens({}) })] } },
+    usage: { kind: "ok", value: { ...usage(), total: tokens({}), agents: [row("team-9", { tokens: tokens({}) })] } },
     metrics: { kind: "ok", value: metrics({ agents: [ash] }) },
   });
   assert.equal([...markup.matchAll(/class="mx-row"/gu)].length, 1, tableText(markup));
