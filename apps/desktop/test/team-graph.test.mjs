@@ -420,6 +420,7 @@ test("an agent waiting for a file under Wait leads its card's task line and its 
 });
 
 test("Open all terminals opens nothing and says why when its fresh read finds the project removed (UI-5-F2)", () => {
+  assert.equal(typeof view.openAllPlan, "function", "Open all terminals plans its windows from the fresh reads");
   const nodes = Array.from({ length: 13 }, (_, at) => ({ id: `a${at}`, kind: at === 0 ? "master" : "sub", parent: at === 0 ? null : "a0", label: `a${at}`, harness: "codex", status: "working", status_label: "Working", account: null, terminal: `team-${at}` }));
   const read = { kind: "ok", value: { project_id: "alpha", nodes, edges: [] } };
   const six = { kind: "ok", value: 6 };
