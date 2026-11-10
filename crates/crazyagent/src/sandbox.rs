@@ -356,11 +356,11 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
 }
 
 /// Tells whether one variable may reach an agent process with this value: a name
-/// [`agent_env_refused`] accepts, one of the fixed [`AGENT_GIT_ENV`] pairs, or a model key
-/// name holding the local placeholder, never a real provider key. No variable may hold a
-/// key relay token: any process of the owner's user can read another's environment, so a
-/// harness reads its token from the key file in its own home. Inputs: the name and value.
-/// Output: true when allowed.
+/// [`agent_env_refused`] accepts, one of the fixed [`AGENT_GIT_ENV`] pairs, a model key
+/// name holding the local placeholder, never a real provider key, or the launch's lineage
+/// token in its own variable. No variable may hold a key relay token: any process of the
+/// owner's user can read another's environment, so a harness reads its token from the key
+/// file in its own home. Inputs: the name and value. Output: true when allowed.
 pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     let token = crate::model_gateway::relay::TOKEN_PREFIX.as_bytes();
     if value
@@ -369,6 +369,11 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
         .any(|window| window == token)
     {
         return false;
+    }
+    if name == crate::harnesses::leftovers::LINEAGE_VARIABLE {
+        return value
+            .to_str()
+            .is_some_and(crate::harnesses::leftovers::LineageToken::valid);
     }
     if AGENT_GIT_ENV
         .iter()
