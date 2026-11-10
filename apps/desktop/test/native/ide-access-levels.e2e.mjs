@@ -145,11 +145,13 @@ async function atLevel(t, level, shared) {
 
     if (level.access === "full") {
       await t.test("Full access: the terminal is the owner's login shell and git knows the owner", async () => {
-        const said = await ran("level-shell.txt", `ps -o command= -p $$; git config user.name; git config user.email; git status --porcelain 2>&1 >/dev/null`);
+        const said = await ran("level-shell.txt", `ps -o command= -p $$; git config user.name; git config user.email`);
         assert.match(said.split("\n")[0], /\s-[a-z]*l\b/, said);
         assert.ok(said.split("\n").includes(OWNER_NAME), said);
         assert.ok(said.split("\n").includes(OWNER_EMAIL), said);
         assert.doesNotMatch(said, /fatal|unable to access/, said);
+        const stderr = await ran("level-shell-stderr.txt", "git status --porcelain 2>&1 >/dev/null");
+        assert.equal(stderr, "finished\n", stderr);
       });
     }
 

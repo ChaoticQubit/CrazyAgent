@@ -367,27 +367,30 @@ fn the_sandboxed_terminal_cannot_commit() {
     assert_eq!(git_files(&case.folder), before, "{said}");
 }
 
-/// The owner's login shell in a Sandboxed terminal pane starts with one line saying the
-/// terminal cannot stage or commit, printed inside the pane, since the pane host repaints
-/// the terminal as it attaches and wipes anything written from outside.
+/// Runs a confined IDE terminal's pane as the host would and answers what it says first, which
+/// is printed inside the pane because the pane host repaints the terminal as it attaches and
+/// wipes anything written from outside. Inputs: the project's level and the terminal's.
+/// Output: the pane's first line.
 #[cfg(target_os = "macos")]
-#[test]
-fn the_sandboxed_terminal_pane_says_it_cannot_stage_before_its_shell_starts() {
+fn pane_first_line(project_access: AgentAccess, level: AgentAccess) -> String {
     let case = Case::new();
     let project = ProjectId::new(PROJECT).unwrap();
-    let pane = ide_shell::interactive(&ide_shell::Launch {
-        root: &case.root,
-        project: &project,
-        folder: &case.folder,
-        cwd: &case.folder,
-        shell: std::path::Path::new("/bin/sh"),
-        arguments: &[],
-        incoming: &[],
-        extra_reads: &[],
-        level: AgentAccess::Sandboxed,
-        network: AgentNetwork::Open,
-        kept_ports: &[],
-    })
+    let pane = ide_shell::interactive(
+        &ide_shell::Launch {
+            root: &case.root,
+            project: &project,
+            folder: &case.folder,
+            cwd: &case.folder,
+            shell: std::path::Path::new("/bin/sh"),
+            arguments: &[],
+            incoming: &[],
+            extra_reads: &[],
+            level,
+            network: AgentNetwork::Open,
+            kept_ports: &[],
+        },
+        project_access,
+    )
     .unwrap();
     let mut command = std::process::Command::new(&pane.argv[0]);
     command
@@ -400,10 +403,38 @@ fn the_sandboxed_terminal_pane_says_it_cannot_stage_before_its_shell_starts() {
         .stderr(std::process::Stdio::piped());
     let output = crate::spawn_gate::output(&mut command).unwrap();
     let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "{output:?}");
+    said.lines().next().unwrap_or_default().to_owned()
+}
+
+/// A Sandboxed project's terminal says it cannot stage or commit, and that a Full access
+/// terminal needs the project's access raised first.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandboxed_terminal_pane_says_it_cannot_stage_before_its_shell_starts() {
     assert_eq!(
-        said.lines().next(),
-        Some("This terminal can't stage or commit. Use Source Control, or a Full access terminal."),
-        "{output:?}"
+        pane_first_line(AgentAccess::Sandboxed, AgentAccess::Sandboxed),
+        "This terminal can't stage or commit. Use Source Control, or a Full access terminal after raising project access."
+    );
+}
+
+/// An Own branch project's terminal is told the same: it has no Full access terminal yet.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_own_branch_terminal_pane_says_to_raise_project_access() {
+    assert_eq!(
+        pane_first_line(AgentAccess::OwnBranch, AgentAccess::OwnBranch),
+        "This terminal can't stage or commit. Use Source Control, or a Full access terminal after raising project access."
+    );
+}
+
+/// A narrower terminal in a Full access project names a Full access terminal plainly.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_full_access_projects_narrower_pane_is_not_told_to_raise_access() {
+    assert_eq!(
+        pane_first_line(AgentAccess::Full, AgentAccess::Sandboxed),
+        "This terminal can't stage or commit. Use Source Control, or a Full access terminal."
     );
 }
 
@@ -502,7 +533,7 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
     };
     let mut command = ide_shell::command(&launch).unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
-    let pane = ide_shell::interactive(&launch).unwrap();
+    let pane = ide_shell::interactive(&launch, AgentAccess::Sandboxed).unwrap();
     let argv: Vec<&std::ffi::OsStr> = std::iter::once(command.get_program())
         .chain(command.get_args())
         .collect();
@@ -600,7 +631,7 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         }
         other => panic!("expected the unavailable refusal, got {other:?}"),
     }
-    match ide_shell::interactive(&launch) {
+    match ide_shell::interactive(&launch, AgentAccess::Sandboxed) {
         Err(crate::sandbox::SandboxError::Unavailable(reason)) => {
             assert_eq!(reason, ide_shell::UNAVAILABLE)
         }
@@ -710,6 +741,10 @@ fn terminal_profiles_hide_every_shell_and_default_to_the_extension_sandboxed_pro
     }
     let unavailable = crate::sandbox::ide_shell::UNAVAILABLE;
     assert!(!unavailable.contains("IDE shell"), "{unavailable}");
+    assert_eq!(
+        unavailable,
+        "This terminal is unavailable: this system has no qualified sandbox for it."
+    );
     let windows = profiles(Platform::Windows, &owner_shell, AgentAccess::Sandboxed);
     assert_eq!(windows["terminal.integrated.useWslProfiles"], json!(false));
     let (name, manifest) = crate::ide::bridge::EXTENSION_FILES[0];

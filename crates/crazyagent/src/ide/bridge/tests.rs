@@ -1846,6 +1846,29 @@ fn a_full_access_project_can_open_a_narrower_terminal() {
     );
 }
 
+/// The project's level picks the pane's words, not the terminal's: a Sandboxed terminal asked
+/// for in a Full access project is not told to raise access.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_full_access_projects_narrower_terminal_is_prepared_without_raising_words() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let db = rusqlite::Connection::open(case.root.path().join("engine.db")).unwrap();
+    let policy = crate::sandbox::policy::AgentPolicy {
+        access: AgentAccess::Full,
+        ..crate::sandbox::policy::AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&db, "alpha", &policy).unwrap();
+    drop(db);
+    let pane = terminal::prepare(case.root.path(), &alpha, AgentAccess::Sandboxed, None).unwrap();
+    assert!(
+        pane.argv.iter().any(|argument| argument == "This terminal can't stage or commit. Use Source Control, or a Full access terminal."),
+        "{:?}",
+        pane.argv
+    );
+    case.stop().await;
+}
+
 /// Where no sandbox is qualified for the Sandboxed terminal, the call is refused before
 /// any pane starts.
 #[cfg(target_os = "linux")]

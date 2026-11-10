@@ -215,7 +215,10 @@ pub fn command(_launch: &Launch<'_>) -> Result<Command, SandboxError> {
 /// started through [`SAYS_THEN_SHELL`] so the owner reads that this terminal cannot stage or
 /// commit. Input: the launch. Output: the pane command, or [`command`]'s refusal, or
 /// `Invalid` for a part that is not UTF-8.
-pub fn interactive(launch: &Launch<'_>) -> Result<InteractiveCommand, SandboxError> {
+pub fn interactive(
+    launch: &Launch<'_>,
+    _project_access: AgentAccess,
+) -> Result<InteractiveCommand, SandboxError> {
     let command = command(launch)?;
     let text = |value: &OsStr| {
         value
