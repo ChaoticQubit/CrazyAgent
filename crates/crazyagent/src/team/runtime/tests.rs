@@ -3498,7 +3498,6 @@ fn turned_off(fixture: &Fixture, why: &str) -> bool {
             .any(|message| message.state == MessageState::Note && said(&message.text))
 }
 
-#[cfg(target_os = "macos")]
 fn idle_ticks(team: &mut TeamRuntime) {
     for _ in 0..20 {
         team.tick().unwrap();
@@ -4160,7 +4159,6 @@ fn launches(fixture: &Fixture, master: i64) -> Vec<String> {
         .collect()
 }
 
-#[cfg(target_os = "macos")]
 fn noted(fixture: &Fixture, text: &str) -> usize {
     fixture
         .status()
@@ -6316,7 +6314,6 @@ fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamAction {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn task_of(fixture: &Fixture, prompt: &str) -> (String, Option<String>) {
     fixture
         .connection
@@ -19595,6 +19592,7 @@ fn endpoint_binding() -> AccountBinding {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn endpoint_account() -> TeamAccount {
     TeamAccount {
         connection: reference(ENDPOINT),
@@ -19605,6 +19603,7 @@ fn endpoint_account() -> TeamAccount {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn hookless_saved(fixture: &Fixture, id: i64) -> bool {
     fixture
         .connection
@@ -19617,12 +19616,14 @@ fn hookless_saved(fixture: &Fixture, id: i64) -> bool {
 }
 
 /// Opens a team runtime whose only harness is a stand-in Claude Code that exits at once.
+#[cfg(target_os = "macos")]
 fn exiting_claude_runtime(fixture: &Fixture) -> TeamRuntime {
     standin_claude_runtime(fixture, "#!/bin/sh\nexit 0\n")
 }
 
 /// Opens a team runtime whose only harness is a stand-in Claude Code running one script.
 /// Takes the fixture and the script. Returns the runtime.
+#[cfg(target_os = "macos")]
 fn standin_claude_runtime(fixture: &Fixture, script: &str) -> TeamRuntime {
     let bin = fixture.base.join("claude-bin");
     std::fs::create_dir_all(&bin).unwrap();

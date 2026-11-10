@@ -1078,7 +1078,6 @@ fn a_chat_answer_must_quote_an_owner_turn_of_this_project() {
 /// Adds a sub-agent of the fixture's project with a role handle and, for a finished one, a
 /// kept worktree, as a delegated agent leaves them. Takes the fixture, the role, the status
 /// and when it stopped. Returns the agent id.
-#[cfg(target_os = "macos")]
 fn named_sub(fixture: &Fixture, role: &str, status: &str) -> i64 {
     fixture
         .connection

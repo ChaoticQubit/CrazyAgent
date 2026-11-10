@@ -2923,6 +2923,7 @@ async fn the_owner_reads_a_sub_agent_s_messages_timeline_and_saves_its_settings_
 
 /// The Save both the desktop and the TUI send ends the project's open IDE once the new
 /// level is committed, so nothing keeps running at the level the owner just changed.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn an_applied_access_save_stops_the_projects_running_ide() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy};
