@@ -165,6 +165,31 @@ fn the_proxy_variables_name_the_proxy_and_exempt_no_host() {
     }
 }
 
+/// S4B-2W1: a proxy started without a saved port takes a port of the fixed block 41300 to
+/// 41427 on both loopback addresses, and a second proxy started while the first holds its
+/// port takes another port of the block.
+#[test]
+fn a_proxy_takes_a_port_of_the_fixed_block_and_skips_a_taken_one() {
+    let first = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], None).unwrap();
+    let second = ModelProxy::bind(8, vec![host("api.anthropic.com", 443)], None).unwrap();
+    for proxy in [&first, &second] {
+        assert!(
+            (41_300..=41_427).contains(&proxy.port()),
+            "{}",
+            proxy.port()
+        );
+    }
+    assert_ne!(first.port(), second.port());
+    for address in ["127.0.0.1", "[::1]"] {
+        let taken = spawn_gate::bind_tcp_std(format!("{address}:{}", first.port()));
+        assert_eq!(
+            taken.map(|_| ()).map_err(|error| error.kind()),
+            Err(io::ErrorKind::AddrInUse),
+            "{address}"
+        );
+    }
+}
+
 #[test]
 fn a_host_or_port_off_the_list_and_an_address_are_refused_with_403() {
     let proxy = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], None).unwrap();

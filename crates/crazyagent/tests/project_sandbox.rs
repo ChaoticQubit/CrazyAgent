@@ -961,6 +961,26 @@ fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port()
     }
 }
 
+/// S4B-2W1: no Open-network agent listens on a port of the engine's model proxy block, at
+/// either end of it, on IPv4 or IPv6 loopback or any address. So no agent can take a kept
+/// pane's proxy port while the engine that held it is down, or wait on the wildcard for it.
+#[test]
+fn an_open_agent_never_listens_on_a_model_proxy_port() {
+    let case = case();
+    let open = sandbox(&case, SandboxNetwork::Open);
+    for port in [41_300, 41_427] {
+        for host in ["127.0.0.1", "::1", "0.0.0.0", "::"] {
+            let name = format!("proxy-{port}-{}.sb", host.replace([':', '.'], "-"));
+            let (got, said) = listen(&open, &case, &name, host, port, false);
+            assert_eq!(got, "", "{host} {port}");
+            assert!(
+                said.contains("Operation not permitted"),
+                "an agent cannot take {host}:{port} from a model proxy: {said}"
+            );
+        }
+    }
+}
+
 /// One owner model connection in settings, at `url`. Input: its id and URL. Output: the
 /// connection as the settings file writes it.
 fn connection(id: &str, url: &str) -> String {
@@ -1040,13 +1060,18 @@ fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_o
     let open = sandbox(&case, SandboxNetwork::Open)
         .keep_ports(&ports)
         .unwrap();
-    assert!(
-        open.profile().contains(&format!(
-            "(deny network-bind (local ip \"*:1455\") (local ip \"*:11434\") (local ip \"*:{port}\"))"
-        )),
-        "{}",
-        open.profile()
-    );
+    let block: String = (41_300..=41_427)
+        .map(|proxy| format!(" (local ip \"*:{proxy}\")"))
+        .collect();
+    for rule in ["network-bind", "network-inbound"] {
+        assert!(
+            open.profile().contains(&format!(
+                "(deny {rule} (local ip \"*:1455\") (local ip \"*:11434\") (local ip \"*:{port}\"){block})"
+            )),
+            "{}",
+            open.profile()
+        );
+    }
     let served = std::thread::spawn(move || {
         let (mut stream, _) = crazyagent::spawn_gate::accept_tcp_std(&server).unwrap();
         let mut got = String::new();
