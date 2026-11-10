@@ -489,14 +489,16 @@ fn named(db: &Connection, record: &store::Record) -> String {
     )
 }
 
-/// Records the Undone row of a finished undo, naming the sets its merge closed whose work
-/// it reverted too; a failure is logged by its plain code. Inputs: the store, the undone
-/// set, the labels of those sets and who undid it.
+/// Records the Undone row of a finished undo, naming the set as its Accept row does, by its
+/// agent's title and the subject of its message, and the sets its merge closed whose work it
+/// reverted too; a failure is logged by its plain code. Inputs: the store, the undone set,
+/// the labels of those sets and who undid it.
 #[cfg(unix)]
 fn note_undo(db: &Connection, record: &store::Record, closed: &[String], by: &str) {
     let mut text = format!(
         "Undid the changes of {}: {}",
-        record.agent.label, record.prompt_line
+        agent_title(record.agent.kind, &record.agent.label),
+        subject(&record.message())
     );
     if !closed.is_empty() {
         text.push_str(&format!(
