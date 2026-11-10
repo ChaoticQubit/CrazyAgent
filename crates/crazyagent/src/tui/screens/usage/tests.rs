@@ -933,3 +933,39 @@ fn the_money_keys_flip_one_setting_and_send_it() {
         }
     );
 }
+
+#[test]
+fn a_priced_row_at_80_columns_wraps_so_no_figure_or_label_is_cut() {
+    use crate::usage::money::MainNumber;
+    let limit = 76;
+    let ctx = ctx(80, 40);
+    let mut priced = report();
+    priced.money = money(MainNumber::Tokens);
+    priced.projects = vec![UsageRow {
+        cost_nanos: 2_000_000_000,
+        ..usage_row(&"p".repeat(32))
+    }];
+    let lines = text(&summary(
+        &priced,
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        limit,
+        &ctx,
+    ));
+    assert!(
+        lines.iter().all(|line| line.chars().count() <= limit),
+        "{lines:#?}"
+    );
+    let joined = lines
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        joined.contains("$2.00 (Estimated cost at API prices)"),
+        "{joined}"
+    );
+    assert!(joined.contains("2 runs"), "{joined}");
+}
