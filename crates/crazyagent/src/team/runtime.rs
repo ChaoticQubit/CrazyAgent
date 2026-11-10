@@ -3058,10 +3058,15 @@ impl TeamRuntime {
     /// Tells the owner once of each pair of agents whose waits under Wait would have closed
     /// a cycle, so a start went ahead without the file the other holds (OS-8). The pairs are
     /// marked told in the transaction that writes their notes, so a failure leaves every pair
-    /// untold for the next sweep (T9-R2-L2). Inputs: the project and the time in ms. Output:
-    /// Ok or the first failure.
+    /// untold for the next sweep (T9-R2-L2). That transaction takes the write lock before it
+    /// reads, as the cycle check does, so no other writer commits between the read and the
+    /// marks (TEAM-16-L1). Inputs: the project and the time in ms. Output: Ok or the first
+    /// failure.
     fn note_wait_cycles(&mut self, project: &ProjectId, now: i64) -> Result<(), EngineError> {
-        let tx = self.connection.transaction().map_err(error)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
         for (starter, holder, file) in crate::coord::wait_cycle_notices(&tx, project, now)? {
             let starter = crate::team::events::label(&tx, starter)?;
             let holder = crate::team::events::label(&tx, holder)?;
@@ -3078,7 +3083,10 @@ impl TeamRuntime {
     }
 
     fn note(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
-        let tx = self.connection.transaction().map_err(error)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
         let _ = append_message(
             &tx,
             project,
