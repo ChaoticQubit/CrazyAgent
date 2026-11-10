@@ -235,7 +235,8 @@ impl TerminalSession {
     /// `launch_adopt_unsettled` once its processes are confirmed gone and
     /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
     /// budget go on counting from its start. A Codex pane still on its folder access screen
-    /// is not ready: it goes on with its launch's one Enter before any prompt is typed. The
+    /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
+    /// failed look at the screen counts as not on it, so it cannot end the pane. The
     /// key and context files are removed when the session stops, or at once when the pane
     /// cannot be taken over. Takes the host, the pane name, the stored record and the limits.
     /// Returns the idle session, or a plain code.
@@ -286,8 +287,9 @@ impl TerminalSession {
         }
         let unkept = host.unkept(&agent);
         let on_menu = matches!(record.source, RecordSource::CodexRollouts { .. })
-            && codex_folder::read_screen(&host.screen(&agent).map_err(host_failure)?)
-                == Screen::Menu;
+            && host
+                .screen(&agent)
+                .is_ok_and(|screen| codex_folder::read_screen(&screen) == Screen::Menu);
         Ok(Self {
             host,
             agent,
