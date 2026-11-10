@@ -102,10 +102,10 @@ async function openTab(page, { site, project, opened, evidence }) {
     assert.ok(Date.now() < deadline, "the IDE build never became Ready");
   }
   await me.click("IDE", "[role=tab]");
-  for (const deadline = Date.now() + WORKBENCH_MS; opened.length === known; await pause(POLL_MS * 10)) {
+  for (const deadline = Date.now() + BUILD_MS; opened.length === known; await pause(POLL_MS * 10)) {
     const text = await me.seen();
     assert.ok(!IDE_FAILED.test(text), `the IDE tab reports a failure: ${text.slice(0, 600)}`);
-    assert.ok(Date.now() < deadline, "the IDE never opened");
+    assert.ok(Date.now() < deadline, `the IDE never opened: ${text.slice(0, 600)}`);
   }
 }
 
