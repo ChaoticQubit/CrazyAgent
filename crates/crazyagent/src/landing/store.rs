@@ -241,6 +241,7 @@ impl Record {
             waiting: self.waiting && self.state == ChangeState::Updating,
             outside: self.outside,
             number,
+            regenerated: Vec::new(),
         }
     }
 

@@ -10,7 +10,7 @@ let root = null;
 
 const setOf = (id, label, extra) => ({
   id, agent: { kind: "sub", id, label }, state: "pending", base: "a".repeat(40), head: "b".repeat(40), files: 1, added: 4, removed: 0,
-  last_outcome: "succeeded", checked: false, created_ms: 1, updated_ms: 1, restorable_until_ms: null, conflicts: [], message: "", waiting: false, outside: false, ...extra,
+  last_outcome: "succeeded", checked: false, created_ms: 1, updated_ms: 1, restorable_until_ms: null, conflicts: [], regenerated: [], message: "", waiting: false, outside: false, ...extra,
 });
 
 const SETS = [

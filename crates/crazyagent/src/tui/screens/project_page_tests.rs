@@ -4995,6 +4995,7 @@ fn with_the_move_banner_showing_accept_waits_for_the_moved_diffs_last_line_paint
         message: "Add lines".into(),
         waiting: false,
         outside: false,
+        regenerated: Vec::new(),
         number: None,
     };
     let page = |text: &str, next: Option<u16>| {

@@ -11012,6 +11012,36 @@ fn cargo_workspace(case: &mut Case) {
     case.start();
 }
 
+/// The notes the engine left in the owner's team conversation, oldest first, read every
+/// 50 ms until one is there or `within` passes. Inputs: the case and the time. Output: the
+/// texts.
+fn owner_notes_within(case: &Case, within: Duration) -> Vec<String> {
+    let started = Instant::now();
+    loop {
+        let notes: Vec<String> = case
+            .db
+            .prepare("SELECT text FROM team_messages WHERE project=?1 AND state='note' ORDER BY id")
+            .unwrap()
+            .query_map([case.workspace.project.as_str()], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        if !notes.is_empty() || started.elapsed() >= within {
+            return notes;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// What the owner reads once a set they heard waits in Changes went back to its agent.
+/// Input: the set. Output: the note.
+fn went_back_note(set: &ChangeSetView) -> String {
+    format!(
+        "The edits from {} went back to it to take in newer work, so they are not waiting for you in Changes yet.",
+        set.agent.label
+    )
+}
+
 /// The agent adds a dev-dependency of `app` and the owner then adds a dependency of `app` on
 /// crate `a` on main, each with its own Cargo.lock, so the lockfile alone clashes. Inputs:
 /// the case, the agent's manifest line and the name it locks. Output: the agent's change
@@ -11187,6 +11217,7 @@ fn a_clash_beyond_the_named_lockfiles_regenerates_nothing() {
 
 const TURN_END_WITHIN: Duration = Duration::from_secs(20);
 const REGENERATED_WITHIN: Duration = Duration::from_secs(120);
+const OWNER_NOTE_WITHIN: Duration = Duration::from_secs(5);
 
 /// Ends the agent's turn the way a team turn does, on its own thread and store connection,
 /// and waits at most `within` for it to return. Inputs: the case, the turn id and the time.
@@ -11415,6 +11446,11 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
         "CrazyAgent <engine@crazyagent.invalid>\nRegenerate Cargo.lock on main\n"
     );
     assert_eq!(
+        set.regenerated,
+        vec!["Cargo.lock".to_owned()],
+        "Changes can say the project's tools wrote this lockfile"
+    );
+    assert_eq!(
         case.owner(&["rev-parse", &format!("{}^2", set.head)])
             .trim(),
         tip
@@ -11462,6 +11498,24 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
     );
 }
 
+/// Once a later turn moves a regenerated set's head, Changes no longer says the project's
+/// tools wrote its lockfile, since the agent may have rewritten it (T8-R1-WORDING).
+#[test]
+fn a_later_turn_on_a_regenerated_set_drops_the_words_about_the_tools() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set)
+    });
+    assert_eq!(set.regenerated, vec!["Cargo.lock".to_owned()]);
+    case.edit("app/src/lib.rs", "pub fn later() {}\n");
+    turn_end_within(&case, "turn-2", TURN_END_WITHIN);
+    let later = set_within(&case, &id, TURN_END_WITHIN, |later| later.head != set.head);
+    assert_ne!(later.head, set.head);
+    assert_eq!(later.regenerated, Vec::<String>::new());
+}
+
 /// When cargo cannot rewrite the clashing lockfile, here offline on a crate it never
 /// fetched, the turn end falls back to Task 7's update: the set goes back to its agent with
 /// main merged into its worktree, no regeneration note goes out and nothing temporary is
@@ -11490,6 +11544,11 @@ fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_e
             .iter()
             .all(|note| !note.contains("regenerated")),
         "no regeneration note goes out"
+    );
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set)],
+        "the owner, told the edits wait in Changes, hears they went back"
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
@@ -11617,6 +11676,10 @@ fn a_tool_past_the_regeneration_time_falls_back_to_the_agent_update() {
         set.state,
         ChangeState::Updating,
         "past its time the tool is stopped and the agent fixes the clash"
+    );
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set)]
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
