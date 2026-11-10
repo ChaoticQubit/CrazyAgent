@@ -66,6 +66,7 @@ async fn native_auth_custodian_entry_run_retires_real_committed_work_and_preserv
         assert!(after.fences.is_empty());
         let probe = case.probe();
         rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::Unlock).unwrap();
         drop(probe);
         let replay = case
             .client(OwnerClientKind::Tui)

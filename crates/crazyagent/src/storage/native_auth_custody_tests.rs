@@ -628,6 +628,7 @@ fn native_auth_custody_dropping_dispatch_never_retires_a_free_physical_lock() {
     drop(dispatch);
     let probe = case.probe();
     flock(&probe, FlockOperation::NonBlockingLockExclusive).unwrap();
+    flock(&probe, FlockOperation::Unlock).unwrap();
     drop(probe);
     assert_eq!(case.snapshot(), before);
     let mut alias = case.command("drop-cannot-authorize-alias");
