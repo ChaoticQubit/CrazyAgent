@@ -517,6 +517,7 @@ struct Worker {
     restarting: bool,
     warm: bool,
     worked: bool,
+    ended_well: bool,
     managed: bool,
     tools: bool,
     team_tool: bool,
@@ -5941,6 +5942,7 @@ impl TeamRuntime {
                 restarting: false,
                 warm: false,
                 worked: false,
+                ended_well: false,
                 managed,
                 tools: seat.tools,
                 team_tool,
@@ -7611,6 +7613,7 @@ impl TeamRuntime {
                 }
                 worker.idle_since = Instant::now();
                 worker.worked = true;
+                worker.ended_well = end == TurnEnd::Success;
                 let connection = worker.connection.clone();
                 let project = worker.project.clone();
                 let held = worker.held;
@@ -7669,6 +7672,7 @@ impl TeamRuntime {
             Report::Turn { end: None, .. } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 worker.turn_started = Some(now_ms());
+                worker.ended_well = false;
                 if let Some(hosted) = &worker.hosted {
                     hosted.set_busy(true);
                 }
@@ -7692,6 +7696,7 @@ impl TeamRuntime {
                 let started = worker.turn_started.take();
                 worker.idle_since = Instant::now();
                 worker.worked = true;
+                worker.ended_well = end == TurnEnd::Success;
                 if let Some(hosted) = &worker.hosted {
                     hosted.text(&text);
                     hosted.set_busy(false);
@@ -7742,6 +7747,7 @@ impl TeamRuntime {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 assert!(worker.kept_session);
                 worker.own_turn = Some(now_ms());
+                worker.ended_well = false;
                 worker.idle_since = Instant::now();
                 let idle = worker.busy.is_none();
                 if let Some(hosted) = worker.hosted.as_ref().filter(|_| idle) {
@@ -7761,6 +7767,7 @@ impl TeamRuntime {
                 worker.own_rules = None;
                 worker.idle_since = Instant::now();
                 worker.worked = true;
+                worker.ended_well = end == TurnEnd::Success;
                 let idle = worker.busy.is_none();
                 if let Some(hosted) = worker.hosted.as_ref().filter(|_| idle) {
                     hosted.text(&text);
@@ -7844,7 +7851,10 @@ impl TeamRuntime {
                         TurnEnd::Closed,
                     )?;
                 }
-                let status = if problem.is_some() && !worker.stopping {
+                let outlived = worker.busy.is_none()
+                    && worker.ended_well
+                    && problem.as_deref().is_some_and(only_left_running);
+                let status = if problem.is_some() && !worker.stopping && !outlived {
                     AgentStatus::Failed
                 } else {
                     AgentStatus::Stopped
@@ -8874,7 +8884,18 @@ fn live_serve(
         drop(held);
         return None;
     }
-    settle_stop(session.stop(), held).or(problem)
+    ended_with(settle_stop(session.stop(), held), problem)
+}
+
+/// What a harness's end reports: what its stop left to say and the problem that ended it,
+/// both when there are both. The problem comes last because the agent's status reads the
+/// last code, so a command left running never hides that the process closed.
+/// Inputs: the stop's report and the ending problem. Output: the report, if either.
+fn ended_with(stopped: Option<String>, problem: Option<String>) -> Option<String> {
+    match (stopped, problem) {
+        (Some(stopped), Some(problem)) => Some(format!("{stopped} {problem}")),
+        (stopped, problem) => stopped.or(problem),
+    }
 }
 
 /// The account's credential copy and lease an agent's harness holds while it runs.
@@ -9376,7 +9397,7 @@ fn serve(
         let _ = session.interrupt();
         session.leave();
     } else {
-        return settle_stop(session.stop(), held).or(problem);
+        return ended_with(settle_stop(session.stop(), held), problem);
     }
     drop(held);
     problem
@@ -9490,9 +9511,10 @@ fn per_turn(
                 end,
                 TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
             );
-        let closed = stopped.or_else(|| {
-            (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()))
-        });
+        let closed = ended_with(
+            stopped,
+            (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref())),
+        );
         if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
             return closed;
         }
@@ -9878,6 +9900,16 @@ fn with_code(sentence: &str, cause: Option<&str>) -> String {
         }
         None => sentence.to_owned(),
     }
+}
+
+/// Whether a closing problem says only that commands an agent started were still running
+/// when it ended, which says nothing against its finished work. Input: the problem, worded
+/// by [`with_code`]. Output: true when its code is `LEFT` or `SANDBOX_LEFT`.
+fn only_left_running(problem: &str) -> bool {
+    use crate::harnesses::leftovers::{LEFT, SANDBOX_LEFT};
+    [LEFT, SANDBOX_LEFT]
+        .iter()
+        .any(|code| problem.ends_with(&format!(" ({code})")))
 }
 
 /// Ends an owner line with one full stop, leaving a line that already ends with a sentence

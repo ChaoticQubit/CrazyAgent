@@ -13044,6 +13044,7 @@ fn between_turns(
         restarting: false,
         warm: false,
         worked: true,
+        ended_well: false,
         managed,
         tools: true,
         team_tool: true,
@@ -13795,6 +13796,182 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
         )]
     );
     team.workers.clear();
+}
+
+/// An agent whose last turn ended well is stopped, not failed, when a command it started
+/// outlives it, and the reason stays for the owner (HB-S5-D). A failed or unfinished turn,
+/// a closed process and a listing that failed still fail it.
+#[test]
+fn an_agent_whose_work_ended_well_is_not_failed_for_a_command_that_outlived_it() {
+    use crate::harnesses::leftovers::{LEFT, SANDBOX_LEFT, UNCHECKED};
+    type Ended = fn(TurnEnd) -> Report;
+    let finished: Ended = |end| Report::Finished {
+        text: String::new(),
+        end,
+        cause: None,
+    };
+    let turn: Ended = |end| Report::Turn {
+        end: Some(end),
+        text: String::new(),
+    };
+    let own: Ended = |end| Report::Own {
+        end: Some(end),
+        text: String::new(),
+    };
+    let well = TurnEnd::Success;
+    let badly = TurnEnd::Failed;
+    let rows: [(Ended, &[TurnEnd], bool, &str, AgentStatus); 12] = [
+        (finished, &[well], false, LEFT, AgentStatus::Stopped),
+        (turn, &[well], false, LEFT, AgentStatus::Stopped),
+        (own, &[well], false, LEFT, AgentStatus::Stopped),
+        (finished, &[well], false, SANDBOX_LEFT, AgentStatus::Stopped),
+        (finished, &[well], false, UNCHECKED, AgentStatus::Failed),
+        (
+            finished,
+            &[well],
+            false,
+            PROCESS_CLOSED,
+            AgentStatus::Failed,
+        ),
+        (finished, &[badly], false, LEFT, AgentStatus::Failed),
+        (finished, &[well, badly], false, LEFT, AgentStatus::Failed),
+        (turn, &[well, badly], false, LEFT, AgentStatus::Failed),
+        (own, &[well, badly], false, LEFT, AgentStatus::Failed),
+        (finished, &[well], true, LEFT, AgentStatus::Failed),
+        (finished, &[], false, LEFT, AgentStatus::Failed),
+    ];
+    for (at, (ended, ends, busy, code, expected)) in rows.into_iter().enumerate() {
+        let fixture = Fixture::new(1);
+        let mut team = fixture.runtime();
+        let project = ProjectId::new(PROJECT).unwrap();
+        let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+        team.workers
+            .insert(agent, between_turns(&project, AgentRole::Sub, true, true));
+        for end in ends {
+            team.apply(agent, ended(*end)).unwrap();
+        }
+        if busy {
+            fixture
+                .connection
+                .execute(
+                    "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms) VALUES (?1,'master','codex',0,'Go on.','running',?2,1)",
+                    params![PROJECT, agent],
+                )
+                .unwrap();
+            let task = fixture.connection.last_insert_rowid();
+            team.workers.get_mut(&agent).unwrap().busy = Some(Busy::Task(task));
+        }
+        let problem = with_code("Still running: 7 make", Some(code));
+        team.apply(
+            agent,
+            Report::Ended {
+                problem: Some(problem.clone()),
+            },
+        )
+        .unwrap();
+        let shown: Option<String> = fixture
+            .connection
+            .query_row(
+                "SELECT error FROM team_agents WHERE id=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fixture.agent_status(agent).0, expected, "row {at}");
+        assert_eq!(shown, Some(problem), "row {at}");
+    }
+}
+
+/// A turn that starts after a good one and never ends leaves no good end to stand on, so a
+/// command outliving it still fails the agent (team-8 r1 M1).
+#[test]
+fn an_unfinished_turn_after_a_good_one_still_fails_the_agent_a_command_outlived() {
+    use crate::harnesses::leftovers::LEFT;
+    let own: fn() -> Report = || Report::Own {
+        end: None,
+        text: String::new(),
+    };
+    let turn: fn() -> Report = || Report::Turn {
+        end: None,
+        text: String::new(),
+    };
+    for (at, started) in [own, turn].into_iter().enumerate() {
+        let fixture = Fixture::new(1);
+        let mut team = fixture.runtime();
+        let project = ProjectId::new(PROJECT).unwrap();
+        let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+        team.workers
+            .insert(agent, between_turns(&project, AgentRole::Sub, true, true));
+        team.apply(
+            agent,
+            Report::Finished {
+                text: String::new(),
+                end: TurnEnd::Success,
+                cause: None,
+            },
+        )
+        .unwrap();
+        team.apply(agent, started()).unwrap();
+        let problem = with_code("Still running: 7 make", Some(LEFT));
+        team.apply(
+            agent,
+            Report::Ended {
+                problem: Some(problem),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.agent_status(agent).0,
+            AgentStatus::Failed,
+            "row {at}"
+        );
+    }
+}
+
+/// A harness that closed and left a command running reports both, the close last, so its
+/// agent fails for the close and the owner sees both (team-8 r1 M2). A leftover alone after
+/// good work stops the agent, a close alone fails it, and a clean end reports nothing.
+#[test]
+fn a_close_with_a_command_left_fails_the_agent_and_reports_both() {
+    use crate::harnesses::leftovers::LEFT;
+    let left = with_code("Still running: 7 make", Some(LEFT));
+    let closed = with_code(PROCESS_CLOSED, Some("session_gone"));
+    let both = format!("{left} {closed}");
+    let rows = [
+        (Some(&left), Some(&closed), AgentStatus::Failed, Some(&both)),
+        (Some(&left), None, AgentStatus::Stopped, Some(&left)),
+        (None, Some(&closed), AgentStatus::Failed, Some(&closed)),
+        (None, None, AgentStatus::Stopped, None),
+    ];
+    for (at, (stopped, problem, expected, reported)) in rows.into_iter().enumerate() {
+        let fixture = Fixture::new(1);
+        let mut team = fixture.runtime();
+        let project = ProjectId::new(PROJECT).unwrap();
+        let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+        team.workers
+            .insert(agent, between_turns(&project, AgentRole::Sub, true, true));
+        team.apply(
+            agent,
+            Report::Finished {
+                text: String::new(),
+                end: TurnEnd::Success,
+                cause: None,
+            },
+        )
+        .unwrap();
+        let problem = ended_with(stopped.cloned(), problem.cloned());
+        team.apply(agent, Report::Ended { problem }).unwrap();
+        let shown: Option<String> = fixture
+            .connection
+            .query_row(
+                "SELECT error FROM team_agents WHERE id=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fixture.agent_status(agent).0, expected, "row {at}");
+        assert_eq!(shown.as_ref(), reported, "row {at}");
+    }
 }
 
 /// A wake task whose message was read before the task ran, as when a restart runs it a
