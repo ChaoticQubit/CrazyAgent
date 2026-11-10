@@ -799,14 +799,11 @@ fn work_rows_keep_their_own_share_and_never_push_out_other_events() {
     assert_eq!(count(&format!("{work} AND at_ms = 8003")), 1);
 }
 
-/// A team that logs fast cannot crowd the engine's and the owner's events out of a listing
-/// (T11-R2-L1): agents' phases, test runs and work verbs take at most a quarter of it, so
-/// the owner's Accept under 1,000 newer agent rows still lists, at every limit, and the
-/// read says older rows were left out.
-#[test]
-fn agent_rows_take_at_most_a_quarter_of_a_listing() {
-    let (_folder, db) = db();
-    note_created(&db, &project(), "Harbor Notes", 0);
+/// Writes a project's Created row at 0 and the owner's Accept at 1, then `rows` agent rows
+/// at 2 onward, phases, test runs and work starts in turn, each with `text` after its
+/// number. Takes the database, the row count and the text. Returns nothing.
+fn under_agent_rows(db: &Connection, rows: i64, text: &str) {
+    note_created(db, &project(), "Harbor Notes", 0);
     let accepted = NewActivity {
         kind: ActivityKind::Accepted,
         actor: OWNER_ACTOR,
@@ -815,43 +812,83 @@ fn agent_rows_take_at_most_a_quarter_of_a_listing() {
         text: "Accepted the changes of Ada (@api): Add the login form",
         change_set: None,
     };
-    record(&db, &project(), &accepted, 1).unwrap();
+    record(db, &project(), &accepted, 1).unwrap();
     db.execute(
-        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?2)
          INSERT INTO project_activity(project,at_ms,kind,actor,text)
          SELECT ?1, 1 + i, CASE i % 3 WHEN 0 THEN 'phase' WHEN 1 THEN 'test' ELSE 'work_started' END,
-                'Ada (@api)', 'Row ' || i FROM n",
-        [PROJECT],
+                'Ada (@api)', 'Row ' || i || ?3 FROM n",
+        params![PROJECT, rows, text],
     )
     .unwrap();
+}
+
+/// Counts the phases, test runs and work verb rows agents set the pace of in one listing.
+/// Takes the listed items. Returns the count.
+fn agent_rows(items: &[ActivityItem]) -> usize {
+    items
+        .iter()
+        .filter(|item| LOGGED_KINDS.contains(&item.kind) || WORK_KINDS.contains(&item.kind))
+        .count()
+}
+
+/// A team that logs fast cannot crowd the engine's and the owner's events out of a listing
+/// (T11-R2-L1), and its rows still fill the places those events leave (team-18 r1 L1): under
+/// 1,000 newer agent rows the owner's Accept and the Created row list at every limit, the
+/// agent rows take every other place the byte bound allows, and the read says more are left.
+#[test]
+fn agent_rows_fill_the_places_other_events_leave() {
+    let (_folder, db) = db();
+    under_agent_rows(&db, 1_000, "");
     for limit in [LIST_MAX, 200, 4] {
         let read = listed(&db, &project(), limit).unwrap();
         let kinds: Vec<ActivityKind> = read.items.iter().map(|item| item.kind).collect();
-        let agent_rows = kinds
-            .iter()
-            .filter(|kind| {
-                matches!(
-                    kind,
-                    ActivityKind::Phase
-                        | ActivityKind::Test
-                        | ActivityKind::WorkStarted
-                        | ActivityKind::WorkReviewReady
-                        | ActivityKind::WorkComplete
-                        | ActivityKind::WorkClosed
-                )
-            })
-            .count();
-        assert!(
-            agent_rows <= limit.div_ceil(4),
-            "limit {limit}: {agent_rows}"
-        );
-        assert!(
-            agent_rows > 0,
-            "limit {limit}: the newest agent rows still list"
-        );
         assert!(kinds.contains(&ActivityKind::Accepted), "limit {limit}");
         assert!(kinds.contains(&ActivityKind::Created), "limit {limit}");
         assert!(read.more, "limit {limit}: older agent rows were left out");
+        let agents = agent_rows(&read.items);
+        match limit {
+            LIST_MAX => assert!(agents > LIST_MAX.div_ceil(4), "limit {limit}: {agents}"),
+            _ => assert_eq!(agents, limit - 2, "limit {limit}"),
+        }
+    }
+}
+
+/// The byte bound never lets agent rows push the engine's and the owner's events out either
+/// (team-18 r1): under 1,000 newer agent rows of about 600 bytes each, the Accept and the
+/// Created row still list at the largest limit, where those rows fill the byte bound long
+/// before the place limit.
+#[test]
+fn long_agent_rows_never_push_other_events_out_by_bytes() {
+    let (_folder, db) = db();
+    under_agent_rows(&db, 1_000, &"x".repeat(590));
+    for limit in [LIST_MAX, 200] {
+        let read = listed(&db, &project(), limit).unwrap();
+        let kinds: Vec<ActivityKind> = read.items.iter().map(|item| item.kind).collect();
+        assert!(kinds.contains(&ActivityKind::Accepted), "limit {limit}");
+        assert!(kinds.contains(&ActivityKind::Created), "limit {limit}");
+        assert!(agent_rows(&read.items) > 0, "limit {limit}");
+        assert!(read.more, "limit {limit}");
+    }
+}
+
+/// A project with only agent rows lists as many of them as the limit asks (team-18 r1 L1):
+/// with no engine or owner event to keep a place for, the newest agent rows fill the read.
+#[test]
+fn a_project_with_only_agent_rows_lists_limit_rows() {
+    let (_folder, db) = db();
+    db.execute(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300)
+         INSERT INTO project_activity(project,at_ms,kind,actor,text)
+         SELECT ?1, i, 'phase', 'Ada (@api)', 'Phase ' || i FROM n",
+        [PROJECT],
+    )
+    .unwrap();
+    for limit in [200, 4] {
+        let read = listed(&db, &project(), limit).unwrap();
+        assert_eq!(read.items.len(), limit, "limit {limit}");
+        assert_eq!(read.items[0].at_ms, 300, "limit {limit}: newest first");
+        assert!(read.more, "limit {limit}");
     }
 }
 
