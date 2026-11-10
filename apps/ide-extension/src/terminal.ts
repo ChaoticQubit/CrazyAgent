@@ -1,12 +1,20 @@
 import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
-import { SandboxedPty } from "./pty.js";
+import { SandboxedPty, gitFirstOnPath } from "./pty.js";
 
 /** The id of the Sandboxed terminal profile `package.json` contributes. */
 export const PROFILE = "crazyagent.sandboxed";
 
 /** The title of the Sandboxed terminal profile, which the engine sets as the default. */
 export const TITLE = "Sandboxed";
+
+/**
+ * Makes `git` in the terminals the IDE server hosts the git the IDE's Source Control runs.
+ * Input: the extension context. Output: none.
+ */
+export function terminalGit(context: vscode.ExtensionContext): void {
+  gitFirstOnPath(context.environmentVariableCollection, vscode.workspace.getConfiguration("git").get("path"));
+}
 
 /**
  * Offers the Sandboxed terminal profile: every terminal opened from it is the owner's

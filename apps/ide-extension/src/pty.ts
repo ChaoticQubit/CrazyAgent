@@ -1,4 +1,5 @@
 import type { Socket } from "node:net";
+import { dirname, isAbsolute } from "node:path";
 import { FrameReader, encodeFrame, type Disposable } from "./engine.js";
 
 /** Smallest terminal side, in cells, the engine accepts. */
@@ -35,6 +36,26 @@ type Pushed =
   | { kind: "rejected"; code: string }
   | { kind: "output"; bytes: number[] }
   | { kind: "closed"; reason: string };
+
+/** The part of VS Code's environment variable collection that puts a folder first on PATH. */
+export interface PathPrepender {
+  prepend(variable: string, value: string): void;
+}
+
+/**
+ * Puts the folder of the engine's `git.path` shim first on PATH in the terminals the IDE
+ * server hosts, so `git` there runs the real git the engine resolved and not macOS's
+ * `/usr/bin/git`, whose cache write the IDE's sandbox refuses on every call. VS Code applies a
+ * PATH prepend again after a login shell's profile, which would otherwise put `/usr/bin` first.
+ * Inputs: the collection and the `git.path` setting. Output: none; a value that is not an
+ * absolute path, or a folder PATH cannot hold, changes nothing.
+ */
+export function gitFirstOnPath(collection: PathPrepender, gitPath: unknown): void {
+  if (typeof gitPath !== "string" || !isAbsolute(gitPath)) return;
+  const folder = dirname(gitPath);
+  if (folder.includes(":")) return;
+  collection.prepend("PATH", `${folder}:`);
+}
 
 /** An event source with VS Code's `Event` shape: subscribe a listener, get a disposable. */
 class Signal<T> {

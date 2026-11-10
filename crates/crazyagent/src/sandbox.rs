@@ -773,6 +773,23 @@ pub struct ProjectSandbox {
     setup: Option<TeammatesSetup>,
 }
 
+/// The Seatbelt rule giving back a project's `.git/index` and its lock, placed after the
+/// denies since the last match wins: all Source Control's `git add` and `git commit` need
+/// beyond the project folder. Only the IDE server's profile holds it: a process that writes
+/// the index can write outside the project through the owner's next `git restore .`, so no
+/// agent and no terminal the engine hosts gets it. Input: the project folder. Output: the
+/// rule.
+pub(crate) fn git_index_allow(root: &Path) -> String {
+    let index = root.join(".git").join("index");
+    assert!(index.is_absolute());
+    let rule = format!(
+        "(allow file-write*\n  (literal \"{0}\")\n  (literal \"{0}.lock\"))\n",
+        index.display()
+    );
+    assert!(rule.starts_with("(allow file-write*"));
+    rule
+}
+
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
 /// native teammates' linked worktrees (OP-9b): the teammates' folder inside the lead's
 /// worktree and the project repository's worktree records.

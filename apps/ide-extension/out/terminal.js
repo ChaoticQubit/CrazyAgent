@@ -34,11 +34,15 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TITLE = exports.PROFILE = void 0;
+exports.terminalGit = terminalGit;
 exports.sandboxedTerminal = sandboxedTerminal;
 const vscode = __importStar(require("vscode"));
 const pty_js_1 = require("./pty.js");
 exports.PROFILE = "crazyagent.sandboxed";
 exports.TITLE = "Sandboxed";
+function terminalGit(context) {
+    (0, pty_js_1.gitFirstOnPath)(context.environmentVariableCollection, vscode.workspace.getConfiguration("git").get("path"));
+}
 function sandboxedTerminal(context, engine) {
     context.subscriptions.push(vscode.window.registerTerminalProfileProvider(exports.PROFILE, {
         provideTerminalProfile: () => new vscode.TerminalProfile({

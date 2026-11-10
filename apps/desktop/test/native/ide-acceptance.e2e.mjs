@@ -590,37 +590,39 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(await page.evaluate(`document.querySelectorAll(".terminal-initial-hint").length`), 0, "the terminal shows no AI hint");
       });
 
-      await t.test("git answers in the Sandboxed terminal, and with the owner's name in the IDE shell", async () => {
-        const centre = (found) => `(() => {
-          const label = ${found};
-          if (!label) return null;
-          const rect = label.getBoundingClientRect();
-          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-        })()`;
-        const menuOpener = centre(`document.querySelector(".part.panel .monaco-dropdown-with-primary .dropdown-action-container .action-label")`);
-        const menuShell = centre(`[document, ...[...document.querySelectorAll(".shadow-root-host")].map((host) => host.shadowRoot).filter(Boolean)]
-          .flatMap((root) => [...root.querySelectorAll(".monaco-menu .action-label")]).find((item) => item.textContent.trim().startsWith("IDE shell"))`);
-        const answers = async (file, owned) => {
-          await ide.until("the terminal has the keyboard", `document.activeElement?.classList.contains("xterm-helper-textarea") === true`);
-          await keys.text(`cd ${repo} && { git --version; git config user.name; git config user.email; echo "HOME=$HOME"; echo finished; } > ${file} 2>&1`);
-          await keys.key("Enter");
-          const path = join(repo, file);
-          for (const deadline = Date.now() + STEP_MS; !existsSync(path) || !readFileSync(path, "utf8").includes("finished"); await pause(POLL_MS)) {
-            if (Date.now() > deadline) {
-              await me.capture(`no-git-answer-${file}`);
-              assert.fail(`no git answer in ${file}`);
-            }
+      const centre = (found) => `(() => {
+        const label = ${found};
+        if (!label) return null;
+        const rect = label.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      })()`;
+      const menuOpener = centre(`document.querySelector(".part.panel .monaco-dropdown-with-primary .dropdown-action-container .action-label")`);
+      const menuShell = centre(`[document, ...[...document.querySelectorAll(".shadow-root-host")].map((host) => host.shadowRoot).filter(Boolean)]
+        .flatMap((root) => [...root.querySelectorAll(".monaco-menu .action-label")]).find((item) => item.textContent.trim().startsWith("IDE shell"))`);
+      const ran = async (file, commands) => {
+        await ide.until("the terminal has the keyboard", `document.activeElement?.classList.contains("xterm-helper-textarea") === true`);
+        await keys.text(`cd ${repo} && { ${commands}; echo finished; } > ${file} 2>&1`);
+        await keys.key("Enter");
+        const path = join(repo, file);
+        for (const deadline = Date.now() + STEP_MS; !existsSync(path) || !readFileSync(path, "utf8").includes("finished"); await pause(POLL_MS)) {
+          if (Date.now() > deadline) {
+            await me.capture(`no-git-answer-${file}`);
+            assert.fail(`no git answer in ${file}`);
           }
-          const said = readFileSync(path, "utf8");
-          const lines = said.split("\n");
-          assert.ok(lines.some((line) => line.startsWith("git version ")), `${file}: ${said}`);
-          assert.equal(lines.some((line) => line.startsWith("HOME=") && line.includes("/ide-shell/")), !owned, `${file}: ${said}`);
-          if (owned) {
-            assert.ok(lines.includes(OWNER_NAME), `${file}: ${said}`);
-            assert.ok(lines.includes(OWNER_EMAIL), `${file}: ${said}`);
-          }
-          assert.doesNotMatch(said, /fatal|unable to access/, `${file}: ${said}`);
-        };
+        }
+        return readFileSync(path, "utf8");
+      };
+      const answers = async (file, sandboxed) => {
+        const said = await ran(file, `command -v git; git --version; git config user.name; git config user.email; echo "HOME=$HOME"`);
+        const lines = said.split("\n");
+        assert.ok(lines.some((line) => line.startsWith("git version ")), `${file}: ${said}`);
+        assert.equal(lines.some((line) => line.startsWith("HOME=") && line.includes("/ide-shell/")), sandboxed, `${file}: ${said}`);
+        assert.equal(lines.includes(OWNER_NAME), !sandboxed, `${file}: ${said}`);
+        assert.equal(lines.includes(OWNER_EMAIL), !sandboxed, `${file}: ${said}`);
+        assert.doesNotMatch(said, /fatal|unable to access/, `${file}: ${said}`);
+      };
+
+      await t.test("the Sandboxed terminal reads git but cannot stage or commit", async () => {
         await keys.key("Escape");
         await ide.run("Terminal: Create New Terminal");
         await pause(SETTLE_MS);
@@ -630,7 +632,14 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await ide.until("the Sandboxed terminal in the panel", `document.querySelectorAll(".part.panel .xterm").length > 0`);
         await me.capture("sandboxed-terminal");
         assert.equal(await page.evaluate(`document.querySelectorAll(".terminal-initial-hint").length`), 0, "the open terminal shows no AI hint");
-        await answers("sandboxed-terminal-git.txt", false);
+        await answers("sandboxed-terminal-git.txt", true);
+        const refused = await ran("sandboxed-terminal-refused-git.txt", `echo staged > terminal-refused.txt; git add terminal-refused.txt; echo "add=$?"; git -c user.name=o -c user.email=o@example.invalid commit -q -m no; echo "commit=$?"; git status --porcelain`);
+        assert.match(refused, /^add=[1-9]/m, refused);
+        assert.match(refused, /^commit=[1-9]/m, refused);
+        assert.match(refused, /^\?\? terminal-refused\.txt$/m, refused);
+      });
+
+      await t.test("git in the IDE shell knows the owner and prints nothing on stderr", async () => {
         await ide.until("the terminal's profile menu button", menuOpener);
         await keys.click(await page.evaluate(menuOpener));
         await ide.until("the IDE shell in the profile menu", menuShell);
@@ -639,7 +648,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await ide.until("the IDE shell in the panel", `document.querySelector(".part.panel").innerText.includes("IDE shell")`);
         await pause(SETTLE_MS);
         await me.capture("ide-shell");
-        await answers("ide-shell-git.txt", true);
+        await answers("ide-shell-git.txt", false);
+        const stderr = await ran("ide-shell-stderr-git.txt", "git status --porcelain 2>&1 >/dev/null");
+        assert.equal(stderr, "finished\n", stderr);
       });
 
       await t.test("nothing the workbench asked for left the machine, and the agent host never started", async () => {
