@@ -2127,6 +2127,8 @@ pub(super) fn record(
             undone: None,
             landed_on: None,
             restored: false,
+            regenerated_head: None,
+            regenerated_files: Vec::new(),
             files: 0,
             added: 0,
             removed: 0,

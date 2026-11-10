@@ -35,6 +35,7 @@ fn set(digit: char, state: ChangeState) -> ChangeSetView {
         message: "Add a file".into(),
         waiting: false,
         outside: false,
+        regenerated: Vec::new(),
         number: None,
     }
 }
@@ -103,6 +104,28 @@ fn a_pending_change_set_shows_its_agent_size_and_that_crazyagent_did_not_check_i
     let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
     assert!(help.contains(&("a", "Accept")) && help.contains(&("d", "Discard")));
     assert!(!help.iter().any(|(key, _)| *key == "u" || *key == "r"));
+}
+
+/// T8-R1-WORDING: a set whose lockfile the project's tools rebuilt says so while it waits
+/// for review, and a set that holds none, or was already reviewed, does not.
+#[test]
+fn a_rebuilt_lockfile_is_named_as_the_tools_work_while_its_set_waits_for_review() {
+    const NOTE: &str = "Rebuilt with this project's own tools to fit your branch: Cargo.lock. They ran on the agent's work, so review the result like the agent's own edits.";
+    let words = |set: ChangeSetView| {
+        text(&listed(vec![set]))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut rebuilt = set('1', ChangeState::Pending);
+    rebuilt.regenerated = vec!["Cargo.lock".to_owned()];
+    let shown = words(rebuilt.clone());
+    assert!(shown.contains(NOTE), "{shown}");
+    let shown = words(set('1', ChangeState::Pending));
+    assert!(!shown.contains("Rebuilt with"), "{shown}");
+    rebuilt.state = ChangeState::Conflict;
+    let shown = words(rebuilt);
+    assert!(!shown.contains("Rebuilt with"), "{shown}");
 }
 
 /// AL17: the Changes list shows a numbered set's number before its agent and the details

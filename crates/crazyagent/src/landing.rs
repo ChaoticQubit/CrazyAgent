@@ -273,6 +273,8 @@ pub struct ChangeSetView {
     pub outside: bool,
     #[serde(default)]
     pub number: Option<u64>,
+    #[serde(default)]
+    pub regenerated: Vec<String>,
 }
 
 /// How a file changed between a change set's base and head.
