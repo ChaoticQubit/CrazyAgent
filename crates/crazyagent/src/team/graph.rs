@@ -213,6 +213,8 @@ pub struct TeamGraph {
     pub overlaps: Vec<OverlapEdge>,
     #[serde(default)]
     pub relations: Vec<RelationEdge>,
+    #[serde(default = "super::live_terminal_default")]
+    pub master_live_terminal: bool,
 }
 
 /// What the graph reads beside the team status: each sub-agent's branch, the project's
@@ -686,6 +688,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         messages,
         overlaps,
         relations,
+        master_live_terminal: status.master_live_terminal,
     }
 }
 
