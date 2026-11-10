@@ -9722,14 +9722,38 @@ enum UnmanagedEnd {
     Retry,
 }
 
-/// Runs one native teammate's end on its thread and sends what it found. Takes the agent,
+/// Runs one native teammate's end on its thread and sends what it found, also when the end
+/// panics: a guard then sends it as not proven, so its row is still marked, with the
+/// uncertain cleanup code, and no agent stays handed over (S4B-B1-L1 r1). Takes the agent,
 /// the channel and the end. Returns nothing.
 fn end_reported(
     id: i64,
     sender: Sender<PaneEnd>,
     end: impl FnOnce() -> Result<bool, crate::terminal::HostError>,
 ) {
-    let _ = sender.send((id, end()));
+    let mut guard = EndGuard {
+        id,
+        sender: Some(sender),
+    };
+    let outcome = end();
+    if let Some(sender) = guard.sender.take() {
+        let _ = sender.send((id, outcome));
+    }
+}
+
+/// Sends a native teammate's end as not proven when its thread leaves before it sent a
+/// result, as on a panic.
+struct EndGuard {
+    id: i64,
+    sender: Option<Sender<PaneEnd>>,
+}
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send((self.id, Ok(false)));
+        }
+    }
 }
 const OWNER_STOPPED_TEAMMATE: &str = "The owner stopped this teammate.";
 const MASTER_STOPPED_TEAMMATE: &str = "The master stopped this teammate.";
