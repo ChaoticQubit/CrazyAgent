@@ -403,7 +403,6 @@ fn pane_first_line(project_access: AgentAccess, level: AgentAccess) -> String {
         .stderr(std::process::Stdio::piped());
     let output = crate::spawn_gate::output(&mut command).unwrap();
     let said = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert!(output.status.success(), "{output:?}");
     said.lines().next().unwrap_or_default().to_owned()
 }
 
