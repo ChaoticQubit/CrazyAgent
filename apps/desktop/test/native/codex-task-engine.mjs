@@ -41,7 +41,7 @@ while IFS= read -r line; do
   esac
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   /bin/sleep 0.3
-  printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9200,"cached_input_tokens":8000,"output_tokens":300}}}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9200,"cached_input_tokens":8000,"output_tokens":300,"total_tokens":9500}}}}\n' >> "$f"
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}\n' >> "$f"
   printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
 done
@@ -72,6 +72,12 @@ export function tileParts(tiles) {
   const split = /^(\S+) input, (\S+) cache write, (\S+) output$/.exec(tiles?.[0]?.[2] ?? "");
   if (!split || tiles[1]?.[0] !== "Re-read from cache" || tiles[2]?.[0] !== "Runs") return { parts: [], runs: 0 };
   return { parts: [tiles[0][1], split[1], split[2], split[3], tiles[1][1]], runs: Number(tiles[2][1]) };
+}
+
+/** Turns dollars off through the engine's own command, so a spec about token figures reads
+ * exactly those. Input: the bridge. Output: none. */
+export async function pricesOff(bridge) {
+  await value(bridge, "desktop_usage_set_money", { settings: { main_number: "dollars", prices: "off" } });
 }
 
 /** Makes the owner's project folder: a git repository on main with one commit. Input: the

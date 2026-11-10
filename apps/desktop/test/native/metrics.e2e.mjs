@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { POLL_MS } from "./e2e-harness.mjs";
-import { TASK, USAGE_MS, handOff, onEngine, tileParts, turnsOf } from "./codex-task-engine.mjs";
+import { TASK, USAGE_MS, handOff, onEngine, pricesOff, tileParts, turnsOf } from "./codex-task-engine.mjs";
 
 const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
 const AGENT_HEAD = ["Agent", "Tokens", "Input", "Cache write", "Output", "Cache read", "Turns", "graphify", "ctx_*", "Skills", "Share of tokens"];
@@ -43,7 +43,8 @@ function metricsShown(page) {
 }
 
 test("the project Metrics tab shows this project's tokens with the headline from Task 13, every part, its runs and tasks, and no project picker (OS-6, OS-7)", { timeout: 600000 }, async (t) => {
-  await onEngine(t, "ca-metrics-", async ({ project, runtime, me, page, site }) => {
+  await onEngine(t, "ca-metrics-", async ({ project, runtime, me, page, site, bridge }) => {
+    await pricesOff(bridge);
     assert.equal(await handOff(me, page, project, runtime), "done", "the Codex sub-agent finished the task");
     await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/metrics` });
     let shown = null;

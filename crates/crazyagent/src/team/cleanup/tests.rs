@@ -197,7 +197,15 @@ impl Case {
     /// Lands an agent's change set the way the owner's Accept does. Input: the set.
     fn accept(&self, id: &crate::landing::ChangeSetId) {
         let head = self.head_of(id);
-        let outcome = crate::landing::accept(&self.db, &self.home, id, &head, None).unwrap();
+        let outcome = crate::landing::accept(
+            &self.db,
+            &self.home,
+            id,
+            &head,
+            None,
+            crate::activity::AcceptPlace::Changes,
+        )
+        .unwrap();
         assert!(matches!(
             outcome,
             crate::landing::AcceptOutcome::Landed { .. }
@@ -308,7 +316,15 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
     write(&case.worktree(2).join("README"), b"one\ntwo\n");
     let landed = case.turn_end(2);
     let head = case.head_of(&landed);
-    let outcome = crate::landing::accept(&case.db, &case.home, &landed, &head, None).unwrap();
+    let outcome = crate::landing::accept(
+        &case.db,
+        &case.home,
+        &landed,
+        &head,
+        None,
+        crate::activity::AcceptPlace::Changes,
+    )
+    .unwrap();
     assert!(matches!(
         outcome,
         crate::landing::AcceptOutcome::Landed { .. }

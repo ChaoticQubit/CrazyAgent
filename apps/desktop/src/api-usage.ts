@@ -11,6 +11,7 @@ export interface Tokens {
 export interface UsageRow {
   key: string;
   tokens: Tokens;
+  cost_nanos: number;
   runs: number;
   last_ms: number;
   not_reported_by?: string | null;
@@ -48,7 +49,7 @@ export interface LimitWindow {
 
 export type WindowKind = "five_hour" | "weekly";
 
-export type UsageStep = "poll" | "team" | "runs";
+export type UsageStep = "poll" | "team" | "runs" | "recount";
 
 export interface StepHealth {
   step: UsageStep;
@@ -74,6 +75,30 @@ export interface AccountLimits {
   weekly_left_out_label: string | null;
 }
 
+export interface MoneySettings {
+  main_number: "dollars" | "tokens";
+  prices: "bundled" | "off";
+}
+
+export interface MoneyView {
+  settings: MoneySettings;
+  shown: "dollars" | "tokens";
+  as_of: string | null;
+  cost_nanos: number;
+  unpriced_tokens: number;
+}
+
+/** The one comparison the owner sees: totals as they stand and as they would be, and how many
+ * sessions each side covers. */
+export interface RecountStatus {
+  old: Tokens;
+  new: Tokens;
+  new_cost_nanos: number;
+  sessions_recounted: number;
+  sessions_kept_old: number;
+  homes_partial: number;
+}
+
 export interface UsageReport {
   since_ms: number | null;
   total: Tokens;
@@ -89,11 +114,15 @@ export interface UsageReport {
   not_reported_by?: string[];
   health?: StepHealth[];
   partial_homes: number;
+  money: MoneyView;
+  recount?: RecountStatus | null;
+  counting_notice?: string | null;
 }
 
 export interface MetricsBucket {
   start_ms: number;
   tokens: Tokens;
+  cost_nanos: number;
 }
 
 export interface MetricsRun {
@@ -106,11 +135,13 @@ export interface MetricsRun {
   status: string | null;
   last_ms: number;
   tokens: Tokens;
+  cost_nanos: number;
 }
 
 export interface MetricsGroup {
   key: string;
   tokens: Tokens;
+  cost_nanos: number;
   agents: number;
   runs: number;
   projects: string[];
@@ -127,7 +158,27 @@ export interface MetricsAgent {
   accounts: string[];
   more_accounts: number;
   tokens: Tokens;
+  cost_nanos: number;
   turns?: number | null;
+}
+
+export interface ModelRow {
+  model: string;
+  tokens: Tokens;
+  cost_nanos: number;
+}
+
+export interface ToolBucket {
+  start_ms: number;
+  tool: string;
+  count: number;
+}
+
+export interface ActivityRow {
+  activity: string;
+  turns: number;
+  edit_turns: number;
+  first_try_turns: number;
 }
 
 export interface Metrics {
@@ -145,10 +196,16 @@ export interface Metrics {
   agents: MetricsAgent[];
   accounts: MetricsGroup[];
   harnesses: MetricsGroup[];
+  models: ModelRow[];
+  tools: ToolBucket[];
+  tools_since_ms: number | null;
+  activity: ActivityRow[];
+  activity_since_ms: number | null;
 }
 
 const REFUSALS: Record<string, string> = {
   usage_limits_invalid: "That reset time isn't valid. Pick a time in the future.",
+  usage_recount_not_ready: "This recount was already decided. Reload the page.",
   usage_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the page before you try again.",
   usage_request_invalid: "The engine didn't accept this usage request. Reload the page and try again.",
   usage_unavailable: "Usage isn't available in this engine yet.",
@@ -216,8 +273,24 @@ export function refreshUsage(): Promise<Result<void>> {
   return call<void>("desktop_usage_refresh");
 }
 
+/** Stores the owner's main number and price source. Input: the settings. Output: done. */
+export function setMoney(settings: MoneySettings): Promise<Result<void>> {
+  return call<void>("desktop_usage_set_money", { settings });
+}
+
+/** Applies the owner's choice of the recount, once. Input: whether to use the new numbers.
+ * Output: done. */
+export function decideRecount(useNew: boolean): Promise<Result<void>> {
+  return call<void>("desktop_usage_decide_recount", { useNew });
+}
+
 /** Sets or clears the owner's manual reset time of one account's window. Inputs: the
  * account id, the window and the time in milliseconds, null to clear it. */
 export function setManualReset(account: string, windowKind: WindowKind, atMs: number | null): Promise<Result<void>> {
   return call<void>("desktop_usage_set_reset", { account, windowKind, atMs });
+}
+
+/** Reads the notices for the code the app adapts from others. Output: the text. */
+export function loadNotices(): Promise<Result<string>> {
+  return call<string>("desktop_usage_notices");
 }

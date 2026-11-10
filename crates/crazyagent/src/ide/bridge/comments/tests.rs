@@ -308,6 +308,7 @@ fn comment_on_a_closed_change_set_is_refused() {
         &set.id,
         &set.head,
         Some("Land it"),
+        crate::activity::AcceptPlace::Changes,
     )
     .unwrap();
     assert_eq!(

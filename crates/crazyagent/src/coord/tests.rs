@@ -2475,6 +2475,31 @@ fn presence_follows_the_last_activity_and_a_wait_keeps_its_start() {
     }
 }
 
+/// COUNT-13-L1: a tool call's count and its chart hour are one write, so a failure between
+/// them leaves neither, never a total the chart does not show.
+#[cfg(unix)]
+#[test]
+fn a_tool_call_whose_chart_hour_fails_leaves_no_count_either() {
+    let connection = db();
+    let lead = agent(&connection, "sub", None);
+    let sub = agent(&connection, "sub", Some(lead));
+    connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER no_hour BEFORE INSERT ON coord_tool_hours
+             BEGIN SELECT RAISE(ABORT, 'no_hour'); END;",
+        )
+        .unwrap();
+    assert!(record_tool(&connection, sub, "graphify", NOW).is_err());
+    let counted: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_tool_use WHERE agent=?1",
+            [sub],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(counted, 0);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_snapshot_counts_chosen_tools_orders_owner_questions_and_sums_unread_edges() {
@@ -3039,6 +3064,12 @@ fn removing_a_project_forgets_its_coordination_and_leaves_other_projects() {
                 params![ended, NOW],
             )
             .unwrap();
+        connection
+            .execute(
+                "INSERT INTO coord_tool_hours(hour_ms,agent,tool,count) VALUES (0,?1,'graphify',1)",
+                [ended],
+            )
+            .unwrap();
         settings::write(&connection, project, &CoordSettings::default()).unwrap();
         settings::set_mode(
             &connection,
@@ -3111,7 +3142,7 @@ fn removing_a_project_forgets_its_coordination_and_leaves_other_projects() {
             )
             .unwrap()
     };
-    for table in ["coord_activity", "coord_tool_use"] {
+    for table in ["coord_activity", "coord_tool_use", "coord_tool_hours"] {
         assert!(!kept(table, ended), "{table}");
         assert!(kept(table, live), "a live agent keeps its {table}");
         assert!(

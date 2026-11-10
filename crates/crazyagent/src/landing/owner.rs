@@ -867,6 +867,10 @@ fn finish(
     by: By<'_>,
 ) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
+    record.accepted_in = match by {
+        By::Owner(place) => place,
+        By::Named(_) | By::Master => None,
+    };
     record.landed_on = match &record.intent {
         Some(Intent::Land { reference, new, .. }) if new == landed => Some(reference.clone()),
         _ => None,
@@ -878,7 +882,7 @@ fn finish(
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
     flow::release_agent_claims(db, record);
-    if let By::Named(by) = by {
+    if let Some(by) = by.named() {
         let closed = if record.agent.kind == AgentKind::Master {
             close_covered(db, record, landed)
         } else {
@@ -886,7 +890,7 @@ fn finish(
         };
         super::note_accepted(db, record, by, &closed);
     }
-    let owner_pressed = by == By::Named(OWNER_ACTOR);
+    let owner_pressed = matches!(by, By::Owner(_));
     if let Err(error) = super::subagent::close_with_lead(db, record, owner_pressed) {
         eprintln!(
             "landing_settle_failed cause={}",
@@ -968,13 +972,27 @@ pub(super) fn tell_landed(db: &Connection, record: &Record, landed: &str) {
     }
 }
 
-/// Who lands a change set, as the project's activity names them: someone whose Accept or
-/// conflict is recorded as it happens, or the master landing its own set, whose land its
-/// caller records once with the sets it closed and whose conflict leaves the set as it was.
+/// Who lands a change set, as the project's activity names them: the owner, with where
+/// Accept was pressed when known, or someone else, each with the Accept or conflict recorded
+/// as it happens, or the master landing its own set, whose land its caller records once with
+/// the sets it closed and whose conflict leaves the set as it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum By<'a> {
+    Owner(Option<crate::activity::AcceptPlace>),
     Named(&'a str),
     Master,
+}
+
+impl<'a> By<'a> {
+    /// Who the project's activity names as acting now. Output: the actor, None for the
+    /// master's own land, which its caller records.
+    fn named(self) -> Option<&'a str> {
+        match self {
+            Self::Owner(_) => Some(OWNER_ACTOR),
+            Self::Named(by) => Some(by),
+            Self::Master => None,
+        }
+    }
 }
 
 /// Lands the master's own pending change set when `team::master_lands` says Merges and
@@ -1146,14 +1164,16 @@ fn edited(text: &str) -> Result<String, EngineError> {
 /// layout or a link chain out of the project (SR1-1, SR1-2), makes the commit with the
 /// owner's identity, records the intent, writes the index and files with a two-tree
 /// read-tree and moves the branch by compare and swap. Inputs: the store, the owner's
-/// home, the change set, the reviewed head, the owner's edited message and where a test
-/// stops it. Output: the landed commit and branch, or the conflicts.
+/// home, the change set, the reviewed head, the owner's edited message, where the owner
+/// pressed Accept and where a test stops it. Output: the landed commit and branch, or the
+/// conflicts.
 pub(super) fn accept(
     db: &Connection,
     home: &Path,
     id: &ChangeSetId,
     expected_head: &str,
     message: Option<&str>,
+    place: crate::activity::AcceptPlace,
     stopped: &dyn Fn(Step) -> bool,
 ) -> Result<AcceptOutcome, EngineError> {
     accept_to(
@@ -1163,7 +1183,7 @@ pub(super) fn accept(
         expected_head,
         message,
         None,
-        By::Named(OWNER_ACTOR),
+        By::Owner(Some(place)),
         stopped,
     )
 }
@@ -1216,7 +1236,7 @@ fn accept_held(
     {
         return Err(failure("changes_stale"));
     }
-    if by != By::Named(OWNER_ACTOR) && super::subagent::has_open_worker(db, &record)? {
+    if !matches!(by, By::Owner(_)) && super::subagent::has_open_worker(db, &record)? {
         return Err(failure(super::WORKER_OPEN));
     }
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
@@ -1236,7 +1256,7 @@ fn accept_held(
     let (tree, conflicts) = merge(&owner, &from, &tip, &record.head)?;
     let branch = reference.trim_start_matches("refs/heads/").to_owned();
     if !conflicts.is_empty() {
-        if let By::Named(by) = by {
+        if let Some(by) = by.named() {
             record.state = ChangeState::Conflict;
             record.conflicts = conflicts.clone();
             record.updated_ms = flow::now_ms()?;
@@ -2344,7 +2364,7 @@ fn observe_one(
         Judged::Landed => {
             record.outside = true;
             let by = match against {
-                Against::Owner => By::Named(OWNER_ACTOR),
+                Against::Owner => By::Owner(None),
                 Against::Lead(_) => By::Named(ENGINE_ACTOR),
             };
             finish(db, &mut record, tip, by)?;

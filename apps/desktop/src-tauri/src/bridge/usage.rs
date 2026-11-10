@@ -4,6 +4,7 @@ use crazyagent::engine::owner::{OwnerClient, USAGE_CODES};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::usage::WindowKind;
 use crazyagent::usage::metrics::Metrics;
+use crazyagent::usage::money::MoneySettings;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 
@@ -84,6 +85,27 @@ impl NativeBridge {
         let client = self.usage_client()?;
         Ok(Box::pin(async move {
             client.usage_refresh().await.map_err(usage_error)
+        }))
+    }
+
+    /// Stores the owner's main number and price source, run without the bridge lock. Input:
+    /// the settings. Output: done once they are stored.
+    pub fn usage_set_money(&self, settings: MoneySettings) -> Result<Unlocked<()>, BridgeError> {
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client.usage_set_money(settings).await.map_err(usage_error)
+        }))
+    }
+
+    /// Applies the owner's choice of the recount, run without the bridge lock. Input: whether
+    /// to use the new numbers. Output: done once it is applied.
+    pub fn usage_decide_recount(&self, use_new: bool) -> Result<Unlocked<()>, BridgeError> {
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client
+                .usage_decide_recount(use_new)
+                .await
+                .map_err(usage_error)
         }))
     }
 

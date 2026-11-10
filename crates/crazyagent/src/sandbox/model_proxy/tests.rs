@@ -576,3 +576,22 @@ fn the_proxy_counts_every_refused_request_and_cut_tunnel() {
     assert!(answer(client).is_empty());
     assert_eq!(proxy.refusals(), refused + 1);
 }
+
+/// Where a Linux sysctl lets programs bind any address, every address counts as held, so a
+/// cut says the proxy cannot tell its own addresses rather than that the host is this
+/// machine (S4B-I1-L1). The sysctl values are given; the real ones are never read here.
+#[test]
+fn a_cut_names_the_sysctl_that_lets_any_address_bind() {
+    let reason = |values: [Option<&str>; 2]| {
+        own_address_reason(&values.map(|value| value.map(str::to_owned)))
+    };
+    let named = "this machine lets programs bind any address, so CrazyAgent cannot tell which addresses are its own";
+    assert_eq!(reason([None, None]), "resolves to this machine");
+    assert_eq!(
+        reason([Some("0\n"), Some("0\n")]),
+        "resolves to this machine"
+    );
+    assert_eq!(reason([Some("x\n"), None]), "resolves to this machine");
+    assert_eq!(reason([Some("1\n"), Some("0\n")]), named);
+    assert_eq!(reason([None, Some("1\n")]), named);
+}

@@ -1289,19 +1289,23 @@ pub fn diff(
 /// with the owner's git identity. Inputs: the store, the owner's home folder (where git
 /// finds the owner's own user.name and user.email), the change set, the head the owner
 /// reviewed and the owner's edited message, None for the proposed one. Output: the
-/// landed commit and branch, or the conflicting files.
+/// landed commit and branch, or the conflicting files. `place` is where the owner pressed
+/// Accept, which the project's activity names.
 pub fn accept(
     db: &Connection,
     owner_home: &Path,
     id: &ChangeSetId,
     expected_head: &str,
     message: Option<&str>,
+    place: crate::activity::AcceptPlace,
 ) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
-    return owner::accept(db, owner_home, id, expected_head, message, &|_| false);
+    return owner::accept(db, owner_home, id, expected_head, message, place, &|_| {
+        false
+    });
     #[cfg(not(unix))]
     {
-        let _ = (db, owner_home, id, expected_head, message);
+        let _ = (db, owner_home, id, expected_head, message, place);
         Err(unavailable())
     }
 }
@@ -1311,8 +1315,8 @@ pub fn accept(
 /// out nowhere by moving its ref only, leaving the owner's files untouched, or an agent's
 /// own branch through that agent's worktree, which must hold nothing uncommitted. Inputs:
 /// the store, the owner's home folder, the change set, the head the owner reviewed, the
-/// edited message, None for the proposed one, and the target branch. Output: the landed
-/// commit and branch, or the conflicting files.
+/// edited message, None for the proposed one, the target branch and where the owner pressed
+/// Accept. Output: the landed commit and branch, or the conflicting files.
 pub fn accept_into(
     db: &Connection,
     owner_home: &Path,
@@ -1320,16 +1324,32 @@ pub fn accept_into(
     expected_head: &str,
     message: Option<&str>,
     target_branch: &str,
+    place: crate::activity::AcceptPlace,
 ) -> Result<AcceptOutcome, EngineError> {
-    accept_into_as(
+    #[cfg(unix)]
+    return owner::accept_to(
         db,
         owner_home,
         id,
         expected_head,
         message,
-        target_branch,
-        crate::activity::OWNER_ACTOR,
-    )
+        Some(target_branch),
+        owner::By::Owner(Some(place)),
+        &|_| false,
+    );
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            db,
+            owner_home,
+            id,
+            expected_head,
+            message,
+            target_branch,
+            place,
+        );
+        Err(unavailable())
+    }
 }
 
 /// The refusal of a land the owner did not press while a worker below the set's agent
@@ -1341,8 +1361,9 @@ pub const WORKER_OPEN_TEXT: &str = "a worker's work under that agent is still op
 
 /// Lands a change set on a chosen local branch as [`accept_into`] does, for an Accept the
 /// owner did not make: the project's activity names who accepted it, the master or the
-/// engine. Inputs: as [`accept_into`], plus who accepts. Output: the landed commit and
-/// branch, or the conflicting files.
+/// engine. The owner's Accept goes through [`accept`] or [`accept_into`] instead, which know
+/// where it was pressed. Inputs: as [`accept_into`] without the place, plus who accepts.
+/// Output: the landed commit and branch, or the conflicting files.
 pub fn accept_into_as(
     db: &Connection,
     owner_home: &Path,
@@ -1352,6 +1373,11 @@ pub fn accept_into_as(
     target_branch: &str,
     by: &str,
 ) -> Result<AcceptOutcome, EngineError> {
+    assert_ne!(
+        by,
+        crate::activity::OWNER_ACTOR,
+        "the owner's Accept goes through accept or accept_into"
+    );
     #[cfg(unix)]
     return owner::accept_to(
         db,

@@ -621,6 +621,68 @@ fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
 
+/// One running task an engine step puts back in the queue or cancels: the task, its
+/// project and agent, and whether the owner asked to cancel it.
+struct LeftTask {
+    task: i64,
+    project: ProjectId,
+    agent: i64,
+    cancel: bool,
+}
+
+/// The most running tasks one engine step reads to tell how they ended; far past every
+/// project's agent cap together, so it never cuts a real step short.
+const LEFT_TASKS_READ: usize = 1024;
+
+/// Reads the running tasks with an agent that `filter` names ("1" for all of them) before
+/// the caller puts them back in the queue or cancels them, since the queue clears their
+/// agent, so each one's activity line can still name it. Takes the connection, the SQL
+/// filter on team_tasks and its parameters. Returns the tasks, or the SQLite failure.
+fn running_tasks(
+    connection: &Connection,
+    filter: &'static str,
+    values: impl rusqlite::Params,
+) -> Result<Vec<LeftTask>, EngineError> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT id,project,agent,cancel_requested FROM team_tasks
+             WHERE status='running' AND agent IS NOT NULL AND ({filter})
+             ORDER BY id LIMIT {LEFT_TASKS_READ}"
+        ))
+        .map_err(error)?;
+    let rows: Vec<(i64, String, i64, bool)> = statement
+        .query_map(values, |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= LEFT_TASKS_READ);
+    Ok(rows
+        .into_iter()
+        .filter_map(|(task, project, agent, cancel)| {
+            let project = ProjectId::new(project).ok()?;
+            Some(LeftTask {
+                task,
+                project,
+                agent,
+                cancel,
+            })
+        })
+        .collect())
+}
+
+/// Tells the project's activity how each task in `left` left its agent: stopped when the
+/// owner asked to cancel it, else stopped and back in the queue. Takes the connection, the
+/// tasks and the time in ms.
+fn note_left_tasks(connection: &Connection, left: &[LeftTask], now: i64) {
+    for item in left {
+        assert!(item.task > 0);
+        let (project, requeued) = (&item.project, !item.cancel);
+        crate::activity::note_task_stop(connection, project, item.agent, item.task, requeued, now);
+    }
+}
+
 /// How one agent start ended: started, held back because a projects home move holds the
 /// project folder, so the work that asked for it waits for the move to end with nothing
 /// spent or switched off, or refused for the plain reason.
@@ -755,7 +817,7 @@ impl TeamRuntime {
                 return Err(EngineError("team_executable_invalid".into()));
             }
         }
-        let connection = Connection::open_with_flags(
+        let mut connection = Connection::open_with_flags(
             database,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -778,19 +840,22 @@ impl TeamRuntime {
         }
         crate::recovery::capture(&connection, None)?;
         let now = now_ms();
-        connection
-            .execute_batch(&format!(
-                "BEGIN IMMEDIATE;
-                 UPDATE team_agents SET status='stopped', task=NULL, error='Stopped when CrazyAgent closed', stopped_ms={now}
-                   WHERE status IN ('starting','idle','working');
-                 UPDATE team_tasks SET status='queued', agent=NULL, cancel_requested=0
-                   WHERE status='running' AND cancel_requested=0;
-                 UPDATE team_tasks SET status='cancelled', agent=NULL, error='Cancelled by you', finished_ms={now}
-                   WHERE status='running' AND cancel_requested=1;
-                 UPDATE team_messages SET state='pending' WHERE state='sent';
-                 COMMIT;"
-            ))
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
+        let left = running_tasks(&tx, "1", ())?;
+        tx.execute_batch(&format!(
+            "UPDATE team_agents SET status='stopped', task=NULL, error='Stopped when CrazyAgent closed', stopped_ms={now}
+               WHERE status IN ('starting','idle','working');
+             UPDATE team_tasks SET status='queued', agent=NULL, cancel_requested=0
+               WHERE status='running' AND cancel_requested=0;
+             UPDATE team_tasks SET status='cancelled', agent=NULL, error='Cancelled by you', finished_ms={now}
+               WHERE status='running' AND cancel_requested=1;
+             UPDATE team_messages SET state='pending' WHERE state='sent';"
+        ))
+        .map_err(error)?;
+        note_left_tasks(&tx, &left, now);
+        tx.commit().map_err(error)?;
         delivery::settle(&connection)?;
         let custody = std::fs::symlink_metadata(database)
             .map_err(error)
@@ -2331,11 +2396,13 @@ impl TeamRuntime {
             .map_err(error)?;
         crate::recovery::capture(&tx, Some(now))?;
         for id in ids {
+            let left = running_tasks(&tx, "agent=?1 AND cancel_requested=0", [id])?;
             tx.execute(
                 "UPDATE team_tasks SET status='queued', agent=NULL WHERE agent=?1 AND status='running' AND cancel_requested=0",
                 [id],
             )
             .map_err(error)?;
+            note_left_tasks(&tx, &left, now);
             let note = kept.contains(&id).then_some(LEFT_RUNNING_NOTE);
             tx.execute(
                 "UPDATE team_agents SET status='stopped', task=NULL, error=?3, stopped_ms=?2 WHERE id=?1 AND status IN ('starting','idle','working')",
@@ -2683,6 +2750,9 @@ impl TeamRuntime {
     fn release(&mut self, pin: Option<i64>, busy: Busy) -> Result<(), EngineError> {
         match busy {
             Busy::Task(task) => {
+                let now = now_ms();
+                let left = running_tasks(&self.connection, "id=?1", [task])?;
+                assert!(left.len() <= 1);
                 self.connection
                     .execute(
                         "UPDATE team_tasks SET status='queued', agent=NULL, attempts=MAX(attempts-1,0)
@@ -2704,9 +2774,10 @@ impl TeamRuntime {
                     .execute(
                         "UPDATE team_tasks SET status='cancelled', error='Cancelled by you', finished_ms=?2
                          WHERE id=?1 AND status='running'",
-                        params![task, now_ms()],
+                        params![task, now],
                     )
                     .map_err(error)?;
+                note_left_tasks(&self.connection, &left, now);
             }
             Busy::Message(message) => {
                 self.connection
@@ -8262,6 +8333,8 @@ impl TeamRuntime {
         else {
             return Ok(());
         };
+        let left = running_tasks(&self.connection, "id=?1", [task])?;
+        assert!(left.len() <= 1);
         let retry = attempts < self.limits.attempts_max;
         let closed = with_code("The sub-agent stopped unexpectedly", cause);
         let timed = format!("The sub-agent was {}", cause.unwrap_or(TIME_LIMIT_NOTE));
@@ -8319,6 +8392,21 @@ impl TeamRuntime {
         assert!(changed <= 1);
         if changed == 1 {
             super::events::task_ended(&self.connection, task, now_ms())?;
+            if matches!(status, TaskStatus::Cancelled | TaskStatus::Queued) {
+                let requeued = status == TaskStatus::Queued;
+                for item in &left {
+                    let (project, agent) = (&item.project, item.agent);
+                    let now = now_ms();
+                    crate::activity::note_task_stop(
+                        &self.connection,
+                        project,
+                        agent,
+                        task,
+                        requeued,
+                        now,
+                    );
+                }
+            }
         }
         Ok(())
     }

@@ -78,8 +78,10 @@ pub enum ActivityKind {
     ResearchStarted,
     ResearchSaved,
     ResearchStopped,
+    ResearchWaiting,
     TaskStarted,
     TaskFinished,
+    TaskStopped,
     ChangesReady,
     Accepted,
     Discarded,
@@ -97,13 +99,15 @@ pub enum ActivityKind {
 }
 
 impl ActivityKind {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 22] = [
         Self::Created,
         Self::ResearchStarted,
         Self::ResearchSaved,
         Self::ResearchStopped,
+        Self::ResearchWaiting,
         Self::TaskStarted,
         Self::TaskFinished,
+        Self::TaskStopped,
         Self::ChangesReady,
         Self::Accepted,
         Self::Discarded,
@@ -137,8 +141,10 @@ impl ActivityKind {
             Self::ResearchStarted => "research_started",
             Self::ResearchSaved => "research_saved",
             Self::ResearchStopped => "research_stopped",
+            Self::ResearchWaiting => "research_waiting",
             Self::TaskStarted => "task_started",
             Self::TaskFinished => "task_finished",
+            Self::TaskStopped => "task_stopped",
             Self::ChangesReady => "changes_ready",
             Self::Accepted => "accepted",
             Self::Discarded => "discarded",
@@ -161,6 +167,32 @@ impl ActivityKind {
     }
 }
 
+/// Where the owner pressed Accept, as an accepted row names it: a Changes page, the
+/// desktop's or the terminal's, or the IDE's Source Control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptPlace {
+    Changes,
+    Ide,
+}
+
+impl AcceptPlace {
+    /// The place's stored name. Output: `changes` or `ide`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Changes => "changes",
+            Self::Ide => "ide",
+        }
+    }
+
+    /// Reads a stored name. Input: the name. Output: the place, or None for any other word.
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::Changes, Self::Ide]
+            .into_iter()
+            .find(|place| place.name() == name)
+    }
+}
+
 /// One thing that happened in a project, as the Overview shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityItem {
@@ -176,6 +208,10 @@ pub struct ActivityItem {
     /// read from the stored set rather than the row's words; None for any other row.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Where the owner pressed Accept on an accepted row, read from the stored set; None for
+    /// any other row, an Accept by someone else, or one recorded before places were kept.
+    #[serde(default)]
+    pub place: Option<AcceptPlace>,
 }
 
 /// One event a writer records. `agent` is the team agent whose work the event is about:
@@ -408,7 +444,43 @@ pub fn note_task(db: &Connection, project: &ProjectId, agent: i64, task: i64, no
     let kind = ActivityKind::TaskStarted;
     logged(
         kind,
-        record_task(db, project, agent, Some(task), (kind, "started"), now_ms),
+        record_task(
+            db,
+            project,
+            agent,
+            Some(task),
+            (kind, "started", ""),
+            now_ms,
+        ),
+    );
+}
+
+/// Records that a team agent's running task stopped before it ended, named by its title:
+/// stopped for a cancelled one, and stopped and back in the queue for one that waits to run
+/// again, so no started row is left with no end; a failure is logged by its plain code.
+/// Takes the database, the project, the agent, the task, whether it waits again and the
+/// time in ms.
+pub fn note_task_stop(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    task: i64,
+    requeued: bool,
+    now_ms: i64,
+) {
+    assert!(task > 0);
+    let kind = ActivityKind::TaskStopped;
+    let tail = if requeued { ", back in the queue" } else { "" };
+    logged(
+        kind,
+        record_task(
+            db,
+            project,
+            agent,
+            Some(task),
+            (kind, "stopped", tail),
+            now_ms,
+        ),
     );
 }
 
@@ -432,7 +504,7 @@ pub fn note_task_end(
     };
     logged(
         kind,
-        record_task(db, project, agent, task, (kind, verb), now_ms),
+        record_task(db, project, agent, task, (kind, verb, ""), now_ms),
     );
 }
 
@@ -441,7 +513,7 @@ fn record_task(
     project: &ProjectId,
     agent: i64,
     task: Option<i64>,
-    (kind, verb): (ActivityKind, &str),
+    (kind, verb, tail): (ActivityKind, &str, &str),
     now_ms: i64,
 ) -> Result<(), EngineError> {
     let actor = agent_actor(db, agent)?;
@@ -450,9 +522,9 @@ fn record_task(
         None => String::new(),
     };
     let text = if title.is_empty() {
-        format!("{actor} {verb} a task")
+        format!("{actor} {verb} a task{tail}")
     } else {
-        format!("{actor} {verb} \u{201c}{title}\u{201d}")
+        format!("{actor} {verb} \u{201c}{title}\u{201d}{tail}")
     };
     let item = NewActivity {
         kind,
@@ -595,14 +667,14 @@ pub fn note_research(db: &Connection, job: i64, kind: ActivityKind, now_ms: i64)
     );
 }
 
-/// Records that a research run was parked until its project has a pool, as a stopped run
-/// that says it waits for one; a failure is logged by its plain code. Takes the database,
+/// Records that a research run was parked until its project has a pool, under its own kind
+/// so it never reads as stopped; a failure is logged by its plain code. Takes the database,
 /// the job id and the time in ms.
 pub fn note_research_waiting(db: &Connection, job: i64, now_ms: i64) {
-    let kind = ActivityKind::ResearchStopped;
+    let kind = ActivityKind::ResearchWaiting;
     logged(
         kind,
-        record_research(db, job, (kind, "waiting for a pool"), now_ms),
+        record_research(db, job, (kind, research_verb(kind)), now_ms),
     );
 }
 
@@ -688,6 +760,12 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
     if limit == 0 || limit > LIST_MAX {
         return Err(failure("activity_limit_invalid"));
     }
+    let accepted_in = if has_column(db, "landing_change_sets", "accepted_in")? {
+        "CASE WHEN kind='accepted' THEN \
+         (SELECT accepted_in FROM landing_change_sets WHERE id=project_activity.change_set) END"
+    } else {
+        "NULL"
+    };
     let landed_on = if has_table(db, "landing_change_sets")? {
         "CASE WHEN kind='merged_into_main' THEN \
          (SELECT landed_on FROM landing_change_sets WHERE id=project_activity.change_set) END"
@@ -696,7 +774,7 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
     };
     let mut statement = db
         .prepare(&format!(
-            "SELECT id,at_ms,kind,actor,goal,text,change_set,undone,{landed_on} \
+            "SELECT id,at_ms,kind,actor,goal,text,change_set,undone,{landed_on},{accepted_in} \
              FROM project_activity WHERE project=?1 ORDER BY at_ms DESC, id DESC LIMIT ?2"
         ))
         .map_err(state)?;
@@ -718,6 +796,10 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
                         branch: row.get::<_, Option<String>>(8)?.and_then(|reference| {
                             reference.strip_prefix("refs/heads/").map(str::to_owned)
                         }),
+                        place: row
+                            .get::<_, Option<String>>(9)?
+                            .as_deref()
+                            .and_then(AcceptPlace::parse),
                     },
                 ))
             },
@@ -868,6 +950,18 @@ pub fn backfill(db: &Connection, project: &ProjectId) -> Result<usize, EngineErr
     tx.commit().map_err(state)?;
     assert!(added <= found.len());
     Ok(added)
+}
+
+/// Tells whether a table has a column, false when the table is missing too. Inputs: the
+/// store, the table and the column. Output: the answer.
+fn has_column(db: &Connection, table: &str, column: &str) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+        params![table, column],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .map_err(state)
 }
 
 fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
@@ -1081,6 +1175,7 @@ fn research_verb(kind: ActivityKind) -> &'static str {
         ActivityKind::ResearchStarted => "started",
         ActivityKind::ResearchSaved => "saved",
         ActivityKind::ResearchStopped => "stopped",
+        ActivityKind::ResearchWaiting => "waiting for a pool",
         _ => unreachable!("research_text takes a research event"),
     }
 }
