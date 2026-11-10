@@ -870,7 +870,8 @@ impl ResearchRunner {
         if let Some(reason) = policy.access.unavailable() {
             return Err(RunError::Invalid(reason.into()));
         }
-        let (network, proxy) = job_reach(&policy, job.tools, account, job.id)?;
+        let kept = job_kept_ports(self.settings.as_ref(), job.tools)?;
+        let (network, proxy) = job_reach(&policy, job.tools, account, job.id, &kept)?;
         let display = jobs
             .claude_display(&project)
             .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
@@ -897,7 +898,6 @@ impl ResearchRunner {
         #[cfg(target_os = "macos")]
         toolchains::write_getconf(&home, false)?;
         toolchains::prepare_cargo_home(&home, &homes)?;
-        let kept = job_kept_ports(self.settings.as_ref(), job.tools)?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?.keep_ports(&kept)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime)?;
@@ -1745,14 +1745,16 @@ pub(crate) fn job_network(
 /// through (S4B-M1). A tools-on job under None whose model is not on loopback gets a proxy
 /// for its account's hosts and reaches only the proxy's port; any other job gets
 /// [`job_network`]. Inputs: the project's agent policy, whether the job has tools, its
-/// account and its id, which the proxy's refusal lines name. Output: the network and the
-/// proxy, which must live as long as the job runs, or the refusal of an endpoint no proxy
-/// can reach by name or a proxy that could not start.
+/// account, its id, which the proxy's refusal lines name, and the owner's model ports the
+/// proxy leaves alone. Output: the network and the proxy, which must live as long as the
+/// job runs, or the refusal of an endpoint no proxy can reach by name or a proxy that could
+/// not start.
 pub(crate) fn job_reach(
     policy: &crate::sandbox::policy::AgentPolicy,
     tools: bool,
     account: &ResearchAccount,
     job: i64,
+    kept: &[u16],
 ) -> Result<(SandboxNetwork, Option<ModelProxy>), RunError> {
     let model = model_remote(account)?;
     let proxied = tools
@@ -1780,7 +1782,7 @@ pub(crate) fn job_reach(
             "with no network, a research job with tools reaches only an https endpoint named by a host name".into(),
         ));
     }
-    let proxy = ModelProxy::bind(job, hosts, None)?;
+    let proxy = ModelProxy::bind(job, hosts, None, kept)?;
     let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]);
     Ok((network, Some(proxy)))
 }
@@ -3345,7 +3347,7 @@ mod tests {
             connection: codex_connection(),
             model: None,
         };
-        let (network, proxy) = job_reach(&none, true, &account, 41).unwrap();
+        let (network, proxy) = job_reach(&none, true, &account, 41, &[]).unwrap();
         assert!(
             proxy.is_some(),
             "a tools-on job under None gets a model proxy, not {network:?}"
@@ -3375,14 +3377,14 @@ mod tests {
                 .unwrap();
             assert_eq!(line.trim_end(), status, "{target}");
         }
-        let (off, unproxied) = job_reach(&none, false, &account, 41).unwrap();
+        let (off, unproxied) = job_reach(&none, false, &account, 41, &[]).unwrap();
         assert!(unproxied.is_none());
         assert_eq!(off, SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]));
         let local = ResearchAccount::Endpoint {
             base_url: "http://localhost:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
         };
-        let (direct, unproxied) = job_reach(&none, true, &local, 41).unwrap();
+        let (direct, unproxied) = job_reach(&none, true, &local, 41, &[]).unwrap();
         assert!(unproxied.is_none());
         assert_eq!(
             direct,
@@ -3393,7 +3395,7 @@ mod tests {
             model: "qwen2.5:0.5b".into(),
         };
         assert!(matches!(
-            job_reach(&none, true, &unnamed, 41),
+            job_reach(&none, true, &unnamed, 41, &[]),
             Err(RunError::Invalid(_))
         ));
     }
