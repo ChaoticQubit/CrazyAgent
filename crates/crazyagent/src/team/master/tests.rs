@@ -1899,6 +1899,17 @@ fn a_sender_is_told_its_message_waits_for_an_agent_that_stopped() {
     );
     assert!(!refused, "{said}");
     assert!(said.contains(&waits(&fixture, lead)), "{said}");
+    let present = named_sub(&fixture, "lead-here", "working");
+    let helper = named_sub(&fixture, "helper", "working");
+    lead_of(&fixture, present, helper);
+    let (said, refused) = as_sub(
+        &mut fixture,
+        helper,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "question", "for": "lead", "severity": "normal", "text": "Which way?"}),
+    );
+    assert!(!refused, "{said}");
+    assert!(!said.contains("has stopped"), "{said}");
 }
 
 /// Finishing work that already waits for review says so, not a rule about who may finish
