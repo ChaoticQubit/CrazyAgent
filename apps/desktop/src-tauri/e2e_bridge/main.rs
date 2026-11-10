@@ -278,8 +278,8 @@ fn record_turn_end(mode: &str, args: &[OsString]) -> Result<String, String> {
     };
     let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
     if kind != AgentKind::Master {
-        let recorded =
-            crazyagent::landing_turns::record(&db, &workspace, &turn).map_err(|error| error.0)?;
+        let recorded = crazyagent::landing_turns::record(&db, &workspace, &turn, None)
+            .map_err(|error| error.0)?;
         return Ok(match recorded {
             crazyagent::landing_turns::Landed::Nothing => "none".to_owned(),
             crazyagent::landing_turns::Landed::Added(id)
