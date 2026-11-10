@@ -589,29 +589,39 @@ fn agents(
     Ok(rows)
 }
 
-/// Reads each model's tokens and dollars, largest first. Inputs: the store, the project and
-/// the range start. Output: at most `ROWS_MAX` rows, or `usage_unavailable`.
+/// Reads each model's tokens and dollars, largest dollars first, or largest tokens first with
+/// prices off so the order keeps no hidden dollars. Inputs: the store, the project, the range
+/// start and the price source. Output: at most `ROWS_MAX` rows, or `usage_unavailable`.
 fn models(
     db: &Connection,
     project: Option<&str>,
     since_ms: i64,
+    prices: PriceSource,
 ) -> Result<Vec<ModelRow>, EngineError> {
     let mut statement = db
         .prepare(
             "SELECT model,TOTAL(input),TOTAL(output),TOTAL(cache_read),TOTAL(cache_write),TOTAL(cost_nanos)
              FROM usage_tokens WHERE hour_ms>=?2 AND (?1 IS NULL OR project=?1)
              GROUP BY model
-             ORDER BY TOTAL(cost_nanos) DESC,TOTAL(input)+TOTAL(output)+TOTAL(cache_write) DESC,model LIMIT ?3",
+             ORDER BY CASE WHEN ?4 THEN 0 ELSE TOTAL(cost_nanos) END DESC,TOTAL(input)+TOTAL(output)+TOTAL(cache_write) DESC,model LIMIT ?3",
         )
         .map_err(storage)?;
     statement
-        .query_map(params![project, since_ms, ROWS_MAX as i64], |row| {
-            Ok(ModelRow {
-                model: row.get(0)?,
-                tokens: tokens(row, 1)?,
-                cost_nanos: row.get::<_, f64>(5)? as i64,
-            })
-        })
+        .query_map(
+            params![
+                project,
+                since_ms,
+                ROWS_MAX as i64,
+                prices == PriceSource::Off
+            ],
+            |row| {
+                Ok(ModelRow {
+                    model: row.get(0)?,
+                    tokens: tokens(row, 1)?,
+                    cost_nanos: row.get::<_, f64>(5)? as i64,
+                })
+            },
+        )
         .map_err(storage)?
         .collect::<Result<_, _>>()
         .map_err(storage)
@@ -679,6 +689,7 @@ pub fn read(
     let bucket_ms = bucket_for(span_ms);
     let mut projects = groups(db, "project", project, since_ms)?;
     project_merges(db, project, since_ms, &mut projects)?;
+    let prices = super::money::read(db)?.prices;
     let mut metrics = fit(Metrics {
         running,
         tasks_waiting,
@@ -694,7 +705,7 @@ pub fn read(
         agents: agents(db, project, since_ms)?,
         accounts: groups(db, "account", project, since_ms)?,
         harnesses: groups(db, "harness", project, since_ms)?,
-        models: models(db, project, since_ms)?,
+        models: models(db, project, since_ms, prices)?,
     })?;
     assert!(metrics.bucket_ms > 0 && metrics.series.len() <= SERIES_MAX);
     assert!(metrics.runs.len() <= ROWS_MAX);
@@ -722,7 +733,7 @@ pub fn read(
             .as_ref()
             .is_none_or(|title| title.len() <= TITLE_BYTES_MAX)
     }));
-    if super::money::read(db)?.prices == PriceSource::Off {
+    if prices == PriceSource::Off {
         metrics.series.iter_mut().for_each(|row| row.cost_nanos = 0);
         metrics.runs.iter_mut().for_each(|row| row.cost_nanos = 0);
         metrics

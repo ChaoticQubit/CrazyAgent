@@ -3,12 +3,13 @@ import { listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
-import { loadMetrics, loadUsage, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type MetricsBucket, type Tokens, type UsageReport } from "../../api-usage";
+import { loadMetrics, loadNotices, loadUsage, setMoney, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type MetricsBucket, type MoneySettings, type MoneyView, type Tokens, type UsageReport } from "../../api-usage";
 import { useLoad, type Loaded } from "../../state";
 import { LoadError, NotReady, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
 import { REMOVED_LABEL, REMOVED_PROJECTS, agentLabel, agoText, cacheShare, compactCount, headlineTokens, offsetMinutes, rangeStart, windowNow } from "../settings/usage";
 import { HARNESS_NAMES } from "../team/coordination";
+import { COST_LABEL, Figure, dollarText, dollarsBeside, figure, unpricedNote } from "./money";
 import "../project/projects.css";
 import "./metrics.css";
 
@@ -40,6 +41,10 @@ const BREAKDOWNS: { value: MetricsBy; label: string }[] = [
 
 const APP_BREAKDOWNS: { value: MetricsBy; label: string }[] = [{ value: "project", label: "By project" }, ...BREAKDOWNS];
 
+const MAIN_NUMBERS: { value: "dollars" | "tokens"; label: string }[] = [{ value: "dollars", label: "Dollars" }, { value: "tokens", label: "Tokens" }];
+
+const PRICE_SOURCES: { value: "bundled" | "off"; label: string }[] = [{ value: "bundled", label: "Bundled" }, { value: "off", label: "Off" }];
+
 const RESULTS: Record<string, string> = {
   running: "Working",
   done: "Done",
@@ -66,13 +71,14 @@ export interface MetricsFilter {
   onProject: (id: string | null) => void;
 }
 
-/** One breakdown row: its name, its project when the breakdown spans projects, its tokens and
- * the cells of the breakdown's own columns. */
+/** One breakdown row: its name, its project when the breakdown spans projects, its tokens, its
+ * dollars and the cells of the breakdown's own columns. */
 interface BreakdownRow {
   key: string;
   name: string;
   project?: string;
   tokens: Tokens;
+  cost_nanos: number;
   extra: string[];
 }
 
@@ -81,10 +87,12 @@ interface BreakdownRow {
  * oldest first. */
 export function chartBars(metrics: Metrics, sinceMs: number, nowMs: number): MetricsBucket[] {
   assert(metrics.bucket_ms > 0, "a chart bar spans time");
-  const counted = new Map(metrics.series.map((bar) => [bar.start_ms, bar.tokens]));
+  const counted = new Map(metrics.series.map((bar) => [bar.start_ms, bar]));
+  const empty = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
   const bars: MetricsBucket[] = [];
   for (let start = sinceMs; start <= nowMs && bars.length < BARS_MAX; start += metrics.bucket_ms) {
-    bars.push({ start_ms: start, tokens: counted.get(start) ?? { input: 0, output: 0, cache_read: 0, cache_write: 0 } });
+    const bar = counted.get(start);
+    bars.push({ start_ms: start, tokens: bar?.tokens ?? empty, cost_nanos: bar?.cost_nanos ?? 0 });
   }
   return bars;
 }
@@ -142,8 +150,8 @@ function agentKey(projectId: string | null, agent: Pick<AgentAdoption, "agent" |
   return agent.role === "master" && projectId !== null ? `master-${projectId}` : `team-${agent.agent}`;
 }
 
-function Tile({ label, value, detail, quiet = false }: { label: string; value: string; detail: string; quiet?: boolean }) {
-  return <div className={`mx-tile${quiet ? " quiet" : ""}`}>
+function Tile({ label, value, detail, quiet = false, title = "" }: { label: string; value: string; detail: string; quiet?: boolean; title?: string }) {
+  return <div className={`mx-tile${quiet ? " quiet" : ""}`} title={title || undefined}>
     <span className="mx-tile-key">{label}</span>
     <span className="mx-tile-value">{value}</span>
     <span className="mx-tile-detail">{detail}</span>
@@ -156,9 +164,11 @@ function Tiles({ usage, metrics }: { usage: UsageReport; metrics: Metrics }) {
   const added = usage.lines.reduce((sum, row) => sum + row.added, 0);
   const removed = usage.lines.reduce((sum, row) => sum + row.removed, 0);
   const sets = usage.lines.reduce((sum, row) => sum + row.change_sets, 0);
+  const shown = figure(total, usage.money.cost_nanos, usage.money);
+  const parts = `${compactCount(total.input)} input, ${compactCount(total.cache_write)} cache write, ${compactCount(total.output)} output`;
   return <div className="mx-tiles">
-    <Tile label="Tokens" value={compactCount(headlineTokens(total))}
-      detail={`${compactCount(total.input)} input, ${compactCount(total.cache_write)} cache write, ${compactCount(total.output)} output`} />
+    <Tile label={usage.money.shown === "dollars" ? COST_LABEL : "Tokens"} value={shown.main} title={shown.title}
+      detail={shown.beside ? `${shown.beside}${dollarsBeside(usage.money) ? ` ${COST_LABEL}` : ""} · ${parts}` : parts} />
     <Tile label="Re-read from cache" value={compactCount(total.cache_read)} quiet
       detail={share === null ? "Billed far lower, not in Tokens" : `${share}% of everything read; billed far lower, not in Tokens`} />
     <Tile label="Runs" value={String(usage.runs)} detail={`${metrics.running} running now`} />
@@ -168,36 +178,44 @@ function Tiles({ usage, metrics }: { usage: UsageReport; metrics: Metrics }) {
   </div>;
 }
 
-function Chart({ metrics, sinceMs, nowMs, offset, reread }: { metrics: Metrics; sinceMs: number; nowMs: number; offset: number; reread: number }) {
+function Chart({ metrics, sinceMs, nowMs, offset, reread, money }: { metrics: Metrics; sinceMs: number; nowMs: number; offset: number; reread: number; money: MoneyView }) {
   const bars = chartBars(metrics, sinceMs, nowMs);
-  const max = Math.max(1, ...bars.map((bar) => headlineTokens(bar.tokens))) * 1.1;
+  const dollars = money.shown === "dollars";
+  const amount = (bar: MetricsBucket) => dollars ? bar.cost_nanos : headlineTokens(bar.tokens);
+  const axis = (value: number) => dollars ? dollarText(value) : compactCount(value);
+  const tick = (step: number) => step === 0 ? "0" : step < 1 && axis(Math.round(step * max)) === axis(Math.round(max)) ? "" : axis(Math.round(step * max));
+  const max = Math.max(1, ...bars.map(amount)) * 1.1;
   const { width, height, left, bottom, top, barMax } = CHART;
   const slot = (width - left) / Math.max(1, bars.length);
   const barWidth = Math.min(barMax, slot * 0.7);
   const y = (value: number) => Math.round((height - bottom - (value / max) * (height - bottom - top)) * 10) / 10;
   const parts: [keyof Tokens, string, string][] = [["input", "in", "input"], ["cache_write", "cw", "cache write"], ["output", "out", "output"]];
-  return <Panel title="Tokens over time" actions={<span className="mx-legend">
+  return <Panel title={dollars ? `${COST_LABEL} over time` : "Tokens over time"} actions={dollars ? undefined : <span className="mx-legend">
     <span><i className="in" />Input</span><span><i className="cw" />Cache write</span><span><i className="out" />Output</span>
     <span className="muted">Re-read from cache: {compactCount(reread)}, not drawn</span>
   </span>}>
-    <svg className="mx-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Tokens per ${barWords(metrics.bucket_ms)}: input, cache write and output`}>
+    <svg className="mx-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={dollars ? `${COST_LABEL} per ${barWords(metrics.bucket_ms)}` : `Tokens per ${barWords(metrics.bucket_ms)}: input, cache write and output`}>
       {[0, 0.5, 1].map((step) => <g key={step}>
         <line className="gl" x1={left} x2={width} y1={y(step * max)} y2={y(step * max)} />
-        <text className="ax" x={left - 6} y={y(step * max) + 4} textAnchor="end">{step === 0 ? "0" : compactCount(Math.round(step * max))}</text>
+        <text className="ax" x={left - 6} y={y(step * max) + 4} textAnchor="end">{tick(step)}</text>
       </g>)}
       {bars.map((bar, index) => {
         const x = Math.round((left + index * slot + (slot - barWidth) / 2) * 10) / 10;
         const label = barLabel(bar.start_ms, metrics.bucket_ms, offset);
         let base = 0;
         return <g key={bar.start_ms}>
-          {parts.map(([field, className, words]) => {
-            const value = bar.tokens[field];
-            const from = base;
-            base += value;
-            return <rect key={field} className={className} x={x} y={y(base)} width={barWidth} height={Math.max(0, Math.round((y(from) - y(base)) * 10) / 10)} rx={2}>
-              <title>{`${label}: ${compactCount(value)} ${words}`}</title>
-            </rect>;
-          })}
+          {dollars
+            ? <rect className="in" x={x} y={y(bar.cost_nanos)} width={barWidth} height={Math.max(0, Math.round((y(0) - y(bar.cost_nanos)) * 10) / 10)} rx={2}>
+                <title>{`${label}: ${dollarText(bar.cost_nanos)} (${COST_LABEL}, prices as of ${money.as_of})`}</title>
+              </rect>
+            : parts.map(([field, className, words]) => {
+                const value = bar.tokens[field];
+                const from = base;
+                base += value;
+                return <rect key={field} className={className} x={x} y={y(base)} width={barWidth} height={Math.max(0, Math.round((y(from) - y(base)) * 10) / 10)} rx={2}>
+                  <title>{`${label}: ${compactCount(value)} ${words}`}</title>
+                </rect>;
+              })}
           <text className="ax" x={x + barWidth / 2} y={height - 6} textAnchor="middle">{label}</text>
         </g>;
       })}
@@ -223,7 +241,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
   if (by === "project") {
     return {
       head: "Project", extra: ["Agents", "Runs", "Merges"], projectColumn,
-      rows: metrics.projects.map((row) => ({ key: row.key, name: projectName(row.key), tokens: row.tokens, extra: [String(row.agents), String(row.runs), String(row.merges)] })),
+      rows: metrics.projects.map((row) => ({ key: row.key, name: projectName(row.key), tokens: row.tokens, cost_nanos: row.cost_nanos, extra: [String(row.agents), String(row.runs), String(row.merges)] })),
     };
   }
   if (by === "run") {
@@ -234,6 +252,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
         name: run.task !== null && run.title !== null ? `#${run.task} ${displayText(run.title)}` : "No task",
         project: projectColumn ? projectName(run.project) : undefined,
         tokens: run.tokens,
+        cost_nanos: run.cost_nanos,
         extra: [agent(run.agent, run.label), run.status === "running" ? "running" : agoText(run.last_ms, nowMs), run.status === null ? "" : RESULTS[run.status] ?? run.status],
       })),
     };
@@ -241,7 +260,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
   if (by === "account" && filter) {
     return {
       head: "Account", extra: ["Agents", "Projects"], projectColumn,
-      rows: metrics.accounts.map((row) => ({ key: row.key, name: account(row.key), tokens: row.tokens, extra: [String(row.agents), listed(row.projects, row.more_projects, projectName)] })),
+      rows: metrics.accounts.map((row) => ({ key: row.key, name: account(row.key), tokens: row.tokens, cost_nanos: row.cost_nanos, extra: [String(row.agents), listed(row.projects, row.more_projects, projectName)] })),
     };
   }
   if (by === "account") {
@@ -249,7 +268,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
       head: "Account", extra: ["Agents", "Limit left", "Resets"], projectColumn,
       rows: metrics.accounts.map((row) => {
         const limit = limitLeft(usage.limits.find((limits) => limits.account === row.key), nowMs);
-        return { key: row.key, name: account(row.key), tokens: row.tokens, extra: [String(row.agents), limit.left, limit.resets] };
+        return { key: row.key, name: account(row.key), tokens: row.tokens, cost_nanos: row.cost_nanos, extra: [String(row.agents), limit.left, limit.resets] };
       }),
     };
   }
@@ -257,7 +276,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
     return {
       head: "Harness", extra: filter ? ["Agents", "Projects"] : ["Agents", "Runs"], projectColumn,
       rows: metrics.harnesses.map((row) => ({
-        key: row.key, name: harness(row.key), tokens: row.tokens, extra: [String(row.agents), filter ? listed(row.projects, row.more_projects, projectName) : String(row.runs)],
+        key: row.key, name: harness(row.key), tokens: row.tokens, cost_nanos: row.cost_nanos, extra: [String(row.agents), filter ? listed(row.projects, row.more_projects, projectName) : String(row.runs)],
       })),
     };
   }
@@ -265,7 +284,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
     return {
       head: "Agent", extra: ["Harness", "Account"], projectColumn,
       rows: metrics.agents.map((row) => ({
-        key: `${row.project}/${row.agent}`, name: agent(row.agent, row.label), project: projectColumn ? projectName(row.project) : undefined, tokens: row.tokens,
+        key: `${row.project}/${row.agent}`, name: agent(row.agent, row.label), project: projectColumn ? projectName(row.project) : undefined, tokens: row.tokens, cost_nanos: row.cost_nanos,
         extra: [listed(row.harnesses, row.more_harnesses, harness), listed(row.accounts, row.more_accounts, account)],
       })),
     };
@@ -279,7 +298,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
       const skills = used ? (used.skills ?? []).reduce((sum, count) => sum + count, 0) + (used.other_skills ?? []).reduce((sum, other) => sum + other.count, 0) : null;
       const ended = turns.get(row.key);
       return {
-        key: row.key, name: agent(row.key), tokens: row.tokens,
+        key: row.key, name: agent(row.key), tokens: row.tokens, cost_nanos: row.cost_nanos,
         extra: [typeof ended === "number" ? String(ended) : "", ...(used ? [String(used.graphify ?? 0), String(used.context_mode ?? 0), String(skills)] : ["", "", ""])],
       };
     }),
@@ -290,8 +309,8 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
  * share of tokens, then an Other row for what a capped list leaves out of the range, then the
  * Total, which is the Tokens tile's total. Every share is out of that total. Across all
  * projects each row also names its project. Inputs: the choice, its switch, the heads, the
- * rows, whether to show the project column and the range total. */
-function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { by: MetricsBy; control: ReactNode; head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean; total: Tokens }) {
+ * rows, whether to show the project column, the range total and the money view. */
+function Breakdown({ by, control, head, extra, rows, projectColumn, total, money }: { by: MetricsBy; control: ReactNode; head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean; total: Tokens; money: MoneyView }) {
   const left = (field: keyof Tokens) => Math.max(0, total[field] - rows.reduce((sum, row) => sum + row.tokens[field], 0));
   const other: Tokens = { input: left("input"), output: left("output"), cache_read: left("cache_read"), cache_write: left("cache_write") };
   const unlisted = other.input + other.output + other.cache_read + other.cache_write > 0;
@@ -308,7 +327,7 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { b
   return <Panel title="Breakdown" padded={false} actions={control}>
     <div className="pj-table-wrap mx-table-wrap"><table className="pj-table mx-table" data-by={by}>
       <thead><tr>
-        <th scope="col">{head}</th>{projectColumn && <th scope="col">Project</th>}<th scope="col" className="num">Tokens</th><th scope="col" className="num">Input</th>
+        <th scope="col">{head}</th>{projectColumn && <th scope="col">Project</th>}<th scope="col" className="num">{money.shown === "dollars" ? COST_LABEL : "Tokens"}{dollarsBeside(money) && <small> {COST_LABEL}</small>}</th><th scope="col" className="num">Input</th>
         <th scope="col" className="num">Cache write</th><th scope="col" className="num">Output</th><th scope="col" className="num muted">Cache read</th>
         {extra.map((column) => <th scope="col" key={column}>{column}</th>)}<th scope="col">Share of tokens</th>
       </tr></thead>
@@ -316,7 +335,7 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { b
         {rows.map((row) => <tr key={row.key}>
           <th scope="row">{row.name}</th>
           {projectColumn && <td>{row.project}</td>}
-          <td className="num mx-headline">{compactCount(headlineTokens(row.tokens))}</td>
+          <td className="num mx-headline"><Figure tokens={row.tokens} costNanos={row.cost_nanos} money={money} /></td>
           {cells(row.tokens)}
           {row.extra.map((value, index) => <td key={extra[index]}>{value}</td>)}
           {bar(row.tokens)}
@@ -324,7 +343,7 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { b
         {unlisted && <tr className="mx-other">
           <th scope="row" className="muted">Other, not listed</th>
           {projectColumn && <td />}
-          <td className="num mx-headline">{compactCount(headlineTokens(other))}</td>
+          <td className="num mx-headline"><Figure tokens={other} costNanos={Math.max(0, money.cost_nanos - rows.reduce((sum, row) => sum + row.cost_nanos, 0))} money={money} /></td>
           {cells(other)}
           {extra.map((column) => <td key={column} />)}
           {bar(other)}
@@ -332,7 +351,7 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { b
         <tr className="mx-total">
           <th scope="row">Total</th>
           {projectColumn && <td />}
-          <td className="num mx-headline">{compactCount(headline)}</td>
+          <td className="num mx-headline"><Figure tokens={total} costNanos={money.cost_nanos} money={money} /></td>
           {cells(total)}
           {extra.map((column) => <td key={column} />)}
           <td className="mono small muted">{share === null ? "" : `cache read ${share}% of all read`}</td>
@@ -346,10 +365,11 @@ function Breakdown({ by, control, head, extra, rows, projectColumn, total }: { b
  * with their three parts, cache re-reads apart, runs, tasks, merges and lines), the tokens chart and
  * the breakdown by agent, run, account or harness, each with its four token parts and its
  * share of tokens. With a filter (the app page) it also picks a project and breaks down by
- * project. Inputs: the project, null for every project, the usage and metrics reads, the
+ * project. Every figure leads with the number the owner chose and every dollar carries its
+ * label. Inputs: the project, null for every project, the usage and metrics reads, the
  * project's adoption read, the range, the breakdown, the names, the range start, now, when
- * the page last read, the viewer's offset, the filter and the actions. */
-export function MetricsPage({ projectId, usage, metrics, adoption, range, by, names, sinceMs, nowMs, updatedMs, offset, filter, onRange, onBy, onRetry }: {
+ * the page last read, the viewer's offset, the filter, the notices text and the actions. */
+export function MetricsPage({ projectId, usage, metrics, adoption, range, by, names, sinceMs, nowMs, updatedMs, offset, filter, notices, onRange, onBy, onRetry }: {
   projectId: string | null;
   usage: Loaded<UsageReport>;
   metrics: Loaded<Metrics>;
@@ -362,34 +382,50 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   updatedMs: number | null;
   offset: number;
   filter?: MetricsFilter;
+  notices: string;
   onRange: (range: MetricsRange) => void;
   onBy: (by: MetricsBy) => void;
   onRetry: () => void;
 }) {
+  const [refused, setRefused] = useState("");
+  const change = (settings: MoneySettings) => void setMoney(settings).then((result) => {
+    setRefused(result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" }));
+    if (result.kind === "ok") onRetry();
+  });
   const ranges = <Segmented label="Range" value={range} options={METRIC_RANGES} onValue={onRange} />;
   const covers = filter === undefined ? (projectId === null ? "All projects" : "This project only")
-    : projectId === null ? `${filter.projects.length} projects` : displayText(filter.projects.find((project) => project.id === projectId)?.name ?? projectId);
+    : projectId === null ? `${filter.projects.length} project${filter.projects.length === 1 ? "" : "s"}` : displayText(filter.projects.find((project) => project.id === projectId)?.name ?? projectId);
+  const money = usage.kind === "ok" ? usage.value.money : null;
+  const moneyTools = money && <div className="pj-row mx-money">
+    {money.settings.prices !== "off" && <Segmented label="Main number" value={money.settings.main_number} options={MAIN_NUMBERS} onValue={(main_number) => change({ ...money.settings, main_number })} />}
+    <Segmented label="Prices" value={money.settings.prices} options={PRICE_SOURCES} onValue={(prices) => change({ ...money.settings, prices })} />
+  </div>;
   const tools = <div className="mx-tools">
     {filter ? <div className="pj-row">
       {ranges}
       <Select id="mx-project" label="Project" hideLabel value={projectId ?? ""} onValue={(id) => filter.onProject(id === "" ? null : id)}
         options={[{ value: "", label: "All projects" }, ...filter.projects.map((project) => ({ value: project.id, label: displayText(project.name) }))]} />
     </div> : ranges}
+    {moneyTools}
     <span className="mx-count">{covers} · {updatedText(updatedMs, nowMs)} · provider-reported usage per turn</span>
   </div>;
+  const head = <>{tools}{refused && <LoadError message={refused} onRetry={() => { setRefused(""); onRetry(); }} />}</>;
   const reads = [usage, metrics];
   if (reads.some((read) => read.kind === "not_ready" || (read.kind === "error" && usageNotReady(read)))) return <NotReady what="Metrics" />;
   if (usage.kind === "error" || metrics.kind === "error") {
     const failed = usage.kind === "error" ? usage : metrics.kind === "error" ? metrics : null;
-    return <div className="stack">{tools}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
+    return <div className="stack">{head}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
   }
-  if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{tools}<Skeleton shape="card" count={3} /></div>;
+  if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{head}<Skeleton shape="card" count={3} /></div>;
   const table = breakdownRows(by, projectId, usage.value, metrics.value, adoption?.kind === "ok" ? adoption.value : null, names, nowMs, filter);
   return <div className="stack mx-page">
-    {tools}
+    {head}
     <Tiles usage={usage.value} metrics={metrics.value} />
-    <Chart metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} reread={usage.value.total.cache_read} />
-    <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={filter ? APP_BREAKDOWNS : BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} />
+    <Chart metrics={metrics.value} sinceMs={sinceMs} nowMs={nowMs} offset={offset} reread={usage.value.total.cache_read} money={usage.value.money} />
+    <Breakdown by={by} control={<Segmented label="Breakdown" value={by} options={filter ? APP_BREAKDOWNS : BREAKDOWNS} onValue={onBy} />} {...table} total={usage.value.total} money={usage.value.money} />
+    {unpricedNote(usage.value.money) && <p className="muted">{unpricedNote(usage.value.money)}</p>}
+    {usage.value.money.as_of && <p className="muted">Prices as of {usage.value.money.as_of}. Off hides every dollar. Tokens keep counting.</p>}
+    <details className="mx-credit"><summary>Counting rules adapted from CodeBurn (MIT)</summary><pre>{notices}</pre></details>
   </div>;
 }
 
@@ -431,6 +467,7 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
   const [adoption] = useLoad<Adoption | null>(() => projectId === null || filter ? Promise.resolve({ kind: "ok" as const, value: null }) : loadAdoption(projectId), [projectId, reload, Boolean(filter)]);
   const [statuses] = useLoad(() => teamStatuses(named), [named.join("\n"), reload]);
   const [accounts] = useLoad(listAccounts, [], "accounts");
+  const [notices] = useLoad(loadNotices, []);
   useEffect(() => {
     const timer = setInterval(() => { setNowMs(Date.now()); setTicks((old) => old + 1); }, TICK_MS);
     return () => clearInterval(timer);
@@ -446,6 +483,6 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
   const names: MetricsNames = { agents, accounts: new Map(accounts.kind === "ok" ? accounts.value.map((row) => [row.id, row.name]) : []) };
   const adopted: Loaded<Adoption> | null = adoption.kind === "ok" ? (adoption.value === null ? null : { kind: "ok", value: adoption.value }) : adoption;
   return <MetricsPage projectId={projectId} usage={usage} metrics={metrics} adoption={adopted} range={range} by={by} names={names}
-    sinceMs={sinceMs} nowMs={nowMs} updatedMs={updatedMs} offset={offsetMinutes(new Date(nowMs))} filter={filter}
+    sinceMs={sinceMs} nowMs={nowMs} updatedMs={updatedMs} offset={offsetMinutes(new Date(nowMs))} filter={filter} notices={notices.kind === "ok" ? notices.value : ""}
     onRange={(next) => { setRange(next); setNowMs(Date.now()); }} onBy={setBy} onRetry={() => { retryUsage(); retryMetrics(); }} />;
 }

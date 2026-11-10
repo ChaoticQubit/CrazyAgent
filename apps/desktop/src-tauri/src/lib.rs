@@ -3079,6 +3079,12 @@ async fn desktop_usage_refresh(
 }
 
 #[tauri::command]
+fn desktop_usage_notices(webview: Webview) -> Result<&'static str, BridgeError> {
+    main_window(&webview)?;
+    Ok(crazyagent::usage::THIRD_PARTY_NOTICES)
+}
+
+#[tauri::command]
 async fn desktop_usage_set_money(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4199,6 +4205,7 @@ native_commands! {
     desktop_usage_report,
     desktop_usage_metrics,
     desktop_usage_refresh,
+    desktop_usage_notices,
     desktop_usage_set_money,
     desktop_usage_set_reset,
     desktop_ide_extension_asks,

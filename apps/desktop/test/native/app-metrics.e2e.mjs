@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { POLL_MS } from "./e2e-harness.mjs";
-import { USAGE_MS, handOff, onEngine, tileParts, turnsOf } from "./codex-task-engine.mjs";
+import { USAGE_MS, handOff, onEngine, pricesOff, tileParts, turnsOf } from "./codex-task-engine.mjs";
 
 const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
 const PROJECT_HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Merges", "Share of tokens"];
@@ -75,7 +75,8 @@ async function pick(page, id) {
 }
 
 test("the sidebar's Metrics page adds up every project, and its filter shows one project's own numbers, the same as its Metrics tab (OS-6, OS-7)", { timeout: 900000 }, async (t) => {
-  await onEngine(t, "ca-app-metrics-", async ({ projects, runtime, me, page, site }) => {
+  await onEngine(t, "ca-app-metrics-", async ({ projects, runtime, me, page, site, bridge }) => {
+    await pricesOff(bridge);
     assert.equal(projects.length, 2);
     const [first, second] = projects;
     assert.equal(await handOff(me, page, first, runtime), "done", "the first project's Codex sub-agent finished");

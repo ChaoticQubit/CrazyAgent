@@ -59,7 +59,7 @@ while IFS= read -r line; do
   esac
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   /bin/sleep 0.3
-  printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9200,"cached_input_tokens":8000,"output_tokens":300}}}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9200,"cached_input_tokens":8000,"output_tokens":300,"total_tokens":9500}}}}\n' >> "$f"
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}\n' >> "$f"
   printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
 done

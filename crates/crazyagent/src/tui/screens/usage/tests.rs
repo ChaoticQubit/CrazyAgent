@@ -810,3 +810,182 @@ fn a_usage_step_that_panicked_shows_one_plain_line_with_its_count_and_last_time(
     );
     assert_eq!(lines[8], "Account limits");
 }
+
+fn money(shown: crate::usage::money::MainNumber) -> MoneyView {
+    MoneyView {
+        shown,
+        as_of: Some("2026-11-08".into()),
+        cost_nanos: 5_000_000_000,
+        ..MoneyView::default()
+    }
+}
+
+#[test]
+fn every_tui_dollar_carries_the_label() {
+    assert_eq!(
+        money_text(5_000_000_000),
+        "$5.00 (Estimated cost at API prices)"
+    );
+    assert_eq!(
+        money_text(4_000_000),
+        "<$0.01 (Estimated cost at API prices)"
+    );
+    assert_eq!(
+        money_text(5_000_000),
+        "$0.01 (Estimated cost at API prices)"
+    );
+    assert_eq!(money_text(0), "$0.00 (Estimated cost at API prices)");
+    assert_eq!(
+        money_text(i64::MAX),
+        "$9223372036.85 (Estimated cost at API prices)"
+    );
+}
+
+#[test]
+fn a_row_leads_with_the_chosen_number_and_shows_only_tokens_without_prices() {
+    use crate::usage::money::MainNumber;
+    assert_eq!(
+        figures_text("1.2K tokens", 5_000_000_000, &money(MainNumber::Dollars)),
+        "$5.00 (Estimated cost at API prices)  1.2K tokens"
+    );
+    assert_eq!(
+        figures_text("1.2K tokens", 5_000_000_000, &money(MainNumber::Tokens)),
+        "1.2K tokens  $5.00 (Estimated cost at API prices)"
+    );
+    assert_eq!(
+        figures_text("1.2K tokens", 5_000_000_000, &MoneyView::default()),
+        "1.2K tokens"
+    );
+}
+
+#[test]
+fn the_summary_shows_each_rows_dollars_and_the_total_with_prices_on() {
+    use crate::usage::money::MainNumber;
+    let ctx = ctx(100, 40);
+    let mut priced = report();
+    priced.money = money(MainNumber::Dollars);
+    priced.projects = vec![UsageRow {
+        cost_nanos: 2_000_000_000,
+        ..usage_row("project-harbor")
+    }];
+    let shown = text(&summary(
+        &priced,
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ))
+    .join("\n");
+    assert!(
+        shown.contains("$2.00 (Estimated cost at API prices)"),
+        "{shown}"
+    );
+    assert!(
+        shown
+            .lines()
+            .any(|line| line == "$5.00 (Estimated cost at API prices)"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn the_money_keys_flip_one_setting_and_send_it() {
+    use crate::usage::money::{MainNumber, MoneySettings, PriceSource};
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    let mut answer = report();
+    answer.since_ms = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(answer)), &mut ctx);
+    let labels: Vec<(String, String)> = page
+        .hints(&ctx)
+        .into_iter()
+        .map(|hint| (hint.key, hint.label))
+        .collect();
+    assert!(
+        labels.contains(&("m".to_owned(), "Dollars or tokens".to_owned())),
+        "{labels:?}"
+    );
+    assert!(
+        labels.contains(&("p".to_owned(), "Prices on or off".to_owned())),
+        "{labels:?}"
+    );
+    let sent = |key: char, page: &mut UsagePage, ctx: &mut Ctx| -> MoneySettings {
+        assert!(matches!(page.key(&Key::Char(key), ctx), Flow::Handled));
+        let Some(Request::Settings(job)) = ctx.next_request() else {
+            panic!("the money key asks the engine");
+        };
+        let SettingsJob::SetMoney(settings) = *job else {
+            panic!("the money key sets the money choice");
+        };
+        settings
+    };
+    assert_eq!(
+        sent('m', &mut page, &mut ctx),
+        MoneySettings {
+            main_number: MainNumber::Tokens,
+            prices: PriceSource::Bundled
+        }
+    );
+    assert_eq!(
+        sent('p', &mut page, &mut ctx),
+        MoneySettings {
+            main_number: MainNumber::Dollars,
+            prices: PriceSource::Off
+        }
+    );
+}
+
+#[test]
+fn a_priced_row_at_80_columns_wraps_so_no_figure_or_label_is_cut() {
+    use crate::usage::money::MainNumber;
+    let limit = 76;
+    let ctx = ctx(80, 40);
+    let mut priced = report();
+    priced.money = money(MainNumber::Tokens);
+    priced.projects = vec![UsageRow {
+        cost_nanos: 2_000_000_000,
+        ..usage_row(&"p".repeat(32))
+    }];
+    let lines = text(&summary(
+        &priced,
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        limit,
+        &ctx,
+    ));
+    assert!(
+        lines.iter().all(|line| line.chars().count() <= limit),
+        "{lines:#?}"
+    );
+    let joined = lines
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        joined.contains("$2.00 (Estimated cost at API prices)"),
+        "{joined}"
+    );
+    assert!(joined.contains("2 runs"), "{joined}");
+}
+
+#[test]
+fn with_prices_off_the_main_number_key_is_not_offered_and_does_nothing() {
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    let mut answer = report();
+    answer.money.settings.prices = PriceSource::Off;
+    answer.since_ms = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(answer)), &mut ctx);
+    let keys: Vec<String> = page.hints(&ctx).into_iter().map(|hint| hint.key).collect();
+    assert!(!keys.contains(&"m".to_owned()), "{keys:?}");
+    assert!(keys.contains(&"p".to_owned()), "{keys:?}");
+    assert!(matches!(page.key(&Key::Char('m'), &mut ctx), Flow::Ignored));
+    assert!(ctx.next_screen_request().is_none());
+}

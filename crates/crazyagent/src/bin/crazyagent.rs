@@ -15,6 +15,7 @@ use std::time::Duration;
 const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
 crazyagent --version\n\
+crazyagent --third-party-notices\n\
 crazyagent engine [--home DIR] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent tui\n\
@@ -50,6 +51,10 @@ fn main() -> ExitCode {
     }
     if args == ["--version"] {
         println!("{}", crazyagent::version::line());
+        return ExitCode::SUCCESS;
+    }
+    if args == ["--third-party-notices"] {
+        print!("{}", crazyagent::usage::THIRD_PARTY_NOTICES);
         return ExitCode::SUCCESS;
     }
     if args.first().is_some_and(|arg| arg == "update") {
