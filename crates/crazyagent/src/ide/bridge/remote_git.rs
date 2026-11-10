@@ -36,7 +36,7 @@ const FIXED: [(&str, &str); 10] = [
     ("LANG", "en_US.UTF-8"),
     ("LC_ALL", "en_US.UTF-8"),
 ];
-const HARDENING: [&str; 23] = [
+const HARDENING: [&str; 25] = [
     "--no-replace-objects",
     "-c",
     "core.hooksPath=/dev/null",
@@ -60,6 +60,8 @@ const HARDENING: [&str; 23] = [
     "maintenance.auto=false",
     "-c",
     "core.commitGraph=false",
+    "-c",
+    "advice.graftFileDeprecated=false",
 ];
 /// The most bytes of each of git's two output streams an answer carries, its last ones, so
 /// both fit one bridge frame once escaped for JSON.

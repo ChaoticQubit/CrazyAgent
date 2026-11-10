@@ -28,8 +28,9 @@ thread_local! {
 /// `GIT_SAFE`: no attributes file from outside the repository, no automatic upkeep, the
 /// case-folding path checks on, no signing, no untracked or split index caches, no
 /// reflog created for a ref update and no commit-graph file, which a confined process could
-/// write to make git answer ancestry wrongly (land-19 r1 M1).
-const ENGINE_SETTINGS: [&str; 20] = [
+/// write to make git answer ancestry wrongly (land-19 r1 M1), and no advice about the grafts
+/// file the command's `GIT_GRAFT_FILE=/dev/null` names (land-19 r2).
+const ENGINE_SETTINGS: [&str; 22] = [
     "-c",
     "core.attributesFile=/dev/null",
     "-c",
@@ -50,6 +51,8 @@ const ENGINE_SETTINGS: [&str; 20] = [
     "core.logAllRefUpdates=false",
     "-c",
     "core.commitGraph=false",
+    "-c",
+    "advice.graftFileDeprecated=false",
 ];
 
 pub(super) fn failure(code: &str) -> EngineError {

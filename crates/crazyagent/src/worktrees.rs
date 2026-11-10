@@ -304,6 +304,8 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
             "maintenance.auto=false",
             "-c",
             "core.commitGraph=false",
+            "-c",
+            "advice.graftFileDeprecated=false",
         ])
         .arg("--git-dir")
         .arg(repository.join(".git"))
