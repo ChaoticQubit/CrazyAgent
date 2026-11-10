@@ -29,6 +29,10 @@ const ARROWED = "Owner edit from the real IDE";
 const SETUP_MS = 120000;
 const BUILD_MS = 15 * 60 * 1000;
 const WORKBENCH_MS = 120000;
+const UNSAVED = "UnsavedOwnerLineBeforeRestart";
+const BACKUP_MS = 3000;
+const STOP_MS = 20000;
+const RESTORE_MS = 20000;
 const SETTLE_MS = 1500;
 const PRIMARY = process.platform === "darwin" ? 4 : 2;
 const CTRL = 2;
@@ -663,6 +667,38 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           assert.equal(failed.get(id), "csp", `the policy blocked ${url} before it was sent`);
         }
         assert.deepEqual(agentHosts(runtime), [], "no IDE agent host process runs");
+      });
+
+      await t.test("a saved access level restarts the IDE, and the Save's words match what happens to an unsaved edit", async () => {
+        await keys.key("P", PRIMARY);
+        await ide.until("quick open", ide.rows);
+        await keys.text("notes.md");
+        await pause(SETTLE_MS);
+        await ide.pick("notes.md", FOLDER);
+        await ide.until("the editor focused", `document.activeElement?.closest(".monaco-editor") !== null`);
+        await keys.text(UNSAVED);
+        await ide.until("the edit marked unsaved", `document.querySelector(".tabs-container .tab.active.dirty") !== null`);
+        await pause(BACKUP_MS);
+        await me.capture("unsaved-before-restart");
+        const view = await value(bridge, "desktop_project_agent_policy", { id: project });
+        const access = view.access === "sandboxed" ? "own_branch" : "sandboxed";
+        const saved = await value(bridge, "desktop_set_project_agent_policy", { id: project, version: view.version, policy: { access, network: view.network, toolchains: [], ide_git_hooks: false }, generation: next() });
+        assert.equal(saved.outcome, "applied", `the level is saved: ${JSON.stringify(saved)}`);
+        for (const deadline = Date.now() + STOP_MS; existsSync(server.token_path); await pause(POLL_MS)) {
+          assert.ok(Date.now() < deadline, "the IDE server kept running after its level was saved");
+        }
+        const reopened = await bridgeCall(bridge, "e2e_ide_open", { projectId: project });
+        assert.ok("value" in reopened, `the IDE opens again: ${JSON.stringify(reopened)}`);
+        await page.send("Page.navigate", { url: workbenchUrl(reopened.value) });
+        await ide.until("the workbench again", `document.querySelector(".monaco-workbench .part.activitybar") !== null`, WORKBENCH_MS);
+        let back = false;
+        for (const deadline = Date.now() + RESTORE_MS; !back && Date.now() < deadline; await pause(POLL_MS)) {
+          back = await page.evaluate(`[...document.querySelectorAll(".view-line")].some((line) => line.textContent.includes(${JSON.stringify(UNSAVED)}))`);
+        }
+        await me.capture("unsaved-after-restart");
+        writeFileSync(join(evidence, "unsaved-after-restart.txt"), `${back ? "returned" : "lost"}\n`);
+        const said = readFileSync(join(appRoot, "src/screens/project/access.tsx"), "utf8").includes("Unsaved edits are lost.");
+        assert.equal(said, !back, `an unsaved edit was ${back ? "returned" : "lost"} after the restart, and the Save ${said ? "says" : "does not say"} it is lost`);
       });
     });
   } finally {

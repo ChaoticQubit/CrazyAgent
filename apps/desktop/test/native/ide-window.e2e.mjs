@@ -285,6 +285,13 @@ const WORKBENCH_MS = 90;
 const OWN_WINDOW_MS = 30000;
 const FRONT_MS = 5000;
 const SAME_PAGE_MS = 1000;
+const UNSAVED = "UnsavedBeforeRestart";
+const BACKUP_MS = 3000;
+const SERVER_GONE_MS = 20000;
+const WINDOW_GONE_MS = 90000;
+const REOPEN_MS = 60000;
+const RESTORE_MS = 120000;
+const LEAVE_S = 320;
 
 /** Fails the row unless two rows show one page. WebKit's time origin wobbles by a millisecond or
  * so, while a reload would move it by the many seconds since the page first loaded. Inputs: the
@@ -385,6 +392,43 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
       assert.ok(row.off <= FIT_PX, `${row.step}: the IDE sits on its panel within ${FIT_PX} px: ${JSON.stringify(row)}`);
       assert.ok(row.clear, `${row.step}: the IDE covers neither the tab row nor the side rail: ${JSON.stringify(row)}`);
     }
+  });
+
+  it("a saved level ends the IDE's own window, the tab opens it again, and the Save's words match what happens to an unsaved edit", async () => {
+    const project = await newProject("ide-own-level");
+    await buildReady();
+    await go(`#/projects/${encodeURIComponent(project)}/overview`);
+    await until(() => browser.execute(() => Boolean(document.querySelector("#tab-ide"))), 60000, "the project page never listed the IDE tab");
+    const moved = await moveOut(project);
+    assert.ok(serverUp(project), "the server runs while the IDE is in its own window");
+    raise("IDE");
+    const focused = await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.focused && row.look !== null, "the IDE window never had the focus", OWN_WINDOW_MS, moved.at);
+    const before = focused.look.editors;
+    await commandKey("n");
+    await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.look?.editors === before + 1, "Cmd+N opened no editor in the IDE window", OWN_WINDOW_MS, focused.at);
+    await testAppInFront();
+    onApp(`keystroke "${UNSAVED}"`);
+    await pause(BACKUP_MS);
+    shot("unsaved-before-restart");
+    await startPlan([[LEAVE_S, "go", "#/"]]);
+    const view = await invoke("desktop_project_agent_policy", { id: project });
+    const access = view.access === "sandboxed" ? "own_branch" : "sandboxed";
+    const saving = Date.now();
+    const saved = await invoke("desktop_set_project_agent_policy", { id: project, version: view.version, policy: { access, network: view.network, toolchains: [], ide_git_hooks: false }, generation: ++generation });
+    assert.equal(saved.outcome, "applied", JSON.stringify(saved));
+    await until(() => !serverUp(project), SERVER_GONE_MS, "the server kept running after its level was saved");
+    await rowWhere((row) => row.windows && !row.windows.some((label) => OWN_WINDOW.test(label)), "the own window stayed open after its server ended", WINDOW_GONE_MS, saving);
+    await until(() => serverUp(project), REOPEN_MS, "the tab never opened the IDE again at the new level");
+    const editors = () => windowRows().filter((row) => row.at > saving && row.view?.window === "main" && row.look).at(-1)?.look.editors ?? -1;
+    let count = editors();
+    for (const deadline = Date.now() + RESTORE_MS; count !== before + 1 && Date.now() < deadline; await pause(POLL_MS)) count = editors();
+    const back = count === before + 1;
+    shot("unsaved-after-restart");
+    writeFileSync(join(evidence, "unsaved-after-restart.txt"), `${back ? "returned" : "lost"} editors ${count} before ${before}\n`);
+    const said = readFileSync(new URL("../../src/screens/project/access.tsx", import.meta.url), "utf8").includes("Unsaved edits are lost.");
+    assert.equal(said, !back, `an unsaved edit was ${back ? "returned" : "lost"} after the restart, and the Save ${said ? "says" : "does not say"} it is lost`);
+    await pause(Math.max(0, saving + LEAVE_S * 1000 + POLL_MS * 5 - Date.now()));
+    await until(() => browser.execute(() => location.hash === "#/"), 60000, "the page never left the project");
   });
 
   it("moves to its own window with no reload, comes back, and closes with its project and the main window", async () => {
