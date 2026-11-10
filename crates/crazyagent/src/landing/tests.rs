@@ -10924,6 +10924,84 @@ fn a_fast_forward_across_owner_commits_the_change_checks_refuse_opens_no_set() {
     }
 }
 
+/// Starts team agent 3, has the owner commit a plain file on main and the agent fast-forward
+/// onto it, as a turn that only took main in leaves the agent. Input: the case. Output: the
+/// agent's workspace.
+fn fast_forwarded_agent(case: &Case) -> Workspace {
+    case.start();
+    let agent = numbered_agent(case, 3);
+    record_worktree_start(&case.db, &agent.repository, &agent.worktree, &agent.git_dir).unwrap();
+    case.owner_commit("LATER", "later\n", "Owner adds a file");
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &["merge", "-q", "--ff-only", "main"],
+    );
+    agent
+}
+
+/// Commits everything in an agent's worktree as the agent. Inputs: the case, the agent's
+/// workspace and the message.
+fn commit_as_agent(case: &Case, agent: &Workspace, message: &str) {
+    git_in(&case.home, &agent.worktree, &["add", "-A"]);
+    git_in(
+        &case.home,
+        &agent.worktree,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
+}
+
+/// rv-secreview land-17 L2: the fast-forward skip covers only a head already on the landing
+/// tip, so a link out of the tree that the agent commits after a fast-forward is still
+/// refused at its turn end.
+#[test]
+fn an_agent_link_out_of_the_tree_committed_after_a_fast_forward_is_refused() {
+    let case = Case::new();
+    let agent = fast_forwarded_agent(&case);
+    std::os::unix::fs::symlink("/etc", agent.worktree.join("outside")).unwrap();
+    commit_as_agent(&case, &agent, "Agent links out");
+    assert_eq!(
+        refused(record_turn_end(&case.db, &agent, &merge_turn())),
+        "changes_link_outside"
+    );
+}
+
+/// rv-secreview land-17 L2: the same link left uncommitted after a fast-forward is refused by
+/// the commit that takes the worktree's files in.
+#[test]
+fn an_agent_link_out_of_the_tree_left_uncommitted_after_a_fast_forward_is_refused() {
+    let case = Case::new();
+    let agent = fast_forwarded_agent(&case);
+    std::os::unix::fs::symlink("/etc", agent.worktree.join("outside")).unwrap();
+    assert_eq!(
+        refused(record_turn_end(&case.db, &agent, &merge_turn())),
+        "changes_link_outside"
+    );
+}
+
+/// rv-code land-17: a plain commit the agent makes after a fast-forward opens a set.
+#[test]
+fn a_plain_agent_commit_after_a_fast_forward_opens_a_set() {
+    let case = Case::new();
+    let agent = fast_forwarded_agent(&case);
+    write(&agent.worktree.join("own.txt"), "own\n");
+    commit_as_agent(&case, &agent, "Agent adds a file");
+    assert!(
+        record_turn_end(&case.db, &agent, &merge_turn())
+            .unwrap()
+            .is_some()
+    );
+}
+
 /// T3-R2-S4: an ordinary Accept's stored intent keeps the shape an older engine reads, and a
 /// master's still carries its mark.
 #[test]
