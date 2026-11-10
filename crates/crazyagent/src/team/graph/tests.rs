@@ -94,6 +94,7 @@ fn status() -> TeamStatus {
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
         master_lands: None,
+        access_unreadable: false,
         reask_empty_reply: true,
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,

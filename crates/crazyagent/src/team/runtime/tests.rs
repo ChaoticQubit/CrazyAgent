@@ -513,6 +513,43 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
     assert!(upgraded.shutdown().unwrap().is_empty());
 }
 
+/// With Full access and Merges saved, a policy body the engine cannot read offers no master
+/// landing, says the access is unreadable rather than below Full, and land time refuses
+/// (FBT3-S1, FB-T3 r1 L1 and L2).
+#[test]
+fn an_unreadable_agent_access_offers_no_master_landing_and_says_why() {
+    use crate::team::MasterLands;
+    let fixture = Fixture::new(1);
+    let full = crate::sandbox::policy::AgentPolicy {
+        access: AgentAccess::Full,
+        ..crate::sandbox::policy::AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&fixture.connection, PROJECT, &full).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::team::set_master_lands(&fixture.connection, &project, MasterLands::Merges).unwrap();
+    let status = fixture.status();
+    assert_eq!(
+        (status.master_lands, status.access_unreadable),
+        (Some(MasterLands::Merges), false)
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_agent_policy SET body='{' WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    let status = fixture.status();
+    assert_eq!(
+        (status.master_lands, status.access_unreadable),
+        (None, true),
+        "an unreadable body offers nothing and says so"
+    );
+    assert!(crate::team::master_lands(&fixture.connection, &project).is_err());
+    crate::sandbox::policy::save(&fixture.connection, PROJECT, &full).unwrap();
+    assert!(!fixture.status().access_unreadable);
+}
+
 /// An agent holding a toolchain is stopped under a reason that says what happened: a
 /// policy the engine cannot read is named as unreadable, and a toolchain the saved policy
 /// no longer allows without an owner choice turning it off is never called turned off.

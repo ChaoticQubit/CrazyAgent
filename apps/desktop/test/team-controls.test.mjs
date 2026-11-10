@@ -332,6 +332,12 @@ test("Settings, Team offers Apply a master harness change with When the master i
   assert.match(choose, /setNote\(message\);\s*data\.reloadTeam\(\);/, "the page reads the team again after every save, stale or not");
 });
 
+test("an unreadable agent access says so under what the master does with its conflict fixes", () => {
+  const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ master_lands: null, access_unreadable: true }), reload() {} }));
+  assert.match(html, /This project&#x27;s agent access can&#x27;t be read, so the master&#x27;s conflict fixes wait for your Accept\./);
+  assert.doesNotMatch(html, /Only at Full access\./, "the access is unknown, not below Full");
+});
+
 test("what the master does with its conflict fixes shows its two choices always and is a choice only at Full access", () => {
   const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
   const cards = (html) => [...html.matchAll(/<label class="radio-card"><input type="radio"([^>]*)\/>/g)].map((card) => [card[1].match(/value="([^"]*)"/)?.[1], /checked=""/.test(card[1]), /disabled=""/.test(card[1])]);

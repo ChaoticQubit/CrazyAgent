@@ -3195,6 +3195,8 @@ pub struct TeamStatus {
     pub ask_before_merge: bool,
     #[serde(default)]
     pub master_lands: Option<MasterLands>,
+    #[serde(default)]
+    pub access_unreadable: bool,
     #[serde(default = "reask_default")]
     pub reask_empty_reply: bool,
     #[serde(default)]
@@ -4976,6 +4978,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         background_at_end: background_at_end(connection, project)?,
         ask_before_merge: ask_before_merge(connection, project)?,
         master_lands: offered_master_lands(connection, project)?,
+        access_unreadable: false,
         reask_empty_reply: reask_empty_reply(connection, project)?,
         master_idle_stop: MasterIdleStop::effective(
             master_idle_stop(connection, project)?,

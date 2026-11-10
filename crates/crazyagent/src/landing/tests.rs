@@ -8403,6 +8403,26 @@ fn master_set_waits(
     );
 }
 
+/// With Full access and Merges saved, a master fix never lands itself while the project's
+/// agent access cannot be read: land time reads it again and refuses, and main and both
+/// sets stay as they were (FBT3-S1, FB-T3 r1 L2).
+#[test]
+fn a_master_fix_never_lands_itself_while_agent_access_cannot_be_read() {
+    let case = Case::new();
+    let (sub, fix, _) = master_fixing_a_conflict(&case);
+    let tip = case.tip();
+    case.db
+        .execute(
+            "UPDATE project_agent_policy SET body='{' WHERE project=?1",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+    assert!(land_master_set(&case.db, &case.home, &fix).is_err());
+    assert_eq!(case.tip(), tip, "main did not move");
+    assert_eq!(case.view(&fix).state, ChangeState::Pending);
+    assert_eq!(case.view(&sub).state, ChangeState::Conflict);
+}
+
 #[test]
 fn a_master_set_that_fixes_a_conflicted_set_lands_itself_and_closes_it_when_master_lands_is_merges()
 {
