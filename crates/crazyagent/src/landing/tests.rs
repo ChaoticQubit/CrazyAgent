@@ -11012,6 +11012,36 @@ fn cargo_workspace(case: &mut Case) {
     case.start();
 }
 
+/// The notes the engine left in the owner's team conversation, oldest first, read every
+/// 50 ms until one is there or `within` passes. Inputs: the case and the time. Output: the
+/// texts.
+fn owner_notes_within(case: &Case, within: Duration) -> Vec<String> {
+    let started = Instant::now();
+    loop {
+        let notes: Vec<String> = case
+            .db
+            .prepare("SELECT text FROM team_messages WHERE project=?1 AND state='note' ORDER BY id")
+            .unwrap()
+            .query_map([case.workspace.project.as_str()], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        if !notes.is_empty() || started.elapsed() >= within {
+            return notes;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// What the owner reads once a set they heard waits in Changes went back to its agent.
+/// Input: the set. Output: the note.
+fn went_back_note(set: &ChangeSetView) -> String {
+    format!(
+        "The edits from {} went back to it to take in newer work, so they are not waiting for you in Changes yet.",
+        set.agent.label
+    )
+}
+
 /// The agent adds a dev-dependency of `app` and the owner then adds a dependency of `app` on
 /// crate `a` on main, each with its own Cargo.lock, so the lockfile alone clashes. Inputs:
 /// the case, the agent's manifest line and the name it locks. Output: the agent's change
@@ -11187,6 +11217,7 @@ fn a_clash_beyond_the_named_lockfiles_regenerates_nothing() {
 
 const TURN_END_WITHIN: Duration = Duration::from_secs(20);
 const REGENERATED_WITHIN: Duration = Duration::from_secs(120);
+const OWNER_NOTE_WITHIN: Duration = Duration::from_secs(5);
 
 /// Ends the agent's turn the way a team turn does, on its own thread and store connection,
 /// and waits at most `within` for it to return. Inputs: the case, the turn id and the time.
@@ -11415,6 +11446,11 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
         "CrazyAgent <engine@crazyagent.invalid>\nRegenerate Cargo.lock on main\n"
     );
     assert_eq!(
+        set.regenerated,
+        vec!["Cargo.lock".to_owned()],
+        "Changes can say the project's tools wrote this lockfile"
+    );
+    assert_eq!(
         case.owner(&["rev-parse", &format!("{}^2", set.head)])
             .trim(),
         tip
@@ -11462,6 +11498,24 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
     );
 }
 
+/// Once a later turn moves a regenerated set's head, Changes no longer says the project's
+/// tools wrote its lockfile, since the agent may have rewritten it (T8-R1-WORDING).
+#[test]
+fn a_later_turn_on_a_regenerated_set_drops_the_words_about_the_tools() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set)
+    });
+    assert_eq!(set.regenerated, vec!["Cargo.lock".to_owned()]);
+    case.edit("app/src/lib.rs", "pub fn later() {}\n");
+    turn_end_within(&case, "turn-2", TURN_END_WITHIN);
+    let later = set_within(&case, &id, TURN_END_WITHIN, |later| later.head != set.head);
+    assert_ne!(later.head, set.head);
+    assert_eq!(later.regenerated, Vec::<String>::new());
+}
+
 /// When cargo cannot rewrite the clashing lockfile, here offline on a crate it never
 /// fetched, the turn end falls back to Task 7's update: the set goes back to its agent with
 /// main merged into its worktree, no regeneration note goes out and nothing temporary is
@@ -11490,6 +11544,11 @@ fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_e
             .iter()
             .all(|note| !note.contains("regenerated")),
         "no regeneration note goes out"
+    );
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set)],
+        "the owner, told the edits wait in Changes, hears they went back"
     );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
@@ -11618,7 +11677,168 @@ fn a_tool_past_the_regeneration_time_falls_back_to_the_agent_update() {
         ChangeState::Updating,
         "past its time the tool is stopped and the agent fixes the clash"
     );
+    assert_eq!(
+        owner_notes_within(&case, OWNER_NOTE_WITHIN),
+        vec![went_back_note(&set)]
+    );
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// One lockfile tool a row runs for real on a workspace whose packages are all local, so no
+/// registry is asked. Fields: the program, its lockfile, the manifest both sides edit, that
+/// manifest and the lockfile at the start, the owner's and the agent's, the other files, what
+/// the tool's lockfile must name and what the landed manifest must hold.
+struct RealTool {
+    program: &'static str,
+    lockfile: &'static str,
+    manifest: &'static str,
+    start: (String, String),
+    owner: (String, String),
+    agent: (String, String),
+    others: Vec<(&'static str, String)>,
+    locks: [&'static str; 2],
+    keeps: [&'static str; 2],
+}
+
+/// Whether a program runs on the PATH the engine gives its tools. Input: the program.
+/// Output: the answer.
+fn runs_for_the_engine(program: &str) -> bool {
+    crate::spawn_gate::status(
+        Command::new("/usr/bin/env")
+            .env_clear()
+            .env(
+                "PATH",
+                "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+            )
+            .env("HOME", "/tmp")
+            .args([program, "--version"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|status| status.success())
+}
+
+/// A clash in one tool's lockfile alone is rewritten by the real tool in its sandbox, and
+/// the set lands with both sides locked; only `cargo update` ran in a row before
+/// (T8-R1-TOOLS). A tool this machine does not have is skipped. pnpm and uv have no row
+/// yet: neither regenerates in the tool sandbox today. Input: the tool.
+fn a_real_tool_rewrites_its_clashing_lockfile(tool: &RealTool) {
+    let program = tool.program;
+    if !runs_for_the_engine(program) {
+        eprintln!("skipped: {program} is not installed");
+        return;
+    }
+    let mut case = Case::new();
+    seat_team_agent(&mut case);
+    for (path, text) in &tool.others {
+        write(&case.repo.join(path), text);
+    }
+    write(&case.repo.join(tool.manifest), &tool.start.0);
+    write(&case.repo.join(tool.lockfile), &tool.start.1);
+    case.owner(&["add", "-A"]);
+    case.owner(&["commit", "-q", "-m", "Start a workspace"]);
+    case.agent(&["checkout", "-q", "--detach", "main"]);
+    case.start();
+    write(&case.repo.join(tool.manifest), &tool.owner.0);
+    write(&case.repo.join(tool.lockfile), &tool.owner.1);
+    case.owner(&["add", "-A"]);
+    case.owner(&["commit", "-q", "-m", "Depend on a"]);
+    case.edit(tool.manifest, &tool.agent.0);
+    case.edit(tool.lockfile, &tool.agent.1);
+    let landed = turn_end_within(&case, "turn-1", TURN_END_WITHIN);
+    let id = list(&case.db, &case.workspace.project)
+        .unwrap()
+        .first()
+        .expect("the agent's turn kept a change set")
+        .id
+        .clone();
+    assert_eq!(
+        landed,
+        Some(crate::landing_turns::Landed::Added(id.clone())),
+        "{program}"
+    );
+    let subject = format!("Regenerate {} on main", tool.lockfile);
+    let head_subject = |set: &ChangeSetView| {
+        case.owner(&["log", "-1", "--format=%s", &set.head])
+            .trim()
+            .to_owned()
+    };
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating || head_subject(set) == subject
+    });
+    assert_eq!(
+        (head_subject(&set), set.state),
+        (subject, ChangeState::Pending),
+        "{program}: its lockfile did not land"
+    );
+    let lock = case.owner(&["show", &format!("{}:{}", set.head, tool.lockfile)]);
+    for name in tool.locks {
+        assert!(lock.contains(name), "{program}: {name} in\n{lock}");
+    }
+    assert_eq!(
+        regenerate_leftovers(&case),
+        Vec::<String>::new(),
+        "{program}"
+    );
+    let outcome = case.accept(&id).unwrap();
+    assert!(
+        matches!(outcome, AcceptOutcome::Landed { .. }),
+        "{program}: {outcome:?}"
+    );
+    let manifest = std::fs::read_to_string(case.repo.join(tool.manifest)).unwrap();
+    for kept in tool.keeps {
+        assert!(manifest.contains(kept), "{program}: {kept} in\n{manifest}");
+    }
+}
+
+/// A package.json whose two dependency lists sit far enough apart for git to merge edits to
+/// each. Inputs: the two lists' entries. Output: the text.
+fn node_app(dependencies: &str, dev_dependencies: &str) -> String {
+    format!(
+        "{{\n  \"name\": \"app\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {{{dependencies}}},\n  \"private\": true,\n  \"license\": \"MIT\",\n  \"devDependencies\": {{{dev_dependencies}}}\n}}\n"
+    )
+}
+
+/// The packages a Node workspace links, beside its root manifest. Input: extra root fields.
+/// Output: the files.
+fn node_packages(root_fields: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "package.json",
+            format!("{{\"name\":\"root\",\"version\":\"1.0.0\",\"private\":true{root_fields}}}\n"),
+        ),
+        (
+            "packages/a/package.json",
+            "{\"name\":\"a\",\"version\":\"1.0.0\"}\n".to_owned(),
+        ),
+        (
+            "packages/b/package.json",
+            "{\"name\":\"b\",\"version\":\"1.0.0\"}\n".to_owned(),
+        ),
+    ]
+}
+
+#[test]
+fn real_npm_rewrites_a_clashing_package_lock() {
+    let lock = |version: &str| {
+        format!(
+            "{{\"name\":\"root\",\"version\":\"{version}\",\"lockfileVersion\":3,\"requires\":true,\"packages\":{{}}}}\n"
+        )
+    };
+    a_real_tool_rewrites_its_clashing_lockfile(&RealTool {
+        program: "npm",
+        lockfile: "package-lock.json",
+        manifest: "packages/app/package.json",
+        start: (node_app("", ""), lock("1.0.0")),
+        owner: (node_app("\"a\": \"1.0.0\"", ""), lock("1.0.1")),
+        agent: (node_app("", "\"b\": \"1.0.0\""), lock("1.0.2")),
+        others: node_packages(",\"workspaces\":[\"packages/*\"]"),
+        locks: [
+            "\"resolved\": \"packages/a\"",
+            "\"resolved\": \"packages/b\"",
+        ],
+        keeps: ["\"a\": \"1.0.0\"", "\"b\": \"1.0.0\""],
+    });
 }
 
 /// A tool that changes a file other than the clashing lockfiles, here the manifest, lands
@@ -13161,4 +13381,322 @@ fn the_owners_accept_names_the_set_by_its_number_in_the_activity() {
         texts,
         vec!["You accepted change set #1 (Agent 1: Add the fourth line, 1 file)".to_owned()]
     );
+}
+
+/// How long a landing race row runs: `CRAZYAGENT_LANDING_RACE_SECONDS` for a longer run at a
+/// red, else a few seconds. Output: the seconds.
+#[cfg(target_os = "macos")]
+fn race_seconds() -> u64 {
+    std::env::var("CRAZYAGENT_LANDING_RACE_SECONDS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(5)
+}
+
+/// The engine's git on the case's agent worktree, confined for one step. Inputs: the case and
+/// what the step may write. Output: the repository.
+#[cfg(target_os = "macos")]
+fn confined_agent(case: &Case, writes: git::Writes) -> git::Repo {
+    git::Repo::open(
+        &case.repo,
+        &case.workspace.git_dir,
+        Some(&case.workspace.worktree),
+    )
+    .unwrap()
+    .confined(writes)
+    .unwrap()
+}
+
+/// SECAUDIT unconfined-git-add-reads-through-raced-symlink, with no timing: a step on the work
+/// tree cannot read a file behind a link, while a plain file in the work tree still reads.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_git_step_cannot_read_a_file_behind_a_link() {
+    let case = Case::new();
+    let outside = case.home.join("marker");
+    write(&outside, "secret\n");
+    let worktree = &case.workspace.worktree;
+    std::os::unix::fs::symlink(&outside, worktree.join("link")).unwrap();
+    write(&worktree.join("plain"), "plain\n");
+    let repo = confined_agent(&case, git::Writes::Objects);
+    let hash = |path: &str| {
+        repo.exec(&["hash-object", "--", path], None, &[], 4096)
+            .unwrap()
+            .code
+    };
+    assert_eq!(hash("plain"), 0);
+    assert_ne!(hash("link"), 0, "a step read the file behind the link");
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree, with no timing: a step writes
+/// only what it names. Neither step reaches the owner's hooks or anywhere outside, a step
+/// filling the work tree writes no git metadata, and a step adding the work tree writes
+/// nothing in it. What each may write still works.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_git_step_writes_only_what_it_names_and_never_the_git_folder() {
+    use super::git::Writes::{Objects, WorkTree};
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let folder = case.repo.join(".git");
+    let private = case.workspace.git_dir.clone();
+    let outside = case.home.join("outside");
+    let checkout = |writes: git::Writes, into: &Path| {
+        let prefix = format!("--prefix={}/", into.display());
+        confined_agent(&case, writes)
+            .exec(&["checkout-index", "-a", "-f", &prefix], None, &[], 4096)
+            .unwrap()
+    };
+    for (writes, into) in [
+        (WorkTree, outside.clone()),
+        (WorkTree, folder.join("hooks")),
+        (WorkTree, folder.join("objects")),
+        (WorkTree, private),
+        (Objects, worktree.join("out")),
+        (Objects, outside),
+        (Objects, folder.join("hooks")),
+    ] {
+        checkout(writes, &into);
+        assert!(
+            std::fs::symlink_metadata(into.join("README")).is_err(),
+            "a step wrote in {}",
+            into.display()
+        );
+    }
+    assert_eq!(checkout(WorkTree, &worktree.join("ok")).code, 0);
+    assert!(worktree.join("ok/README").is_file());
+    assert_eq!(checkout(Objects, &folder.join("objects/ok")).code, 0);
+    assert!(folder.join("objects/ok/README").is_file());
+}
+
+/// SECAUDIT unconfined-git-add-reads-through-raced-symlink: a file an agent keeps swapping for
+/// a link while its turn ends leaves no blob of what the link points at.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_file_swapped_for_a_link_during_the_turn_end_leaves_no_blob_of_what_it_points_at() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let case = Case::new();
+    let marker = format!("{}\n", "S".repeat(63));
+    let secret = case.home.join("marker");
+    std::fs::write(&secret, &marker).unwrap();
+    let decoy = case.workspace.worktree.join("decoy.txt");
+    std::fs::write(&decoy, format!("{}\n", "D".repeat(63))).unwrap();
+    let side = case.home.join("swap");
+    std::fs::create_dir_all(&side).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(race_seconds());
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = std::thread::spawn({
+        let (stop, decoy, secret) = (stop.clone(), decoy.clone(), secret.clone());
+        move || {
+            let (plain, link) = (side.join("plain"), side.join("link"));
+            let mut round = 0u64;
+            while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+                std::fs::write(&plain, format!("{round:063}\n")).unwrap();
+                let _ = std::fs::rename(&plain, &decoy);
+                let _ = std::fs::remove_file(&link);
+                std::os::unix::fs::symlink(&secret, &link).unwrap();
+                let _ = std::fs::rename(&link, &decoy);
+                round += 1;
+            }
+        }
+    });
+    let mut turns = 0u32;
+    while turns < 200 && Instant::now() < deadline {
+        let turn = TurnEnd {
+            outcome: TurnOutcome::Succeeded,
+            turn: format!("turn-{turns}"),
+            prompt_line: "Probe".into(),
+        };
+        let _ = record_turn_end(&case.db, &case.workspace, &turn);
+        turns += 1;
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    assert!(turns > 0);
+    let listing = git_in(
+        &case.home,
+        &case.repo,
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+    );
+    let found = listing
+        .lines()
+        .filter(|line| line.ends_with(" blob 64"))
+        .filter_map(|line| line.split(' ').next())
+        .any(|sha| git_in(&case.home, &case.repo, &["cat-file", "-p", sha]) == marker);
+    assert!(!found, "a blob holds the bytes behind the link");
+}
+
+/// One attempt of the read-tree race: a lead's worktree on its branch holding `x/keep.txt`
+/// from one landed set, and a waiting second set adding `x/planted.bin` with `known`.
+/// Input: the file's text. Output: the case, the lead and the waiting set.
+#[cfg(target_os = "macos")]
+fn read_tree_attempt(known: &str) -> (Case, Workspace, ChangeSetId) {
+    let case = Case::new();
+    let agents = case
+        .repo
+        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join("worktrees");
+    std::fs::create_dir_all(&agents).unwrap();
+    let worktree = agents.join("agent-2");
+    case.owner(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        worktree.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let lead = Workspace {
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-2".into(),
+            label: "Agent 2".into(),
+        },
+        worktree,
+        git_dir: case.repo.join(".git/worktrees/agent-2"),
+        ..case.workspace.clone()
+    };
+    assert_eq!(named(&case, &lead).unwrap(), "crazyagent/agent-2");
+    case.edit("x/keep.txt", "keep\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let landed = accept_into(
+        &case.db,
+        &case.home,
+        &id,
+        &case.view(&id).head,
+        None,
+        "crazyagent/agent-2",
+    )
+    .unwrap();
+    assert!(matches!(landed, AcceptOutcome::Landed { .. }));
+    case.edit("x/planted.bin", known);
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    (case, lead, second)
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree, with no timing: the step an
+/// Accept fills an agent's worktree through writes nothing outside that worktree, where the
+/// same step on the owner's checkout still can.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_accept_fills_an_agents_worktree_through_a_step_confined_to_it() {
+    let (case, lead, _) = read_tree_attempt("known\n");
+    let repository =
+        git::Repo::open(&case.repo, &case.repo.join(".git"), Some(&case.repo)).unwrap();
+    let agent = flow::open_agent(
+        &case.db,
+        AgentKind::Sub,
+        &case.repo,
+        &lead.worktree,
+        &lead.git_dir,
+    )
+    .unwrap();
+    let outside = case.home.join("outside");
+    let prefix = format!("--prefix={}/", outside.display());
+    let args = ["checkout-index", "-a", "-f", prefix.as_str()];
+
+    let target = owner::Target::Agent(Box::new(agent));
+    let (confined, refused) = owner::filled_checkout(&target, &repository)
+        .unwrap()
+        .unwrap();
+    assert_eq!(refused, "changes_agent_busy");
+    confined.exec(&args, None, &[], 4096).unwrap();
+    assert!(
+        std::fs::symlink_metadata(outside.join("README")).is_err(),
+        "the step wrote outside the agent's worktree"
+    );
+
+    let (plain, refused) = owner::filled_checkout(&owner::Target::Checkout, &repository)
+        .unwrap()
+        .unwrap();
+    assert_eq!(refused, "changes_owner_dirty");
+    assert_eq!(plain.exec(&args, None, &[], 4096).unwrap().code, 0);
+    assert!(
+        outside.join("README").is_file(),
+        "the owner's checkout was confined"
+    );
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree: a folder of a lead's worktree
+/// swapped for a link while its worker's set lands writes nothing outside the worktree, and
+/// the same landing with no swap still fills the worktree under the confined step.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_swapped_for_a_link_during_a_landing_writes_nothing_outside_the_worktree() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let known: String = (0..)
+        .map(|n: u32| format!("{n:08}\n"))
+        .take(466_034)
+        .collect();
+    let (case, lead, second) = read_tree_attempt(&known);
+    let landed = accept_into(
+        &case.db,
+        &case.home,
+        &second,
+        &case.view(&second).head,
+        None,
+        "crazyagent/agent-2",
+    )
+    .unwrap();
+    assert!(
+        matches!(landed, AcceptOutcome::Landed { .. })
+            && lead.worktree.join("x/planted.bin").is_file(),
+        "the landing with no swap did not fill the worktree"
+    );
+    let deadline = Instant::now() + Duration::from_secs(race_seconds());
+    let (mut tried, mut hits) = (0u32, 0u32);
+    while tried < 100 && Instant::now() < deadline {
+        let (case, lead, second) = read_tree_attempt(&known);
+        let outside = tempfile::tempdir().unwrap();
+        let go = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let x = lead.worktree.join("x");
+        let aside = lead.worktree.join("x.aside");
+        let swapper = std::thread::spawn({
+            let (go, done, x, aside) = (go.clone(), done.clone(), x.clone(), aside.clone());
+            let target = outside.path().to_path_buf();
+            move || {
+                while !go.load(Ordering::Relaxed) {
+                    if done.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::yield_now();
+                }
+                while !done.load(Ordering::Relaxed) {
+                    let _ = std::fs::rename(&x, &aside);
+                    let _ = std::os::unix::fs::symlink(&target, &x);
+                    let _ = std::fs::remove_file(&x);
+                    let _ = std::fs::rename(&aside, &x);
+                }
+            }
+        });
+        let head = case.view(&second).head;
+        let _ = owner::accept_to(
+            &case.db,
+            &case.home,
+            &second,
+            &head,
+            None,
+            Some("crazyagent/agent-2"),
+            owner::By::Named(crate::activity::ENGINE_ACTOR),
+            &|step| {
+                if step == owner::Step::Recorded {
+                    go.store(true, Ordering::Relaxed);
+                }
+                false
+            },
+        );
+        done.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        tried += 1;
+        if std::fs::read(outside.path().join("planted.bin"))
+            .is_ok_and(|bytes| bytes == known.as_bytes())
+        {
+            hits += 1;
+        }
+    }
+    assert!(tried > 0);
+    assert_eq!(hits, 0, "planted.bin was written outside the worktree");
 }

@@ -437,6 +437,8 @@ fn regenerated(
     now.base = tip;
     now.head = commit.clone();
     now.conflicts = Vec::new();
+    now.regenerated_head = Some(commit.clone());
+    now.regenerated_files = paths.to_vec();
     let stats = diff::stats(&owner, &now.base, &now.head)?;
     (now.files, now.added, now.removed) = (stats.files, stats.added, stats.removed);
     now.updated_ms = flow::now_ms()?;

@@ -37,7 +37,9 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     made INTEGER NOT NULL DEFAULT 0 CHECK(made IN (0,1)),
     undone TEXT,
     landed_on TEXT,
-    restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1))
+    restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1)),
+    regenerated_head TEXT,
+    regenerated_files TEXT NOT NULL DEFAULT '[]'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
@@ -66,8 +68,8 @@ const NUMBER_PASS_MAX: i64 = 10_000;
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
     restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone,landed_on,\
-    restored";
-const ADDED_COLUMNS: [(&str, &str); 7] = [
+    restored,regenerated_head,regenerated_files";
+const ADDED_COLUMNS: [(&str, &str); 9] = [
     ("message", "message TEXT NOT NULL DEFAULT ''"),
     (
         "waiting",
@@ -86,6 +88,11 @@ const ADDED_COLUMNS: [(&str, &str); 7] = [
     (
         "restored",
         "restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1))",
+    ),
+    ("regenerated_head", "regenerated_head TEXT"),
+    (
+        "regenerated_files",
+        "regenerated_files TEXT NOT NULL DEFAULT '[]'",
     ),
 ];
 
@@ -216,6 +223,8 @@ pub(super) struct Record {
     pub(super) undone: Option<String>,
     pub(super) landed_on: Option<String>,
     pub(super) restored: bool,
+    pub(super) regenerated_head: Option<String>,
+    pub(super) regenerated_files: Vec<String>,
 }
 
 impl Record {
@@ -241,6 +250,11 @@ impl Record {
             waiting: self.waiting && self.state == ChangeState::Updating,
             outside: self.outside,
             number,
+            regenerated: if self.regenerated_head.as_ref() == Some(&self.head) {
+                self.regenerated_files.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -404,6 +418,8 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         undone: row.get(28)?,
         landed_on: row.get(29)?,
         restored: row.get::<_, bool>(30)?,
+        regenerated_head: row.get(31)?,
+        regenerated_files: serde_json::from_str(&text(32)?).map_err(|_| invalid(32))?,
     })
 }
 
@@ -435,6 +451,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
         .map(|intent| serde_json::to_string(intent).map_err(storage))
         .transpose()?;
     let conflicts = serde_json::to_string(&record.conflicts).map_err(storage)?;
+    let regenerated_files = serde_json::to_string(&record.regenerated_files).map_err(storage)?;
     let updates = COLUMNS
         .split(',')
         .filter(|column| *column != "id")
@@ -444,7 +461,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
     db.execute(
         &format!(
             "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31) \
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33) \
              ON CONFLICT(id) DO UPDATE SET {updates}"
         ),
         params![
@@ -479,6 +496,8 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
             record.undone,
             record.landed_on,
             record.restored,
+            record.regenerated_head,
+            regenerated_files,
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {

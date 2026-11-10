@@ -413,7 +413,7 @@ test("a live master switch from an older team read is not saved; the area says s
   assert.match(source, /const version = Math\.max\(engine\?\.version \?\? 0, saved\.current\);/, "the switch names the newer of the team read and this area's own last save");
   assert.match(source, /if \(savedStale\(turned\)\) \{\s*if \(clicked\) data\.notify\(liveStaleNote\(data\.name\)\);\s*if \(!mounted\.current\) return;\s*asked\.current = false;\s*refused\.current = version;\s*setWant\(null\);\s*setLive\(\{ kind: "starting" \}\);\s*data\.reloadTeam\(\);\s*return;\s*\}/, "a stale switch drops the change, toasts only an owner's click, remembers the refused version and reads the team again");
   assert.match(source, /\} else \{\s*saved\.current = version \+ 1;/, "an applied switch moves the version this area names next");
-  assert.match(source, /if \(autoStart\(on, asked\.current, engine\?\.version \?\? 0, refused\.current\)\) void start\(true, false\);\s*\}, \[on, data\.team\.at\]\);/, "a first open refused as stale turns the master on again from the fresh read, without a toast");
+  assert.match(source, /if \(autoStart\(on, asked\.current, engine\?\.version \?\? 0, refused\.current, teamPaused\(data\.team\.result, data\.id\)\)\) void start\(true, false\);\s*\}, \[on, data\.team\.at\]\);/, "a first open refused as stale turns the master on again from the fresh read, without a toast");
   assert.match(source, /onStart=\{\(\) => start\(\)\}/, "Try again and a session switch are the owner's clicks, so their stale refusal toasts");
 });
 
@@ -425,6 +425,28 @@ test("a first open refused as stale starts the live master once from the fresh r
   assert.equal(live.autoStart(false, false, 1, -1), true, "opening the area starts a stopped master too");
   assert.equal(live.autoStart(undefined, false, 0, -1), false, "no start before a team read arrives");
   assert.equal(live.autoStart(null, true, 1, -1), false, "a start already asked is not sent twice");
+});
+
+test("a stopped team's first open starts nothing, and the read after Start all starts it", () => {
+  assert.equal(live.autoStart(null, false, 1, -1, true), false, "a switch never set stays unset under Stop all");
+  assert.equal(live.autoStart(false, false, 1, -1, true), false, "a stopped master stays stopped under Stop all");
+  assert.equal(live.autoStart(null, false, 1, -1, false), true, "the read after Start all starts it");
+});
+
+test("opening a stopped team's area writes no switch until a read shows the team running", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    const opened = {};
+    for (const on of [null, false]) {
+      await evaluate(`Fixture.mountAreaStopped("codex", ${JSON.stringify(on)})`);
+      await evaluate("Fixture.settle()");
+      opened[String(on)] = await evaluate("Fixture.teamReloads()");
+    }
+    await evaluate('Fixture.readSwitch("codex", false, { paused: false })');
+    await evaluate("Fixture.settle()");
+    return { opened, resumed: await evaluate("Fixture.teamReloads()") };
+  });
+  assert.deepEqual(seen.opened, { null: 0, false: 0 }, "no start under Stop all");
+  assert.ok(seen.resumed >= 1, `the running team's read starts the master: ${seen.resumed}`);
 });
 
 test("a terminal view that connects again drops the right-click menu the old view opened, so focus never lands on it", async () => {

@@ -1054,6 +1054,7 @@ async fn native_auth_channel_no_child_retirement_is_atomic_under_retained_physic
         assert_eq!(after.facts, vec![fact.clone()]);
         assert!(after.fences.is_empty());
         rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::Unlock).unwrap();
         drop(probe);
         let replay = case
             .client(OwnerClientKind::Tui)
@@ -1144,6 +1145,7 @@ async fn native_auth_channel_lost_committed_retirement_ack_reconciles_without_se
         drop(future);
         drop(channel);
         rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::Unlock).unwrap();
         drop(probe);
         let replay = case
             .client(OwnerClientKind::Tui)
@@ -1199,6 +1201,7 @@ async fn native_auth_channel_any_real_child_effect_forbids_no_effect_retirement(
         assert_eq!(case.snapshot().fences, before.fences);
         let probe = case.probe();
         rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::Unlock).unwrap();
         drop(probe);
         let mut alias = case.start("effect-still-fences-alias");
         alias.scope.connection = CredentialRef::new("connection-alias").unwrap();
