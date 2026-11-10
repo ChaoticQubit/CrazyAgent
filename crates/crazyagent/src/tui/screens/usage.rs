@@ -380,33 +380,104 @@ fn group(
             }
             Some(harness) => format!("{counted}  + usage not reported by {harness}"),
         };
-        lines.extend(
-            wrap(shown.trim_start(), limit.saturating_sub(2).max(8))
-                .into_iter()
-                .map(|part| Line::raw(format!("  {part}"))),
-        );
+        lines.extend(row_lines(&shown, limit));
     }
-    if rows.len() > ROWS_SHOWN {
-        lines.push(styled(
-            format!("  and {} more", rows.len() - ROWS_SHOWN),
+    lines.extend(and_more(rows.len(), theme));
+    lines
+}
+
+/// One row wrapped under its heading. Inputs: the text and the content width. Output: the
+/// lines, two columns in.
+fn row_lines(text: &str, limit: usize) -> impl Iterator<Item = Line<'static>> {
+    wrap(text.trim_start(), limit.saturating_sub(2).max(8))
+        .into_iter()
+        .map(|part| Line::raw(format!("  {part}")))
+}
+
+/// Says how many rows did not fit. Inputs: the row count and the theme. Output: the line, none
+/// when all fit.
+fn and_more(rows: usize, theme: &Theme) -> Option<Line<'static>> {
+    (rows > ROWS_SHOWN).then(|| {
+        styled(
+            format!("  and {} more", rows - ROWS_SHOWN),
             Role::Muted,
             theme,
+        )
+    })
+}
+
+/// An activity's name as this screen shows it. Input: the stored name. Output: the words.
+fn activity_name(activity: &str) -> String {
+    if activity == "build_deploy" {
+        return "Build/deploy".to_owned();
+    }
+    let mut letters = activity.chars();
+    letters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(letters).collect()
+    })
+}
+
+/// The activity lines: one per activity up to `ROWS_SHOWN`, then the first-try rate over every
+/// activity. Inputs: the rows, the content width and the theme. Output: the lines, none for no
+/// rows.
+fn activity_lines(rows: &[ActivityRow], limit: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for row in rows.iter().take(ROWS_SHOWN) {
+        let word = if row.turns == 1 { "turn" } else { "turns" };
+        let name = activity_name(&row.activity);
+        lines.extend(row_lines(
+            &format!("{name:<14} {} {word}", row.turns),
+            limit,
         ));
+    }
+    lines.extend(and_more(rows.len(), theme));
+    let edited: u64 = rows.iter().map(|row| row.edit_turns).sum();
+    if edited > 0 {
+        let first: u64 = rows.iter().map(|row| row.first_try_turns).sum();
+        let percent = (first * 100 + edited / 2) / edited;
+        let word = if edited == 1 { "turn" } else { "turns" };
+        let rate = format!("{percent}% of {edited} editing {word} worked first try");
+        lines.extend(
+            wrap(&rate, limit.saturating_sub(2).max(8))
+                .into_iter()
+                .map(Line::raw),
+        );
     }
     lines
 }
 
-fn activity_lines(_rows: &[ActivityRow], _limit: usize, _theme: &Theme) -> Vec<Line<'static>> {
-    Vec::new()
+/// The model lines: one per model up to `ROWS_SHOWN`. Inputs: the rows, the money view, the
+/// content width and the theme. Output: the lines, none for no rows.
+fn model_lines(
+    rows: &[ModelRow],
+    money: &MoneyView,
+    limit: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for row in rows.iter().take(ROWS_SHOWN) {
+        let name = if row.model.is_empty() {
+            "Model not recorded"
+        } else {
+            row.model.as_str()
+        };
+        let tokens = format!("{} tokens", compact(row.tokens.headline()));
+        let figures = figures_text(&tokens, row.cost_nanos, money);
+        lines.extend(row_lines(&format!("{name}  {figures}"), limit));
+    }
+    lines.extend(and_more(rows.len(), theme));
+    lines
 }
 
-fn model_lines(
-    _rows: &[ModelRow],
-    _money: &MoneyView,
-    _limit: usize,
-    _theme: &Theme,
-) -> Vec<Line<'static>> {
-    Vec::new()
+/// A titled block of lines. Inputs: the title, its lines and the theme. Output: a blank line,
+/// the heading and the lines, or nothing when there are none.
+fn section(title: &str, body: Vec<Line<'static>>, theme: &Theme) -> Vec<Line<'static>> {
+    if body.is_empty() {
+        return body;
+    }
+    let mut lines = vec![Line::default(), styled(title, Role::Heading, theme)];
+    lines.extend(body);
+    lines
 }
 
 /// The plain line a reading shows when a scan left records out. Input: how many agent homes
@@ -425,8 +496,8 @@ pub fn partial_line(homes: u64) -> Option<String> {
     }
 }
 
-/// The Usage summary's lines: totals, each account's limits with reset countdowns, and
-/// tokens by project, pool and account. Inputs: the report, its range, names by id, now,
+/// The Usage summary's lines: totals, each account's limits with reset countdowns, tokens by
+/// project, pool, account and model, and turns by activity. Inputs: the report, its range, names by id, now,
 /// the local offset in seconds, the content width and the theme. Output: the lines.
 pub fn summary(
     report: &UsageReport,
@@ -545,6 +616,16 @@ pub fn summary(
         |key| shown(&names.accounts, key).to_owned(),
         &report.money,
         limit,
+        theme,
+    ));
+    lines.extend(section(
+        "By model",
+        model_lines(&report.models, &report.money, limit, theme),
+        theme,
+    ));
+    lines.extend(section(
+        "By activity",
+        activity_lines(&report.activity, limit, theme),
         theme,
     ));
     lines

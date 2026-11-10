@@ -149,6 +149,25 @@ export interface MetricsAgent {
   turns?: number | null;
 }
 
+export interface ModelRow {
+  model: string;
+  tokens: Tokens;
+  cost_nanos: number;
+}
+
+export interface ToolBucket {
+  start_ms: number;
+  tool: string;
+  count: number;
+}
+
+export interface ActivityRow {
+  activity: string;
+  turns: number;
+  edit_turns: number;
+  first_try_turns: number;
+}
+
 export interface Metrics {
   running: number;
   tasks_waiting: number;
@@ -164,6 +183,11 @@ export interface Metrics {
   agents: MetricsAgent[];
   accounts: MetricsGroup[];
   harnesses: MetricsGroup[];
+  models: ModelRow[];
+  tools: ToolBucket[];
+  tools_since_ms: number | null;
+  activity: ActivityRow[];
+  activity_since_ms: number | null;
 }
 
 const REFUSALS: Record<string, string> = {
