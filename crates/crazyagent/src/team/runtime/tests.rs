@@ -15540,7 +15540,7 @@ fn a_wake_task_with_its_message_already_delivered_says_so() {
 /// then gives up resuming after the owner's retry, is let go and handed out again as the
 /// same task: a fresh conversation gets the still unread message that woke it under
 /// "Messages for you", while a kept session is told it was already delivered and gets no
-/// text (HB-S5-C-RESIDUAL).
+/// text (HB-S5-C-RESIDUAL). Messages the agent read or replied to stay out of both.
 #[test]
 fn a_given_up_wake_task_brings_its_unread_message_to_a_fresh_conversation_only() {
     use super::super::master::{WAKE_DELIVERED, WAKE_TASK};
@@ -15580,6 +15580,27 @@ fn a_given_up_wake_task_brings_its_unread_message_to_a_fresh_conversation_only()
             1,
         )
         .unwrap();
+        let handled: Vec<_> = ["Read the style guide", "Answer the reviewer"]
+            .into_iter()
+            .map(|body| {
+                crate::coord::send(
+                    &fixture.connection,
+                    crate::coord::NewMessage {
+                        project: project.clone(),
+                        from: crate::coord::Party::Agent(lead),
+                        to: crate::coord::Party::Agent(woken),
+                        kind: crate::coord::MessageKind::Prompt,
+                        question: None,
+                        work: None,
+                        reply_to: None,
+                        body: body.into(),
+                        idempotency_key: None,
+                    },
+                    1,
+                )
+                .unwrap()
+            })
+            .collect();
         let asleep = team.asleep(&project);
         team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
             .unwrap();
@@ -15592,6 +15613,16 @@ fn a_given_up_wake_task_brings_its_unread_message_to_a_fresh_conversation_only()
         };
         assert!(first.contains(WAKE_TASK), "{first}");
         assert!(first.contains("Merge your branch"), "{first}");
+        assert!(first.contains("Answer the reviewer"), "{first}");
+        for (id, receipt) in handled.iter().zip(["read", "replied"]) {
+            fixture
+                .connection
+                .execute(
+                    "UPDATE coord_messages SET receipt=?2, receipt_at=?3 WHERE id=?1",
+                    params![id, receipt, now_ms()],
+                )
+                .unwrap();
+        }
         let task: i64 = fixture
             .connection
             .query_row(
@@ -15667,8 +15698,226 @@ fn a_given_up_wake_task_brings_its_unread_message_to_a_fresh_conversation_only()
         assert_eq!(again.contains("Merge your branch"), fresh, "{again}");
         assert_eq!(again.contains(WAKE_TASK), fresh, "{again}");
         assert_eq!(again.contains(WAKE_DELIVERED), !fresh, "{again}");
+        assert!(!again.contains("Read the style guide"), "{again}");
+        assert!(!again.contains("Answer the reviewer"), "{again}");
         team.workers.clear();
     }
+}
+
+/// A fresh conversation's wake task carries a message typed into an earlier conversation
+/// before this one was launched, and not one typed into this conversation after its launch,
+/// which it already shows once (events-sec-2 r1 L1).
+#[test]
+fn a_fresh_conversation_s_wake_task_leaves_out_a_message_typed_into_it() {
+    use super::super::master::WAKE_TASK;
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let woken = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    team.workers
+        .insert(woken, between_turns(&project, AgentRole::Sub, true, true));
+    let send = |body: &str| {
+        crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Agent(lead),
+                to: crate::coord::Party::Agent(woken),
+                kind: crate::coord::MessageKind::Prompt,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap()
+    };
+    let earlier = send("Rebase on main first");
+    let typed = send("Merge your branch");
+    let asleep = team.asleep(&project);
+    assert!(asleep.contains(&woken));
+    team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
+        .unwrap();
+    let launched = now_ms();
+    for (message, at) in [(earlier, launched - 60_000), (typed, launched + 1_000)] {
+        fixture
+            .connection
+            .execute(
+                "UPDATE coord_messages SET receipt='typed', receipt_at=?2 WHERE id=?1",
+                params![message, at],
+            )
+            .unwrap();
+    }
+    let (orders, turns) = channel();
+    let worker = team.workers.get_mut(&woken).unwrap();
+    worker.orders = orders;
+    worker.fresh = Some(launched);
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let Ok(Order::Turn(text, None, _)) = turns.try_recv() else {
+        panic!("the woken agent got no turn");
+    };
+    assert!(text.contains(WAKE_TASK), "{text}");
+    assert!(text.contains("Rebase on main first"), "{text}");
+    assert!(!text.contains("Merge your branch"), "{text}");
+    team.workers.clear();
+}
+
+/// A launch that starts a new conversation, as the relaunch after a given-up resume does,
+/// records its worker fresh from the launch time; a launch that continues a conversation
+/// and an adopted pane do not (events-sec-2 r1 L2).
+#[cfg(target_os = "macos")]
+#[test]
+fn only_a_launch_with_no_conversation_to_continue_starts_its_worker_fresh() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, recording_codex()).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let before = now_ms();
+    let fresh = super::managed_agent::ManagedAgent::new("codex", &codex).fresh_at_launch(None);
+    assert!(
+        fresh.is_some_and(|at| (before..=now_ms()).contains(&at)),
+        "{fresh:?}"
+    );
+    let continued = super::managed_agent::ManagedAgent::new("codex", &codex).fresh_at_launch(Some(
+        crate::harnesses::terminal_session::Resume {
+            id: "0199a0b0-0000-4000-8000-000000000001".into(),
+            record: fixture.base.join("record.jsonl"),
+        },
+    ));
+    assert_eq!(continued, None);
+
+    let host = fixture.host();
+    let mut team = fixture.runtime();
+    let adopted = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    let record = fixture.pane(&host, adopted);
+    team.run_worker(
+        adopted,
+        Launch::Adopt(Box::new(Adoption {
+            host: host.clone(),
+            agent: AgentId::team(adopted).unwrap(),
+            record,
+            limits: LaunchLimits::default(),
+            live: false,
+            managed: Some(Managed {
+                home: fixture.base.join("adopted-home"),
+                executable: PathBuf::from("/bin/sh"),
+            }),
+            access: AgentAccess::Sandboxed,
+            toolchains: Some(Vec::new()),
+            network: crate::sandbox::policy::AgentNetwork::Open,
+            proxy: None,
+            task_start: None,
+        })),
+        Seat {
+            project: ProjectId::new(PROJECT).unwrap(),
+            role: AgentRole::Sub,
+            harness: "claude-code".into(),
+            connection: reference(ENDPOINT),
+            tools: false,
+            hosted: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(team.workers[&adopted].fresh, None);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// A harness stop that finds a command still running, with nothing else ending the agent,
+/// tells the runtime so before the end it reports, and an agent whose work ended well then
+/// reads Stopped with the leftover named, not Failed (events-sec-2 r1 L2, TEAM-8-L1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stop_that_leaves_a_command_running_says_so_and_the_agent_reads_stopped() {
+    use crate::harnesses::leftovers::{LEFT, Lineage};
+    let folder = tempfile::tempdir().unwrap();
+    let mut leader = crate::spawn_gate::spawn(
+        std::process::Command::new("/usr/bin/perl")
+            .args([
+                "-mPOSIX",
+                "-e",
+                "POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1",
+            ])
+            .arg(
+                "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); exec \"/bin/sleep\", \"30\"' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30",
+            )
+            .current_dir(folder.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let child = loop {
+        if let Some(child) = std::fs::read_to_string(folder.path().join("child.pid"))
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok())
+        {
+            break child;
+        }
+        assert!(Instant::now() < deadline, "the stand-in never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let lineage = Lineage::of(leader.id()).unwrap();
+    leader.kill().unwrap();
+    leader.wait().unwrap();
+    let (reports, reported) = channel();
+    let ended = settle_end(lineage.settle(), None, None, &reports);
+    if let Some(pid) = rustix::process::Pid::from_raw(child) {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+    drop(reports);
+    let sent: Vec<Report> = reported.iter().collect();
+    assert!(
+        matches!(sent.as_slice(), [Report::LeftRunning]),
+        "{:?}",
+        super::managed_agent::shown(&sent)
+    );
+    let problem = ended.expect("the stop names what it left running");
+    assert!(problem.contains(LEFT), "{problem}");
+
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers
+        .insert(agent, between_turns(&project, AgentRole::Sub, true, true));
+    team.apply(
+        agent,
+        Report::Finished {
+            text: String::new(),
+            end: TurnEnd::Success,
+            cause: None,
+        },
+    )
+    .unwrap();
+    for report in sent {
+        team.apply(agent, report).unwrap();
+    }
+    team.apply(
+        agent,
+        Report::Ended {
+            problem: Some(problem.clone()),
+        },
+    )
+    .unwrap();
+    let shown: Option<String> = fixture
+        .connection
+        .query_row(
+            "SELECT error FROM team_agents WHERE id=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(fixture.agent_status(agent).0, AgentStatus::Stopped);
+    assert_eq!(shown, Some(problem));
 }
 
 /// The delivery intent of a wake task records the words its turn typed. With its message

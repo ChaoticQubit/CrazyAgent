@@ -928,6 +928,39 @@ impl ManagedAgent {
         }
     }
 
+    /// Starts this agent's worker from its plan as a launch from a plan does, continuing
+    /// `resume` when given, reads when the worker records its conversation as started fresh,
+    /// then shuts the team down. Input: the conversation to continue, if any. Output: that
+    /// time, none for a launch that continues a conversation.
+    pub(super) fn fresh_at_launch(mut self, resume: Option<Resume>) -> Option<i64> {
+        self.plan.resume = resume;
+        let seat = Seat {
+            project: ProjectId::new(PROJECT).unwrap(),
+            role: self.role,
+            harness: self.plan.harness.clone(),
+            connection: self.binding.connection.id.clone(),
+            tools: true,
+            hosted: None,
+        };
+        let Self {
+            mut runtime,
+            plan,
+            home,
+            _root,
+            ..
+        } = self;
+        runtime
+            .run_worker(
+                AGENT,
+                Launch::Fresh(Box::new(plan), Box::new(Mode::PerTurn { home })),
+                seat,
+            )
+            .unwrap();
+        let fresh = runtime.workers[&AGENT].fresh;
+        runtime.shutdown().unwrap();
+        fresh
+    }
+
     /// Builds a command that runs `program` the way the agent's harness runs its tools:
     /// inside the agent's installed Seatbelt profile, in its worktree, with the home and
     /// temp folder the runtime gave it and a system path. Input: the program and its
