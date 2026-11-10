@@ -1,4 +1,4 @@
-use super::store::{MESSAGE_COLUMNS, agent, failure, message_from_row, party_of, state};
+use super::store::{Change, MESSAGE_COLUMNS, agent, failure, message_from_row, party_of, state};
 use super::{
     AgentId, AgentState, Message, Party, Presence, Receipt, Snapshot, TOOL_BYTES_MAX, Waiting,
 };
@@ -55,8 +55,9 @@ pub fn set_waiting(
     Ok(())
 }
 
-/// Counts one tool call of an agent for the adoption counts (Q18) and as activity.
-/// Takes the database, the agent, the tool name as its harness reported it (1 to
+/// Counts one tool call of an agent for the adoption counts (Q18) and as activity, the
+/// count and its chart hour in one change, nested in the caller's transaction if it holds
+/// one. Takes the database, the agent, the tool name as its harness reported it (1 to
 /// `TOOL_BYTES_MAX` bytes, no space or control character) and the time in ms.
 /// Returns Ok, `coord_tool_invalid` or `coord_agent_unknown`.
 pub fn record_tool(
@@ -71,15 +72,18 @@ pub fn record_tool(
     {
         return Err(failure("coord_tool_invalid"));
     }
-    touch(db, agent_id, now)?;
-    db.execute(
-        "INSERT INTO coord_tool_use(agent,tool,count,last) VALUES (?1,?2,1,?3)
-         ON CONFLICT(agent,tool) DO UPDATE SET count=MIN(count+1, 4294967295), last=?3",
-        params![agent_id, tool, now],
-    )
-    .map_err(state)?;
-    add_tool_hour(db, now - now.rem_euclid(HOUR_MS), agent_id, tool).map_err(state)?;
-    Ok(())
+    let change = Change::begin(db)?;
+    touch(change.db(), agent_id, now)?;
+    change
+        .db()
+        .execute(
+            "INSERT INTO coord_tool_use(agent,tool,count,last) VALUES (?1,?2,1,?3)
+             ON CONFLICT(agent,tool) DO UPDATE SET count=MIN(count+1, 4294967295), last=?3",
+            params![agent_id, tool, now],
+        )
+        .map_err(state)?;
+    add_tool_hour(change.db(), now - now.rem_euclid(HOUR_MS), agent_id, tool).map_err(state)?;
+    change.commit()
 }
 
 /// Counts one tool call in its hour. A new row needs room under both caps; past them the call
