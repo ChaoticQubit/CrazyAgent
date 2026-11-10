@@ -17,6 +17,7 @@
 .mx-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 .mx-table-wrap { border: 0; border-radius: 0; }
 .mx-table .num { text-align: right; font-family: var(--mono); white-space: nowrap; }
+.mx-table thead th.num { white-space: normal; }
 .mx-table .mx-headline { font-weight: 600; }
 .mx-table .muted { color: var(--text-3); }
 .mx-total th, .mx-total td { border-top: 2px solid var(--border); }
