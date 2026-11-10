@@ -908,6 +908,54 @@ fn standings(pool: &PoolRanking) -> Vec<(&str, Standing)> {
         .collect()
 }
 
+/// An account one project holds after a limit its agent reported (SECAUDIT-RATELIMIT-FORGE)
+/// keeps its place in the order, since every other project still uses it, and carries each
+/// project's hold with the project's name and end, in the shape the Pools screens read. A
+/// project with no name shows its id, and an ended hold shows nothing.
+#[test]
+fn a_project_hold_shows_on_its_account_with_the_project_name_and_end() {
+    let (_directory, connection) = database();
+    let access = access(&["a", "b"]);
+    crate::team::initialize(&connection).unwrap();
+    known_project(&connection, "project-a");
+    connection
+        .execute(
+            "UPDATE projects SET body=?1 WHERE id='project-a'",
+            [r#"{"spec":{"name":"Meals for two"}}"#],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_project_pauses(project,connection,until_ms)
+             VALUES ('project-a','a',?1),('project-old','a',?2),('project-a','b',?3)",
+            params![NOW_MS + HOUR_MS, NOW_MS + 2 * HOUR_MS, NOW_MS - 1],
+        )
+        .unwrap();
+    let shape = serde_json::to_value(ranked(&connection, &access)).unwrap();
+    let account = |id: &str| {
+        shape[0]["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|account| account["connection"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(account("a")["standing"]["kind"], "next");
+    assert_eq!(
+        account("a")["held_for"],
+        serde_json::json!([
+            {"project": "project-a", "name": "Meals for two", "until_ms": NOW_MS + HOUR_MS},
+            {"project": "project-old", "name": "project-old", "until_ms": NOW_MS + 2 * HOUR_MS},
+        ])
+    );
+    assert_eq!(
+        account("b").get("held_for"),
+        None,
+        "an ended hold shows nothing"
+    );
+}
+
 #[test]
 fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() {
     let (_directory, mut connection) = database();

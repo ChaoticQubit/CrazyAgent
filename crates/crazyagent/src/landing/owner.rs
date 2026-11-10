@@ -1725,12 +1725,14 @@ pub(super) fn conflicts_with_tip(
 /// clone waits for the owner, since its git takes no merge of the engine's commit. With
 /// `after`, a clash in known lockfiles only starts a regeneration off this thread instead
 /// ([`super::lockfiles::regenerate_later`]), and the set waits for it, not its agent.
-/// Inputs: the store, the change set and what runs after a regeneration that landed
-/// nothing. Output: the answer, or the plain code of a check that could not run.
+/// Inputs: the store, the change set, what runs after a regeneration that landed nothing
+/// and the owner's settings files. Output: the answer, or the plain code of a check that
+/// could not run.
 pub(super) fn conflicts_with_main(
     db: &Connection,
     id: &ChangeSetId,
     after: Option<super::AfterRegeneration>,
+    settings: Option<&(PathBuf, PathBuf)>,
 ) -> Result<bool, EngineError> {
     let record = store::load(db, id)?;
     if record.state != ChangeState::Pending
@@ -1752,7 +1754,7 @@ pub(super) fn conflicts_with_main(
     }
     match after {
         Some(after) => Ok(!super::lockfiles::regenerate_later(
-            db, &record, &conflicts, after,
+            db, &record, &conflicts, after, settings,
         )?),
         None => Ok(true),
     }

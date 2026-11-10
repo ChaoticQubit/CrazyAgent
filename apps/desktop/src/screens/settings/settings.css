@@ -58,6 +58,7 @@
 .pool-why { font-size: 13px; line-height: 18px; color: var(--text); }
 .pool-row.held .pool-why { color: var(--text-2); }
 .pool-why a { color: var(--accent-text); font-weight: 500; }
+.pool-hold { font-size: 12px; line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
 .pool-limits { display: flex; flex-direction: column; gap: 2px; }
 .pool-limit { display: grid; grid-template-columns: 44px 72px minmax(0, 1fr); gap: 6px; align-items: center; font: 11px/16px var(--mono); color: var(--text-2); }
 .pool-bar { display: block; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }

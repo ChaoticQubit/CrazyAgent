@@ -191,13 +191,14 @@ fn current(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 /// none starts; a set already being rewritten counts as started. When it ends without
 /// landing, `after` gets the set and whether another regeneration may start: false after a
 /// refusal, which hands the clash to the agent, true after the set or main moved. Inputs:
-/// the store, the set, its clashing paths and what runs after. Output: whether one runs
-/// now.
+/// the store, the set, its clashing paths, what runs after and the owner's settings files.
+/// Output: whether one runs now.
 pub(super) fn regenerate_later(
     db: &Connection,
     record: &Record,
     paths: &[String],
     after: AfterRegeneration,
+    settings: Option<&(PathBuf, PathBuf)>,
 ) -> Result<bool, EngineError> {
     if !cfg!(target_os = "macos")
         || paths.is_empty()
@@ -225,7 +226,7 @@ pub(super) fn regenerate_later(
         running.insert(record.id.as_str().to_owned(), record.repository.clone());
     }
     let guard = Running(record.id.as_str().to_owned());
-    let (id, paths) = (record.id.clone(), paths.to_vec());
+    let (id, paths, settings) = (record.id.clone(), paths.to_vec(), settings.cloned());
     #[cfg(test)]
     let home = super::git::OWNER_HOME.with(|home| home.borrow().clone());
     let spawned = std::thread::Builder::new()
@@ -233,13 +234,14 @@ pub(super) fn regenerate_later(
         .spawn(move || {
             #[cfg(test)]
             super::git::OWNER_HOME.with(|owner| *owner.borrow_mut() = home);
-            let ended = super::open(&runtime)
-                .and_then(|db| regenerated(&db, &id, &paths).map(|how| (db, how)));
+            let ended = super::open(&runtime).and_then(|db| {
+                regenerated(&db, &id, &paths, settings.as_ref()).map(|how| (db, how))
+            });
             drop(guard);
             match ended {
                 Ok((_, Regenerated::Applied)) => {}
-                Ok((db, Regenerated::Refused)) => after(&db, &id, false),
-                Ok((db, Regenerated::Stale)) => after(&db, &id, true),
+                Ok((db, Regenerated::Refused)) => after(&db, &id, false, settings.as_ref()),
+                Ok((db, Regenerated::Stale)) => after(&db, &id, true, settings.as_ref()),
                 Err(error) => eprintln!(
                     "landing_regenerate_failed code={}",
                     crate::protocol::plain_code(&error.0)
@@ -250,15 +252,17 @@ pub(super) fn regenerate_later(
 }
 
 /// Rewrites the clashing lockfiles of a held set at once, as a regeneration does, for the
-/// lockfile tests. Inputs: the store, the set and its clashing lockfiles. Output: the new
-/// head, or None when nothing landed; the set is reloaded either way.
+/// lockfile tests. Inputs: the store, the set, its clashing lockfiles and the owner's
+/// settings files. Output: the new head, or None when nothing landed; the set is reloaded
+/// either way.
 #[cfg(test)]
 pub(super) fn regenerate(
     db: &Connection,
     record: &mut Record,
     paths: &[String],
+    settings: Option<&(PathBuf, PathBuf)>,
 ) -> Result<Option<String>, EngineError> {
-    let how = regenerated(db, &record.id, paths)?;
+    let how = regenerated(db, &record.id, paths, settings)?;
     *record = store::load(db, &record.id)?;
     Ok((how == Regenerated::Applied).then(|| record.head.clone()))
 }
@@ -273,12 +277,13 @@ pub(super) fn regenerate(
 /// the hold again, unless the set, main, the owner's stop or the team's pause changed, it
 /// saves the commit as the set's head, moves the pending ref and the agent's quiet
 /// worktree there and tells the agent. The engine never runs git in the agent's own clone
-/// (CC-N1) and the temporary worktree is removed on every path. Inputs: the store, the set
-/// and its clashing lockfiles. Output: how it ended.
+/// (CC-N1) and the temporary worktree is removed on every path. Inputs: the store, the set,
+/// its clashing lockfiles and the owner's settings files. Output: how it ended.
 fn regenerated(
     db: &Connection,
     id: &ChangeSetId,
     paths: &[String],
+    settings: Option<&(PathBuf, PathBuf)>,
 ) -> Result<Regenerated, EngineError> {
     assert!(
         !paths.is_empty() && paths.len() <= PATHS_MAX,
@@ -344,7 +349,7 @@ fn regenerated(
     let Some(worktree) = scratch.add_worktree(&merged)? else {
         return Ok(Regenerated::Refused);
     };
-    let sandbox = match confined(db, &record, &root, &runtime, &worktree, &scratch) {
+    let sandbox = match confined(db, &record, &root, &runtime, &worktree, &scratch, settings) {
         Ok(sandbox) => sandbox,
         Err(code) => {
             eprintln!("landing_regenerate_unconfined code={code}");
@@ -583,13 +588,14 @@ fn read_plain(worktree: &Path, path: &str) -> Option<Vec<u8>> {
 const REGENERATE_CACHE: &str = "regenerate";
 
 /// Builds the sandbox a lockfile's tool runs in, as an agent's is built: the project's
-/// network choice with no model, its toolchains, hidden folders and the engine's guarded
-/// secrets, written to the given worktree only beside its own home and temp folders and,
-/// when the tool's PATH finds a uv the engine may run, a tool cache primed for this run in
-/// the scratch folder, so uv's `.git` cache markers are the engine's `/dev/null` links the
-/// SM1-R rule allows (T8), and installs its profile. Inputs: the store, the change set, the
-/// owner checkout's canonical root, the engine runtime folder, the temporary worktree and
-/// the scratch folders. Output: the sandbox, or the plain code of what refused it.
+/// network choice with no model, never listening on the owner's model ports, its
+/// toolchains, hidden folders and the engine's guarded secrets, written to the given
+/// worktree only beside its own home and temp folders and, when the tool's PATH finds a uv
+/// the engine may run, a tool cache primed for this run in the scratch folder, so uv's
+/// `.git` cache markers are the engine's `/dev/null` links the SM1-R rule allows (T8), and
+/// installs its profile. Inputs: the store, the change set, the owner checkout's canonical
+/// root, the engine runtime folder, the temporary worktree, the scratch folders and the
+/// owner's settings files. Output: the sandbox, or the plain code of what refused it.
 fn confined(
     db: &Connection,
     record: &Record,
@@ -597,7 +603,12 @@ fn confined(
     runtime: &Path,
     worktree: &Path,
     scratch: &Scratch,
+    settings: Option<&(PathBuf, PathBuf)>,
 ) -> Result<ProjectSandbox, &'static str> {
+    let kept = match settings {
+        Some((global, project)) => crate::sandbox::settings_owner_ports(global, project)?,
+        None => Vec::new(),
+    };
     let project = record.project.as_str();
     let policy = crate::sandbox::policy::load(db, project).map_err(|_| "agent_access_unread")?;
     let hidden =
@@ -611,6 +622,7 @@ fn confined(
         &scratch.tmp,
         policy.network.sandbox(None),
     )
+    .and_then(|sandbox| sandbox.keep_ports(&kept))
     .and_then(|sandbox| sandbox.guard_engine(runtime))
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &policy.allowed(root))))
     .and_then(|sandbox| sandbox.allow_scratch(&tmp))

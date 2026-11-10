@@ -87,8 +87,10 @@ export function workbenchUrl(server) {
   return address.toString();
 }
 
-/** Real keyboard and mouse input for a DevTools page: keys as the OS sends them, typed text,
- * clicks and hovers at a point. Input: the page. Output: the helpers. */
+/** Real keyboard and mouse input for a DevTools page: keys as the OS sends them, typed text as
+ * one key press per character the way a keyboard types it (text with no keys is dropped by a
+ * terminal still holding an earlier key down, IDE-TERM-FOCUS-TYPING), clicks and hovers at a
+ * point. Input: the page. Output: the helpers; text() refuses control characters. */
 export function input({ send }) {
   const key = async (name, modifiers = 0) => {
     const [code, keyCode] = KEYS[name] ?? [`Key${name}`, name.charCodeAt(0)];
@@ -97,7 +99,13 @@ export function input({ send }) {
       await send("Input.dispatchKeyEvent", { type, key: pressed, code, windowsVirtualKeyCode: keyCode, modifiers });
     }
   };
-  const text = (value) => send("Input.insertText", { text: value });
+  const text = async (value) => {
+    if (/[\x00-\x1f\x7f]/.test(value)) throw new Error("type control characters with key(), not text()");
+    for (const ch of value) {
+      await send("Input.dispatchKeyEvent", { type: "keyDown", key: ch, text: ch, unmodifiedText: ch });
+      await send("Input.dispatchKeyEvent", { type: "keyUp", key: ch });
+    }
+  };
   const hover = ({ x, y }) => send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
   const click = async ({ x, y }) => {
     for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {

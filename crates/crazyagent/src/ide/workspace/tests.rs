@@ -217,7 +217,7 @@ impl Case {
             turn: format!("task-{}", agent.id),
             prompt_line: "Write the notes".into(),
         };
-        match crate::landing_turns::record(&landing, &workspace, &end).unwrap() {
+        match crate::landing_turns::record(&landing, &workspace, &end, None).unwrap() {
             crate::landing_turns::Landed::Added(id) => id,
             _ => panic!("the turn opened no change set"),
         }

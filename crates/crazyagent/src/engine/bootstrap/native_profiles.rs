@@ -2,6 +2,7 @@ use super::{Anchor, Identity, hex, safe_directory, safe_file};
 use crate::config::{ModelAuthentication, ModelConnection};
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, NativeProfileBinding, PreparedNativeProfile};
+use crate::file_lock::HeldLock;
 use crate::protocol::{CredentialRef, RequestId};
 use rustix::fs::{AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, flock};
 use serde::{Deserialize, Serialize};
@@ -367,21 +368,6 @@ fn take_lock(file: &File, operation: FlockOperation) -> Result<(), EngineError> 
             },
         )
     })
-}
-
-/// A lock one custody step or renewal holds on a profile file, taken through its own open
-/// file description or a duplicate of one and unlocked when dropped, so a child that
-/// another thread is starting, and that briefly shares the description, cannot keep it.
-/// Holds that file. Dropping it ends the lock for every descriptor that shares it.
-#[must_use = "the lock ends as soon as this guard is dropped"]
-pub(crate) struct HeldLock(File);
-
-impl Drop for HeldLock {
-    /// Unlocks the open file description through the guard's duplicate, ending the lock
-    /// for every descriptor that shares it. Input: the guard being dropped. Output: none.
-    fn drop(&mut self) {
-        let _ = flock(&self.0, FlockOperation::Unlock);
-    }
 }
 
 /// The locks that show no custodian holds one native profile, taken while a stale sign-in

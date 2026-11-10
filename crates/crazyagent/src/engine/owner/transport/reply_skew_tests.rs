@@ -403,6 +403,7 @@ fn ranking_reply(lacking: Option<&str>) -> Value {
                 use_last: false,
                 why: OrderWhy::NoReading,
             },
+            held_for: Vec::new(),
         }],
         own_order_projects: 0,
     };

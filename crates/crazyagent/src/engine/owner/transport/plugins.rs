@@ -1470,8 +1470,9 @@ async fn start_check(
         let folder = id.clone();
         let settings = engine.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            let kept = settings.owner_ports();
-            let outcome = boundary_check(&root, &folder, &command, &args, &values, &kept, network);
+            let outcome = settings.owner_ports().and_then(|kept| {
+                boundary_check(&root, &folder, &command, &args, &values, &kept, network)
+            });
             for (_, value) in values.iter_mut() {
                 value.fill(0);
             }

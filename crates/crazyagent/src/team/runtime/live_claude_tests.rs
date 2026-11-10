@@ -1,4 +1,4 @@
-use super::managed_agent::{ManagedAgent, SignedIn, claude};
+use super::managed_agent::{Closing, ManagedAgent, SignedIn, claude, real_claude};
 use super::{BACKGROUND_STOPPED, Report, TurnEnd};
 use crate::harnesses::terminal_session::Resume;
 use crate::team::{AgentRole, BackgroundAtEnd};
@@ -189,7 +189,7 @@ fn a_resumed_claude_agent_keeps_its_conversation_and_sees_an_edit_only_as_the_en
 
 /// The running processes whose command line holds `needle`, as `ps` lists them.
 /// Input: the text. Output: each process's pid and command line.
-fn processes_with(needle: &str) -> Vec<String> {
+pub(super) fn processes_with(needle: &str) -> Vec<String> {
     let listed = crate::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-axww", "-o", "pid=,command="])
@@ -337,6 +337,111 @@ fn a_real_claude_agent_whose_background_command_ends_mid_turn_ends_its_task_with
     assert!(
         took < MID_TURN,
         "the task stayed held until its time limit: {took:?}"
+    );
+}
+
+/// A script that runs `lsof` on its own shell, then on a loopback port its perl child
+/// listens on, and prints each `lsof` exit status as `lsof=` and `lsofport=`.
+const LSOF_SCRIPT: &str = r#"/usr/sbin/lsof -p $$ > /dev/null 2>&1
+echo "lsof=$?"
+/usr/bin/perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(Listen => 1, LocalAddr => "127.0.0.1", LocalPort => 0) or die "bind\n"; system("/usr/sbin/lsof -a -p $$ -iTCP:" . $s->sockport . " -sTCP:LISTEN > /dev/null 2>&1"); print "lsofport=", $? >> 8, "\n"'
+"#;
+
+/// The `lsof=` and `lsofport=` lines among the standard output of every command the agent
+/// ran with its Bash tool, from the transcript Claude Code keeps, so nothing else the agent
+/// ran reaches the log. Input: the transcript path. Output: those lines in transcript order.
+fn lsof_lines(record: &Path) -> Vec<String> {
+    std::fs::read_to_string(record)
+        .unwrap_or_else(|problem| panic!("no transcript at {}: {problem}", record.display()))
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|entry| entry["toolUseResult"]["stdout"].as_str().map(str::to_owned))
+        .flat_map(|stdout| {
+            stdout
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("lsof=") || line.starts_with("lsofport="))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The Claude Code versions a transcript's entries name, each once, in transcript order.
+/// Input: the transcript path. Output: the versions.
+fn transcript_versions(record: &Path) -> Vec<String> {
+    let mut versions = Vec::new();
+    for line in std::fs::read_to_string(record).unwrap().lines() {
+        if let Some(version) = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|entry| entry["version"].as_str().map(str::to_owned))
+            .filter(|version| !versions.contains(version))
+        {
+            versions.push(version);
+        }
+    }
+    versions
+}
+
+/// SECAUDIT-5-LIVE G2: the real Claude Code as a sub-agent in a pane, on the owner's
+/// signed-in account, runs a script with its Bash tool inside the agent's Seatbelt profile
+/// and its process-info deny: `lsof` on its own shell, then on a loopback port its own perl
+/// child listens on. The turn ends in success, and the transcript Claude Code wrote in the
+/// agent's home, naming its version, shows both `lsof` runs exited 0, so the deny still lets
+/// the agent read its own processes. Runs in a live window only.
+#[test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+fn a_real_claude_agent_s_bash_runs_lsof_on_its_own_process_and_port_inside_the_agent_sandbox() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-live-lsof-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
+    let mut agent =
+        ManagedAgent::in_pane("claude-code", &real_claude(), host.clone(), AgentRole::Sub);
+    let host = Closing::new(host);
+    let mut signed_in = SignedIn::claude();
+    let script = agent.working_dir.join("lsof-check.sh");
+    std::fs::write(&script, LSOF_SCRIPT).unwrap();
+    let prompt = format!(
+        "Use your Bash tool in the foreground to run `/bin/sh {}` exactly once. Then reply with exactly the word DONE and end your turn.",
+        script.display()
+    );
+    let turns = vec![(prompt.as_str(), signed_in.acquire("claude-live-lsof"))];
+    let (reports, problem) = agent.run_turns(None, turns, TURN);
+    host.close();
+    let (text, end, cause, conversation) = outcome(&reports);
+    println!("real claude lsof: end={end:?} cause={cause:?} reply={text:?}");
+    assert_eq!(problem, None);
+    assert_eq!(end, TurnEnd::Success, "{cause:?}");
+    let record = conversation
+        .expect("the turn records its conversation")
+        .record;
+    let versions = transcript_versions(&record);
+    println!(
+        "claude transcript={} versions={versions:?}",
+        record.display()
+    );
+    assert!(
+        record.starts_with(&agent.home),
+        "the transcript is not in the agent's home: {}",
+        record.display()
+    );
+    assert!(
+        !versions.is_empty(),
+        "the transcript names no Claude Code version"
+    );
+    let printed = lsof_lines(&record);
+    println!("lsof lines: {printed:?}");
+    assert!(
+        printed.iter().any(|line| line == "lsof=0"),
+        "lsof on the agent's own shell failed: {printed:?}"
+    );
+    assert!(
+        printed.iter().any(|line| line == "lsofport=0"),
+        "lsof on the agent's own listening port failed: {printed:?}"
     );
 }
 

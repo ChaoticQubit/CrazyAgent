@@ -156,8 +156,8 @@ pub fn standing_line(standing: &Standing, now_ms: i64, offset: i64) -> String {
 }
 
 /// The "Next accounts" lines for one pool: each account work would try now, numbered in
-/// order, then each held account with why. Takes the pool, its ranking read, now and
-/// the UTC offset. Returns the lines.
+/// order, then each held account with why, each followed by one line per project that holds
+/// it. Takes the pool, its ranking read, now and the UTC offset. Returns the lines.
 pub fn ranking_lines(
     pool: &PoolSummary,
     ranking: Option<&Result<Vec<PoolRanking>, String>>,
@@ -201,6 +201,13 @@ pub fn ranking_lines(
             clipped(&name, NAME_WIDTH - 4),
             standing_line(&account.standing, now_ms, offset)
         ));
+        lines.extend(account.held_for.iter().map(|hold| {
+            format!(
+                "    Held for {} until {}",
+                clipped(&hold.name, NAME_WIDTH).trim_end(),
+                at_text(hold.until_ms, now_ms, offset)
+            )
+        }));
     }
     if found.accounts.is_empty() {
         lines.push("  No accounts in this pool.".into());

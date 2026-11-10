@@ -58,7 +58,8 @@ const HELD_ROWS = [ranked(2, next({ kind: "ranked", rank: 1 })), ranked(1, { kin
 const NONE_ROWS = [ranked(1, { kind: "not_signed_in" }), ranked(0, { kind: "never_use" }), ranked(2, { kind: "five_hour_cap", until_ms: null })];
 const UNCONFIRMED_ROWS = [ranked(2, next({ kind: "ranked", rank: 1 })), ranked(1, { kind: "sign_in_unconfirmed" })];
 const FULL_ROWS = Array.from({ length: 15 }, (_, index) => ranked(index, next({ kind: "tied_order" })));
-const RANKINGS = { ok: [order(READY_ROWS), SPARE_ORDER], held: [order(HELD_ROWS), SPARE_ORDER], unconfirmed: [order(UNCONFIRMED_ROWS), SPARE_ORDER], none: [order(NONE_ROWS), SPARE_ORDER], full: [order(FULL_ROWS)], bare: [] };
+const HOLD_ROWS = [{ ...ranked(2, next({ kind: "ranked", rank: 1 })), held_for: [{ project: "project-a", name: "Meals for two", until_ms: Date.now() + 90 * 60000 }] }, ranked(0, next({ kind: "least_used" })), ranked(1, { kind: "never_use" })];
+const RANKINGS = { ok: [order(READY_ROWS), SPARE_ORDER], held: [order(HELD_ROWS), SPARE_ORDER], unconfirmed: [order(UNCONFIRMED_ROWS), SPARE_ORDER], none: [order(NONE_ROWS), SPARE_ORDER], full: [order(FULL_ROWS)], "project-held": [order(HOLD_ROWS), SPARE_ORDER], bare: [] };
 const SCHEDULE = { strategy: "use_it_or_lose_it", pools: [{ id: "pool-spare", strategy: "balanced" }], projects: [], accounts: [{ connection: "acct-1", plan: { rank: 2, reserve_percent: 10, pin: "use_last" } }], version: 4 };
 const reading = (used_percent) => (used_percent === null ? null : { used_percent, resets_at_ms: null });
 const limit = (index, weekly, fiveHour = null) => ({ account: `acct-${index}`, plan: null, weekly: reading(weekly), five_hour: reading(fiveHour), five_hour_reset_override_ms: null, weekly_reset_override_ms: null, source: "poll", observed_ms: 0, checked_ms: 0, failure: null });
@@ -310,6 +311,7 @@ export function orderRows() {
     return {
       held: row.classList.contains("held"), number: say(row.querySelector('.pool-pos [aria-hidden="true"]')), spoken: say(row.querySelector(".pool-pos .visually-hidden")),
       name: say(row.querySelector(".pool-name")), badges: [...row.querySelectorAll(".badge")].map(say), plan: say(row.querySelector(".pool-plan")), why: say(row.querySelector(".pool-why")),
+      holds: [...row.querySelectorAll(".pool-hold")].map(say),
       link: link && { href: link.getAttribute("href"), label: link.getAttribute("aria-label") },
       limits: [...row.querySelectorAll(".pool-limit")].map((line) => [say(line), line.classList.contains("near") ? "near" : line.classList.contains("full") ? "full" : "ok"]),
       none: say(row.querySelector(".pool-limit-none")), whoWidth: row.querySelector(".pool-who").getBoundingClientRect().width,

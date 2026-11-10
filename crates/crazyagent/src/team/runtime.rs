@@ -577,6 +577,7 @@ pub struct TeamRuntime {
     state: PathBuf,
     executables: BTreeMap<&'static str, PathBuf>,
     access: AccessSource,
+    settings: Option<(PathBuf, PathBuf)>,
     limits: TeamLimits,
     workers: BTreeMap<i64, Worker>,
     custody: Result<NativeProfileCustody, EngineError>,
@@ -876,6 +877,7 @@ impl TeamRuntime {
             state: state.to_path_buf(),
             executables,
             access,
+            settings: None,
             limits,
             workers: BTreeMap::new(),
             custody,
@@ -943,6 +945,15 @@ impl TeamRuntime {
     /// that team messaging is not available.
     pub fn with_events(mut self, events: super::master::TeamEvents) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    /// Reads the owner's configured local model ports from these two settings files at each
+    /// tools-on launch, so the agent cannot bind them, and refuses the launch when they do
+    /// not read (OWNER-PORTS-FAIL-OPEN). Without them the ports come from the model access
+    /// source. Takes the global and project settings files. Returns the runtime.
+    pub fn with_settings(mut self, global: &Path, project: &Path) -> Self {
+        self.settings = Some((global.to_path_buf(), project.to_path_buf()));
         self
     }
 
@@ -2289,7 +2300,7 @@ impl TeamRuntime {
                 Some(slot) => (slot.harness.clone(), slot.tools),
             },
         };
-        let paused = self.paused()?;
+        let paused = self.paused(&project)?;
         let started = match self.account_for(access, &project, &harness, &paused) {
             Ok(None) => return self.note(&project, AGENT_RESTART_CHECKING),
             Ok(Some(account)) if role == AgentRole::Sub => {
@@ -2471,13 +2482,22 @@ impl TeamRuntime {
         Ok(stored)
     }
 
-    fn paused(&self) -> Result<BTreeSet<CredentialRef>, EngineError> {
+    /// The accounts `project`'s picks skip now: those paused for every project and those the
+    /// project holds itself after a limit its own agents reported (SECAUDIT-RATELIMIT-FORGE).
+    /// Takes the project. Returns the connections.
+    fn paused(&self, project: &ProjectId) -> Result<BTreeSet<CredentialRef>, EngineError> {
         let mut statement = self
             .connection
-            .prepare("SELECT connection FROM team_paused_accounts WHERE until_ms > ?1")
+            .prepare(
+                "SELECT connection FROM team_paused_accounts WHERE until_ms > ?1
+                 UNION SELECT connection FROM team_project_pauses
+                 WHERE project = ?2 AND until_ms > ?1",
+            )
             .map_err(error)?;
         let paused = statement
-            .query_map([now_ms()], |row| row.get::<_, String>(0))
+            .query_map(params![now_ms(), project.as_str()], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(error)?
             .filter_map(|row| row.ok().and_then(|c| CredentialRef::new(c).ok()))
             .collect();
@@ -2504,7 +2524,7 @@ impl TeamRuntime {
         {
             return Ok(());
         }
-        let paused = self.paused()?;
+        let paused = self.paused(project)?;
         self.retire_rejected(project, access);
         self.retire_narrowed(&stored);
         self.sync_pool(&stored, access)?;
@@ -6623,7 +6643,9 @@ impl TeamRuntime {
                 prompt_line: format!("Work of teammate {name}"),
             };
             let tries = self.teammate_turn_tries.entry(lead).or_default();
-            if let Err(problem) = crate::landing_turns::record(&db, &workspace, &ended) {
+            if let Err(problem) =
+                crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref())
+            {
                 let code = crate::landing::refusal_code(&problem).to_owned();
                 eprintln!("teammate_turn_failed cause={code}");
                 let tried = tries.entry(teammate).or_insert(0);
@@ -7174,10 +7196,22 @@ impl TeamRuntime {
         }
         toolchains::prepare_cargo_home(&home, &homes)
             .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
-        let kept = if tools {
-            (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
-        } else {
-            Vec::new()
+        let kept = match (tools, &self.settings) {
+            (true, Some((global, project))) => crate::sandbox::settings_owner_ports(global, project)
+                .map_err(|code| {
+                    with_code(
+                        &format!(
+                            "the settings files {} and {} do not read, so the owner's model ports cannot be kept from the agent",
+                            global.display(),
+                            project.display()
+                        ),
+                        Some(code),
+                    )
+                })?,
+            (true, None) => {
+                (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
+            }
+            (false, _) => Vec::new(),
         };
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
             .and_then(|sandbox| sandbox.keep_ports(&kept))
@@ -7902,7 +7936,7 @@ impl TeamRuntime {
                 let team_tool = worker.team_tool;
                 let master = worker.role == AgentRole::Master;
                 if end == TurnEnd::RateLimited {
-                    self.pause(&connection)?;
+                    self.pause(&project, &connection)?;
                 }
                 self.count_turn(id, &project, master)?;
                 if team_tool {
@@ -7990,7 +8024,7 @@ impl TeamRuntime {
                 let master = worker.role == AgentRole::Master;
                 let live_session = worker.session.clone().filter(|_| worker.live);
                 if end == TurnEnd::RateLimited {
-                    self.pause(&connection)?;
+                    self.pause(&project, &connection)?;
                     self.workers.get_mut(&id).expect("worker exists").stopping = true;
                 }
                 let turn = super::master::turn_ended(
@@ -8057,7 +8091,7 @@ impl TeamRuntime {
                 let (project, connection) = (worker.project.clone(), worker.connection.clone());
                 let master = worker.role == AgentRole::Master;
                 if end == TurnEnd::RateLimited {
-                    self.pause(&connection)?;
+                    self.pause(&project, &connection)?;
                 }
                 self.count_turn(id, &project, master)?;
                 self.own_turn_ended(id, &project, started, &text, end)?;
@@ -8308,7 +8342,8 @@ impl TeamRuntime {
             prompt_line: line.lines().next().unwrap_or_default().to_owned(),
         };
         let landed = crate::landing::open(&self.root).and_then(|db| {
-            let landed = crate::landing_turns::record(&db, &workspace, &ended);
+            let landed =
+                crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref());
             if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
                 eprintln!(
                     "landing_settle_failed cause={}",
@@ -8362,17 +8397,21 @@ impl TeamRuntime {
         self.note(project, &note)
     }
 
-    fn pause(&mut self, connection: &CredentialRef) -> Result<(), EngineError> {
-        let until = now_ms().saturating_add(
-            i64::try_from(self.limits.rate_limit_pause.as_millis()).unwrap_or(i64::MAX),
-        );
-        self.connection
-            .execute(
-                "INSERT INTO team_paused_accounts(connection,until_ms) VALUES (?1,?2)
-                 ON CONFLICT(connection) DO UPDATE SET until_ms=excluded.until_ms",
-                params![connection.as_str(), until],
-            )
-            .map_err(error)?;
+    /// Rests `connection` for `project` only after one of its agents' turns ended on a rate
+    /// limit read from what the agent's harness wrote (SECAUDIT-RATELIMIT-FORGE), and asks for
+    /// a usage poll that can hold it everywhere. Takes the project and the account.
+    fn pause(
+        &mut self,
+        project: &ProjectId,
+        connection: &CredentialRef,
+    ) -> Result<(), EngineError> {
+        super::hold_for_project(
+            &self.connection,
+            project.as_str(),
+            connection,
+            self.limits.rate_limit_pause,
+        )
+        .map_err(error)?;
         Ok(())
     }
 
@@ -11043,7 +11082,8 @@ pub fn start_for_engine(
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
-    let (global, project) = (global.to_path_buf(), project.to_path_buf());
+    let settings = (global.to_path_buf(), project.to_path_buf());
+    let (global, project) = settings.clone();
     let access: AccessSource = Box::new(move || {
         crate::config::resolve_config(&global, &project)
             .ok()?
@@ -11058,7 +11098,8 @@ pub fn start_for_engine(
         TeamLimits::default(),
     )
     .map_err(|e| e.0)?
-    .with_events(super::master::EVENTS);
+    .with_events(super::master::EVENTS)
+    .with_settings(&settings.0, &settings.1);
     let runtime = match engine {
         Some(engine) => runtime.with_delegation_tool(engine).map_err(|e| e.0)?,
         None => runtime,

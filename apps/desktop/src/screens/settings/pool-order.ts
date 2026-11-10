@@ -1,4 +1,4 @@
-import type { AccountStanding, AccountStrategy, OrderWhy } from "../../api";
+import type { AccountStanding, AccountStrategy, OrderWhy, ProjectHold } from "../../api";
 import type { AccountLimits, LimitWindow } from "../../api-usage";
 import { nearLimit } from "../metrics/limits";
 import { windowNow } from "../metrics/usage-model";
@@ -59,6 +59,14 @@ export function heldLine(standing: AccountStanding, nowMs: number): string {
       if (standing.reserve_percent > 0) return `Reserve reached (${standing.reserve_percent}%)`;
       return standing.until_ms === null ? "Weekly limit used up" : `Weekly limit used up until ${at(standing.until_ms)}`;
   }
+}
+
+/** Says which project holds an account after a limit its own agent reported, and until when.
+ * Inputs: the hold and now. Output: the line; throws for a hold with no name, so a line never
+ * reads "Held for  until". */
+export function holdLine(hold: ProjectHold, nowMs: number): string {
+  if (hold.name.length === 0) throw new Error(`the hold on ${hold.project} has no name`);
+  return `Held for ${hold.name} until ${atText(hold.until_ms, nowMs)}`;
 }
 
 /** Says where a pool's order comes from and how a row can move. Inputs: the strategy, whether

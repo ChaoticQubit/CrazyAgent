@@ -194,7 +194,8 @@ impl Earlier {
 /// One stored change set with everything the engine needs to act on it. `made` says the
 /// set's own Accept committed `landed`, so an undo may revert it, on `landed_on`, the ref
 /// that Accept moved; `undone` is the commit that reverted it; `accepted_in` is where the
-/// owner pressed that Accept, None for anyone else's or one stored before places were kept.
+/// owner pressed that Accept, None for anyone else's, one stored before places were kept, or
+/// a place a later build named, which this build reads as None and keeps as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Record {
     pub(super) id: ChangeSetId,
@@ -416,8 +417,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         regenerated_files: serde_json::from_str(&text(32)?).map_err(|_| invalid(32))?,
         accepted_in: row
             .get::<_, Option<String>>(33)?
-            .map(|name| crate::activity::AcceptPlace::parse(&name).ok_or_else(|| invalid(33)))
-            .transpose()?,
+            .and_then(|name| crate::activity::AcceptPlace::parse(&name)),
     })
 }
 
@@ -430,8 +430,9 @@ fn signed(value: u64) -> Result<i64, EngineError> {
     i64::try_from(value).map_err(|_| failure("changes_unavailable"))
 }
 
-/// Writes a change set, adding it or updating every column of the row with its id, and
-/// gives a set with no number the next number of its project in the same savepoint.
+/// Writes a change set, adding it or updating every column of the row with its id, except
+/// that a record with no place keeps the place stored, and gives a set with no number the
+/// next number of its project in the same savepoint.
 /// Inputs: the store and the record. Output: Ok once stored; a second open change set
 /// for the same worktree is refused with `changes_agent_has_pending` and both rows stay.
 pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> {
@@ -453,7 +454,10 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
     let updates = COLUMNS
         .split(',')
         .filter(|column| *column != "id")
-        .map(|column| format!("{column}=excluded.{column}"))
+        .map(|column| match column {
+            "accepted_in" => "accepted_in=COALESCE(excluded.accepted_in,accepted_in)".to_owned(),
+            _ => format!("{column}=excluded.{column}"),
+        })
         .collect::<Vec<_>>()
         .join(",");
     db.execute(

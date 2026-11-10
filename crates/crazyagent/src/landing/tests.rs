@@ -3720,16 +3720,67 @@ fn a_store_from_before_the_added_columns_gains_them_and_falls_back_to_the_prompt
     case.db
         .execute_batch(
             "ALTER TABLE landing_change_sets DROP COLUMN message;
-             ALTER TABLE landing_change_sets DROP COLUMN waiting;",
+             ALTER TABLE landing_change_sets DROP COLUMN waiting;
+             ALTER TABLE landing_change_sets DROP COLUMN accepted_in;",
         )
         .unwrap();
     store::initialize(&case.db).unwrap();
+    assert_eq!(store::load(&case.db, &id).unwrap().accepted_in, None);
     assert_eq!(case.view(&id).message, "Add the fourth line");
     assert!(!case.view(&id).waiting);
     let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
         panic!("the accept conflicted");
     };
     assert_eq!(case.landed_message(&commit), "Add the fourth line");
+}
+
+#[test]
+fn a_set_accepted_in_a_place_a_later_build_named_still_lists_and_keeps_that_place() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET accepted_in='terminal' WHERE id=?1",
+            [id.as_str()],
+        )
+        .unwrap();
+    let listed = list(&case.db, &case.workspace.project)
+        .expect("a set accepted in a later build's place still lists");
+    assert!(
+        listed
+            .iter()
+            .any(|view| view.id == id && view.state == ChangeState::Accepted)
+    );
+    let mut record =
+        store::load(&case.db, &id).expect("a set accepted in a later build's place still reads");
+    assert_eq!(record.accepted_in, None);
+    let rows = crate::activity::list(&case.db, &case.workspace.project, crate::activity::LIST_MAX)
+        .unwrap();
+    let ours = rows
+        .iter()
+        .filter(|item| item.change_set.as_deref() == Some(id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(!ours.is_empty());
+    assert!(ours.iter().all(|item| item.place.is_none()), "{ours:?}");
+    record.updated_ms += 1;
+    store::save(&case.db, &record).unwrap();
+    let kept: Option<String> = case
+        .db
+        .query_row(
+            "SELECT accepted_in FROM landing_change_sets WHERE id=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        kept.as_deref(),
+        Some("terminal"),
+        "a save by this build keeps a place it cannot read"
+    );
 }
 
 #[test]
@@ -7159,8 +7210,8 @@ fn a_master_s_set_that_conflicts_with_main_waits_for_the_owner_at_its_turn_end()
         "one\ntwo\nthree, the master's\n",
     )
     .unwrap();
-    let recorded =
-        crate::landing_turns::record(&case.db, &master, &merge_turn()).map_err(|problem| problem.0);
+    let recorded = crate::landing_turns::record(&case.db, &master, &merge_turn(), None)
+        .map_err(|problem| problem.0);
     let Ok(crate::landing_turns::Landed::Added(id)) = recorded else {
         panic!("the master's turn kept no change set: {recorded:?}");
     };
@@ -11925,7 +11976,7 @@ fn a_lockfile_only_clash_is_rewritten_by_its_tool_as_an_engine_commit_on_top_of_
     let tip = case.tip();
     let mut record = store::load(&case.db, &id).unwrap();
     let regenerated =
-        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()]).unwrap();
+        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap();
     let commit = regenerated.expect("a lockfile-only clash is regenerated");
     assert_eq!(
         (
@@ -11991,7 +12042,7 @@ fn a_lockfile_its_tool_cannot_rewrite_changes_nothing_and_leaves_nothing_behind(
     let mut record = store::load(&case.db, &id).unwrap();
     let before = (record.head.clone(), record.base.clone(), record.state);
     assert_eq!(
-        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()]).unwrap(),
+        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap(),
         None
     );
     assert_eq!(
@@ -12021,13 +12072,84 @@ fn a_clash_beyond_the_named_lockfiles_regenerates_nothing() {
     let mut record = store::load(&case.db, &id).unwrap();
     let head = record.head.clone();
     assert_eq!(
-        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()]).unwrap(),
+        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap(),
         None
     );
     assert_eq!(record.head, head);
     assert_eq!(store::load(&case.db, &id).unwrap().head, head);
     assert!(engine_notes(&case).is_empty());
     assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
+/// OWNER-PORTS-FAIL-OPEN r1 L1: a lockfile's tool runs on the project's open network but
+/// never listens on the owner's configured local model port, while another free port stays
+/// open to it, and owner settings that do not read refuse the regeneration instead of
+/// running the tool with that port unknown: nothing changes and nothing is left behind.
+#[test]
+fn a_lockfile_tool_never_listens_on_a_configured_model_port_and_unread_settings_refuse_it() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    let (kept, other) = {
+        let first = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let second = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        (
+            first.local_addr().unwrap().port(),
+            second.local_addr().unwrap().port(),
+        )
+    };
+    let probe = format!(
+        "probe() {{\nif /usr/bin/perl -MIO::Socket::INET -e 'exit(IO::Socket::INET->new(LocalAddr => \"127.0.0.1\", LocalPort => $ARGV[0], Listen => 1) ? 0 : 1)' \"$2\"; then echo \"# $1 listened\" >> Cargo.lock; else echo \"# $1 refused\" >> Cargo.lock; fi\n}}\nprobe kept {kept}\nprobe other {other}"
+    );
+    stand_in_cargo(&case, "", &probe, Duration::from_secs(60));
+    let id = lockfile_clash(&case, "b = { path = \"../b\" }", "b");
+    let folder = case.repo.parent().unwrap();
+    let settings = (folder.join("global.toml"), folder.join("project.toml"));
+    write(&settings.0, "[[[\n");
+    let mut record = store::load(&case.db, &id).unwrap();
+    let head = record.head.clone();
+    assert_eq!(
+        lockfiles::regenerate(
+            &case.db,
+            &mut record,
+            &["Cargo.lock".to_owned()],
+            Some(&settings)
+        )
+        .unwrap(),
+        None,
+        "settings that do not read refuse the regeneration"
+    );
+    assert_eq!(record.head, head);
+    assert_eq!(store::load(&case.db, &id).unwrap().head, head);
+    assert!(engine_notes(&case).is_empty());
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+    write(
+        &settings.0,
+        &format!(
+            r#"version = 1
+timeout_ms = 2000
+allowed_destinations = []
+
+[model_access]
+accounts = ["local-account"]
+connections = [{{ id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = {{ kind = "http", url = "http://127.0.0.1:{kept}/v1" }}, model = {{ id = "qwen2.5:0.5b", author = "openai-compatible" }}, auth = {{ method = "none" }} }}]
+pools = [{{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }}]
+"#
+        ),
+    );
+    std::fs::set_permissions(&settings.0, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let commit = lockfiles::regenerate(
+        &case.db,
+        &mut record,
+        &["Cargo.lock".to_owned()],
+        Some(&settings),
+    )
+    .unwrap()
+    .expect("readable settings let the regeneration run");
+    let lock = case.owner(&["show", &format!("{commit}:Cargo.lock")]);
+    assert!(
+        lock.contains("# kept refused\n") && lock.contains("# other listened\n"),
+        "the tool listens only where the owner's model server does not:\n{lock}"
+    );
 }
 
 const TURN_END_WITHIN: Duration = Duration::from_secs(20);
@@ -12054,7 +12176,7 @@ fn turn_end_within(
     std::thread::spawn(move || {
         git::OWNER_HOME.with(|owner| *owner.borrow_mut() = home);
         let db = open(&engine).unwrap();
-        let _ = sent.send(crate::landing_turns::record(&db, &workspace, &end).unwrap());
+        let _ = sent.send(crate::landing_turns::record(&db, &workspace, &end, None).unwrap());
     });
     got.recv_timeout(within).ok()
 }
@@ -13033,7 +13155,7 @@ fn a_merge_driver_on_the_path_main_renamed_the_agent_s_file_to_never_runs_in_a_r
     );
     let mut record = store::load(&case.db, &id).unwrap();
     let regenerated =
-        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()]).unwrap();
+        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None).unwrap();
     assert!(
         !marker.exists(),
         "the owner's merge driver ran at the path main renamed the agent's file to"
@@ -13918,7 +14040,7 @@ fn a_regeneration_stopped_inside_its_reset_is_put_back_once_the_agent_committed(
     let before = store::load(&case.db, &id).unwrap();
     let mut record = before.clone();
     stopped_inside_reset(&case, &flow::BEFORE_RESET, || {
-        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()])
+        lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None)
     });
     assert!(store::load(&case.db, &id).unwrap().intent.is_some());
     assert_put_back(&case, &id, &before, Some(&before.head));
@@ -14343,6 +14465,24 @@ fn an_owner_accept_row_says_where_accept_was_pressed() {
         matches!(landed, Ok(AcceptOutcome::Landed { .. })),
         "{landed:?}"
     );
+    assert_eq!(accepted_places(&case), vec![None]);
+}
+
+/// LAND-15-L1: the activity list reads a landing store made before Accept kept its place,
+/// with no `accepted_in` column and before any start adds it, without an error, and its
+/// Accepted row names no place, as one stored before places were kept.
+#[test]
+fn an_activity_list_on_a_landing_store_without_the_place_column_names_no_place() {
+    use crate::activity::AcceptPlace;
+    let case = Case::new();
+    closing_tables(&case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(matches!(case.accept(&id), Ok(AcceptOutcome::Landed { .. })));
+    assert_eq!(accepted_places(&case), vec![Some(AcceptPlace::Changes)]);
+    case.db
+        .execute_batch("ALTER TABLE landing_change_sets DROP COLUMN accepted_in;")
+        .unwrap();
     assert_eq!(accepted_places(&case), vec![None]);
 }
 
