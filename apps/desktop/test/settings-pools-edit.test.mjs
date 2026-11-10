@@ -376,6 +376,17 @@ test("picking another pool clears a refusal left on the screen", async () => {
   assert.deepEqual(seen.items.map((item) => [item.name, item.current]), [["Main pool", null], ["Spare", "true"]]);
 });
 
+test("New pool clears a refusal left on the screen", async () => {
+  const seen = await onPools({ ...LIVE, refuseEdit: "pool_name_bounds" }, async (page) => {
+    await press(page, REMOVE("Account 0"));
+    const before = await alert(page);
+    await press(page, NEW, "New pool");
+    return { before, after: await alert(page) };
+  });
+  assert.equal(seen.before, "Use a pool name of 1 to 60 characters on one line.");
+  assert.equal(seen.after, "");
+});
+
 test("a refused first Add keeps the draft and shows the engine's sentence", async () => {
   const seen = await onPools({ ...LIVE, refuseEdit: "pool_name_bounds" }, async (page) => {
     await press(page, NEW, "New pool");
