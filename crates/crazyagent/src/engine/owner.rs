@@ -251,6 +251,9 @@ pub enum OwnerMutation {
     SetSandboxSettings {
         settings: crate::sandbox_settings::SandboxSettings,
     },
+    SetCleanupSettings {
+        settings: crate::cleanup_settings::CleanupSettings,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -538,6 +541,9 @@ impl OwnerMutation {
             Self::SetSandboxSettings { settings } => Command::OwnerSandbox {
                 settings: *settings,
             },
+            Self::SetCleanupSettings { settings } => Command::OwnerAgentCleanup {
+                settings: *settings,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -728,6 +734,7 @@ pub enum OwnerRead {
     },
     OwnerProfile,
     SandboxSettings,
+    CleanupSettings,
     ProjectsHome,
     SetupStatus,
     FoundProjects,
@@ -825,6 +832,7 @@ impl OwnerRead {
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::SandboxSettings
+            | Self::CleanupSettings
             | Self::ProjectsHome
             | Self::SetupStatus
             | Self::FoundProjects
@@ -1248,6 +1256,9 @@ pub enum OwnerData {
     },
     SandboxSettings {
         settings: crate::sandbox_settings::SandboxSettings,
+    },
+    CleanupSettings {
+        settings: crate::cleanup_settings::CleanupSettings,
     },
     SetupStatus {
         status: crate::setup::SetupStatus,

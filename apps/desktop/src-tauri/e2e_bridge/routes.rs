@@ -20,6 +20,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::projects_home::AddMode;
     use crazyagent::projects_home::AddOverride;
     use crazyagent::protocol::ProjectSpec;
+    use crazyagent::cleanup_settings::CleanupSettings;
     use crazyagent::sandbox_settings::SandboxSettings;
     use crazyagent::scheduling::ScheduleChange;
     use crazyagent::team::TerminalsPerWindow;
@@ -1945,6 +1946,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .set_sandbox_settings(settings, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_cleanup_settings" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.cleanup_settings().await }.await;
+            routed(result)
+        }
+        "desktop_set_cleanup_settings" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: CleanupSettings,
+                generation: u64,
+            }
+            let Args { settings, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_cleanup_settings(settings, generation) .await }.await;
             routed(result)
         }
         "desktop_pool_summaries" => {

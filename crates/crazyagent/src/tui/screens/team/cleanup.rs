@@ -50,6 +50,12 @@ fn agents_word(count: usize) -> String {
     )
 }
 
+/// Red stub of why a check keeps a finished agent's worktree: names only the code. Input:
+/// the code. Output: the fallback reason.
+pub(super) fn kept_reason(code: &str) -> String {
+    format!("a check keeps it ({code})")
+}
+
 /// One plain sentence for a refused cleanup. Input: the code. Output: the sentence.
 pub(super) fn words(code: &str) -> &'static str {
     match code {
