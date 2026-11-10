@@ -1115,7 +1115,8 @@ fn server_git(
 }
 
 /// An owner home holding git config files the IDE profile denies: `.gitconfig` with an
-/// identity whose name needs quoting, and git's default ignore file. Output: the folder.
+/// identity whose name needs quoting, and git's default ignore and attributes files. Output:
+/// the folder.
 fn owner_home_with_git_config() -> tempfile::TempDir {
     let home = scratch();
     fs::write(
@@ -1126,6 +1127,7 @@ fn owner_home_with_git_config() -> tempfile::TempDir {
     let xdg = home.path().join(".config").join("git");
     fs::create_dir_all(&xdg).unwrap();
     fs::write(xdg.join("ignore"), "*.denied\n").unwrap();
+    fs::write(xdg.join("attributes"), "*.denied binary\n").unwrap();
     home
 }
 
@@ -1199,6 +1201,71 @@ fn a_commit_from_the_ide_carries_the_name_and_email_of_the_owners_config() {
         String::from_utf8_lossy(&log.stdout).trim(),
         "Dana \"Q\" O\\wner <dana@example.invalid>"
     );
+}
+
+/// The git config the engine writes for the server is read only to it: neither git nor a
+/// direct write from inside the server's profile changes the file.
+#[test]
+fn the_server_cannot_change_the_git_config_the_engine_wrote_for_it() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let (built, folder) = built_server(&servers, &project("config-read-only"), &root);
+    crate::ide::git::write_global(&folder, &root, Some(owner.path())).unwrap();
+    let config = folder.join(crate::ide::git::GLOBAL_CONFIG);
+    let before = fs::read(&config).unwrap();
+    let git = server_git(
+        &built,
+        &folder,
+        owner.path(),
+        &root,
+        &["config", "--global", "core.editor", "changed"],
+    );
+    assert!(
+        !git.status.success(),
+        "{}",
+        String::from_utf8_lossy(&git.stderr)
+    );
+    let mut shell = sandbox::command(&folder.join(sandbox::PROFILE), Path::new("/bin/sh"));
+    shell
+        .args(["-c", &format!("printf x >> '{}'", config.display())])
+        .current_dir(&root)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let write = crate::spawn_gate::output(&mut shell).unwrap();
+    let said = String::from_utf8_lossy(&write.stderr).into_owned();
+    assert!(!write.status.success(), "{said}");
+    assert!(said.contains("Operation not permitted"), "{said}");
+    assert_eq!(fs::read(&config).unwrap(), before);
+}
+
+/// Git's default attributes file in the owner's home, which the server's profile denies,
+/// draws no warning from the server's git. The same git pointed back at that file does warn,
+/// so the row fails if the engine's config stops naming `/dev/null`.
+#[test]
+fn the_servers_git_draws_no_warning_from_the_owners_denied_attributes_file() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let (built, folder) = built_server(&servers, &project("denied-attributes"), &root);
+    crate::ide::git::write_global(&folder, &root, Some(owner.path())).unwrap();
+    let run = |args: &[&str]| server_git(&built, &folder, owner.path(), &root, args);
+    let denied = owner.path().join(".config").join("git").join("attributes");
+    let default = format!("core.attributesFile={}", denied.display());
+    let control = run(&["-c", &default, "check-attr", "-a", "a.txt"]);
+    assert!(
+        String::from_utf8_lossy(&control.stderr).contains("unable to access"),
+        "{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let quiet = run(&["check-attr", "-a", "a.txt"]);
+    let said = String::from_utf8_lossy(&quiet.stderr).into_owned();
+    assert!(quiet.status.success(), "{said}");
+    assert!(!said.contains("unable to access"), "{said}");
 }
 
 /// The git ceiling one built server command hands the IDE server. Inputs: the register,

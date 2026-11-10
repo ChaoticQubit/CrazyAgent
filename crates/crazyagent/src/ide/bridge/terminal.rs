@@ -183,6 +183,9 @@ fn prepare(root: &Path, project: &ProjectId) -> Result<InteractiveCommand, Engin
                 .any(|known| variable.as_os_str() == *known)
         })
         .collect();
+    let owner_home = std::env::var_os("HOME");
+    let git_config =
+        crate::ide::git::global_for(&place.folder, owner_home.as_deref().map(Path::new));
     let command = ide_shell::interactive(&Launch {
         root,
         project,
@@ -192,6 +195,7 @@ fn prepare(root: &Path, project: &ProjectId) -> Result<InteractiveCommand, Engin
         arguments: &[],
         incoming: &incoming,
         extra_reads: &place.extra_reads,
+        git_config: &git_config,
     })
     .map_err(|error| match error {
         SandboxError::Unavailable(_) => failure("ide_terminal_unavailable"),

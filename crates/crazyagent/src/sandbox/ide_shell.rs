@@ -42,7 +42,8 @@ pub struct Place {
 
 /// One Sandboxed IDE terminal launch: the engine data root, the project and its folder,
 /// where the terminal starts, the shell and its arguments (none starts a login shell), the
-/// terminal variables the engine passes and the project's extra read-only folders.
+/// terminal variables the engine passes, the project's extra read-only folders and the text
+/// of the git config in the terminal's own home.
 #[derive(Debug, Clone, Copy)]
 pub struct Launch<'a> {
     pub root: &'a Path,
@@ -53,6 +54,7 @@ pub struct Launch<'a> {
     pub arguments: &'a [OsString],
     pub incoming: &'a [(OsString, OsString)],
     pub extra_reads: &'a [PathBuf],
+    pub git_config: &'a str,
 }
 
 /// Reads the project's folder and its extra read-only folders from the engine database,

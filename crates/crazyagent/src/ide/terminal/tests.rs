@@ -67,33 +67,47 @@ fn quoted(path: &std::path::Path) -> String {
     format!("'{text}'")
 }
 
-/// Git answers in a Sandboxed IDE terminal, whose home is its own, so no config the sandbox
-/// denies stands in its way as the owner's home does for the IDE server's git.
 #[cfg(target_os = "macos")]
-#[test]
-fn the_sandboxed_terminals_git_answers_in_the_project() {
-    let case = Case::new();
-    let mut init = std::process::Command::new(crate::research::runner::setup_git());
-    init.args(["init", "-q"])
-        .current_dir(&case.folder)
+const OWNER_CONFIG: &str = "[user]\n\tname = Dana Owner\n\temail = dana@example.invalid\n";
+
+/// Runs git outside every sandbox, as the row's own setup. Inputs: the folder and git's
+/// arguments. Output: none; a git that fails fails the row.
+#[cfg(target_os = "macos")]
+fn setup_git(folder: &std::path::Path, args: &[&str]) {
+    let mut git = std::process::Command::new(crate::research::runner::setup_git());
+    git.args(args)
+        .current_dir(folder)
         .env_clear()
-        .env("HOME", &case.folder)
+        .env("HOME", folder)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     assert!(
-        crate::spawn_gate::output(&mut init)
+        crate::spawn_gate::output(&mut git)
             .unwrap()
             .status
             .success()
     );
-    let script = format!(
-        "{git} --version && {git} status --porcelain",
-        git = quoted(crate::research::runner::sandboxed_git())
-    );
+}
+
+/// The git config the engine gives a terminal for an owner whose own config is `text`.
+/// Inputs: the case and the owner's config. Output: the terminal's config text.
+#[cfg(target_os = "macos")]
+fn owner_config(case: &Case, text: &str) -> String {
+    let home = case.folder.parent().unwrap().join("owner");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join(".gitconfig"), text).unwrap();
+    crate::ide::git::global_for(&case.folder, Some(&home))
+}
+
+/// Runs a script in a Sandboxed terminal of the project through the real launch and the real
+/// `sandbox-exec`. Inputs: the case, the text of the terminal's git config and the script.
+/// Output: the finished process.
+#[cfg(target_os = "macos")]
+fn in_terminal(case: &Case, git_config: &str, script: &str) -> std::process::Output {
     let project = ProjectId::new(PROJECT).unwrap();
-    let shell_arguments = arguments(&["-c", &script]);
+    let shell_arguments = arguments(&["-c", script]);
     let launch = ide_shell::Launch {
         root: &case.root,
         project: &project,
@@ -103,13 +117,139 @@ fn the_sandboxed_terminals_git_answers_in_the_project() {
         arguments: &shell_arguments,
         incoming: &[],
         extra_reads: &[],
+        git_config,
     };
     let mut command = ide_shell::command(&launch).unwrap();
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = crate::spawn_gate::output(&mut command).unwrap();
+    crate::spawn_gate::output(&mut command).unwrap()
+}
+
+/// The script that stages the project's file, commits it and prints the commit in a format.
+/// Input: the `git log` format. Output: the script.
+#[cfg(target_os = "macos")]
+fn commit_script(log: &str) -> String {
+    let git = quoted(crate::research::runner::sandboxed_git());
+    format!("{git} add README && {git} commit -q -m first && {git} log -1 --format='{log}'")
+}
+
+/// `git add` then `git commit` succeed in a Sandboxed terminal, and the commit carries the
+/// name and email from the owner's own git config.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_commit_in_the_sandboxed_terminal_carries_the_owners_name_and_email() {
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    let config = owner_config(&case, OWNER_CONFIG);
+    let output = in_terminal(&case, &config, &commit_script("%an <%ae>"));
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{said}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "Dana Owner <dana@example.invalid>",
+        "{said}"
+    );
+}
+
+/// An owner who signs every commit through their own git config still commits in a
+/// Sandboxed terminal, unsigned: only the name and email reach it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_commit_in_the_sandboxed_terminal_is_unsigned_when_the_owner_signs_everywhere() {
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    let config = owner_config(
+        &case,
+        &format!("{OWNER_CONFIG}[commit]\n\tgpgsign = true\n"),
+    );
+    let output = in_terminal(&case, &config, &commit_script("%G?"));
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{said}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "N",
+        "{said}"
+    );
+}
+
+/// A project whose own git config signs its commits cannot commit in a Sandboxed terminal,
+/// whose home holds no signing key.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_project_that_signs_its_commits_cannot_commit_in_the_sandboxed_terminal() {
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    setup_git(&case.folder, &["config", "commit.gpgsign", "true"]);
+    let config = owner_config(&case, OWNER_CONFIG);
+    let output = in_terminal(&case, &config, &commit_script("%H"));
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(!output.status.success(), "{said}");
+    assert!(said.contains("gpg failed to sign the data"), "{said}");
+}
+
+/// A commit in a Sandboxed terminal runs the project's own pre-commit hook.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_commit_in_the_sandboxed_terminal_runs_the_projects_pre_commit_hook() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    let hooks = case.folder.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\necho ran > hook-ran\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = owner_config(&case, OWNER_CONFIG);
+    let output = in_terminal(&case, &config, &commit_script("%s"));
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{said}");
+    assert!(case.folder.join("hook-ran").exists(), "{said}");
+}
+
+/// A Sandboxed terminal is refused a new file in the project's git hooks.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandboxed_terminal_cannot_write_the_projects_git_hooks() {
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    let hooks = case.folder.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let output = in_terminal(&case, "", "printf x > .git/hooks/x");
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(!output.status.success(), "{said}");
+    assert!(said.contains("Operation not permitted"), "{said}");
+    assert!(!hooks.join("x").exists(), "{said}");
+}
+
+/// A Sandboxed terminal is refused a change to the project's git config.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandboxed_terminal_cannot_write_the_projects_git_config() {
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    let config = case.folder.join(".git").join("config");
+    let before = std::fs::read(&config).unwrap();
+    let output = in_terminal(&case, "", "printf x >> .git/config");
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(!output.status.success(), "{said}");
+    assert!(said.contains("Operation not permitted"), "{said}");
+    assert_eq!(std::fs::read(&config).unwrap(), before, "{said}");
+}
+
+/// Git answers in a Sandboxed IDE terminal, whose home is its own, so no config the sandbox
+/// denies stands in its way as the owner's home does for the IDE server's git.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandboxed_terminals_git_answers_in_the_project() {
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    let script = format!(
+        "{git} --version && {git} status --porcelain",
+        git = quoted(crate::research::runner::sandboxed_git())
+    );
+    let output = in_terminal(&case, "", &script);
     let said = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(output.status.success(), "{said}");
     assert!(!said.contains("unable to access"), "{said}");
@@ -187,6 +327,7 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         arguments: &shell_arguments,
         incoming: &incoming,
         extra_reads: &[],
+        git_config: "",
     };
     let mut command = ide_shell::command(&launch).unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
@@ -278,6 +419,7 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         arguments: &shell_arguments,
         incoming: &[],
         extra_reads: &[],
+        git_config: "",
     };
     match ide_shell::command(&launch) {
         Err(crate::sandbox::SandboxError::Unavailable(reason)) => {
