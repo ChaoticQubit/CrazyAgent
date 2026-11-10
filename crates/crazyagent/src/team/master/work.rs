@@ -23,6 +23,7 @@ const TITLE_SHOWN_MAX: usize = 120;
 const CLAIMS_SHOWN_MAX: usize = 300;
 const WORKING_TEAMMATES_SHOWN_MAX: usize = 16;
 const WAITING_TEAMMATES_SHOWN_MAX: usize = 16;
+const UNSAVED_TEAMMATES_CHECKED_MAX: usize = 64;
 const WIDE_CLAIMS_CHECKED_MAX: usize = 4;
 const WIDE_CLAIMS_TIME: Duration = Duration::from_millis(1500);
 const SECTION_BYTES_MAX: usize = 6 * 1024;
@@ -598,8 +599,9 @@ pub(super) fn transfer_work(
 }
 
 /// Finishes a unit of work with its evidence for `finish_work` (DEC-104). Complete is
-/// refused while a native teammate of the caller still works or its change set still
-/// waits to land on the caller's task branch (OP9B-M1), or while a branch of an agent the
+/// refused while a native teammate of the caller still works, its change set still waits
+/// to land on the caller's task branch (OP9B-M1) or its edits are not saved on its own
+/// branch (`unsaved_teammates`), or while a branch of an agent the
 /// caller leads is not merged into the caller's own (`unmerged_for_finish`); review_ready
 /// tells the caller's lead, or the master, in a message. Takes the database, what the
 /// answers need, the caller, the work, the version it read, the outcome and the evidence.
@@ -647,6 +649,27 @@ pub(super) fn finish_work(
                 return Ok((
                     format!(
                         "Not finished: the engine could not tell whether your teammates' work landed ({}). Try again in a moment.",
+                        bound_text(&problem.0, 120)
+                    ),
+                    true,
+                ));
+            }
+        }
+        match unsaved_teammates(connection, answering, agent) {
+            Ok(unsaved) if unsaved.is_empty() => {}
+            Ok(unsaved) => {
+                return Ok((
+                    format!(
+                        "Not finished: the edits of these teammates are not saved on their own branches yet: {}. CrazyAgent saves a teammate's work each time it rests and tells you when it cannot; ask that teammate to work and rest again, then finish again.",
+                        bound_text(&unsaved.join(", "), CLAIMS_SHOWN_MAX)
+                    ),
+                    true,
+                ));
+            }
+            Err(problem) => {
+                return Ok((
+                    format!(
+                        "Not finished: the engine could not tell whether your teammates' edits are saved ({}). Try again in a moment.",
                         bound_text(&problem.0, 120)
                     ),
                     true,
@@ -808,6 +831,65 @@ fn waiting_teammates(
             })
             .collect(),
     )
+}
+
+/// The names of a linked lead's resting native teammates whose worktree holds edits not
+/// committed on their own branch yet (OP9B-C4): the engine saves a teammate's work each time
+/// it rests and, once its tries fail, leaves it uncommitted there, where Complete would strand
+/// it. Takes the database, what the answers need and the lead. Returns the names among the
+/// first `UNSAVED_TEAMMATES_CHECKED_MAX` resting ones, none for a lead in its own clone, or
+/// the failure that kept one unread.
+fn unsaved_teammates(
+    connection: &Connection,
+    answering: &Answering<'_>,
+    lead: i64,
+) -> Result<Vec<String>, EngineError> {
+    let project = &answering.stored.project_id;
+    let place: Option<(String, String)> = connection
+        .query_row(
+            "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+            params![lead, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(state)?;
+    let Some((worktree, git_dir)) = place else {
+        return Ok(Vec::new());
+    };
+    let (worktree, git_dir) = (Path::new(&worktree), Path::new(&git_dir));
+    if git_dir == crate::agent_git::git_dir(worktree) {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT n.name FROM team_agents a JOIN team_teammate_names n ON n.agent=a.id
+             WHERE a.project=?1 AND a.parent=?2 AND a.role='teammate' AND a.status='idle'
+             ORDER BY a.id LIMIT ?3",
+        )
+        .map_err(state)?;
+    let resting: Vec<String> = statement
+        .query_map(
+            params![project.as_str(), lead, UNSAVED_TEAMMATES_CHECKED_MAX as i64],
+            |row| row.get(0),
+        )
+        .map_err(state)?
+        .collect::<Result<_, _>>()
+        .map_err(state)?;
+    assert!(resting.len() <= UNSAVED_TEAMMATES_CHECKED_MAX);
+    if resting.is_empty() {
+        return Ok(Vec::new());
+    }
+    let db = crate::landing::open(answering.landing)?;
+    let mut unsaved = Vec::new();
+    for name in resting {
+        if crate::agent_git::worktree_name_valid(&name)
+            && crate::landing::teammate_unsaved(&db, worktree, git_dir, &name)?
+        {
+            unsaved.push(name);
+        }
+    }
+    assert!(unsaved.len() <= UNSAVED_TEAMMATES_CHECKED_MAX);
+    Ok(unsaved)
 }
 
 /// The branches of agents a lead leads that are not merged into its own branch yet, which

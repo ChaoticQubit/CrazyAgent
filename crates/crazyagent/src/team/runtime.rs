@@ -594,6 +594,7 @@ pub struct TeamRuntime {
     teammate_turn_tries: BTreeMap<i64, BTreeMap<i64, u8>>,
     teammates_unreadable_told: BTreeSet<i64>,
     teammate_conflicts_told: BTreeMap<i64, BTreeMap<String, (String, String)>>,
+    teammates_unrecorded: BTreeMap<i64, (String, String, u8)>,
     receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     unread: BTreeMap<ProjectId, (i64, Instant)>,
@@ -894,6 +895,7 @@ impl TeamRuntime {
             teammate_turn_tries: BTreeMap::new(),
             teammates_unreadable_told: BTreeSet::new(),
             teammate_conflicts_told: BTreeMap::new(),
+            teammates_unrecorded: BTreeMap::new(),
             receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
             unread: BTreeMap::new(),
@@ -1468,6 +1470,8 @@ impl TeamRuntime {
         self.teammates_unreadable_told
             .retain(|lead| harnesses.iter().any(|(agent, _)| agent == lead));
         self.teammate_conflicts_told
+            .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
+        self.teammates_unrecorded
             .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
         for (agent, project) in harnesses {
             let cap = super::teammate_cap(&self.connection, &project)?;
@@ -5657,7 +5661,8 @@ impl TeamRuntime {
             OWN_TURN_TASK.to_owned(),
             &format!("task {task}"),
             end,
-        )
+        )?;
+        Ok(())
     }
 
     /// Tells whether a project's master still has work in flight: a task queued, waiting
@@ -6678,13 +6683,14 @@ impl TeamRuntime {
     /// as an owner's Accept onto that branch does, only while the lead is idle and the
     /// owner lets a lead's workers land on it, then records the lead's change set again so
     /// the landed work waits for the owner there and tells the lead whose work landed, so a
-    /// lead that could not finish while it waited finishes then (OP9B-M1). A conflicting set
-    /// stays on the teammate's branch and the lead is told its files, each quoted on its own
-    /// line (OP9B-C2), once for each teammate head and lead tip.
-    /// Takes the project and the lead. Returns Ok, or a SQLite or coordination failure.
+    /// lead that could not finish while it waited finishes then (OP9B-M1), through
+    /// `record_landed`. A conflicting set stays on the teammate's branch and the lead is told
+    /// its files, each quoted on its own line (OP9B-C2), once for each teammate head and lead
+    /// tip. Takes the project and the lead. Returns Ok, or a SQLite or coordination failure.
     fn land_teammates(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
         let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
             self.teammate_conflicts_told.remove(&lead);
+            self.teammates_unrecorded.remove(&lead);
             return Ok(());
         };
         let idle: bool = self
@@ -6706,28 +6712,45 @@ impl TeamRuntime {
         {
             return Ok(());
         }
+        let landed = self.accept_resting(project, lead, &repository, &worktree, &git_dir)?;
+        self.record_landed(project, lead, landed)
+    }
+
+    /// Accepts each resting native teammate's open change set onto its idle linked lead's
+    /// task branch for `land_teammates`, telling the lead the files of one that conflicts.
+    /// Takes the project, the lead and its repository, worktree and git folder. Returns the
+    /// names of the teammates whose work landed and the branch, None when none landed, or a
+    /// SQLite or coordination failure.
+    fn accept_resting(
+        &mut self,
+        project: &ProjectId,
+        lead: i64,
+        repository: &Path,
+        worktree: &Path,
+        git_dir: &Path,
+    ) -> Result<Option<(Vec<String>, String)>, EngineError> {
         let resting: Vec<i64> = teammates::resting(&self.connection, project, lead)?
             .into_iter()
             .filter(|(_, resting)| *resting)
             .map(|(teammate, _)| teammate)
             .collect();
         if resting.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let opened = crate::landing::open(&self.root).and_then(|db| {
             let sets = crate::landing::list(&db, project)?;
-            let branch = crate::landing::agent_branch(&db, &worktree, &git_dir)?;
+            let branch = crate::landing::agent_branch(&db, worktree, git_dir)?;
             Ok((db, sets, branch))
         });
         let (db, sets, branch) = match opened {
             Ok((db, sets, Some(branch))) => (db, sets, branch),
-            Ok(_) => return Ok(()),
+            Ok(_) => return Ok(None),
             Err(problem) => {
                 eprintln!(
                     "teammate_landing_failed cause={}",
                     crate::protocol::plain_code(&problem.0)
                 );
-                return Ok(());
+                return Ok(None);
             }
         };
         let mut landed = Vec::new();
@@ -6744,8 +6767,8 @@ impl TeamRuntime {
             }) else {
                 continue;
             };
-            let tip = crate::landing::agent_tip(&db, &repository, &worktree, &git_dir)
-                .unwrap_or_default();
+            let tip =
+                crate::landing::agent_tip(&db, repository, worktree, git_dir).unwrap_or_default();
             let seen = (set.head.clone(), tip);
             let told = self.teammate_conflicts_told.entry(lead).or_default();
             if told.get(set.id.as_str()) == Some(&seen) {
@@ -6793,26 +6816,60 @@ impl TeamRuntime {
                 ),
             }
         }
-        if !landed.is_empty() {
-            self.land_turn(
-                lead,
-                project,
-                format!("teammates-{}", now_ms()),
-                "Land the teammates' work".to_owned(),
-                "its teammates' work",
-                TurnEnd::Success,
-            )?;
-            self.note_lead(
-                project,
-                lead,
-                format!(
-                    "CrazyAgent landed the work of your teammates {} on your task branch {}. If your work is done, finish it again.",
-                    bound_text(&landed.join(", "), TEAMMATE_CONFLICT_FILES_SHOWN_MAX),
-                    bound_text(&branch, crate::landing::BRANCH_BYTES_MAX)
-                ),
-            )?;
-        }
-        Ok(())
+        Ok((!landed.is_empty()).then_some((landed, branch)))
+    }
+
+    /// Records an idle linked lead's change set after its teammates' work landed on its task
+    /// branch, and tells it to finish only once that record is kept, so the lead never
+    /// finishes over landed work the owner cannot see (OP9B-C5). A refused record is tried
+    /// again at each later pass while the lead stays idle, `TEAMMATE_TURN_TRIES` times in all,
+    /// then the lead is told its next turn end records it. Takes the project, the lead and
+    /// the teammates landed this pass with the branch. Returns Ok, or a SQLite failure.
+    fn record_landed(
+        &mut self,
+        project: &ProjectId,
+        lead: i64,
+        landed: Option<(Vec<String>, String)>,
+    ) -> Result<(), EngineError> {
+        let (names, branch, tried) = match (self.teammates_unrecorded.remove(&lead), landed) {
+            (None, None) => return Ok(()),
+            (Some(earlier), None) => earlier,
+            (None, Some((names, branch))) => (names.join(", "), branch, 0),
+            (Some((earlier, _, tried)), Some((names, branch))) => {
+                (format!("{earlier}, {}", names.join(", ")), branch, tried)
+            }
+        };
+        assert!(tried < TEAMMATE_TURN_TRIES);
+        let names = bound_text(&names, TEAMMATE_CONFLICT_FILES_SHOWN_MAX);
+        let shown = bound_text(&branch, crate::landing::BRANCH_BYTES_MAX);
+        let kept = self.land_turn(
+            lead,
+            project,
+            format!("teammates-{}", now_ms()),
+            "Land the teammates' work".to_owned(),
+            "its teammates' work",
+            TurnEnd::Success,
+        )?;
+        let tried = tried + 1;
+        let told = if kept {
+            format!(
+                "CrazyAgent landed the work of your teammates {names} on your task branch {shown}. If your work is done, finish it again."
+            )
+        } else if tried < TEAMMATE_TURN_TRIES {
+            self.teammates_unrecorded.insert(lead, (names.clone(), branch, tried));
+            if tried > 1 {
+                return Ok(());
+            }
+            format!(
+                "CrazyAgent landed the work of your teammates {names} on your task branch {shown} but could not record it for the owner's review yet. It tries again while you are idle and tells you once it is recorded."
+            )
+        } else {
+            format!(
+                "CrazyAgent landed the work of your teammates {names} on your task branch {shown} but could not record it for the owner's review, {TEAMMATE_TURN_TRIES} times. It is recorded when your next turn ends; finish after that turn."
+            )
+        };
+        assert!(kept || !told.contains("finish it again"));
+        self.note_lead(project, lead, told)
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
@@ -8244,14 +8301,16 @@ impl TeamRuntime {
                 "the team master's turn".to_owned(),
             ),
         };
-        self.land_turn(id, project, turn, line, &what, end)
+        self.land_turn(id, project, turn, line, &what, end)?;
+        Ok(())
     }
 
     /// Lands one ended turn of an agent under its change-set turn key, as `land` does, and
     /// closes its workers' sets its tip now holds (F3). A lead's worker's new change set is
     /// told to its lead to merge, never to the owner, while Lands is Lead. Inputs: the agent,
     /// its project, the turn key, the prompt line, what ended for the note and how it ended.
-    /// Output: any SQLite failure writing the note.
+    /// Output: whether the record was kept, false when the store refused it and the project
+    /// was told, or any SQLite failure writing the note.
     fn land_turn(
         &mut self,
         id: i64,
@@ -8260,7 +8319,7 @@ impl TeamRuntime {
         line: String,
         what: &str,
         end: TurnEnd,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         type Row = (String, String, String, String, String, Option<i64>);
         let row: Option<Row> = self
             .connection
@@ -8282,7 +8341,7 @@ impl TeamRuntime {
             .optional()
             .map_err(error)?;
         let Some((role, harness, repository, worktree, git_dir, lead)) = row else {
-            return Ok(());
+            return Ok(true);
         };
         let lands = match lead {
             Some(_) => Some(super::nesting(&self.connection, project)?.lands),
@@ -8339,11 +8398,12 @@ impl TeamRuntime {
             }
             landed
         });
+        let kept = landed.is_ok();
         let note = match landed {
             Ok(
                 crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
             ) => {
-                return Ok(());
+                return Ok(true);
             }
             Ok(crate::landing_turns::Landed::Added(_)) => {
                 let note = format!("The edits from {what} are waiting for you in Changes.");
@@ -8364,7 +8424,7 @@ impl TeamRuntime {
                     )?;
                 }
                 if lands == Some(super::ChildLanding::Lead) {
-                    return Ok(());
+                    return Ok(true);
                 }
                 note
             }
@@ -8381,7 +8441,8 @@ impl TeamRuntime {
             }
         };
         assert!(note.len() <= NOTE_BYTES_MAX);
-        self.note(project, &note)
+        self.note(project, &note)?;
+        Ok(kept)
     }
 
     /// Rests `connection` for `project` only after one of its agents' turns ended on a rate

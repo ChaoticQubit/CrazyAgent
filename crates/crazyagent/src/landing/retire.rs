@@ -209,6 +209,30 @@ pub(super) fn linked_teammate_place(
     Ok(Some((folder, own_git)))
 }
 
+/// Says whether one native teammate of a linked lead holds edits not committed on its own
+/// branch yet (OP9B-C4), read with the engine's own git under the repository's hold, as the
+/// cleanup check reads a teammate worktree. Inputs: the store, the lead's worktree and git
+/// folder and the teammate's name. Output: the answer, false for a lead in its own clone or
+/// a teammate with no worktree on its own branch, or the code that kept it unread.
+pub(super) fn teammate_unsaved(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+    name: &str,
+) -> Result<bool, EngineError> {
+    assert!(agent_git::worktree_name_valid(name));
+    let Some((folder, own_git)) = linked_teammate_place(db, worktree, git_dir, name)? else {
+        return Ok(false);
+    };
+    assert!(folder.starts_with(worktree));
+    let repository = linked_repository(git_dir)?;
+    let _held = hold(repository);
+    let agent = open_agent(db, AgentKind::Sub, repository, &folder, &own_git)?;
+    let head = agent.head()?;
+    let excluded = graph_excludes(&agent.repo, &head)?;
+    Ok(!holds_only_except(&agent.repo, &head, excluded)?)
+}
+
 /// The owner checkout root a linked worktree's git folder sits in,
 /// `<repository>/.git/worktrees/<record>`, read from the path alone. Input: the git
 /// folder. Output: the root, or `changes_workspace_invalid` for any other path.
