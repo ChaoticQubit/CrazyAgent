@@ -108,8 +108,8 @@ const REASK_EMPTY: &str = "Your master got no reply text from your last turn. Re
 /// Bounds every team agent obeys. The task, session and sub-agent idle limits are the
 /// owner's team settings, read per project when a turn or an agent starts or an idle agent
 /// is checked, so none is set here. `output_bytes` caps the harness output of one process,
-/// `attempts_max` the tries per task, `master_idle_stop` how long an idle master is kept
-/// once no work is in flight and `rate_limit_pause` how long an account that hit its limit
+/// `attempts_max` the tries per task, `master_idle_stop` the bound for an idle master, which
+/// the project's choice scales, once no work is in flight and `rate_limit_pause` how long an account that hit its limit
 /// is skipped.
 #[derive(Debug, Clone, Copy)]
 pub struct TeamLimits {
@@ -5153,49 +5153,58 @@ impl TeamRuntime {
     /// with the owner's idle stop Off, every idle sub-agent. An agent past its session limit
     /// stops even when kept warm. A master is never idle while its project has work in
     /// flight, so its idle time counts from the moment the last of that work ended and its
-    /// session is ended at its next turn. Takes the project. Returns any SQLite failure.
+    /// session is ended at its next turn. A live master stops as idle only under a choice the
+    /// owner saved, once quiet, and its switch goes off so it stays stopped. Takes the project.
+    /// Returns any SQLite failure.
     fn reap_idle(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let warm = super::keep_warm(&self.connection, project)?;
         let floor = usize::from(stored.team.min_agents.saturating_sub(1));
         let mut live_subs = self.live(project, AgentRole::Sub, None);
+        let chosen = super::master_idle_stop(&self.connection, project)?;
+        let stops_live = chosen.is_some_and(|choice| choice != super::MasterIdleStop::Off);
         let ids: Vec<i64> = self
             .workers
             .iter()
             .filter(|(_, w)| {
-                &w.project == project
-                    && w.busy.is_none()
-                    && w.own_turn.is_none()
-                    && !w.stopping
-                    && !w.live
+                &w.project == project && w.busy.is_none() && w.own_turn.is_none() && !w.stopping
             })
             .map(|(id, _)| *id)
             .collect();
         if ids.is_empty() {
             return Ok(());
         }
-        let masters = ids
-            .iter()
-            .any(|id| self.workers[id].role == AgentRole::Master);
+        let masters = ids.iter().any(|id| {
+            let worker = &self.workers[id];
+            worker.role == AgentRole::Master && (!worker.live || stops_live)
+        });
         let in_flight = masters && self.work_in_flight(project)?;
         let limits = super::time_limits(&self.connection, project)?;
         for id in ids {
+            if self.workers[&id].live && !self.live_master_idles(id, project, stops_live) {
+                continue;
+            }
             let waits = self.workers[&id].kept_session && self.lead_waits(id)?;
             let worker = self.workers.get_mut(&id).expect("worker exists");
             if worker.role == AgentRole::Master && in_flight {
                 worker.idle_since = Instant::now();
                 continue;
             }
-            let ended = limits
-                .session_time()
-                .is_some_and(|session| worker.ran() >= session);
+            let ended = !worker.live
+                && limits
+                    .session_time()
+                    .is_some_and(|session| worker.ran() >= session);
             if !ended && waits {
                 worker.idle_since = Instant::now();
                 continue;
             }
+            let choice = super::MasterIdleStop::effective(chosen, worker.live);
             if !ended {
                 let limit = match worker.role {
-                    AgentRole::Master => self.limits.master_idle_stop,
+                    AgentRole::Master => match choice.after(self.limits.master_idle_stop) {
+                        Some(limit) => limit,
+                        None => continue,
+                    },
                     AgentRole::Sub => match limits.idle_time() {
                         Some(limit) => limit,
                         None => continue,
@@ -5211,10 +5220,33 @@ impl TeamRuntime {
             if worker.role == AgentRole::Sub {
                 live_subs -= 1;
             }
+            let live = worker.live;
             worker.stopping = true;
             let _ = worker.orders.send(Order::Stop);
+            if live {
+                self.live_off(project, &format!("it was idle for {}", choice.label()))?;
+            }
         }
         Ok(())
+    }
+
+    /// Tells whether a live master counts as idle for the owner's idle stop: a saved choice
+    /// can stop one, no turn is open and it is quiet. Otherwise its idle time starts over, so
+    /// a choice saved later counts from then. Takes the agent, the project and whether the
+    /// choice can stop a live master. Returns the answer.
+    fn live_master_idles(&mut self, id: i64, project: &ProjectId, stops_live: bool) -> bool {
+        let quiet = stops_live
+            && self.workers[&id].turn_started.is_none()
+            && super::master::quiet(
+                &self.connection,
+                self.agents.as_deref().map(Agents::typing),
+                project,
+                now_ms(),
+            );
+        if !quiet {
+            self.workers.get_mut(&id).expect("worker exists").idle_since = Instant::now();
+        }
+        quiet
     }
 
     /// Makes room at a full limit for a task that may not reuse an idle agent: stops one idle

@@ -61,6 +61,11 @@ pub const IDLE_CHOICES_SECS: [u32; 3] = [120, 600, 3600];
 /// How long an idle master is kept once its work is done, in seconds: 15 min. It is never
 /// stopped while that work still runs, and no owner setting changes it.
 pub const MASTER_IDLE_STOP_SECS: u32 = 900;
+
+/// How many of the engine's master idle bounds the 1 h choice keeps a master for.
+const MASTER_IDLE_HOUR_BOUNDS: u32 = 4;
+const _: () = assert!(MASTER_IDLE_STOP_SECS == 900);
+const _: () = assert!(MASTER_IDLE_STOP_SECS * MASTER_IDLE_HOUR_BOUNDS == 3600);
 /// The longest Master's branch name the owner may choose, in bytes.
 pub const MASTER_BRANCH_BYTES_MAX: usize = 255;
 /// The idle stop a team starts with: 10 minutes.
@@ -1506,6 +1511,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT PRIMARY KEY,
                 reask INTEGER NOT NULL CHECK(reask IN (0,1))
             );
+            CREATE TABLE IF NOT EXISTS team_master_idle_stop (
+                project TEXT PRIMARY KEY,
+                choice TEXT NOT NULL CHECK(choice IN ('off','fifteen_minutes','one_hour'))
+            );
             CREATE TABLE IF NOT EXISTS team_wall (
                 project TEXT PRIMARY KEY,
                 per_window INTEGER NOT NULL CHECK(per_window IN (4,6,9))
@@ -2491,7 +2500,10 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::MasterIdleStop { .. } => Ok(Outcome::Applied),
+        TeamAction::MasterIdleStop { choice, .. } => {
+            set_master_idle_stop(tx, project, *choice)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::TerminalsPerWindow { per_window, .. } => {
             wall::store(tx, project, *per_window)?;
             Ok(Outcome::Applied)
@@ -3816,14 +3828,32 @@ impl MasterIdleStop {
     /// What a project's saved choice means for one master. Inputs: the choice, none when the
     /// owner made none, and whether that master is live. Output: the choice in force.
     pub fn effective(chosen: Option<Self>, live: bool) -> Self {
-        let _ = (chosen, live);
-        Self::FifteenMinutes
+        chosen.unwrap_or(if live {
+            Self::Off
+        } else {
+            Self::FifteenMinutes
+        })
     }
 
     /// How long this choice keeps an idle master. Input: the engine's idle bound, 15 minutes
     /// outside tests. Output: the time, none for Off.
     pub fn after(self, bound: std::time::Duration) -> Option<std::time::Duration> {
-        Some(bound)
+        match self {
+            Self::Off => None,
+            Self::FifteenMinutes => Some(bound),
+            Self::OneHour => Some(bound.saturating_mul(MASTER_IDLE_HOUR_BOUNDS)),
+        }
+    }
+
+    /// Says what the choice does to an idle master. Output: the sentence.
+    pub fn sentence(self) -> String {
+        match self {
+            Self::Off => "An idle master keeps running until the team stops.".to_owned(),
+            stop => format!(
+                "An idle master stops {} after its work is done.",
+                stop.label()
+            ),
+        }
     }
 }
 
@@ -3833,8 +3863,36 @@ pub fn master_idle_stop(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<Option<MasterIdleStop>, EngineError> {
-    let _ = (connection, project);
-    Ok(None)
+    let name: Option<String> = connection
+        .query_row(
+            "SELECT choice FROM team_master_idle_stop WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    name.map(|name| {
+        MasterIdleStop::named(&name)
+            .ok_or_else(|| EngineError("team_master_idle_stop_invalid".into()))
+    })
+    .transpose()
+}
+
+/// Saves a project's "Stop the master when idle after" choice, replacing an earlier one.
+/// Takes a connection, the project and the choice. Returns done.
+fn set_master_idle_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    choice: MasterIdleStop,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_master_idle_stop(project,choice) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET choice=excluded.choice",
+            params![project.as_str(), choice.name()],
+        )
+        .map_err(error)?;
+    Ok(())
 }
 
 /// The owner's "Catch up with main" setting (OS-8): `On`, the default, lets every agent's
@@ -4739,7 +4797,10 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         ask_before_merge: ask_before_merge(connection, project)?,
         master_lands: offered_master_lands(connection, project)?,
         reask_empty_reply: reask_empty_reply(connection, project)?,
-        master_idle_stop: MasterIdleStop::default(),
+        master_idle_stop: MasterIdleStop::effective(
+            master_idle_stop(connection, project)?,
+            master::live(connection, project)?,
+        ),
         catch_up_main: catch_up_main(connection, project)?,
         reuse_idle: reuse_idle(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,

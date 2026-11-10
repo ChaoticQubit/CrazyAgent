@@ -746,6 +746,7 @@ impl TeamView {
             KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('E') => self.master_lands(),
             KeyCode::Char('R') => self.reask_empty_reply(),
+            KeyCode::Char('I') => self.master_idle_stop(),
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('W') => self.terminals_per_window(),
             KeyCode::Char('B') => self.background_at_end(),
@@ -1577,7 +1578,7 @@ impl TeamView {
         };
         self.changing = Some(match which {
             Limit::Idle => format!(
-                "{} An idle master stops {} after its work is done.",
+                "{} {}",
                 idle.map_or_else(
                     || "Idle sub-agents now keep running until the team stops.".to_owned(),
                     |secs| {
@@ -1587,7 +1588,7 @@ impl TeamView {
                         )
                     },
                 ),
-                crate::team::span_words(crate::team::MASTER_IDLE_STOP_SECS.into())
+                status.master_idle_stop.sentence()
             ),
             Limit::Task | Limit::Session => format!(
                 "Each task may now run {}, each agent session {}.",
@@ -2088,6 +2089,36 @@ impl TeamView {
         TeamReply::Change(TeamAction::ReaskEmptyReply {
             project_id: self.project.clone(),
             on,
+        })
+    }
+
+    /// Moves "Stop the master when idle after" to its next choice: 15 min, 1 h, Off and back
+    /// to 15 min (DEC-117 Q4). Output: the change to send, or Handled with a notice while
+    /// loading or saving.
+    fn master_idle_stop(&mut self) -> TeamReply {
+        use crate::team::MasterIdleStop::{FifteenMinutes, Off, OneHour};
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let (choice, words) = match status.master_idle_stop {
+            FifteenMinutes => (OneHour, "An idle master now stops after 1 h."),
+            OneHour => (
+                Off,
+                "An idle master now keeps running until the team stops.",
+            ),
+            Off => (FifteenMinutes, "An idle master now stops after 15 min."),
+        };
+        self.changing = Some(words.to_owned());
+        TeamReply::Change(TeamAction::MasterIdleStop {
+            project_id: self.project.clone(),
+            choice,
         })
     }
 
@@ -3137,6 +3168,10 @@ impl TeamView {
                 .to_owned(),
             ),
             setting(
+                "Stop the master when idle after",
+                status.master_idle_stop.label().to_owned(),
+            ),
+            setting(
                 "New folder limit",
                 format!("{} files", status.new_folder_files_max),
             ),
@@ -3496,6 +3531,7 @@ impl TeamView {
             ("g", "Ask before merge"),
             ("E", "Master merges"),
             ("R", "Re-ask empty reply"),
+            ("I", "Stop the master when idle after"),
             ("F", "New folder limit"),
             ("W", "Terminals per window"),
             ("B", "Background commands"),
