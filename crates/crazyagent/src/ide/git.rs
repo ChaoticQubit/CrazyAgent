@@ -194,8 +194,8 @@ pub const SHIM: &str = "git";
 /// The shim's text. The IDE sandbox has no network, so `push`, `pull`, `fetch` and
 /// `ls-remote` go to the built-in extension's forwarder, which the extension names in
 /// `CRAZYAGENT_IDE_GIT_NODE` and `CRAZYAGENT_IDE_GIT_FORWARD` and which hands them to the
-/// engine as `ide.git` (DEC-098 addendum 13); before the extension starts they fail with a
-/// plain message. `worktree prune` and `worktree remove` are refused, since the IDE sees an
+/// engine as `ide.git` (DEC-098 addendum 13); before the extension starts, and in a terminal,
+/// which never has the forwarder, they fail with a plain message. `worktree prune` and `worktree remove` are refused, since the IDE sees an
 /// agent worktree as missing and would drop it (IN1-FN1). Every other command runs the
 /// `git` on the server's PATH, as stock VS Code does, where the engine resolved no real git
 /// ([`shim_text`]), without the relay's secret, so a project's hook under it does not hold it.
@@ -205,7 +205,7 @@ push|pull|fetch|ls-remote)\n  \
 if [ -n \"$CRAZYAGENT_IDE_GIT_NODE\" ] && [ -n \"$CRAZYAGENT_IDE_GIT_FORWARD\" ]; then\n    \
 exec \"$CRAZYAGENT_IDE_GIT_NODE\" \"$CRAZYAGENT_IDE_GIT_FORWARD\" \"$@\"\n  \
 fi\n  \
-echo \"fatal: CrazyAgent runs git $1 in its engine, and the IDE has not connected to it yet\" >&2\n  \
+echo \"fatal: CrazyAgent runs git $1 in its engine. Use Source Control in the IDE once it has connected\" >&2\n  \
 exit 128\n  \
 ;;\n\
 worktree)\n  \

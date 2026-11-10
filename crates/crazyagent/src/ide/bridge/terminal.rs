@@ -169,7 +169,8 @@ fn ended(killed: Result<(), HostError>) -> Result<(), EngineError> {
 }
 
 /// Builds the pane command for the owner's login shell under the project's agent sandbox,
-/// starting in the project folder. Inputs: the engine root and the project. Output: the
+/// starting in the project folder, with the owner's name and email as git reads them for the
+/// project in the terminal's own git config. Inputs: the engine root and the project. Output: the
 /// command, or `ide_terminal_project_unavailable`, `ide_terminal_shell_unknown`,
 /// `ide_terminal_unavailable` or `ide_terminal_refused`.
 fn prepare(root: &Path, project: &ProjectId) -> Result<InteractiveCommand, EngineError> {

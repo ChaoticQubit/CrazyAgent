@@ -586,7 +586,7 @@ fn the_git_shim_hands_network_commands_to_the_extension_and_runs_the_rest() {
         let early = shim_run(&case.shim(), &[], args);
         assert_eq!(early.status.code(), Some(128), "{args:?}");
         assert!(
-            String::from_utf8_lossy(&early.stderr).contains("has not connected"),
+            String::from_utf8_lossy(&early.stderr).contains("Use Source Control"),
             "{args:?}: {early:?}"
         );
     }

@@ -19,7 +19,7 @@ export const TOOLCHAIN_OFF_STOPS_AGENTS = "Turning a toolchain off stops agents,
 export const IDE_GIT_HOOKS = "IDE git runs the project's hooks";
 
 /** What the IDE hooks switch does and never does, the same in the TUI. */
-export const IDE_GIT_HOOKS_LINE = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed; the Sandboxed terminal runs hooks and signs. Applies when the IDE next starts.";
+export const IDE_GIT_HOOKS_LINE = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. The Sandboxed terminal always runs hooks and has no signing key, so a project that signs its commits can't commit there. Applies when the IDE next starts.";
 
 /** Every access level from the most to the least confined, with what it lets agents do. */
 export const ACCESS_LEVELS: { access: AgentAccess; label: string; help: string }[] = [

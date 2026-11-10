@@ -4,13 +4,26 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { Engine, encodeFrame } from "../out/engine.js";
-import { BUSY, INPUT_BYTES_MAX, SandboxedPty, UNAVAILABLE, clampSize, stopped } from "../out/pty.js";
+import { BUSY, INPUT_BYTES_MAX, SandboxedPty, UNAVAILABLE, clampSize, gitFirstOnPath, stopped } from "../out/pty.js";
 import { memoryStore, reading, withServer } from "./peer.mjs";
 
 const fixture = JSON.parse(readFileSync(new URL("./frames.json", import.meta.url), "utf8"));
 const terminal = fixture.terminal;
 const bytes = (entry) => Buffer.from(entry.frame, "hex");
 const LIMIT = { timeout: 10_000 };
+
+test("the terminals the server hosts find the folder of the engine's git first on PATH", () => {
+  const prepended = [];
+  gitFirstOnPath({ prepend: (name, value) => prepended.push([name, value]) }, "/engine/data/Machine/git");
+  assert.deepEqual(prepended, [["PATH", "/engine/data/Machine:"]]);
+});
+
+test("a git.path that is not an absolute path, or a folder PATH cannot hold, leaves PATH alone", () => {
+  const prepended = [];
+  const collection = { prepend: (name, value) => prepended.push([name, value]) };
+  for (const value of [undefined, 7, "git", "/engine:data/Machine/git"]) gitFirstOnPath(collection, value);
+  assert.deepEqual(prepended, []);
+});
 
 async function withSession(check) {
   await withServer(async (server, socket, capability) => {

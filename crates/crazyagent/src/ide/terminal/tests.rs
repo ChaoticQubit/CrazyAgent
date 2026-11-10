@@ -238,6 +238,71 @@ fn the_sandboxed_terminal_cannot_write_the_projects_git_config() {
     assert_eq!(std::fs::read(&config).unwrap(), before, "{said}");
 }
 
+/// A sandbox gives back the project's git index only when asked, so no agent profile holds
+/// the rule, and the rule comes after the deny it undoes.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_git_index_stays_denied_unless_the_sandbox_asks_for_it() {
+    let case = Case::new();
+    let base = case.folder.parent().unwrap().to_path_buf();
+    let (home, tmp) = (base.join("agent-home"), base.join("agent-tmp"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&tmp).unwrap();
+    let sandbox = || {
+        crate::sandbox::ProjectSandbox::new(
+            &case.folder,
+            &home,
+            &tmp,
+            crate::sandbox::SandboxNetwork::Open,
+        )
+        .unwrap()
+    };
+    let allow = crate::sandbox::git_index_allow(&case.folder);
+    assert!(!sandbox().profile().contains(&allow));
+    let given = sandbox().allow_git_index().unwrap().profile();
+    let deny = format!("(literal \"{}/.git/index\")", case.folder.display());
+    assert!(given.find(&deny) < given.find(&allow));
+}
+
+/// A sandbox confined to its own clone never holds the project's git index, whichever is
+/// asked for first.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandbox_confined_to_a_clone_refuses_the_git_index() {
+    let case = Case::new();
+    let base = case.folder.parent().unwrap().to_path_buf();
+    let (home, tmp) = (base.join("agent-home"), base.join("agent-tmp"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&tmp).unwrap();
+    let clone = crate::projects_home::state_folder(&case.folder)
+        .join("worktrees")
+        .join("agent");
+    std::fs::create_dir_all(clone.join(".git")).unwrap();
+    let sandbox = || {
+        crate::sandbox::ProjectSandbox::new(
+            &case.folder,
+            &home,
+            &tmp,
+            crate::sandbox::SandboxNetwork::Open,
+        )
+        .unwrap()
+    };
+    assert!(
+        sandbox()
+            .confine_to_clone(&clone)
+            .unwrap()
+            .allow_git_index()
+            .is_err()
+    );
+    assert!(
+        sandbox()
+            .allow_git_index()
+            .unwrap()
+            .confine_to_clone(&clone)
+            .is_err()
+    );
+}
+
 /// Git answers in a Sandboxed IDE terminal, whose home is its own, so no config the sandbox
 /// denies stands in its way as the owner's home does for the IDE server's git.
 #[cfg(target_os = "macos")]
