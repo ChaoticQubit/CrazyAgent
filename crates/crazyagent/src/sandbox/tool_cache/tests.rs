@@ -267,25 +267,70 @@ fn anything_but_a_dev_null_link_at_a_marker_fails_closed() {
     }
 }
 
-/// T8 C3 (R5): a link in place of the tool cache folder, the project's folder, the cache
-/// root, its uv folder or a bucket fails closed, and nothing is made through it.
+/// T8 C3 (R5): a link in place of the engine's own folders, the tool cache folder, the
+/// project's folder or the cache root, fails closed, and nothing is made through it.
 #[test]
-fn a_link_in_place_of_any_cache_folder_fails_closed() {
-    for at in ["tool-cache", "project", "root", "uv", "bucket"] {
+fn a_link_in_place_of_an_engine_cache_folder_fails_closed() {
+    for at in ["tool-cache", "project", "root"] {
         let runtime = Runtime::new("");
         let prepared = runtime.prepare().unwrap();
         let elsewhere = runtime.runtime.parent().unwrap().join("elsewhere");
         let swapped = match at {
             "tool-cache" => runtime.runtime.join(FOLDER),
             "project" => project_folder(&runtime.runtime, "project-1"),
-            "root" => prepared.root.clone(),
-            "uv" => prepared.root.join(UV),
-            _ => prepared.root.join(UV).join("sdists-v10"),
+            _ => prepared.root.clone(),
         };
         std::fs::rename(&swapped, &elsewhere).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &swapped).unwrap();
         assert_eq!(runtime.prepare(), Err("tool_cache_link"), "{at}");
     }
+}
+
+/// T8 r1 L2: in the cache an agent writes, a link left where `uv` or a bucket was, a file
+/// left where `pnpm-store` was and a `uv` folder closed to its owner do not keep every
+/// later launch at the key from a cache: the next launch unlinks what was left without
+/// following it, opens the closed folder again and makes the rest anew, and the link's
+/// target gets nothing.
+#[test]
+fn a_link_file_or_closed_folder_an_agent_left_in_its_cache_is_repaired_at_the_next_launch() {
+    let runtime = Runtime::new("");
+    let prepared = runtime.prepare().unwrap();
+    let elsewhere = runtime.runtime.parent().unwrap().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let uv = prepared.root.join(UV);
+    let pnpm = prepared.root.join(PNPM);
+    std::fs::rename(&uv, prepared.root.join("moved-uv")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &uv).unwrap();
+    std::fs::rename(&pnpm, prepared.root.join("moved-pnpm")).unwrap();
+    std::fs::write(&pnpm, "left").unwrap();
+    assert_eq!(
+        runtime.prepare().map(|again| (again.root, again.uv)),
+        Ok((prepared.root.clone(), true)),
+        "uv link and pnpm file"
+    );
+    let bucket = uv.join("sdists-v10");
+    std::fs::rename(&bucket, uv.join("moved-bucket")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &bucket).unwrap();
+    assert_eq!(
+        runtime.prepare().map(|again| (again.root, again.uv)),
+        Ok((prepared.root.clone(), true)),
+        "bucket link"
+    );
+    std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(
+        runtime.prepare().map(|again| (again.root, again.uv)),
+        Ok((prepared.root.clone(), true)),
+        "closed uv folder"
+    );
+    for folder in [&uv, &pnpm, &bucket] {
+        let found = std::fs::symlink_metadata(folder).unwrap();
+        assert!(found.is_dir(), "{} is a folder again", folder.display());
+    }
+    assert_eq!(
+        std::fs::read_link(marker_of(&prepared)).unwrap(),
+        Path::new(MARKER_TARGET)
+    );
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
 /// T8 C3: a folder of the engine's own that others may enter fails closed.

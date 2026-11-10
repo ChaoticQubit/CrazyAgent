@@ -1,6 +1,6 @@
 use super::ProjectSandbox;
 use super::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -260,7 +260,7 @@ pub fn prepare(
 /// accepts it only as a folder of this user that nobody else may enter. Inputs: the open
 /// parent and the name. Output: the open folder, or the plain code that refused it.
 fn engine_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> {
-    let folder = agent_folder(parent, name)?;
+    let folder = open_folder(parent, name)?;
     let stat = rustix::fs::fstat(&folder).map_err(|_| "tool_cache_unmade")?;
     if stat.st_uid != rustix::process::geteuid().as_raw() || u32::from(stat.st_mode) & 0o077 != 0 {
         return Err("tool_cache_folder_refused");
@@ -268,16 +268,39 @@ fn engine_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> 
     Ok(folder)
 }
 
-/// Makes or opens a folder below `parent` with no link followed, mode 0700 when made: a
-/// folder in the agent's cache, which the agent may have moved, emptied or remade. Inputs:
-/// the open parent and the name. Output: the open folder, or the plain code that refused
-/// it.
-fn agent_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> {
+/// Makes or opens a folder below `parent` with no link followed, mode 0700 when made.
+/// Inputs: the open parent and a plain name. Output: the open folder, else
+/// `tool_cache_unmade` or `tool_cache_link`.
+fn open_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> {
+    assert!(plain_name(name), "{name}");
     match rustix::fs::mkdirat(parent, name, Mode::from_raw_mode(0o700)) {
         Ok(()) | Err(Errno::EXIST) => {}
         Err(_) => return Err("tool_cache_unmade"),
     }
     rustix::fs::openat(parent, name, OPEN_FOLDER, Mode::empty()).map_err(|_| "tool_cache_link")
+}
+
+/// Makes or opens a folder in the agent's cache, which the agent may have moved, emptied or
+/// remade. A link or a file an agent left under the folder's name is unlinked, never
+/// followed, and a folder of this user it closed gets owner rwx again, once, so no agent at
+/// a Shared key keeps every later launch there from a cache (T8 r1 L2). Inputs: the open
+/// parent and the name. Output: the open folder, or the plain code that refused it.
+fn agent_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> {
+    match open_folder(parent, name) {
+        Err("tool_cache_link") => {}
+        opened => return opened,
+    }
+    let found = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|_| "tool_cache_link")?;
+    let repaired = match FileType::from_raw_mode(found.st_mode) {
+        FileType::Directory if found.st_uid == rustix::process::geteuid().as_raw() => {
+            rustix::fs::chmodat(parent, name, Mode::RWXU, AtFlags::SYMLINK_NOFOLLOW)
+        }
+        FileType::Directory => return Err("tool_cache_link"),
+        _ => rustix::fs::unlinkat(parent, name, AtFlags::empty()),
+    };
+    repaired.map_err(|_| "tool_cache_link")?;
+    open_folder(parent, name)
 }
 
 /// Puts the uv marker in one cache bucket: makes `.git` as a link to exactly `/dev/null`,
