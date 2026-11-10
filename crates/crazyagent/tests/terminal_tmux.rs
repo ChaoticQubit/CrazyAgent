@@ -2145,6 +2145,33 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_the_lead_was_kille
     );
 }
 
+/// PLCC-L1: an engine started again on a root whose teammates' server pin record is gone
+/// refuses that server for the lead's team panes, where it used to trust whichever answered.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_restarted_engine_refuses_a_teammates_server_whose_pin_record_is_gone() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+        .unwrap();
+    assert_eq!(host.panes(&leader).unwrap().len(), 1);
+    std::fs::remove_file(crazyagent::team::runtime::agent_teammates_server_pid(
+        &root.join("team"),
+        1,
+    ))
+    .unwrap();
+    let restarted = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    assert_eq!(
+        restarted
+            .panes(&leader)
+            .map(|panes| panes.len())
+            .map_err(|problem| problem.0),
+        Err("terminal_own_server_unavailable".to_string())
+    );
+}
+
 #[test]
 fn quiet_through_the_engine_host_answers_for_an_agent_on_the_engine_server() {
     let root = root();
