@@ -388,7 +388,7 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
 }) {
   const ranges = <Segmented label="Range" value={range} options={METRIC_RANGES} onValue={onRange} />;
   const covers = filter === undefined ? (projectId === null ? "All projects" : "This project only")
-    : projectId === null ? `${filter.projects.length} projects` : displayText(filter.projects.find((project) => project.id === projectId)?.name ?? projectId);
+    : projectId === null ? `${filter.projects.length} project${filter.projects.length === 1 ? "" : "s"}` : displayText(filter.projects.find((project) => project.id === projectId)?.name ?? projectId);
   const money = usage.kind === "ok" ? usage.value.money : null;
   const moneyTools = money && <div className="pj-row mx-money">
     {money.settings.prices !== "off" && <Segmented label="Main number" value={money.settings.main_number} options={MAIN_NUMBERS} onValue={(main_number) => void setMoney({ ...money.settings, main_number }).then(onRetry)} />}
