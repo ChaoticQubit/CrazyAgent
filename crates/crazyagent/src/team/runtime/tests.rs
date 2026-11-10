@@ -19407,51 +19407,58 @@ fn a_kept_lead_taken_over_with_a_held_task_resumes_it_in_its_pane_then_takes_its
 
 /// S4B-B1: a native lead taken over and then stopped is proven gone like any other pane.
 /// One whose pane process ignores terminate is not confirmed, so the worker reports the
-/// cleanup uncertain instead of a clean stop.
+/// cleanup uncertain instead of a clean stop, followed by the cause the lead ended for when
+/// it had one, as a first order without the signed-in account.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
-    let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
-    let agent = AgentId::team(id).unwrap();
-    let adoption = Adoption {
-        host: host.clone(),
-        agent: agent.clone(),
-        record,
-        limits: LaunchLimits::default(),
-        live: false,
-        managed: Some(Managed {
-            home: fixture.base.join(format!("lead-home-{id}")),
-            executable: PathBuf::from("/bin/sh"),
-        }),
-        access: AgentAccess::Sandboxed,
-        toolchains: Some(Vec::new()),
-        network: crate::sandbox::policy::AgentNetwork::Open,
-        proxy: None,
-        task_start: None,
-    };
-    let (orders, ordered) = channel();
-    let (reports, _reported) = channel();
-    orders.send(Order::Stop).unwrap();
+    let uncertain = with_code(
+        crate::sandbox::warden::CLEANUP_UNCERTAIN,
+        Some(crate::harnesses::leftovers::UNCERTAIN),
+    );
+    for (first, expected) in [
+        (Order::Stop, uncertain.clone()),
+        (
+            Order::Start("Your brief".into(), None),
+            format!("{uncertain} The native lead was taken over without its signed-in account"),
+        ),
+    ] {
+        let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+        let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+        let agent = AgentId::team(id).unwrap();
+        let adoption = Adoption {
+            host: host.clone(),
+            agent: agent.clone(),
+            record,
+            limits: LaunchLimits::default(),
+            live: false,
+            managed: Some(Managed {
+                home: fixture.base.join(format!("lead-home-{id}")),
+                executable: PathBuf::from("/bin/sh"),
+            }),
+            access: AgentAccess::Sandboxed,
+            toolchains: Some(Vec::new()),
+            network: crate::sandbox::policy::AgentNetwork::Open,
+            proxy: None,
+            task_start: None,
+        };
+        let (orders, ordered) = channel();
+        let (reports, _reported) = channel();
+        orders.send(first).unwrap();
 
-    let problem = native_adopted(
-        adoption,
-        &ordered,
-        &reports,
-        &AtomicBool::new(false),
-        &AtomicBool::new(false),
-        &AtomicBool::new(false),
-    );
-    assert_eq!(
-        problem,
-        Some(with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
-            Some(crate::harnesses::leftovers::UNCERTAIN),
-        ))
-    );
-    assert!(!host.alive().unwrap().contains(&agent));
+        let problem = native_adopted(
+            adoption,
+            &ordered,
+            &reports,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(problem, Some(expected));
+        assert!(!host.alive().unwrap().contains(&agent));
+    }
 }
 
 /// Wiring test of engine mechanics, not Claude Code: a shell stand-in pane plays a native
@@ -22473,6 +22480,19 @@ fn a_lead_hears_who_stopped_its_sub_agent_and_nothing_of_a_stop_it_made() {
     team.shutdown().unwrap();
 }
 
+/// Calls `stop_unmanaged` until it reports the stops whose ends it handed over, at most
+/// `WAIT`. Input: the runtime. Output: the first stops it reports, or none at the deadline.
+fn stopped_unmanaged(team: &mut TeamRuntime) -> Vec<(i64, ProjectId, crate::team::StoppedBy)> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let stopped = team.stop_unmanaged().unwrap();
+        if !stopped.is_empty() || Instant::now() >= deadline {
+            return stopped;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// A native teammate a stop ends keeps the reason of who stopped it, and the stop reports
 /// who made it (HB-S5-B).
 #[cfg(target_os = "macos")]
@@ -22512,7 +22532,7 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
             )
             .unwrap();
         assert_eq!(
-            team.stop_unmanaged().unwrap(),
+            stopped_unmanaged(&mut team),
             vec![(mate, fixture.setup.project_id.clone(), by)],
             "{maker}"
         );
@@ -22527,9 +22547,192 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
     team.shutdown().unwrap();
 }
 
+/// S4B-B1-L1 r1: a native teammate's end that panics on its thread still reports, as not
+/// proven, so the stop leaves no agent handed over and marks its row with the uncertain
+/// cleanup code.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
+    use crate::team::StoppedBy;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+            params![mate, PROJECT],
+        )
+        .unwrap();
+    let project = fixture.setup.project_id.clone();
+    team.unmanaged_ending.insert(
+        mate,
+        PendingEnd {
+            reason: stopped_teammate(StoppedBy::Owner),
+            told: Told::Stop(project.clone(), StoppedBy::Owner),
+        },
+    );
+    let sender = team.unmanaged_ends.0.clone();
+    let ended = std::thread::spawn(move || {
+        end_reported(
+            mate,
+            sender,
+            || -> Result<bool, crate::terminal::HostError> { panic!("the end failed") },
+        );
+    })
+    .join();
+    assert!(ended.is_err(), "the end panicked");
+
+    assert_eq!(
+        stopped_unmanaged(&mut team),
+        vec![(mate, project, StoppedBy::Owner)]
+    );
+    assert!(team.unmanaged_ending.is_empty());
+    let error: Option<String> = fixture
+        .connection
+        .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        error.as_deref(),
+        Some("The owner stopped this teammate. (harness_cleanup_uncertain)")
+    );
+    team.shutdown().unwrap();
+}
+
+/// S4B-B1-L1 r1: a teammate's row stopped elsewhere while its end ran, as by its lead's
+/// end, keeps that first mark, and the finished end reports no stop for it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_row_stopped_elsewhere_while_its_end_ran_reports_no_stop() {
+    use crate::team::StoppedBy;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    let project = fixture.setup.project_id.clone();
+    team.unmanaged_ending.insert(
+        mate,
+        PendingEnd {
+            reason: stopped_teammate(StoppedBy::Owner),
+            told: Told::Stop(project, StoppedBy::Owner),
+        },
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='stopped', error=?2 WHERE id=?1",
+            params![mate, LEAD_ENDED_TEAMMATE],
+        )
+        .unwrap();
+    team.unmanaged_ends.0.send((mate, Ok(false))).unwrap();
+
+    assert_eq!(team.stop_unmanaged().unwrap(), Vec::new());
+    assert!(team.unmanaged_ending.is_empty());
+    let error: Option<String> = fixture
+        .connection
+        .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(error.as_deref(), Some(LEAD_ENDED_TEAMMATE));
+    team.shutdown().unwrap();
+}
+
+/// S4B-B1-L1 r1: a lead over its cap is noted once its teammate's end is marked, not when
+/// the end is handed over: an end the host failed leaves the row running and the lead
+/// unnoted, and the next end that finishes notes it once.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_over_cap_lead_is_noted_once_its_teammates_end_is_marked() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    let project = fixture.setup.project_id.clone();
+    let label = names::label(
+        AgentRole::Sub,
+        mate,
+        names::name(&fixture.connection, mate).unwrap().as_ref(),
+    );
+    let note = over_cap_note(1, &[label]);
+    let notes = || -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT count(*) FROM coord_messages WHERE to_agent=?1 AND body=?2",
+                params![lead, note],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let hand = |team: &mut TeamRuntime, outcome: Result<bool, crate::terminal::HostError>| {
+        team.unmanaged_ending.insert(
+            mate,
+            PendingEnd {
+                reason: OVER_TEAMMATE_CAP,
+                told: Told::Lead {
+                    project: project.clone(),
+                    lead,
+                    cap: 1,
+                },
+            },
+        );
+        team.unmanaged_ends.0.send((mate, outcome)).unwrap();
+        assert_eq!(team.stop_unmanaged().unwrap(), Vec::new());
+        assert!(team.unmanaged_ending.is_empty());
+    };
+
+    hand(
+        &mut team,
+        Err(crate::terminal::HostError("terminal_host_failed".into())),
+    );
+    assert_eq!(notes(), 0, "a failed end noted the lead");
+    let status: String = fixture
+        .connection
+        .query_row(
+            "SELECT status FROM team_agents WHERE id=?1",
+            [mate],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "working");
+
+    hand(&mut team, Ok(true));
+    assert_eq!(notes(), 1, "the marked end noted the lead once");
+    team.shutdown().unwrap();
+}
+
 /// S4B-B1: a native teammate a stop ends is proven gone like any other pane. One whose
 /// pane process ignores terminate is not confirmed, so its row says the cleanup is
-/// uncertain, and its pane is still closed.
+/// uncertain, and its pane is still closed. S4B-B1-L1: that end waits seconds on the pane,
+/// so the tick hands it over and returns at once; the row is marked once it finished.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
@@ -22554,7 +22757,18 @@ fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
         )
         .unwrap();
 
-    assert_eq!(team.stop_unmanaged().unwrap().len(), 1);
+    let started = Instant::now();
+    assert_eq!(
+        team.stop_unmanaged().unwrap(),
+        Vec::new(),
+        "the tick waited for the pane's end"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the tick took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(stopped_unmanaged(&mut team).len(), 1);
     let error: Option<String> = fixture
         .connection
         .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
