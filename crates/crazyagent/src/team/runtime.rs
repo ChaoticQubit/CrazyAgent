@@ -3049,17 +3049,25 @@ impl TeamRuntime {
     }
 
     /// Tells the owner once of each pair of agents whose waits under Wait would have closed
-    /// a cycle, so a start went ahead without the file the other holds (OS-8). Inputs: the
-    /// project and the time in ms. Output: Ok or the first failure.
+    /// a cycle, so a start went ahead without the file the other holds (OS-8). The pairs are
+    /// marked told in the transaction that writes their notes, so a failure leaves every pair
+    /// untold for the next sweep (T9-R2-L2). Inputs: the project and the time in ms. Output:
+    /// Ok or the first failure.
     fn note_wait_cycles(&mut self, project: &ProjectId, now: i64) -> Result<(), EngineError> {
-        for (starter, holder, file) in
-            crate::coord::wait_cycle_notices(&self.connection, project, now)?
-        {
-            let starter = crate::team::events::label(&self.connection, starter)?;
-            let holder = crate::team::events::label(&self.connection, holder)?;
-            self.note(project, &wait_cycle_note(&starter, &holder, &file))?;
+        let tx = self.connection.transaction().map_err(error)?;
+        for (starter, holder, file) in crate::coord::wait_cycle_notices(&tx, project, now)? {
+            let starter = crate::team::events::label(&tx, starter)?;
+            let holder = crate::team::events::label(&tx, holder)?;
+            let _ = append_message(
+                &tx,
+                project,
+                MessageAuthor::Engine,
+                &wait_cycle_note(&starter, &holder, &file),
+                MessageState::Note,
+                now_ms(),
+            )?;
         }
-        Ok(())
+        tx.commit().map_err(error)
     }
 
     fn note(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
