@@ -264,12 +264,13 @@ test("with Live terminal off the area shows the conversation and starts nothing,
   assert.equal(seen.starts, 0, "nothing turned the master on");
 });
 
-test("flipping Live terminal leaves the Master settings drawer open with focus on the switch, both ways, and closing it returns to the button of the view now shown (DEC-117 Q4)", async () => {
+test("flipping Live terminal leaves the Master settings drawer open with focus on the switch, both ways, and closing it returns to the button of the view now shown, opened by keyboard or by mouse (DEC-117 Q4)", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     const flips = [];
     await evaluate('Fixture.mountArea("codex", true)');
     await evaluate("Fixture.settle()");
-    for (const terminal of [false, true]) {
+    for (const [terminal, keyboard] of [[false, true], [true, true], [false, false], [true, false]]) {
+      if (keyboard) await evaluate('Fixture.focusButton("Master settings")');
       await evaluate('Fixture.click("Master settings")');
       await evaluate("Fixture.settle()");
       const focused = await evaluate("Fixture.focusSwitch()");
@@ -278,13 +279,13 @@ test("flipping Live terminal leaves the Master settings drawer open with focus o
       const flipped = await evaluate("Fixture.focusState()");
       await evaluate("Fixture.closeDrawer()");
       await evaluate("Fixture.settle()");
-      flips.push({ terminal, focused, live: view.live, conversation: view.conversation, flipped, closed: await evaluate("Fixture.focusState()") });
+      flips.push({ terminal, keyboard, focused, live: view.live, conversation: view.conversation, flipped, closed: await evaluate("Fixture.focusState()") });
     }
     return flips;
   });
-  assert.equal(seen.length, 2);
+  assert.equal(seen.length, 4);
   for (const flip of seen) {
-    const way = flip.terminal ? "On" : "Off";
+    const way = `${flip.terminal ? "On" : "Off"}, ${flip.keyboard ? "keyboard" : "mouse"}`;
     assert.equal(flip.focused, true, `${way}: the switch took focus`);
     assert.equal(flip.live, flip.terminal, `${way}: the area swapped`);
     assert.equal(flip.conversation, !flip.terminal, `${way}: the area swapped`);

@@ -139,6 +139,14 @@ export function click(text) {
   return true;
 }
 
+/** Puts keyboard focus on the button with this exact text, as Tab does. A mouse click in the
+ * app's web view leaves focus where it was. Output: whether the button holds focus. */
+export function focusButton(text) {
+  const button = [...document.querySelectorAll("button")].find((item) => item.textContent.trim() === text);
+  button?.focus();
+  return button !== undefined && document.activeElement === button;
+}
+
 /** Puts keyboard focus on the drawer's Live terminal switch, as Tab does. Output: whether the
  * switch holds focus. */
 export function focusSwitch() {
