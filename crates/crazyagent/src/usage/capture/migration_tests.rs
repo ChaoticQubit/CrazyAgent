@@ -158,8 +158,8 @@ fn a_seeded_message_adds_only_its_growth_on_its_next_line() {
     )
     .unwrap();
     migrate(&db);
-    count_rows(&db).unwrap();
     db.execute_batch(crate::usage::recount::SCHEMA).unwrap();
+    count_rows(&db).unwrap();
     std::fs::write(&file, format!("{first}{}", line(40))).unwrap();
     let who = Attribution {
         kind: RunKind::Agent,
