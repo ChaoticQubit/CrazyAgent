@@ -169,8 +169,7 @@ fn ended(killed: Result<(), HostError>) -> Result<(), EngineError> {
 }
 
 /// Builds the pane command for the owner's login shell under the project's agent sandbox,
-/// starting in the project folder, with the owner's name and email as git reads them for the
-/// project in the terminal's own git config. Inputs: the engine root and the project. Output: the
+/// starting in the project folder. Inputs: the engine root and the project. Output: the
 /// command, or `ide_terminal_project_unavailable`, `ide_terminal_shell_unknown`,
 /// `ide_terminal_unavailable` or `ide_terminal_refused`.
 fn prepare(root: &Path, project: &ProjectId) -> Result<InteractiveCommand, EngineError> {
@@ -184,9 +183,6 @@ fn prepare(root: &Path, project: &ProjectId) -> Result<InteractiveCommand, Engin
                 .any(|known| variable.as_os_str() == *known)
         })
         .collect();
-    let owner_home = std::env::var_os("HOME");
-    let git_config =
-        crate::ide::git::global_for(&place.folder, owner_home.as_deref().map(Path::new));
     let command = ide_shell::interactive(&Launch {
         root,
         project,
@@ -196,7 +192,6 @@ fn prepare(root: &Path, project: &ProjectId) -> Result<InteractiveCommand, Engin
         arguments: &[],
         incoming: &incoming,
         extra_reads: &place.extra_reads,
-        git_config: &git_config,
     })
     .map_err(|error| match error {
         SandboxError::Unavailable(_) => failure("ide_terminal_unavailable"),

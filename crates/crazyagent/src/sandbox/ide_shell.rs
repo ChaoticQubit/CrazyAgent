@@ -31,8 +31,6 @@ const FOLDER: &str = "ide-shell";
 const SHELLS: &str = "/etc/shells";
 #[cfg(target_os = "macos")]
 const SHELLS_BYTES_MAX: u64 = 16 * 1024;
-#[cfg(target_os = "macos")]
-static GIT_CONFIG_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Where a project lives for its IDE terminal: its canonical folder and the extra
 /// read-only folders the owner saved for its agents.
@@ -44,8 +42,7 @@ pub struct Place {
 
 /// One Sandboxed IDE terminal launch: the engine data root, the project and its folder,
 /// where the terminal starts, the shell and its arguments (none starts a login shell), the
-/// terminal variables the engine passes, the project's extra read-only folders and the text
-/// of the git config in the terminal's own home.
+/// terminal variables the engine passes and the project's extra read-only folders.
 #[derive(Debug, Clone, Copy)]
 pub struct Launch<'a> {
     pub root: &'a Path,
@@ -56,7 +53,6 @@ pub struct Launch<'a> {
     pub arguments: &'a [OsString],
     pub incoming: &'a [(OsString, OsString)],
     pub extra_reads: &'a [PathBuf],
-    pub git_config: &'a str,
 }
 
 /// Reads the project's folder and its extra read-only folders from the engine database,
@@ -95,12 +91,10 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
 
 /// Builds the Sandboxed terminal's command: the shell under the project's agent sandbox
 /// with open network, the engine runtime guarded (its IDE folder with each capability and
-/// server token lies outside every allowed root), the project's git index writable, so
-/// `git add` and `git commit` work while its hooks and config stay denied, the project's
-/// toolchains and extra folders readable, its own home and temp folders, with
-/// [`Launch::git_config`] replacing the home's `.gitconfig` whole and never through a link,
-/// and only the [`TERMINAL_VARIABLES`] given. The engine runs it outside every sandbox, since
-/// macOS refuses a second Seatbelt profile inside a sandboxed process such as the IDE server.
+/// server token lies outside every allowed root), the project's toolchains and extra
+/// folders readable, its own home and temp folders, and only the
+/// [`TERMINAL_VARIABLES`] given. The engine runs it outside every sandbox, since macOS
+/// refuses a second Seatbelt profile inside a sandboxed process such as the IDE server.
 /// Input: the launch. Output: the command, or a refusal for an unlisted shell, a start
 /// outside the project folder or an unsafe root.
 #[cfg(target_os = "macos")]
@@ -131,21 +125,11 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     for folder in [&home, &tmp] {
         private_folder(folder)?;
     }
-    let number = GIT_CONFIG_NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    crate::ide::settings::replace(
-        &place,
-        &format!("gitconfig-{number}.tmp"),
-        &home.join(".gitconfig"),
-        launch.git_config.as_bytes(),
-        0o600,
-    )
-    .map_err(|_| invalid("the terminal's git config could not be written"))?;
     let homes = ToolHomes::owner()?;
     let scratch = toolchains::make_tmp(&home)?;
     toolchains::prepare_cargo_home(&home, &homes)?;
     let (sandbox, _) = ProjectSandbox::new(launch.folder, &home, &tmp, SandboxNetwork::Open)?
         .guard_engine(&root)?
-        .allow_git_index()?
         .allow_tools(&Toolchains::detect(launch.folder, &homes))?
         .allow_scratch(&scratch)?
         .allow_extra_reads(launch.extra_reads)?;

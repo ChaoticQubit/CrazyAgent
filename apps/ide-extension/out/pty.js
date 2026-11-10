@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SandboxedPty = exports.BUSY = exports.UNAVAILABLE = exports.INPUT_BYTES_MAX = exports.SIZE_MAX = exports.SIZE_MIN = void 0;
+exports.SandboxedPty = exports.BUSY = exports.NO_STAGING = exports.UNAVAILABLE = exports.INPUT_BYTES_MAX = exports.SIZE_MAX = exports.SIZE_MIN = void 0;
 exports.gitFirstOnPath = gitFirstOnPath;
 exports.clampSize = clampSize;
 exports.stopped = stopped;
@@ -10,6 +10,7 @@ exports.SIZE_MIN = 2;
 exports.SIZE_MAX = 1000;
 exports.INPUT_BYTES_MAX = 4096;
 exports.UNAVAILABLE = "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it. \"IDE shell\" in the terminal menu runs inside the IDE's own sandbox instead.";
+exports.NO_STAGING = "This terminal can't stage or commit. Use Source Control, or a Full access terminal.";
 exports.BUSY = "Too many Sandboxed terminals are open. Close one, then open a new terminal.";
 const SIZE_DEFAULT = { columns: 80, rows: 24 };
 const CODE = /^[a-z0-9_]{1,64}$/;
@@ -112,6 +113,7 @@ class SandboxedPty {
             return;
         if (!this.#attached && frame.kind === "ok") {
             this.#attached = true;
+            this.#wrote.fire(`${exports.NO_STAGING}\r\n`);
         }
         else if (!this.#attached && frame.kind === "rejected") {
             this.#stop(String(frame.code));

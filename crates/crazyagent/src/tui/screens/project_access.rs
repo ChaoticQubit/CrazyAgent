@@ -18,7 +18,7 @@ pub(in crate::tui) const TOOLCHAIN_OFF_STOPS_AGENTS: &str = "Turning a toolchain
 pub(in crate::tui) const IDE_GIT_HOOKS: &str = "IDE git runs the project's hooks";
 
 /// What the IDE hooks switch does and never does (INT-1, IN1-1), the same in Desktop.
-pub(in crate::tui) const IDE_GIT_HOOKS_LINE: &str = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. The Sandboxed terminal always runs hooks and has no signing key, so a project that signs its commits can't commit there. Applies when the IDE next starts.";
+pub(in crate::tui) const IDE_GIT_HOOKS_LINE: &str = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. Applies when the IDE next starts.";
 
 /// Why the network choice has no effect under Full access: Full access runs agents with no
 /// sandbox, so nothing bounds their network.

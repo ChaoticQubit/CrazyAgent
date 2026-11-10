@@ -149,16 +149,6 @@ fn quoted(value: &str) -> String {
     text
 }
 
-/// The text of the user-level git config an IDE git reads for a repository, with the owner's
-/// name and email as git reads them there, when it has them. Inputs: the repository and the
-/// owner's home, if known. Output: the text.
-#[cfg(unix)]
-pub fn global_for(repository: &Path, owner_home: Option<&Path>) -> String {
-    let identity =
-        owner_home.and_then(|home| crate::landing::owner_git_identity(repository, home).ok());
-    global_text(identity.as_ref())
-}
-
 /// Writes a project's [`GLOBAL_CONFIG`] whole, replacing what is there and never following a
 /// link, with the owner's name and email as git reads them for the repository, so an IDE
 /// commit carries them; git keeps its own default when it has none. Inputs: the project's IDE
@@ -170,7 +160,9 @@ pub fn write_global(
     repository: &Path,
     owner_home: Option<&Path>,
 ) -> Result<(), EngineError> {
-    let text = global_for(repository, owner_home);
+    let identity =
+        owner_home.and_then(|home| crate::landing::owner_git_identity(repository, home).ok());
+    let text = global_text(identity.as_ref());
     let target = folder.join(GLOBAL_CONFIG);
     assert!(target.is_absolute());
     super::settings::replace(folder, GLOBAL_TEMPORARY, &target, text.as_bytes(), 0o600)

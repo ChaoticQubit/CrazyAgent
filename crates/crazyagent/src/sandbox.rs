@@ -770,13 +770,14 @@ pub struct ProjectSandbox {
     shared: Vec<PathBuf>,
     teammates: bool,
     setup: Option<TeammatesSetup>,
-    git_index: bool,
 }
 
 /// The Seatbelt rule giving back a project's `.git/index` and its lock, placed after the
-/// denies since the last match wins: all `git add` and `git commit` need beyond the project
-/// folder, for the IDE server and the terminals the engine hosts for it. Input: the project
-/// folder. Output: the rule.
+/// denies since the last match wins: all Source Control's `git add` and `git commit` need
+/// beyond the project folder. Only the IDE server's profile holds it: a process that writes
+/// the index can write outside the project through the owner's next `git restore .`, so no
+/// agent and no terminal the engine hosts gets it. Input: the project folder. Output: the
+/// rule.
 pub(crate) fn git_index_allow(root: &Path) -> String {
     let index = root.join(".git").join("index");
     assert!(index.is_absolute());
@@ -859,7 +860,6 @@ impl ProjectSandbox {
             shared: Vec::new(),
             teammates: false,
             setup: None,
-            git_index: false,
         })
     }
 
@@ -1036,7 +1036,9 @@ impl ProjectSandbox {
     /// worktree in `worktrees/` whose `.git` link and admin folder name each other.
     /// Output: the confined sandbox, `Invalid` or the disk error.
     pub fn confine_to_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
-        self.confinable()?;
+        if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
+            return Err(invalid("the sandbox is already confined to a worktree"));
+        }
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
@@ -1095,7 +1097,9 @@ impl ProjectSandbox {
     /// read-only. Input: a canonical folder in the project's `worktrees/` folder whose
     /// `.git` is a real folder, not a link. Output: the confined sandbox, or `Invalid`.
     pub fn confine_to_clone(mut self, worktree: &Path) -> Result<Self, SandboxError> {
-        self.confinable()?;
+        if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
+            return Err(invalid("the sandbox is already confined to a worktree"));
+        }
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
@@ -1129,7 +1133,9 @@ impl ProjectSandbox {
     /// link names a record in `.git/worktrees`. Output: the confined sandbox, `Invalid` or
     /// the disk error.
     pub fn confine_to_teammates_setup(mut self, worktree: &Path) -> Result<Self, SandboxError> {
-        self.confinable()?;
+        if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
+            return Err(invalid("the sandbox is already confined to a worktree"));
+        }
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
@@ -1634,29 +1640,6 @@ impl ProjectSandbox {
         paths
     }
 
-    /// Refuses to confine a sandbox that already is, or one given the project's git index,
-    /// which a confined agent never writes. Output: Ok, or `Invalid`.
-    fn confinable(&self) -> Result<(), SandboxError> {
-        if self.confinements() != 0 {
-            return Err(invalid("the sandbox is already confined to a worktree"));
-        }
-        if self.git_index {
-            return Err(invalid("a sandbox given the git index cannot be confined"));
-        }
-        Ok(())
-    }
-
-    /// Gives back the project's `.git/index` and its lock, which every agent profile denies,
-    /// so `git add` and `git commit` work in a terminal the owner types in. The project's git
-    /// hooks and config stay denied. Output: the sandbox, or `Invalid` for a confined one.
-    pub fn allow_git_index(mut self) -> Result<Self, SandboxError> {
-        if self.confinements() != 0 {
-            return Err(invalid("a confined sandbox cannot be given the git index"));
-        }
-        self.git_index = true;
-        Ok(self)
-    }
-
     /// How many confinements the sandbox holds: its own worktree, its own clone or the
     /// teammates' setup, at most one. Output: the count.
     fn confinements(&self) -> usize {
@@ -1811,10 +1794,6 @@ impl ProjectSandbox {
         text.push_str(&self.git_link_denies());
         text.push_str(&self.submodule_denies());
         text.push_str(&self.nested_git_denies());
-        if self.git_index {
-            assert_eq!(self.confinements(), 0);
-            text.push_str(&git_index_allow(&self.project_root));
-        }
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
             text.push_str(&format!(
