@@ -54,6 +54,15 @@ pub struct ServerGit<'a> {
     pub config: &'a Path,
 }
 
+/// The word the extension reads for a level. Input: the level. Output: the word.
+fn access_name(access: AgentAccess) -> &'static str {
+    match access {
+        AgentAccess::Sandboxed => "sandboxed",
+        AgentAccess::OwnBranch => "own_branch",
+        AgentAccess::Full => "full",
+    }
+}
+
 /// Builds the IDE server's whole environment from the engine's own: only the variables
 /// [`allowed`] passes, each value at most 16 KiB, at most 16 locale variables, then
 /// [`CAPABILITY_VARIABLE`] naming the capability file, [`SOCKET_VARIABLE`] naming the owner
@@ -70,7 +79,7 @@ pub fn server_env(
     capability: &Path,
     socket: &Path,
     locked: &Path,
-    _access: AgentAccess,
+    access: AgentAccess,
     git: Option<ServerGit<'_>>,
 ) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = Vec::new();
@@ -102,6 +111,10 @@ pub fn server_env(
         OsString::from(super::settings::LOCKED_VARIABLE),
         locked.as_os_str().to_owned(),
     ));
+    env.push((
+        OsString::from(ACCESS_VARIABLE),
+        OsString::from(access_name(access)),
+    ));
     let global = git.map(|git| super::git::global_env(git.config));
     if let (Some(git), Some(global)) = (git, &global) {
         env.push((
@@ -125,6 +138,7 @@ pub fn server_env(
         allowed(name)
             || name == CAPABILITY_VARIABLE
             || name == SOCKET_VARIABLE
+            || name == ACCESS_VARIABLE
             || name == super::settings::LOCKED_VARIABLE
             || name == super::git::CEILING_VARIABLE
             || global.iter().flatten().any(|(fixed, _)| name == fixed)

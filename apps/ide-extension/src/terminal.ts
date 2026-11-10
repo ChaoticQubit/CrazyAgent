@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
-import { type Level, SandboxedPty, gitFirstOnPath } from "./pty.js";
+import { ACCESS_ENV, type Level, SandboxedPty, accessOf, gitFirstOnPath } from "./pty.js";
 
 /** The id of the Sandboxed terminal profile `package.json` contributes. */
 export const PROFILE = "crazyagent.sandboxed";
@@ -18,6 +18,30 @@ const OFFERED: readonly { id: string; name: string; level: Level }[] = [
   { id: PROFILE, name: TITLE, level: "sandboxed" },
   { id: OWN_BRANCH_PROFILE, name: OWN_BRANCH_TITLE, level: "own_branch" },
 ];
+
+const ACCESS_KEY = "crazyagent.ideAccess";
+const MENU: readonly { command: string; profileName: string }[] = [
+  { command: "crazyagent.terminal.sandboxed", profileName: TITLE },
+  { command: "crazyagent.terminal.ownBranch", profileName: OWN_BRANCH_TITLE },
+  { command: "crazyagent.terminal.full", profileName: "Full access" },
+];
+
+/**
+ * The menu in the terminal panel's title: tells VS Code the project's access level, which
+ * greys the levels above it, and opens a terminal at the level picked. The engine still
+ * clamps each terminal itself. Input: the extension context. Output: none; the commands are
+ * the context's subscriptions.
+ */
+export function terminalMenu(context: vscode.ExtensionContext): void {
+  void vscode.commands.executeCommand("setContext", ACCESS_KEY, accessOf(process.env[ACCESS_ENV]));
+  for (const { command, profileName } of MENU) {
+    context.subscriptions.push(
+      vscode.commands.registerCommand(command, () =>
+        vscode.commands.executeCommand("workbench.action.terminal.newWithProfile", { profileName }),
+      ),
+    );
+  }
+}
 
 /**
  * Makes `git` in the terminals the IDE server hosts the git the IDE's Source Control runs.

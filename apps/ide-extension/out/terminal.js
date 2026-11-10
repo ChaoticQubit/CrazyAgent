@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.OWN_BRANCH_TITLE = exports.OWN_BRANCH_PROFILE = exports.TITLE = exports.PROFILE = void 0;
+exports.terminalMenu = terminalMenu;
 exports.terminalGit = terminalGit;
 exports.sandboxedTerminal = sandboxedTerminal;
 const vscode = __importStar(require("vscode"));
@@ -46,6 +47,18 @@ const OFFERED = [
     { id: exports.PROFILE, name: exports.TITLE, level: "sandboxed" },
     { id: exports.OWN_BRANCH_PROFILE, name: exports.OWN_BRANCH_TITLE, level: "own_branch" },
 ];
+const ACCESS_KEY = "crazyagent.ideAccess";
+const MENU = [
+    { command: "crazyagent.terminal.sandboxed", profileName: exports.TITLE },
+    { command: "crazyagent.terminal.ownBranch", profileName: exports.OWN_BRANCH_TITLE },
+    { command: "crazyagent.terminal.full", profileName: "Full access" },
+];
+function terminalMenu(context) {
+    void vscode.commands.executeCommand("setContext", ACCESS_KEY, (0, pty_js_1.accessOf)(process.env[pty_js_1.ACCESS_ENV]));
+    for (const { command, profileName } of MENU) {
+        context.subscriptions.push(vscode.commands.registerCommand(command, () => vscode.commands.executeCommand("workbench.action.terminal.newWithProfile", { profileName })));
+    }
+}
 function terminalGit(context) {
     (0, pty_js_1.gitFirstOnPath)(context.environmentVariableCollection, vscode.workspace.getConfiguration("git").get("path"));
 }

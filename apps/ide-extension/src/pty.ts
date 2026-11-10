@@ -38,8 +38,8 @@ export type Access = Level | "full";
  * clamps every terminal itself. Input: the variable's value. Output: the level, the narrowest
  * for a missing or unknown value.
  */
-export function accessOf(_value: string | undefined): Access {
-  return "full";
+export function accessOf(value: string | undefined): Access {
+  return value === "own_branch" || value === "full" ? value : "sandboxed";
 }
 
 /** A terminal size in cells, as VS Code reports it. */

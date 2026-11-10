@@ -16,8 +16,8 @@ exports.ABOVE_PROJECT = "Raise project access to use this";
 const SIZE_DEFAULT = { columns: 80, rows: 24 };
 const CODE = /^[a-z0-9_]{1,64}$/;
 exports.ACCESS_ENV = "CRAZYAGENT_IDE_ACCESS";
-function accessOf(_value) {
-    return "full";
+function accessOf(value) {
+    return value === "own_branch" || value === "full" ? value : "sandboxed";
 }
 function gitFirstOnPath(collection, gitPath) {
     if (typeof gitPath !== "string" || !(0, node_path_1.isAbsolute)(gitPath))
