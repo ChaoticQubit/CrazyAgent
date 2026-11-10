@@ -563,6 +563,7 @@ impl Host for Servers {
     }
 
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
+        let mut first = None;
         for lead in self.leads_listening() {
             if keep.contains(&lead) {
                 continue;
@@ -570,9 +571,13 @@ impl Host for Servers {
             match self.kill(&lead) {
                 Ok(()) => {}
                 Err(problem) if problem.0 == "terminal_agent_unknown" => {}
-                Err(problem) => return Err(problem),
+                Err(problem) => first = first.or(Some(problem)),
             }
         }
-        self.engine.close(keep)
+        let closed = self.engine.close(keep);
+        match first {
+            Some(problem) => Err(problem),
+            None => closed,
+        }
     }
 }

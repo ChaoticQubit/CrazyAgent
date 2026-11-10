@@ -100,6 +100,37 @@ fn expected_locks() -> Value {
 }
 
 #[test]
+fn a_launch_sweeps_the_private_index_and_follows_no_link() {
+    let case = Case::new();
+    let project = case.data().join("project-folder");
+    let launch = || {
+        write(
+            &case.folder,
+            &case.server_data,
+            &case.data(),
+            None,
+            AgentAccess::Sandboxed,
+            Some(&project),
+        )
+        .unwrap();
+    };
+    launch();
+    let private = case.server_data.join(crate::ide::git::PRIVATE_INDEX);
+    std::fs::write(private.join("9.base"), "left by a killed command").unwrap();
+    launch();
+    assert!(std::fs::read_dir(&private).unwrap().next().is_none());
+    assert_eq!(std::fs::metadata(&private).unwrap().mode() & 0o777, 0o700);
+    std::fs::remove_dir(&private).unwrap();
+    let elsewhere = case.data().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("keep"), "the engine's").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &private).unwrap();
+    launch();
+    assert!(elsewhere.join("keep").exists(), "the sweep followed a link");
+    assert!(std::fs::symlink_metadata(&private).unwrap().is_dir());
+}
+
+#[test]
 fn written_remote_settings_hold_every_locked_key() {
     let case = Case::new();
     let written = write(
@@ -108,6 +139,7 @@ fn written_remote_settings_hold_every_locked_key() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     assert_eq!(written.machine, case.machine());
@@ -173,6 +205,7 @@ fn written_remote_settings_hold_every_locked_key() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     assert_eq!(read(&again.machine), expected_machine(&case));
@@ -195,6 +228,7 @@ fn keys_the_engine_does_not_write_are_set_aside_never_carried_forward() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     let earlier = r#"{"editor.fontSize": 15, "terminal.integrated.env.osx": {"PATH": "/x"}, "chat.disableAIFeatures": false, "update.mode": "start", "extensions.allowed": {"*": true}}"#;
@@ -206,6 +240,7 @@ fn keys_the_engine_does_not_write_are_set_aside_never_carried_forward() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -230,6 +265,7 @@ fn keys_the_engine_does_not_write_are_set_aside_never_carried_forward() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     assert_eq!(read(&written.machine), expected_machine(&case));
@@ -246,6 +282,7 @@ fn keys_the_engine_does_not_write_are_set_aside_never_carried_forward() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     assert_eq!(read(&written.machine), expected_machine(&case));
@@ -265,6 +302,7 @@ fn keys_the_engine_does_not_write_are_set_aside_never_carried_forward() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     assert!(
@@ -345,7 +383,8 @@ fn settings_outside_the_ide_folder_are_refused() {
                 &server_data,
                 &case.data(),
                 None,
-                AgentAccess::Sandboxed
+                AgentAccess::Sandboxed,
+                None
             )
             .unwrap_err()
             .0,
@@ -362,7 +401,8 @@ fn settings_outside_the_ide_folder_are_refused() {
                 &case.server_data,
                 &data,
                 None,
-                AgentAccess::Sandboxed
+                AgentAccess::Sandboxed,
+                None
             )
             .unwrap_err()
             .0,
@@ -429,6 +469,7 @@ fn the_remote_settings_pin_exactly_the_owner_approved_extensions() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -454,6 +495,7 @@ fn the_remote_settings_pin_exactly_the_owner_approved_extensions() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -477,6 +519,7 @@ fn the_remote_settings_pin_exactly_the_owner_approved_extensions() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -548,6 +591,7 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     let file = written.machine.display().to_string();
@@ -593,7 +637,8 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
         );
         assert_eq!(
             std::fs::read_to_string(case.shim()).unwrap(),
-            super::super::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap(),
+            super::super::git::shim_text(None, crate::research::runner::sandboxed_git(), None)
+                .unwrap(),
             "after: {attempt}"
         );
     }
@@ -618,7 +663,7 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
     );
     assert_eq!(
         std::fs::read_to_string(case.shim()).unwrap(),
-        super::super::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+        super::super::git::shim_text(None, crate::research::runner::sandboxed_git(), None).unwrap()
     );
 }
 
@@ -655,6 +700,7 @@ fn the_git_shim_hands_network_commands_to_the_extension_and_runs_the_rest() {
         &case.data(),
         None,
         AgentAccess::Sandboxed,
+        None,
     )
     .unwrap();
     assert_eq!(read(&written.machine)["git.path"], json!(case.shim()));
@@ -663,7 +709,7 @@ fn the_git_shim_hands_network_commands_to_the_extension_and_runs_the_rest() {
     assert_eq!(metadata.mode() & 0o7777, 0o700);
     assert_eq!(
         std::fs::read_to_string(case.shim()).unwrap(),
-        super::super::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+        super::super::git::shim_text(None, crate::research::runner::sandboxed_git(), None).unwrap()
     );
 
     let version = shim_run(&case.shim(), &[], &["--version"]);

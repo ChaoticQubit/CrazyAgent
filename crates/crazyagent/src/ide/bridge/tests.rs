@@ -1475,6 +1475,85 @@ async fn the_ide_pushes_its_project_folder_through_the_engine_and_nothing_else()
     case.stop().await;
 }
 
+/// SECAUDIT-IDE-SERVER-INDEX: the shim's index call reaches the engine over the real frame
+/// and carries one command's staged change into the project's index, while a slot of any
+/// other shape and another project's folder are refused.
+#[tokio::test]
+async fn the_ide_carries_a_private_index_through_the_engine() {
+    use super::remote_git::tests::{Daemon, ok, owner_repository};
+    let mut case = Case::start().await;
+    let served = case.root.path().join("served");
+    std::fs::create_dir(&served).unwrap();
+    ok(
+        &served,
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    let daemon = Daemon::start(&served);
+    let folder = case.root.path().join("projects").join("alpha");
+    owner_repository(&folder, &daemon.url("remote.git"));
+    let project = ProjectId::new("alpha").unwrap();
+    let capability = issue(&case.runtime, &project).unwrap();
+    let socket = case.socket(&capability);
+    let ide = packet(MAGIC, 0, &session(&socket, &capability).await);
+    let call = |args: &[&str], folder: &Path| {
+        request(
+            "alpha",
+            json!({ "name": "ide.git", "args": { "args": args, "folder": folder } }),
+        )
+    };
+    let private = case
+        .root
+        .path()
+        .join("ide")
+        .join("alpha")
+        .join("server-data")
+        .join("git-index");
+    std::fs::create_dir_all(&private).unwrap();
+    let index = folder.join(".git").join("index");
+    std::fs::copy(&index, private.join("77.base")).unwrap();
+    std::fs::write(folder.join("notes.md"), "Planting notes.\n").unwrap();
+    ok(&folder, &["add", "notes.md"]);
+    std::fs::copy(&index, private.join("77.work")).unwrap();
+    ok(&folder, &["reset", "-q"]);
+
+    let carried = exchange(&socket, ide, &call(&["crazyagent-index", "77"], &folder)).await;
+    let Some(IdeReply::Ok { data }) = carried else {
+        panic!("{carried:?}");
+    };
+    assert_eq!(data["code"], json!(0), "{data}");
+    assert_eq!(
+        ok(&folder, &["diff", "--cached", "--name-only"]),
+        "notes.md"
+    );
+
+    let beta = case.root.path().join("projects").join("beta");
+    for (args, folder, code) in [
+        (
+            ["crazyagent-index", "../77"].as_slice(),
+            folder.as_path(),
+            "ide_git_refused",
+        ),
+        (
+            &["crazyagent-index", "77", "extra"],
+            folder.as_path(),
+            "ide_git_refused",
+        ),
+        (
+            &["crazyagent-index", "77"],
+            beta.as_path(),
+            "ide_git_folder_refused",
+        ),
+    ] {
+        assert_eq!(
+            exchange(&socket, ide, &call(args, folder)).await,
+            rejected(code),
+            "{args:?}"
+        );
+    }
+    drop(daemon);
+    case.stop().await;
+}
+
 /// While git waits on a remote that never answers, each `ide.git` call keeps its place: a
 /// project's call past `PROJECT_GIT_CALLS_MAX` and any call past `GIT_CALLS_MAX` in all are
 /// refused at once, and once the remote lets go the places are given back.
@@ -1844,6 +1923,29 @@ fn a_full_access_project_can_open_a_narrower_terminal() {
         terminal::terminal_level(AgentAccess::Full, AgentAccess::Sandboxed),
         Ok(AgentAccess::Sandboxed)
     );
+}
+
+/// The project's level picks the pane's words, not the terminal's: a Sandboxed terminal asked
+/// for in a Full access project is not told to raise access.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_full_access_projects_narrower_terminal_is_prepared_without_raising_words() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let db = rusqlite::Connection::open(case.root.path().join("engine.db")).unwrap();
+    let policy = crate::sandbox::policy::AgentPolicy {
+        access: AgentAccess::Full,
+        ..crate::sandbox::policy::AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&db, "alpha", &policy).unwrap();
+    drop(db);
+    let pane = terminal::prepare(case.root.path(), &alpha, AgentAccess::Sandboxed, None).unwrap();
+    assert!(
+        pane.argv.iter().any(|argument| argument == "This terminal can't stage or commit. Use Source Control, or a Full access terminal."),
+        "{:?}",
+        pane.argv
+    );
+    case.stop().await;
 }
 
 /// Where no sandbox is qualified for the Sandboxed terminal, the call is refused before

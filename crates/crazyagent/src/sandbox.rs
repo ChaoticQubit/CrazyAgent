@@ -773,23 +773,6 @@ pub struct ProjectSandbox {
     setup: Option<TeammatesSetup>,
 }
 
-/// The Seatbelt rule giving back a project's `.git/index` and its lock, placed after the
-/// denies since the last match wins: all Source Control's `git add` and `git commit` need
-/// beyond the project folder. Only the IDE server's profile holds it: a process that writes
-/// the index can write outside the project through the owner's next `git restore .`, so no
-/// agent and no terminal the engine hosts gets it. Input: the project folder. Output: the
-/// rule.
-pub(crate) fn git_index_allow(root: &Path) -> String {
-    let index = root.join(".git").join("index");
-    assert!(index.is_absolute());
-    let rule = format!(
-        "(allow file-write*\n  (literal \"{0}\")\n  (literal \"{0}.lock\"))\n",
-        index.display()
-    );
-    assert!(rule.starts_with("(allow file-write*"));
-    rule
-}
-
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
 /// native teammates' linked worktrees (OP-9b): the teammates' folder inside the lead's
 /// worktree and the project repository's worktree records.
@@ -1816,7 +1799,7 @@ impl ProjectSandbox {
         }
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git/index.lock\")\n  (subpath \"{project}/.git/rebase-merge\")\n  (subpath \"{project}/.git/rebase-apply\")\n  (subpath \"{project}/.git/remotes\")\n  (subpath \"{project}/.git/branches\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         if let Some(scratch) = &self.scratch {
             text.push_str(&format!(

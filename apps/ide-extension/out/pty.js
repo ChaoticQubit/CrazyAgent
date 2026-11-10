@@ -9,8 +9,8 @@ const engine_js_1 = require("./engine.js");
 exports.SIZE_MIN = 2;
 exports.SIZE_MAX = 1000;
 exports.INPUT_BYTES_MAX = 4096;
-exports.UNAVAILABLE = "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it.";
-exports.BUSY = "Too many Sandboxed terminals are open. Close one, then open a new terminal.";
+exports.UNAVAILABLE = "This terminal is unavailable: this system has no qualified sandbox for it.";
+exports.BUSY = "This terminal can't start: too many are open. Close one, then open a new terminal.";
 exports.ABOVE_PROJECT = "Raise project access to use this";
 const SIZE_DEFAULT = { columns: 80, rows: 24 };
 const CODE = /^[a-z0-9_]{1,64}$/;
@@ -44,7 +44,7 @@ function stopped(code) {
         return exports.BUSY;
     if (code === "ide_terminal_above_project")
         return exports.ABOVE_PROJECT;
-    return `The Sandboxed terminal stopped (${CODE.test(code) ? code : "unknown"}).`;
+    return `This terminal stopped (${CODE.test(code) ? code : "unknown"}).`;
 }
 class SandboxedPty {
     #wrote = new Signal();

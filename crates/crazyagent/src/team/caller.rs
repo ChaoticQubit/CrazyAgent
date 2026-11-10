@@ -665,21 +665,21 @@ fn socket_pin(path: &Path) -> Option<(u64, u64)> {
 }
 
 #[cfg(target_os = "macos")]
-fn peer_pid(stream: &UnixStream) -> Option<u32> {
+pub(crate) fn peer_pid(stream: &UnixStream) -> Option<u32> {
     nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::LocalPeerPid)
         .ok()
         .and_then(|pid| u32::try_from(pid).ok())
 }
 
 #[cfg(target_os = "linux")]
-fn peer_pid(stream: &UnixStream) -> Option<u32> {
+pub(crate) fn peer_pid(stream: &UnixStream) -> Option<u32> {
     nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
         .ok()
         .and_then(|credentials| u32::try_from(credentials.pid()).ok())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn peer_pid(_stream: &UnixStream) -> Option<u32> {
+pub(crate) fn peer_pid(_stream: &UnixStream) -> Option<u32> {
     None
 }
 
@@ -701,7 +701,7 @@ fn pane_of(
     None
 }
 
-fn process_parents() -> Option<HashMap<u32, u32>> {
+pub(crate) fn process_parents() -> Option<HashMap<u32, u32>> {
     let output = crate::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-A", "-o", "pid=,ppid="])

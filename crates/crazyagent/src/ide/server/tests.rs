@@ -515,11 +515,31 @@ async fn the_hooks_switch_reaches_the_git_shim_through_open() {
     let on = fs::read_to_string(&shim).unwrap();
     assert_eq!(
         on,
-        crate::ide::git::shim_text(Some(&root), crate::research::runner::sandboxed_git()).unwrap()
+        crate::ide::git::shim_text(
+            Some(&root),
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
     );
     assert_ne!(
         on,
-        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
     );
     assert!(
         on.contains(&format!("if [ \"$(pwd -P)\" = '{}' ]", root.display())),
@@ -530,7 +550,17 @@ async fn the_hooks_switch_reaches_the_git_shim_through_open() {
     servers.open(&project, &root, &build).await.unwrap();
     assert_eq!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
     );
     servers.stop_all().await;
 }
@@ -557,7 +587,17 @@ async fn open_looks_up_the_ides_git_off_the_async_thread() {
     let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
     assert_eq!(
         fs::read_to_string(&shim).unwrap(),
-        crate::ide::git::shim_text(None, crate::research::runner::sandboxed_git()).unwrap()
+        crate::ide::git::shim_text(
+            None,
+            crate::research::runner::sandboxed_git(),
+            Some((
+                &root,
+                &folder
+                    .join(SERVER_DATA)
+                    .join(crate::ide::git::PRIVATE_INDEX)
+            ))
+        )
+        .unwrap()
     );
     servers.stop_all().await;
 }
@@ -1119,10 +1159,13 @@ fn server_git(
                 .filter_map(|(name, value)| value.map(|value| (name, value))),
         )
         .env("HOME", owner)
+        .envs(crate::ide::bridge::engine_step::forwarder_env(
+            &folder.join(SERVER_DATA),
+        ))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::spawn_gate::output(&mut git).unwrap()
+    crate::ide::bridge::engine_step::output_with_engine(&mut git, &folder.join(SERVER_DATA), cwd)
 }
 
 /// An owner home holding git config files the IDE profile denies: `.gitconfig` with an

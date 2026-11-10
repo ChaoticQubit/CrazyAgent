@@ -114,7 +114,7 @@ enum RecordAction {
 }
 
 pub(super) struct State {
-    native_auth: native_auth::State,
+    pub(super) native_auth: native_auth::State,
     profile: account_profile::Profile,
     managed_setup: Option<managed_setup::Setup>,
     pool_setup: Option<pool_setup::Setup>,
@@ -770,12 +770,14 @@ impl State {
                 self.apply_profile_capabilities(submission, result);
             }
             Event::NativeAuth(event) => {
+                let said = self.native_auth.notice().to_owned();
                 self.native_auth.apply(*event)?;
-                self.notice = if self.native_auth.is_open() {
-                    "Native authentication observation updated; metadata retained".into()
-                } else {
-                    self.native_auth.notice().to_owned()
-                };
+                if self.native_auth.is_open() {
+                    self.notice =
+                        "Native authentication observation updated; metadata retained".into();
+                } else if self.native_auth.notice() != said {
+                    self.notice = self.native_auth.notice().to_owned();
+                }
             }
             Event::Read {
                 identity,

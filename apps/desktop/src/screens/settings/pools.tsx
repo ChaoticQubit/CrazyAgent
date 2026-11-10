@@ -121,11 +121,17 @@ export async function readyAdded(previous: string[], members: string[], accounts
   return setupNote(await readyEach(setupTargets(previous, members, accounts), note));
 }
 
+/** The most accounts a usage report holds, the engine's LIMITS_MAX: past it an account with no
+ * row may still have a reading. */
+const LIMITS_MAX = 64;
+
 /** One account's usage on its row. Inputs: the limits read, the account id and now. Output: its
- * bars, the line for an account with no reading, or nothing while the limits are not read. */
+ * bars, the line for an account with no reading, or nothing while the limits are not read or
+ * when a full report may have cut this account off. */
 function RowUsage({ limits, id, nowMs }: { limits: Loaded<AccountLimits[]>; id: string; nowMs: number }) {
   if (limits.kind !== "ok") return null;
   const found = limits.value.find((row) => row.account === id);
+  if (!found && limits.value.length >= LIMITS_MAX) return null;
   const bars = found ? usageBars(found, nowMs) : [];
   if (bars.length === 0) return <div className="pool-limit-none">No usage read yet</div>;
   return <div className="pool-limits">{bars.map((bar) => <div key={bar.name} className={bar.tone === "ok" ? "pool-limit" : `pool-limit ${bar.tone}`}>
@@ -156,7 +162,7 @@ function OrderRow({ item, at, account, member, plan, limits, nowMs, open, onTogg
   const status = account?.status_label ?? member?.status_label ?? "";
   const near = limits.kind === "ok" && limits.value.some((row) => row.account === id && isNear(row, nowMs));
   const why = item.standing.kind === "next" ? whyLine(item.standing.why, nowMs) : heldLine(item.standing, nowMs);
-  const signIn = item.standing.kind === "not_signed_in";
+  const signIn = item.standing.kind === "not_signed_in" || item.standing.kind === "sign_in_unconfirmed";
   return <li className={at === null ? "pool-row held" : "pool-row"}>
     <span className="pool-pos"><span aria-hidden="true">{at === null ? "-" : at + 1}</span><span className="visually-hidden">{at === null ? "Held" : `Position ${at + 1}`}</span></span>
     <div className="pool-who">
@@ -590,6 +596,7 @@ export function Pools({ creating }: { creating: boolean }) {
     const pool = deleting;
     setDeleting(undefined);
     if (result.kind !== "ok") return setRefusal(result.kind === "not_ready" ? "Deleting pools isn't ready yet in this build." : result.message);
+    edits.drop();
     const at = read.findIndex((item) => item.id === pool.id);
     setSelected((read[at + 1] ?? read[at - 1])?.id);
     setAdding(false);
@@ -620,7 +627,7 @@ export function Pools({ creating }: { creating: boolean }) {
     <div>
       {refusal && <div className="pool-refusal"><Notice tone="danger" alert><span className="grow">{refusal}</span></Notice></div>}
       <PoolsScreenView pools={pools} accounts={accounts} schedule={schedule} ranking={ranking} limits={limits} nowMs={nowMs} selected={selected} draft={draft} adding={adding} onRetryOrder={rerank} onRetrySchedule={rereadSchedule} saved={saved} apply={apply}
-        onSelect={(id) => { edits.drop(); setAdding(false); setSelected(id); }} onNew={() => { edits.open(read.map((item) => item.name)); setAdding(true); }}
+        onSelect={(id) => { edits.drop(); setAdding(false); setRefusal(undefined); setSelected(id); }} onNew={() => { edits.open(read.map((item) => item.name)); setRefusal(undefined); setAdding(true); }}
         onToggleAdd={() => setAdding(!adding)} onDoneAdd={closeAdd} onAdd={(pool, account) => (draft ? edits.addToDraft(account) : edits.add(pool, account))} onRemove={edits.remove} onRename={edits.rename} onDraftName={edits.setName}
         onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} preparing={preparing} />
     </div>

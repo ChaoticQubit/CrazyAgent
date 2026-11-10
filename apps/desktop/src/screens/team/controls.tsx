@@ -342,8 +342,10 @@ export function MasterIdleSetting({ projectId, status, reload }: { projectId: st
 
 /** The Live terminal setting as one row of the master's settings: on, the master runs in its
  * own terminal; off, the area shows the conversation and a running live master ends at its next
- * stop (DEC-117 Q4). Inputs: the project id, the team status and a reload. Output: the row. */
-export function LiveTerminalSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+ * stop (DEC-117 Q4). A master with no live terminal gets the row unavailable with the reason.
+ * Inputs: the project id, the team status, a reload and whether the master runs in a live
+ * terminal. Output: the row. */
+export function LiveTerminalSetting({ projectId, status, reload, liveHarness }: { projectId: string; status: TeamStatus; reload: () => void; liveHarness: boolean }) {
   const { busy, note, change } = useChange(reload);
   const [shown, hold] = useHeld<"off" | "on">(status.master_live_terminal === false ? "off" : "on");
 
@@ -351,8 +353,8 @@ export function LiveTerminalSetting({ projectId, status, reload }: { projectId: 
 
   return <SettingRow label="Live terminal">
     <span className="set-label" aria-hidden="true">Live terminal</span>
-    <span className="set-ctl"><Switch id={`tg-live-terminal-${projectId}`} label="Live terminal" hideLabel checked={shown === "on"} onChecked={(on) => { if (!busy) void choose(on); }} /></span>
-    <span className="tg-terminal-note">You see and type into the master's own terminal.</span>
+    <span className="set-ctl"><Switch id={`tg-live-terminal-${projectId}`} label="Live terminal" hideLabel disabledReason={liveHarness ? undefined : "This master has no live terminal: its conversation is the console."} checked={shown === "on"} onChecked={(on) => { if (!busy) void choose(on); }} /></span>
+    {liveHarness && <span className="tg-terminal-note">You see and type into the master's own terminal.</span>}
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </SettingRow>;
 }

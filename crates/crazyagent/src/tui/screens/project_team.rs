@@ -2130,6 +2130,10 @@ impl TeamView {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
+        if !master_runs_live(status) {
+            self.notice = Some(Notice::plain(NO_LIVE_TERMINAL));
+            return TeamReply::Handled;
+        }
         if self.changing.is_some() {
             self.notice = Some(Notice::problem(
                 "Still saving the last change. Try again in a moment.",
@@ -2915,8 +2919,12 @@ impl TeamView {
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
         let over = (fixed + 2).saturating_sub(room);
         let spacers = over.min(2);
-        let every_harness_runs = status.harnesses.iter().all(|harness| harness.runnable);
-        let plan_gives_way = usize::from(every_harness_runs && over > spacers);
+        let plan_can_go = status.harnesses.iter().all(|harness| harness.runnable)
+            && status
+                .harnesses
+                .iter()
+                .any(|harness| harness.role == AgentRole::Master);
+        let plan_gives_way = usize::from(plan_can_go && over > spacers);
         let folded = (over - spacers - plan_gives_way).min(summary_rows.saturating_sub(1));
         assert!(
             folded < summary_rows.max(1),
@@ -2924,7 +2932,7 @@ impl TeamView {
         );
         assert!(folded == 0 || spacers == 2, "blank rows go before settings");
         assert!(
-            folded == 0 || plan_gives_way == 1 || !every_harness_runs,
+            folded == 0 || plan_gives_way == 1 || !plan_can_go,
             "the plan line goes before settings"
         );
         if plan_gives_way == 1 {
@@ -3146,6 +3154,8 @@ impl TeamView {
                 branch_words(status.agent_branches).to_owned(),
             ),
             setting("Max harnesses", cap_words(status.max_harnesses)),
+        ];
+        let live_terminal = master_runs_live(status).then(|| {
             setting(
                 "Live terminal",
                 if status.master_live_terminal {
@@ -3154,7 +3164,9 @@ impl TeamView {
                     "Off"
                 }
                 .to_owned(),
-            ),
+            )
+        });
+        let middle = [
             setting("Max teammates", cap_words(status.max_teammates)),
             setting(
                 "Spread accounts",
@@ -3222,7 +3234,13 @@ impl TeamView {
         ];
         let mut rows = Vec::new();
         let mut right = Row::default();
-        for item in settings.into_iter().chain(master_lands).chain(later) {
+        for item in settings
+            .into_iter()
+            .chain(live_terminal)
+            .chain(middle)
+            .chain(master_lands)
+            .chain(later)
+        {
             let used = match (left.width(), right.width()) {
                 (0, 0) => 0,
                 (0, taken) | (taken, 0) => taken + 2,
@@ -3588,9 +3606,33 @@ impl TeamView {
         if unseen {
             help.push(("s", "Seen"));
         }
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|status| !master_runs_live(status))
+        {
+            help.retain(|(key, _)| *key != "V");
+        }
         help.push(("Esc", "Back"));
         help
     }
+}
+
+/// What V says for a master with no live terminal, whose conversation already is the console.
+const NO_LIVE_TERMINAL: &str = "This master has no live terminal: its conversation is the console.";
+
+/// Says whether "Live terminal" governs the project's master (OWNER-Q4-2-L3). Input: the team
+/// status. Output: true for a master harness the engine reads as a terminal app, and with no
+/// master yet, whose choice is stored for the master that comes.
+fn master_runs_live(status: &TeamStatus) -> bool {
+    status
+        .harnesses
+        .iter()
+        .find(|harness| harness.role == AgentRole::Master)
+        .is_none_or(|harness| {
+            crate::harnesses::interactive::support(&harness.harness)
+                == crate::harnesses::interactive::Support::Terminal
+        })
 }
 
 /// Which cap on running agents a key moves.

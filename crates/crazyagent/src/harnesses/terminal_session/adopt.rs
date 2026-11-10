@@ -1,4 +1,7 @@
-use super::{AgentSession, KEY_FILE_BYTES_MAX, KeyFile, Resume, TerminalSession, host_failure};
+use super::{
+    AgentSession, FolderStep, KEY_FILE_BYTES_MAX, KeyFile, Resume, Screen, TerminalSession,
+    codex_folder, host_failure,
+};
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
@@ -231,9 +234,11 @@ impl TerminalSession {
     /// longer be matched to the engine's work; a turn that does not end ends the pane, with
     /// `launch_adopt_unsettled` once its processes are confirmed gone and
     /// `launch_adopt_cleanup_uncertain` when they are not. The launch's run time and event
-    /// budget go on counting from its start. The key and context files are removed when the
-    /// session stops, or at once when the pane cannot be taken over. Takes the host, the pane
-    /// name, the stored record and the limits. Returns the idle session, or a plain code.
+    /// budget go on counting from its start. A Codex pane still on its folder access screen
+    /// is not ready: it goes on with its launch's one Enter before any prompt is typed. The
+    /// key and context files are removed when the session stops, or at once when the pane
+    /// cannot be taken over. Takes the host, the pane name, the stored record and the limits.
+    /// Returns the idle session, or a plain code.
     pub fn adopt(
         host: Arc<dyn Host>,
         agent: AgentId,
@@ -280,6 +285,9 @@ impl TerminalSession {
             replay(&mut reader, &limits, &mut events)?;
         }
         let unkept = host.unkept(&agent);
+        let on_menu = matches!(record.source, RecordSource::CodexRollouts { .. })
+            && codex_folder::read_screen(&host.screen(&agent).map_err(host_failure)?)
+                == Screen::Menu;
         Ok(Self {
             host,
             agent,
@@ -290,10 +298,12 @@ impl TerminalSession {
             deadline: Instant::now() + record.run_time_left(limits.run_time),
             checked: Instant::now(),
             events,
-            ready: true,
+            ready: !on_menu,
             first: None,
+            folder: on_menu.then_some(FolderStep::Waiting),
             turn: false,
             held: false,
+            over_hold: false,
             own_held: false,
             live: false,
             own: false,

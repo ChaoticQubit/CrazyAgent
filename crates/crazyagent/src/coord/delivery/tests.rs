@@ -13,15 +13,15 @@ const READ_ONE_LINE: &str = "IFS= read -r line\nprintf '%s\\n' \"$line\" > \"$1\
 const READ_RAW: &str = "stty -icanon\nexec cat >> \"$1\"\n";
 const ASK: &str = "printf ' Do you want to proceed?\\n \\342\\235\\257 1. Yes\\n   2. No\\n\\n Esc to cancel\\n'\nexec sleep 60\n";
 
-struct Fixture {
+pub(super) struct Fixture {
     _root: tempfile::TempDir,
-    base: PathBuf,
+    pub(super) base: PathBuf,
     db: Connection,
     tmux: Option<PathBuf>,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-delivery-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -45,13 +45,19 @@ impl Fixture {
         }
     }
 
-    fn host(&mut self) -> Tmux {
+    pub(super) fn host(&mut self) -> Tmux {
         let tmux = installed(&self.base).expect("tmux must be installed on this machine");
         self.tmux = Some(tmux.clone());
         Tmux::open(Some(tmux), &self.base.join(crate::terminal::FOLDER))
     }
 
-    fn agent(&self, role: &str, harness: &str, status: &str, parent: Option<i64>) -> i64 {
+    pub(super) fn agent(
+        &self,
+        role: &str,
+        harness: &str,
+        status: &str,
+        parent: Option<i64>,
+    ) -> i64 {
         self.db
             .execute(
                 "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent)
@@ -115,7 +121,7 @@ impl Fixture {
             .unwrap()
     }
 
-    fn pane(&self, host: &Tmux, agent: i64, script: &str, out: &Path) {
+    pub(super) fn pane(&self, host: &Tmux, agent: i64, script: &str, out: &Path) {
         let file = self.base.join(format!("script-{agent}.sh"));
         std::fs::write(&file, script).unwrap();
         host.spawn(
@@ -156,7 +162,7 @@ fn project() -> ProjectId {
     ProjectId::new(PROJECT).unwrap()
 }
 
-fn until(what: &str, mut done: impl FnMut() -> bool) {
+pub(super) fn until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + WAIT;
     while !done() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
@@ -286,6 +292,30 @@ fn lines_name_each_message_cut_a_long_first_one_and_stay_within_the_bound() {
     );
 }
 
+/// SECAUDIT-13 F1: a tick that cannot use a Codex agent's bridge keeps the plain code, so
+/// the engine log names a refusal once; here the agent has a home but no pane to compare.
+#[test]
+fn a_tick_keeps_why_a_codex_agent_s_bridge_was_refused() {
+    let fixture = Fixture::new();
+    let agent = fixture.agent("sub", "codex", "working", None);
+    std::fs::create_dir_all(crate::team::runtime::agent_home(&fixture.base, agent)).unwrap();
+    fixture.send(Party::Owner, agent, MessageKind::Prompt, "Ship it", 1);
+    let asleep = BTreeSet::new();
+    let mut deliveries = Deliveries::default();
+    deliveries
+        .tick(
+            &fixture.db,
+            &project(),
+            3,
+            &reach(None, None, &fixture.base, &asleep),
+        )
+        .unwrap();
+    assert_eq!(
+        deliveries.bridge_refused.get(&agent),
+        Some(&"codex_bridge_peer_unknown")
+    );
+}
+
 /// K2b: messages delivered or typed to an agent whose session stopped or failed go back
 /// to Sent on the next tick, so its next session gets them; a live agent's stay.
 #[test]
@@ -364,7 +394,17 @@ fn native_only_and_the_claude_code_grace_leave_messages_sent() {
     );
     let asleep = BTreeSet::new();
     let none = reach(None, None, &fixture.base, &asleep);
-    assert!(deliver_to(&fixture.db, &project(), claude, now, &none).unwrap());
+    assert!(
+        deliver_to(
+            &fixture.db,
+            &project(),
+            claude,
+            now,
+            &none,
+            &mut BTreeMap::new()
+        )
+        .unwrap()
+    );
     assert_eq!(fixture.receipt(young), "sent");
     assert!(
         !deliver_to(
@@ -372,7 +412,8 @@ fn native_only_and_the_claude_code_grace_leave_messages_sent() {
             &project(),
             claude,
             now + NATIVE_GRACE_MS,
-            &none
+            &none,
+            &mut BTreeMap::new()
         )
         .unwrap(),
         "a message past the grace is retried while it cannot be typed"
@@ -663,6 +704,28 @@ fn tmux_quiet_grows_while_a_pane_is_silent_and_resets_on_output() {
     until("the echoed line", || std::fs::read_to_string(&out).is_ok());
     let after = host.quiet(&pane).unwrap().unwrap();
     assert!(after < Duration::from_secs(3), "{after:?}");
+}
+
+/// SECAUDIT codex-bridge-socket-check-then-connect-follows-swapped-link: the bridge is
+/// given the agent's own pane as the host shows it, and none for an agent with no pane or
+/// an engine with no host to ask.
+#[test]
+fn the_bridge_is_given_the_agents_own_pane_from_the_host() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = fixture.agent("sub", "codex", "idle", None);
+    let paneless = fixture.agent("sub", "codex", "idle", None);
+    fixture.pane(&host, agent, READ_ONE_LINE, &fixture.base.join("out.txt"));
+    let shown = host
+        .pane_pid(&crate::terminal::AgentId::team(agent).unwrap())
+        .unwrap();
+    assert!(shown.is_some());
+    let asleep = BTreeSet::new();
+    let hosted = reach(Some(&host as &dyn Host), None, &fixture.base, &asleep);
+    assert_eq!(pane_of(&hosted, agent), shown);
+    assert_eq!(pane_of(&hosted, paneless), None);
+    let hostless = reach(None, None, &fixture.base, &asleep);
+    assert_eq!(pane_of(&hostless, agent), None);
 }
 
 /// K2b: the engine types into an agent's terminal only while the agent is idle, the

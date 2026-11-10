@@ -597,7 +597,7 @@ fn a_transcript_reading_orders_an_account_after_the_others_but_never_leaves_it_o
         )]
     );
     assert_eq!(ordered(&choice, &list), ["c", "a", "b"]);
-    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    let pools = ranked(&connection, &access);
     assert_eq!(
         standings(&pools[0]),
         [
@@ -894,6 +894,13 @@ fn next(resets_ms: Option<i64>, left: Option<u8>, use_last: bool, why: OrderWhy)
     }
 }
 
+/// Ranks the pools inside a transaction, as the owner read does. Takes the store and the model
+/// access. Returns the rankings.
+fn ranked(connection: &Connection, access: &ModelAccess) -> Vec<PoolRanking> {
+    let tx = connection.unchecked_transaction().unwrap();
+    ranking(&tx, access, NOW_MS).unwrap()
+}
+
 fn standings(pool: &PoolRanking) -> Vec<(&str, Standing)> {
     pool.accounts
         .iter()
@@ -944,7 +951,7 @@ fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() 
             params![NOW_MS + HOUR_MS, NOW_MS - 1],
         )
         .unwrap();
-    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    let pools = ranked(&connection, &access);
     assert_eq!(pools.len(), 1);
     assert_eq!(pools[0].pool, reference("pool-a"));
     assert_eq!(pools[0].strategy, Strategy::UseItOrLoseIt);
@@ -1001,7 +1008,7 @@ fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() 
             strategy: Some(Strategy::Balanced),
         },
     );
-    let balanced = ranking(&connection, &access, NOW_MS).unwrap();
+    let balanced = ranked(&connection, &access);
     assert_eq!(balanced[0].strategy, Strategy::Balanced);
     assert_eq!(
         standings(&balanced[0])[..2],
@@ -1032,7 +1039,7 @@ fn the_ranking_lists_each_pool_in_pick_order_then_every_held_account_with_why() 
 fn before_any_usage_read_or_pause_every_account_is_next_in_pool_order() {
     let (_directory, connection) = database();
     let access = access(&["a", "b"]);
-    let pools = ranking(&connection, &access, NOW_MS).unwrap();
+    let pools = ranked(&connection, &access);
     assert_eq!(
         standings(&pools[0]),
         [
@@ -1040,11 +1047,7 @@ fn before_any_usage_read_or_pause_every_account_is_next_in_pool_order() {
             ("b", next(None, None, false, OrderWhy::NoReading))
         ]
     );
-    assert!(
-        ranking(&connection, &ModelAccess::default(), NOW_MS)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(ranked(&connection, &ModelAccess::default()).is_empty());
 }
 
 const RESET_MS: i64 = NOW_MS + 24 * HOUR_MS;
@@ -1094,7 +1097,7 @@ fn why_under(
             },
         );
     }
-    reasons(&ranking(&connection, &access, NOW_MS).unwrap())
+    reasons(&ranked(&connection, &access))
 }
 
 /// Two reasons with the accounts named, for comparing with `why_under`. Inputs: the first
@@ -1227,22 +1230,67 @@ fn an_account_with_no_reading_says_so_under_the_strategies_that_need_one() {
 }
 
 /// A store with the real sign-in tables, where a native account is not signed in until a
-/// row records it. Output: the store's folder and connection.
+/// row records it, running under the engine run these rows prove sign-ins in. Output: the
+/// store's folder and connection.
 fn signed_out_database() -> (tempfile::TempDir, Connection) {
     let (directory, connection) = database();
     crate::storage::initialize_authority_schemas(&connection).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS owner_meta(singleton INTEGER PRIMARY KEY,
+             schema_version INTEGER,db_instance TEXT,engine_epoch TEXT,runtime_state TEXT)",
+        )
+        .unwrap();
+    let run = this_run();
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO owner_meta(singleton,schema_version,db_instance,engine_epoch,runtime_state) VALUES (1,1,?1,?2,'active')",
+            params![run.db_instance, run.engine_epoch],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .execute("UPDATE state SET revision=MAX(revision,1) WHERE id=1", [])
+            .unwrap(),
+        1,
+        "the store keeps one revision row"
+    );
     (directory, connection)
 }
 
-/// Records one account's latest sign-in as the native sign-in flow stores it. Inputs: the
-/// store, the account, its action and the phase it ended in. Output: none.
+/// The engine run these rows read under. Output: its host stamp.
+fn this_run() -> crate::engine::owner::HostStamp {
+    crate::engine::owner::HostStamp {
+        db_instance: "a".repeat(64),
+        engine_epoch: "b".repeat(64),
+    }
+}
+
+/// Records one account's latest sign-in as the native sign-in flow stores it, under this run.
+/// Inputs: the store, the account, its action and the phase it ended in. Output: none.
 fn sign_in_ended(
     connection: &Connection,
     id: &str,
     action: crate::engine::owner::NativeAuthAction,
     phase: crate::engine::owner::NativeAuthPhase,
 ) {
-    use crate::engine::owner::{NativeAuthFact, NativeAuthPhase, NativeProfileBinding};
+    sign_in_under(connection, id, action, phase, &this_run().engine_epoch);
+}
+
+/// Records one account's latest sign-in as the native sign-in flow stores it. Inputs: the
+/// store, the account, its action, the phase it ended in and the engine run it ended under.
+/// Output: none.
+fn sign_in_under(
+    connection: &Connection,
+    id: &str,
+    action: crate::engine::owner::NativeAuthAction,
+    phase: crate::engine::owner::NativeAuthPhase,
+    epoch: &str,
+) {
+    use crate::engine::owner::{
+        NativeAuthAction, NativeAuthFact, NativeAuthMethod, NativeAuthPhase, NativeAuthScope,
+        NativeAuthStart, NativeProfileBinding,
+    };
     let model = managed(id);
     let ModelAuthentication::NativeManaged { profile_ref } = &model.auth else {
         unreachable!("every account in these rows is native managed");
@@ -1253,12 +1301,27 @@ fn sign_in_ended(
         other => unreachable!("these rows end a sign-in, not {other:?}"),
     };
     let operation = format!("operation-{id}");
+    let method = match action {
+        NativeAuthAction::SignIn { method } => method,
+        _ => NativeAuthMethod::ClaudeOfficial,
+    };
+    let request = serde_json::to_vec(&NativeAuthStart {
+        request_id: crate::protocol::RequestId::new(operation.clone()).unwrap(),
+        scope: NativeAuthScope {
+            expected_database_instance: "a".repeat(64),
+            connection: model.id.clone(),
+            expected_config_id: crate::protocol::ConfigId::new("c".repeat(64)).unwrap(),
+            expected_source_hash: "d".repeat(64),
+        },
+        method,
+    })
+    .unwrap();
     let fact = crate::engine::owner::native_auth::encode_fact(&NativeAuthFact {
         operation_id: crate::protocol::RequestId::new(operation.clone()).unwrap(),
         action,
         binding: NativeProfileBinding {
             database_instance: "a".repeat(64),
-            engine_epoch: "b".repeat(64),
+            engine_epoch: epoch.to_owned(),
             config_id: crate::protocol::ConfigId::new("c".repeat(64)).unwrap(),
             source_hash: "d".repeat(64),
             at_revision: crate::protocol::Cursor::new(1),
@@ -1273,11 +1336,12 @@ fn sign_in_ended(
     connection
         .execute(
             "INSERT INTO native_auth_operations(id,profile_key,generation,phase,request,fact)
-             VALUES (?1,?2,1,?3,X'01',?4)",
+             VALUES (?1,?2,1,?3,?4,?5)",
             params![
                 operation,
                 crate::memory::hash(profile_ref.as_str().as_bytes()),
                 column,
+                request,
                 fact
             ],
         )
@@ -1326,7 +1390,7 @@ fn provider_rejected(connection: &Connection, id: &str) {
 /// Every account's standing in the only pool's ranking, in ranking order. Inputs: the store
 /// and the access. Output: the standings.
 fn held_as(connection: &Connection, access: &ModelAccess) -> Vec<Standing> {
-    ranking(connection, access, NOW_MS).unwrap()[0]
+    ranked(connection, access)[0]
         .accounts
         .iter()
         .map(|account| account.standing)
@@ -1339,7 +1403,7 @@ fn an_account_with_no_sign_in_is_held_as_not_signed_in_and_a_signed_in_one_is_ne
     let access = access(&["a", "b"]);
     signed_in(&connection, "b");
     assert_eq!(
-        standings(&ranking(&connection, &access, NOW_MS).unwrap()[0]),
+        standings(&ranked(&connection, &access)[0]),
         [
             ("b", next(None, None, false, OrderWhy::NoReading)),
             ("a", Standing::NotSignedIn),
@@ -1410,12 +1474,30 @@ fn a_latest_sign_in_that_did_not_end_authenticated_reads_not_signed_in() {
     );
 }
 
-#[test]
-fn an_authenticated_account_being_checked_again_stays_ready_as_the_real_pick_reads_it() {
-    let (_directory, connection) = signed_out_database();
-    let access = access(&["a"]);
-    signed_in(&connection, "a");
-    let ModelAuthentication::NativeManaged { profile_ref } = &managed("a").auth else {
+/// Holds an account's sign-in for an account check as the engine does when it could not use
+/// the credential locally. Inputs: the store and the account. Output: none; it panics unless
+/// the sign-in passed the pick's check and is now held.
+fn doubted(connection: &Connection, id: &str) {
+    signed_in(connection, id);
+    let tx = connection.unchecked_transaction().unwrap();
+    crate::storage::doubt_sign_in(&tx, &this_run(), &managed(id)).unwrap();
+    tx.commit().unwrap();
+    let held: i64 = connection
+        .query_row("SELECT COUNT(*) FROM native_auth_doubts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        held, 1,
+        "only a sign-in that passes the pick can be doubted"
+    );
+}
+
+/// Records a sign-in whose profile a check still holds. Inputs: the store and the account.
+/// Output: none.
+fn fenced(connection: &Connection, id: &str) {
+    signed_in(connection, id);
+    let ModelAuthentication::NativeManaged { profile_ref } = &managed(id).auth else {
         unreachable!("every account in these rows is native managed");
     };
     connection
@@ -1428,10 +1510,116 @@ fn an_authenticated_account_being_checked_again_stays_ready_as_the_real_pick_rea
             ],
         )
         .unwrap();
+}
+
+/// Records a sign-in proved under an earlier engine run. Inputs: the store and the account.
+/// Output: none.
+fn from_an_earlier_run(connection: &Connection, id: &str) {
+    use crate::engine::owner::{NativeAuthAction, NativeAuthMethod, NativeAuthPhase};
+    sign_in_under(
+        connection,
+        id,
+        NativeAuthAction::SignIn {
+            method: NativeAuthMethod::ClaudeOfficial,
+        },
+        NativeAuthPhase::AuthenticatedObserved,
+        &"f".repeat(64),
+    );
+}
+
+#[test]
+fn a_doubted_sign_in_does_not_read_next() {
+    let (_directory, connection) = signed_out_database();
+    let access = access(&["a"]);
+    doubted(&connection, "a");
+    assert_eq!(held_as(&connection, &access), [Standing::SignInUnconfirmed]);
+}
+
+#[test]
+fn a_profile_a_check_still_holds_does_not_read_next() {
+    let (_directory, connection) = signed_out_database();
+    let access = access(&["a"]);
+    fenced(&connection, "a");
+    assert_eq!(held_as(&connection, &access), [Standing::SignInUnconfirmed]);
+}
+
+#[test]
+fn a_sign_in_proved_under_an_earlier_engine_run_does_not_read_next() {
+    let (_directory, connection) = signed_out_database();
+    let access = access(&["a"]);
+    from_an_earlier_run(&connection, "a");
+    assert_eq!(held_as(&connection, &access), [Standing::SignInUnconfirmed]);
+}
+
+#[test]
+fn a_sign_in_that_needs_a_check_reads_so_over_a_pause_and_never_use_over_it() {
+    let (_directory, mut connection) = signed_out_database();
+    let access = access(&["a", "b"]);
+    fenced(&connection, "a");
+    from_an_earlier_run(&connection, "b");
+    connection
+        .execute(
+            "INSERT INTO team_paused_accounts(connection,until_ms) VALUES ('a',?1)",
+            [NOW_MS + HOUR_MS],
+        )
+        .unwrap();
+    plan(
+        &mut connection,
+        &access,
+        "b",
+        AccountPlan {
+            pin: Some(Pin::NeverUse),
+            ..AccountPlan::default()
+        },
+    );
     assert_eq!(
         held_as(&connection, &access),
-        [next(None, None, false, OrderWhy::NoReading)]
+        [Standing::SignInUnconfirmed, Standing::NeverUse]
     );
+}
+
+#[test]
+fn the_ranking_reads_next_exactly_when_the_real_pick_would_take_the_account() {
+    use crate::engine::owner::{NativeAuthAction, NativeAuthMethod, NativeAuthPhase};
+    type Case = (&'static str, bool, fn(&Connection));
+    let cases: [Case; 7] = [
+        ("proved", true, |store| signed_in(store, "a")),
+        ("doubted", false, |store| doubted(store, "a")),
+        ("fenced", false, |store| fenced(store, "a")),
+        ("earlier run", false, |store| {
+            from_an_earlier_run(store, "a")
+        }),
+        ("no sign-in", false, |_| {}),
+        ("rejected", false, |store| {
+            signed_in(store, "a");
+            provider_rejected(store, "a");
+        }),
+        ("unauthenticated", false, |store| {
+            sign_in_ended(
+                store,
+                "a",
+                NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::ClaudeOfficial,
+                },
+                NativeAuthPhase::UnauthenticatedObserved,
+            );
+        }),
+    ];
+    for (state, taken, seed) in cases {
+        let (_directory, connection) = signed_out_database();
+        let access = access(&["a"]);
+        seed(&connection);
+        assert_eq!(
+            crate::research::accounts::managed_sign_in(&connection, &managed("a")).is_ok(),
+            taken,
+            "the real pick on {state}"
+        );
+        assert_eq!(
+            matches!(held_as(&connection, &access)[0], Standing::Next { .. }),
+            taken,
+            "the ranking on {state}"
+        );
+    }
 }
 
 #[test]
@@ -1454,9 +1642,7 @@ fn a_ranking_counts_only_this_pools_projects_that_set_their_own_order() {
     for id in ["project-a", "project-b"] {
         known_project(&connection, id);
     }
-    let count = |connection: &Connection| {
-        ranking(connection, &access, NOW_MS).unwrap()[0].own_order_projects
-    };
+    let count = |connection: &Connection| ranked(connection, &access)[0].own_order_projects;
     assert_eq!(count(&connection), 0);
     change(
         &mut connection,

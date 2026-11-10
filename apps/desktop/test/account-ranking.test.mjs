@@ -39,6 +39,7 @@ test("each standing reads as one short reason", () => {
   assert.equal(standingLine({ kind: "five_hour_cap", until_ms: at }, monday), "5-hour cap until 14:30");
   assert.equal(standingLine({ kind: "five_hour_cap", until_ms: null }, monday), "5-hour cap reached");
   assert.equal(standingLine({ kind: "never_use" }, monday), "never use");
+  assert.equal(standingLine({ kind: "sign_in_unconfirmed" }, monday), "sign-in needs a check");
   assert.equal(standingLine({ kind: "paused", until_ms: at }, monday), "paused until 14:30");
 });
 

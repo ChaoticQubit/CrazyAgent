@@ -116,7 +116,7 @@ test("a refused or broken terminal stays open and says why", LIMIT, async () => 
     dropped.connection.write(bytes(terminal.frames[0]));
     dropped.connection.end();
     await until(() => dropped.seen.shown.length === 1);
-    assert.deepEqual(dropped.seen, { shown: ["\r\nThe Sandboxed terminal stopped (ide_engine_closed).\r\n"], closed: 0 });
+    assert.deepEqual(dropped.seen, { shown: ["\r\nThis terminal stopped (ide_engine_closed).\r\n"], closed: 0 });
 
     const unready = new Engine(socket, join(socket, "missing"), memoryStore());
     const sessionless = new SandboxedPty((name, args) => unready.stream(name, args));
@@ -124,7 +124,7 @@ test("a refused or broken terminal stays open and says why", LIMIT, async () => 
     sessionless.open(undefined);
     sessionless.handleInput("ignored");
     await until(() => seen.shown.length === 1);
-    assert.deepEqual(seen, { shown: ["\r\nThe Sandboxed terminal stopped (ide_session_missing).\r\n"], closed: 0 });
+    assert.deepEqual(seen, { shown: ["\r\nThis terminal stopped (ide_session_missing).\r\n"], closed: 0 });
   });
 });
 
@@ -134,9 +134,11 @@ test("sizes stay in the engine's bounds and stop reasons stay plain", () => {
   assert.deepEqual(clampSize({ columns: Number.NaN, rows: 30.7 }), { columns: 80, rows: 30 });
   assert.equal(stopped("ide_terminal_unavailable"), UNAVAILABLE);
   assert.equal(stopped("ide_terminals_busy"), BUSY);
-  assert.equal(stopped("ide_capability_revoked"), "The Sandboxed terminal stopped (ide_capability_revoked).");
-  assert.equal(stopped("x\u001b[2J"), "The Sandboxed terminal stopped (unknown).");
+  assert.equal(stopped("ide_capability_revoked"), "This terminal stopped (ide_capability_revoked).");
+  assert.equal(stopped("x\u001b[2J"), "This terminal stopped (unknown).");
   assert.ok(!UNAVAILABLE.includes("IDE shell"), UNAVAILABLE);
+  assert.equal(UNAVAILABLE, "This terminal is unavailable: this system has no qualified sandbox for it.");
+  assert.equal(BUSY, "This terminal can't start: too many are open. Close one, then open a new terminal.");
   assert.equal(stopped("ide_terminal_above_project"), "Raise project access to use this");
 });
 

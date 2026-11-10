@@ -197,7 +197,7 @@ pub(super) fn terminal_level(
 /// `ide_terminal_project_unavailable`, `ide_terminal_above_project`,
 /// `ide_terminal_level_refused`, `ide_settings_unavailable`, `ide_terminal_shell_unknown`,
 /// `ide_terminal_unavailable` or `ide_terminal_refused`.
-fn prepare(
+pub(super) fn prepare(
     root: &Path,
     project: &ProjectId,
     asked: AgentAccess,
@@ -215,19 +215,22 @@ fn prepare(
                 .any(|known| variable.as_os_str() == *known)
         })
         .collect();
-    let command = ide_shell::interactive(&Launch {
-        root,
-        project,
-        folder: &place.folder,
-        cwd: &place.folder,
-        shell: &shell,
-        arguments: &[],
-        incoming: &incoming,
-        extra_reads: &place.extra_reads,
-        level,
-        network: place.network,
-        kept_ports: &kept_ports,
-    })
+    let command = ide_shell::interactive(
+        &Launch {
+            root,
+            project,
+            folder: &place.folder,
+            cwd: &place.folder,
+            shell: &shell,
+            arguments: &[],
+            incoming: &incoming,
+            extra_reads: &place.extra_reads,
+            level,
+            network: place.network,
+            kept_ports: &kept_ports,
+        },
+        place.access,
+    )
     .map_err(|error| match error {
         SandboxError::Unavailable(_) => failure("ide_terminal_unavailable"),
         SandboxError::Invalid(_) | SandboxError::Io(_) => failure("ide_terminal_refused"),

@@ -47,7 +47,7 @@ pub const RECONNECTION_GRACE: Duration = Duration::from_secs(30);
 pub const WORKSPACE: &str = super::workspace::FILE;
 
 const GROUP: &str = "server.pid";
-const SERVER_DATA: &str = "server-data";
+pub(crate) const SERVER_DATA: &str = "server-data";
 const EXTENSIONS: &str = "extensions";
 const LAUNCHER: &str = "bin/codium-server";
 const SERVER_MAIN: &str = "out/server-main.js";
@@ -929,7 +929,8 @@ fn command(
     let home = folder.join(SERVER_DATA);
     let confined = policy.access != AgentAccess::Full;
     let hooks = (confined && policy.hooks).then_some(launch.root);
-    let written = settings::write(folder, &home, data, hooks, policy.access)?;
+    let index_project = confined.then_some(launch.root);
+    let written = settings::write(folder, &home, data, hooks, policy.access, index_project)?;
     let ceiling = confined.then(|| confined_git(data, &launch)).transpose()?;
     let places = Places {
         data,

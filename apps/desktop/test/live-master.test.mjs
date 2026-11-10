@@ -600,3 +600,37 @@ test("the running harness comes from the team status agent behind the master car
   const same = renderToStaticMarkup(createElement(live.LiveMasterView, { data, harness: "claude", live: { kind: "running", node }, onStart: async () => undefined }));
   assert.doesNotMatch(same, /master-switch-waits/);
 });
+
+test("Live terminal is unavailable with its plain reason for a master with no live terminal, and available with its words for one that has it (OWNER-Q4-2-L3)", async () => {
+  const rows = await inPage(async ({ evaluate }) => {
+    const seen = {};
+    for (const [harness, on] of [["rcli", "null"], ["codex", "true"]]) {
+      await evaluate(`Fixture.mountArea("${harness}", ${on})`);
+      await evaluate("Fixture.settle()");
+      await evaluate('Fixture.click("Master settings")');
+      await evaluate("Fixture.settle()");
+      seen[harness] = await evaluate("Fixture.liveTerminalRow()");
+      await evaluate("Fixture.closeDrawer()");
+      await evaluate("Fixture.settle()");
+    }
+    return seen;
+  });
+  assert.equal(rows.rcli.disabled, "true", `rcli: unavailable: ${rows.rcli.text}`);
+  assert.match(rows.rcli.text, /This master has no live terminal: its conversation is the console\./);
+  assert.doesNotMatch(rows.rcli.text, /You see and type/);
+  assert.equal(rows.codex.disabled, null, `codex: available: ${rows.codex.text}`);
+  assert.match(rows.codex.text, /You see and type into the master's own terminal\./);
+  assert.doesNotMatch(rows.codex.text, /no live terminal/);
+});
+
+test("Live terminal stays available with no master known yet (OWNER-Q4-2-L3 F2)", async () => {
+  const row = await inPage(async ({ evaluate }) => {
+    await evaluate("Fixture.mountAreaNoMaster()");
+    await evaluate("Fixture.settle()");
+    await evaluate('Fixture.click("Master settings")');
+    await evaluate("Fixture.settle()");
+    return evaluate("Fixture.liveTerminalRow()");
+  });
+  assert.equal(row.disabled, null, `no master yet: available: ${row.text}`);
+  assert.doesNotMatch(row.text, /no live terminal/);
+});

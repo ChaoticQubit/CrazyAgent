@@ -138,6 +138,7 @@ fn graph() -> Box<TeamGraph> {
         messages: Vec::new(),
         overlaps: Vec::new(),
         relations: Vec::new(),
+        master_live_terminal: true,
     })
 }
 
@@ -269,6 +270,74 @@ fn relation(from: &str, to: &str, relation: Relation, live: Option<LiveAction>) 
     }
 }
 
+/// A graph with the master waiting on the owner over its line to agent-2. Output: the graph.
+fn waiting_on_owner() -> Box<TeamGraph> {
+    let mut team = graph();
+    team.relations = vec![
+        relation(
+            "master",
+            "agent-2",
+            Relation::Leads,
+            Some(LiveAction::WaitingOn { owner: true }),
+        ),
+        relation("agent-2", "agent-3", Relation::TeammateOf, None),
+        relation("master", "agent-5", Relation::DelegatedTo, None),
+    ];
+    team
+}
+
+/// An owner wait keeps its whole words on the agent's line or moves: at 120 columns the line
+/// never reads "waiting on: ...", and the detail row names the owner.
+#[test]
+fn an_owner_wait_stays_whole_or_moves_to_the_detail_row() {
+    let mut shell = fresh(120, 36);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(waiting_on_owner()),
+    });
+    let shown = render(&mut shell);
+    let at = shown
+        .iter()
+        .position(|row| row.contains("├─ ▸ claude-1"))
+        .unwrap_or_else(|| panic!("{}", shown.join("\n")));
+    assert!(!shown[at].contains("waiting"), "{}", shown[at]);
+    assert!(
+        shown[at + 1].contains("waiting on: your answer"),
+        "{}",
+        shown.join("\n")
+    );
+}
+
+/// An agent with no account or branch has no detail row, so a moved owner wait gets a note row.
+#[test]
+fn an_owner_wait_on_an_agent_with_no_detail_row_moves_to_a_note_row() {
+    let mut team = waiting_on_owner();
+    let lead = team
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "agent-2")
+        .unwrap();
+    lead.account = None;
+    lead.branch = None;
+    let mut shell = fresh(80, 24);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    let shown = render(&mut shell);
+    let note = shown
+        .iter()
+        .position(|row| row.contains("waiting on:"))
+        .unwrap_or_else(|| panic!("{}", shown.join("\n")));
+    assert!(
+        shown[note..=note + 1]
+            .iter()
+            .any(|row| row.contains("answer")),
+        "{}",
+        shown.join("\n")
+    );
+}
+
 #[test]
 fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     let mut team = graph();
@@ -284,6 +353,7 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
         relation("agent-2", "agent-3", Relation::TeammateOf, None),
         relation("master", "agent-5", Relation::DelegatedTo, None),
     ];
+    let wider = team.clone();
     let mut shell = fresh(80, 24);
     shell.arrive(Arrival::TeamGraph {
         project: project(),
@@ -294,10 +364,10 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     for line in [
         "> ▸ Master  Working",
         "  │  ChatGPT Pro - main",
-        "  ├─ ▸ claude-1  • handing …",
-        "  │  │  Claude Max - work",
+        "  ├─ ▸ claude-1  Working",
+        "  │  │  • handing off: Fix …",
         "  │  └─ ◌ claude-2  Waiting…",
-        "  └─ ▸ codex-1  Starting  d…",
+        "  └─ ▸ codex-1  Starting",
         "     ChatGPT Plus",
         "",
         "  Tasks",
@@ -312,7 +382,7 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     let drawn: Vec<String> = rows[3..17].iter().map(|row| chars(row, 2, 32)).collect();
     assert_eq!(
         drawn, expected,
-        "each agent's line names its relation on that same line, so 80x24 shows as many agents as with no labels: the live action right after the name, cut to the width left, and the standing word after the status word"
+        "at 80x24 each agent's line keeps its status word: a live action whose first word does not fit moves to the agent's detail row, and a standing word shows whole or not at all"
     );
     let mut bare = graph();
     bare.relations.clear();
@@ -332,6 +402,40 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
         drawn_lines(&render(&mut plain_shell)),
         "the labels take no row of their own"
     );
+    for (columns, lines) in [(80, 24), (100, 30), (120, 36), (160, 40), (200, 50)] {
+        let mut sized = fresh(columns, lines);
+        sized.arrive(Arrival::TeamGraph {
+            project: project(),
+            result: Ok(wider.clone()),
+        });
+        let shown = render(&mut sized);
+        let line = |name: &str| {
+            shown
+                .iter()
+                .find(|row| row.contains(name))
+                .unwrap_or_else(|| panic!("{name} at {columns}x{lines}:\n{}", shown.join("\n")))
+                .clone()
+        };
+        let lead = line("├─ ▸ claude-1");
+        assert!(lead.contains("Working"), "{columns}x{lines}: {lead}");
+        assert!(
+            !lead.contains("•") || lead.contains("• handing"),
+            "{columns}x{lines}: {lead}"
+        );
+        let standing = line("└─ ▸ codex-1");
+        assert!(
+            standing.contains("Starting"),
+            "{columns}x{lines}: {standing}"
+        );
+        assert!(
+            !standing.contains("  d") || standing.contains("delegated to"),
+            "{columns}x{lines}: {standing}"
+        );
+        if columns == 200 {
+            assert!(lead.contains("• handing off: …  Working"), "{lead}");
+            assert!(standing.contains("Starting  delegated to"), "{standing}");
+        }
+    }
     let label = |relation, live| {
         super::edge_label(&RelationEdge {
             from: "a".into(),
@@ -343,6 +447,15 @@ fn each_tree_line_names_its_relation_and_the_live_action_while_it_happens() {
     assert_eq!(label(Relation::Leads, None), "leads");
     assert_eq!(label(Relation::DelegatedTo, None), "delegated to");
     assert_eq!(label(Relation::TeammateOf, None), "teammate of");
+    assert_eq!(
+        label(
+            Relation::Leads,
+            Some(LiveAction::Reviewing {
+                agent: " \n\t ".into()
+            })
+        ),
+        "reviewing: change set"
+    );
     assert_eq!(
         label(
             Relation::DelegatedTo,
@@ -4134,6 +4247,33 @@ fn a_master_idle_stopped_on_the_open_view_says_why_and_s_starts_it_again() {
     assert_eq!(starts_asked(&mut shell), 1);
     shell.key(Key::Char('s'));
     assert_eq!(starts_asked(&mut shell), 0, "one start for one stop");
+}
+
+/// Stop all over a master an idle stop ended: the team's Start all is the one start offered,
+/// and s asks for nothing, so no key starts the master under the owner's Stop all.
+#[test]
+fn a_master_idle_stopped_under_stop_all_offers_no_start_again() {
+    let mut shell = open_running_master();
+    shell.arrive(stopped_master_graph());
+    requests(&mut shell);
+    let mut status = master_status(Some(false), Some(IDLE_LINE), None);
+    status.live_idle_stopped = true;
+    status.paused = true;
+    shell.arrive(team_read(status));
+    assert_eq!(
+        starts_asked(&mut shell),
+        0,
+        "Stop all holds the master stopped"
+    );
+    let seen = render(&mut shell).join("\n");
+    assert!(!seen.contains("s starts it again"), "{seen}");
+    assert!(!seen.contains("Start again"), "{seen}");
+    shell.key(Key::Char('s'));
+    assert_eq!(
+        starts_asked(&mut shell),
+        0,
+        "s asks for no start under Stop all"
+    );
 }
 
 /// A master that stopped for any other reason keeps today's words and s does nothing.

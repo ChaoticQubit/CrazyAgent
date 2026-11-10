@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { bundle } from "./browser.mjs";
 import { doublePress, CONTRAST_MIN, press, tabRunner, tabWalk } from "./settings-tab-steps.mjs";
@@ -81,6 +82,14 @@ test("held accounts come after the held line with no number, in the ranking's or
   assert.equal(seen.rows[2].why, "Never use. You pinned it.");
 });
 
+test("a sign-in that needs a check is held with no number, says why and links to its own sign-in", async () => {
+  const seen = await onPools({ ranking: "unconfirmed" }, rows);
+  assert.deepEqual(seen.map((row) => [row.number, row.spoken, row.name, row.held]), [["1", "Position 1", "Account 2", false], ["-", "Held", "Account 1", true]]);
+  assert.equal(seen[1].why, "Its sign-in needs a check before agents can use it. Sign in");
+  assert.deepEqual(seen[1].link, { href: "#/settings/accounts?action=sign_in&account=acct-1", label: "Sign in Account 1" });
+  assert.equal(seen[0].link, null);
+});
+
 test("a not signed in row reads why and links to its own sign-in, and no other row has the link", async () => {
   const seen = await onPools({ ranking: "held" }, rows);
   assert.equal(seen[1].why, "Not signed in. Agents skip it until you sign in again. Sign in");
@@ -99,6 +108,13 @@ test("Near its limit shows at 80 and not at 79, and a used-up window reads full 
   assert.deepEqual(seen.map((row) => [row.name, row.badges.includes("Near its limit"), row.limits[0][1]]), [["Account 2", true, "near"], ["Account 0", false, "ok"], ["Account 1", false, "full"]]);
 });
 
+test("the row's cap on limit rows is the engine's", () => {
+  const cap = (path, shape) => readFileSync(new URL(path, import.meta.url), "utf8").match(shape)?.[1];
+  const engine = cap("../../../crates/crazyagent/src/usage/report.rs", /pub const LIMITS_MAX: usize = (\d+);/u);
+  assert.ok(engine, "the engine still names its cap");
+  assert.equal(cap("../src/screens/settings/pools.tsx", /^const LIMITS_MAX = (\d+);/mu), engine);
+});
+
 for (const [scene, words, absent] of [
   [{ ranking: "missing" }, ["Account order isn't ready yet"], "No account can take work now."],
   [{ ranking: "error" }, ["Couldn't load the account order.", "Try again"], "No account can take work now."],
@@ -106,6 +122,8 @@ for (const [scene, words, absent] of [
   [{ limits: "error" }, ["Couldn't read usage limits."], "No usage read yet"],
   [{ limits: "pending" }, ["Account 2"], "No usage read yet"],
   [{ limits: "missing" }, ["Account 2"], "No usage read yet"],
+  [{ limits: "capped" }, ["Account 2"], "No usage read yet"],
+  [{ limits: "uncapped" }, ["Account 2", "No usage read yet"], "Couldn't read usage limits."],
 ]) {
   test(`the pane keeps its state for ${JSON.stringify(scene)}`, async () => {
     const seen = await onPools(scene, async (page) => ({ says: await pane(page), items: await items(page) }));

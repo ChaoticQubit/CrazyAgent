@@ -400,6 +400,33 @@ fn a_short_window_keeps_the_plan_line_while_a_harness_cannot_run() {
 }
 
 #[test]
+fn a_short_window_keeps_the_line_saying_there_is_no_master() {
+    use crate::team::events::WaitingAgent;
+    let mut status = team();
+    status
+        .harnesses
+        .retain(|harness| harness.role != AgentRole::Master);
+    status.events.waiting = vec![WaitingAgent {
+        agent: 2,
+        text: "Do you want to proceed?".into(),
+    }];
+    status.events.paused = true;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let rows = frame(&view, 80, 24);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("No master yet."))
+            .count(),
+        1,
+        "{}",
+        rows.join("\n")
+    );
+    assert!(rows.iter().all(|row| row.chars().count() <= 80));
+}
+
+#[test]
 fn a_sub_agent_has_one_name_in_the_team_list_and_the_team_graph() {
     let graph = crate::team::graph(&team(), &Default::default());
     let working = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();
@@ -2760,6 +2787,56 @@ fn capital_v_turns_live_terminal_off_and_on() {
         shown.master_live_terminal = next;
         reread(&mut view, shown, NOW + 10);
     }
+}
+
+/// A master with no live terminal (RCLI) has nothing for "Live terminal" to turn on or off: V
+/// says so and changes nothing, and neither the settings strip nor the help offers it
+/// (OWNER-Q4-2-L3).
+#[test]
+fn capital_v_says_why_for_a_master_with_no_live_terminal() {
+    let mut shown = team();
+    let master = shown
+        .harnesses
+        .iter_mut()
+        .find(|harness| harness.role == crate::team::AgentRole::Master)
+        .expect("the fixture lists a master harness");
+    master.harness = "rcli".into();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(shown))));
+    assert_eq!(view.key(press(KeyCode::Char('V'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "This master has no live terminal: its conversation is the console."
+        ))
+    );
+    assert!(!shows(&view, "Live terminal"), "the strip leaves it out");
+    assert!(!view.help().contains(&("V", "Live terminal")));
+}
+
+/// A project with no master yet still stores the Live terminal choice: V sends it, and the
+/// settings strip and the help offer it. "No live terminal" is only for a master that lacks
+/// one (rv-secreview q4-3 F2).
+#[test]
+fn capital_v_stores_the_choice_with_no_master_yet() {
+    let mut shown = team();
+    shown
+        .harnesses
+        .retain(|harness| harness.role != crate::team::AgentRole::Master);
+    let on = !shown.master_live_terminal;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(shown))));
+    assert_eq!(
+        view.key(press(KeyCode::Char('V'))),
+        TeamReply::Change(TeamAction::MasterLiveTerminal {
+            project_id: project(),
+            on,
+        })
+    );
+    assert!(shows(&view, "Live terminal"), "the strip offers it");
+    assert!(view.help().contains(&("V", "Live terminal")));
 }
 
 /// R flips Re-ask empty reply: On is shown for a team that has made no choice, R sends Off

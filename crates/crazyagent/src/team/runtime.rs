@@ -5245,15 +5245,13 @@ impl TeamRuntime {
             let choice = super::MasterIdleStop::effective(chosen, worker.live);
             if !ended {
                 let limit = match worker.role {
-                    AgentRole::Master => match choice.after(self.limits.master_idle_stop) {
-                        Some(limit) => limit,
-                        None => continue,
-                    },
-                    AgentRole::Sub => match limits.idle_time() {
-                        Some(limit) => limit,
-                        None => continue,
-                    },
-                    AgentRole::Teammate => continue,
+                    AgentRole::Master => choice.after(self.limits.master_idle_stop),
+                    AgentRole::Sub => limits.idle_time(),
+                    AgentRole::Teammate => None,
+                };
+                let Some(limit) = limit else {
+                    worker.idle_since = Instant::now();
+                    continue;
                 };
                 if worker.idle_since.elapsed() < limit
                     || (worker.role == AgentRole::Sub && warm && live_subs <= floor)
@@ -8410,8 +8408,9 @@ fn sub_agent_prompt(
         }
     };
     format!(
-        "You are a sub-agent of the project \"{name}\". Work only inside {}.\n{earlier}Your task: {task}\n{lands}\nWhen you finish, reply with a short summary of what you did.",
-        worktree.display()
+        "You are a sub-agent of the project \"{name}\". Work only inside {}.\n{earlier}{lead}{task}\n{lands}\nWhen you finish, reply with a short summary of what you did.",
+        worktree.display(),
+        lead = delivery::TASK_LEAD,
     )
 }
 
@@ -8837,7 +8836,8 @@ fn live_adopted(
 /// engine moves the master to another pool account. Nothing is typed into the pane at
 /// start; once the app reads keys by the rule a first prompt waits for, it tells the
 /// engine, which types no message before that, and a look that fails before the pane
-/// ends is tried again on the next pass. Takes the session, the worker's channels and
+/// ends is tried again on the next pass, except Codex's folder access step running out,
+/// which ends the session. Takes the session, the worker's channels and
 /// flags, whether a later engine may take the pane over, and the account's credential copy
 /// and lease the session holds, if any, which the stop settles (see [`settle_stop`]).
 /// Returns the problem that ended it, if any, a stop's own problem first.
@@ -8869,6 +8869,10 @@ fn live_serve(
                     let _ = reports.send(Report::InputReady);
                 }
                 Err(problem) if problem.0 == "launch_closed" => reads_keys = true,
+                Err(found) if crate::harnesses::codex_folder::ended_the_launch(&found) => {
+                    problem = Some(with_code(PROCESS_CLOSED, Some(&found.0)));
+                    break;
+                }
                 Err(_) => {}
             }
         }

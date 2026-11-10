@@ -48,10 +48,9 @@ pub fn qualified() -> bool {
 /// file directly in a folder of the data root (the owner keys) and the engine database are
 /// denied again, then every locked folder is denied for writing, case-insensitively as APFS
 /// matches names, with its folders up to its grant kept from being moved, then agent IDE
-/// config and agent git folders in the project are denied for reading ([`agent_config`]),
-/// and last the project's own git index and its lock are given back for writing, so the IDE
-/// stages and commits in the Project section while agents never write that index (IN1-F1).
-/// Network:
+/// config and agent git folders in the project are denied for reading ([`agent_config`]).
+/// The project's own git index and its lock stay denied: the IDE stages on a private index
+/// the engine carries across ([`super::git::shim_text`], SECAUDIT-IDE-SERVER-INDEX). Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
 /// reach what `network` allows ([`crate::sandbox::policy::ide_network`]).
 /// On the open network it never binds or listens on `kept_ports`, the owner's local model
@@ -145,7 +144,6 @@ pub fn profile(
     ));
     text.push_str(&locks(&held));
     text.push_str(&agent_config(grants.root));
-    text.push_str(&crate::sandbox::git_index_allow(grants.root));
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"
     ));

@@ -5581,20 +5581,97 @@ fn every_agent_status_change_is_logged_with_its_time() {
         assert_eq!(project, PROJECT);
         assert!((now_ms() - at_ms).abs() < 60_000, "{at_ms}");
     }
+    let task = running_task(&fixture, agent, "Write the changelog");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='idle', task=?2 WHERE id=?1",
+            params![agent, task],
+        )
+        .unwrap();
+    let noted: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT task FROM team_status_log WHERE agent=?1 ORDER BY id DESC LIMIT 1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(noted, Some(task), "the row names the agent's task");
 }
 
-/// The status log keeps only its newest 20000 rows: a new row drops every row that far
-/// behind it and keeps the next one (HB-S5-I).
+/// A task's first line is looked for after the lead its prompt types, so a short line that
+/// another typed turn happens to hold does not read as delivered, and the task is typed
+/// again (TEAM-9-L1).
+#[test]
+fn a_short_task_line_inside_another_typed_turn_does_not_read_as_delivered() {
+    let fixture = Fixture::new(1);
+    let sub = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    ledger::initialize(&fixture.connection).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let prompt = "Fix it";
+    let task = running_task(&fixture, sub, prompt);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET task=?2 WHERE id=?1",
+            params![sub, task],
+        )
+        .unwrap();
+    assert!(delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap());
+    std::thread::sleep(Duration::from_millis(5));
+    let file = fixture.base.join(format!("session-{sub}.jsonl"));
+    let typed = serde_json::json!({
+        "type": "user",
+        "message": {"content": "Your teammate said:\nFix it when the build is green, not before."}
+    });
+    std::fs::write(&file, format!("{typed}\n{TURN_DONE}\n")).unwrap();
+    let record = PaneRecord::new(
+        &Transcript::ClaudeSession { file },
+        &fixture.base,
+        SystemTime::now(),
+        4242,
+        None,
+    )
+    .unwrap();
+    crate::recovery::remember(&fixture.connection, sub, &record).unwrap();
+
+    drop(fixture.runtime());
+    let row: (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        ("queued".to_owned(), None),
+        "the task waits to be typed"
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{task}")),
+        [Some("failed".to_owned())]
+    );
+}
+
+/// The status log keeps only its newest 20000 rows, whichever project owns them: a new row
+/// drops every row that far behind it and keeps the next one (HB-S5-I, TEAM-11-L2).
 #[test]
 fn the_status_log_keeps_only_its_newest_rows() {
     let fixture = Fixture::new(1);
     let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
-    for id in [10_001, 10_002, 30_000] {
+    for (id, project) in [
+        (10_001, "another-project"),
+        (10_002, PROJECT),
+        (30_000, PROJECT),
+    ] {
         fixture
             .connection
             .execute(
                 "INSERT INTO team_status_log(id,project,agent,status,at_ms) VALUES (?1,?2,?3,'idle',1)",
-                params![id, PROJECT, agent],
+                params![id, project, agent],
             )
             .unwrap();
     }
@@ -6679,6 +6756,45 @@ fn a_master_on_off_is_not_stopped_as_idle_until_the_owner_chooses_a_time() {
     team.shutdown().unwrap();
 }
 
+/// Runs the runtime's ticks for a span, 50 ms apart. Inputs: the runtime and the span.
+/// Output: none.
+#[cfg(target_os = "macos")]
+fn tick_for(team: &mut TeamRuntime, span: Duration) {
+    let until = Instant::now() + span;
+    while Instant::now() < until {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A time chosen after Off counts from the choice, so a master idle all along is not stopped
+/// at the next tick (OWNER-Q4-1-L2).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_time_chosen_after_off_counts_from_the_choice_not_from_the_last_turn() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bound = Duration::from_secs(3);
+    let (mut team, id) = idle_plain_master(
+        &fixture,
+        &host,
+        bound,
+        Some(crate::team::MasterIdleStop::Off),
+    );
+    tick_for(&mut team, bound + Duration::from_secs(1));
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::FifteenMinutes);
+    tick_for(&mut team, Duration::from_millis(250));
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "a master idle since before the choice is still up right after it"
+    );
+    fixture.until(&mut team, "the chosen time passes from the choice", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
+    });
+    team.shutdown().unwrap();
+}
+
 /// A live master with no choice saved is not stopped as idle, as it never was (DEC-117 Q4).
 #[cfg(target_os = "macos")]
 #[test]
@@ -7051,6 +7167,35 @@ fn a_master_turn_cut_by_the_task_limit_names_the_limit_and_the_setting() {
     let said = "The master stopped before it replied: stopped by the 1 s task limit; change it in Team settings.";
     fixture.until(&mut team, "the cut master turn leaves its note", |f| {
         f.note(said)
+    });
+    team.shutdown().unwrap();
+}
+
+/// An idle stop set after Off counts from that change, so a sub-agent idle all along is not
+/// stopped at the next tick (OWNER-Q4-1-L2).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_idle_stop_set_after_off_counts_from_the_change_for_a_sub_agent() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    let id = idle_sub_agent(&fixture, &mut team);
+    tick_for(&mut team, Duration::from_secs(4));
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_time_limits SET idle_secs=3 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    tick_for(&mut team, Duration::from_millis(250));
+    assert_eq!(
+        fixture.agent_status(id).0,
+        AgentStatus::Idle,
+        "a sub-agent idle since before the change is still up right after it"
+    );
+    fixture.until(&mut team, "the 3 s idle stop ends the sub-agent", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
     });
     team.shutdown().unwrap();
 }
@@ -8964,6 +9109,85 @@ fn a_message_to_an_agent_in_a_running_turn_is_not_typed_into_it() {
     host.close(&[]).unwrap();
 }
 
+/// The stand-in of [`long_background`] with a 2 s command, whose later turns run as those of
+/// [`running_turn`] do: 20 s with no command in the background. Returns the script.
+#[cfg(target_os = "macos")]
+fn held_then_running() -> String {
+    let start =
+        "  printf '{\"type\":\"user\",\"message\":{\"content\":\"Owner turn\"}}\\n' >> \"$f\"\n";
+    let running = running_turn();
+    let (_, tail) = running.split_once(start).unwrap();
+    let body = tail.strip_suffix("done\n").unwrap();
+    let later =
+        format!("{start}  if [ -e \"$CLAUDE_CONFIG_DIR/held\" ]; then\n{body}  continue\n  fi\n");
+    long_background(2).replace(start, &later)
+}
+
+/// S2 (DEC-119, HB-R2-S1): once a held turn has ended the agent's next turn really runs, so a
+/// message to it waits, even on a quiet screen, and is typed only after that turn ends.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_message_is_not_typed_into_the_running_turn_after_a_held_turn_ended() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::KeepWarm {
+            project_id: fixture.setup.project_id.clone(),
+            on: true,
+            version: crate::team::settings_version(&fixture.connection, &fixture.setup.project_id)
+                .unwrap(),
+        }],
+    );
+    let mut team = check_runtime(&fixture, &host, &held_then_running(), None, Some(agents));
+    fixture.until(&mut team, "the held task ends", |f| check_end(f).is_some());
+    let agent = subs(&fixture)[0];
+    assert!(stand_in_file(&fixture, agent, "held").exists());
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &claude_access(&fixture),
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("claude-code".into()),
+                prompt: "Run the second check.".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the second turn runs", |f| {
+        stand_in_file(f, agent, "running").exists()
+    });
+    let message = typed_prompt(&fixture, agent, "End your turn now.");
+    let quiet = Instant::now() + crate::coord::delivery::typing::APP_QUIET * 2;
+    while Instant::now() < quiet {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        receipt(&fixture, message),
+        "sent",
+        "typed into a running turn"
+    );
+    assert_eq!(fixture.agent_status(agent).0, AgentStatus::Working);
+    let typed = std::fs::read_to_string(stand_in_file(&fixture, agent, "typed")).unwrap();
+    assert!(!typed.contains("End your turn now."), "{typed}");
+    fixture.until(&mut team, "the second task ends", |f| {
+        task_of(f, "Run the second check.").0 == "done"
+    });
+    fixture.until(&mut team, "the message is typed after the turn", |f| {
+        receipt(f, message) == "typed"
+    });
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// The queued command attachment Claude Code 2.1.309 writes when a background command ends
 /// while its agent is still in the turn, for task `bgcheck1`, with the fields of the line in
 /// the HackerBlog transcript (task 177); the freeze live pass checks it end to end.
@@ -9038,6 +9262,85 @@ fn a_held_task_that_ends_posts_its_change_set_with_its_background_work_and_no_st
         "{changed:?}"
     );
     assert_ne!(fixture.agent_status(agent).0, AgentStatus::Stopped);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// S3 at a level that can commit (DEC-119, HB-F3B): the commit an Own branch agent makes
+/// while its turn waits on a background command is in the change set the task's end posts.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access: crate::sandbox::policy::AgentAccess::OwnBranch,
+            network: crate::sandbox::policy::AgentNetwork::default(),
+            toolchains: Vec::new(),
+            ide_git_hooks: false,
+        },
+    )
+    .unwrap();
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let write = "    printf mine > background.txt\n";
+    let script = mid_turn_background().replace(
+        write,
+        &format!(
+            "{write}    {git} add background.txt > /dev/null 2>&1\n    {git} commit -q -m work > /dev/null 2>&1\n    printf $? > \"$CLAUDE_CONFIG_DIR/commit-code\"\n"
+        ),
+    );
+    assert!(script.contains("commit-code"));
+    let host = fixture.host();
+    let mut team = check_runtime(&fixture, &host, &script, None, None);
+    fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
+    let agent = subs(&fixture)[0];
+    assert_eq!(
+        std::fs::read_to_string(stand_in_file(&fixture, agent, "commit-code")).unwrap(),
+        "0",
+        "the agent's commit failed"
+    );
+    let landing = crate::landing::open(&fixture.base).unwrap();
+    let sets = crate::landing::list(&landing, &fixture.setup.project_id).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    let worktree: String = fixture
+        .connection
+        .query_row(
+            "SELECT worktree FROM team_worktrees WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let folder = fixture.base.join("project").join(&worktree);
+    assert!(
+        std::fs::symlink_metadata(folder.join(".git")).is_ok_and(|found| found.is_dir()),
+        "an Own branch agent works in its own clone"
+    );
+    let subject = level_git(
+        &folder,
+        &fixture.base,
+        &["log", "-1", "--format=%s", &sets[0].head],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&subject.stdout),
+        "work\n",
+        "{subject:?}"
+    );
+    let changed = level_git(
+        &folder,
+        &fixture.base,
+        &["diff", "--name-only", &sets[0].base, &sets[0].head],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&changed.stdout),
+        "background.txt\n",
+        "{changed:?}"
+    );
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
@@ -19690,6 +19993,57 @@ fn a_proxied_agent_s_pane_launch_names_its_model_proxy() {
     for variable in proxy_variables(port) {
         assert!(pane.env.contains(&variable), "{variable:?}: {:?}", pane.env);
     }
+}
+
+/// SECAUDIT-10-L1: a team launch whose pane never shows Codex's folder access screen ends
+/// when its wait runs out, with the code that names it, and never reports input ready, so
+/// the team is not left waiting forever on an agent that cannot take a prompt.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_launch_whose_folder_screen_never_shows_ends_instead_of_waiting() {
+    let mut pane = crate::harnesses::terminal_session::folder_screen_tests::start(
+        "team-folder",
+        "Working\r\n",
+        None,
+        true,
+    );
+    pane.spend_the_wait();
+    let (_orders, receive) = std::sync::mpsc::channel();
+    let (reports, reported) = std::sync::mpsc::channel();
+    let (cancel, leave) = (AtomicBool::new(false), AtomicBool::new(false));
+    let (ended, watched) = std::sync::mpsc::channel::<()>();
+    let cancelling = &cancel;
+    let problem = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            if watched
+                .recv_timeout(std::time::Duration::from_secs(15))
+                .is_err()
+            {
+                cancelling.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let problem = live_serve(
+            pane.session,
+            &receive,
+            &reports,
+            &cancel,
+            &leave,
+            false,
+            None,
+        );
+        let _ = ended.send(());
+        problem
+    })
+    .expect("the launch ended by itself with a problem");
+    assert!(
+        problem.contains("launch_folder_screen_missing"),
+        "{problem}"
+    );
+    assert!(
+        !reported
+            .try_iter()
+            .any(|report| matches!(report, Report::InputReady))
+    );
 }
 
 /// A proxied agent's pane record keeps its model proxy's port, so a later engine binds the

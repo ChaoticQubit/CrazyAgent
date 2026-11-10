@@ -333,10 +333,10 @@ const MASTER_GROUPS: readonly SettingGroupInfo[] = [
 /** The master's settings in the Agent settings layout, grouped as the approved mockup's drawer
  * shows them: Master (its harness and account, picked in place and saved as project Settings
  * saves them), Conversation, Messages and Access (Full access, kept in Agent settings). The
- * shared rows save exactly as they do in Agent settings. Inputs: the project data and what to
- * do before a button leaves the drawer for another page. Output: the groups, or the team read's
- * state. */
-export function MasterSettings({ data, onLeave = () => {} }: { data: ProjectData; onLeave?: () => void }) {
+ * shared rows save exactly as they do in Agent settings. Inputs: the project data, whether its
+ * master runs in a live terminal and what to do before a button leaves the drawer for another
+ * page. Output: the groups, or the team read's state. */
+export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data: ProjectData; liveHarness: boolean; onLeave?: () => void }) {
   const harnessRows = useTeam(data);
   const team = data.team.result;
   if (team === undefined) return <p className="pj-muted" role="status">Loading...</p>;
@@ -352,7 +352,7 @@ export function MasterSettings({ data, onLeave = () => {} }: { data: ProjectData
     <SettingGroup group={masterGroup} prefix={prefix} level={3}>
       <MasterHarnessSetting rows={harnessRows} data={data} label="Harness" id={`${prefix}-harness`} helper="A change reaches the running master as Apply a master harness change says." />
       <AccountSetting data={data} id={`${prefix}-account`} />
-      <LiveTerminalSetting projectId={data.id} status={status} reload={data.reloadTeam} />
+      <LiveTerminalSetting projectId={data.id} status={status} reload={data.reloadTeam} liveHarness={liveHarness} />
     </SettingGroup>
     <SettingGroup group={talk} prefix={prefix} level={3}>
       <OnSwitchSetting projectId={data.id} status={status} reload={data.reloadTeam} />
@@ -378,15 +378,15 @@ export function MasterSettings({ data, onLeave = () => {} }: { data: ProjectData
 
 /** Holds the project's Master settings drawer above the view that opens it, so a setting that
  * swaps that view leaves the drawer and the owner's place in it alone, and closing the drawer
- * returns to the button of the view now shown (DEC-117 Q4). Inputs: the project data and the
- * view. Output: the view and its drawer. */
-export function MasterSettingsDrawer({ data, children }: { data: ProjectData; children: ReactNode }) {
+ * returns to the button of the view now shown (DEC-117 Q4). Inputs: the project data, whether
+ * its master runs in a live terminal and the view. Output: the view and its drawer. */
+export function MasterSettingsDrawer({ data, liveHarness, children }: { data: ProjectData; liveHarness: boolean; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const button = useId();
   return <MasterSettingsHost.Provider value={{ open: () => setOpen(true), button }}>
     {children}
     <Drawer open={open} title="Master settings" onClose={() => setOpen(false)} returnFocus={() => document.getElementById(button)}>
-      <MasterSettings data={data} onLeave={() => setOpen(false)} />
+      <MasterSettings data={data} liveHarness={liveHarness} onLeave={() => setOpen(false)} />
     </Drawer>
   </MasterSettingsHost.Provider>;
 }

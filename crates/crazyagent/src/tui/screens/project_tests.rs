@@ -1417,6 +1417,7 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
         messages: Vec::new(),
         overlaps: Vec::new(),
         relations: Vec::new(),
+        master_live_terminal: true,
     }));
     screen.open(Tab::Conversation);
     let look = Look::plain();
@@ -3070,6 +3071,7 @@ fn console_screen() -> ProjectScreen {
         messages: Vec::new(),
         overlaps: Vec::new(),
         relations: Vec::new(),
+        master_live_terminal: true,
     }));
     screen.context = Some(ProjectContext {
         project_id: project,
@@ -3947,6 +3949,52 @@ fn a_live_switch_that_opened_no_session_shows_on_and_names_why() {
         named.starts_with("No master session opened, so this conversation won't be in Sessions. ")
             && named.contains("master_open_provenance"),
         "{named}"
+    );
+}
+
+/// A short window shows the help lines of the setting the cursor is on along with its row, so
+/// the owner reads what the setting does while changing it (FB-TUI F1).
+#[test]
+fn the_access_box_shows_the_help_of_the_row_the_cursor_is_on_in_a_short_window() {
+    use super::project_access::{IDE_GIT_HOOKS_LINE, network_help};
+    use crate::sandbox::policy::{AgentNetwork, ToolchainView};
+    use crate::sandbox::toolchains::Toolchain;
+    let opening = |help: &str| help.split(' ').take(5).collect::<Vec<_>>().join(" ");
+    let project = ProjectId::new("access-help").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_access_read(&mut screen, 20);
+    let mut view = access_view(AgentAccess::Sandboxed, 1);
+    view.toolchains = [(Toolchain::Rust, "Rust"), (Toolchain::Python, "Python")]
+        .into_iter()
+        .map(|(toolchain, label)| ToolchainView {
+            toolchain,
+            label: label.into(),
+            installed: true,
+            used: false,
+            allowed: false,
+        })
+        .collect();
+    screen.apply(&read, Ok(SetupView::AgentPolicy(view)));
+    screen.key(key(KeyCode::Char('c')));
+    let look = Look::plain();
+    for _ in 0..3 {
+        screen.key(key(KeyCode::Down));
+    }
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("> Network")
+            && shown.contains(&opening(network_help(AgentNetwork::default())))
+            && shown.contains("[> Save ]"),
+        "{shown}"
+    );
+    screen.key(key(KeyCode::Down));
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("> [ ] IDE git runs the project's hooks")
+            && shown.contains(&opening(IDE_GIT_HOOKS_LINE))
+            && shown.contains("[> Save ]"),
+        "{shown}"
     );
 }
 
