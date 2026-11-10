@@ -3702,10 +3702,12 @@ fn a_store_from_before_the_added_columns_gains_them_and_falls_back_to_the_prompt
     case.db
         .execute_batch(
             "ALTER TABLE landing_change_sets DROP COLUMN message;
-             ALTER TABLE landing_change_sets DROP COLUMN waiting;",
+             ALTER TABLE landing_change_sets DROP COLUMN waiting;
+             ALTER TABLE landing_change_sets DROP COLUMN accepted_in;",
         )
         .unwrap();
     store::initialize(&case.db).unwrap();
+    assert_eq!(store::load(&case.db, &id).unwrap().accepted_in, None);
     assert_eq!(case.view(&id).message, "Add the fourth line");
     assert!(!case.view(&id).waiting);
     let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
@@ -14339,6 +14341,24 @@ fn an_owner_accept_row_says_where_accept_was_pressed() {
         matches!(landed, Ok(AcceptOutcome::Landed { .. })),
         "{landed:?}"
     );
+    assert_eq!(accepted_places(&case), vec![None]);
+}
+
+/// LAND-15-L1: the activity list reads a landing store made before Accept kept its place,
+/// with no `accepted_in` column and before any start adds it, without an error, and its
+/// Accepted row names no place, as one stored before places were kept.
+#[test]
+fn an_activity_list_on_a_landing_store_without_the_place_column_names_no_place() {
+    use crate::activity::AcceptPlace;
+    let case = Case::new();
+    closing_tables(&case);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(matches!(case.accept(&id), Ok(AcceptOutcome::Landed { .. })));
+    assert_eq!(accepted_places(&case), vec![Some(AcceptPlace::Changes)]);
+    case.db
+        .execute_batch("ALTER TABLE landing_change_sets DROP COLUMN accepted_in;")
+        .unwrap();
     assert_eq!(accepted_places(&case), vec![None]);
 }
 
