@@ -573,6 +573,45 @@ fn the_read_budget_stops_a_huge_record_and_says_so() {
     );
 }
 
+/// OP25-S5: one agent's record tree never crowds the others out of the search. A newer
+/// agent whose home holds as many entries as the whole visit budget, or more newer records
+/// than the search keeps, still leaves an older agent its share, so the older agent's one
+/// record is found.
+#[test]
+fn one_agent_tree_over_the_budgets_leaves_the_other_agents_their_share() {
+    for shape in ["visits", "records"] {
+        let fixture = Fixture::new();
+        let (quiet, quiet_home) = fixture.agent("claude-code");
+        let path = quiet_home.join("projects").join("p").join("quiet.jsonl");
+        record(&path, &[claude("user", "The okapi plan")]);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+            .unwrap();
+        let (_, busy_home) = fixture.agent("claude-code");
+        let folder = busy_home.join("projects").join("p");
+        std::fs::create_dir_all(&folder).unwrap();
+        let (entries, extension) = match shape {
+            "visits" => (VISITS_MAX, "txt"),
+            _ => (RECORDS_MAX + 1, "jsonl"),
+        };
+        for index in 0..entries {
+            std::fs::File::create(folder.join(format!("{index}.{extension}"))).unwrap();
+        }
+
+        let found = fixture.sessions("okapi");
+
+        let hits = hit_lines(&found);
+        assert_eq!(hits.len(), 1, "{shape}: {found}");
+        assert!(
+            hits[0].starts_with(&format!("- agent-{quiet}/quiet #")),
+            "{shape}: {found}"
+        );
+    }
+}
+
 /// S1: a conversation id is plain: letters, digits, `-`, `_`, `.` and `/`, no `..`, at most
 /// `ID_BYTES_MAX` bytes.
 #[test]
