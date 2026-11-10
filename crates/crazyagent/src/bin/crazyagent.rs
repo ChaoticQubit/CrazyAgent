@@ -820,6 +820,10 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             let terminal = service
                 .owner_runtime()
                 .and_then(|runtime| runtime.terminal().ok());
+            #[cfg(unix)]
+            let renewal = terminal.clone().and_then(|host| {
+                crazyagent::terminal::renew_while_running(host, runtime_dir.to_path_buf())
+            });
             let result = service.run(stopped).await.map_err(|e| e.to_string());
             if let Some(upkeep) = usage_upkeep {
                 let _ = tokio::task::spawn_blocking(move || upkeep.stop()).await;
@@ -831,9 +835,17 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             if let Some(team) = team {
                 let _ = tokio::task::spawn_blocking(move || team.stop()).await;
             }
+            #[cfg(unix)]
+            if let Some(renewal) = renewal {
+                let _ = tokio::task::spawn_blocking(move || renewal.stop()).await;
+            }
             if let Some(terminal) = terminal {
+                let root = runtime_dir.to_path_buf();
                 let quit = tokio::task::spawn_blocking(move || {
-                    crazyagent::terminal::quit(terminal.as_ref())
+                    let keep = crazyagent::landing::open(&root)
+                        .and_then(|db| crazyagent::quit_settings::load(&db))
+                        .map_or(true, |settings| settings.keeps_team_agents());
+                    crazyagent::terminal::quit(terminal.as_ref(), keep)
                 })
                 .await;
                 if let Ok(Err(problem)) = quit {

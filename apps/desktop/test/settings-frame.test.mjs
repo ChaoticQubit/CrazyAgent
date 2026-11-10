@@ -23,7 +23,7 @@ test("a grouped list replaces the tab row: Access, Agents and App in the approve
   const shown = await onFrame("pools", 1180, ({ evaluate }) => evaluate("Fixture.structure()"));
   assert.deepEqual(shown.groups, [
     { name: "Access", links: ["Accounts", "Pools", "GitHub", "Profile"] },
-    { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents"] },
+    { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents", "Quitting"] },
     { name: "App", links: ["Projects folder", "Sandbox", "Team alerts", "Updates"] },
   ]);
   assert.deepEqual(shown.current, ["Pools"]);
@@ -60,28 +60,38 @@ test("at the 760 minimum the list stands above the panel and nothing scrolls sid
   assert.equal(shown.sideways, false, JSON.stringify(shown));
 });
 
-test("where the list wraps above the panel it does not stick, so it never rides over the panel", async () => {
-  const shown = await onFrame("memory", 1000, async ({ evaluate }) => {
-    await evaluate("document.querySelector('.main').scrollTop = 600");
-    await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
-    return evaluate("Fixture.layout()");
+for (const width of [1000, 1051, 1070]) {
+  test(`at ${width}px, where the list wraps above the panel, it does not stick, so it never rides over the panel`, async () => {
+    const shown = await onFrame("memory", width, async ({ evaluate }) => {
+      await evaluate("document.querySelector('.main').scrollTop = 600");
+      await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
+      return evaluate("Fixture.layout()");
+    });
+    assert.equal(shown.navPosition, "static", JSON.stringify(shown));
+    assert.ok(shown.navBottom <= shown.panelTop, JSON.stringify(shown));
   });
-  assert.equal(shown.navPosition, "static", JSON.stringify(shown));
-  assert.ok(shown.navBottom <= shown.panelTop, JSON.stringify(shown));
+}
+
+test("the list stops sticking up to 1070px, past the 1052px wrap point with room for a scrollbar (DESIGN-2-L1)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const css = readFileSync(new URL("../src/screens/settings/settings.css", import.meta.url), "utf8");
+  const bound = css.match(/@media \(max-width: (\d+)px\) \{ \.settings-nav \{ position: static;/u);
+  assert.ok(bound, "the settings list has a static breakpoint");
+  assert.ok(Number(bound[1]) >= 1070, `the breakpoint covers the wrap point: ${bound[1]}`);
 });
 
 test("real Tab keys walk every Settings link in list order with a visible ring, then enter the panel", async () => {
   const walked = await onFrame("accounts", 1180, async ({ evaluate, send }) => {
     const seen = [];
-    for (let at = 0; at < 15; at += 1) {
+    for (let at = 0; at < 17; at += 1) {
       for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
       seen.push(await evaluate("Fixture.focused()"));
     }
     return seen;
   });
-  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "GitHub", "Profile", "Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents",
+  assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "GitHub", "Profile", "Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents", "Quitting",
     "Projects folder", "Sandbox", "Team alerts", "Updates", "In the panel"]);
-  assert.deepEqual([...new Set(walked.slice(1, 14).map((item) => item.outline))], ["solid"]);
+  assert.deepEqual([...new Set(walked.slice(1, 16).map((item) => item.outline))], ["solid"]);
 });
 
 test("a real Enter on a focused link opens that section's address", async () => {

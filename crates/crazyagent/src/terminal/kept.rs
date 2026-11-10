@@ -230,6 +230,10 @@ impl<H: Host> Host for LastScreenHost<H> {
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
         self.inner.close(keep)
     }
+
+    fn renew(&self, until: std::time::SystemTime) -> Result<(), HostError> {
+        self.inner.renew(until)
+    }
 }
 
 #[cfg(test)]

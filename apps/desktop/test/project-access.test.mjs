@@ -26,16 +26,22 @@ const view = {
     { toolchain: "node", label: "Node", installed: true, used: false, allowed: false },
   ],
   ide_git_hooks: false,
+  tool_cache: "shared",
+  tool_caches: [
+    { scope: "shared", label: "Shared by agents with the same access" },
+    { scope: "per_agent", label: "One per agent" },
+  ],
   ide_agent_files: "allow_all",
 };
 
 test("Save sends the level, the network choice and only the toolchain switches that differ from the project's own use", () => {
-  assert.deepEqual(access.policyOf(view, "own_branch", "open", [true, false], false, "allow_all"), { access: "own_branch", network: "open", toolchains: [], ide_git_hooks: false, ide_agent_files: "allow_all" });
+  assert.deepEqual(access.policyOf(view, "own_branch", "open", [true, false], false, "allow_all"), { access: "own_branch", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "shared", ide_agent_files: "allow_all" });
   assert.deepEqual(access.policyOf(view, "sandboxed", "https", [false, true], false, "allow_all"), {
     access: "sandboxed",
     network: "https",
     toolchains: [{ toolchain: "rust", allowed: false }, { toolchain: "node", allowed: true }],
     ide_git_hooks: false,
+    tool_cache: "shared",
     ide_agent_files: "allow_all",
   });
   assert.throws(() => access.policyOf(view, "full", "none", [true], false, "allow_all"), /one switch per toolchain/);
@@ -109,7 +115,7 @@ test("agent access saves at the version the page read, and a stale save reads th
   assert.match(shared, /fresh\.kind === "ok" \? \{ note: ACCESS_STALE, fresh: fresh\.value \}/);
   assert.ok(shared.indexOf("savedStale(result)") >= 0 && shared.indexOf("savedStale(result)") < shared.indexOf("failureCopy(result)"), "before the plain refusal copy");
   const save = page.slice(page.indexOf("  async function save() {\n    if (!view) return;"));
-  assert.match(save, /saveAccess\(data\.id, view, policyOf\(view, access, network, allowed, ideGitHooks, ideAgentFiles\)\)/);
+  assert.match(save, /saveAccess\(data\.id, view, policyOf\(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache\)\)/);
   assert.match(save, /if \(saved\.fresh\) seed\(saved\.fresh\);\n    setNote\(saved\.note\);/);
   const rows = readFileSync(new URL("../src/screens/team/setup-rows.tsx", import.meta.url), "utf8");
   assert.match(rows, /saveAccess\(projectId, view, policyOf\(view, access, view\.network, view\.toolchains\.map\(\(row\) => row\.allowed\), view\.ide_git_hooks, view\.ide_agent_files\)\)/,
@@ -125,7 +131,7 @@ test("agent access saves at the version the page read, and a stale save reads th
 });
 
 test("the IDE hooks switch is saved with the policy and reads the same in both UIs, Off for a new project", () => {
-  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], true, "allow_all"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: true, ide_agent_files: "allow_all" });
+  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], true, "allow_all"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: true, tool_cache: "shared", ide_agent_files: "allow_all" });
   assert.equal(access.IDE_GIT_HOOKS, "IDE git runs the project's hooks");
   assert.match(access.IDE_GIT_HOOKS_LINE, /never signed/);
   assert.doesNotMatch(access.IDE_GIT_HOOKS_LINE, /Sandboxed terminal/);
@@ -134,7 +140,7 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS}"`));
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS_LINE}"`));
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
-  assert.ok(page.includes("policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles)"));
+  assert.ok(page.includes("policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache)"));
   assert.ok(page.includes("ideGitHooks !== view.ide_git_hooks"));
   assert.ok(page.includes("setIdeGitHooks(next.ide_git_hooks)"));
   assert.match(page, /<IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} \/>/);
@@ -142,6 +148,23 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
   assert.ok(created.includes('{ access, network: "open", toolchains: [], ide_git_hooks: false, ide_agent_files: "allow_all" }'));
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
   assert.match(engine, /#\[serde\(default\)\]\n    pub ide_git_hooks: bool,/);
+});
+
+test("the tool cache choice is saved with the policy, the saved one unless the owner picks another, with the engine's labels and what each means", () => {
+  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], false, "allow_all", "per_agent"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "per_agent", ide_agent_files: "allow_all" });
+  assert.equal(access.policyOf({ ...view, tool_cache: "per_agent" }, "sandboxed", "open", [true, false], false, "allow_all").tool_cache, "per_agent", "a save that shows no choice keeps the saved one");
+  assert.deepEqual(access.TOOL_CACHE_CHOICES.map((choice) => [choice.scope, choice.label]), view.tool_caches.map((row) => [row.scope, row.label]));
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  for (const choice of access.TOOL_CACHE_CHOICES) assert.ok(engine.includes(`"${choice.label}"`), `${choice.label} is the engine's label`);
+  assert.match(access.TOOL_CACHE_CLEAN, /^uv cache clean fails inside an agent's sandbox\./);
+  assert.match(access.TOOL_CACHE_CHOICES.find((choice) => choice.scope === "shared").help, /One agent can change what the other agents at its level install\./, "Shared says one agent can change what the others install");
+  assert.match(access.TOOL_CACHE_IGNORED_UNDER_FULL, /^Full access runs agents without a sandbox/);
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.ok(page.includes("setToolCache(next.tool_cache)"));
+  assert.ok(page.includes("toolCache !== view.tool_cache"));
+  assert.match(page, /<ToolCacheChoices name="ps-tool-cache" value={toolCache} access={access} onChange={setToolCache} \/>/);
+  const rows = readFileSync(new URL("../src/screens/team/setup-rows.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(rows, /tool_cache|toolCache/, "Agent settings' level row keeps the saved choice through policyOf");
 });
 
 test("the IDE agent folders choice is saved with the policy, restarts the IDE and reads the same in both UIs, Allow all changes by default", () => {

@@ -38,8 +38,8 @@ test("the meta line is drawn under the description and hidden once the head take
 });
 
 for (const [label, reduced] of [["with motion", false], ["with motion reduced", true]]) {
-  test(`a page just taller than the window keeps the head's scrolled form ${label}`, async () => {
-    for (const over of [10, 20]) {
+  for (const over of [9, 10, 20, 22]) {
+    test(`a page ${over} px taller than the window keeps the head's scrolled form ${label} (Chromium proof, WebKit not shown)`, async () => {
       const seen = await withPage(async ({ evaluate, send }) => {
         await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 600, deviceScaleFactor: 1, mobile: false });
         await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: reduced ? "reduce" : "no-preference" }] });
@@ -61,9 +61,15 @@ for (const [label, reduced] of [["with motion", false], ["with motion reduced", 
       assert.equal(seen.later.head, "pj-head scrolled", `the head does not snap back: ${shown}`);
       assert.ok(seen.later.top > 2, `the browser did not pull the page back to the top: ${shown}`);
       assert.equal(seen.later.room, Math.ceil(seen.rest.height - seen.later.height), `the room is what the head gave up: ${shown}`);
-    }
-  });
+    });
+  }
 }
+
+test("a project page turns off scroll anchoring, so the browser never moves the page as the head changes size (UI-4-LOWS)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
+  assert.match(css, /\.main:has\(\.pj-project\) \{ overflow-anchor: none; \}/u);
+});
 
 /** Reads the tab strip of a project page in a window of a given width at the app's default
  * height. Input: the window's width. Output: the strip's values. */

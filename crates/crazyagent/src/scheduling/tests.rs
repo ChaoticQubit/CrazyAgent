@@ -240,6 +240,33 @@ fn a_strategy_for_a_project_that_does_not_exist_is_refused_and_can_still_be_clea
     );
 }
 
+/// PROTO-4 r1 L2: an override stored while its project was known, whose project row is then
+/// gone without the removal path (an older build), is still deleted by a clear, so the place it
+/// held among the scoped strategies comes back.
+#[test]
+fn an_override_left_by_a_gone_project_is_deleted_by_a_clear() {
+    let (_directory, mut connection) = database();
+    let access = access(&["a"]);
+    known_project(&connection, "project-gone");
+    let edit = |strategy| ScheduleChange::ProjectStrategy {
+        project: reference("project-gone"),
+        strategy,
+    };
+    assert_eq!(
+        change(&mut connection, &access, edit(Some(Strategy::Balanced))),
+        Outcome::Applied
+    );
+    assert_eq!(load(&connection).unwrap().projects.len(), 1);
+    connection
+        .execute("DELETE FROM projects WHERE id = ?1", ["project-gone"])
+        .unwrap();
+    assert_eq!(
+        change(&mut connection, &access, edit(None)),
+        Outcome::Applied
+    );
+    assert!(load(&connection).unwrap().projects.is_empty());
+}
+
 #[test]
 fn removing_a_project_with_an_override_moves_the_schedule_version_once() {
     let (_directory, mut connection) = database();

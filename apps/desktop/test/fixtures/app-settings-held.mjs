@@ -1,5 +1,6 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
+import { setAccountSchedule } from "../../src/api.ts";
 import { AgentSettingsView } from "../../src/screens/process.tsx";
 import { ProjectAccountOrderView } from "../../src/screens/settings/account-choice.tsx";
 import { MemoryView } from "../../src/screens/settings/memory.tsx";
@@ -17,10 +18,11 @@ const UPDATES = { settings: { kind: "ok", value: { current_version: "0.2.0", cha
 let root = null;
 let asked = 0;
 let waiting = [];
+const sent = [];
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /** Mounts one app settings view whose read never comes back after a save, so what stays on
- * screen is the pick. Inputs: "project", "memory", "delivery" or "updates", whether
+ * screen is the pick. Inputs: "project", "gone", "memory", "delivery" or "updates", whether
  * a save is refused and whether its answers wait for `answer`. Output: nothing. */
 export async function mount(view, refused, manual = false) {
   root?.unmount();
@@ -36,12 +38,30 @@ export async function mount(view, refused, manual = false) {
   const note = () => reply(refused ? "Refused." : "");
   const views = {
     project: [ProjectAccountOrderView, { schedule: { kind: "ok", value: SCHEDULE }, project: "project-a", pool: "pool-main", onChange: answer }],
+    gone: [ProjectAccountOrderView, { schedule: { kind: "ok", value: SCHEDULE }, project: "project-a", pool: "pool-main", onChange: (change) => setAccountSchedule(change, SCHEDULE.version) }],
     memory: [MemoryView, { ...MEMORY, onWrites: note }],
     delivery: [AgentSettingsView, { settings: DELIVERY, busy: false, failure: "", onSave: note }],
     updates: [UpdatesView, { ...UPDATES, onChannel: note }],
   };
   const [component, props] = views[view];
   await act(async () => { root.render(createElement(component, props)); });
+}
+
+/** Mounts the project's account order on the real save path, against an engine that refuses
+ * every save because the project is gone. Output: nothing; `shown` reads the result. */
+export async function mountGone() {
+  sent.length = 0;
+  window.__TAURI_INTERNALS__ = { async invoke(command) {
+    sent.push(command);
+    return { outcome: "rejected", pending: false, rejection: "project_not_found" };
+  } };
+  await mount("gone", false);
+}
+
+/** Reads what a refused save left. Output: the commands sent to the engine and the alert
+ * text on screen, or null when none shows. */
+export function shown() {
+  return { sent: [...sent], alert: document.querySelector('[role="alert"]')?.textContent ?? null };
 }
 
 /** Answers one save that waits. Input: its place in the order the saves were asked. Output:

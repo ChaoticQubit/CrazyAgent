@@ -688,6 +688,24 @@ fn merges_keep_their_own_share_and_other_events_never_push_them_out() {
         KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX,
         "merges push out none of the others"
     );
+    let lead_merge = newest + 120_000;
+    record(
+        &db,
+        &project(),
+        &event(ActivityKind::LeadMerged, "The newest lead merge"),
+        lead_merge,
+    )
+    .unwrap();
+    assert_eq!(
+        count(merges),
+        MERGES_KEPT_MAX,
+        "a lead's merge at the bound takes the cap too (PROTO-5-L1)"
+    );
+    assert_eq!(count(&format!("{merges} AND at_ms = {lead_merge}")), 1);
+    assert_eq!(
+        count("kind='task_started'"),
+        KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX
+    );
 }
 
 /// Phases and test runs agents log keep their own newest 1,000 (T11 r1 M1): a looping

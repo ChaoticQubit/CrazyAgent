@@ -581,10 +581,11 @@ pub struct Swept {
 /// finish time counting as past it, each one checked and removed as Clean up does, one at a
 /// time, so one a check keeps never stops the others. Nothing goes when only the owner's
 /// Clean up removes. A pass reads at most `CANDIDATES_MAX` agents with an id above `after`
-/// and removes at most `RECLAIMABLE_MAX`. Inputs: the store, the setting, where the last
-/// pass stopped and the time now. Output: what this pass did.
+/// and removes at most `RECLAIMABLE_MAX`. Inputs: the store, the engine root, the setting,
+/// where the last pass stopped and the time now. Output: what this pass did.
 pub fn sweep(
     db: &Connection,
+    runtime: &Path,
     settings: &CleanupSettings,
     after: i64,
     now_ms: i64,
@@ -633,7 +634,7 @@ pub fn sweep(
         }
         assert!(*id > swept.after);
         swept.after = *id;
-        if let Err(problem) = sweep_one(db, project, *id, now, now_ms, &mut swept) {
+        if let Err(problem) = sweep_one(db, runtime, project, *id, now, now_ms, &mut swept) {
             swept.failures.push(format!(
                 "agent={id} cause={}",
                 crate::protocol::plain_code(&problem.0)
@@ -657,6 +658,7 @@ pub fn sweep(
 /// or stayed, or the problem that stopped the check.
 fn sweep_one(
     db: &Connection,
+    runtime: &Path,
     project: &str,
     id: i64,
     now: u64,
@@ -671,7 +673,7 @@ fn sweep_one(
     if !free {
         return Ok(());
     }
-    let removal = remove(db, &project, &[id], now_ms)?;
+    let removal = remove(db, runtime, &project, &[id], now_ms)?;
     match removal.kept {
         None => {
             assert_eq!(removal.agents, [id]);
@@ -694,10 +696,12 @@ fn sweep_one(
 /// checked again, then each is removed with git, never forcing, and only then its record.
 /// A stop hands back the record of every claimed agent whose worktree is still there. The
 /// agent's folder with its conversations, its sandbox profile, its rows, messages and logs
-/// stay as history. Inputs: the store, the project, the agents and the time now. Output:
-/// the agents removed and the plain code of the first one kept.
+/// stay as history; on macOS the tool caches One per agent gave it go with the worktree
+/// (T8). Inputs: the store, the engine root, the project, the agents and the time now.
+/// Output: the agents removed and the plain code of the first one kept.
 pub fn remove(
     db: &Connection,
+    runtime: &Path,
     project: &ProjectId,
     agents: &[i64],
     now_ms: i64,
@@ -718,7 +722,7 @@ pub fn remove(
         Err(code) => return Ok(Removal::refused(code)),
     };
     let mut removed = Vec::new();
-    let kept = match retire_claimed(db, project, &claimed, now, &mut removed) {
+    let kept = match retire_claimed(db, runtime, project, &claimed, now, &mut removed) {
         Ok(None) => None,
         Ok(Some(code)) => Some(code.to_owned()),
         Err(problem) => Some(problem.0),
@@ -748,6 +752,7 @@ pub fn remove(
 /// one kept.
 fn retire_claimed(
     db: &Connection,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] runtime: &Path,
     project: &ProjectId,
     claimed: &[Target],
     now: u64,
@@ -802,6 +807,17 @@ fn retire_claimed(
                 }
                 Err(code) => return Ok(Some(code)),
             }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(project_root) = place.repository.to_str()
+            && crate::sandbox::tool_cache::remove_agent(
+                runtime,
+                project_root,
+                &target.id.to_string(),
+            )
+            .is_err()
+        {
+            return Ok(Some("cleanup_folder_failed"));
         }
         db.execute(
             "DELETE FROM team_retiring WHERE agent=?1 AND project=?2",
@@ -932,7 +948,20 @@ fn gone(result: std::io::Result<()>) -> Result<(), EngineError> {
 /// once nothing has its name.
 pub(crate) fn remove_tree(folder: &Path) -> Result<(), EngineError> {
     if std::fs::remove_dir_all(folder).is_err() {
-        writable(folder);
+        writable(folder, false);
+        gone(std::fs::remove_dir_all(folder))?;
+    }
+    Ok(())
+}
+
+/// Deletes a folder an agent wrote as [`remove_tree`] does and, when a plain delete stops,
+/// also clears the immutable and append-only flags of this user's entries on the way, so an
+/// agent's `chflags uchg` or `chmod 0500` in its own tool cache keeps neither Clean up nor a
+/// project's delete from removing it (T8 r1 L3). Input: the folder. Output: Ok once nothing
+/// has its name.
+pub(crate) fn remove_agent_tree(folder: &Path) -> Result<(), EngineError> {
+    if std::fs::remove_dir_all(folder).is_err() {
+        writable(folder, true);
         gone(std::fs::remove_dir_all(folder))?;
     }
     Ok(())
@@ -941,14 +970,25 @@ pub(crate) fn remove_tree(folder: &Path) -> Result<(), EngineError> {
 /// Lets the owner delete inside every real folder under `folder`, visiting at most
 /// `DISK_ENTRIES_MAX` folders. Every folder is opened relative to its parent's open
 /// handle without following a link, and changed and listed through its own handle, so a
-/// link swapped in meanwhile is never followed. Input: the folder.
+/// link swapped in meanwhile is never followed. With `pinned`, the flags [`unpin`] clears
+/// go first from the folder, each folder below it and each entry in them. Inputs: the
+/// folder and whether to clear those flags.
 #[cfg(unix)]
-fn writable(folder: &Path) {
+fn writable(folder: &Path, pinned: bool) {
     use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
     use std::ffi::CString;
     use std::rc::Rc;
     let flags =
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    if pinned {
+        unpin(rustix::fs::CWD, folder);
+        let _ = rustix::fs::chmodat(
+            rustix::fs::CWD,
+            folder,
+            Mode::RWXU,
+            AtFlags::SYMLINK_NOFOLLOW,
+        );
+    }
     let Ok(top) = rustix::fs::open(folder, flags, Mode::empty()) else {
         return;
     };
@@ -963,6 +1003,9 @@ fn writable(folder: &Path) {
             None => Ok(Rc::clone(&parent)),
             Some(name) => rustix::fs::openat(&*parent, name.as_c_str(), flags, Mode::empty())
                 .or_else(|_| {
+                    if pinned {
+                        unpin(&*parent, name.as_c_str());
+                    }
                     rustix::fs::chmodat(
                         &*parent,
                         name.as_c_str(),
@@ -976,6 +1019,9 @@ fn writable(folder: &Path) {
         let Ok(handle) = opened else {
             continue;
         };
+        if pinned {
+            unpin(&*handle, c".");
+        }
         let _ = rustix::fs::fchmod(&*handle, Mode::RWXU);
         let Ok(entries) = Dir::read_from(&*handle) else {
             continue;
@@ -985,9 +1031,13 @@ fn writable(folder: &Path) {
                 break;
             }
             let child = entry.file_name();
-            if matches!(child.to_bytes(), b"." | b"..")
-                || !matches!(entry.file_type(), FileType::Directory | FileType::Unknown)
-            {
+            if matches!(child.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            if !matches!(entry.file_type(), FileType::Directory | FileType::Unknown) {
+                if pinned {
+                    unpin(&*handle, child);
+                }
                 continue;
             }
             pending.push((Rc::clone(&handle), Some(child.to_owned())));
@@ -996,7 +1046,58 @@ fn writable(folder: &Path) {
 }
 
 #[cfg(not(unix))]
-fn writable(_: &Path) {}
+fn writable(_: &Path, _: bool) {}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    /// A step a cleanup test runs in [`unpin`] once a pinned entry is open and before its
+    /// flags change, standing in for a process an agent left that swaps a folder meanwhile.
+    /// Runs once; None runs nothing.
+    pub(super) static AFTER_UNPIN_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Clears the immutable and append-only flags, which an agent may set on what it owns, from
+/// one entry of this user that is not a link, keeping every other flag (T8 r1 L3). The
+/// entry is opened from its parent's handle without following a link, and its flags are set
+/// through `/dev/fd/<n>` of that open entry, so no path an agent can change is resolved and
+/// a folder or link it swaps in meanwhile is never followed (T8 r2 L1). An entry that will
+/// not open, such as one at mode 000, keeps its flags; the removal then stops on it and its
+/// caller reports what is left. Inputs: the entry's open parent and its name there.
+#[cfg(target_os = "macos")]
+fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: P) {
+    use nix::sys::stat::FileFlag;
+    use rustix::fs::{FileType, Mode, OFlags};
+    use std::os::fd::AsRawFd;
+    let pinning = FileFlag::UF_IMMUTABLE | FileFlag::UF_APPEND;
+    let open = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let Ok(entry) = rustix::fs::openat(parent, name, open, Mode::empty()) else {
+        return;
+    };
+    let Ok(found) = rustix::fs::fstat(&entry) else {
+        return;
+    };
+    assert_ne!(
+        FileType::from_raw_mode(found.st_mode),
+        FileType::Symlink,
+        "an entry opened without following a link is never one"
+    );
+    let flags = FileFlag::from_bits_retain(found.st_flags);
+    if !flags.intersects(pinning) || found.st_uid != rustix::process::geteuid().as_raw() {
+        return;
+    }
+    #[cfg(test)]
+    if let Some(step) = AFTER_UNPIN_OPEN.with(|step| step.borrow_mut().take()) {
+        step();
+    }
+    let handle = PathBuf::from(format!("/dev/fd/{}", entry.as_raw_fd()));
+    let _ = nix::unistd::chflags(&handle, flags.difference(pinning));
+}
+
+/// Leaves flags alone where no flag an agent may set keeps an entry from going. Inputs:
+/// unused.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unpin<P: rustix::path::Arg>(_: impl std::os::fd::AsFd, _: P) {}
 
 /// Counts what a folder holds on disk, never following a link, visiting at most `budget`
 /// entries. Inputs: the folder and the entries left. Output: the bytes and whether every

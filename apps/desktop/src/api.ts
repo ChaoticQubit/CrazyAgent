@@ -337,6 +337,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   owner_profile: "saving your profile",
   sandbox_settings: "changing the sandbox setting",
   cleanup_settings: "changing when finished agents' worktrees go",
+  quit_settings: "changing what quitting does to team agents",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
@@ -437,6 +438,31 @@ export function getCleanupSettings(): Promise<Result<CleanupSettings>> {
 /** Saves when finished agents' worktrees go. Input: the full setting. Output: ok once saved. */
 export function saveCleanupSettings(settings: CleanupSettings): Promise<Result<void>> {
   return change("desktop_set_cleanup_settings", { settings, generation: nextGeneration() });
+}
+
+/** What quitting CrazyAgent does to running team agents, the engine's `OnQuit`. */
+export type OnQuit = "keep_running" | "stop";
+
+/** How long agents left running wait for CrazyAgent to come back, the engine's `LeftRunning`. */
+export type LeftRunning = "after_hours" | "never";
+
+/** The owner's agents on quit setting, the engine's `QuitSettings`: what quitting does to
+ * running team agents, and how long the ones left running wait, with the hours, 1 to 168,
+ * kept while Never is picked. */
+export interface QuitSettings {
+  on_quit: OnQuit;
+  left_running: LeftRunning;
+  hours: number;
+}
+
+/** Reads what quitting does to team agents. Output: the stored setting, or the default before the first save. */
+export function getQuitSettings(): Promise<Result<QuitSettings>> {
+  return call<QuitSettings>("desktop_quit_settings");
+}
+
+/** Saves what quitting does to team agents. Input: the full setting. Output: ok once saved. */
+export function saveQuitSettings(settings: QuitSettings): Promise<Result<void>> {
+  return change("desktop_set_quit_settings", { settings, generation: nextGeneration() });
 }
 
 export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";

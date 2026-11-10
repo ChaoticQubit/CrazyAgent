@@ -405,6 +405,35 @@ fn a_manual_reset_is_marked_and_an_empty_range_says_so() {
     assert!(all.contains("No limits read yet."), "{all}");
 }
 
+/// PROTO-2 F1 TUI sibling: a reset time the owner set that has passed is not shown, so the
+/// window's line names no time of the owner's.
+#[test]
+fn a_passed_manual_reset_is_not_marked_as_the_owners_time() {
+    let ctx = ctx(100, 40);
+    let mut passed = limits(None);
+    passed.five_hour_reset_override_ms = Some(NOW - MINUTE);
+    let shown = UsageReport {
+        limits: vec![passed],
+        ..report()
+    };
+    let all = text(&summary(
+        &shown,
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ))
+    .join("\n");
+    let five_hour = all
+        .lines()
+        .find(|line| line.contains("5-hour"))
+        .expect("the 5-hour line shows");
+    assert!(five_hour.contains("Next reset not known yet"), "{all}");
+    assert!(!five_hour.contains("(your time)"), "{all}");
+}
+
 /// R4 N-D16 follow-up: an account whose read failed before any window was read shows its
 /// cause first and each window as not read, pointing at that cause, never as a window the
 /// provider left out.

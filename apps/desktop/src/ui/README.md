@@ -65,7 +65,7 @@ Theme: system by default; `applyTheme("light" | "dark" | "system")` in `state.ts
 - `PageHeader { title; description?; actions? }`. Holds the page's `h1`.
 - `Tabs { label; tabs: { id; label; href; icon? }[]; current }`. Route links with `role="tab"`; arrow keys, Home and End move. Give the panel `role="tabpanel" aria-labelledby={"tab-" + current}`.
 - `Panel { title?; actions?; padded? = true; className? }`.
-- `WindowedList { label; count; rowHeight? = 44; overscan? = 10; viewport? = 560; renderRow(index) }`. Renders visible rows only; rows carry `aria-setsize` and `aria-posinset`. `windowRange(...)` is the pure math.
+- `WindowedList { label; head?; count; rowHeight? = 44; overscan? = 10; viewport? = 560; renderRow(index); className? }`. Renders visible rows only; rows carry `aria-setsize` and `aria-posinset`. `head` draws above the rows inside the scroller. `windowRange(...)` is the pure math.
 - `AppShell { sidebar; toast? }` and `Sidebar { route; projects?: { id; name; flag? }[]; profileName?; engine; onRetry }`. Owned by core.
 - `BrandMark { large? }`. The only place the logo lives.
 

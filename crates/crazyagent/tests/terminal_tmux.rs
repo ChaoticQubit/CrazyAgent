@@ -6,13 +6,13 @@ use crazyagent::terminal::buffer::skipped_marker;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{
     AgentId, FOLDER, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream,
-    VIEWER_BUFFER_BYTES_MAX, VIEWERS_MAX, plain_reason, platform, quit,
+    VIEWER_BUFFER_BYTES_MAX, VIEWERS_MAX, plain_reason, platform, quit, renew_once,
 };
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const PANE_ENV_ROOT: &str = "PANE_ENV_ROOT";
 const PANE_ENV_OUT: &str = "PANE_ENV_OUT";
@@ -887,7 +887,7 @@ fn an_engine_stop_keeps_the_server_only_while_a_team_agent_lives_on() {
             .unwrap();
         panes.push(pane.pid);
     }
-    quit(&host).unwrap();
+    quit(&host, true).unwrap();
     assert_eq!(
         host.alive().unwrap(),
         std::slice::from_ref(&team),
@@ -904,7 +904,7 @@ fn an_engine_stop_keeps_the_server_only_while_a_team_agent_lives_on() {
     );
     let server = server_pid(&tmux, &socket);
     next.kill(&team).unwrap();
-    quit(&next).unwrap();
+    quit(&next, true).unwrap();
     assert!(
         !socket.exists(),
         "with no team agent left the stop ends the server and removes its socket"
@@ -912,6 +912,120 @@ fn an_engine_stop_keeps_the_server_only_while_a_team_agent_lives_on() {
     assert!(ends(&[server, panes[0]]), "the server process is gone");
     assert!(next.alive().unwrap().is_empty());
     assert!(!socket.exists(), "listing after the stop starts no server");
+}
+
+/// FBTMUX-P1, Stop: with team agents set to stop when CrazyAgent quits, an engine stop ends
+/// every terminal, a team agent's included, and the server.
+#[test]
+fn an_engine_stop_set_to_stop_team_agents_ends_them_and_the_server() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let team = AgentId::team(1).unwrap();
+    let research = AgentId::new("research-7-1").unwrap();
+    let mut pids = Vec::new();
+    for agent in [&team, &research] {
+        let pane = host
+            .spawn(agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+            .unwrap();
+        pids.push(pane.pid);
+    }
+    pids.push(server_pid(&tmux, &socket));
+    quit(&host, false).unwrap();
+    assert!(host.alive().unwrap().is_empty());
+    assert!(
+        !socket.exists(),
+        "with no team agent kept the stop ends the server and removes its socket"
+    );
+    assert!(ends(&pids), "the agents and the server process are gone");
+    let next = Tmux::open(Some(tmux.clone()), &folder);
+    assert!(
+        next.alive().unwrap().is_empty(),
+        "the next engine finds none"
+    );
+}
+
+/// FBTMUX-P1: renewing sets the deadline the server's holder reads, its socket's
+/// modification time, to the time given, and keeps the server and its agent; a host with
+/// no server renews nothing and starts none.
+#[test]
+fn renewing_moves_the_server_deadline_to_the_time_given() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let until = SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000_000);
+    host.renew(until).unwrap();
+    assert!(!socket.exists(), "renewing starts no server");
+    let team = AgentId::team(1).unwrap();
+    host.spawn(&team, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+        .unwrap();
+    for deadline in [until, until + Duration::from_secs(60 * 60)] {
+        host.renew(deadline).unwrap();
+        let modified = std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(modified, deadline);
+    }
+    assert_eq!(host.alive().unwrap(), std::slice::from_ref(&team));
+    quit(&host, false).unwrap();
+}
+
+/// FBTMUX-P1 r1 L2: a running engine whose saved quitting setting it cannot read still moves
+/// its server's deadline, to the default 24 hours ahead, so its own live agents never reach a
+/// deadline it set earlier; once the setting reads again its hours are used.
+#[test]
+fn an_unreadable_quitting_setting_renews_with_the_default_limit() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let team = AgentId::team(1).unwrap();
+    host.spawn(&team, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+        .unwrap();
+    let engine = root.path().join("engine");
+    std::fs::create_dir(&engine).unwrap();
+    let db = rusqlite::Connection::open(engine.join("engine.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE agent_quit_settings (singleton INTEGER PRIMARY KEY, on_quit TEXT NOT NULL, left_running TEXT NOT NULL, hours INTEGER NOT NULL);
+         INSERT INTO agent_quit_settings VALUES(1,'pause','never',1);",
+    )
+    .unwrap();
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let modified = || {
+        std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    renew_once(&host, &engine, now).unwrap();
+    assert_eq!(modified(), now + Duration::from_secs(24 * 60 * 60));
+    db.execute(
+        "UPDATE agent_quit_settings SET on_quit='stop', left_running='after_hours', hours=2",
+        [],
+    )
+    .unwrap();
+    renew_once(&host, &engine, now).unwrap();
+    assert_eq!(modified(), now + Duration::from_secs(2 * 60 * 60));
+    assert_eq!(host.alive().unwrap(), std::slice::from_ref(&team));
+    quit(&host, false).unwrap();
 }
 
 fn tmux_reply(tmux: &Path, socket: &Path, arguments: &[&str]) -> String {

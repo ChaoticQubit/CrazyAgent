@@ -2376,13 +2376,18 @@ impl TeamRuntime {
     }
 
     /// Ends the engine's hold on every agent as the engine stops and returns running tasks
-    /// to the queue. An agent in a pane a later engine can take over keeps running there with
-    /// its turn stopped, so agent sessions outlive the engine; every other agent process group
-    /// stops. Waits a bounded time for each agent thread. Returns the panes left running.
+    /// to the queue. While the owner keeps team agents running when CrazyAgent quits, the
+    /// default and also when that setting cannot be read, an agent in a pane a later engine
+    /// can take over keeps running there with its turn stopped, so agent sessions outlive the
+    /// engine; with Stop every agent stops as an owner Stop would (FBTMUX-P1). Every other
+    /// agent process group stops. Waits a bounded time for each agent thread. Returns the
+    /// panes left running.
     pub fn shutdown(&mut self) -> Result<Vec<AgentId>, EngineError> {
+        let keep_panes = crate::quit_settings::load(&self.connection)
+            .map_or(true, |settings| settings.keeps_team_agents());
         let mut kept = BTreeSet::new();
         for (id, worker) in &self.workers {
-            if !worker.stopping && self.has_pane_record(*id)? {
+            if keep_panes && !worker.stopping && self.has_pane_record(*id)? {
                 kept.insert(*id);
             }
         }
@@ -6680,7 +6685,10 @@ impl TeamRuntime {
     /// the landed work waits for the owner there and tells the lead whose work landed, so a
     /// lead that could not finish while it waited finishes then (OP9B-M1). A conflicting set
     /// stays on the teammate's branch and the lead is told its files, each quoted on its own
-    /// line (OP9B-C2), once for each teammate head and lead tip.
+    /// line (OP9B-C2), once for each teammate head and lead tip. A set refused because a
+    /// worker below the teammate holds open work stays too: the lead is told once for each
+    /// teammate head and lead tip, and the land is tried again only once that head, that tip
+    /// or the project's open change sets moved (TEAM-3-R2-LOWS).
     /// Takes the project and the lead. Returns Ok, or a SQLite or coordination failure.
     fn land_teammates(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
         let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
@@ -6730,6 +6738,19 @@ impl TeamRuntime {
                 return Ok(());
             }
         };
+        let open = sets
+            .iter()
+            .filter(|set| {
+                matches!(
+                    set.state,
+                    crate::landing::ChangeState::Pending
+                        | crate::landing::ChangeState::Conflict
+                        | crate::landing::ChangeState::Updating
+                )
+            })
+            .map(|set| set.id.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         let mut landed = Vec::new();
         for teammate in resting {
             let id = teammate.to_string();
@@ -6747,8 +6768,10 @@ impl TeamRuntime {
             let tip = crate::landing::agent_tip(&db, &repository, &worktree, &git_dir)
                 .unwrap_or_default();
             let seen = (set.head.clone(), tip);
+            let held_key = format!("{} {}", set.id.as_str(), crate::landing::WORKER_OPEN);
+            let held = (format!("{} {}", seen.0, seen.1), open.clone());
             let told = self.teammate_conflicts_told.entry(lead).or_default();
-            if told.get(set.id.as_str()) == Some(&seen) {
+            if told.get(set.id.as_str()) == Some(&seen) || told.get(&held_key) == Some(&held) {
                 continue;
             }
             let outcome = crate::projects_home::owner_home().and_then(|home| {
@@ -6765,6 +6788,7 @@ impl TeamRuntime {
             match outcome {
                 Ok(crate::landing::AcceptOutcome::Landed { .. }) => {
                     told.remove(set.id.as_str());
+                    told.remove(&held_key);
                     landed.push(
                         teammates::name(&self.connection, teammate)
                             .unwrap_or_else(|| format!("teammate {teammate}")),
@@ -6786,6 +6810,16 @@ impl TeamRuntime {
                             quoted_lines(&files, TEAMMATE_CONFLICT_FILES_SHOWN_MAX)
                         ),
                     )?;
+                }
+                Err(problem) if problem.0 == crate::landing::WORKER_OPEN => {
+                    let again = told.get(&held_key).is_some_and(|(at, _)| *at == held.0);
+                    if told.len() >= TEAMMATE_WORKTREE_NAMES_MAX {
+                        told.clear();
+                    }
+                    told.insert(held_key, held);
+                    if !again {
+                        self.tell_teammate_held(project, lead, teammate, &branch)?;
+                    }
                 }
                 Err(problem) => eprintln!(
                     "teammate_landing_failed cause={}",
@@ -6813,6 +6847,31 @@ impl TeamRuntime {
             )?;
         }
         Ok(())
+    }
+
+    /// Tells a lead, and the engine's log, that a teammate's work was not landed on its task
+    /// branch because a worker below that teammate still holds open work (TEAM-3-R2-LOWS).
+    /// Takes the project, the lead, the teammate and the lead's task branch. Returns Ok, or a
+    /// coordination failure.
+    fn tell_teammate_held(
+        &self,
+        project: &ProjectId,
+        lead: i64,
+        teammate: i64,
+        branch: &str,
+    ) -> Result<(), EngineError> {
+        eprintln!(
+            "teammate_landing_held cause={}",
+            crate::landing::WORKER_OPEN
+        );
+        let name = teammates::name(&self.connection, teammate)
+            .unwrap_or_else(|| format!("teammate {teammate}"));
+        let branch = bound_text(branch, crate::landing::BRANCH_BYTES_MAX);
+        let body = format!(
+            "CrazyAgent did not land teammate {name}'s work on your task branch {branch}: {} CrazyAgent lands it by itself once that work is closed.",
+            crate::landing::WORKER_OPEN_TEXT
+        );
+        self.note_lead(project, lead, body)
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
@@ -7406,6 +7465,19 @@ impl TeamRuntime {
                     Some("team_delegate_writable"),
                 ));
             }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(runtime) = self.state.parent() {
+            use crate::sandbox::tool_cache::{CacheShape, grant};
+            let shape = match layout {
+                Layout::Linked => CacheShape::Worktree,
+                Layout::Clone => CacheShape::Clone,
+            };
+            let agent = id.to_string();
+            sandbox = grant(sandbox, runtime, &root, &policy, shape, &agent);
+            let mates = format!("{agent}-teammates");
+            teammates = teammates
+                .map(|team| grant(team, runtime, &root, &policy, CacheShape::Teammate, &mates));
         }
         if let Some(mates) = &teammates {
             mates

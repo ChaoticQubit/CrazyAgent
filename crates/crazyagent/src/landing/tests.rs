@@ -1065,6 +1065,24 @@ fn a_grafts_file_does_not_hide_an_agent_gitlink_at_the_turn_end_or_at_accept() {
     assert_eq!(case.tip(), tip);
 }
 
+/// T8 R1: a uv cache bucket an agent moved into its worktree, with its engine-made `.git`
+/// link to `/dev/null`, opens a set of plain files with no `.git` path and no gitlink.
+#[test]
+fn a_moved_uv_bucket_opens_a_set_of_plain_files() {
+    let case = Case::new();
+    case.start();
+    let bucket = case.workspace.worktree.join("moved");
+    write(&bucket.join("a.txt"), "a\n");
+    std::os::unix::fs::symlink("/dev/null", bucket.join(".git")).unwrap();
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let listed = case.owner(&["ls-tree", "-r", &case.view(&id).head]);
+    assert!(listed.contains("moved/a.txt"), "{listed}");
+    assert!(
+        !listed.contains(".git") && !listed.contains("160000"),
+        "{listed}"
+    );
+}
+
 /// Makes links in a folder, each a path and its target. Inputs: the folder and the links.
 fn plant_links(folder: &Path, links: &[(&str, &str)]) {
     for (link, target) in links {
@@ -12802,26 +12820,12 @@ fn uv_workspace() -> RealTool {
     }
 }
 
-/// A clash in uv.lock alone goes straight back to its agent at the turn end: uv can never
-/// start in the tool sandbox, whose nested-git rule refuses the `.git` marker every uv cache
-/// writes, so no sandboxed run is tried and the owner is never told the edits wait in
-/// Changes (land-14). uv need not be installed.
+/// T8 row 6: a clash in uv.lock alone is rewritten by the real uv in the tool sandbox, on a
+/// cache the engine primes for that run under the SM1-R rule, and the run leaves nothing
+/// behind; land-14 sent it back to its agent unregenerated. Fails without uv.
 #[test]
-fn a_uv_lock_clash_goes_back_to_its_agent_at_the_turn_end_without_a_sandboxed_run() {
-    let mut case = Case::new();
-    let (id, landed) = tool_clash_at_turn_end(&mut case, &uv_workspace());
-    assert_eq!(
-        landed,
-        Some(crate::landing_turns::Landed::Waiting(id.clone())),
-        "the turn end sends it back at once"
-    );
-    let set = case.view(&id);
-    assert_eq!(
-        (set.state, set.conflicts.clone()),
-        (ChangeState::Updating, vec!["uv.lock".to_owned()])
-    );
-    assert!(!lockfiles::is_running(&id), "no regeneration started");
-    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+fn real_uv_rewrites_a_clashing_uv_lock() {
+    a_real_tool_rewrites_its_clashing_lockfile(&uv_workspace());
 }
 
 /// A tool that changes a file other than the clashing lockfiles, here the manifest, lands
@@ -13014,6 +13018,29 @@ fn an_agent_edit_while_the_lockfile_tool_runs_stays_and_lands_nothing() {
         std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
         "edited mid-run\n"
     );
+}
+
+/// rv-code T8 r1 N2: only a uv.lock clash primes uv, so a Cargo.lock clash never runs or
+/// waits on uv priming and its tool gets no uv cache, whatever uv the owner has. Red only
+/// where the owner's tool PATH finds a uv the engine may run.
+#[test]
+fn a_cargo_lock_regeneration_primes_no_uv_cache() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(
+        &case,
+        "",
+        "echo \"# uv cache ${UV_CACHE_DIR:-none}\" >> Cargo.lock",
+        Duration::from_secs(60),
+    );
+    let id = lockfile_clash(&case, "b = { path = \"../b\" }", "b");
+    let mut record = store::load(&case.db, &id).unwrap();
+    let commit = lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None)
+        .unwrap()
+        .expect("the Cargo.lock clash was regenerated");
+    let lock = case.owner(&["show", &format!("{commit}:Cargo.lock")]);
+    assert!(lock.contains("# uv cache none\n"), "{lock}");
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
 /// T8-R2-S4: past the most regenerations one repository runs at once, a clash goes straight
