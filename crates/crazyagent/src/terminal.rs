@@ -628,9 +628,9 @@ pub struct Renewal {
 
 #[cfg(unix)]
 /// Starts renewing the deadlines of a host's servers at once and every [`RENEW_EVERY`].
-/// A pass whose setting cannot be read renews nothing and says why, so no guess moves a
-/// deadline. Takes the host and the engine root that holds the engine database. Returns the
-/// running renewal, or None when its thread cannot start.
+/// A pass whose setting cannot be read renews with the default setting and says why (see
+/// [`renew_once`]). Takes the host and the engine root that holds the engine database.
+/// Returns the running renewal, or None when its thread cannot start.
 pub fn renew_while_running(host: Arc<dyn Host>, root: PathBuf) -> Option<Renewal> {
     let stop = Arc::new((Mutex::new(false), Condvar::new()));
     let signal = stop.clone();
@@ -664,15 +664,26 @@ pub fn renew_while_running(host: Arc<dyn Host>, root: PathBuf) -> Option<Renewal
 }
 
 #[cfg(unix)]
-/// Renews the deadlines of a host's servers once from the owner's saved setting. Takes the
-/// host, the engine root and the current time. Returns Ok, the database failure, or the
-/// host's first failure.
+/// Renews the deadlines of a host's servers once from the owner's saved setting, or from the
+/// default setting when the saved one cannot be read, logged, so a running engine never lets
+/// its own servers reach a deadline it set earlier (FBTMUX-P1 r1 L2). Takes the host, the
+/// engine root and the current time. Returns Ok, or the host's first failure.
 pub fn renew_once(host: &dyn Host, root: &Path, now: SystemTime) -> Result<(), EngineError> {
-    let db = crate::landing::open(root)?;
-    crate::quit_settings::initialize(&db)?;
-    let settings = crate::quit_settings::load(&db)?;
+    let settings = saved_quit_settings(root).unwrap_or_else(|problem| {
+        eprintln!("terminal_deadline_from_default cause={}", problem.0);
+        crate::quit_settings::QuitSettings::default()
+    });
     host.renew(settings.deadline(now))
         .map_err(|problem| EngineError(problem.0))
+}
+
+#[cfg(unix)]
+/// Reads the owner's agents on quit setting from the engine database. Takes the engine root.
+/// Returns the setting, or the database failure or `quit_settings_invalid`.
+fn saved_quit_settings(root: &Path) -> Result<crate::quit_settings::QuitSettings, EngineError> {
+    let db = crate::landing::open(root)?;
+    crate::quit_settings::initialize(&db)?;
+    crate::quit_settings::load(&db)
 }
 
 #[cfg(unix)]

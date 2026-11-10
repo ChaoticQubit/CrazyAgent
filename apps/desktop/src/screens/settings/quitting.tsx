@@ -45,7 +45,8 @@ export function quitHours(typed: string): number | null {
  * valid, else the stored ones, so a bad entry never holds back the save of No limit. */
 export function savedHours(left: LeftRunning, typed: string, stored: number): number | null {
   const hours = quitHours(typed);
-  return left === "after_hours" || hours === null || hours === stored ? hours : hours;
+  if (left === "after_hours") return hours;
+  return hours ?? stored;
 }
 
 const QUIT_TOP = <div className="settings-top"><div>
