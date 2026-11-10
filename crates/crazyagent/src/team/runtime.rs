@@ -6633,7 +6633,7 @@ impl TeamRuntime {
             };
             let place = (repository.as_path(), worktree.as_path(), git_dir.as_path());
             let stopped = ended.contains(&teammate);
-            if self.save_teammate(&db, project, lead, place, teammate, &name, stopped)? {
+            if self.save_teammate(&db, project, lead, place, (teammate, &name), stopped)? {
                 self.teammates_rested
                     .entry(lead)
                     .or_default()
@@ -6657,8 +6657,7 @@ impl TeamRuntime {
         project: &ProjectId,
         lead: i64,
         (repository, worktree, git_dir): (&Path, &Path, &Path),
-        teammate: i64,
-        name: &str,
+        (teammate, name): (i64, &str),
         ended: bool,
     ) -> Result<bool, EngineError> {
         let Ok(Some((own, own_git))) =
