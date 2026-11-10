@@ -1966,6 +1966,135 @@ fn tools_are_read_per_bar_and_per_project() {
     );
 }
 
+/// Stores the coordination tables and one agent in each of the projects alpha and beta.
+/// Input: the store. Output: none.
+fn tool_agents(db: &Connection) {
+    crate::coord::ensure(db).unwrap();
+    db.execute_batch(
+        "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,hookless) VALUES
+            (1,'alpha','sub','codex',1,'running',1,1,0),
+            (2,'beta','sub','codex',1,'running',1,1,0);",
+    )
+    .unwrap();
+}
+
+/// Stores one agent's calls of one tool in one hour. Inputs: the store, the hour, the agent,
+/// the tool and the calls. Output: none.
+fn tool_row(db: &Connection, hour_ms: i64, agent: i64, tool: &str, calls: i64) {
+    db.execute(
+        "INSERT INTO coord_tool_hours(hour_ms,agent,tool,count) VALUES (?1,?2,?3,?4)",
+        params![hour_ms, agent, tool, calls],
+    )
+    .unwrap();
+}
+
+#[test]
+fn tools_keep_every_bar_past_the_old_row_limit() {
+    let (_directory, db) = database();
+    tool_agents(&db);
+    for index in 0..30 {
+        tool_row(&db, 2 * HOUR, 1, &format!("new-{index:02}"), 1);
+    }
+    for index in 0..3 {
+        tool_row(&db, 0, 1, &format!("old-{index:02}"), 1);
+    }
+    let metrics = read(&db, None, 0, 4 * HOUR).unwrap();
+    assert_eq!(
+        metrics.tools.iter().filter(|row| row.start_ms == 0).count(),
+        3,
+        "the oldest bar is still there"
+    );
+    assert_eq!(metrics.tools.len(), TOOLS_PER_BAR_MAX + 3);
+}
+
+#[test]
+fn tools_keep_only_the_most_used_of_a_bar() {
+    let (_directory, db) = database();
+    tool_agents(&db);
+    for calls in 1..=TOOLS_PER_BAR_MAX as i64 + 1 {
+        tool_row(&db, 0, 1, &format!("tool-{calls:02}"), calls);
+    }
+    let metrics = read(&db, None, 0, HOUR).unwrap();
+    assert_eq!(metrics.tools.len(), TOOLS_PER_BAR_MAX);
+    assert_eq!(metrics.tools[0].count, TOOLS_PER_BAR_MAX as u64 + 1);
+    assert!(
+        metrics.tools.iter().all(|row| row.tool != "tool-01"),
+        "the least-used tool of the bar is the one left out"
+    );
+}
+
+#[test]
+fn tools_keep_the_newest_bars_the_chart_keeps() {
+    let (_directory, db) = database();
+    tool_agents(&db);
+    let bar_ms = 5 * DAY;
+    let bars = SERIES_MAX as i64 + 1;
+    for index in 0..bars {
+        tool_row(&db, index * bar_ms, 1, "Edit", 1);
+    }
+    let metrics = read(&db, None, 0, bars * bar_ms).unwrap();
+    assert_eq!(metrics.bucket_ms, bar_ms);
+    assert_eq!(metrics.tools.len(), SERIES_MAX);
+    assert_eq!(metrics.tools[0].start_ms, (bars - 1) * bar_ms);
+    assert!(
+        metrics.tools.iter().all(|row| row.start_ms != 0),
+        "the oldest bar goes, as it does in the chart"
+    );
+}
+
+#[test]
+fn tools_read_exact_bars_newest_first() {
+    let (_directory, db) = database();
+    tool_agents(&db);
+    let since_ms = HOUR / 2;
+    tool_row(&db, HOUR, 1, "Edit", 3);
+    tool_row(&db, HOUR, 2, "Edit", 5);
+    tool_row(&db, HOUR, 1, "Bash", 1);
+    tool_row(&db, 3 * HOUR, 1, "Read", 2);
+    let metrics = read(&db, None, since_ms, since_ms + 4 * HOUR).unwrap();
+    assert_eq!(metrics.bucket_ms, 2 * HOUR);
+    let rows: Vec<(i64, &str, u64)> = metrics
+        .tools
+        .iter()
+        .map(|row| (row.start_ms, row.tool.as_str(), row.count))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (since_ms + 2 * HOUR, "Read", 2),
+            (since_ms, "Edit", 8),
+            (since_ms, "Bash", 1),
+        ]
+    );
+}
+
+#[test]
+fn tools_since_follows_the_project_filter() {
+    let (_directory, db) = database();
+    tool_agents(&db);
+    tool_row(&db, HOUR, 2, "Edit", 1);
+    tool_row(&db, 3 * HOUR, 1, "Edit", 1);
+    let since = |project: Option<&str>| {
+        let project = project.map(|name| ProjectId::new(name).unwrap());
+        read(&db, project.as_ref(), 0, 4 * HOUR)
+            .unwrap()
+            .tools_since_ms
+    };
+    assert_eq!(since(None), Some(HOUR));
+    assert_eq!(since(Some("alpha")), Some(3 * HOUR));
+    assert_eq!(since(Some("gamma")), None);
+}
+
+#[test]
+fn tools_fit_keeps_more_rows_than_the_other_lists() {
+    let fitted = fit(Metrics {
+        tools: vec![ToolBucket::default(); ROWS_MAX + 1],
+        ..Metrics::default()
+    })
+    .unwrap();
+    assert_eq!(fitted.tools.len(), ROWS_MAX + 1);
+}
+
 #[test]
 fn models_with_prices_off_sort_by_tokens_not_hidden_dollars() {
     use crate::usage::money::{self, MainNumber, MoneySettings};

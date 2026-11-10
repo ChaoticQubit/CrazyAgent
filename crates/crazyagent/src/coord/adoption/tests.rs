@@ -719,4 +719,14 @@ fn past_its_caps_a_tool_call_is_left_out_of_the_chart_only() {
         )
         .unwrap();
     assert_eq!(later, 0);
+    let counted = |tool: &str| -> i64 {
+        db.query_row(
+            "SELECT count FROM coord_tool_use WHERE agent=?1 AND tool=?2",
+            rusqlite::params![agent, tool],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(counted("one-more"), 1, "past the caps it still counts");
+    assert_eq!(counted("tool-0"), 3, "the call past the row cap counts");
 }

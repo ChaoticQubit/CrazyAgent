@@ -13,6 +13,7 @@ use std::collections::HashMap;
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 const SERIES_MAX: usize = 64;
+const TOOLS_PER_BAR_MAX: usize = 8;
 const TITLE_BYTES_MAX: usize = 120;
 const NAMES_MAX: usize = 8;
 
