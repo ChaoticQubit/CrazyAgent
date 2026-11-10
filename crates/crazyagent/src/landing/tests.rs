@@ -13020,6 +13020,29 @@ fn an_agent_edit_while_the_lockfile_tool_runs_stays_and_lands_nothing() {
     );
 }
 
+/// rv-code T8 r1 N2: only a uv.lock clash primes uv, so a Cargo.lock clash never runs or
+/// waits on uv priming and its tool gets no uv cache, whatever uv the owner has. Red only
+/// where the owner's tool PATH finds a uv the engine may run.
+#[test]
+fn a_cargo_lock_regeneration_primes_no_uv_cache() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(
+        &case,
+        "",
+        "echo \"# uv cache ${UV_CACHE_DIR:-none}\" >> Cargo.lock",
+        Duration::from_secs(60),
+    );
+    let id = lockfile_clash(&case, "b = { path = \"../b\" }", "b");
+    let mut record = store::load(&case.db, &id).unwrap();
+    let commit = lockfiles::regenerate(&case.db, &mut record, &["Cargo.lock".to_owned()], None)
+        .unwrap()
+        .expect("the Cargo.lock clash was regenerated");
+    let lock = case.owner(&["show", &format!("{commit}:Cargo.lock")]);
+    assert!(lock.contains("# uv cache none\n"), "{lock}");
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
+}
+
 /// T8-R2-S4: past the most regenerations one repository runs at once, a clash goes straight
 /// to Task 7's update.
 #[test]

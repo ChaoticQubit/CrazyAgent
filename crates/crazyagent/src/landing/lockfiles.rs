@@ -349,7 +349,10 @@ fn regenerated(
     let Some(worktree) = scratch.add_worktree(&merged)? else {
         return Ok(Regenerated::Refused);
     };
-    let sandbox = match confined(db, &record, &root, &runtime, &worktree, &scratch, settings) {
+    let uv_clash = paths.iter().any(|path| program_for(path) == Some("uv"));
+    let sandbox = match confined(
+        db, &record, &root, &runtime, &worktree, &scratch, settings, uv_clash,
+    ) {
         Ok(sandbox) => sandbox,
         Err(code) => {
             eprintln!("landing_regenerate_unconfined code={code}");
@@ -590,12 +593,15 @@ const REGENERATE_CACHE: &str = "regenerate";
 /// Builds the sandbox a lockfile's tool runs in, as an agent's is built: the project's
 /// network choice with no model, never listening on the owner's model ports, its
 /// toolchains, hidden folders and the engine's guarded secrets, written to the given
-/// worktree only beside its own home and temp folders and, when the tool's PATH finds a uv
-/// the engine may run, a tool cache primed for this run in the scratch folder, so uv's
-/// `.git` cache markers are the engine's `/dev/null` links the SM1-R rule allows (T8), and
-/// installs its profile. Inputs: the store, the change set, the owner checkout's canonical
-/// root, the engine runtime folder, the temporary worktree, the scratch folders and the
-/// owner's settings files. Output: the sandbox, or the plain code of what refused it.
+/// worktree only beside its own home and temp folders and, for a uv.lock clash when the
+/// tool's PATH finds a uv the engine may run, a tool cache primed for this run in the
+/// scratch folder, so uv's `.git` cache markers are the engine's `/dev/null` links the
+/// SM1-R rule allows (T8); another lockfile's clash never waits on uv priming. Installs its
+/// profile. Inputs: the store, the change set, the owner checkout's canonical root, the
+/// engine runtime folder, the temporary worktree, the scratch folders, the owner's settings
+/// files and whether a uv.lock clashes. Output: the sandbox, or the plain code of what
+/// refused it.
+#[allow(clippy::too_many_arguments)]
 fn confined(
     db: &Connection,
     record: &Record,
@@ -604,6 +610,7 @@ fn confined(
     worktree: &Path,
     scratch: &Scratch,
     settings: Option<&(PathBuf, PathBuf)>,
+    uv_clash: bool,
 ) -> Result<ProjectSandbox, &'static str> {
     let kept = match settings {
         Some((global, project)) => crate::sandbox::settings_owner_ports(global, project)?,
@@ -628,8 +635,10 @@ fn confined(
     .and_then(|sandbox| sandbox.allow_scratch(&tmp))
     .and_then(|sandbox| sandbox.confine_to_worktree(worktree))
     .map_err(|_| "sandbox_refused")?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = uv_clash;
     #[cfg(target_os = "macos")]
-    if let Some(uv) = sandbox.tool_program("uv") {
+    if uv_clash && let Some(uv) = sandbox.tool_program("uv") {
         let project = root.to_str().ok_or("tool_cache_project_name")?;
         let cache = crate::sandbox::tool_cache::prepare(
             &scratch.folder,
