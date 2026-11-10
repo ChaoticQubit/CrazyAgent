@@ -15865,7 +15865,7 @@ fn a_stop_that_leaves_a_command_running_says_so_and_the_agent_reads_stopped() {
         assert!(Instant::now() < deadline, "the stand-in never started");
         std::thread::sleep(Duration::from_millis(10));
     };
-    let lineage = Lineage::of(leader.id()).unwrap();
+    let lineage = Lineage::of(leader.id(), None).unwrap();
     leader.kill().unwrap();
     leader.wait().unwrap();
     let (reports, reported) = channel();
