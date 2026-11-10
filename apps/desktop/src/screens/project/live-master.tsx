@@ -184,7 +184,7 @@ export function MasterArea({ data }: { data: ProjectData }) {
   const area = harness === undefined || !runsLive(harness) || liveTerminalOff(data.team.result, data.id)
     ? <ConversationTab data={data} />
     : <LiveMaster key={data.id} data={data} harness={harness} />;
-  return <MasterSettingsDrawer data={data} liveHarness={runsLive(harness)}>{area}</MasterSettingsDrawer>;
+  return <MasterSettingsDrawer data={data} liveHarness={harness === undefined || runsLive(harness)}>{area}</MasterSettingsDrawer>;
 }
 
 function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {

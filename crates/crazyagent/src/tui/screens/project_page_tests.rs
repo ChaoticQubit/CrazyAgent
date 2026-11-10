@@ -1365,6 +1365,15 @@ async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    until_place(
+        &mut shell,
+        &mut connection,
+        &Place::Master {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+        },
+    )
+    .await;
     leave_the_master_view(&mut shell, &notes, "Notes CLI");
     pump(&mut shell, &mut connection).await;
     say(&mut shell, &mut connection, "Add a dark theme").await;
@@ -4643,6 +4652,59 @@ async fn a_conversation_entry_under_live_terminal_off_keeps_the_console_and_says
         )
         .await;
     }
+}
+
+/// A read taken before Team settings opened does not decide the next Conversation entry: with
+/// Live terminal turned Off there, that entry keeps the console, with no open, no bounce and
+/// no warning (rv-secreview q4-3 F1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_from_before_team_settings_does_not_decide_the_next_conversation_entry() {
+    const OFF: &str = "Live terminal is off for this project.";
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let tab = |tab: ProjectTab| Place::Project {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        tab,
+    };
+    let settings = Place::TeamSettings {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+    };
+    let mut connection = engine.connect();
+    let mut shell = shell_on(&tab(ProjectTab::Agents));
+    stays_on(
+        &mut shell,
+        &mut connection,
+        &tab(ProjectTab::Agents),
+        "the first read lands with Live terminal On",
+    )
+    .await;
+
+    shell.key(Key::Char('s'));
+    until_place(&mut shell, &mut connection, &settings).await;
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('V'));
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("Live terminal is off: the master"),
+        "V saved Off:\n{shown}"
+    );
+
+    shell.key(Key::Esc);
+    shell.key(Key::ShiftLeft);
+    for _ in 0..5 {
+        stays_on(
+            &mut shell,
+            &mut connection,
+            &tab(ProjectTab::Conversation),
+            "the entry after Off in Team settings",
+        )
+        .await;
+    }
+    let shown = render(&mut shell, 100, 40);
+    assert!(!shown.contains(OFF), "no warning on entry:\n{shown}");
 }
 
 /// N-T1 B, Switch tabs: Shift-←→ in the master view move the project page one tab, so a

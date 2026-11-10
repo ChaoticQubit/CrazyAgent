@@ -80,6 +80,16 @@ export function mountArea(master, on, catalog = true) {
   flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, catalog ? CATALOG : undefined) })));
 }
 
+/** Mounts the project's master area with no master known yet, the plan not read. Output:
+ * none. */
+export function mountAreaNoMaster() {
+  const panel = page();
+  root = createRoot(panel);
+  const read = data("codex", true, undefined, CATALOG);
+  read.setup = { kind: "not_ready" };
+  flushSync(() => root.render(createElement(MasterArea, { data: read })));
+}
+
 /** Mounts the project's master area with the Live terminal setting Off. Inputs: the master
  * harness and the engine's run flag. Output: none. */
 export function mountAreaOff(master, on) {
