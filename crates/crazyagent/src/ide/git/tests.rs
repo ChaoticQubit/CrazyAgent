@@ -404,6 +404,38 @@ fn the_shim_keeps_the_relay_secret_from_git_and_hands_it_to_the_forwarder() {
     assert_eq!(String::from_utf8_lossy(&pushed.stdout), "dummy-secret");
 }
 
+/// SEC-4-R2-LOWS F2: the shim takes the relay's secret off git's environment, and hands it
+/// to the forwarder, under the name the extension sets it by, so a rename on either side
+/// fails here instead of an `unset` that clears nothing while every other row still passes.
+#[test]
+fn the_shim_clears_the_relay_secret_under_the_name_the_extension_sets() {
+    let relay = include_str!("../../../../../apps/ide-extension/src/git.ts");
+    let name = relay
+        .split("export const GIT_SECRET_ENV = \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the extension declares the variable of the relay's secret");
+    assert!(!name.is_empty());
+    assert!(
+        SHIM_TEXT.contains(&format!("\nsecret=${name}\nunset {name}\n")),
+        "the shim keeps and clears {name}"
+    );
+    let flow = private_flow(
+        Path::new("/private/project"),
+        Path::new("/private/index"),
+        "git",
+    )
+    .unwrap();
+    assert!(
+        flow.contains(&format!("{name}=\"$secret\"")),
+        "the forwarder gets {name}"
+    );
+    assert_eq!(
+        crate::ide::bridge::engine_step::FORWARDER_VARIABLES[2],
+        name
+    );
+}
+
 /// INT1-1, INT1-R2-1: a git that cannot read an agent folder's `.git` treats it as missing
 /// and walks up to the project's repository. The ceiling is the agents root of the project's
 /// own layout: git in an agent folder finds no repository, while the project folder and its
