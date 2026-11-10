@@ -41,8 +41,9 @@ const MODIFIED: &str = "stat -L -c %Y";
 /// bound. Takes the read spacing and the count. Returns the command text.
 fn holder_command(loops: u32, late: u32) -> String {
     assert!(loops >= 1 && late >= 1);
-    let _ = MODIFIED;
-    "while [ -S \"${TMUX%,*,*}\" ]; do sleep 2; done; p=${TMUX%,*}; kill \"${p##*,}\"".to_owned()
+    format!(
+        "s=${{TMUX%,*,*}}; i=0; a=0; l=0; while [ -S \"$s\" ]; do i=$((i+1)); if [ $i -ge {loops} ]; then i=0; d=$({MODIFIED} \"$s\" 2>/dev/null) && n=$(date +%s) && if [ \"$n\" -lt \"$d\" ]; then a=1; l=0; elif [ $a = 1 ]; then l=$((l+1)); fi; [ $l -ge {late} ] && break; fi; sleep 2; done; p=${{TMUX%,*}}; kill \"${{p##*,}}\""
+    )
 }
 
 /// Moves one server's deadline (FBTMUX-P1): sets the modification time of its socket, which
@@ -53,7 +54,7 @@ fn renew_socket(socket: &Path, until: SystemTime) -> Result<(), HostError> {
     let Ok(metadata) = std::fs::symlink_metadata(socket) else {
         return Ok(());
     };
-    if !metadata.file_type().is_socket() || metadata.uid() != user() || until > UNIX_EPOCH {
+    if !metadata.file_type().is_socket() || metadata.uid() != user() {
         return Ok(());
     }
     let seconds = until

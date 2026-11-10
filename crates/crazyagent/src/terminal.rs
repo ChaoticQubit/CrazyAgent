@@ -607,7 +607,7 @@ pub fn quit(host: &(impl Host + ?Sized), keep_team_agents: bool) -> Result<(), H
     };
     let keep: Vec<AgentId> = alive
         .into_iter()
-        .filter(|agent| agent.team_agent().is_some())
+        .filter(|agent| keep_team_agents && agent.team_agent().is_some())
         .collect();
     host.close(&keep)
 }

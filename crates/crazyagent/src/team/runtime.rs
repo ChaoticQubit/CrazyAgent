@@ -2383,7 +2383,8 @@ impl TeamRuntime {
     /// agent process group stops. Waits a bounded time for each agent thread. Returns the
     /// panes left running.
     pub fn shutdown(&mut self) -> Result<Vec<AgentId>, EngineError> {
-        let keep_panes = true;
+        let keep_panes = crate::quit_settings::load(&self.connection)
+            .map_or(true, |settings| settings.keeps_team_agents());
         let mut kept = BTreeSet::new();
         for (id, worker) in &self.workers {
             if keep_panes && !worker.stopping && self.has_pane_record(*id)? {
