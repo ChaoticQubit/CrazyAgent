@@ -11570,3 +11570,6 @@ mod live_native_lead_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_network_none_tests.rs"]
 mod live_network_none_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_stop_hook_tests.rs"]
+mod live_stop_hook_tests;
