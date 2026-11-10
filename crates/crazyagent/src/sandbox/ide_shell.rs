@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// What a Sandboxed IDE terminal shows on a system with no qualified sandbox for it.
+/// What a confined IDE terminal shows on a system with no qualified sandbox for it.
 pub const UNAVAILABLE: &str =
-    "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it.";
+    "This terminal is unavailable: this system has no qualified sandbox for it.";
 
 /// The variables a Sandboxed IDE terminal takes from the engine's own environment. One the
 /// engine does not have is removed, and every other variable is dropped, so the IDE
@@ -30,15 +30,15 @@ const SHELL_ARGUMENTS_MAX: usize = 16;
 const FOLDER: &str = "ide-shell";
 const NO_STAGING: &str =
     "This terminal can't stage or commit. Use Source Control, or a Full access terminal.";
-/// The words a pane puts in front of the owner's login shell: a plain shell prints
-/// [`NO_STAGING`] and becomes that login shell. The pane host repaints the terminal as it
+const NO_STAGING_RAISE_ACCESS: &str = "This terminal can't stage or commit. Use Source Control, or a Full access terminal after raising project access.";
+/// The words a pane puts in front of the owner's login shell: a plain shell prints the line
+/// that follows them and becomes that login shell. The pane host repaints the terminal as it
 /// attaches, so a line written from outside the pane would be wiped.
-const SAYS_THEN_SHELL: [&str; 5] = [
+const SAYS_THEN_SHELL: [&str; 4] = [
     "/bin/sh",
     "-c",
     "printf '%s\\n' \"$1\"; shift; exec \"$@\"",
     "sh",
-    NO_STAGING,
 ];
 /// Where a pane's argument list names the shell: after `sandbox-exec -f <profile>`.
 const SHELL_ARGUMENT: usize = 3;
@@ -213,11 +213,11 @@ pub fn command(_launch: &Launch<'_>) -> Result<Command, SandboxError> {
 /// Builds the Sandboxed terminal as the engine's terminal host runs it in a pane: the same
 /// argument list, working folder and environment as [`command`], as text, with a login shell
 /// started through [`SAYS_THEN_SHELL`] so the owner reads that this terminal cannot stage or
-/// commit. Input: the launch. Output: the pane command, or [`command`]'s refusal, or
-/// `Invalid` for a part that is not UTF-8.
+/// commit. Inputs: the launch and the level the project is at, which picks those words.
+/// Output: the pane command, or [`command`]'s refusal, or `Invalid` for a part that is not UTF-8.
 pub fn interactive(
     launch: &Launch<'_>,
-    _project_access: AgentAccess,
+    project_access: AgentAccess,
 ) -> Result<InteractiveCommand, SandboxError> {
     let command = command(launch)?;
     let text = |value: &OsStr| {
@@ -244,10 +244,11 @@ pub fn interactive(
     assert_eq!(env.len(), command.get_envs().count());
     if launch.arguments.is_empty() {
         assert_eq!(OsStr::new(&argv[SHELL_ARGUMENT]), launch.shell.as_os_str());
-        argv.splice(
-            SHELL_ARGUMENT..SHELL_ARGUMENT,
-            SAYS_THEN_SHELL.map(str::to_owned),
-        );
+        let says = SAYS_THEN_SHELL
+            .into_iter()
+            .chain([staging_line(project_access)])
+            .map(str::to_owned);
+        argv.splice(SHELL_ARGUMENT..SHELL_ARGUMENT, says);
     }
     Ok(InteractiveCommand {
         argv,
@@ -255,6 +256,15 @@ pub fn interactive(
         env,
         transcript: Transcript::Unavailable,
     })
+}
+
+/// What a confined terminal says about staging. Input: the level the project is at. Output:
+/// the line, which says to raise the project's access first unless it is at Full access.
+fn staging_line(project_access: AgentAccess) -> &'static str {
+    match project_access {
+        AgentAccess::Full => NO_STAGING,
+        AgentAccess::Sandboxed | AgentAccess::OwnBranch => NO_STAGING_RAISE_ACCESS,
+    }
 }
 
 /// Reads the owner's login shell from the account database, never from `SHELL`.

@@ -13,10 +13,10 @@ export const INPUT_BYTES_MAX = 4096;
 
 /** What the terminal shows where the engine has no qualified sandbox for it. */
 export const UNAVAILABLE =
-  "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it.";
+  "This terminal is unavailable: this system has no qualified sandbox for it.";
 
-/** What the terminal shows when the engine already runs its most Sandboxed terminals. */
-export const BUSY = "Too many Sandboxed terminals are open. Close one, then open a new terminal.";
+/** What the terminal shows when the engine already runs its most confined terminals. */
+export const BUSY = "This terminal can't start: too many are open. Close one, then open a new terminal.";
 
 /** What the terminal shows when its level is above the project's access. */
 export const ABOVE_PROJECT = "Raise project access to use this";
@@ -88,14 +88,14 @@ export function clampSize(size: Size | undefined): Size {
 }
 
 /**
- * Explains why a Sandboxed terminal stopped, for the terminal itself. Input: the engine's
+ * Explains why a confined terminal stopped, for the terminal itself. Input: the engine's
  * plain code. Output: one line; a code that is not plain text is not repeated.
  */
 export function stopped(code: string): string {
   if (code === "ide_terminal_unavailable") return UNAVAILABLE;
   if (code === "ide_terminals_busy") return BUSY;
   if (code === "ide_terminal_above_project") return ABOVE_PROJECT;
-  return `The Sandboxed terminal stopped (${CODE.test(code) ? code : "unknown"}).`;
+  return `This terminal stopped (${CODE.test(code) ? code : "unknown"}).`;
 }
 
 /**
