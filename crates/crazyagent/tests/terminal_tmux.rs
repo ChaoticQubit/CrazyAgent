@@ -2172,6 +2172,58 @@ fn a_restarted_engine_refuses_a_teammates_server_whose_pin_record_is_gone() {
     );
 }
 
+/// PLCC-L1: a lead whose pin is refused does not stop a close. The next lead and the
+/// engine's own server still end, and the close reports the refusal.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let team = root.join("team");
+    let (refused, next) = (AgentId::team(1).unwrap(), AgentId::team(2).unwrap());
+    let next_home = crazyagent::team::runtime::agent_home(&team, 2);
+    std::fs::create_dir_all(&next_home).unwrap();
+    crazyagent::sandbox::toolchains::make_tmp(&next_home).unwrap();
+    for profile in [
+        crazyagent::team::runtime::agent_profile(&team, 2),
+        crazyagent::team::runtime::agent_teammates_profile(&team, 2),
+    ] {
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    }
+    let _next_own = Server {
+        tmux: lead.tmux.clone(),
+        socket: crazyagent::terminal::harness_socket(&root, &next).unwrap(),
+    };
+    let _next_mates = Server {
+        tmux: lead.tmux.clone(),
+        socket: crazyagent::terminal::renew_teammates_socket(&root, &next).unwrap(),
+    };
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    host.spawn_own_server(&refused, &lead.confined("one$ ", &["/bin/sh"]))
+        .unwrap();
+    host.spawn_own_server(&next, &lead.confined("two$ ", &["/bin/sh"]))
+        .unwrap();
+    host.spawn(
+        &AgentId::team(3).unwrap(),
+        &lead.shell("three$ ", &["/bin/sh"]),
+    )
+    .unwrap();
+    std::fs::remove_file(crazyagent::team::runtime::agent_teammates_server_pid(
+        &team, 1,
+    ))
+    .unwrap();
+
+    let restarted = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    assert_eq!(
+        restarted.close(&[]).map_err(|problem| problem.0),
+        Err("terminal_own_server_unavailable".to_string())
+    );
+    let after = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    assert_eq!(after.alive().unwrap(), Vec::<AgentId>::new());
+    crazyagent::sandbox::toolchains::remove_tmp(&next_home).unwrap();
+}
+
 #[test]
 fn quiet_through_the_engine_host_answers_for_an_agent_on_the_engine_server() {
     let root = root();
