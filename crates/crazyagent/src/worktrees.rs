@@ -268,8 +268,9 @@ fn git_until(
 }
 
 /// Builds the engine's Git process: the host Git with a cleared environment, no system
-/// or global config, hooks, fsmonitor, replace objects, protocols or automatic
-/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process.
+/// or global config, hooks, fsmonitor, replace objects, grafts, commit-graph files,
+/// protocols or automatic maintenance. Inputs: the repository and the arguments. Output:
+/// the unspawned process.
 fn git_command(repository: &Path, args: &[&str]) -> Process {
     let mut command = Process::new("/usr/bin/git");
     command
@@ -281,6 +282,7 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
         .args([
@@ -300,6 +302,10 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
             "gc.auto=0",
             "-c",
             "maintenance.auto=false",
+            "-c",
+            "core.commitGraph=false",
+            "-c",
+            "advice.graftFileDeprecated=false",
         ])
         .arg("--git-dir")
         .arg(repository.join(".git"))

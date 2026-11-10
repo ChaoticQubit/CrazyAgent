@@ -70,6 +70,72 @@ fn quoted(path: &Path) -> String {
     format!("'{text}'")
 }
 
+/// land-19 r2 M1 and L1: in a project with no `.git/info` or `.git/objects/info`, as a clone
+/// or `init --template=` leaves it, no confined process makes `.git/info`, `.git/shallow` or
+/// an alternates file in any letter case, the long s included, from which the owner's git
+/// would read grafts, shallow cuts or other object stores through the case-insensitive
+/// volume.
+#[test]
+fn sandboxed_child_cannot_make_git_info_or_shallow_in_any_letter_case() {
+    let case = case();
+    let git = case.project.join(".git");
+    fs::create_dir_all(git.join("objects")).unwrap();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("info.sb");
+    for script in [
+        format!("mkdir {}", quoted(&git.join("INFO"))),
+        format!("mkdir {}", quoted(&git.join("info"))),
+        format!("echo x > {}", quoted(&git.join("SHALLOW"))),
+        format!("echo x > {}", quoted(&git.join("shallow"))),
+        format!(
+            "echo x > {}",
+            quoted(&case.project.join(".GIT").join("Shallow"))
+        ),
+        format!("echo x > {}", quoted(&git.join("\u{17f}hallow"))),
+        format!(
+            "mkdir -p {0} && echo x > {0}/ALTERNATES",
+            quoted(&git.join("objects").join("INFO"))
+        ),
+        format!(
+            "mkdir -p {0} && echo x > {0}/Http-Alternates",
+            quoted(&git.join("objects").join("Info"))
+        ),
+    ] {
+        let output = run(&sandbox, &profile, &script);
+        assert!(!output.status.success(), "{script}");
+    }
+    assert_eq!(fs::read_dir(&git).unwrap().count(), 1);
+    let info = git.join("objects").join("info");
+    assert!(!info.join("alternates").exists() && !info.join("http-alternates").exists());
+}
+
+/// land-19 r1 M1: no confined process writes a commit-graph file into the project's object
+/// store, in any letter case, since git answers ancestry from it without reading commits.
+#[test]
+fn sandboxed_child_cannot_write_a_commit_graph_in_any_letter_case() {
+    let case = case();
+    let info = case.project.join(".git").join("objects").join("info");
+    fs::create_dir_all(info.join("commit-graphs")).unwrap();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("graph.sb");
+    for target in [
+        info.join("commit-graph"),
+        case.project.join(".git/OBJECTS/Info/Commit-Graph"),
+        info.join("commit-graphs").join("graph-0.graph"),
+        case.project
+            .join(".git/objects/INFO/COMMIT-GRAPHS/commit-graph-chain"),
+    ] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("echo forged > {}", quoted(&target)),
+        );
+        assert!(!output.status.success(), "{}", target.display());
+    }
+    assert!(!info.join("commit-graph").exists());
+    assert_eq!(fs::read_dir(info.join("commit-graphs")).unwrap().count(), 0);
+}
+
 #[test]
 fn sandboxed_child_writes_only_inside_the_project_and_its_own_dirs() {
     let case = case();

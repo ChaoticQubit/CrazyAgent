@@ -1815,6 +1815,7 @@ impl ProjectSandbox {
         text.push_str(&self.git_link_denies());
         text.push_str(&self.submodule_denies());
         text.push_str(&self.nested_git_denies());
+        text.push_str(&self.ancestry_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
             text.push_str(&format!(
@@ -2092,6 +2093,50 @@ impl ProjectSandbox {
                     + usize::from(self.setup.is_some())
         );
         assert!(text.ends_with(")\n"));
+        text
+    }
+
+    /// The Seatbelt rule that keeps an agent from writing what git reads ancestry or objects
+    /// from beside the commits, in every letter case the volume folds together (`any_case`,
+    /// the Kelvin sign and long s included): a commit-graph file, single or split, and an
+    /// `alternates` or `http-alternates` file in the project's object store or the one its
+    /// checkout shares (land-19 r1 M1, r2 L1), and the project's `.git/info` (which holds
+    /// `grafts`) and `.git/shallow` (land-19 r2 M1). A forged graph or graft could claim an
+    /// agent commit is on the landing tip. The case-exact denies on `.git/info`,
+    /// `.git/shallow` and the alternates files miss a case variant made where the name does
+    /// not exist yet, as after a clone or `init --template=`, which git then reads through
+    /// the case-insensitive volume. Engine git reads no graph or graft; this also keeps the
+    /// owner's own git from being handed one. Input: the policy. Output: the rule text.
+    fn ancestry_denies(&self) -> String {
+        let git = format!(
+            "{}/{}",
+            seatbelt_pattern(&self.project_root),
+            any_case(".git")
+        );
+        let mut stores = vec![format!("{git}/{}", any_case("objects"))];
+        if let Some(checkout) = &self.checkout {
+            stores.push(seatbelt_pattern(&checkout.objects));
+        }
+        let mut text = format!(
+            "(deny file-write*\n  (regex #\"^{git}/({}(/.*)?|{})$\")",
+            any_case("info"),
+            any_case("shallow")
+        );
+        let held = format!(
+            "{}{}?(/.*)?|{}|{}",
+            any_case("commit-graph"),
+            any_case("s"),
+            any_case("alternates"),
+            any_case("http-alternates")
+        );
+        for store in &stores {
+            text.push_str(&format!(
+                "\n  (regex #\"^{store}/{}/({held})$\")",
+                any_case("info")
+            ));
+        }
+        text.push_str(")\n");
+        assert_eq!(text.matches("(regex #\"^/").count(), stores.len() + 1);
         text
     }
 
