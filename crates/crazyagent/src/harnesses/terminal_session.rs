@@ -59,6 +59,7 @@ pub struct TerminalSession {
     turn: bool,
     held: bool,
     over_hold: bool,
+    noticed: bool,
     own_held: bool,
     live: bool,
     own: bool,
@@ -322,6 +323,7 @@ impl TerminalSession {
             turn: false,
             held: false,
             over_hold: false,
+            noticed: false,
             own_held: false,
             live: false,
             own: false,
@@ -720,7 +722,8 @@ impl TerminalSession {
                     continue;
                 }
                 TranscriptEvent::BackgroundEnded { id } => {
-                    self.background.remove(&id);
+                    let ended = self.background.remove(&id);
+                    self.noticed |= self.held && ended;
                     continue;
                 }
                 _ => {}
@@ -768,9 +771,10 @@ impl TerminalSession {
                 }
                 TranscriptEvent::TurnStarted => {
                     if self.held {
-                        self.over_hold = !self.background.is_empty();
+                        self.over_hold = !self.background.is_empty() && !self.noticed;
                     }
                     self.held = false;
+                    self.noticed = false;
                     continue;
                 }
                 TranscriptEvent::Waiting

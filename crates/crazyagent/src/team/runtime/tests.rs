@@ -24435,6 +24435,55 @@ fn a_native_lead_s_stop_names_a_process_it_started_on_its_own_that_still_runs() 
     );
 }
 
+/// TEAM-8-R2-L1: a live harness whose pane closes while a process it started in a group of
+/// its own, still in the pane's session where the stop's listing finds it, runs on reports
+/// both through `live_serve`, with the close last, so the agent reads as failed and the owner
+/// still sees what runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_last() {
+    let script = LEAVING_CLAUDE.replace(
+        "POSIX::setsid() > 0 or die;",
+        "defined(POSIX::setpgid(0, 0)) or die; $SIG{HUP} = 'IGNORE';",
+    );
+    assert_ne!(script, LEAVING_CLAUDE);
+    let (problem, running) = ended_native_lead(&script, |session, host, lead| {
+        let AgentSession::Terminal(session) = session else {
+            panic!("the native lead runs in a terminal");
+        };
+        host.kill(lead).unwrap();
+        let (_orders, receive) = std::sync::mpsc::channel();
+        let (reports, _reported) = std::sync::mpsc::channel();
+        let (cancel, leave) = (AtomicBool::new(false), AtomicBool::new(false));
+        let (ended, watched) = std::sync::mpsc::channel::<()>();
+        let cancelling = &cancel;
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                if watched
+                    .recv_timeout(std::time::Duration::from_secs(15))
+                    .is_err()
+                {
+                    cancelling.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            let problem = live_serve(*session, &receive, &reports, &cancel, &leave, false, None);
+            let _ = ended.send(());
+            problem
+        })
+    });
+    assert!(
+        running,
+        "the lead's own process outlived the close: {problem:?}"
+    );
+    let problem = problem.expect("a close with a command left reports a problem");
+    assert!(problem.contains("harness_sandbox_left"), "{problem}");
+    assert!(problem.contains(PROCESS_CLOSED), "{problem}");
+    assert!(
+        !only_left_running(&problem),
+        "the close comes last: {problem}"
+    );
+}
+
 /// Keeper r1 F1: a native lead's pane an earlier engine left, ended with no session, is not
 /// confirmed gone while a process the lead started in a session of its own still runs.
 #[cfg(target_os = "macos")]
