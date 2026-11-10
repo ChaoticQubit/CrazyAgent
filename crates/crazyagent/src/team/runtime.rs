@@ -1827,7 +1827,7 @@ impl TeamRuntime {
                 Err(_) => return Ok(false),
             }
         }
-        let error = if confirmed {
+        let note = if confirmed {
             reason.to_owned()
         } else {
             with_code(reason, Some(crate::harnesses::leftovers::UNCERTAIN))
@@ -1836,7 +1836,7 @@ impl TeamRuntime {
             .execute(
                 "UPDATE team_agents SET status='stopped', task=NULL, error=?2, stopped_ms=?3
                  WHERE id=?1 AND status IN ('starting','idle','working')",
-                params![id, error, now_ms()],
+                params![id, note, now_ms()],
             )
             .map_err(error)?;
         Ok(true)
