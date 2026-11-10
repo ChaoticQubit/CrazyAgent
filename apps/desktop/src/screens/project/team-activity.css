@@ -35,13 +35,8 @@
 }
 
 @media (max-width: 1000px) {
-  .ta-split,
-  .ta-split.with-terminal {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .ta-side {
-    height: 360px;
+  .ta-split {
+    grid-template-columns: minmax(0, 1fr) 240px;
   }
 }
 
