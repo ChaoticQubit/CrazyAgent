@@ -63,7 +63,17 @@ test("no trial step changes the owner's Terminal input, since a restore cannot s
   const steps = [fileURLToPath(new URL("./trial3-steps.mjs", import.meta.url)), fileURLToPath(new URL("./trial-kit.mjs", import.meta.url))];
   const sources = [...steps, ...readdirSync(CHECKS).filter((file) => file.endsWith(".mjs")).map((file) => join(CHECKS, file))];
   assert(sources.length > steps.length, "the scan read the check modules");
-  assert.deepEqual(sources.filter((path) => readFileSync(path, "utf8").includes('segment("Terminal input"')), []);
+  const writers = (spellings) => sources.filter((path) => spellings.some((spelling) => readFileSync(path, "utf8").includes(spelling)));
+  assert.deepEqual(writers(['"Terminal input"', "localStorage.setItem"]), []);
+});
+
+test("a native window given a home of its own also has its web store moved there, as HOME alone leaves it in the real user Library", () => {
+  const native = fileURLToPath(new URL(".", import.meta.url));
+  const windows = readdirSync(native).filter((file) => file.endsWith(".wdio.conf.mjs"))
+    .flatMap((file) => readFileSync(join(native, file), "utf8").split("\n"))
+    .filter((line) => /CRAZYAGENT_DESKTOP_SOCKET.*\bHOME: /.test(line));
+  assert.equal(windows.length, 2);
+  for (const line of windows) assert.match(line, /CFFIXED_USER_HOME: /);
 });
 
 test("plan refuses an id that a desktop and a TUI module both use", async () => {
