@@ -127,57 +127,69 @@ export async function terminalLive(kit, timeout) {
   return filled;
 }
 
-/** Lists the rows a paste drew: those with a letter or digit that differ from the rows before
- * it. A rule or box edge is left out, as the next box edge can land on its row once the message
- * is sent. Inputs: the rows before and after the paste. Output: [{ at, row }]. */
-export function drawnRows(before, after) {
-  return after.flatMap((row, at) => (row !== before[at] && /[\p{L}\p{N}]/u.test(row) ? [{ at, row }] : []));
+/** The characters of a message's start that name it in the input area, as leader/tell.sh reads it. */
+const MESSAGE_START_CHARS = 20;
+
+/** How Claude Code and Codex draw a long paste in their input area. */
+const PASTE_PLACEHOLDER = "[Pasted ";
+
+/** A row of nothing but rule characters, the edges of a ruled input box. */
+const RULE_ROW = /^\s*\u2500+\s*$/;
+
+/** A row that opens with a prompt mark, where a harness with no ruled box takes input. */
+const PROMPT_ROW = /^\s*[\u203a\u276f>]/;
+
+/** The first characters of a message, by which its paste is known. Input: the text. Output:
+ * the start of its first line; throws for a message with no text, which every row would match. */
+export function messageStart(text) {
+  const start = text.trim().split("\n")[0].trim().slice(0, MESSAGE_START_CHARS);
+  if (start === "") throw new Error("a message to send has text");
+  return start;
 }
 
-/** Says whether a drawn paste still sits on the terminal: any of its rows reads as it did.
- * Inputs: its rows and the terminal's rows now. Output: a boolean. */
-export function pasteWaiting(drawn, rows) {
-  return drawn.some(({ at, row }) => rows[at] === row);
+/** Picks a harness's input area off its screen by what the rows say: between the last two rule
+ * rows, as leader/tell.sh reads it, or with no ruled box from the last prompt row to the bottom.
+ * Input: the terminal rows. Output: those rows, none when no input area shows. */
+export function inputRows(rows) {
+  const rules = rows.flatMap((row, at) => (RULE_ROW.test(row) ? [at] : []));
+  if (rules.length >= 2) return rows.slice(rules.at(-2) + 1, rules.at(-1));
+  const prompt = rows.findLastIndex((row) => PROMPT_ROW.test(row));
+  return prompt < 0 ? [] : rows.slice(prompt);
 }
 
-/** Waits until a paste has drawn and stopped changing: the rows that differ from before it and
- * held still since the last read are the same on two reads in a row, so an animated row neither
- * holds this up nor counts. Inputs: the terminal and the rows before the paste. Output: the
- * drawn rows; throws when none held still, so no Enter is pressed on an unseen paste. */
-async function steadyPaste(terminal, before) {
-  let last = before;
-  let held = [];
+/** Says whether a paste still sits in the input area: its start or the paste placeholder shows
+ * there, wherever the area has moved and whatever the transcript holds. Inputs: the message's
+ * start and the terminal rows. Output: a boolean. */
+export function pasteWaiting(start, rows) {
+  const area = inputRows(rows).join(" ");
+  return area.includes(start) || area.includes(PASTE_PLACEHOLDER);
+}
+
+/** Waits until a paste shows in the input area and that area reads the same on two reads in a
+ * row, so Enter never lands on a half-drawn paste. Inputs: the terminal and the message's
+ * start. Output: none; throws when it never showed, so no Enter is pressed on an unseen paste. */
+async function steadyPaste(terminal, start) {
+  let last = null;
   for (let reads = 0; reads < DRAW_READS_MAX; reads += 1) {
     await terminal.pause();
     const rows = await terminal.rows();
-    const kept = drawnRows(before, rows).filter(({ at, row }) => last[at] === row);
-    if (kept.length > 0 && JSON.stringify(kept) === JSON.stringify(held)) return kept;
-    held = kept;
-    last = rows;
+    const area = JSON.stringify(inputRows(rows));
+    if (area === last && pasteWaiting(start, rows)) return;
+    last = area;
   }
-  throw new Error("the paste never drew on the master terminal: Enter was not pressed");
-}
-
-/** The first characters of a message. Input: the text. Output: nothing yet. */
-export function messageStart(text) {
-  return text;
-}
-
-/** The rows of the input area. Input: the terminal rows. Output: nothing yet. */
-export function inputRows(rows) {
-  return [];
+  throw new Error("the paste never drew in the master's input area: Enter was not pressed");
 }
 
 /** Pastes a message and presses Enter until its turn has started: a long paste followed at once
  * by Enter can sit unsent, and a first Enter can only clear a notice. The turn has started when
- * the caller's read says so or, with no such read, once the drawn paste left the terminal.
- * Inputs: the terminal, { rows, paste, enter, pause }, and the read for a terminal that draws no
- * echo. Output: how many times Enter was pressed; throws when the paste stayed unsent. */
+ * the caller's read says so or, with no such read, once the paste left the input area. Inputs:
+ * the terminal, { rows, paste, enter, pause }, the message and the read for a terminal that draws
+ * no echo. Output: how many times Enter was pressed; throws when the paste stayed unsent. */
 export async function pasteAndSend(terminal, text, started) {
-  const before = await terminal.rows();
+  const start = messageStart(text);
   await terminal.paste();
-  const drawn = started ? [] : await steadyPaste(terminal, before);
-  const begun = started ?? (async () => !pasteWaiting(drawn, await terminal.rows()));
+  if (!started) await steadyPaste(terminal, start);
+  const begun = started ?? (async () => !pasteWaiting(start, await terminal.rows()));
   for (let presses = 1; presses <= ENTER_PRESSES_MAX; presses += 1) {
     await terminal.enter();
     for (let reads = 0; reads < ENTER_READS_MAX; reads += 1) {
@@ -185,7 +197,7 @@ export async function pasteAndSend(terminal, text, started) {
       if (await begun()) return presses;
     }
   }
-  throw new Error(`the paste stayed on the master terminal after ${ENTER_PRESSES_MAX} Enter presses: it was not sent`);
+  throw new Error(`the paste stayed in the master's input area after ${ENTER_PRESSES_MAX} Enter presses: it was not sent`);
 }
 
 /** Sends one message to the live master as the owner does: through the message box when the

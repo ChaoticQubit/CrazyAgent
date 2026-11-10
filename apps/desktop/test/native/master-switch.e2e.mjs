@@ -7,8 +7,8 @@ import { setTimeout as pause } from "node:timers/promises";
 import { shownView } from "./agents-cards.mjs";
 import { TURN_S } from "./master-switch.wdio.conf.mjs";
 import { click, shown, toasts, unfold } from "./settings-steps.mjs";
-import { go, paste, pick, reopen, run, segment, tab, until, waitFor } from "./trial-kit.mjs";
-import { masterRows, sendToMaster, startIfPaused, teamNodes, terminalLive } from "./trial4/n-d8-master-reply.mjs";
+import { go, paste, pick, reopen, run, segment, tab, terminalTyping, until, waitFor } from "./trial-kit.mjs";
+import { KEYS, TERMINAL, masterRows, sendToMaster, startIfPaused, teamNodes, terminalLive } from "./trial4/n-d8-master-reply.mjs";
 
 const root = process.env.MS_ROOT;
 const GIT = "/usr/bin/git";
@@ -17,6 +17,7 @@ const UI_MS = 30000;
 const SETUP_MS = 120000;
 const SWITCH_MS = (TURN_S + 60) * 1000;
 const HOLD_MS = 40000;
+const TYPED_HOLD_MS = 8000;
 const MASTER = "#ps-master-harness";
 const APPLY = "#ps-apply-switch";
 const TITLE = ".pj-master-live .pj-console-title";
@@ -190,16 +191,42 @@ async function liveMaster(name) {
   return area();
 }
 
+/** Counts the turns a stand-in has printed on the master terminal. Input: the harness name
+ * it prints. Output: the count. */
+async function shownTurns(name) {
+  return (await masterRows()).filter((row) => row.includes(`${name} stand-in turn`)).length;
+}
+
 /** Sends one owner line to the live master and waits until its turn shows on the terminal.
- * Inputs: the line and the harness name the stand-in prints. Output: none. */
+ * Inputs: the line and the harness name the stand-in prints. Output: the input it went through. */
 async function ownerTurn(line, name) {
-  const shownTurns = async () => (await masterRows()).filter((row) => row.includes(`${name} stand-in turn`)).length;
-  const turns = await shownTurns();
-  await sendToMaster(kit, line, async () => (await shownTurns()) > turns);
+  const turns = await shownTurns(name);
+  const way = await sendToMaster(kit, line, async () => (await shownTurns(name)) > turns);
   await waitFor(async () => {
-    const now = await shownTurns();
+    const now = await shownTurns(name);
     return { done: now > turns, seen: `${now} ${name} turns on the terminal` };
   }, UI_MS, `${name} never started a turn for "${line}"`);
+  return way;
+}
+
+/** Types one line at the keyboard into the master terminal and checks what the saved Terminal
+ * input says must happen: with keys let through it starts a turn, with them held back none
+ * starts. Inputs: the line, the harness name the stand-in prints and whether keys reach it. */
+async function typeIntoTerminal(line, name, reaches) {
+  const turns = await shownTurns(name);
+  await $(TERMINAL).click();
+  assert.equal(await browser.execute(() => document.activeElement?.classList.contains("xterm-helper-textarea") === true), true, "the keys are typed with the focus on the terminal");
+  await browser.keys(line);
+  await browser.keys(KEYS.enter);
+  if (reaches) {
+    await waitFor(async () => {
+      const now = await shownTurns(name);
+      return { done: now > turns, seen: `${now} ${name} turns on the terminal, ${turns} before the typing` };
+    }, UI_MS, "keys typed at the terminal never reached the harness");
+    return;
+  }
+  await pause(TYPED_HOLD_MS);
+  assert.equal(await shownTurns(name), turns, "keys typed at the terminal reached the harness under Message box only");
 }
 
 /** Reads the owner turns the engine counted from the live terminal in the project's newest
@@ -241,6 +268,7 @@ describe("A saved master harness change reaches the live master as the owner's A
   before(async () => {
     await until(() => browser.execute(() => Boolean(window.__TAURI_INTERNALS__)), 120000, "the app window never loaded");
     await storeIsTheFixtures();
+    terminalTyping(browser);
     await until(async () => (await invoke("desktop_connect").catch(() => ({}))).connected === true, 60000, "the app never connected to the test engine");
     assert.equal((await invoke("desktop_save_owner_profile", { profile: { name: "E2E Owner" }, generation: ++generation })).outcome, "applied");
     mkdirSync(join(root, "projects"), { mode: 0o700 });
@@ -307,15 +335,16 @@ describe("A saved master harness change reaches the live master as the owner's A
     assert.deepEqual(switches(id), ["codex"], "the engine wrote one switch row, to Codex");
   });
 
-  for (const [option, saved, name] of [["Message box only", "box", "box-shop"], ["Both", "both", "both-shop"]]) {
-    it(`${option}: saved in Settings, the Master tab and a sub-agent offer the box and one message goes through the real engine`, async () => {
+  for (const [option, saved, name, keys] of [["Message box only", "box", "box-shop", false], ["Both", "both", "both-shop", true]]) {
+    it(`${option}: saved in Settings, the Master tab and a sub-agent offer the box, one message goes through the real engine and typed keys ${keys ? "reach" : "do not reach"} the terminal`, async () => {
       const id = await newProject(name);
       await saveMaster("claude-code");
       await saveInput(option);
       await until(() => fixtureStoreHolds(INPUT_KEY), UI_MS, `Terminal input never reached the fixture's own web store at ${STORE}`);
       await liveMaster("Claude");
       assert.equal((await masterFollowsSavedInput()).saved, saved);
-      await ownerTurn(`Through ${option}.`, "Claude");
+      assert.equal(await ownerTurn(`Through ${option}.`, "Claude"), "message box");
+      await typeIntoTerminal("Typed at the keyboard.", "Claude", keys);
       const offered = await subAgentOffers(id);
       assert.equal(offered.boxes, 1, `${offered.label} offers one message box`);
     });
