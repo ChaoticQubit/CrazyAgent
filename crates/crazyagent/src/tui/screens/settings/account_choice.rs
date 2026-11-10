@@ -135,6 +135,7 @@ pub fn standing_line(standing: &Standing, now_ms: i64, offset: i64) -> String {
             }
         }
         Standing::NotSignedIn => "not signed in".to_owned(),
+        Standing::SignInUnconfirmed => "sign-in needs a check".to_owned(),
         Standing::Paused { until_ms } => format!("paused until {}", at(until_ms)),
         Standing::NeverUse => "never use".to_owned(),
         Standing::FiveHourCap {

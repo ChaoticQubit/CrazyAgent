@@ -949,6 +949,7 @@ pub enum Standing {
         why: OrderWhy,
     },
     NotSignedIn,
+    SignInUnconfirmed,
     Paused {
         until_ms: i64,
     },

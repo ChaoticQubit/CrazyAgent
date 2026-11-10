@@ -1219,6 +1219,7 @@ mod tests {
             "no usage read yet, used last"
         );
         assert_eq!(line(Standing::NotSignedIn), "not signed in");
+        assert_eq!(line(Standing::SignInUnconfirmed), "sign-in needs a check");
         assert_eq!(
             line(Standing::ReserveReached {
                 reserve_percent: 20,
