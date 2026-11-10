@@ -848,7 +848,7 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
     let paced_rows = listed_rows(db, project, &format!("kind IN ({paced})"), paced_max + 1)?;
     let mut more = paced_rows.len() > paced_max;
     rows.extend(paced_rows.into_iter().take(paced_max));
-    rows.sort_by(|(_, a), (_, b)| (b.at_ms, b.id).cmp(&(a.at_ms, a.id)));
+    rows.sort_by_key(|(_, item)| std::cmp::Reverse((item.at_ms, item.id)));
     let mut items = Vec::new();
     let mut bytes = 0;
     for (kind, mut item) in rows {

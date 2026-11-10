@@ -105,7 +105,15 @@ fn every_kind_records_and_lists_newest_first_with_its_goal() {
         );
         assert!(!item.undone);
     }
-    assert_eq!(list(&db, &project(), 3).unwrap(), listed[..3].to_vec());
+    let (paced, others): (Vec<ActivityItem>, Vec<ActivityItem>) = listed
+        .iter()
+        .cloned()
+        .partition(|item| LOGGED_KINDS.contains(&item.kind) || WORK_KINDS.contains(&item.kind));
+    assert_eq!(
+        list(&db, &project(), 3).unwrap(),
+        [paced[0].clone(), others[0].clone(), others[1].clone()],
+        "a limit of 3 gives the agents' rows one place (T11-R2-L1)"
+    );
     assert_eq!(
         list(&db, &project(), 0).unwrap_err().0,
         "activity_limit_invalid"
@@ -389,7 +397,7 @@ fn a_read_says_when_older_events_were_left_out_by_the_limit_or_the_byte_bound() 
     let line = "x".repeat(TEXT_BYTES_MAX);
     for at_ms in 0..3 {
         let item = NewActivity {
-            kind: ActivityKind::Phase,
+            kind: ActivityKind::TaskStarted,
             actor: "Master",
             agent: None,
             goal: None,
@@ -412,7 +420,7 @@ fn a_read_says_when_older_events_were_left_out_by_the_limit_or_the_byte_bound() 
     assert!(newest.more, "the limit left one out");
     for at_ms in 3..200 {
         let item = NewActivity {
-            kind: ActivityKind::Phase,
+            kind: ActivityKind::TaskStarted,
             actor: "Master",
             agent: None,
             goal: None,
