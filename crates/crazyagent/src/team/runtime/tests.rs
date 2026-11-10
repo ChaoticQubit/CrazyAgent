@@ -6340,8 +6340,11 @@ fn an_idle_stopped_live_master_starts_again_on_the_same_conversation() {
     fixture.until(&mut team, "the master runs again", |f| {
         live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
     });
-    let launches =
-        std::fs::read_to_string(record.ancestors().nth(5).unwrap().join("launches")).unwrap();
+    let launched = record.ancestors().nth(5).unwrap().join("launches");
+    fixture.until(&mut team, "the master launched again", |_| {
+        std::fs::read_to_string(&launched).unwrap().lines().count() == 2
+    });
+    let launches = std::fs::read_to_string(&launched).unwrap();
     assert!(
         launches
             .lines()

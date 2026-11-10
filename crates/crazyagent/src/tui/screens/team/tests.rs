@@ -3443,16 +3443,13 @@ fn the_master_view_head_says_the_live_session_switched_harness() {
         sent.iter()
             .filter(|sent| live_master_change(sent, true))
             .count(),
-        1,
-        "{sent:?}"
+        0,
+        "a switch seen on stays off until the owner acts: {sent:?}"
     );
     let rows = render(&mut shell);
     assert_eq!(
         chars(&rows[2], 2, 78),
-        format!(
-            "{:<63}n New session",
-            "Live master on. It starts when you open this view."
-        )
+        format!("{:<51}n New session  l Sessions", "Live master stopped.")
     );
 }
 
