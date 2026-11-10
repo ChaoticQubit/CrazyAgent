@@ -24269,7 +24269,7 @@ fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_la
                     cancelling.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             });
-            let problem = live_serve(session, &receive, &reports, &cancel, &leave, false, None);
+            let problem = live_serve(*session, &receive, &reports, &cancel, &leave, false, None);
             let _ = ended.send(());
             problem
         })
