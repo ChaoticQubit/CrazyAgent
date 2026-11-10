@@ -361,7 +361,7 @@ export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data
     </SettingGroup>
     <SettingGroup group={messages} prefix={prefix} level={3}>
       <QuestionsSetting projectId={data.id} status={status} reload={data.reloadTeam} />
-      {claude && <DeliverySetting projectId={data.id} row={claude} reload={data.reloadTeam} />}
+      {claude && <DeliverySetting projectId={data.id} row={claude} status={status} reload={data.reloadTeam} />}
       <ReaskSetting projectId={data.id} status={status} reload={data.reloadTeam} />
     </SettingGroup>
     <SettingGroup group={access} prefix={prefix} level={3}>

@@ -23,8 +23,63 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const SESSION: &str = "crazyagent";
 pub const SOCKET: &str = "tmux.sock";
 const HOLDER: &str = "_crazyagent";
-const HOLDER_COMMAND: &str =
-    "while [ -S \"${TMUX%,*,*}\" ]; do sleep 2; done; p=${TMUX%,*}; kill \"${p##*,}\"";
+/// How many 2 second holder loops pass between two reads of the server's deadline: the
+/// modification time of its socket, which the running engine keeps ahead (FBTMUX-P1).
+const DEADLINE_CHECK_LOOPS: u32 = 30;
+/// How many deadline reads in a row must find the deadline passed before the holder ends
+/// its server, about five awake minutes, so an engine waking with the machine renews first.
+const DEADLINE_LATE_CHECKS: u32 = 5;
+/// The command that prints a file's modification time in seconds, following a socket alias.
+#[cfg(target_os = "macos")]
+const MODIFIED: &str = "stat -L -f %m";
+#[cfg(not(target_os = "macos"))]
+const MODIFIED: &str = "stat -L -c %Y";
+
+/// The POSIX command of a server's holder session. It ends the server at once when its
+/// socket is gone, and once a deadline was ever set ahead, after `late` reads in a row, one
+/// every `loops` loops, find it passed; a server no engine renewed keeps only the socket
+/// bound. Takes the read spacing and the count. Returns the command text.
+fn holder_command(loops: u32, late: u32) -> String {
+    assert!(loops >= 1 && late >= 1);
+    format!(
+        "s=${{TMUX%,*,*}}; i=0; a=0; l=0; while [ -S \"$s\" ]; do i=$((i+1)); if [ $i -ge {loops} ]; then i=0; d=$({MODIFIED} \"$s\" 2>/dev/null) && n=$(date +%s) && if [ \"$n\" -lt \"$d\" ]; then a=1; l=0; elif [ $a = 1 ]; then l=$((l+1)); fi; [ $l -ge {late} ] && break; fi; sleep 2; done; p=${{TMUX%,*}}; kill \"${{p##*,}}\""
+    )
+}
+
+/// Moves one server's deadline (FBTMUX-P1): sets the modification time of its socket, which
+/// its holder reads, never through a link and only on a socket of this user. Takes the
+/// socket and the deadline. Returns Ok, also when no socket is there, or
+/// `terminal_unavailable` when the time cannot be set.
+fn renew_socket(socket: &Path, until: SystemTime) -> Result<(), HostError> {
+    let Ok(metadata) = std::fs::symlink_metadata(socket) else {
+        return Ok(());
+    };
+    if !metadata.file_type().is_socket() || metadata.uid() != user() {
+        return Ok(());
+    }
+    let seconds = until
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())
+        .ok_or_else(|| failure("terminal_unavailable"))?;
+    let times = rustix::fs::Timestamps {
+        last_access: rustix::fs::Timespec {
+            tv_sec: 0,
+            tv_nsec: rustix::fs::UTIME_OMIT,
+        },
+        last_modification: rustix::fs::Timespec {
+            tv_sec: seconds,
+            tv_nsec: 0,
+        },
+    };
+    rustix::fs::utimensat(
+        rustix::fs::CWD,
+        socket,
+        &times,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(|_| failure("terminal_unavailable"))
+}
 /// The program that runs the POSIX holder command. Given to tmux as separate arguments, it
 /// is started directly, not through `default-shell`, which is the owner's login shell and
 /// may be fish, csh or nushell, none of which can read the holder.
@@ -89,7 +144,9 @@ type Answer = Result<Lines, HostError>;
 /// The server's socket lives in the engine's own private folder and never the owner's tmux.
 /// Agents keep running when the engine stops; a later host on the same folder finds them again.
 /// The server ends itself, with its agents, once its socket is gone, such as when the engine
-/// home is deleted, so no server outlives the folder that reaches it. A confined host drives a
+/// home is deleted, so no server outlives the folder that reaches it, and once the deadline
+/// the running engine keeps setting ahead has passed, so no server outlives an engine that
+/// never comes back by more than the owner's chosen time (FBTMUX-P1). A confined host drives a
 /// native-mode lead's own server instead: the server and every client the engine starts on it
 /// run inside the lead's Seatbelt profile, since a tmux server can make a client run commands.
 /// A teammates host drives a native lead's teammates' server: the server starts inside the
@@ -104,6 +161,7 @@ pub struct Tmux {
     control: Mutex<Option<Arc<Control>>>,
     spawning: Mutex<()>,
     reapers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    deadline_checks: (u32, u32),
 }
 
 struct Control {
@@ -167,6 +225,7 @@ impl Tmux {
             control: Mutex::new(None),
             spawning: Mutex::new(()),
             reapers: Mutex::new(Vec::new()),
+            deadline_checks: (DEADLINE_CHECK_LOOPS, DEADLINE_LATE_CHECKS),
         }
     }
 
@@ -194,6 +253,7 @@ impl Tmux {
             control: Mutex::new(None),
             spawning: Mutex::new(()),
             reapers: Mutex::new(Vec::new()),
+            deadline_checks: (DEADLINE_CHECK_LOOPS, DEADLINE_LATE_CHECKS),
         })
     }
 
@@ -220,6 +280,21 @@ impl Tmux {
             pin: Some(pin),
             ..Self::confined(executable, socket, profile)?
         })
+    }
+
+    /// Has a server this host starts read its deadline every `loops` holder loops and end
+    /// after `late` passed reads, so a row sees the bound within seconds. Takes the spacing
+    /// and the count. Returns the host.
+    #[cfg(test)]
+    pub(crate) fn with_deadline_checks(mut self, loops: u32, late: u32) -> Self {
+        assert!(loops >= 1 && late >= 1);
+        self.deadline_checks = (loops, late);
+        self
+    }
+
+    /// The command of the holder session a server this host starts runs.
+    fn holder(&self) -> String {
+        holder_command(self.deadline_checks.0, self.deadline_checks.1)
     }
 
     /// Gives the tmux server's socket. Takes the host.
@@ -430,7 +505,7 @@ impl Tmux {
                 .arg(socket)
                 .args(["new-session", "-d", "-s", SESSION, "-n", HOLDER])
                 .args(HOLDER_SHELL)
-                .arg(HOLDER_COMMAND)
+                .arg(self.holder())
                 .env_clear()
                 .env("PATH", SERVER_PATH)
                 .current_dir(&self.folder)
@@ -481,7 +556,7 @@ impl Tmux {
                 .arg(&socket)
                 .args(["-C", "new-session", "-A", "-s", SESSION, "-n", HOLDER])
                 .args(HOLDER_SHELL)
-                .arg(HOLDER_COMMAND)
+                .arg(self.holder())
                 .env_clear()
                 .env("PATH", SERVER_PATH)
                 .current_dir(&self.folder)
@@ -2093,6 +2168,10 @@ impl Host for Tmux {
         let ended = self.end_server(keep);
         self.join_reapers();
         ended
+    }
+
+    fn renew(&self, until: SystemTime) -> Result<(), HostError> {
+        renew_socket(&self.socket, until)
     }
 }
 

@@ -223,3 +223,33 @@ async fn a_recheck_reads_the_engine_once_per_config() {
     drop(bridge);
     case.stop().await;
 }
+
+/// PROTO-3-LOWS (rv-code r1 L1): a busy engine admitted no request, so the outcome is known.
+/// A sign-in the bridge holds as running stays running and certain, and the connection
+/// stays, so the next recheck retries instead of the sign-in turning stuck.
+#[tokio::test]
+async fn a_busy_engine_leaves_a_running_sign_in_running_and_connected() {
+    let case = Case::new().await;
+    let mut bridge = case.stuck().await;
+    bridge.connect().await.unwrap();
+    let operation = bridge.native_auth.as_mut().unwrap();
+    operation.running = true;
+    operation.uncertain = false;
+    let busy = crazyagent::engine::EngineError("owner_busy".to_owned());
+    assert_eq!(
+        bridge.settle_auth(Err(busy)).map_err(|error| error.code),
+        Err("owner_busy")
+    );
+    let operation = bridge.native_auth.as_ref().unwrap();
+    assert!(operation.running, "a busy engine ended the held sign-in");
+    assert!(
+        !operation.uncertain,
+        "a busy engine made the sign-in's outcome unknown"
+    );
+    assert!(
+        bridge.status().connected,
+        "a busy engine dropped the connection"
+    );
+    drop(bridge);
+    case.stop().await;
+}

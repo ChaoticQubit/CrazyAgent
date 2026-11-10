@@ -553,6 +553,66 @@ fn harness_without_reader_reports_not_reported_never_zero() {
     assert_eq!(rows, 5, "a refused mark writes nothing");
 }
 
+/// METRICS-AGENT-RUNS: an agent key that counted in two projects lists once per project, each
+/// row with only that project's tokens, runs and last use, and only the project whose run had
+/// no reader flags it, so the app page can fill Runs and Last used on each project's row.
+#[test]
+fn an_agent_key_used_in_two_projects_lists_once_per_project() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    for (project, session, input, at) in [
+        ("alpha", "a", 70, MIDNIGHT + HOUR),
+        ("beta", "b", 30, MIDNIGHT + 3 * HOUR),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        append(
+            &home.path().join(format!("projects/f/{session}.jsonl")),
+            &line(session, input, 1),
+        );
+        let agent = who(project, None, "claude-1", "onboarding", RunKind::Agent);
+        scan_home(&db, home.path(), Format::Claude, &agent, at).unwrap();
+    }
+    let opencode = readerless("beta", "onboarding", "opencode", RunKind::Agent);
+    mark_unreported(&db, &opencode, MIDNIGHT + 4 * HOUR).unwrap();
+
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
+    let rows: Vec<(&str, Option<&str>, u64, u64, i64)> = all
+        .agents
+        .iter()
+        .map(|row| {
+            (
+                row.key.as_str(),
+                row.project.as_deref(),
+                row.tokens.input,
+                row.runs,
+                row.last_ms,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("onboarding", Some("alpha"), 70, 1, MIDNIGHT + HOUR),
+            ("onboarding", Some("beta"), 30, 1, MIDNIGHT + 4 * HOUR),
+        ]
+    );
+    assert!(
+        all.projects
+            .iter()
+            .chain(&all.pools)
+            .chain(&all.accounts)
+            .all(|row| row.project.is_none()),
+        "only agent rows name a project"
+    );
+    assert_eq!(
+        flagged(&all.agents),
+        [
+            ("onboarding", 70, None),
+            ("onboarding", 30, Some("OpenCode")),
+        ]
+    );
+}
+
 #[test]
 fn rcli_counted_from_host_frames_is_reported_and_never_marked_unreported() {
     let root = tempfile::tempdir().unwrap();
@@ -964,13 +1024,56 @@ fn a_window_past_its_reset_reads_as_not_read_when_the_last_read_failed() {
     }
     record_failure(&db, &held[0], "usage_unreachable", MIDNIGHT).unwrap();
     record_failure(&db, &held[2], "usage_unreachable", MIDNIGHT).unwrap();
-    let shown = report(&db, None, None, 0, now, &held).unwrap().limits;
+    let at_now = LimitWindow {
+        used_percent: 30.0,
+        resets_at_ms: Some(now),
+    };
+    let edges: Vec<CredentialRef> = ["overridden", "boundary"]
+        .iter()
+        .map(|id| CredentialRef::new(*id).unwrap())
+        .collect();
+    for (account, five_hour) in edges.iter().zip([passed, at_now]) {
+        record_observation(
+            &db,
+            account,
+            &Observation {
+                plan: None,
+                five_hour: Some(five_hour),
+                weekly: Some(ahead),
+                provider: Some(crate::usage::poll::Provider::Claude),
+            },
+            LimitSource::Poll,
+            MIDNIGHT,
+        )
+        .unwrap();
+        record_failure(&db, account, "usage_unreachable", MIDNIGHT).unwrap();
+    }
+    crate::usage::set_reset_override(
+        &db,
+        &edges[0],
+        crate::usage::WindowKind::FiveHour,
+        Some(now + HOUR),
+    )
+    .unwrap();
+    let every: Vec<CredentialRef> = held.iter().chain(&edges).cloned().collect();
+    let shown = report(&db, None, None, 0, now, &every).unwrap().limits;
     let row = |id: &str| shown.iter().find(|row| row.account.as_str() == id).unwrap();
     assert_eq!(row("failed").five_hour, None);
     assert_eq!(row("failed").weekly, Some(ahead));
     assert_eq!(row("healthy").five_hour, Some(passed));
     assert_eq!(row("mixed").five_hour, Some(ahead));
     assert_eq!(row("mixed").weekly, None);
+    let overridden = row("overridden").five_hour;
+    assert_eq!(
+        overridden.map(|window| window.used_percent),
+        Some(40.0),
+        "a reset the owner set ahead keeps a failed account's window (PROTO-2-LOWS): {overridden:?}"
+    );
+    assert_eq!(
+        row("boundary").five_hour,
+        None,
+        "a reset at exactly now has passed"
+    );
 }
 
 fn priced_store() -> (tempfile::TempDir, Connection) {

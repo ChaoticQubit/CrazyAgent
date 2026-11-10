@@ -39,7 +39,9 @@ pub(super) async fn answer(
 /// cannot add a line to that notice. A master hears nothing; the owner talks to it
 /// directly. Inputs: the engine root, the terminal host when there is one, the project, the
 /// agent, the path inside its worktree and the time in ms. Output: whether the agent was
-/// told, or `ide_agent_unknown`, `ide_agent_not_running` or the store's refusal.
+/// told, or `ide_agent_unknown`, `ide_agent_not_running`, `ide_agent_files_read_only` while
+/// the project's agent folders are Read only below Full access (DEC-124), since the IDE could
+/// not save the file, or the store's refusal.
 pub(crate) fn edit(
     root: &Path,
     host: Option<&dyn Host>,
@@ -72,6 +74,13 @@ pub(crate) fn edit(
     let (role, status, worktree) = found.ok_or_else(|| failure("ide_agent_unknown"))?;
     if status != "starting" && status != "working" {
         return Err(failure("ide_agent_not_running"));
+    }
+    let policy = crate::sandbox::policy::load(&db, project.as_str())
+        .map_err(|_| failure("ide_owner_edit_unavailable"))?;
+    if policy.access != crate::sandbox::policy::AgentAccess::Full
+        && policy.ide_agent_files == crate::sandbox::policy::IdeAgentFiles::ReadOnly
+    {
+        return Err(failure("ide_agent_files_read_only"));
     }
     crate::landing::owner_edit::record(&db, &worktree, path, now)?;
     super::super::readonly::unlock(&db, id, path)?;

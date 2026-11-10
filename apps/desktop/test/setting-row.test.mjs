@@ -7,6 +7,7 @@ const CONTRAST_MIN = 4.5;
 const WIDTH_PX = 760;
 const NARROW_PX = 320;
 const ACTION_GAP_MAX = 17;
+const SEGMENT_COLUMN_PX = 110;
 
 /** Runs a check on a mounted section. Inputs: the section's width, the check and the theme.
  * Output: the check's value. */
@@ -96,3 +97,26 @@ for (const theme of ["light", "dark"]) {
     for (const [name, ratio] of Object.entries(seen)) assert.ok(ratio >= CONTRAST_MIN, `${name}: ${ratio}`);
   });
 }
+
+test("a segmented choice whose label wraps in a narrow column keeps every label inside its own pill (DESIGN-3-L2)", async () => {
+  const pills = await withPage(async (page) => {
+    await page.send("Emulation.setDeviceMetricsOverride", { width: 1180, height: 800, deviceScaleFactor: 1, mobile: false });
+    await page.evaluate(fixture);
+    await page.evaluate(`Fixture.mountSegmented(${SEGMENT_COLUMN_PX})`);
+    return page.evaluate("Fixture.pills()");
+  });
+  assert.ok(pills.some((pill) => pill.lines > 1), `a label wraps at ${SEGMENT_COLUMN_PX}px: ${JSON.stringify(pills)}`);
+  for (const pill of pills) {
+    assert.ok(pill.text.top >= pill.box.top - 0.5 && pill.text.bottom <= pill.box.bottom + 0.5, `the label stays inside its pill: ${JSON.stringify(pill)}`);
+    assert.ok(pill.box.bottom <= pill.group.bottom + 0.5 && pill.box.right <= pill.group.right + 0.5, `the pill stays inside the group: ${JSON.stringify(pill)}`);
+  }
+});
+
+test("no segmented button rule fixes a height a wrapped label can spill out of (DESIGN-3-L2 rule)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const rules = ["../src/style.css", "../src/screens/settings/settings.css"].flatMap((path) => [...readFileSync(new URL(path, import.meta.url), "utf8").matchAll(/([^{}]*\.segmented button[^{}]*)\{([^}]*)\}/gu)]);
+  assert.ok(rules.length > 0);
+  for (const [, selector, body] of rules) assert.doesNotMatch(body, /(^|;)\s*height:/u, `${selector.trim()} grows with its label`);
+  const shell = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
+  assert.match(shell, /\.segmented button \{[^}]*min-height: 26px;/u, "the pill keeps its usual height as a floor");
+});

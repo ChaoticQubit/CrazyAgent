@@ -418,3 +418,18 @@ test("an agent waiting for a file under Wait leads its card's task line and its 
   assert.ok(graph.cardTip(waiting, { ...team, nodes: [...team.nodes, waiting], edges }).includes("Waiting for src/ui/chart.ts. Draw the chart"));
   assert.ok(graph.cardText(waiting, edges, []).task[0].startsWith("Waiting for src/ui/chart.ts."), "the card shows it on its first task line");
 });
+
+test("Open all terminals opens nothing and says why when its fresh read finds the project removed (UI-5-F2)", () => {
+  assert.equal(typeof view.openAllPlan, "function", "Open all terminals plans its windows from the fresh reads");
+  const nodes = Array.from({ length: 13 }, (_, at) => ({ id: `a${at}`, kind: at === 0 ? "master" : "sub", parent: at === 0 ? null : "a0", label: `a${at}`, harness: "codex", status: "working", status_label: "Working", account: null, terminal: `team-${at}` }));
+  const read = { kind: "ok", value: { project_id: "alpha", nodes, edges: [] } };
+  const six = { kind: "ok", value: 6 };
+  for (const code of ["project_missing", "project_setup_missing"]) {
+    const plan = view.openAllPlan({ kind: "error", code, message: code }, six, 6, 2);
+    assert.equal(plan.windows, 0, `${code}: a removed project opens no window`);
+    assert.match(plan.note ?? "", /removed/u, `${code}: the note says why nothing opened`);
+  }
+  assert.deepEqual(view.openAllPlan({ kind: "error", code: "owner_read_failed", message: "No." }, six, 6, 2), { windows: 2, note: null }, "another failure keeps the shown count");
+  assert.deepEqual(view.openAllPlan(read, six, 9, 2), { windows: 3, note: null }, "a good read counts from the team and the setting read now");
+  assert.deepEqual(view.openAllPlan(read, { kind: "error", code: "owner_read_failed", message: "No." }, 4, 2), { windows: 4, note: null }, "a failed setting read keeps the given Terminals per window");
+});

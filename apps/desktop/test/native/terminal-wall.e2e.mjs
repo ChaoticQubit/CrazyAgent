@@ -81,7 +81,8 @@ function wallShown(page) {
  * resting agents, serves the built app to a browser page on the project's Agents tab, runs
  * the steps and stops everything. Inputs: the test context, the temporary folder prefix and
  * the steps, given the project, the owner on the page, the page, a page reload, the team
- * status reader, the graph's tiles, the site's address and the call log. Output: none. */
+ * status reader, the graph's tiles, the site's address, the call log and the bridge. Output:
+ * none. */
 async function onEngine(t, prefix, steps) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
@@ -157,7 +158,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           }
         };
         const graph = () => value(bridge, "desktop_team_graph", { id: project });
-        await steps({ project, me, page, reload, status, graph, runtime, tiles: shownTiles, site, log });
+        await steps({ project, me, page, reload, status, graph, runtime, tiles: shownTiles, site, log, bridge });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -367,5 +368,22 @@ test("Terminals per window 9: the owner's pick is kept, and Open all terminals a
     assert.equal(await shown(context.page), "9", "9 is shown again after a reload");
     const name = await openAll(context, 9, "Opens 1 window of up to 9 terminals.");
     await grows(context, 9, name);
+  });
+});
+
+test("a project removed with its wall window open: the wall's next read finds it gone and the wall asks to close its own project's walls (UI-5-F1, Chrome page, WKWebView not shown)", { timeout: 600000 }, async (t) => {
+  await onEngine(t, "ca-twrm-", async ({ project, page, site, log, bridge }) => {
+    await openWall(page, site, project, 1, "Booking");
+    for (const deadline = Date.now() + STEP_MS; (await wallShown(page)).tiles.length === 0; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, `the wall never drew its terminals: ${JSON.stringify(await wallShown(page))}`);
+    }
+    const mark = log.trail.length;
+    const removed = await value(bridge, "desktop_remove_project", { id: project, generation: 10, deleteName: null });
+    assert.equal(removed.outcome, "applied", `the engine removed the project: ${JSON.stringify(removed)}`);
+    const closes = () => log.trail.slice(mark).filter((call) => call.cmd === "desktop_close_project_walls");
+    for (const deadline = Date.now() + STEP_MS; closes().length === 0; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "the wall never asked to close after its project was removed");
+    }
+    assert.ok(closes().every((call) => call.args.id === project), `the wall closes only its own project's walls: ${JSON.stringify(closes())}`);
   });
 });

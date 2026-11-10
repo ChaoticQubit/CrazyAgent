@@ -181,7 +181,7 @@ export function AgentAccessSetting({ projectId, notify, reload }: { projectId: s
     if (!view) return;
     setAsked(false);
     setBusy(true);
-    const saved = await saveAccess(projectId, view, policyOf(view, access, view.network, view.toolchains.map((row) => row.allowed), view.ide_git_hooks));
+    const saved = await saveAccess(projectId, view, policyOf(view, access, view.network, view.toolchains.map((row) => row.allowed), view.ide_git_hooks, view.ide_agent_files));
     setBusy(false);
     if (saved.fresh) setView(saved.fresh);
     else if (saved.note === "") setView({ ...view, access });
@@ -252,7 +252,7 @@ export function AccountSetting({ data, id }: { data: TeamProject; id: string }) 
   const listed = valueOf(data.pools) ?? [];
   const pools = data.assigned && !listed.some((choice) => choice.pool.id === data.assigned?.pool.id) ? [data.assigned, ...listed] : listed;
   const current = data.assigned?.pool.id ?? "";
-  const [shown, hold] = useHeld(current);
+  const [shown, hold] = useHeld(current, Object.is, data.pools);
   const [asking, setAsking] = useState(false);
 
   async function save(value: string): Promise<string> {

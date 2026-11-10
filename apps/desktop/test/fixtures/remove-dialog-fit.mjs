@@ -3,7 +3,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import shell from "../../src/style.css?inline";
 import projects from "../../src/screens/project/projects.css?inline";
-import { RemoveDialogView } from "../../src/screens/project/remove-dialog.tsx";
+import { RemoveDialogView, removeTitle } from "../../src/screens/project/remove-dialog.tsx";
 import { Dialog } from "../../src/ui/overlay.tsx";
 
 let root = null;
@@ -19,7 +19,7 @@ export function mount(preview) {
   document.body.innerHTML = '<div id="root"></div>';
   root = createRoot(document.getElementById("root"));
   const idle = () => {};
-  flushSync(() => root.render(h(Dialog, { open: true, title: `Remove ${preview.name} from CrazyAgent?`, onClose: idle, wide: true },
+  flushSync(() => root.render(h(Dialog, { open: true, title: removeTitle(preview.name), onClose: idle, wide: true },
     h(RemoveDialogView, { preview, choice: "everything", typed: preview.name, pending: false, onChoice: idle, onTyped: idle }))));
 }
 
@@ -49,11 +49,16 @@ function seen(node, dialog) {
   return true;
 }
 
+/** How many lines a block's text takes. Input: the element. Output: the line count. */
+function lines(node) {
+  return Math.round(node.getBoundingClientRect().height / parseFloat(getComputedStyle(node).lineHeight));
+}
+
 /** Measures the open dialog, its body and its top choice, rounded to whole pixels. Output: the
  * window height, the dialog's, its body's and its folder and loss lists' visible and full
  * heights and scroll offsets, the top choice's edges against the dialog's visible edges,
- * whether the loss list, the name box and the Delete everything button are wholly in view, and
- * the folder list's tab index. */
+ * whether the loss list, the name box and the Delete everything button are wholly in view, the
+ * folder list's tab index, the dialog's full and visible widths and the title's line count. */
 export function fit() {
   const dialog = document.querySelector("dialog[open]");
   const remove = [...dialog.querySelectorAll("button")].find((button) => button.textContent.trim() === "Delete everything");
@@ -67,6 +72,7 @@ export function fit() {
     cardTop: Math.round(card.top - frame.top), cardBottom: Math.round(card.bottom - frame.top), frame: Math.round(frame.height),
     losses: seen(dialog.querySelector("[aria-label='What would be lost']"), dialog), remove: seen(remove, dialog),
     name: seen(dialog.querySelector("input[aria-label='Type the project name']"), dialog), detailsTab: details?.tabIndex ?? null,
+    wide: dialog.scrollWidth, frameWidth: dialog.clientWidth, titleLines: lines(dialog.querySelector(".dialog-head h2")),
   };
 }
 

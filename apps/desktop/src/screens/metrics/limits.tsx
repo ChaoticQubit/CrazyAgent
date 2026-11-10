@@ -82,7 +82,7 @@ function WindowLine({ limits, kind, nowMs, pending, onSetReset }: {
       <span>{current ? `${Math.round(current.used_percent)}% used` : missing}{current && nearLimit(current.used_percent) && <> <span className="badge">Near limit</span></>}</span>
     </div>
     {current && <meter className="usage-meter" min={0} max={100} low={70} high={90} optimum={0} value={current.used_percent} aria-label={`${label} limit used`} />}
-    <span className="muted small">{current ? resetAtText(current.resets_at_ms, nowMs) : why}{override !== null ? " (your time)" : ""}</span>
+    <span className="muted small">{current ? resetAtText(current.resets_at_ms, nowMs) : why}{current !== null && override !== null && current.resets_at_ms === override ? " (your time)" : ""}</span>
     <ResetEditor id={`usage-reset-${limits.account}-${kind}`} override={override} nowMs={nowMs} pending={pending}
       onSave={(at) => onSetReset(limits.account, kind, at)} />
   </div>;

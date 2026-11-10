@@ -129,9 +129,10 @@ export class KeepRowFocus extends Component<{ gone: string; children: ReactNode 
   }
 }
 
-/** One account's pin. Inputs: the account, its name, its plan and the queue. Output: the choice. */
-function PinControl({ id, name, plan, apply }: { id: string; name: string; plan: AccountPlan; apply: ApplyChange }) {
-  const [shown, hold] = useHeld<PinChoice>(plan.pin ?? "none");
+/** One account's pin. Inputs: the account, its name, its plan, the schedule read it came from and
+ * the queue. Output: the choice. */
+function PinControl({ id, name, plan, read, apply }: { id: string; name: string; plan: AccountPlan; read: AccountSchedule; apply: ApplyChange }) {
+  const [shown, hold] = useHeld<PinChoice>(plan.pin ?? "none", Object.is, read);
   return <div data-control={`pin:${id}`}>
     <Segmented label={`Pin for ${name}`} value={shown} options={PIN_CHOICES} onValue={(choice) => {
       if (choice === shown) return;
@@ -141,18 +142,19 @@ function PinControl({ id, name, plan, apply }: { id: string; name: string; plan:
 }
 
 /** One number of a plan, saved on Enter or on leaving the field; a change that fails its rule
- * shows it and sends nothing. Inputs: the field's id, label and length, the saved value, its
- * parser, the queue and the change for a value. Output: the field. */
-function PlanField<T extends number | null>({ id, label, length, saved, parse, apply, made }: {
+ * shows it and sends nothing. Inputs: the field's id, label and length, the saved value, the
+ * schedule read it came from, its parser, the queue and the change for a value. Output: the field. */
+function PlanField<T extends number | null>({ id, label, length, saved, read, parse, apply, made }: {
   id: string;
   label: string;
   length: number;
   saved: T;
+  read: AccountSchedule;
   parse: (text: string) => { kind: "ok"; value: T } | { kind: "error"; message: string };
   apply: ApplyChange;
   made: (value: T) => MadeChange;
 }) {
-  const [shown, hold] = useHeld<T>(saved);
+  const [shown, hold] = useHeld<T>(saved, Object.is, read);
   const words = shown === null ? "" : String(shown);
   const [text, setText] = useState(words);
   const [error, setError] = useState<string>();
@@ -176,29 +178,31 @@ function PlanField<T extends number | null>({ id, label, length, saved, parse, a
 }
 
 /** One account's rank and reserve, and what its plan comes to. Inputs: the account, its name, its
- * plan and the queue. Output: the panel. */
-export function SchedulePanel({ id, name, plan, apply }: { id: string; name: string; plan: AccountPlan; apply: ApplyChange }) {
+ * plan, the schedule read it came from and the queue. Output: the panel. */
+export function SchedulePanel({ id, name, plan, read, apply }: { id: string; name: string; plan: AccountPlan; read: AccountSchedule; apply: ApplyChange }) {
   return <div className="pool-sched">
-    <PlanField id={`pool-rank-${id}`} label="Rank" length={4} saved={plan.rank} parse={rankInput} apply={apply}
+    <PlanField id={`pool-rank-${id}`} label="Rank" length={4} saved={plan.rank} read={read} parse={rankInput} apply={apply}
       made={(rank) => ({ change: accountChange(id, { rank }), done: `Rank for ${name} saved.` })} />
-    <PlanField id={`pool-reserve-${id}`} label="Reserve %" length={3} saved={plan.reserve_percent} parse={reserveInput} apply={apply}
+    <PlanField id={`pool-reserve-${id}`} label="Reserve %" length={3} saved={plan.reserve_percent} read={read} parse={reserveInput} apply={apply}
       made={(reserve_percent) => ({ change: accountChange(id, { reserve_percent }), done: `Reserve for ${name} saved.` })} />
     <div className="pool-sched-text"><b>{planLine(plan)}</b>Applies in every pool this account is in.</div>
   </div>;
 }
 
 /** The controls on one row: its pin and the button of its Schedule panel. Inputs: the account, its
- * name, its plan, whether its panel is open, the toggle and the queue. Output: the controls. */
-export function RowControls({ id, name, plan, open, onToggle, apply }: {
+ * name, its plan, the schedule read it came from, whether its panel is open, the toggle and the
+ * queue. Output: the controls. */
+export function RowControls({ id, name, plan, read, open, onToggle, apply }: {
   id: string;
   name: string;
   plan: AccountPlan;
+  read: AccountSchedule;
   open: boolean;
   onToggle: () => void;
   apply: ApplyChange;
 }) {
   return <>
-    <PinControl id={id} name={name} plan={plan} apply={apply} />
+    <PinControl id={id} name={name} plan={plan} read={read} apply={apply} />
     <Button size="small" aria-expanded={open} aria-label={`Schedule for ${name}`} data-control={`schedule:${id}`} onClick={onToggle}>Schedule</Button>
   </>;
 }
@@ -206,7 +210,7 @@ export function RowControls({ id, name, plan, open, onToggle, apply }: {
 
 /** A pool's own account order. Inputs: the pool, the schedule and the queue. Output: the choice. */
 export function PoolOrderPicker({ pool, schedule, apply }: { pool: PoolSummary; schedule: AccountSchedule; apply: ApplyChange }) {
-  const [shown, hold] = useHeld<string>(poolStrategy(schedule, pool.id) ?? "");
+  const [shown, hold] = useHeld<string>(poolStrategy(schedule, pool.id) ?? "", Object.is, schedule);
   const options = strategyOptions(strategyLabel(schedule.strategy));
   return <Segmented label="Account order" value={shown} options={options} onValue={(value) => {
     if (value === shown) return;
@@ -227,7 +231,7 @@ export function AppOrder({ schedule, apply, onRetry }: { schedule: Loaded<Accoun
 
 /** The choice of the order every pool follows, with what the pick does. */
 function AppOrderChoice({ schedule, apply }: { schedule: AccountSchedule; apply: ApplyChange }) {
-  const [shown, hold] = useHeld<AccountStrategy>(schedule.strategy);
+  const [shown, hold] = useHeld<AccountStrategy>(schedule.strategy, Object.is, schedule);
   const choice = STRATEGIES.find((item) => item.value === shown);
   return <section className="pool-app-order" aria-label="How every pool picks an account">
     <h3>How every pool picks an account</h3>

@@ -1042,3 +1042,56 @@ async fn a_replayed_delete_records_and_removes_nothing_twice() {
     }
     engine.stop().await;
 }
+
+/// T8 r1 secreview L2: Remove from dashboard takes the tool cache of the project's folder, so
+/// a different project added later at that folder starts with none, and keeps the cache of a
+/// repository another project still declares, whose agents use it; the record of what it
+/// takes is cleared once the cache is gone.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn removing_a_project_takes_its_tool_cache_and_keeps_one_another_project_uses() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    let (_, service_folder) = service(&mut owner, 2).await;
+    let shared = engine.home().join("shared-lib");
+    std::fs::create_dir(&shared).unwrap();
+    for id in [PROJECT, "service-a"] {
+        set(
+            &engine,
+            "UPDATE projects SET body=json_set(body,'$.spec.repositories',json_array(?1)) WHERE id=?2",
+            [shared.to_str().unwrap(), id],
+        );
+    }
+    let cache = |of: &std::path::Path| {
+        crate::sandbox::tool_cache::project_folder(engine.root.path(), of.to_str().unwrap())
+    };
+    for of in [&folder, &shared] {
+        std::fs::create_dir_all(cache(of).join("sandboxed-worktree").join("uv")).unwrap();
+    }
+    let removed = owner.remove_project(project.clone(), 3).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert!(folder.is_dir(), "Remove from dashboard keeps the folder");
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while (cache(&folder).exists() || engine.rows("SELECT count(*) FROM projects_delete_files") > 0)
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !cache(&folder).exists(),
+        "the project's own tool cache goes with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects_delete_files"),
+        0,
+        "the record is cleared once the cache is gone"
+    );
+    assert!(
+        cache(&shared).is_dir(),
+        "Service A still uses the shared repository's cache"
+    );
+    assert!(service_folder.is_dir() && shared.is_dir());
+    drop(owner);
+    engine.stop().await;
+}

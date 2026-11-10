@@ -2380,13 +2380,18 @@ impl TeamRuntime {
     }
 
     /// Ends the engine's hold on every agent as the engine stops and returns running tasks
-    /// to the queue. An agent in a pane a later engine can take over keeps running there with
-    /// its turn stopped, so agent sessions outlive the engine; every other agent process group
-    /// stops. Waits a bounded time for each agent thread. Returns the panes left running.
+    /// to the queue. While the owner keeps team agents running when CrazyAgent quits, the
+    /// default and also when that setting cannot be read, an agent in a pane a later engine
+    /// can take over keeps running there with its turn stopped, so agent sessions outlive the
+    /// engine; with Stop every agent stops as an owner Stop would (FBTMUX-P1). Every other
+    /// agent process group stops. Waits a bounded time for each agent thread. Returns the
+    /// panes left running.
     pub fn shutdown(&mut self) -> Result<Vec<AgentId>, EngineError> {
+        let keep_panes = crate::quit_settings::load(&self.connection)
+            .map_or(true, |settings| settings.keeps_team_agents());
         let mut kept = BTreeSet::new();
         for (id, worker) in &self.workers {
-            if !worker.stopping && self.has_pane_record(*id)? {
+            if keep_panes && !worker.stopping && self.has_pane_record(*id)? {
                 kept.insert(*id);
             }
         }
@@ -6736,7 +6741,11 @@ impl TeamRuntime {
     /// lead that could not finish while it waited finishes then (OP9B-M1), through
     /// `record_landed`. A conflicting set stays on the teammate's branch and the lead is told
     /// its files, each quoted on its own line (OP9B-C2), once for each teammate head and lead
-    /// tip. Takes the project and the lead. Returns Ok, or a SQLite or coordination failure.
+    /// tip. A set refused because a worker below the teammate holds open work stays too: the
+    /// lead is told once for each teammate head and lead tip, and the land is tried again
+    /// only once that head, that tip or the project's open change sets moved
+    /// (TEAM-3-R2-LOWS). Takes the project and the lead. Returns Ok, or a SQLite or
+    /// coordination failure.
     fn land_teammates(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
         let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
             self.teammate_conflicts_told.remove(&lead);
@@ -6806,6 +6815,19 @@ impl TeamRuntime {
                 return Ok(None);
             }
         };
+        let open = sets
+            .iter()
+            .filter(|set| {
+                matches!(
+                    set.state,
+                    crate::landing::ChangeState::Pending
+                        | crate::landing::ChangeState::Conflict
+                        | crate::landing::ChangeState::Updating
+                )
+            })
+            .map(|set| set.id.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         let mut landed = Vec::new();
         for teammate in resting {
             let id = teammate.to_string();
@@ -6823,8 +6845,10 @@ impl TeamRuntime {
             let tip =
                 crate::landing::agent_tip(&db, repository, worktree, git_dir).unwrap_or_default();
             let seen = (set.head.clone(), tip);
+            let held_key = format!("{} {}", set.id.as_str(), crate::landing::WORKER_OPEN);
+            let held = (format!("{} {}", seen.0, seen.1), open.clone());
             let told = self.teammate_conflicts_told.entry(lead).or_default();
-            if told.get(set.id.as_str()) == Some(&seen) {
+            if told.get(set.id.as_str()) == Some(&seen) || told.get(&held_key) == Some(&held) {
                 continue;
             }
             let outcome = crate::projects_home::owner_home().and_then(|home| {
@@ -6841,6 +6865,7 @@ impl TeamRuntime {
             match outcome {
                 Ok(crate::landing::AcceptOutcome::Landed { .. }) => {
                     told.remove(set.id.as_str());
+                    told.remove(&held_key);
                     landed.push(
                         teammates::name(&self.connection, teammate)
                             .unwrap_or_else(|| format!("teammate {teammate}")),
@@ -6871,6 +6896,16 @@ impl TeamRuntime {
                             quoted_lines(&files, TEAMMATE_CONFLICT_FILES_SHOWN_MAX)
                         ),
                     )?;
+                }
+                Err(problem) if problem.0 == crate::landing::WORKER_OPEN => {
+                    let again = told.get(&held_key).is_some_and(|(at, _)| *at == held.0);
+                    if told.len() >= TEAMMATE_WORKTREE_NAMES_MAX {
+                        told.clear();
+                    }
+                    told.insert(held_key, held);
+                    if !again {
+                        self.tell_teammate_held(project, lead, teammate, &branch)?;
+                    }
                 }
                 Err(problem) => eprintln!(
                     "teammate_landing_failed cause={}",
@@ -6933,6 +6968,31 @@ impl TeamRuntime {
         };
         assert!(kept || !told.contains("finish it again"));
         self.note_lead(project, lead, told)
+    }
+
+    /// Tells a lead, and the engine's log, that a teammate's work was not landed on its task
+    /// branch because a worker below that teammate still holds open work (TEAM-3-R2-LOWS).
+    /// Takes the project, the lead, the teammate and the lead's task branch. Returns Ok, or a
+    /// coordination failure.
+    fn tell_teammate_held(
+        &self,
+        project: &ProjectId,
+        lead: i64,
+        teammate: i64,
+        branch: &str,
+    ) -> Result<(), EngineError> {
+        eprintln!(
+            "teammate_landing_held cause={}",
+            crate::landing::WORKER_OPEN
+        );
+        let name = teammates::name(&self.connection, teammate)
+            .unwrap_or_else(|| format!("teammate {teammate}"));
+        let branch = bound_text(branch, crate::landing::BRANCH_BYTES_MAX);
+        let body = format!(
+            "CrazyAgent did not land teammate {name}'s work on your task branch {branch}: {} CrazyAgent lands it by itself once that work is closed.",
+            crate::landing::WORKER_OPEN_TEXT
+        );
+        self.note_lead(project, lead, body)
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
@@ -7526,6 +7586,19 @@ impl TeamRuntime {
                     Some("team_delegate_writable"),
                 ));
             }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(runtime) = self.state.parent() {
+            use crate::sandbox::tool_cache::{CacheShape, grant};
+            let shape = match layout {
+                Layout::Linked => CacheShape::Worktree,
+                Layout::Clone => CacheShape::Clone,
+            };
+            let agent = id.to_string();
+            sandbox = grant(sandbox, runtime, &root, &policy, shape, &agent);
+            let mates = format!("{agent}-teammates");
+            teammates = teammates
+                .map(|team| grant(team, runtime, &root, &policy, CacheShape::Teammate, &mates));
         }
         if let Some(mates) = &teammates {
             mates
@@ -10446,12 +10519,20 @@ fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, Tur
     }
 }
 
+/// The owner's line for a Codex launch refused because skills an earlier run locked into its
+/// home could not be removed (CTX-M1 r2 I3).
+const SKILLS_KEPT_PROBLEM: &str = "The agent could not start: an earlier run locked skills into \
+     its Codex home, so CrazyAgent could not remove them and Codex would have loaded them";
+
 /// The owner's line for an agent whose harness could not start: a command that would hold
-/// an MCP secret names its server and secret, any other refusal names its plain code.
-/// Input: the launch error. Output: the line.
+/// an MCP secret names its server and secret, skills left in a Codex home say so, and any
+/// other refusal names its plain code. Input: the launch error. Output: the line.
 fn start_problem(problem: &LaunchError) -> String {
     match crate::launch_context::secret_in_command_text(problem) {
         Some(sentence) => format!("The agent could not start. {sentence}"),
+        None if problem.0 == crate::launch_context::SKILLS_KEPT => {
+            with_code(SKILLS_KEPT_PROBLEM, Some(&problem.0))
+        }
         None => with_code("The agent could not start", Some(&problem.0)),
     }
 }
@@ -11076,15 +11157,30 @@ fn expose_graph(root: &Path, worktree: &Path, hidden: &[PathBuf]) {
 
 /// Whether git keeps the graph folder out of a worktree's changes, by one of its usual
 /// spellings: the last line about it in the worktree's `.gitignore` decides, and with none
-/// there the repository's `info/exclude` does, a clone's own where `.git` is a folder and
-/// the project repository's, which the engine writes, for a linked worktree. Takes the
-/// project folder and the worktree. Returns the answer; an unreadable file names nothing.
+/// there the repository's `info/exclude` does: a clone's own where `.git` is a folder, and
+/// for a linked worktree the one of the nearest folder above it in the project whose `.git`
+/// is a folder, so an own-clone lead's teammates follow the clone's file (DEC123B-L2), else
+/// the project repository's, which the engine writes. Takes the project folder and the
+/// worktree. Returns the answer; an unreadable file names nothing.
 #[cfg(unix)]
 fn ignores_graph(root: &Path, worktree: &Path) -> bool {
     let git = worktree.join(".git");
+    let repository = |folder: &&Path| {
+        std::fs::symlink_metadata(folder.join(".git")).is_ok_and(|metadata| metadata.is_dir())
+    };
     let exclude = match std::fs::symlink_metadata(&git) {
         Ok(metadata) if metadata.is_dir() => Some(git.join("info").join("exclude")),
-        Ok(metadata) if metadata.is_file() => Some(root.join(".git").join("info").join("exclude")),
+        Ok(metadata) if metadata.is_file() => Some(
+            worktree
+                .ancestors()
+                .skip(1)
+                .take_while(|folder| folder.starts_with(root))
+                .find(repository)
+                .unwrap_or(root)
+                .join(".git")
+                .join("info")
+                .join("exclude"),
+        ),
         _ => None,
     };
     match plain_text(&worktree.join(".gitignore"))

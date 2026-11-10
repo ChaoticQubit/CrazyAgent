@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -8,6 +8,7 @@ import "./load-source.mjs";
 const research = await import("../src/screens/project/research.ts");
 const team = await import("../src/screens/project/team.tsx");
 const controls = await import("../src/screens/team/controls.tsx");
+const state = await import("../src/state.ts");
 
 const MINUTE = 60_000;
 const agent = (id, status, extra = {}) => ({ id, role: "sub", label: `Sub-agent ${id}`, harness: "codex", tools: true, account: null, worktree: null, status, status_label: "",
@@ -128,4 +129,86 @@ test("the Wake button sends the team wake by agent id, never the agent register'
   const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
   assert.match(client, /invoke<IntentReceipt>\("desktop_team_wake_agent", \{ id, agent, generation \}\)/);
   assert.match(client, /invoke<IntentReceipt>\("desktop_team_finished_agents", \{ id, show, version, generation \}\)/);
+});
+
+test("an applied save's hold ends at the first read that started after the save answered, even one showing the old value again (UI1-R2)", () => {
+  for (const name of ["startRead", "stampRead", "answeredHold", "holdEnds"]) assert.equal(typeof state[name], "function", `state has ${name}`);
+  const held = { choice: "show", from: "hide" };
+  const before = { finished_agents: "hide" };
+  const early = state.startRead();
+  const kept = state.answeredHold(held, "");
+  assert.equal(kept.choice, "show", "an applied save keeps the pick");
+  state.stampRead({ kind: "ok", value: before }, early);
+  assert.equal(state.holdEnds(kept, "hide", Object.is, before), false, "a read already on its way when the save answered keeps the pick");
+  const after = { finished_agents: "hide" };
+  state.stampRead({ kind: "ok", value: after }, state.startRead());
+  assert.equal(state.holdEnds(kept, "hide", Object.is, after), true, "a read that started after the answer ends the hold, even at the old value another writer put back");
+  state.stampRead({ kind: "ok", value: before }, state.startRead());
+  assert.equal(state.holdEnds(kept, "hide", Object.is, before), false, "a read keeps the start it was first noted with");
+  assert.equal(state.holdEnds(kept, "other", Object.is, before), true, "a read that moves the value still ends it");
+  assert.equal(state.holdEnds(held, "hide", Object.is, after), false, "a hold whose save has not answered stays");
+  assert.equal(state.holdEnds(kept, "hide", Object.is, undefined), false, "with no read given only a moved value ends it");
+  assert.equal(state.answeredHold(held, "Refused."), null, "a refused save holds nothing");
+  assert.equal(state.holdEnds(null, "hide", Object.is, after), false);
+  for (const file of ["controls.tsx", "coordination.tsx"]) {
+    const source = readFileSync(new URL(`../src/screens/team/${file}`, import.meta.url), "utf8");
+    const calls = [...source.matchAll(/useHeld(?:<[^>]+>)?\(([^;]*?)\);/gu)].map((match) => match[1]);
+    assert.ok(calls.length > 0, file);
+    for (const call of calls) assert.match(call, /, status$/u, `${file} gives its hold the read: ${call}`);
+  }
+  const team = readFileSync(new URL("../src/screens/project/team.tsx", import.meta.url), "utf8");
+  assert.match(team, /const started = startRead\(\);[\s\S]*stampRead\(result, started\);/u, "the team poller notes when each read started");
+});
+
+test("every other hold on a loaded read gives that read, so a later read ends it too (UI1-R2 r1 L2)", () => {
+  const reads = [["settings/updates.tsx", "Object.is, settings"], ["process.tsx", "sameJson, settings"], ["settings/memory.tsx", "Object.is, writesRead"], ["project/settings.tsx", "Object.is, status"]];
+  for (const [file, read] of reads) {
+    const source = readFileSync(new URL(`../src/screens/${file}`, import.meta.url), "utf8");
+    const calls = [...source.matchAll(/useHeld(?:<[^>]+>)?\(([^;]*?)\);/gu)].map((match) => match[1]);
+    assert.equal(calls.length, 1, file);
+    assert.ok(calls[0].endsWith(`, ${read}`), `${file} gives its hold the read: ${calls[0]}`);
+  }
+});
+
+test("a hold on a nested field or a merged page gets the top-level read it came from, so a later read ends it (UI1-R2-REST)", () => {
+  const plan = { rank: 1, reserve_percent: 0, pin: null };
+  const schedule = { strategy: "balanced", pools: [], projects: [], accounts: [{ connection: "account-a", plan }], version: 2 };
+  const page = { items: [], next: "older-1", agent_writes: "save" };
+  const first = { kind: "ok", value: page };
+  const kept = state.answeredHold({ choice: "use_last", from: "none" }, "");
+  state.stampRead({ kind: "ok", value: schedule }, state.startRead());
+  state.stampRead(first, state.startRead());
+  assert.equal(state.holdEnds(kept, "none", Object.is, plan), false, "a nested plan was made by no read on its own, so it never ends a hold");
+  assert.equal(state.holdEnds(kept, "none", Object.is, schedule), true, "the schedule read it came from, started after the save answered, ends it");
+  const merged = { kind: "ok", value: { items: [...page.items], next: null, agent_writes: page.agent_writes } };
+  assert.equal(state.holdEnds(kept, "none", Object.is, merged), false, "a page merged after More was made by no read, so it never ends a hold");
+  assert.equal(state.holdEnds(kept, "none", Object.is, first), true, "the first page's read ends it");
+
+  const screens = new URL("../src/screens/", import.meta.url);
+  const files = readdirSync(screens, { recursive: true }).filter((file) => file.endsWith(".tsx"));
+  let holds = 0;
+  for (const file of files) {
+    const source = readFileSync(new URL(file, screens), "utf8");
+    for (const [, call] of source.matchAll(/useHeld(?:<[^>]+>)?\(([^;]*?)\);/gu)) {
+      holds += 1;
+      assert.match(call, /, (?:Object\.is|sameJson|sameLimits|sameBackground), [\w.]+$/u, `${file} gives its hold the read: ${call}`);
+    }
+  }
+  assert.ok(holds >= 40, `the sweep reads every hold on the screens: ${holds}`);
+
+  const source = (file) => readFileSync(new URL(file, screens), "utf8");
+  const wiring = [
+    ["settings/pool-controls.tsx", [/useHeld<PinChoice>\(plan\.pin \?\? "none", Object\.is, read\)/u, /useHeld<T>\(saved, Object\.is, read\)/u, /<PinControl id=\{id\} name=\{name\} plan=\{plan\} read=\{read\}/u,
+      /saved=\{plan\.rank\} read=\{read\}/u, /saved=\{plan\.reserve_percent\} read=\{read\}/u, /<AppOrderChoice schedule=\{schedule\.value\}/u]],
+    ["settings/pools.tsx", [/schedule=\{schedule\.kind === "ok" \? schedule\.value : undefined\}/u, /<RowControls [^>]*read=\{schedule\}/u, /<SchedulePanel [^>]*read=\{schedule\}/u,
+      /<PoolOrderPicker key=\{pool\.id\} pool=\{pool\} schedule=\{schedule\.value\}/u, /<PoolDetail pool=\{pool\} pools=\{pools\.value\}/u, /<PoolNameField key=\{pool\.id\} pool=\{pool\} read=\{pools\}/u,
+      /const \[pools, reload\] = useLoad\(poolSummaries/u, /const \[schedule, rereadSchedule\] = useLoad\(accountSchedule/u]],
+    ["settings/account-choice.tsx", [/read=\{schedule\.value\}/u, /const \[schedule, reload\] = useLoad\(accountSchedule/u]],
+    ["settings/memory.tsx", [/<MemoryView saved=\{saved\} writesRead=\{first\}/u, /const \[first, reloadSaved\] = useLoad\(/u]],
+    ["team/setup-rows.tsx", [/useHeld\(current, Object\.is, data\.pools\)/u]],
+    ["project/index.tsx", [/pools: shown\(pools\)/u, /return read\.kind === "loading" \? undefined : read;/u]],
+  ];
+  for (const [file, pins] of wiring) {
+    for (const pin of pins) assert.match(source(file), pin, `${file} hands its hold the read itself: ${pin}`);
+  }
 });

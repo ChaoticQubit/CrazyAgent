@@ -328,6 +328,44 @@ fn a_restarted_engine_takes_over_live_agent_panes_and_ends_every_other_one() {
     assert!(host.alive().unwrap().is_empty());
 }
 
+/// FBTMUX-P1, Stop: with team agents set to stop when CrazyAgent quits, an engine stop ends
+/// an agent's live pane as an owner Stop would and leaves no pane for a next engine, while
+/// keeping them running stays the default.
+#[test]
+fn an_engine_set_to_stop_team_agents_ends_their_panes_at_shutdown() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = fixture.pane(&host, master);
+    fixture.keep(master, &record);
+    assert!(
+        crate::quit_settings::load(&fixture.connection)
+            .unwrap()
+            .keeps_team_agents()
+    );
+    crate::quit_settings::save(
+        &fixture.connection,
+        &crate::quit_settings::QuitSettings {
+            on_quit: crate::quit_settings::OnQuit::Stop,
+            ..crate::quit_settings::QuitSettings::default()
+        },
+    )
+    .unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the adopted master is idle", |f| {
+        f.agent_status(master).0 == AgentStatus::Idle && f.recorded(master)
+    });
+    assert_eq!(team.shutdown().unwrap(), Vec::<AgentId>::new());
+    assert!(
+        host.alive().unwrap().is_empty(),
+        "no agent session outlives the engine"
+    );
+    assert_eq!(fixture.agent_status(master), (AgentStatus::Stopped, None));
+    let mut again = fixture.runtime().with_terminal(host.clone()).unwrap();
+    assert!(host.alive().unwrap().is_empty());
+    assert_eq!(again.shutdown().unwrap(), Vec::<AgentId>::new());
+}
+
 #[test]
 fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_stopped() {
     let fixture = Fixture::new(1);
@@ -341,6 +379,8 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
                 network: crate::sandbox::policy::AgentNetwork::default(),
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
+                tool_cache: Default::default(),
+                ide_agent_files: Default::default(),
             },
         )
         .unwrap();
@@ -440,6 +480,8 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
                 allowed: false,
             }],
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
         },
     )
@@ -562,6 +604,8 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
         access: AgentAccess::Sandboxed,
         toolchains: Vec::new(),
         ide_git_hooks: false,
+        tool_cache: Default::default(),
+        ide_agent_files: Default::default(),
         network: crate::sandbox::policy::AgentNetwork::default(),
     };
     crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
@@ -9752,6 +9796,8 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         },
     )
     .unwrap();
@@ -12097,6 +12143,8 @@ fn agent_at_level_running(
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         },
     )
     .unwrap();
@@ -12319,6 +12367,8 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         },
     )
     .unwrap();
@@ -12375,6 +12425,8 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
                 allowed: false,
             }],
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
         },
     )
@@ -12425,6 +12477,8 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         },
     )
     .unwrap();
@@ -12572,6 +12626,8 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
             network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         },
     )
     .unwrap();
@@ -17874,6 +17930,74 @@ fn a_linked_teammate_s_conflicting_file_names_reach_the_lead_quoted_one_per_line
     );
 }
 
+/// TEAM-3-R2-LOWS (rv-code L2): a resting teammate whose own worker still holds an open
+/// change set is not landed on its idle lead's task branch. The lead is told once why, not
+/// at every pass, and the work lands at the first pass after that worker's set closed,
+/// though neither the teammate's head nor the lead's tip moved.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_teammate_with_an_open_worker_set_waits_and_its_lead_is_told_once() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    std::fs::write(linked.teammate("check").join("check.txt"), "Checked.\n").unwrap();
+    let (greet, check) = (linked.id(&fixture, "greet"), linked.id(&fixture, "check"));
+    linked.mark(&fixture, greet, "idle");
+    linked.mark(&fixture, check, "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let worker = crate::landing::open_change_set(&db, &linked.teammate("check"))
+        .unwrap()
+        .expect("check's turn waits as its change set");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1, status='working' WHERE id=?2",
+            params![greet, check],
+        )
+        .unwrap();
+    linked.mark(&fixture, linked.lead, "idle");
+    let held = || -> Vec<String> {
+        linked
+            .notes(&fixture)
+            .into_iter()
+            .filter(|note| {
+                note.contains("greet") && note.contains(crate::landing::WORKER_OPEN_TEXT)
+            })
+            .collect()
+    };
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    assert_eq!(
+        linked.tip(&linked.branch),
+        start,
+        "greet's work waits for its worker"
+    );
+    assert_eq!(held().len(), 1, "the lead is told once: {:?}", held());
+    crate::landing::discard(
+        &db,
+        &worker.id,
+        &worker.head,
+        u64::try_from(now_ms()).unwrap(),
+    )
+    .unwrap();
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    let landed = linked.tip(&linked.branch);
+    assert_ne!(
+        landed, start,
+        "greet's work lands once its worker's set closed"
+    );
+    assert_eq!(linked.files(&start, &landed), "hello.txt");
+    assert_eq!(held().len(), 1, "{:?}", held());
+}
+
 /// A Claude Code lead in native mode in a linked worktree of the project repository, as
 /// the Sandboxed default gives it, on the task branch the engine named for it, with the
 /// start the engine records for a new worktree and its private home, temp and profiles
@@ -19705,6 +19829,48 @@ fn endpoint_claude_agent_is_hookless_and_refused_under_wait() {
     runtime.shutdown().unwrap();
 }
 
+/// T8 C2: a confined sub-agent starts with the tool cache its project's policy, its level
+/// and its linked worktree give it, granted in its profile, and a Full access one with none.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_agent_starts_with_the_tool_cache_its_policy_gives() {
+    use crate::sandbox::policy::{AgentPolicy, ToolCacheScope};
+    let fixture = Fixture::new(1);
+    let mut runtime = exiting_claude_runtime(&fixture);
+    let start = |access: AgentAccess, tool_cache: ToolCacheScope| {
+        let policy = AgentPolicy {
+            access,
+            tool_cache,
+            ..AgentPolicy::default()
+        };
+        crate::sandbox::policy::save(&fixture.connection, PROJECT, &policy).unwrap();
+        let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+        let (_, plan, _) = runtime
+            .prepare(
+                &fixture.setup,
+                id,
+                AgentRole::Sub,
+                "claude-code",
+                true,
+                &endpoint_account(),
+                false,
+                Layout::Linked,
+            )
+            .unwrap();
+        std::fs::read_to_string(&plan.sandbox_profile).unwrap()
+    };
+    let shared = start(AgentAccess::Sandboxed, ToolCacheScope::Shared);
+    assert!(
+        shared.contains("/tool-cache/") && shared.contains("/sandboxed-worktree\")"),
+        "{shared}"
+    );
+    let own = start(AgentAccess::Sandboxed, ToolCacheScope::PerAgent);
+    assert!(own.contains("/sandboxed-agent-"), "{own}");
+    let full = start(AgentAccess::Full, ToolCacheScope::Shared);
+    assert!(!full.contains("/tool-cache/"), "{full}");
+    runtime.shutdown().unwrap();
+}
+
 /// Prepares one new Claude Code sub-agent with tools on an endpoint account, as the team
 /// starts it, and builds its pane command from the plan and the kept context the runtime
 /// made. Inputs: the fixture and the runtime. Output: the display variables of that command.
@@ -20580,7 +20746,63 @@ fn wiring_a_kept_native_lead_s_ready_pane_names_its_calls_and_registers_its_team
         (true, Some((lead, "Lead".to_owned())), vec![Some(member)]),
         "(pane row kept, the lead's call named, teammates in the status)"
     );
+    assert_eq!(
+        team.shutdown().unwrap(),
+        names(&[lead]),
+        "LP-R1: the pane the Ready report kept outlives the engine"
+    );
+    assert_eq!(
+        fixture.agent_status(lead),
+        (AgentStatus::Stopped, Some(LEFT_RUNNING_NOTE.into()))
+    );
+    assert!(
+        fixture.recorded(lead),
+        "its pane row stays for the next engine"
+    );
     host.kill(&agent).unwrap();
+}
+
+/// Wiring test of engine mechanics (LP-R1): a kept native lead the owner is stopping is not
+/// left running at engine stop, so the pane row its Ready report wrote is dropped and the
+/// engine names no pane it left. The pane is a real tmux pane; the report stands in for a
+/// start, as in the row above.
+#[test]
+fn wiring_a_kept_native_lead_being_stopped_is_not_left_running_at_engine_stop() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    let record = fixture.pane(&host, lead);
+    let worker = between_turns(&project, AgentRole::Sub, true, true);
+    assert!(worker.managed && worker.kept_session && !worker.live);
+    team.workers.insert(lead, worker);
+    team.apply(
+        lead,
+        Report::Ready {
+            group: record.pid,
+            pane: Some(record.clone()),
+        },
+    )
+    .unwrap();
+    assert!(
+        fixture.recorded(lead),
+        "the Ready report keeps the lead's pane row"
+    );
+    team.workers.get_mut(&lead).unwrap().stopping = true;
+
+    assert!(
+        team.shutdown().unwrap().is_empty(),
+        "a stopping lead is not left running"
+    );
+    assert!(!fixture.recorded(lead), "its pane row is gone");
+    assert_eq!(fixture.agent_status(lead), (AgentStatus::Stopped, None));
+    host.kill(&AgentId::team(lead).unwrap()).unwrap();
 }
 
 /// Wiring test of engine mechanics: a managed agent that starts its harness for each turn
@@ -21858,6 +22080,50 @@ fn the_project_graph_is_copied_only_where_real_git_ignores_graphify_out() {
     }
 }
 
+/// DEC123B-L2: a teammate of an own-clone lead is a linked worktree of the lead's clone, so
+/// the clone's `info/exclude` decides whether it gets the graph, not the project
+/// repository's, in either direction.
+#[test]
+fn an_own_clone_leads_teammate_follows_the_clones_exclude() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let project = published_graph(&base);
+    let project_exclude = project.join(".git").join("info").join("exclude");
+    std::fs::create_dir_all(project_exclude.parent().unwrap()).unwrap();
+    let teammate = |lead: &str, exclude: &str| -> PathBuf {
+        let clone = project
+            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join("worktrees")
+            .join(lead);
+        std::fs::create_dir_all(clone.join(".git").join("info")).unwrap();
+        std::fs::write(clone.join(".git").join("info").join("exclude"), exclude).unwrap();
+        let mate = clone.join(crate::agent_git::TEAMMATES_FOLDER).join("mate");
+        std::fs::create_dir_all(&mate).unwrap();
+        std::fs::write(
+            mate.join(".git"),
+            format!("gitdir: {}/.git/worktrees/mate\n", clone.display()),
+        )
+        .unwrap();
+        mate
+    };
+
+    std::fs::write(&project_exclude, ".crazyagent/\n").unwrap();
+    let ignored = teammate("agent-1", "/.worktrees/\n/graphify-out/\n");
+    expose_graph(&project, &ignored, &[]);
+    assert!(
+        copied(&ignored),
+        "the clone's exclude keeps the graph out of its teammate's changes"
+    );
+
+    std::fs::write(&project_exclude, ".crazyagent/\ngraphify-out/\n").unwrap();
+    let tracked = teammate("agent-2", "/.worktrees/\n");
+    expose_graph(&project, &tracked, &[]);
+    assert!(
+        !tracked.join(GRAPH_FOLDER).exists(),
+        "the project repository's exclude does not decide for a clone's teammate"
+    );
+}
+
 /// A worktree whose repository's exclude keeps the graph out of git gets its copy: an own
 /// clone by its own exclude, a linked worktree by the project repository's, which the
 /// engine writes; a `.gitignore` line taking the graph back wins (DEC-123).
@@ -22266,6 +22532,8 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                     network: crate::sandbox::policy::AgentNetwork::default(),
                     toolchains: Vec::new(),
                     ide_git_hooks: false,
+                    tool_cache: Default::default(),
+                    ide_agent_files: Default::default(),
                 },
             )
             .unwrap();
@@ -25352,6 +25620,18 @@ fn an_agent_refused_for_an_mcp_secret_in_its_command_names_the_server_and_the_se
     assert_eq!(
         start_problem(&LaunchError("launch_deadline".into(), None)),
         "The agent could not start. (launch_deadline)"
+    );
+}
+
+/// CTX-M1 residual (rv-secreview r2 I3): a Codex launch refused because skills an earlier run
+/// locked into its home could not be removed says so in words, with its code kept.
+#[test]
+fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
+    assert_eq!(
+        start_problem(&LaunchError("launch_context_skills_kept".into(), None)),
+        "The agent could not start: an earlier run locked skills into its Codex home, so \
+         CrazyAgent could not remove them and Codex would have loaded them. \
+         (launch_context_skills_kept)"
     );
 }
 

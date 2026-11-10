@@ -566,6 +566,8 @@ pub(crate) fn execute(
         toolchains: Vec::new(),
         network: crate::sandbox::policy::AgentNetwork::default(),
         ide_git_hooks: false,
+        tool_cache: Default::default(),
+        ide_agent_files: Default::default(),
     };
     crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
     let stored = crate::project_setup::load_setup(tx, &project_id)?

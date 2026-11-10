@@ -103,3 +103,25 @@ test("a toast about an agent waiting in its terminal starts the keyboard on that
   assert.match(seen.opened.row, /Tester 4/);
   assert.deepEqual(seen.after, seen.opened);
 });
+
+test("a waiting agent that appears while the owner is on Send answer leaves the keyboard on that button (MOCKB2-BUTTON-FOCUS)", { timeout: 120_000 }, async () => {
+  const fixture = await bundle(FIXTURE);
+  const seen = await withPage(async ({ evaluate, send }) => {
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(true, "waiting", false)`);
+    await clickAt(send, await evaluate(`Fixture.pointOf("answer")`));
+    await evaluate("Fixture.frames()");
+    await clickAt(send, await evaluate(`Fixture.pointOf("box")`));
+    await type(send, "a");
+    for (let press = 0; press < 4 && (await evaluate("Fixture.where()")).label !== "Send answer"; press += 1) {
+      await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+      await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+    }
+    const before = await evaluate("Fixture.where()");
+    await evaluate("Fixture.reread(true)");
+    return { before, after: await evaluate("Fixture.where()"), typed: await evaluate("Fixture.typed()") };
+  });
+  assert.equal(seen.before.label, "Send answer", "real Tab keys reached Send answer");
+  assert.deepEqual(seen.after, seen.before, "the new waiting row leaves the keyboard on Send answer");
+  assert.equal(seen.typed, "a", "the typed answer stays");
+});

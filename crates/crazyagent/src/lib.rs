@@ -49,6 +49,7 @@ pub mod projects_home;
 pub mod protocol;
 pub mod qualification;
 pub mod questions;
+pub mod quit_settings;
 pub mod rcli_host;
 pub mod recovery;
 pub mod research;

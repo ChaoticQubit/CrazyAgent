@@ -207,6 +207,13 @@ pub(super) fn prepare(
         .map_err(|_| failure("ide_terminal_project_unavailable"))?;
     let level = terminal_level(place.access, asked).map_err(failure)?;
     let kept_ports = crate::ide::workspace::kept_ports(settings)?;
+    let agent_files = crate::ide::workspace::agent_files_rule(
+        root,
+        project,
+        &place.folder,
+        place.access,
+        place.agent_files,
+    )?;
     let shell = ide_shell::owner_shell().map_err(|_| failure("ide_terminal_shell_unknown"))?;
     let incoming: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(variable, _)| {
@@ -228,6 +235,7 @@ pub(super) fn prepare(
             level,
             network: place.network,
             kept_ports: &kept_ports,
+            agent_files,
         },
         place.access,
     )
@@ -287,8 +295,10 @@ async fn greet(writer: &mut OwnedWriteHalf, viewer: &TerminalStream) -> Result<(
 
 /// Streams the pane's output and applies the extension's input and resizes until one side
 /// ends or the capability no longer admits this project, which each input and resize is
-/// checked against first (CA-SEC-005). Inputs: the read half, the writer, the packet, the
-/// owner runtime, the project, the host and the viewer. Output: the plain reason it ended.
+/// checked against first (CA-SEC-005); a revoked, replaced or ended grant stops it before
+/// any further output, input or resize (V21-SEC-2-L1). Inputs: the read half, the writer,
+/// the packet, the owner runtime, the project, the host and the viewer. Output: the plain
+/// reason it ended.
 async fn relay(
     mut reader: crate::platform::unix_socket::OwnedReadHalf,
     writer: &mut OwnedWriteHalf,
@@ -311,17 +321,15 @@ async fn relay(
         }
     });
     let admitted = || runtime.ide_grants().admit(packet).ok().as_ref() == Some(project);
+    let Ok(mut ended) = runtime.ide_grants().watch(packet) else {
+        listener.abort();
+        return "ide_capability_revoked";
+    };
     let mut check = tokio::time::interval(GRANT_CHECK);
     let reason = loop {
         tokio::select! {
-            chunk = viewer.next() => match chunk {
-                Some(bytes) => {
-                    if send(writer, &TerminalFrame::Output { bytes }).await.is_err() {
-                        break "terminal_viewer_gone";
-                    }
-                }
-                None => break "terminal_ended",
-            },
+            biased;
+            _ = ended.changed() => break "ide_capability_revoked",
             request = asked.recv() => match request {
                 None | Some(TerminalRequest::Detach) => break "terminal_detached",
                 Some(
@@ -348,6 +356,14 @@ async fn relay(
                         break "terminal_ended";
                     }
                 }
+            },
+            chunk = viewer.next() => match chunk {
+                Some(bytes) => {
+                    if send(writer, &TerminalFrame::Output { bytes }).await.is_err() {
+                        break "terminal_viewer_gone";
+                    }
+                }
+                None => break "terminal_ended",
             },
             _ = check.tick() => {
                 if !admitted() {

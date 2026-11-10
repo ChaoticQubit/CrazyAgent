@@ -1,10 +1,14 @@
 use super::live_claude_tests::processes_with;
-use super::managed_agent::{Closing, ManagedAgent, SignedIn, codex, real_codex, shown};
+use super::managed_agent::{
+    Closing, Kept, ManagedAgent, SignedIn, codex, keep_rollouts, open_plain, real_codex,
+    rollout_files, shown,
+};
 use super::{Report, TurnEnd};
 use crate::team::{AgentRole, BackgroundAtEnd};
 use crate::terminal::tmux::{Tmux, installed};
 use crate::terminal::{AgentId, FOLDER, Host};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -13,42 +17,31 @@ const CODEX_TURN: Duration = Duration::from_secs(180);
 const REAPED: Duration = Duration::from_secs(10);
 const MARKER_GRACE: Duration = Duration::from_secs(5);
 const FIRST_PROMPT: &str = "Reply with exactly the word OK and nothing else.";
+/// The most characters of one rollout tool record a row prints (G1-DIAG).
+const CALL_SHOWN: usize = 400;
+/// The rollout record kinds that carry a tool call or its output.
+const TOOL_RECORDS: [&str; 5] = [
+    "function_call",
+    "function_call_output",
+    "custom_tool_call",
+    "custom_tool_call_output",
+    "local_shell_call",
+];
 /// The title row of Codex's folder access screen, as the engine's own screen read finds it.
 const FOLDER_SCREEN_TITLE: &str = "Folder access";
 /// How often a row reads its agent's pane. The engine leaves the folder access screen up
 /// for at least the 700 ms its first screen must stay quiet before it answers.
 const SCREEN_LOOK: Duration = Duration::from_millis(100);
 
-/// Lists every `.jsonl` file below a folder, none when the folder does not exist.
-/// Input: the folder. Output: the files' paths.
-fn jsonl_files(folder: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut pending = vec![folder.to_path_buf()];
-    while let Some(folder) = pending.pop() {
-        let Ok(items) = std::fs::read_dir(&folder) else {
-            continue;
-        };
-        for item in items {
-            let path = item.unwrap().path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "jsonl")
-            {
-                files.push(path);
-            }
-        }
-    }
-    files
-}
-
-/// Reads every rollout Codex wrote below a sessions folder. Input: the folder.
-/// Output: the rollouts' text, joined.
-fn rollouts(folder: &Path) -> String {
-    jsonl_files(folder)
+/// Reads every rollout Codex wrote below an agent home's sessions folder, through
+/// [`rollout_files`], which follows no link. Input: the agent home. Output: the rollouts'
+/// text, joined.
+fn rollouts(home: &Path) -> String {
+    rollout_files(home)
+        .unwrap()
+        .files
         .iter()
-        .map(|path| std::fs::read_to_string(path).unwrap())
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
         .collect()
 }
 
@@ -77,7 +70,7 @@ fn a_real_codex_agent_reads_its_developer_instructions_with_its_launch_files_rea
     );
     assert_eq!(end, TurnEnd::Success, "{cause:?}");
     assert!(text.contains("OK"), "{text}");
-    let written = rollouts(&agent.home.join("sessions"));
+    let written = rollouts(&agent.home);
     let quoted = serde_json::to_string(first).unwrap();
     assert!(
         written.contains(quoted.trim_matches('"')),
@@ -129,22 +122,47 @@ fn running(command: &str) -> bool {
     })
 }
 
-/// What the real Codex wrote of its sessions under an agent home: each rollout's path, the
-/// `cli_version` each session record names and the text of each assistant message.
+/// One tool record of a rollout as a row prints it: its kind, the tool's name, and its
+/// arguments, input, action or output as text, cut to `CALL_SHOWN` characters. Input: the
+/// record's payload. Output: the line.
+fn call_line(payload: &serde_json::Value) -> String {
+    let body = ["arguments", "input", "action", "output"]
+        .iter()
+        .map(|key| &payload[key])
+        .find(|value| !value.is_null())
+        .map_or_else(String::new, |value| {
+            value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned)
+        });
+    let line = format!(
+        "{} {} {body}",
+        payload["type"].as_str().unwrap_or("-"),
+        payload["name"].as_str().unwrap_or("-")
+    );
+    line.chars().take(CALL_SHOWN).collect()
+}
+
+/// What the real Codex wrote of its sessions under an agent home: each rollout's name, how
+/// many entries the no-link read skipped, the `cli_version` each session record names, the
+/// text of each assistant message and each tool call and output as [`call_line`] prints it.
 struct CodexTrace {
-    rollouts: Vec<PathBuf>,
+    rollouts: Vec<OsString>,
+    skipped: usize,
     versions: Vec<String>,
     said: Vec<String>,
+    calls: Vec<String>,
 }
 
 impl CodexTrace {
-    /// Reads the rollouts under an agent home's `sessions` folder. Input: the agent home.
-    /// Output: the trace, empty when Codex wrote none.
+    /// Reads the rollouts under an agent home's `sessions` folder through [`rollout_files`],
+    /// which follows no link. Input: the agent home. Output: the trace, empty when Codex
+    /// wrote none or the sessions folder is a link.
     fn of(home: &Path) -> Self {
-        let rollouts = jsonl_files(&home.join("sessions"));
-        let (mut versions, mut said) = (Vec::new(), Vec::new());
-        for path in &rollouts {
-            for line in std::fs::read_to_string(path).unwrap().lines() {
+        let read = rollout_files(home).unwrap();
+        let (mut versions, mut said, mut calls) = (Vec::new(), Vec::new(), Vec::new());
+        for (_, bytes) in &read.files {
+            for line in String::from_utf8_lossy(bytes).lines() {
                 let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
                     continue;
                 };
@@ -163,24 +181,41 @@ impl CodexTrace {
                             .filter(|part| part["type"] == "output_text")
                             .filter_map(|part| part["text"].as_str().map(str::to_owned)),
                     );
+                } else if entry["type"] == "response_item"
+                    && payload["type"]
+                        .as_str()
+                        .is_some_and(|kind| TOOL_RECORDS.contains(&kind))
+                {
+                    calls.push(call_line(payload));
                 }
             }
         }
         Self {
-            rollouts,
+            rollouts: read.files.into_iter().map(|(name, _)| name).collect(),
+            skipped: read.skipped,
             versions,
             said,
+            calls,
+        }
+    }
+
+    /// Prints the rollouts, the skipped count, the Codex versions and each tool record, one
+    /// line each, so a failed row's log shows what Codex ran. Output: none.
+    fn print(&self) {
+        println!(
+            "codex rollouts={:?} skipped={} cli_version={:?}",
+            self.rollouts, self.skipped, self.versions
+        );
+        for call in &self.calls {
+            assert!(call.chars().count() <= CALL_SHOWN);
+            println!("codex tool {call:?}");
         }
     }
 
     /// Checks that the real Codex itself gave a row's reply: a rollout whose session record
     /// names a Codex version, and an assistant message there holding `word`. Input: the
-    /// word. Output: none; prints the rollouts and the version.
+    /// word. Output: none.
     fn assert_said(&self, word: &str) {
-        println!(
-            "codex rollouts={:?} cli_version={:?}",
-            self.rollouts, self.versions
-        );
         assert!(!self.rollouts.is_empty(), "Codex wrote no rollout");
         assert!(
             self.versions.iter().any(|version| !version.is_empty()),
@@ -240,9 +275,10 @@ fn in_a_pane(prefix: &str) -> (tempfile::TempDir, Closing, ManagedAgent) {
 /// SECAUDIT-5-LIVE G1: under Stop, the real Codex as a sub-agent in a pane, on the owner's
 /// signed-in account, runs a script with its shell tool inside the agent's Seatbelt profile
 /// and its process-info deny. The script leaves a `nohup` sleep and a sleep in a session of
-/// its own. The turn ends in success with no problem, the real Codex's rollout holds the
-/// reply, both sleeps were seen running, and within `REAPED` after the turn no process names
-/// either sleep or the agent's home. Runs in a live window only.
+/// its own, each writing a marker first. The turn ends in success with no problem, the real
+/// Codex's rollout holds the reply, both markers exist, the session sleep was seen running
+/// (Codex 0.164 itself ends the `nohup` one with the command's group, G1-DIAG), and within
+/// `REAPED` no process names either sleep or the agent's home. Runs in a live window only.
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
 fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
@@ -256,10 +292,21 @@ fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
     let kept = format!("/bin/sleep 300.{tag:09}");
     let own_session = format!("/bin/sleep 301.{tag:09}");
     let script = agent.working_dir.join("background.sh");
+    let ran = [
+        agent.working_dir.join("kept-ran"),
+        agent.working_dir.join("own-ran"),
+    ];
+    let [kept_ran, own_ran] = [&ran[0], &ran[1]].map(|path| path.to_str().unwrap().to_owned());
+    assert!(
+        [&kept_ran, &own_ran].iter().all(|path| path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))),
+        "a marker path needs quoting: {kept_ran} {own_ran}"
+    );
     std::fs::write(
         &script,
         format!(
-            "/usr/bin/nohup {kept} > /dev/null 2>&1 &\n/usr/bin/perl -mPOSIX -e 'POSIX::setsid(); exec \"/bin/sleep\", \"301.{tag:09}\"' > /dev/null 2>&1 &\necho started\n"
+            "/usr/bin/nohup /bin/sh -c 'echo ran > {kept_ran}; exec {kept}' > /dev/null 2>&1 &\n/usr/bin/perl -mPOSIX -e 'POSIX::setsid(); exec \"/bin/sh\", \"-c\", \"echo ran > {own_ran}; exec {own_session}\"' > /dev/null 2>&1 &\ntries=0\nwhile [ ! -e {kept_ran} ] || [ ! -e {own_ran} ]; do\n  tries=$((tries + 1))\n  [ \"$tries\" -gt 50 ] && break\n  /bin/sleep 0.1\ndone\necho started\n"
         ),
     )
     .unwrap();
@@ -302,24 +349,123 @@ fn under_stop_a_real_codex_agent_s_shell_grandchild_ends_with_its_turn() {
         std::thread::sleep(Duration::from_millis(200));
     };
     host.close();
+    let seen = [
+        seen[0].load(Ordering::SeqCst),
+        seen[1].load(Ordering::SeqCst),
+    ];
+    let marked = [ran[0].exists(), ran[1].exists()];
+    println!(
+        "real codex background stop: seen nohup={} session={} markers nohup={} session={} left={}",
+        seen[0],
+        seen[1],
+        marked[0],
+        marked[1],
+        left.len()
+    );
+    let trace = CodexTrace::of(&agent.home);
+    trace.print();
     let (text, end, cause) = finished(&reports);
     println!("real codex background stop: end={end:?} cause={cause:?} reply={text:?}");
     assert_eq!(problem, None);
     assert_eq!(end, TurnEnd::Success, "{cause:?}");
     assert!(text.contains("STARTED"), "{text}");
-    CodexTrace::of(&agent.home).assert_said("STARTED");
+    trace.assert_said("STARTED");
+    assert!(marked[0], "the agent's nohup sleep never started: {text}");
     assert!(
-        seen[0].load(Ordering::SeqCst),
-        "the agent's nohup sleep never ran: {text}"
+        marked[1],
+        "the agent's sleep in a session of its own never started: {text}"
     );
     assert!(
-        seen[1].load(Ordering::SeqCst),
+        seen[1],
         "the agent's sleep in a session of its own never ran: {text}"
     );
     assert!(
         left.is_empty(),
         "processes of the agent outlived its turn: {left:?}"
     );
+}
+
+/// G1-DIAG: the live keep and the trace read each plain `.jsonl` file below an agent home's
+/// sessions folder, nested ones too, and nothing through a link the agent could plant: not a
+/// linked file or folder inside, not a hard-linked file, not a file swapped for a link after
+/// it was listed, and not a sessions folder that is itself a link. A second keep never writes
+/// over a kept file, and a home with no sessions folder keeps nothing.
+#[test]
+fn the_live_keep_copies_only_the_rollouts_under_the_agent_home() {
+    use rustix::fs::{CWD, Mode, OFlags};
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let (home, outside, keep) = (base.join("home"), base.join("outside"), base.join("keep"));
+    let sessions = home.join("sessions");
+    std::fs::create_dir_all(sessions.join("2026").join("11")).unwrap();
+    std::fs::create_dir_all(outside.join("deeper")).unwrap();
+    std::fs::write(
+        sessions.join("2026").join("11").join("rollout-a.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    std::fs::write(sessions.join("rollout-b.jsonl"), "{}\n").unwrap();
+    std::fs::write(sessions.join("notes.txt"), "notes\n").unwrap();
+    std::fs::write(outside.join("owner.jsonl"), "{}\n").unwrap();
+    std::fs::write(outside.join("deeper").join("owner.jsonl"), "{}\n").unwrap();
+    std::os::unix::fs::symlink(outside.join("owner.jsonl"), sessions.join("linked.jsonl")).unwrap();
+    std::os::unix::fs::symlink(&outside, sessions.join("linked")).unwrap();
+    std::fs::hard_link(outside.join("owner.jsonl"), sessions.join("hard.jsonl")).unwrap();
+    assert_eq!(
+        keep_rollouts(&home, &keep).unwrap(),
+        Kept {
+            copied: 2,
+            skipped: 4
+        },
+        "notes.txt, the linked file, the linked folder and the hard link are skipped"
+    );
+    let mut kept: Vec<String> = std::fs::read_dir(&keep)
+        .unwrap()
+        .map(|item| item.unwrap().file_name().into_string().unwrap())
+        .collect();
+    kept.sort();
+    assert_eq!(kept, ["rollout-a.jsonl", "rollout-b.jsonl"]);
+    assert_eq!(
+        keep_rollouts(&home, &keep).unwrap(),
+        Kept {
+            copied: 0,
+            skipped: 6
+        },
+        "a second keep never writes over a kept file"
+    );
+    let folders = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let listed = rustix::fs::openat(CWD, &sessions, folders, Mode::empty()).unwrap();
+    assert!(open_plain(&listed, c"rollout-b.jsonl").is_some());
+    assert!(
+        open_plain(&listed, c"linked.jsonl").is_none(),
+        "a name listed as a file and swapped for a link by the time it opens"
+    );
+    assert!(open_plain(&listed, c"hard.jsonl").is_none());
+    let linked_home = base.join("linked-home");
+    std::fs::create_dir_all(&linked_home).unwrap();
+    std::os::unix::fs::symlink(&sessions, linked_home.join("sessions")).unwrap();
+    let none = base.join("keep-none");
+    assert_eq!(
+        keep_rollouts(&linked_home, &none).unwrap(),
+        Kept {
+            copied: 0,
+            skipped: 1
+        }
+    );
+    assert!(!none.exists());
+    let traced = CodexTrace::of(&linked_home);
+    assert!(traced.rollouts.is_empty() && traced.calls.is_empty());
+    assert_eq!(traced.skipped, 1);
+    let bare = base.join("bare-home");
+    std::fs::create_dir_all(&bare).unwrap();
+    assert_eq!(
+        keep_rollouts(&bare, &none).unwrap(),
+        Kept {
+            copied: 0,
+            skipped: 0
+        }
+    );
+    assert!(!none.exists());
 }
 
 /// What one first turn of a real Codex sub-agent in a pane showed: its reply, end and
@@ -417,6 +563,7 @@ fn a_real_codex_agent_in_a_pane_takes_its_first_prompt_with_no_folder_screen() {
         "real codex pane, no .codex: end={:?} cause={:?} reply={:?} folder_screens={}",
         turn.end, turn.cause, turn.text, turn.screens
     );
+    turn.trace.print();
     assert_eq!(turn.problem, None);
     assert_eq!(turn.end, TurnEnd::Success, "{:?}", turn.cause);
     assert!(turn.text.contains("OK"), "{}", turn.text);
@@ -439,6 +586,7 @@ fn a_real_codex_agent_in_a_pane_with_a_codex_folder_gets_past_the_screen_and_sta
         "real codex pane, .codex planted: end={:?} cause={:?} reply={:?} folder_screens={} plant_started={}",
         turn.end, turn.cause, turn.text, turn.screens, turn.ran
     );
+    turn.trace.print();
     assert_eq!(turn.problem, None);
     assert_eq!(turn.end, TurnEnd::Success, "{:?}", turn.cause);
     assert!(turn.text.contains("OK"), "{}", turn.text);

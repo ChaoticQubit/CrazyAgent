@@ -1,6 +1,8 @@
 use super::new_project_view::{Look, Row, wrap_words};
 use super::project_team::window;
-use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy, PolicyView, ToolchainChoice};
+use crate::sandbox::policy::{
+    AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ToolchainChoice,
+};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
@@ -13,9 +15,9 @@ pub(in crate::tui) const FULL_ACCESS_IDE: &str = "The IDE runs with your user's 
 /// started above it, but not what a Full access agent started outside its terminal.
 pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str = "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.";
 
-/// What saving a new level, hooks or network choice does to the project's open IDE, the same
-/// in the desktop app.
-pub(in crate::tui) const POLICY_RESTARTS_IDE: &str = "Changing the level, the IDE hooks switch below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.";
+/// What saving a new level, hooks, agent folders or network choice does to the project's open
+/// IDE, the same in the desktop app.
+pub(in crate::tui) const POLICY_RESTARTS_IDE: &str = "Changing the level, the IDE hooks switch or the agent folders choice below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.";
 
 /// What turning a toolchain off does to work already running: the engine stops each agent,
 /// research job and master turn whose sandbox granted it.
@@ -27,6 +29,14 @@ pub(in crate::tui) const IDE_GIT_HOOKS: &str = "IDE git runs the project's hooks
 /// What the IDE hooks switch does and never does (INT-1, IN1-1), the same in Desktop.
 pub(in crate::tui) const IDE_GIT_HOOKS_LINE: &str = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed. No effect at Full access: git runs as yours. Applies when the IDE next starts.";
 
+/// The agent folders choice's name, the same in the desktop app.
+pub(in crate::tui) const IDE_AGENT_FILES: &str = "IDE changes in agent folders";
+
+/// Why the agent folders choice has no effect under Full access (DEC-124), the same in the
+/// desktop app.
+pub(in crate::tui) const AGENT_FILES_IGNORED_UNDER_FULL: &str =
+    "Full access runs the IDE without a sandbox, so this choice does not apply.";
+
 /// Why the network choice has no effect under Full access: Full access runs agents with no
 /// sandbox, so nothing bounds their network.
 pub(in crate::tui) const NETWORK_IGNORED_UNDER_FULL: &str =
@@ -35,9 +45,9 @@ pub(in crate::tui) const NETWORK_IGNORED_UNDER_FULL: &str =
 const TEXT_WIDTH: usize = 56;
 
 /// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level,
-/// one switch per toolchain family, the network choice and the IDE hooks switch. Row 0 is the
-/// level, each next row one toolchain of the view, then the network row, and the last row the
-/// IDE hooks switch. Busy while the engine saves; a refusal keeps the choices with the reason.
+/// one switch per toolchain family, the network choice, the IDE hooks switch and the IDE agent
+/// folders choice. Row 0 is the level, each next row one toolchain of the view, then the
+/// network row, the IDE hooks switch, and the last row the agent folders choice. Busy while the engine saves; a refusal keeps the choices with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct AccessEdit {
     pub view: PolicyView,
@@ -45,6 +55,7 @@ pub(in crate::tui) struct AccessEdit {
     pub network: AgentNetwork,
     pub allowed: Vec<bool>,
     pub ide_git_hooks: bool,
+    pub ide_agent_files: IdeAgentFiles,
     pub cursor: usize,
     pub confirm_full: bool,
     pub busy: bool,
@@ -68,6 +79,7 @@ impl AccessEdit {
             network: view.network,
             allowed: view.toolchains.iter().map(|row| row.allowed).collect(),
             ide_git_hooks: view.ide_git_hooks,
+            ide_agent_files: view.ide_agent_files,
             view: view.clone(),
             cursor: 0,
             confirm_full: false,
@@ -81,7 +93,7 @@ impl AccessEdit {
     /// Output: what the screen does next.
     pub fn key(&mut self, key: KeyEvent) -> AccessKey {
         assert_eq!(self.allowed.len(), self.view.toolchains.len());
-        assert!(self.cursor <= self.hooks_row());
+        assert!(self.cursor <= self.files_row());
         if self.busy {
             return match key.code {
                 KeyCode::Esc => AccessKey::Close,
@@ -104,7 +116,7 @@ impl AccessEdit {
         match key.code {
             KeyCode::Esc => return AccessKey::Close,
             KeyCode::Up => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Down => self.cursor = (self.cursor + 1).min(self.hooks_row()),
+            KeyCode::Down => self.cursor = (self.cursor + 1).min(self.files_row()),
             KeyCode::Left => self.change(false),
             KeyCode::Right | KeyCode::Char(' ') => self.change(true),
             KeyCode::Enter if self.access == AgentAccess::Full => {
@@ -118,7 +130,8 @@ impl AccessEdit {
 
     /// The policy the box would save: the chosen level, a choice for each toolchain whose
     /// switch differs from the project's own use, so the others keep following the project,
-    /// and the IDE hooks switch.
+    /// the IDE hooks switch, the agent folders choice and the tool cache choice as the project
+    /// saved it (T8).
     pub fn policy(&self) -> AgentPolicy {
         let toolchains: Vec<ToolchainChoice> = self
             .view
@@ -136,6 +149,8 @@ impl AccessEdit {
             network: self.network,
             toolchains,
             ide_git_hooks: self.ide_git_hooks,
+            tool_cache: self.view.tool_cache,
+            ide_agent_files: self.ide_agent_files,
         };
         assert!(policy.validate().is_ok());
         policy
@@ -143,7 +158,8 @@ impl AccessEdit {
 
     /// The box's lines fitted to the rows the window leaves it: what the setting does, the
     /// level row, what lowering the level does to running agents, the toolchain rows, the
-    /// network row with its help, the IDE hooks row with its line, the warning or the refusal,
+    /// network row with its help, the IDE hooks row with its line, the agent folders row with
+    /// its help, the warning or the refusal,
     /// and the save line, all of them when they fit. Else the warning or refusal and the save
     /// line stay whole at the bottom, and the settings above them show a window that keeps the
     /// cursor's row and as many of its help lines as fit, with how many lines sit above and
@@ -183,7 +199,7 @@ impl AccessEdit {
         rows
     }
 
-    /// The box's settings lines, through the blank line after the IDE hooks switch, and the
+    /// The box's settings lines, through the blank line after the agent folders choice, and the
     /// line the cursor's row is on. Input: the look. Output: the rows, that line and the last
     /// line of the help under it.
     fn form(&self, look: &Look) -> (Vec<Row>, usize, usize) {
@@ -333,6 +349,37 @@ impl AccessEdit {
         if self.cursor == hooks {
             end = body.len() - 1;
         }
+        let files = self.files_row();
+        if self.cursor == files {
+            at = body.len();
+        }
+        body.push(
+            Row::of(mark(files), look.accent)
+                .push(format!("{IDE_AGENT_FILES}  "), look.muted)
+                .push(
+                    format!("< {} >", self.ide_agent_files.label()),
+                    if self.cursor == files {
+                        look.selection
+                    } else {
+                        look.fg
+                    },
+                ),
+        );
+        body.extend(
+            wrap_words(agent_files_help(self.ide_agent_files), TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(format!("  {line}"), look.muted)),
+        );
+        if self.access == AgentAccess::Full {
+            body.extend(
+                wrap_words(AGENT_FILES_IGNORED_UNDER_FULL, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(format!("  {line}"), look.warning)),
+            );
+        }
+        if self.cursor == files {
+            end = body.len() - 1;
+        }
         body.push(Row::default());
         assert!(at < body.len(), "the cursor's row is a settings line");
         assert!(
@@ -376,6 +423,10 @@ impl AccessEdit {
         self.allowed.len() + 2
     }
 
+    fn files_row(&self) -> usize {
+        self.hooks_row() + 1
+    }
+
     fn change(&mut self, forward: bool) {
         self.error = None;
         if self.cursor == 0 {
@@ -388,6 +439,10 @@ impl AccessEdit {
         }
         if self.cursor == self.hooks_row() {
             self.ide_git_hooks = !self.ide_git_hooks;
+            return;
+        }
+        if self.cursor == self.files_row() {
+            self.ide_agent_files = next_agent_files(self.ide_agent_files, forward);
             return;
         }
         let row = self.cursor - 1;
@@ -428,6 +483,35 @@ pub(in crate::tui) fn next_network(current: AgentNetwork, forward: bool) -> Agen
     let count = AgentNetwork::ALL.len();
     let step = if forward { 1 } else { count - 1 };
     AgentNetwork::ALL[(at + step) % count]
+}
+
+/// The next agent folders choice, cycling in either direction. Input: the current choice and
+/// the direction. Output: the next choice.
+pub(in crate::tui) fn next_agent_files(current: IdeAgentFiles, forward: bool) -> IdeAgentFiles {
+    let at = IdeAgentFiles::ALL
+        .iter()
+        .position(|choice| *choice == current)
+        .unwrap_or(0);
+    let count = IdeAgentFiles::ALL.len();
+    let step = if forward { 1 } else { count - 1 };
+    IdeAgentFiles::ALL[(at + step) % count]
+}
+
+/// What an agent folders choice lets the IDE, its terminals and its tasks do in agent
+/// folders at Sandboxed and Own branch (DEC-124), the same in the desktop app. Input: the
+/// choice. Output: the line.
+pub(in crate::tui) fn agent_files_help(choice: IdeAgentFiles) -> &'static str {
+    match choice {
+        IdeAgentFiles::AllowAll => {
+            "The IDE, its terminals and its tasks may edit, delete and rename files in agent folders."
+        }
+        IdeAgentFiles::NoDeleteOrRename => {
+            "Files in agent folders can be edited, Edit anyway included, but not deleted or renamed. Tools that delete as they go, such as cargo clean, fail there."
+        }
+        IdeAgentFiles::ReadOnly => {
+            "Nothing in the IDE may write in agent folders, Edit anyway included."
+        }
+    }
 }
 
 /// One line on what a network choice lets agents and the plugin check reach. Input: the

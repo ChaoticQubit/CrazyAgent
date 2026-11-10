@@ -1,4 +1,5 @@
 use crate::engine::EngineError;
+use crate::sandbox::policy::AgentFilesRule;
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
 use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, any_case, seatbelt_pattern};
 use std::fs;
@@ -50,18 +51,21 @@ pub fn qualified() -> bool {
 /// matches names, with its folders up to its grant kept from being moved, then agent IDE
 /// config and agent git folders in the project are denied for reading ([`agent_config`]),
 /// then the project's `.git/worktrees`, its agents' admin folders, for writing
-/// ([`agent_admin`]). The project's own git index and its lock stay denied: the IDE stages on a private index
+/// ([`agent_admin`]), then the owner's agent folders choice is held
+/// ([`AgentFilesRule::seatbelt`], DEC-124). The project's own git index and its lock stay
+/// denied: the IDE stages on a private index
 /// the engine carries across ([`super::git::shim_text`], SECAUDIT-IDE-SERVER-INDEX). Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
 /// reach what `network` allows ([`crate::sandbox::policy::ide_network`]).
 /// On the open network it never binds or listens on `kept_ports`, the owner's local model
-/// ports. Inputs: the grants, the server port, the network and the ports kept. Output: the
-/// profile text, or `ide_sandbox_invalid` for an unsafe place.
+/// ports. Inputs: the grants, the server port, the network, the ports kept and the agent
+/// folders rule. Output: the profile text, or `ide_sandbox_invalid` for an unsafe place.
 pub fn profile(
     grants: &Grants,
     port: u16,
     network: SandboxNetwork,
     kept_ports: &[u16],
+    agent_files: AgentFilesRule,
 ) -> Result<String, EngineError> {
     let invalid = |_| failure("ide_sandbox_invalid");
     let data = grants.data;
@@ -146,6 +150,7 @@ pub fn profile(
     text.push_str(&locks(&held));
     text.push_str(&agent_config(grants.root));
     text.push_str(&agent_admin(grants.root));
+    text.push_str(&agent_files.seatbelt(grants.root));
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"
     ));
@@ -165,16 +170,17 @@ pub fn profile(
 /// Writes an IDE server's profile to `<folder>/server.sb` with mode 0600, never through a
 /// link, replacing the last launch's. The folder is the engine's private IDE folder of the
 /// project, which no grant lets the server write. Inputs: the folder and the grants with the
-/// port, the network and the ports kept. Output: the profile path, or `ide_sandbox_invalid`
-/// or `ide_state_unavailable`.
+/// port, the network, the ports kept and the agent folders rule. Output: the profile path,
+/// or `ide_sandbox_invalid` or `ide_state_unavailable`.
 pub fn install(
     folder: &Path,
     grants: &Grants,
     port: u16,
     network: SandboxNetwork,
     kept_ports: &[u16],
+    agent_files: AgentFilesRule,
 ) -> Result<PathBuf, EngineError> {
-    let text = profile(grants, port, network, kept_ports)?;
+    let text = profile(grants, port, network, kept_ports, agent_files)?;
     let path = folder.join(PROFILE);
     if grants
         .writable

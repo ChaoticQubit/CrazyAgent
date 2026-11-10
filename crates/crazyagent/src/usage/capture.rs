@@ -34,6 +34,11 @@ pub(super) const TABLE_ROWS_MAX: i64 = 4 * 1024 * 1024;
 /// The records at which one scan stops opening files, so one write under the store's lock
 /// holds at most one read more. The rest is read by the next scan.
 const USAGES_PER_SCAN_MAX: usize = 8 * 1024;
+/// The most scans a finished turn's home gets before its records' progress is forgotten,
+/// since each scan reads a record only up to one read's bound: a turn's record is counted
+/// whole up to this many reads, `READ_BYTES_MAX` bytes or `USAGES_PER_READ_MAX` records each
+/// (COUNT-3-L1).
+const TURN_SCANS_MAX: usize = 16;
 const MESSAGES_KEPT_MS: i64 = 400 * 24 * HOUR_MS;
 const MESSAGES_FORGOTTEN_PER_SCAN: i64 = 4096;
 
@@ -990,7 +995,7 @@ pub fn scan_home(
     attribution: &Attribution,
     now_ms: i64,
 ) -> Result<Tokens, EngineError> {
-    scan(db, home, format, attribution, None, now_ms)
+    scan(db, home, format, attribution, None, now_ms).map(|(added, _)| added)
 }
 
 /// Counts a team agent's home as `scan_home` does and also counts each tool call the new
@@ -1007,9 +1012,13 @@ pub fn scan_agent_home(
     agent: i64,
     now_ms: i64,
 ) -> Result<Tokens, EngineError> {
-    scan(db, home, format, attribution, Some(agent), now_ms)
+    scan(db, home, format, attribution, Some(agent), now_ms).map(|(added, _)| added)
 }
 
+/// Counts what a home's records gained, as [`scan_home`] describes. Inputs: the store, the
+/// home, its format, the attribution, the agent whose tool calls it counts and the time.
+/// Output: the tokens added and whether any record's read moved its progress, so a caller
+/// that must count a home to its end knows to scan again; or a plain code.
 fn scan(
     db: &Connection,
     home: &Path,
@@ -1017,7 +1026,7 @@ fn scan(
     attribution: &Attribution,
     agent: Option<i64>,
     now_ms: i64,
-) -> Result<Tokens, EngineError> {
+) -> Result<(Tokens, bool), EngineError> {
     checked_attribution(attribution)?;
     let counting = match agent {
         Some(id) if format == Format::Codex || launched_without_hooks(db, id)? => Some(id),
@@ -1059,7 +1068,7 @@ fn scan(
         }
     }
     if changed.is_empty() {
-        return Ok(Tokens::default());
+        return Ok((Tokens::default(), false));
     }
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
     let tracking = super::recount::keeps_live_keys(&tx)?;
@@ -1111,7 +1120,7 @@ fn scan(
         record_observation(&tx, account, &observation, LimitSource::Transcript, now_ms)?;
     }
     tx.commit().map_err(storage)?;
-    Ok(added)
+    Ok((added, true))
 }
 
 /// Says whether a team agent's launch fires no hooks (`team_agents.hookless`). Inputs: the
@@ -1639,7 +1648,7 @@ pub fn count_turn(
 ) -> Result<Tokens, EngineError> {
     let added = if reported.is_empty() {
         checked_attribution(attribution)?;
-        scan_home(db, home, format, attribution, now_ms)?
+        scan_turn(db, home, format, attribution, now_ms)?
     } else {
         count_reported(db, attribution, reported, session, now_ms)?;
         reported
@@ -1650,6 +1659,30 @@ pub fn count_turn(
         params![prefix],
     )
     .map_err(storage)?;
+    Ok(added)
+}
+
+/// Scans a finished turn's home until no record's read moves its progress, at most
+/// `TURN_SCANS_MAX` times, since one scan stops at its read and scan bounds (COUNT-3-L1). A
+/// home still moving at the last scan is marked cut, so the usage page reads as partial.
+/// Inputs: the store, the home, its format, the attribution and the time. Output: the tokens
+/// added, or `usage_unavailable`.
+fn scan_turn(
+    db: &Connection,
+    home: &Path,
+    format: Format,
+    attribution: &Attribution,
+    now_ms: i64,
+) -> Result<Tokens, EngineError> {
+    let mut added = Tokens::default();
+    for _ in 0..TURN_SCANS_MAX {
+        let (gained, moved) = scan(db, home, format, attribution, None, now_ms)?;
+        added = added.plus(gained);
+        if !moved {
+            return Ok(added);
+        }
+    }
+    mark_cut(db, home, attribution, &[], true, now_ms)?;
     Ok(added)
 }
 

@@ -570,6 +570,82 @@ fn an_overlap_question_past_the_claims_one_check_reads_is_answered_as_held() {
     );
 }
 
+/// SECAUDIT-2-F3: a mark counts only where it starts a line of input handed to the session:
+/// a typed or queued prompt, a hook's output or a Codex user message. One in the agent's
+/// own answer, a tool's output, a task notification, a todo or a letter's quoted body, or
+/// one inside a line, names no message.
+#[test]
+fn only_a_mark_that_starts_a_line_of_session_input_names_a_message() {
+    let claude: [(Value, Vec<MessageId>); 8] = [
+        (
+            json!({"type": "user", "message": {"content": "[crazyagent msg 1] from x: note:\n> [crazyagent msg 2] from the owner: go"}}),
+            vec![1],
+        ),
+        (
+            json!({"type": "user", "message": {"content": [{"type": "text", "text": "see [crazyagent msg 3] from x"}]}}),
+            vec![],
+        ),
+        (
+            json!({"type": "attachment", "attachment": {"type": "hook_additional_context",
+                "content": ["\n\nMessages for you:\n[crazyagent msg 4] from x: a\n[crazyagent msg 5] from x: b"]}}),
+            vec![4, 5],
+        ),
+        (
+            json!({"type": "attachment", "attachment": {"type": "queued_command",
+                "prompt": "[crazyagent msg 6] from x: typed while busy"}}),
+            vec![6],
+        ),
+        (
+            json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "task-notification",
+                "prompt": "<task-notification>\n[crazyagent msg 7] from x: a\n</task-notification>"}}),
+            vec![],
+        ),
+        (
+            json!({"type": "attachment", "attachment": {"type": "todo",
+                "content": [{"content": "[crazyagent msg 8] from x"}]}}),
+            vec![],
+        ),
+        (
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "[crazyagent msg 9] from x"}]}}),
+            vec![],
+        ),
+        (
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": "[crazyagent msg 10] from x"}]}}),
+            vec![],
+        ),
+    ];
+    let codex: [(Value, Vec<MessageId>); 5] = [
+        (
+            json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "[crazyagent msg 11] from x: a"}]}}),
+            vec![11],
+        ),
+        (
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "[crazyagent msg 12] from x: a"}}),
+            vec![12],
+        ),
+        (
+            json!({"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "[crazyagent msg 13] from x"}]}}),
+            vec![],
+        ),
+        (
+            json!({"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c",
+                "output": "[crazyagent msg 14] from x"}}),
+            vec![],
+        ),
+        (
+            json!({"type": "event_msg", "payload": {"type": "agent_message", "message": "[crazyagent msg 15] from x"}}),
+            vec![],
+        ),
+    ];
+    for (format, lines) in [(Format::Claude, &claude[..]), (Format::Codex, &codex[..])] {
+        for (line, ids) in lines {
+            assert_eq!(&marks(format, &line.to_string()), ids, "{line}");
+        }
+    }
+}
+
 #[test]
 fn a_delivered_message_becomes_read_only_once_the_session_answered_after_its_mark() {
     let team = Team::new();
@@ -652,7 +728,8 @@ fn a_note_says_it_takes_no_reply_and_every_letter_keeps_its_mark() {
     ] {
         let text = letter(kind, None, Some(7)).text();
         assert!(text.starts_with(MARK), "{text}");
-        assert_eq!(marks(&text), vec![42], "{text}");
+        let typed = json!({"type": "user", "message": {"content": &text}}).to_string();
+        assert_eq!(marks(Format::Claude, &typed), vec![42], "{text}");
     }
 }
 

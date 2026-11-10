@@ -2603,6 +2603,9 @@ fn access_view(access: AgentAccess, version: u64) -> PolicyView {
             .collect(),
         toolchains: Vec::new(),
         ide_git_hooks: false,
+        tool_cache: Default::default(),
+        tool_caches: Vec::new(),
+        ide_agent_files: Default::default(),
         version,
     }
 }
@@ -2643,6 +2646,8 @@ fn a_stale_access_save_keeps_the_level_and_enter_saves_it_over_the_re_read() {
             access: AgentAccess::Sandboxed,
             toolchains: Vec::new(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
         },
     };
@@ -3956,8 +3961,8 @@ fn a_live_switch_that_opened_no_session_shows_on_and_names_why() {
 /// the owner reads what the setting does while changing it (FB-TUI F1).
 #[test]
 fn the_access_box_shows_the_help_of_the_row_the_cursor_is_on_in_a_short_window() {
-    use super::project_access::{IDE_GIT_HOOKS_LINE, network_help};
-    use crate::sandbox::policy::{AgentNetwork, ToolchainView};
+    use super::project_access::{IDE_GIT_HOOKS_LINE, agent_files_help, network_help};
+    use crate::sandbox::policy::{AgentNetwork, IdeAgentFiles, ToolchainView};
     use crate::sandbox::toolchains::Toolchain;
     let opening = |help: &str| help.split(' ').take(5).collect::<Vec<_>>().join(" ");
     let project = ProjectId::new("access-help").unwrap();
@@ -3993,6 +3998,14 @@ fn the_access_box_shows_the_help_of_the_row_the_cursor_is_on_in_a_short_window()
     assert!(
         shown.contains("> [ ] IDE git runs the project's hooks")
             && shown.contains(&opening(IDE_GIT_HOOKS_LINE))
+            && shown.contains("[> Save ]"),
+        "{shown}"
+    );
+    screen.key(key(KeyCode::Down));
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("> IDE changes in agent folders  < Allow all changes >")
+            && shown.contains(&opening(agent_files_help(IdeAgentFiles::AllowAll)))
             && shown.contains("[> Save ]"),
         "{shown}"
     );

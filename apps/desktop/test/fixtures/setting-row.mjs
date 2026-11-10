@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import shell from "../../src/style.css?inline";
 import projects from "../../src/screens/project/projects.css?inline";
 import { SettingLine, SettingSection } from "../../src/ui/setting.tsx";
+import { Segmented } from "../../src/ui/toggle.tsx";
 
 export { contrast } from "./contrast.mjs";
 
@@ -70,3 +71,24 @@ export const focused = () => document.activeElement?.id || null;
 
 /** The center of an element. Input: the selector. Output: its coordinates. */
 export const point = (selector) => { const box = rect(selector); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; };
+
+/** Mounts a three-choice segmented control, the middle one checked, in a column of the given
+ * width, as a narrow settings section draws it. Input: the column's width. */
+export function mountSegmented(width) {
+  mount(width);
+  const options = [{ value: "one", label: "One worktree" }, { value: "clone", label: "Own clone each" }, { value: "shared", label: "Shared" }];
+  flushSync(() => root.render(h("div", { style: { width: `${width}px` } }, h(Segmented, { label: "Workspace", value: "clone", options, onValue: () => {} }))));
+}
+
+/** Reads each segment of the mounted control. Output: per segment its box, its label's box,
+ * how many lines its label takes and the group's box. */
+export function pills() {
+  const group = document.querySelector(".segmented").getBoundingClientRect();
+  return [...document.querySelectorAll(".segmented button")].map((button) => {
+    const range = document.createRange();
+    range.selectNodeContents(button);
+    const text = range.getBoundingClientRect();
+    const box = button.getBoundingClientRect();
+    return { box: { top: box.top, bottom: box.bottom, right: box.right }, text: { top: text.top, bottom: text.bottom }, lines: range.getClientRects().length, group: { bottom: group.bottom, right: group.right } };
+  });
+}

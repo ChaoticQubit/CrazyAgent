@@ -751,9 +751,10 @@ impl DeletePlan {
     }
 
     /// Names the engine's own files of this deleted project for the record its row removal
-    /// writes: each agent and each research run of its jobs, with the identity of the folder
-    /// that holds it. A folder that is no real run, or that is not there, is left out. Input:
-    /// the project's research jobs. Output: the records.
+    /// writes: each agent, each research run of its jobs and, on macOS, the tool caches of
+    /// its folders (T8), with the identity of the folder that holds it. A folder that is no
+    /// real run, or that is not there, is left out. Input: the project's research jobs.
+    /// Output: the records.
     pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
         let Some(root) = self.database.parent() else {
             return Vec::new();
@@ -776,24 +777,72 @@ impl DeletePlan {
                 }
             }
         }
-        names
-            .into_iter()
-            .filter_map(|name| {
-                let inode = folder_inode(&engine_file(&name)?.folder(root, &name))?;
-                Some((name, inode))
-            })
-            .collect()
+        let mut files = recorded(root, names);
+        files.extend(tool_cache_files(&self.database, &self.folders));
+        files
     }
+}
+
+/// The records of the tool caches (T8) the engine keeps for these project folders, each
+/// with the identity of its folder, for a delete or a Remove from dashboard to remove; a
+/// cache that is not there is left out. Inputs: the engine database path and the project's
+/// folders. Output: the records.
+#[cfg(target_os = "macos")]
+pub fn tool_cache_files(database: &Path, folders: &[PathBuf]) -> Vec<RecordedFile> {
+    let Some(root) = database.parent() else {
+        return Vec::new();
+    };
+    let names = folders
+        .iter()
+        .filter_map(|folder| {
+            let cache = crate::sandbox::tool_cache::project_folder(root, folder.to_str()?);
+            assert_eq!(cache.parent(), Some(root.join(TOOL_CACHE_FOLDER).as_path()));
+            Some(format!(
+                "{TOOL_CACHE_PREFIX}{}",
+                cache.file_name()?.to_str()?
+            ))
+        })
+        .collect();
+    recorded(root, names)
+}
+
+/// Off macOS no project has a tool cache. Inputs: unused. Output: none.
+#[cfg(not(target_os = "macos"))]
+pub fn tool_cache_files(_: &Path, _: &[PathBuf]) -> Vec<RecordedFile> {
+    Vec::new()
+}
+
+/// Pairs each engine file name with the identity of the folder it names, leaving out a
+/// name that is no engine file or whose folder is not there. Inputs: the engine root and
+/// the names. Output: the records.
+fn recorded(root: &Path, names: Vec<String>) -> Vec<RecordedFile> {
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let inode = folder_inode(&engine_file(&name)?.folder(root, &name))?;
+            Some((name, inode))
+        })
+        .collect()
 }
 
 /// One engine file a delete recorded: its exact name and the identity of the folder that held
 /// it when the project's rows were dropped.
 pub type RecordedFile = (String, i64);
 
+/// The folder under the engine root that holds every project's tool caches (T8).
+const TOOL_CACHE_FOLDER: &str = "tool-cache";
+
+/// The start of the name a delete records for one project's tool caches (T8).
+pub(crate) const TOOL_CACHE_PREFIX: &str = "tool-cache-";
+
+/// The length of the hex digest that names one project's tool cache folder (T8).
+const TOOL_CACHE_DIGEST_BYTES: usize = 32;
+
 /// One engine file a delete's record can name.
 enum EngineFile {
     Agent(i64),
     Run,
+    ToolCache,
 }
 
 impl EngineFile {
@@ -803,14 +852,25 @@ impl EngineFile {
         match self {
             Self::Agent(_) => root.join("team").join("agents").join(name),
             Self::Run => root.join("research").join("agents").join(name),
+            Self::ToolCache => root
+                .join(TOOL_CACHE_FOLDER)
+                .join(&name[TOOL_CACHE_PREFIX.len()..]),
         }
     }
 }
 
 /// Reads a recorded name as an engine file, exact shapes only: `agent-<id>`, or
-/// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling.
-/// Input: the name. Output: what it names, or None for anything else.
+/// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling,
+/// or `tool-cache-<digest>` with 32 lowercase hex digits (T8). Input: the name. Output: what
+/// it names, or None for anything else.
 fn engine_file(name: &str) -> Option<EngineFile> {
+    if let Some(digest) = name.strip_prefix(TOOL_CACHE_PREFIX) {
+        let plain = digest.len() == TOOL_CACHE_DIGEST_BYTES
+            && digest
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+        return plain.then_some(EngineFile::ToolCache);
+    }
     if let Some(id) = name.strip_prefix("agent-") {
         return plain_number(id).map(EngineFile::Agent);
     }
@@ -837,12 +897,13 @@ fn folder_inode(folder: &Path) -> Option<i64> {
     i64::try_from(number).ok()
 }
 
-/// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles and
-/// teammates' records, or a research run's folder. Only the folder the record was written for
-/// goes: under any other identity it stays, logged as `project_files_kept`, and the record is
-/// finished. A name that is no engine file removes nothing. A file left behind is logged as
-/// `project_files_left` and keeps its record. Inputs: the engine database path and the
-/// records. Output: the names that are finished.
+/// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles
+/// and teammates' records, a research run's folder, or a project's tool caches, which an
+/// agent may have closed or pinned inside and are cleared of that first. Only the
+/// folder the record was written for goes: under any other identity it stays, logged as
+/// `project_files_kept`, and the record is finished. A name that is no engine file removes
+/// nothing. A file left behind is logged as `project_files_left` and keeps its record.
+/// Inputs: the engine database path and the records. Output: the names that are finished.
 pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<String> {
     let Some(root) = database.parent() else {
         return Vec::new();
@@ -858,6 +919,8 @@ pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<Strin
                     Ok(())
                 } else if let EngineFile::Agent(id) = file {
                     crate::team::cleanup::remove_agent_files(&root.join("team"), id)
+                } else if matches!(file, EngineFile::ToolCache) {
+                    crate::team::cleanup::remove_agent_tree(&folder)
                 } else {
                     crate::team::cleanup::remove_tree(&folder)
                 }

@@ -1,6 +1,7 @@
 use super::*;
 use crate::cleanup_settings::{CleanupMode, CleanupSettings};
 use crate::github::GitHubMethod;
+use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::sandbox::LinuxSockets;
 use crate::sandbox_settings::SandboxSettings;
 use crate::setup::{Dependency, DependencyStatus, PackGroup, Version};
@@ -176,7 +177,8 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
             AppSetupJob::Home,
             AppSetupJob::GitHub,
             AppSetupJob::Sandbox,
-            AppSetupJob::Cleanup
+            AppSetupJob::Cleanup,
+            AppSetupJob::Quit
         ]
     ));
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
@@ -188,6 +190,7 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
     shell.arrive(event(AppSetupEvent::Cleanup(
         Ok(CleanupSettings::default()),
     )));
+    shell.arrive(event(AppSetupEvent::Quit(Ok(QuitSettings::default()))));
     shell
 }
 
@@ -1042,4 +1045,197 @@ fn a_stored_finished_agents_setting_this_version_does_not_know_is_not_offered() 
         lead(&shell),
         "The finished agents setting is not known yet."
     );
+}
+
+fn quit_chosen(shell: &mut Shell) -> QuitSettings {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetQuit { settings, .. }] = sent.as_slice() else {
+        panic!("one quitting change required, got {} jobs", sent.len())
+    };
+    *settings
+}
+
+#[test]
+fn settings_show_team_agents_kept_running_and_ended_a_day_after_quitting_by_default() {
+    let mut shell = settings(200, 60);
+    let rows = render(&mut shell, 200, 60);
+    assert!(find(&rows, "When quitting  ").contains("Keep team agents running"));
+    assert!(find(&rows, "Left running  ").contains("24 hours after CrazyAgent quits"));
+    find(
+        &rows,
+        "An agent still running when the time is up ends with its terminal.",
+    );
+    find(
+        &rows,
+        "agents left behind when CrazyAgent did not quit cleanly.",
+    );
+    assert!(rows.last().unwrap().contains("q Quitting"));
+    shell.key(Key::Char('q'));
+    let rows = render(&mut shell, 200, 60);
+    find(&rows, "what happens to team agents that are running");
+    find(&rows, "> Keep team agents running");
+    find(
+        &rows,
+        "They go on with their work, and CrazyAgent takes them over when it opens again.",
+    );
+    find(&rows, "  Stop team agents");
+    find(
+        &rows,
+        "Each agent stops as Stop would, and its task goes back to the queue.",
+    );
+    assert!(rows.last().unwrap().contains("Enter Next"));
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 200, 60);
+    find(
+        &rows,
+        "how long agents left running wait for CrazyAgent to open again",
+    );
+    find(&rows, "> 24 hours after CrazyAgent quits");
+    find(&rows, "  No limit, until CrazyAgent opens again");
+    shell.key(Key::Enter);
+    find(&render(&mut shell, 200, 60), "Hours after CrazyAgent quits");
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the stored setting saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn stop_team_agents_saves_stop_with_the_stored_hours_and_reads_the_setting_back() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('q'));
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> Stop team agents");
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    assert_eq!(
+        quit_chosen(&mut shell),
+        QuitSettings {
+            on_quit: OnQuit::Stop,
+            left_running: LeftRunning::AfterHours,
+            hours: 24
+        }
+    );
+    shell.arrive(event(AppSetupEvent::QuitSet(Ok(()))));
+    assert_eq!(
+        lead(&shell),
+        "When quitting: Stop team agents. Left running: 24 hours after CrazyAgent quits."
+    );
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Quit)),
+        "a saved change reads the setting back"
+    );
+    shell.arrive(event(AppSetupEvent::Quit(Ok(QuitSettings {
+        on_quit: OnQuit::Stop,
+        left_running: LeftRunning::AfterHours,
+        hours: 24,
+    }))));
+    assert!(find(&render(&mut shell, 120, 60), "When quitting  ").contains("Stop team agents"));
+    shell.key(Key::Char('q'));
+    find(&render(&mut shell, 120, 60), "> Stop team agents");
+}
+
+#[test]
+fn no_limit_saves_never_and_keeps_the_stored_hours_for_later() {
+    let mut shell = settings(120, 60);
+    shell.arrive(event(AppSetupEvent::Quit(Ok(QuitSettings {
+        on_quit: OnQuit::KeepRunning,
+        left_running: LeftRunning::AfterHours,
+        hours: 48,
+    }))));
+    assert!(
+        find(&render(&mut shell, 120, 60), "Left running  ")
+            .contains("48 hours after CrazyAgent quits")
+    );
+    shell.key(Key::Char('q'));
+    shell.key(Key::Enter);
+    shell.key(Key::Down);
+    find(
+        &render(&mut shell, 120, 60),
+        "> No limit, until CrazyAgent opens again",
+    );
+    shell.key(Key::Enter);
+    assert_eq!(
+        quit_chosen(&mut shell),
+        QuitSettings {
+            on_quit: OnQuit::KeepRunning,
+            left_running: LeftRunning::Never,
+            hours: 48
+        }
+    );
+    shell.arrive(event(AppSetupEvent::QuitSet(Ok(()))));
+    assert_eq!(
+        lead(&shell),
+        "When quitting: Keep team agents running. Left running: No limit, until CrazyAgent opens again."
+    );
+}
+
+#[test]
+fn after_hours_saves_the_typed_hours_and_refuses_hours_outside_one_to_168() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('q'));
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    for refused in ["0", "169", "1.5", "-2", "ten", ""] {
+        clear(&mut shell);
+        typed(&mut shell, refused);
+        shell.key(Key::Enter);
+        assert!(jobs(&mut shell).is_empty(), "{refused:?} is not sent");
+        assert_eq!(lead(&shell), "Enter a whole number of hours from 1 to 168.");
+        find(&render(&mut shell, 120, 60), "Hours after CrazyAgent quits");
+    }
+    clear(&mut shell);
+    typed(&mut shell, "1");
+    shell.key(Key::Enter);
+    assert_eq!(
+        quit_chosen(&mut shell),
+        QuitSettings {
+            on_quit: OnQuit::KeepRunning,
+            left_running: LeftRunning::AfterHours,
+            hours: 1
+        }
+    );
+    shell.arrive(event(AppSetupEvent::QuitSet(Err("busy".into()))));
+    assert_ne!(
+        lead(&shell),
+        "When quitting: Keep team agents running. Left running: 1 hour after CrazyAgent quits."
+    );
+    assert!(!lead(&shell).is_empty());
+}
+
+#[test]
+fn esc_at_each_quitting_step_changes_nothing() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('q'));
+    shell.key(Key::Esc);
+    shell.key(Key::Char('q'));
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    shell.key(Key::Char('q'));
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+}
+
+#[test]
+fn a_stored_quitting_setting_this_version_does_not_know_is_not_offered() {
+    let mut shell = settings(120, 60);
+    shell.arrive(event(AppSetupEvent::Quit(Err(
+        "quit_settings_invalid".into()
+    ))));
+    let rows = render(&mut shell, 120, 60);
+    let row = find(&rows, "When quitting  ");
+    assert!(row.contains("Failed to read it."), "{row}");
+    assert!(row.contains("not one this version knows"), "{row}");
+    assert!(!rows.iter().any(|row| row.contains("Left running  ")));
+    shell.key(Key::Char('q'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(lead(&shell), "The quitting setting is not known yet.");
 }

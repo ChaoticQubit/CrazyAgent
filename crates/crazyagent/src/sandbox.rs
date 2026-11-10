@@ -23,10 +23,17 @@ pub mod model_proxy;
 pub mod policy;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
+#[cfg(target_os = "macos")]
+pub mod tool_cache;
 pub mod toolchains;
 pub mod warden;
 #[cfg(target_os = "windows")]
 pub mod windows;
+
+/// The variables that point an agent's tools at its tool cache (T8): uv's cache, and the
+/// pnpm store, the only store variable pnpm 12 reads (probe P5). [`agent_env`] keeps a
+/// harness from replacing either once the sandbox set it.
+const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
 
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -94,6 +101,10 @@ pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
 /// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
 pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
+
+/// Why a sandbox that protects agent folders does not start on Linux or Windows: only
+/// Seatbelt holds the per-path rule, and no IDE sandbox runs there in V1 (DEC-124).
+pub const AGENT_FILES_NEED_SEATBELT: &str = "agent folder protection needs the macOS sandbox";
 
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
@@ -419,7 +430,8 @@ pub fn shell_tmp_prefix(tmp: &Path) -> PathBuf {
 
 /// Builds the environment of every agent process in launch order: `base`, then the
 /// harness's variables (a later value replaces an earlier one and None removes it, but
-/// `HOME`, `TMPDIR` and `TMPPREFIX` always stay as `base` set them), then `TMPPREFIX` from
+/// `HOME`, `TMPDIR` and `TMPPREFIX`, and the tool cache's [`TOOL_CACHE_ENV`] when `base`
+/// sets them, always stay as `base` set them), then `TMPPREFIX` from
 /// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`] and [`AGENT_TLS_ENV`].
 /// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
 /// one fails [`agent_variable_allowed`].
@@ -450,7 +462,9 @@ pub fn agent_env<'a>(
         if value.is_some_and(|value| !agent_variable_allowed(name, value)) {
             return Err(refused());
         }
-        if name == "HOME" || name == "TMPDIR" || name == "TMPPREFIX" {
+        let pinned_cache = TOOL_CACHE_ENV.iter().any(|pinned| name == *pinned)
+            && base.iter().any(|(known, _)| name == *known);
+        if name == "HOME" || name == "TMPDIR" || name == "TMPPREFIX" || pinned_cache {
             continue;
         }
         set(&mut env, name, value);
@@ -796,7 +810,10 @@ pub struct ProjectSandbox {
     teammates: bool,
     answers: Option<PathBuf>,
     setup: Option<TeammatesSetup>,
+    tool_cache: Option<(PathBuf, bool)>,
     lead_branch: Option<String>,
+    adds_worktrees: bool,
+    agent_files: Option<policy::AgentFilesRule>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -871,7 +888,10 @@ impl ProjectSandbox {
             teammates: false,
             answers: None,
             setup: None,
+            tool_cache: None,
             lead_branch: None,
+            adds_worktrees: false,
+            agent_files: None,
         })
     }
 
@@ -1039,6 +1059,16 @@ impl ProjectSandbox {
         self.worktrees.push(worktree.to_path_buf());
         assert!(self.worktrees.len() <= WORKTREES_MAX);
         Ok(self)
+    }
+
+    /// Lets git create a checkout's `.git` link in the project's worktrees folders and the
+    /// `gitdir` and `commondir` files of its admin folder, which no other profile may plant
+    /// (SECAUDIT-WORKTREE-ADMIN-PLANT). Only the engine's own worktree-add step installs it,
+    /// and its callers confine and reinstall the profile before any agent runs.
+    /// Output: the sandbox with that exemption.
+    pub(crate) fn adding_worktrees(mut self) -> Self {
+        self.adds_worktrees = true;
+        self
     }
 
     /// Confines the agent's writes to its own worktree, its `.git/worktrees` admin folder
@@ -1323,6 +1353,62 @@ impl ProjectSandbox {
         Ok((self, skipped))
     }
 
+    /// Grants the agent's tool cache, made by `tool_cache::prepare`, as one more writable
+    /// root: a non-working-tree root under the SM1-R rule, so no `.git` entry can be made,
+    /// moved or written there, and the root of `pnpm_config_store_dir`, and of `UV_CACHE_DIR`
+    /// when its uv markers are in place (T8). Inputs: the cache root, a canonical existing
+    /// folder clear of [`Self::secret_paths`] and of every other root, and whether its uv
+    /// markers are in place. Output: the widened sandbox, or `Invalid` for an unsafe or second
+    /// cache.
+    pub fn allow_tool_cache(mut self, root: &Path, uv: bool) -> Result<Self, SandboxError> {
+        if self.tool_cache.is_some() {
+            return Err(invalid("the sandbox already has a tool cache"));
+        }
+        granted_root(root, &owner_home()?, &self.secret_paths())?;
+        let overlaps = self
+            .writable_roots()
+            .chain(self.read_roots.iter())
+            .chain(self.tool_roots.iter())
+            .chain([&self.project_root])
+            .any(|other| other.starts_with(root) || root.starts_with(other));
+        if overlaps {
+            return Err(invalid("the tool cache must lie outside every other root"));
+        }
+        self.tool_cache = Some((root.to_path_buf(), uv));
+        assert!(self.writes(root));
+        Ok(self)
+    }
+
+    /// The program `name` the agent's PATH finds first, if the engine may run it for the
+    /// agent (T8 C3), as [`Self::trusted_program`] decides. Input: a plain program name.
+    /// Output: the canonical path, or None.
+    pub fn tool_program(&self, name: &str) -> Option<PathBuf> {
+        assert!(!name.is_empty() && !name.contains('/'));
+        let homes = toolchains::ToolHomes::at(&self.owner_home);
+        let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let found = std::env::split_paths(&path)
+            .map(|folder| folder.join(name))
+            .find(|candidate| candidate.is_file())?;
+        self.trusted_program(&found)
+    }
+
+    /// A found program the engine may run for the agent (T8 C3): its canonical path when
+    /// that lies in a read-only system or granted tool root and in no root the agent can
+    /// write, so the agent cannot swap the program the engine runs. Input: the path found.
+    /// Output: the canonical path, or None.
+    pub fn trusted_program(&self, found: &Path) -> Option<PathBuf> {
+        let program = canonical(found).ok()?;
+        let read_only = SYSTEM_READ_ROOTS
+            .iter()
+            .map(Path::new)
+            .chain(self.tool_roots.iter().map(PathBuf::as_path))
+            .any(|root| program.starts_with(root));
+        let writable = self
+            .writable_roots()
+            .any(|root| program.starts_with(root) || root.starts_with(&program));
+        (read_only && !writable && program.is_file()).then_some(program)
+    }
+
     /// Adds the agent's short writable temp folder (see [`toolchains::make_tmp`]), which
     /// becomes its `TMPDIR`. Input: a canonical existing folder clear of
     /// [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid` for an unsafe or
@@ -1365,6 +1451,15 @@ impl ProjectSandbox {
         }
         self.hidden.push(folder.to_path_buf());
         Ok(self)
+    }
+
+    /// Holds the project's agent folders choice in this sandbox (DEC-124): a Sandboxed IDE
+    /// terminal keeps to what the owner chose for the IDE. Only Seatbelt holds it, so the
+    /// Linux and Windows boundaries refuse a sandbox with a choice other than Allow all
+    /// changes. Input: the rule. Output: the sandbox.
+    pub fn protect_agent_files(mut self, rule: policy::AgentFilesRule) -> Self {
+        self.agent_files = Some(rule);
+        self
     }
 
     /// Keeps one file or folder inside a granted root out of the agent's reach, read and
@@ -1729,6 +1824,7 @@ impl ProjectSandbox {
             .chain(self.scratch.iter())
             .chain(self.worktrees.iter())
             .chain(self.shared.iter())
+            .chain(self.tool_cache.iter().map(|(root, _)| root))
     }
 
     /// The read-only toolchain folders, Seatbelt only, with credential names carved out.
@@ -1855,7 +1951,7 @@ impl ProjectSandbox {
         }
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git/index.lock\")\n  (subpath \"{project}/.git/rebase-merge\")\n  (subpath \"{project}/.git/rebase-apply\")\n  (subpath \"{project}/.git/remotes\")\n  (subpath \"{project}/.git/branches\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git/index.lock\")\n  (subpath \"{project}/.git/rebase-merge\")\n  (subpath \"{project}/.git/rebase-apply\")\n  (subpath \"{project}/.git/remotes\")\n  (subpath \"{project}/.git/branches\")\n  (subpath \"{project}/.git/sequencer\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         if let Some(scratch) = &self.scratch {
             text.push_str(&format!(
@@ -1931,6 +2027,11 @@ impl ProjectSandbox {
         text.push_str(&teammates);
         let answers = self.answers_denies();
         text.push_str(&answers);
+        let agent_files = self
+            .agent_files
+            .map(|rule| rule.seatbelt(&self.project_root))
+            .unwrap_or_default();
+        text.push_str(&agent_files);
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
@@ -1953,6 +2054,9 @@ impl ProjectSandbox {
         }
         if !answers.is_empty() {
             last.push(answers);
+        }
+        if !agent_files.is_empty() {
+            last.push(agent_files);
         }
         assert!(
             denies_follow_write_allows(&text, &last),
@@ -2032,7 +2136,10 @@ impl ProjectSandbox {
     /// No agent may move the project folder, the git worktrees folders or a worktree, which
     /// would carry protected files out of their denied paths and back. A worktree's `.git`
     /// file and its `commondir` and `gitdir` files may be created once, as `git worktree add`
-    /// does, but never rewritten or removed, and no `config.worktree` may be written. No link
+    /// does, only by a profile that adds worktrees ([`Self::adding_worktrees`] or a lead's
+    /// teammates' setup), since the owner's `git worktree repair` would point a real
+    /// checkout at an admin folder planted with them; they are never rewritten or removed,
+    /// and no `config.worktree` may be written. No link
     /// may be made anywhere in the git folder, in any letter case: git's `worktree prune`,
     /// which the owner's next commit runs as maintenance, empties whatever folder a link at
     /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
@@ -2050,8 +2157,13 @@ impl ProjectSandbox {
         let mut moves = format!(
             "(deny file-write-unlink\n  (literal \"{project}\")\n  (regex #\"^{pattern}/{git}/{worktrees}$\")\n  (regex #\"^{pattern}(/{state})?/{worktrees}$\")\n  (regex #\"^{admin}$\")\n  (regex #\"^{checkouts}$\")"
         );
+        let create = if self.adds_worktrees || self.setup.is_some() {
+            ""
+        } else {
+            " file-write-create"
+        };
         let mut links = format!(
-            "(deny file-write-unlink file-write-data\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
+            "(deny file-write-unlink file-write-data{create}\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
             any_case("commondir"),
             any_case("gitdir")
         );
@@ -2095,14 +2207,19 @@ impl ProjectSandbox {
     /// writable working tree, which the owner's own unsandboxed git (its terminal or the
     /// V2 IDE) would later enter as a submodule and run under the agent's own config (SM1).
     /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
-    /// below a writable working tree, except that tree's own top-level `.git` and the
-    /// engine's worktree links. The project's own `.git` and each worktree's own `.git` sit
+    /// below a writable working tree, except that tree's own top-level `.git` and, only in a
+    /// profile built by [`Self::adding_worktrees`], the engine's worktree links, which any
+    /// other process could point at git data of its own (SECAUDIT-WORKTREE-ADMIN-PLANT).
+    /// The project's own `.git` and each worktree's own `.git` sit
     /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
     /// already holding a `.git` could once be renamed in as a path-blind move Seatbelt
     /// cannot inspect; that source is removed by also denying `.git` at any depth, top level
     /// included, in every non-working-tree writable root (the admin folder, object store,
     /// home, temp and scratch), so no agent can create a repository anywhere to rename from
-    /// (SM1-R). Input: the policy. Output: the rule text.
+    /// (SM1-R). The only `.git` entries in agent roots are engine-made links to exactly
+    /// `/dev/null`: the uv markers in a tool cache's buckets (T8 C1), which an agent cannot
+    /// make, remove or point elsewhere, and which, moved with their bucket into a tree, git
+    /// never enters or stages. Input: the policy. Output: the rule text.
     fn nested_git_denies(&self) -> String {
         let dot_git = "\\.[gG][iI][tT]";
         let (working, other) = self.git_deny_roots();
@@ -2121,7 +2238,12 @@ impl ProjectSandbox {
         }
         let pattern = seatbelt_pattern(&self.project_root);
         let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
-        let mut exempt = format!("\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))");
+        let mut exempt = String::new();
+        if self.adds_worktrees {
+            exempt.push_str(&format!(
+                "\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))"
+            ));
+        }
         if let Some(clone) = &self.clone {
             exempt.push_str(&format!(
                 "\n    (require-not (regex #\"^{}/{}/[^/]+/{dot_git}$\"))",
@@ -2147,7 +2269,7 @@ impl ProjectSandbox {
             text.matches("(regex #\"^/").count()
                 == working.len()
                     + other.len()
-                    + 1
+                    + usize::from(self.adds_worktrees)
                     + usize::from(self.clone.is_some())
                     + usize::from(self.setup.is_some())
         );
@@ -2205,7 +2327,8 @@ impl ProjectSandbox {
     /// tree, and a `.git` at any depth (top level included) in an admin folder, object
     /// store, home, temp or scratch root, or a team folder a native lead shares with its
     /// teammates, is denied so no agent can create a repository to rename whole into a
-    /// worktree (OP-9 r2).
+    /// worktree (OP-9 r2). The tool cache is such a root (T8): its only `.git` entries are the
+    /// engine's `/dev/null` links.
     fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
         let mut working: Vec<&Path> = Vec::new();
         let mut other: Vec<&Path> = Vec::new();
@@ -2229,6 +2352,9 @@ impl ProjectSandbox {
             other.push(scratch.as_path());
         }
         other.extend(self.shared.iter().map(PathBuf::as_path));
+        if let Some((cache, _)) = &self.tool_cache {
+            other.push(cache.as_path());
+        }
         for worktree in &self.worktrees {
             working.push(worktree.as_path());
         }
@@ -2321,6 +2447,12 @@ impl ProjectSandbox {
             ("LC_ALL", OsString::from("C")),
         ];
         env.extend(toolchains::agent_env(&self.agent_home, &homes));
+        if let Some((cache, uv)) = &self.tool_cache {
+            if *uv {
+                env.push((TOOL_CACHE_ENV[0], cache.join("uv").into_os_string()));
+            }
+            env.push((TOOL_CACHE_ENV[1], cache.join("pnpm-store").into_os_string()));
+        }
         env
     }
 
@@ -2419,6 +2551,13 @@ impl InstalledSandbox {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
+        }
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if sandbox
+            .agent_files
+            .is_some_and(|rule| rule.choice != policy::IdeAgentFiles::AllowAll)
+        {
+            return Err(SandboxError::Unavailable(AGENT_FILES_NEED_SEATBELT.into()));
         }
         #[cfg(target_os = "windows")]
         {
@@ -2754,6 +2893,43 @@ fn borrowed<'a>(env: &'a [(&'static str, OsString)]) -> Vec<(&'static str, &'a O
     env.iter()
         .map(|(name, value)| (*name, value.as_os_str()))
         .collect()
+}
+
+/// The Seatbelt profile the engine primes a uv tool cache under (T8 C3): the system's
+/// read-only roots and the uv binary to read and run, the fresh priming folder as the only
+/// place to write, `/dev/null` and the random devices, no network and no user folder.
+/// Inputs: the canonical priming folder and the canonical uv binary. Output: the text.
+#[cfg(target_os = "macos")]
+pub(crate) fn priming_profile(folder: &Path, uv: &Path) -> String {
+    assert!(clean_absolute(folder) && clean_absolute(uv));
+    let mut text = String::from(
+        "(version 1)\n(deny default)\n(allow process-exec)\n(allow process-fork)\n(allow sysctl-read)\n(allow mach-lookup",
+    );
+    for service in MACH_SERVICES {
+        text.push_str(&format!("\n  (global-name \"{service}\")"));
+    }
+    text.push_str(")\n(allow file-read* file-map-executable");
+    for root in SYSTEM_READ_ROOTS {
+        text.push_str(&format!("\n  (subpath \"{root}\")"));
+    }
+    text.push_str(&format!(
+        "\n  (literal \"{}\"))\n(allow file-read*",
+        uv.display()
+    ));
+    for literal in METADATA_LITERALS {
+        text.push_str(&format!("\n  (literal \"{literal}\")"));
+    }
+    text.push_str(&format!(
+        ")\n(allow file-read-metadata\n  (path-ancestors \"{0}\")\n  (path-ancestors \"{1}\"))\n(allow file-read* file-write*\n  (subpath \"{0}\"))\n",
+        folder.display(),
+        uv.display()
+    ));
+    text.push_str(
+        "(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\"))\n(allow file-read*\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\"))\n",
+    );
+    assert!(text.starts_with("(version 1)\n(deny default)\n"));
+    assert!(!text.contains("(allow network") && text.matches("file-write*").count() == 1);
+    text
 }
 
 fn invalid(reason: &str) -> SandboxError {

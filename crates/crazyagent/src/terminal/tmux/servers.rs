@@ -3,13 +3,13 @@ use super::super::{
     AgentId, Host, HostError, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo, PaneRef,
     TEAMMATES_SERVER_ENDED, TerminalStream, failure,
 };
-use super::{ServerPin, Tmux, harness_socket, user};
+use super::{ServerPin, Tmux, harness_socket, renew_socket, user};
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::BTreeMap;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// The most agent folders the engine reads when it looks for native-mode leads whose own
 /// servers still run, such as after an engine restart.
@@ -579,5 +579,21 @@ impl Host for Servers {
             Some(problem) => Err(problem),
             None => closed,
         }
+    }
+
+    fn renew(&self, until: SystemTime) -> Result<(), HostError> {
+        let mut first = self.engine.renew(until).err();
+        for lead in self.leads_listening() {
+            let sockets = [
+                harness_socket(&self.root, &lead).ok(),
+                teammates_socket(&self.root, &lead).ok(),
+            ];
+            for socket in sockets.into_iter().flatten() {
+                if let Err(problem) = renew_socket(&socket, until) {
+                    first = first.or(Some(problem));
+                }
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 }

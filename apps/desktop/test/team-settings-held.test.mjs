@@ -148,6 +148,19 @@ test("the app's own settings selects keep the pick while their reads run, and go
   }
 });
 
+test("a refused account order save for a gone project shows its sentence on the project's settings, never the code (PROTO-4 F3)", { timeout: 120_000 }, async () => {
+  const seen = await withPage(async (page) => {
+    await page.evaluate(appFixture);
+    await page.evaluate("Fixture.mountGone()");
+    const picked = await page.evaluate(`Fixture.pick("project-account-order", "balanced")`);
+    return { picked, shown: await page.evaluate("Fixture.shown()") };
+  });
+  assert.deepEqual(seen.shown.sent, ["desktop_set_account_schedule"]);
+  assert.match(seen.shown.alert ?? "", /This project no longer exists\./);
+  assert.doesNotMatch(seen.shown.alert ?? "", /project_not_found/);
+  assert.equal(seen.picked.shown, seen.picked.before, "the refused pick goes back to the saved order");
+});
+
 async function press(page, key, code) {
   for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key, code: key, windowsVirtualKeyCode: code });
 }

@@ -152,6 +152,8 @@ async fn wire(chosen: Option<AgentAccess>) -> Wired {
             toolchains: Vec::new(),
             network: AgentNetwork::Open,
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         };
         let version = owner
             .project_agent_policy(project.clone())

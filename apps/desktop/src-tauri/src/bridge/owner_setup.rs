@@ -3,6 +3,7 @@ use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::engine::owner::{OwnerMutation, OwnerRead};
 use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::pools::PoolSummary;
+use crazyagent::quit_settings::QuitSettings;
 use crazyagent::sandbox_settings::SandboxSettings;
 
 fn profile_code(code: &str) -> &'static str {
@@ -130,6 +131,45 @@ impl NativeBridge {
             .map_err(|error| caused("owner_read_failed", &error.0))?;
         self.controller()?
             .begin_mutation(OwnerMutation::SetCleanupSettings { settings }, generation)
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await
+    }
+
+    /// Reads what quitting does to running team agents and how long the ones left running
+    /// wait for the engine. Input: none. Output: the stored setting, or the default before the
+    /// first save.
+    pub async fn quit_settings(&mut self) -> Result<QuitSettings, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?
+            .quit_settings()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))
+    }
+
+    /// Saves what quitting does to running team agents and how long the ones left running
+    /// wait, as one retained owner intent. Inputs: the full setting and a fresh draft
+    /// generation. Output: the intent receipt.
+    pub async fn set_quit_settings(
+        &mut self,
+        settings: QuitSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.allow_new_auth().await?;
+        if self.blocked() {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        self.controller()?
+            .read(OwnerRead::QuitSettings)
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        self.controller()?
+            .begin_mutation(OwnerMutation::SetQuitSettings { settings }, generation)
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await

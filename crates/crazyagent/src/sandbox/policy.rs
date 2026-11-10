@@ -151,6 +151,40 @@ impl AgentNetwork {
     }
 }
 
+/// Who shares one project's tool cache, the uv cache and pnpm store a confined agent's
+/// tools write (T8): Shared, the default, gives one cache to the project's agents at the
+/// same access level that write the same kind of tree (the project folder, a linked
+/// worktree, an own clone or a clone teammate); One per agent gives each agent its own. A
+/// Full access agent gets none and uses its tools' own defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCacheScope {
+    #[default]
+    Shared,
+    PerAgent,
+}
+
+impl ToolCacheScope {
+    /// Every choice, the default first.
+    pub const ALL: [Self; 2] = [Self::Shared, Self::PerAgent];
+
+    /// The choice's stable id, as stored and sent to clients.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::PerAgent => "per_agent",
+        }
+    }
+
+    /// The name shown to the owner.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "Shared by agents with the same access",
+            Self::PerAgent => "One per agent",
+        }
+    }
+}
+
 /// How far a sandboxed IDE server or terminal at a level reaches: nothing at Sandboxed, and
 /// the project's network choice at Own branch through [`AgentNetwork::sandbox`], with no
 /// model port. A Full access process has no Seatbelt for a choice to limit, so it never
@@ -160,6 +194,74 @@ pub fn ide_network(level: AgentAccess, choice: AgentNetwork) -> super::SandboxNe
     match level {
         AgentAccess::OwnBranch => choice.sandbox(None),
         AgentAccess::Sandboxed | AgentAccess::Full => super::SandboxNetwork::Only(Vec::new()),
+    }
+}
+
+/// What the IDE may do to the files inside agent checkouts at Sandboxed and Own branch
+/// (DEC-124): Allow all changes is today's reach; No delete or rename refuses every removal
+/// and every rename there and keeps edits; Read only refuses every write there, Edit anyway
+/// included. Full access runs the IDE with no profile, so no choice reaches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdeAgentFiles {
+    #[default]
+    AllowAll,
+    NoDeleteOrRename,
+    ReadOnly,
+}
+
+impl IdeAgentFiles {
+    /// Every choice, widest first.
+    pub const ALL: [Self; 3] = [Self::AllowAll, Self::NoDeleteOrRename, Self::ReadOnly];
+
+    /// The name shown to the owner, the same in the desktop app.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AllowAll => "Allow all changes",
+            Self::NoDeleteOrRename => "No delete or rename",
+            Self::ReadOnly => "Read only",
+        }
+    }
+}
+
+/// One project's agent folders choice as a Seatbelt profile holds it (DEC-124), with whether
+/// the older agents root `<project>/worktrees` still holds engine-made worktrees
+/// ([`crate::ide::workspace::older_agents`]). While it holds none, that folder may be the
+/// owner's own, so the rule leaves it alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AgentFilesRule {
+    pub choice: IdeAgentFiles,
+    pub older_agents: bool,
+}
+
+impl AgentFilesRule {
+    /// The Seatbelt rules that hold the choice under the project's agents root, in any
+    /// letter case: none for Allow all changes; for No delete or rename, no removal and no
+    /// rename of an agent folder or of anything in it, so edits in place still land; for
+    /// Read only, no write of any kind there. Either way neither the agents root nor the
+    /// `.crazyagent` folder above it is removed or moved aside, in any letter case, so no
+    /// agent folder leaves the rule's reach, not even through a `.CRAZYAGENT` folder made
+    /// before the first agent and then holding it on a case-insensitive volume (DEC-124 r1
+    /// rv-code L1); under Read only that folder is not made or changed either. Input: the
+    /// project folder, a clean absolute path. Output: the rule text.
+    pub fn seatbelt(self, root: &Path) -> String {
+        let operation = match self.choice {
+            IdeAgentFiles::AllowAll => return String::new(),
+            IdeAgentFiles::NoDeleteOrRename => "file-write-unlink",
+            IdeAgentFiles::ReadOnly => "file-write*",
+        };
+        assert!(super::clean_absolute(root));
+        let root = super::any_case(root.to_str().expect("a clean absolute path is text"));
+        let state = super::any_case("/.crazyagent");
+        let layout = if self.older_agents {
+            format!("({state})?")
+        } else {
+            state.clone()
+        };
+        let agents = format!("^{root}{layout}/{}", super::any_case("worktrees"));
+        format!(
+            "(deny {operation}\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n(deny file-write-unlink\n  (regex #\"{agents}$\"))\n(deny {operation}\n  (regex #\"^{root}{state}$\"))\n"
+        )
     }
 }
 
@@ -175,7 +277,9 @@ pub struct ToolchainChoice {
 /// One project's agent policy as the owner saved it: the access level and the toolchain
 /// choices the owner made, which apply to the master, sub-agents and research jobs alike,
 /// and whether git in the IDE runs the project's own hooks in the Project section (Off
-/// unless the owner turned it on; a policy saved before the setting existed reads Off).
+/// unless the owner turned it on; a policy saved before the setting existed reads Off), what
+/// the IDE may do to agent files (Allow all changes when none was saved) and who shares the
+/// agents' tool cache (T8; a policy saved before that setting reads Shared).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
@@ -185,6 +289,10 @@ pub struct AgentPolicy {
     pub ide_git_hooks: bool,
     #[serde(default)]
     pub network: AgentNetwork,
+    #[serde(default)]
+    pub tool_cache: ToolCacheScope,
+    #[serde(default)]
+    pub ide_agent_files: IdeAgentFiles,
 }
 
 impl AgentPolicy {
@@ -234,6 +342,8 @@ impl AgentPolicy {
                 .collect(),
             ide_git_hooks: self.ide_git_hooks,
             network: self.network,
+            tool_cache: self.tool_cache,
+            ide_agent_files: self.ide_agent_files,
         };
         assert!(pinned.validate().is_ok());
         pinned
@@ -241,7 +351,8 @@ impl AgentPolicy {
 
     /// What a client shows: the level, every level with its availability, each toolchain
     /// family the owner has installed, the project uses or the owner chose, the IDE hooks
-    /// choice and the policy's version, which a save names. Inputs: the project folder, the
+    /// and agent files choices, the tool cache choice with every choice, and the policy's
+    /// version, which a save names. Inputs: the project folder, the
     /// owner's tool homes and the version. Output: the view.
     pub fn view(&self, project: &Path, homes: &ToolHomes, version: u64) -> PolicyView {
         let allowed = self.allowed(project);
@@ -278,6 +389,15 @@ impl AgentPolicy {
             toolchains,
             version,
             ide_git_hooks: self.ide_git_hooks,
+            tool_cache: self.tool_cache,
+            tool_caches: ToolCacheScope::ALL
+                .into_iter()
+                .map(|scope| ToolCacheView {
+                    scope,
+                    label: scope.label().to_owned(),
+                })
+                .collect(),
+            ide_agent_files: self.ide_agent_files,
         }
     }
 
@@ -380,6 +500,19 @@ pub struct PolicyView {
     pub toolchains: Vec<ToolchainView>,
     pub version: u64,
     pub ide_git_hooks: bool,
+    #[serde(default)]
+    pub tool_cache: ToolCacheScope,
+    #[serde(default)]
+    pub tool_caches: Vec<ToolCacheView>,
+    pub ide_agent_files: IdeAgentFiles,
+}
+
+/// One tool cache choice with the name shown to the owner (T8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolCacheView {
+    pub scope: ToolCacheScope,
+    pub label: String,
 }
 
 /// One network choice with the name shown to the owner.
@@ -501,6 +634,41 @@ mod tests {
         assert_eq!(AgentNetwork::Open.sandbox(None), SandboxNetwork::Open);
     }
 
+    /// T8: a policy saved before the tool cache setting reads Shared, a pinned policy keeps
+    /// the owner's choice, a save names it, and the view lists every choice, the default
+    /// first.
+    #[test]
+    fn a_policy_saved_before_the_tool_cache_setting_reads_shared_and_the_view_lists_every_choice() {
+        let old: AgentPolicy =
+            serde_json::from_str(r#"{"access":"sandboxed","toolchains":[]}"#).unwrap();
+        assert_eq!(old.tool_cache, ToolCacheScope::Shared);
+        let own = AgentPolicy {
+            tool_cache: ToolCacheScope::PerAgent,
+            ..AgentPolicy::default()
+        };
+        let folder = tempfile::tempdir().unwrap();
+        assert_eq!(
+            own.pinned(folder.path()).tool_cache,
+            ToolCacheScope::PerAgent
+        );
+        let saved = serde_json::to_string(&own).unwrap();
+        assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
+        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        assert_eq!(view.tool_cache, ToolCacheScope::PerAgent);
+        let listed: Vec<(&str, &str)> = view
+            .tool_caches
+            .iter()
+            .map(|row| (row.scope.id(), row.label.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("shared", "Shared by agents with the same access"),
+                ("per_agent", "One per agent")
+            ]
+        );
+    }
+
     #[test]
     fn a_network_choice_is_wider_only_than_the_narrower_ones() {
         let (open, https, none) = (AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None);
@@ -563,6 +731,8 @@ mod tests {
                 })
                 .collect(),
             ide_git_hooks: false,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
             network: AgentNetwork::default(),
         };
         let sandboxed = chose(AgentAccess::Sandboxed, &[]);
@@ -672,6 +842,8 @@ mod tests {
                 allowed: false,
             }],
             ide_git_hooks: true,
+            tool_cache: Default::default(),
+            ide_agent_files: Default::default(),
         };
         save(&connection, "p", &policy).unwrap();
         assert_eq!(load(&connection, "p").unwrap(), policy);
@@ -733,5 +905,115 @@ mod tests {
         let old = load(&connection, "old").unwrap();
         assert_eq!(old.access, AgentAccess::OwnBranch);
         assert_eq!(old.network, AgentNetwork::Open);
+    }
+    /// DEC-124: the agent folders choice reads back as saved, through the view and a pinned
+    /// policy; a policy saved before the setting existed reads Allow all changes, and an
+    /// unknown choice makes the policy unreadable, so it never reads as a wider one.
+    #[test]
+    fn a_saved_agent_folders_choice_reads_back_and_an_older_policy_reads_allow_all() {
+        let connection = Connection::open_in_memory().unwrap();
+        let nowhere = Path::new("/nonexistent");
+        assert_eq!(
+            load(&connection, "p").unwrap().ide_agent_files,
+            IdeAgentFiles::AllowAll
+        );
+        assert_eq!(
+            IdeAgentFiles::ALL.map(IdeAgentFiles::label),
+            ["Allow all changes", "No delete or rename", "Read only"]
+        );
+        let mut policy = AgentPolicy::default();
+        for choice in IdeAgentFiles::ALL {
+            policy.ide_agent_files = choice;
+            save(&connection, "p", &policy).unwrap();
+            let read = load(&connection, "p").unwrap();
+            assert_eq!(read.ide_agent_files, choice);
+            assert_eq!(read.pinned(nowhere).ide_agent_files, choice);
+            assert_eq!(
+                read.view(nowhere, &ToolHomes::at(nowhere), 0)
+                    .ide_agent_files,
+                choice
+            );
+        }
+        for (body, choice) in [
+            (
+                r#"{"access":"own_branch","toolchains":[]}"#,
+                IdeAgentFiles::AllowAll,
+            ),
+            (
+                r#"{"access":"sandboxed","toolchains":[],"ide_agent_files":"no_delete_or_rename"}"#,
+                IdeAgentFiles::NoDeleteOrRename,
+            ),
+            (
+                r#"{"access":"sandboxed","toolchains":[],"ide_agent_files":"read_only"}"#,
+                IdeAgentFiles::ReadOnly,
+            ),
+        ] {
+            connection
+                .execute(
+                    "UPDATE project_agent_policy SET body=?1 WHERE project='p'",
+                    [body],
+                )
+                .unwrap();
+            assert_eq!(load(&connection, "p").unwrap().ide_agent_files, choice);
+        }
+        for body in [
+            r#"{"access":"sandboxed","toolchains":[],"ide_agent_files":"delete_all"}"#,
+            r#"{"access":"sandboxed","toolchains":[],"ide_agent_files":true}"#,
+        ] {
+            connection
+                .execute(
+                    "UPDATE project_agent_policy SET body=?1 WHERE project='p'",
+                    [body],
+                )
+                .unwrap();
+            assert!(load(&connection, "p").is_err(), "{body}");
+        }
+    }
+
+    /// DEC-124: Allow all changes adds no rule. No delete or rename denies every unlink and
+    /// Read only every write at and below each agent folder, in any letter case, and both
+    /// keep the agents root from being removed or moved aside. The older root is named only
+    /// while agents stay there.
+    #[test]
+    fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
+        let root = Path::new("/tmp/ca-proj");
+        let rule = |choice, older_agents| {
+            AgentFilesRule {
+                choice,
+                older_agents,
+            }
+            .seatbelt(root)
+        };
+        assert_eq!(rule(IdeAgentFiles::AllowAll, false), "");
+        assert_eq!(rule(IdeAgentFiles::AllowAll, true), "");
+        let root_text = super::super::any_case("/tmp/ca-proj");
+        let new = format!(
+            "^{root_text}{}/{}",
+            super::super::any_case("/.crazyagent"),
+            super::super::any_case("worktrees")
+        );
+        let both = format!(
+            "^{root_text}({})?/{}",
+            super::super::any_case("/.crazyagent"),
+            super::super::any_case("worktrees")
+        );
+        let state = format!("^{root_text}{}$", super::super::any_case("/.crazyagent"));
+        for (older_agents, agents) in [(false, &new), (true, &both)] {
+            let keep_root = format!("(deny file-write-unlink\n  (regex #\"{agents}$\"))\n");
+            assert_eq!(
+                rule(IdeAgentFiles::NoDeleteOrRename, older_agents),
+                format!(
+                    "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n{keep_root}(deny file-write-unlink\n  (regex #\"{state}\"))\n"
+                )
+            );
+            assert_eq!(
+                rule(IdeAgentFiles::ReadOnly, older_agents),
+                format!(
+                    "(deny file-write*\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n{keep_root}(deny file-write*\n  (regex #\"{state}\"))\n"
+                )
+            );
+        }
+        assert!(state.contains("[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]$"));
+        assert!(new.contains("[wW][oO][rR](k|K|\u{212a})[tT][rR][eE][eE](s|S|\u{17f})"));
     }
 }

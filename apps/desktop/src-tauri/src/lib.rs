@@ -47,6 +47,7 @@ use crazyagent::project_setup::{
 };
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
+use crazyagent::quit_settings::QuitSettings;
 use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
@@ -2640,6 +2641,29 @@ async fn desktop_set_cleanup_settings(
 }
 
 #[tauri::command]
+async fn desktop_quit_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<QuitSettings, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.quit_settings().await
+}
+
+#[tauri::command]
+async fn desktop_set_quit_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: QuitSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_quit_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_pool_summaries(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4269,6 +4293,8 @@ native_commands! {
     desktop_set_sandbox_settings,
     desktop_cleanup_settings,
     desktop_set_cleanup_settings,
+    desktop_quit_settings,
+    desktop_set_quit_settings,
     desktop_pool_summaries,
     desktop_account_schedule,
     desktop_account_ranking,

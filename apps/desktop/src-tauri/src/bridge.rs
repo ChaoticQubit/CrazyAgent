@@ -640,6 +640,7 @@ impl NativeBridge {
             OwnerMutation::SaveOwnerProfile { .. } => ("owner_profile", None, None),
             OwnerMutation::SetSandboxSettings { .. } => ("sandbox_settings", None, None),
             OwnerMutation::SetCleanupSettings { .. } => ("cleanup_settings", None, None),
+            OwnerMutation::SetQuitSettings { .. } => ("quit_settings", None, None),
             OwnerMutation::CreateProject { project_id, .. } => {
                 ("create_project", Some(project_id.as_str().to_owned()), None)
             }
@@ -1349,6 +1350,7 @@ mod tests {
                 intake::known(CODE, &[], "intake_failed"),
             ),
             ("harness catalog", caused("owner_read_failed", CODE)),
+            ("master open", master::open_failure(CODE)),
         ];
         let dropped: Vec<&str> = mapped
             .iter()
