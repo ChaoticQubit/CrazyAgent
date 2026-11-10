@@ -322,11 +322,9 @@ impl Held {
     }
 }
 
-/// The IDE webviews of the main window: each project's webview label and the workbench URL
-/// it loaded, the project shown now, a count that keeps a replaced webview's label unique
-/// while the old one closes, and the open of each project still waiting for the engine. The
-/// flag says an IDE's own window has the focus; window events run on the main thread, so they
-/// read and write only the flag, because a holder of the lock can be waiting on that thread.
+/// The app's IDE webviews, the project shown now and each project's waiting open. The flag says
+/// an IDE's own window has the focus; window events run on the main thread, so they touch only
+/// the flag, because a holder of the lock can be waiting on that thread.
 #[derive(Default)]
 pub struct IdeViews(Mutex<Held>, AtomicBool);
 
