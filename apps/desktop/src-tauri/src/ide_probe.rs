@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{Manager, Webview};
+use tauri::{AppHandle, Manager, Webview};
 
 const ANSWER_FILE: &str = "CRAZYAGENT_E2E_IDE_PROBE";
 const PAGE_LOADED: Duration = Duration::from_secs(30);
@@ -24,7 +24,89 @@ try {
 "#;
 const READ: &str = "JSON.stringify({ origin: location.origin, answer: window.__ideProbe ?? null })";
 
+const WINDOWS_FILE: &str = "ide-own-window.jsonl";
+const WINDOWS_EVERY: Duration = Duration::from_millis(500);
+const WINDOWS_ROWS: usize = 2_400;
+const LOOK: &str = "JSON.stringify({ origin: performance.timeOrigin, editors: document.querySelectorAll('.tabs-container .tab').length, height: innerHeight })";
+
 static ASKED: Once = Once::new();
+static WATCHING: Once = Once::new();
+
+/// Test builds only: every half second writes each IDE webview's window, that window's state and
+/// what the page reports, beside the file named by the environment, so a spec can follow a
+/// webview into another window. Input: the app. Output: none; without that variable it does
+/// nothing.
+pub(crate) fn watch_windows(app: AppHandle) {
+    let Some(file) = std::env::var_os(ANSWER_FILE).map(PathBuf::from) else {
+        return;
+    };
+    let file = file.with_file_name(WINDOWS_FILE);
+    WATCHING.call_once(|| {
+        std::thread::spawn(move || {
+            for _ in 0..WINDOWS_ROWS {
+                write_windows(&app, &file);
+                std::thread::sleep(WINDOWS_EVERY);
+            }
+        });
+    });
+}
+
+fn append(file: &Path, row: &Value) {
+    if let Ok(mut out) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+    {
+        let _ = writeln!(out, "{row}");
+    }
+}
+
+fn write_windows(app: &AppHandle, file: &Path) {
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return;
+    };
+    let at = now.as_millis() as u64;
+    let windows: Vec<String> = app.windows().into_keys().collect();
+    let views: Vec<Webview> = app
+        .webviews()
+        .into_iter()
+        .filter(|(label, _)| label.starts_with("ide-"))
+        .map(|(_, webview)| webview)
+        .collect();
+    if views.is_empty() {
+        append(file, &json!({ "at": at, "windows": windows }));
+    }
+    for webview in views {
+        let Some(row) = window_row(&webview) else {
+            continue;
+        };
+        let file = file.to_owned();
+        let windows = windows.clone();
+        let _ = webview.eval_with_callback(LOOK, move |look| {
+            append(
+                &file,
+                &json!({ "at": at, "windows": windows, "view": row, "look": look }),
+            );
+        });
+    }
+}
+
+fn window_row(webview: &Webview) -> Option<Value> {
+    let window = webview.window();
+    let inner = window.inner_size().ok()?;
+    let outer = window.outer_size().ok()?;
+    Some(json!({
+        "webview": webview.label(),
+        "window": window.label(),
+        "maximized": window.is_maximized().ok()?,
+        "fullscreen": window.is_fullscreen().ok()?,
+        "focused": window.is_focused().ok()?,
+        "scale": window.scale_factor().ok()?,
+        "inner": [inner.width, inner.height],
+        "outer": [outer.width, outer.height],
+        "ide": frame(webview)?,
+    }))
+}
 
 /// Test builds only: makes the first IDE page of this run call one native command as that page
 /// would and writes the page's address and what it got back to the file named by the
