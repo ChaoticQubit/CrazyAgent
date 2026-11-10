@@ -2601,7 +2601,14 @@ fn a_case_variant_crazyagent_folder_made_before_the_first_agent_stays_in_place()
         let agent = s.root.join(".crazyagent").join("worktrees").join("agent-4");
         setup(
             &s.root,
-            &["worktree", "add", "-q", "-b", "agent-4", agent.to_str().unwrap()],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "agent-4",
+                agent.to_str().unwrap(),
+            ],
         );
         let file = agent.join("a.txt");
         assert!(file.exists());

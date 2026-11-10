@@ -2236,11 +2236,13 @@ fn a_launch_profile_holds_the_saved_agent_folders_choice() {
         if !older_agents {
             fs::create_dir(root.join(".crazyagent")).unwrap();
         }
-        let rule = |choice| AgentFilesRule {
-            choice,
-            older_agents,
-        }
-        .seatbelt(&root);
+        let rule = |choice| {
+            AgentFilesRule {
+                choice,
+                older_agents,
+            }
+            .seatbelt(&root)
+        };
         for (index, choice) in IdeAgentFiles::ALL.into_iter().enumerate() {
             for (level, access) in [("s", AgentAccess::Sandboxed), ("o", AgentAccess::OwnBranch)] {
                 let id = project(&format!("files-{layout}-{index}-{level}"));
