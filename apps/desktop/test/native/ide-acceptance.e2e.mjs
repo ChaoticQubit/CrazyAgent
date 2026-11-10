@@ -284,7 +284,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await ide.pick("notes.md", FOLDER);
         await ide.until("notes.md open in an editor", `(() => [...document.querySelectorAll(".tabs-container .tab.active")].some((tab) => (tab.getAttribute("aria-label") ?? tab.textContent).includes("notes.md")))()`);
         await ide.until("the editor focused", `document.activeElement?.closest(".monaco-editor") !== null`);
-        await keys.text(`${OWNER_LINE}\n`);
+        await keys.text(OWNER_LINE);
+        await keys.key("Escape");
+        await keys.key("Enter");
         await keys.key("S", PRIMARY);
         for (const deadline = Date.now() + STEP_MS; !readFileSync(join(repo, "notes.md"), "utf8").startsWith(OWNER_LINE); await pause(POLL_MS)) {
           assert.ok(Date.now() < deadline, `the saved file never reached the project folder: ${readFileSync(join(repo, "notes.md"), "utf8")}`);
