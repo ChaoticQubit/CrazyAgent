@@ -5,7 +5,9 @@ mod e2e_support;
 use crazyagent::engine::owner::OwnerResult;
 use crazyagent::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
 use crazyagent::protocol::ProjectId;
+#[cfg(target_os = "macos")]
 use crazyagent::sandbox::policy::AgentAccess;
+#[cfg(target_os = "macos")]
 use crazyagent::sandbox::toolchains::Toolchain;
 use crazyagent::terminal::tmux::installed;
 use e2e_support::{ENGINE, Engine, Owner, TMUX, git, profile, repository, scratch, stop_tmux};
@@ -22,7 +24,9 @@ const POLL_TIME: Duration = Duration::from_millis(100);
 const DB_BUSY_TIME: Duration = Duration::from_secs(5);
 const STEPS_MAX: usize = 12;
 const SHIFT_RIGHT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "43"];
+#[cfg(target_os = "macos")]
 const RIGHT: [&str; 3] = ["1b", "5b", "43"];
+#[cfg(target_os = "macos")]
 const DOWN: [&str; 3] = ["1b", "5b", "42"];
 const PROJECT: &str = "Tidepool b18";
 const TASKS: usize = 40;
@@ -164,6 +168,7 @@ where
 
 /// Reads the project's agent policy the engine stores. Inputs: the engine and the project.
 /// Output: the policy view.
+#[cfg(target_os = "macos")]
 fn policy(engine: &Engine, project: &ProjectId) -> crazyagent::sandbox::policy::PolicyView {
     let mut view = None;
     owner(engine, |mut owner| {
@@ -190,6 +195,7 @@ fn database(engine: &Engine) -> Connection {
     db
 }
 
+#[cfg(target_os = "macos")]
 fn count(db: &Connection, sql: &str, value: i64) -> i64 {
     db.query_row(sql, [value], |row| row.get(0)).unwrap()
 }

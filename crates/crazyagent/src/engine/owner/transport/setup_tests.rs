@@ -78,7 +78,7 @@ async fn a_pack_removal_that_does_not_commit_puts_its_skill_folders_back() {
     owner.stop().await;
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn owner_request(id: &str, revision: u64, operation: OwnerOperation) -> OwnerRequest {
     OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
@@ -88,7 +88,7 @@ fn owner_request(id: &str, revision: u64, operation: OwnerOperation) -> OwnerReq
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn assert_applied(reply: &OwnerReply) {
     let OwnerResponse::Applied { operation } = &reply.response else {
         panic!("not applied: {reply:?}");

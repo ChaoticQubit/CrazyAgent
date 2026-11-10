@@ -3070,6 +3070,7 @@ fn a_fresh_agent_home_starts_context_mode_from_the_engine_install_not_npx() {
 /// stderr when it stops answering. Inputs: the sandboxed command, with its program and
 /// arguments, the `tools/call` params to send and the time allowed for all. Output: the
 /// seconds the handshake took, the tool names and each call's reply.
+#[cfg(target_os = "macos")]
 fn mcp_handshake(
     mut command: std::process::Command,
     calls: &[serde_json::Value],
@@ -3160,6 +3161,7 @@ fn mcp_handshake(
 
 /// Finds a program on the test's own PATH without following links, as the setup pack's
 /// lookup does. Input: the name. Output: the path, if any.
+#[cfg(target_os = "macos")]
 fn on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
