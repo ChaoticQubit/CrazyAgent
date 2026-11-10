@@ -15,9 +15,9 @@ pub const LISTED_BYTES_MAX: usize = 48 * 1024;
 const ACTOR_BYTES_MAX: usize = 120;
 /// The most bytes of a change set id kept with an event.
 const CHANGE_SET_BYTES_MAX: usize = 128;
-/// The most events one project keeps besides its merges (`MERGES_KEPT_MAX`), split between
-/// the engine's and the owner's events and the agents' (`AGENT_LOGGED_KEPT_MAX`); the oldest
-/// of each share go first.
+/// The most events one project keeps besides its merges (`MERGES_KEPT_MAX`) and work verb
+/// rows (`WORK_KEPT_MAX`), split between the engine's and the owner's events and the
+/// agents' (`AGENT_LOGGED_KEPT_MAX`); the oldest of each share go first.
 const KEPT_PER_PROJECT_MAX: i64 = 10_000;
 /// The share of `KEPT_PER_PROJECT_MAX` for the phases and test runs agents log, which
 /// only push out their own oldest, never another kind of event.
@@ -26,6 +26,25 @@ const AGENT_LOGGED_KEPT_MAX: i64 = 1_000;
 /// merge into main are the only record the Merges count has, so other events never push
 /// them out, and at this many only the oldest merges go.
 const MERGES_KEPT_MAX: i64 = 50_000;
+/// The newest work verb rows a project keeps beyond `KEPT_PER_PROJECT_MAX`. An agent sets
+/// their pace with start_work and finish_work, so they push out only their own oldest and
+/// never the engine's and the owner's events.
+const WORK_KEPT_MAX: i64 = 2_000;
+/// The phases and test runs agents log, kept in `AGENT_LOGGED_KEPT_MAX`.
+const LOGGED_KINDS: [ActivityKind; 2] = [ActivityKind::Phase, ActivityKind::Test];
+/// The merges, kept in `MERGES_KEPT_MAX`.
+const MERGE_KINDS: [ActivityKind; 2] = [ActivityKind::LeadMerged, ActivityKind::MergedIntoMain];
+/// The start and the three ends of a unit of work, kept in `WORK_KEPT_MAX`.
+const WORK_KINDS: [ActivityKind; 4] = [
+    ActivityKind::WorkStarted,
+    ActivityKind::WorkReviewReady,
+    ActivityKind::WorkComplete,
+    ActivityKind::WorkClosed,
+];
+/// One listing gives the rows agents set the pace of, `LOGGED_KINDS` and `WORK_KINDS`, at
+/// most one place in this many, so a team that logs fast never crowds the engine's and the
+/// owner's events out of what Overview reads.
+const LISTED_PACED_SHARE: usize = 4;
 /// The most phases and test runs one caller may log in `LOGGED_WINDOW_MS`.
 pub const LOGGED_PER_WINDOW_MAX: i64 = 30;
 /// The window a caller's logged rows are counted over: one hour.
@@ -45,6 +64,8 @@ const _: () = assert!(LIST_MAX as i64 <= KEPT_PER_PROJECT_MAX);
 const _: () = assert!(AGENT_LOGGED_KEPT_MAX > 0 && AGENT_LOGGED_KEPT_MAX < KEPT_PER_PROJECT_MAX);
 const _: () = assert!(LOGGED_PER_WINDOW_MAX > 0 && LOGGED_PER_WINDOW_MAX <= AGENT_LOGGED_KEPT_MAX);
 const _: () = assert!(MERGES_KEPT_MAX > KEPT_PER_PROJECT_MAX);
+const _: () = assert!(WORK_KEPT_MAX > 0 && WORK_KEPT_MAX < KEPT_PER_PROJECT_MAX);
+const _: () = assert!(LISTED_PACED_SHARE > 1 && LISTED_PACED_SHARE <= LIST_MAX);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS project_activity (
@@ -259,9 +280,10 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
 /// in two shares that never push each other out: its Created event with the newest other
 /// events of the engine and the owner, `KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX` in
 /// all, and the newest `AGENT_LOGGED_KEPT_MAX` phases and test runs agents logged. On top
-/// of those it keeps its newest `MERGES_KEPT_MAX` merges, which no other event pushes out.
-/// Takes the database, the project, the event and the time in ms. Returns the event id, or
-/// `activity_item_invalid` for an empty actor or text.
+/// of those it keeps its newest `MERGES_KEPT_MAX` merges and `WORK_KEPT_MAX` work verb
+/// rows, each pushed out only by its own kinds. Takes the database, the project, the event
+/// and the time in ms. Returns the event id, or `activity_item_invalid` for an empty actor
+/// or text.
 pub fn record(
     db: &Connection,
     project: &ProjectId,
@@ -302,28 +324,16 @@ pub fn record(
     .map_err(state)?;
     let id = db.last_insert_rowid();
     assert!(id > 0);
-    let (phase, test) = (ActivityKind::Phase.name(), ActivityKind::Test.name());
-    if item.kind.agent_logged() {
-        db.execute(
-            "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
-             WHERE project=?1 AND kind IN (?3,?4) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
-            params![project.as_str(), AGENT_LOGGED_KEPT_MAX, phase, test],
-        )
-        .map_err(state)?;
-        return Ok(id);
-    }
-    let (lead_merged, merged) = (
-        ActivityKind::LeadMerged.name(),
-        ActivityKind::MergedIntoMain.name(),
-    );
-    if item.kind.merge() {
-        db.execute(
-            "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
-             WHERE project=?1 AND kind IN (?3,?4) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
-            params![project.as_str(), MERGES_KEPT_MAX, lead_merged, merged],
-        )
-        .map_err(state)?;
-        return Ok(id);
+    let shares: [(&[ActivityKind], i64); 3] = [
+        (&LOGGED_KINDS, AGENT_LOGGED_KEPT_MAX),
+        (&MERGE_KINDS, MERGES_KEPT_MAX),
+        (&WORK_KINDS, WORK_KEPT_MAX),
+    ];
+    for (share, keep) in shares {
+        if share.contains(&item.kind) {
+            prune_share(db, project, (share, false), keep)?;
+            return Ok(id);
+        }
     }
     let created: i64 = db
         .query_row(
@@ -332,21 +342,42 @@ pub fn record(
             |row| row.get(0),
         )
         .map_err(state)?;
+    let apart: Vec<ActivityKind> = std::iter::once(ActivityKind::Created)
+        .chain(shares.iter().flat_map(|(share, _)| share.iter().copied()))
+        .collect();
+    let keep = (KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX - created).max(0);
+    prune_share(db, project, (&apart, true), keep)?;
+    Ok(id)
+}
+
+/// Drops a project's oldest events past the newest `keep` in one share of the store: the
+/// kinds in `share`, or every other kind when `others` is set. The kind names are the
+/// engine's own, so they go into the statement as text. Takes the database, the project,
+/// the share's kinds and whether it is every kind but those, and how many it keeps.
+/// Returns Ok, or the SQLite failure.
+fn prune_share(
+    db: &Connection,
+    project: &ProjectId,
+    (share, others): (&[ActivityKind], bool),
+    keep: i64,
+) -> Result<(), EngineError> {
+    assert!(!share.is_empty() && share.len() < ActivityKind::ALL.len());
+    assert!(keep >= 0);
+    let names: Vec<String> = share
+        .iter()
+        .map(|kind| format!("'{}'", kind.name()))
+        .collect();
+    let not = if others { "NOT " } else { "" };
     db.execute(
-        "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
-         WHERE project=?1 AND kind NOT IN (?3,?4,?5,?6,?7) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
-        params![
-            project.as_str(),
-            (KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX - created).max(0),
-            ActivityKind::Created.name(),
-            phase,
-            test,
-            lead_merged,
-            merged
-        ],
+        &format!(
+            "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
+             WHERE project=?1 AND kind {not}IN ({}) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
+            names.join(",")
+        ),
+        params![project.as_str(), keep],
     )
     .map_err(state)?;
-    Ok(id)
+    Ok(())
 }
 
 /// Records one phase or test run a caller logged with `log_activity`, unless that caller
@@ -753,13 +784,61 @@ pub struct Listed {
     pub more: bool,
 }
 
-/// Lists a project's events as `list` does and says whether older ones were left out.
-/// Takes the database, the project and the limit, 1 to `LIST_MAX`. Returns the read, or
-/// `activity_limit_invalid`.
+/// Lists a project's events as `list` does and says whether older ones were left out. The
+/// phases, test runs and work verb rows agents set the pace of take at most one place in
+/// `LISTED_PACED_SHARE`, so a team that logs fast never crowds out the engine's and the
+/// owner's events. Takes the database, the project and the limit, 1 to `LIST_MAX`. Returns
+/// the read, or `activity_limit_invalid`.
 pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<Listed, EngineError> {
     if limit == 0 || limit > LIST_MAX {
         return Err(failure("activity_limit_invalid"));
     }
+    let paced: Vec<String> = LOGGED_KINDS
+        .iter()
+        .chain(&WORK_KINDS)
+        .map(|kind| format!("'{}'", kind.name()))
+        .collect();
+    let paced = paced.join(",");
+    let paced_max = limit.div_ceil(LISTED_PACED_SHARE);
+    assert!(paced_max > 0 && paced_max <= limit);
+    let mut rows = listed_rows(db, project, &format!("kind NOT IN ({paced})"), limit + 1)?;
+    let paced_rows = listed_rows(db, project, &format!("kind IN ({paced})"), paced_max + 1)?;
+    let mut more = paced_rows.len() > paced_max;
+    rows.extend(paced_rows.into_iter().take(paced_max));
+    rows.sort_by(|(_, a), (_, b)| (b.at_ms, b.id).cmp(&(a.at_ms, a.id)));
+    let mut items = Vec::new();
+    let mut bytes = 0;
+    for (kind, mut item) in rows {
+        let Some(kind) = ActivityKind::parse(&kind) else {
+            continue;
+        };
+        if items.len() == limit {
+            more = true;
+            break;
+        }
+        item.kind = kind;
+        let size = serde_json::to_vec(&item).map_err(state)?.len() + 1;
+        if bytes + size > LISTED_BYTES_MAX {
+            more = true;
+            break;
+        }
+        bytes += size;
+        items.push(item);
+    }
+    assert!(items.len() <= limit && bytes <= LISTED_BYTES_MAX);
+    Ok(Listed { items, more })
+}
+
+/// Reads a project's newest `rows` events whose kind passes `filter`, newest first, each
+/// with its stored kind name beside it. Takes the database, the project, the SQL filter
+/// on the kind and the row bound. Returns the rows, or the SQLite failure.
+fn listed_rows(
+    db: &Connection,
+    project: &ProjectId,
+    filter: &str,
+    rows: usize,
+) -> Result<Vec<(String, ActivityItem)>, EngineError> {
+    assert!(rows > 0 && rows <= LIST_MAX + 1);
     let accepted_in = if has_column(db, "landing_change_sets", "accepted_in")? {
         "CASE WHEN kind='accepted' THEN \
          (SELECT accepted_in FROM landing_change_sets WHERE id=project_activity.change_set) END"
@@ -775,12 +854,13 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
     let mut statement = db
         .prepare(&format!(
             "SELECT id,at_ms,kind,actor,goal,text,change_set,undone,{landed_on},{accepted_in} \
-             FROM project_activity WHERE project=?1 ORDER BY at_ms DESC, id DESC LIMIT ?2"
+             FROM project_activity WHERE project=?1 AND {filter} \
+             ORDER BY at_ms DESC, id DESC LIMIT ?2"
         ))
         .map_err(state)?;
-    let rows = statement
+    let read = statement
         .query_map(
-            params![project.as_str(), i64::try_from(limit + 1).map_err(state)?],
+            params![project.as_str(), i64::try_from(rows).map_err(state)?],
             |row| {
                 Ok((
                     row.get::<_, String>(2)?,
@@ -804,30 +884,11 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
                 ))
             },
         )
+        .map_err(state)?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(state)?;
-    let mut items = Vec::new();
-    let mut bytes = 0;
-    let mut more = false;
-    for row in rows {
-        let (kind, mut item) = row.map_err(state)?;
-        let Some(kind) = ActivityKind::parse(&kind) else {
-            continue;
-        };
-        if items.len() == limit {
-            more = true;
-            break;
-        }
-        item.kind = kind;
-        let size = serde_json::to_vec(&item).map_err(state)?.len() + 1;
-        if bytes + size > LISTED_BYTES_MAX {
-            more = true;
-            break;
-        }
-        bytes += size;
-        items.push(item);
-    }
-    assert!(items.len() <= limit && bytes <= LISTED_BYTES_MAX);
-    Ok(Listed { items, more })
+    assert!(read.len() <= rows);
+    Ok(read)
 }
 
 /// One event found in the project's older records by `backfill`.
