@@ -665,10 +665,10 @@ fn host_name(data: &[u8]) -> Option<&str> {
 }
 
 /// Resolves one host on the engine's side and connects to the first address that answers
-/// before the deadline, skipping every address [`dialable`] refuses unless `any_address`
-/// says otherwise. Each socket is made inside the spawn gate, which is not held while
-/// connecting. Inputs: the host, the deadline and that choice. Output: the blocking
-/// connection, or PermissionDenied when every address the name gave was refused.
+/// before the deadline, skipping each address [`dialable`] refuses or [`on_this_machine`]
+/// finds held unless `any_address` says otherwise. Each socket is made inside the spawn
+/// gate, not held while connecting. Inputs: the host, the deadline and that choice. Output:
+/// the blocking connection, or PermissionDenied when every address the name gave was refused.
 fn open_upstream(host: &ModelHost, deadline: Instant, any_address: bool) -> io::Result<TcpStream> {
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero() {
@@ -686,7 +686,9 @@ fn open_upstream(host: &ModelHost, deadline: Instant, any_address: bool) -> io::
             let allowed: Vec<std::net::SocketAddr> = resolved
                 .iter()
                 .copied()
-                .filter(|address| any_address || dialable(address.ip()))
+                .filter(|address| {
+                    any_address || (dialable(address.ip()) && !on_this_machine(address.ip()))
+                })
                 .collect();
             if allowed.is_empty() && !resolved.is_empty() {
                 return Err(io::Error::from(io::ErrorKind::PermissionDenied));
@@ -706,8 +708,8 @@ fn open_upstream(host: &ModelHost, deadline: Instant, any_address: bool) -> io::
 /// Tells whether a tunnel may dial `address`, one a model host's name resolved to: not
 /// loopback, unspecified, link-local or in 0.0.0.0/8, also as an IPv4 address inside an
 /// IPv6 one. The engine dials outside the sandbox, so a host's DNS must not steer it to this
-/// machine (CS-4); private network addresses stay allowed for an owner's endpoint on the
-/// local network. Input: the address. Output: true when the proxy may dial it.
+/// machine (CS-4); private network addresses stay allowed for an owner's endpoint on another
+/// machine of the local network. Input: the address. Output: true when the proxy may dial it.
 fn dialable(address: IpAddr) -> bool {
     let v4 = |ip: Ipv4Addr| {
         !(ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() || ip.octets()[0] == 0)
@@ -721,10 +723,20 @@ fn dialable(address: IpAddr) -> bool {
     }
 }
 
-/// Tells whether one of this machine's interfaces holds `address`. Not written yet.
-/// Input: the address. Output: false.
-fn on_this_machine(_address: IpAddr) -> bool {
-    false
+/// Tells whether one of this machine's interfaces holds `address`, such as its own LAN
+/// address, which reaches the owner's services from outside the sandbox as loopback does
+/// (S4B-I1). A socket binds only to an address an interface holds, and binding sends nothing.
+/// An IPv4 address inside an IPv6 one is tried as IPv4. Any other bind error counts as held,
+/// so a failed check refuses the dial. Input: the address. Output: true when held or unsure.
+fn on_this_machine(address: IpAddr) -> bool {
+    let held = |ip: IpAddr| match spawn_gate::guarded(|| std::net::UdpSocket::bind((ip, 0))) {
+        Ok(_) => true,
+        Err(error) => error.kind() != io::ErrorKind::AddrNotAvailable,
+    };
+    match address.to_canonical() {
+        IpAddr::V6(ip) => held(IpAddr::V6(ip)) || ip.to_ipv4().is_some_and(|v4| held(v4.into())),
+        v4 => held(v4),
+    }
 }
 
 /// Passes bytes both ways until either side closes, the proxy stops or nothing moved for
