@@ -48,6 +48,8 @@ function answer(scene, command) {
     const limits = failing(scene.limits ?? "ok", LIMITS);
     return limits instanceof Promise ? limits : { limits };
   }
+  if (scene.edits === "ok" && command === "desktop_inspect_model_access") return { ticket: "ticket", record: { kind: "pool", pool: { id: "pool-spare", name: "Spare", members: ["acct-3"] } } };
+  if (scene.edits === "ok" && command === "desktop_edit_model_access") return null;
   if (command === "desktop_inspect_model_access" || command === "desktop_model_access_page") throw FAILURE;
   throw `Command ${command} not found`;
 }
@@ -105,7 +107,7 @@ export function heldHead() {
  * the main area scrolls sideways. */
 export function panes() {
   const main = document.getElementById("main");
-  const [list, pool] = [...document.querySelectorAll(".pool-screen > .set-group")].map((pane) => pane.getBoundingClientRect());
+  const [list, pool] = [...document.querySelectorAll(".pool-screen > *")].map((pane) => pane.getBoundingClientRect());
   return { list: { left: list.left, right: list.right, top: list.top }, pool: { left: pool.left, right: pool.right, top: pool.top }, sideways: document.documentElement.scrollWidth > window.innerWidth || main.scrollWidth > main.clientWidth };
 }
 

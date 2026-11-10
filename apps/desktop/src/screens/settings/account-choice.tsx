@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { accountRanking, accountSchedule, setAccountSchedule, type AccountPin, type AccountPlan, type AccountSchedule, type AccountStanding, type AccountStrategy, type AccountView, type PoolRanking, type PoolSummary, type Result, type ScheduleChange } from "../../api";
+import { accountSchedule, setAccountSchedule, type AccountPin, type AccountPlan, type AccountSchedule, type AccountStanding, type AccountStrategy, type AccountView, type PoolRanking, type PoolSummary, type Result, type ScheduleChange } from "../../api";
 import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, LoadError, Notice, NotReady, Panel, Select, Skeleton, TextField, type SelectOption } from "../../ui";
 
@@ -231,11 +231,17 @@ export function AccountChoiceView({ schedule, pools, names, ranking, nowMs, onCh
   </Panel>;
 }
 
-/** Settings, Pools: the account choice panel. Inputs: the pools and accounts the page read. */
-export function AccountChoice({ pools, accounts }: { pools: Loaded<PoolSummary[]>; accounts: Loaded<AccountView[]> }) {
+/** Settings, Pools: the account choice panel. Inputs: the pools and accounts the page read, its
+ * schedule and ranking reads and the re-reads of both, so a change here moves the order beside it. */
+export function AccountChoice({ pools, accounts, schedule, ranking, reload, rerank }: {
+  pools: Loaded<PoolSummary[]>;
+  accounts: Loaded<AccountView[]>;
+  schedule: Loaded<AccountSchedule>;
+  ranking: Loaded<PoolRanking[]>;
+  reload: () => void;
+  rerank: () => void;
+}) {
   const session = useAppSession();
-  const [schedule, reload] = useLoad(accountSchedule, [], "account-schedule");
-  const [ranking, rerank] = useLoad(accountRanking, [], "account-ranking");
   const names = new Map(accounts.kind === "ok" ? accounts.value.map((account) => [account.id, account.name]) : []);
   return <AccountChoiceView schedule={schedule} pools={pools} names={names} ranking={ranking} nowMs={Date.now()} onRetry={reload} onChange={async (change) => {
     const result = session.noteResult(await setAccountSchedule(change, schedule.kind === "ok" ? schedule.value.version : 0));

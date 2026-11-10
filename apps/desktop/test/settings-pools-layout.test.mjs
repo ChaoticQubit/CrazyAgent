@@ -31,13 +31,14 @@ test("the screen shows the title and purpose, Your pools with New pool on the le
 test("pressing a pool selects it and shows its own accounts, actions and order, and the focus stays on it", async () => {
   const seen = await onPools({}, async (page) => {
     await press(page, ITEM(2));
-    return { items: await items(page), sections: await read(page), rows: await rows(page), order: await page.evaluate("Fixture.wordsOf('.pool-order')"), focused: await page.evaluate("Fixture.focused()") };
+    return { items: await items(page), sections: await read(page), rows: await rows(page), order: await page.evaluate("Fixture.wordsOf('.pool-order p')"), head: await page.evaluate("Fixture.wordsOf('.pool-order-head')"), focused: await page.evaluate("Fixture.focused()") };
   });
   assert.deepEqual(seen.items.map((item) => item.current), [null, "true"]);
   assert.equal(seen.sections[1].heading, "Spare");
   assert.deepEqual(seen.sections[1].actions, ["Edit pool", "Delete pool"], "only a pool with keyed members can be set up for agents");
   assert.deepEqual(seen.rows.map((row) => row.name), ["Account 3"]);
-  assert.match(seen.order, /^Account order Order comes from Balanced, this pool: /);
+  assert.equal(seen.head, "Account order");
+  assert.match(seen.order, /^Order comes from Balanced, this pool: /);
   assert.match(seen.order, /1 project using this pool sets its own order\.$/);
   assert.match(seen.focused.name, /^Spare/);
 });
@@ -165,6 +166,17 @@ test("the page reads the ranking and the limits again once a minute and leaves t
   });
   assert.equal(seen.delays.filter((delay) => delay === 60000).length, 1, JSON.stringify(seen.delays));
   assert.deepEqual(seen.after, [seen.before[0] + 1, seen.before[1] + 1, seen.before[2]]);
+});
+
+test("a deleted pool reads the pools and the order again", async () => {
+  const seen = await onPools({ edits: "ok" }, async (page) => {
+    await press(page, ITEM(2));
+    const before = [await commandCount(page, POOLS_READ), await commandCount(page, RANKING)];
+    await press(page, 'button[aria-label="Delete pool Spare"]');
+    await press(page, "dialog[open] button", "Delete pool");
+    return { before, after: [await commandCount(page, POOLS_READ), await commandCount(page, RANKING)] };
+  });
+  assert.deepEqual(seen.after, [seen.before[0] + 1, seen.before[1] + 1]);
 });
 
 test("a change saved in Account choice reads the order on the right again", async () => {
