@@ -4,7 +4,7 @@ import { failureCopy, loadAgentPolicy, loadSetup, type AgentAccess, type PolicyV
 import { useHeld, useLoad } from "../../state";
 import { Button, ConfirmDialog, Icon, Segmented, Select, Switch, type SelectOption } from "../../ui";
 import { displayText } from "../conversation";
-import { ACCESS_LEVELS, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, accessLabel, confirmFirst, policyOf } from "../project/access";
+import { ACCESS_LEVELS, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, POLICY_RESTARTS_IDE, accessLabel, confirmFirst, policyOf } from "../project/access";
 import { NO_POOL, accessSaved, saveAccess, savePool, saveTeam } from "../project/settings";
 import { valueOf, type ProjectData } from "../project/shared";
 import { harnessName } from "../new-project/team-editor";
@@ -212,7 +212,7 @@ export function AgentAccessSetting({ projectId, notify, reload }: { projectId: s
     {view
       ? <Segmented label={label} value={chosen ?? view.access} onValue={pick} options={ACCESS_LEVELS.map((level) => ({ value: level.access, label: level.label }))} />
       : <span className="set-ctl tg-terminal-note" role={failure ? "alert" : "status"}>{failure || "Loading..."}</span>}
-    <span className="tg-terminal-note">Sandboxed keeps agents in their worktree with today's limits. Own branch gives each agent full git on its own branch. Full access lets them run as you. {LOWERING_STOPS_AGENTS}</span>
+    <span className="tg-terminal-note">Sandboxed keeps agents in their worktree with today's limits. Own branch gives each agent full git on its own branch. Full access lets them run as you. {LOWERING_STOPS_AGENTS} {POLICY_RESTARTS_IDE}</span>
     {view && chosen !== null && <div className="pj-row">
       <span className="tg-terminal-note" role="status">{accessChangeLine(view.access, chosen)}</span>
       <Button variant="primary" size="small" pending={busy} pendingLabel="Saving..." onClick={submit}>Save agent access</Button>

@@ -79,6 +79,125 @@ async fn a_pack_removal_that_does_not_commit_puts_its_skill_folders_back() {
 }
 
 #[cfg(unix)]
+fn owner_request(id: &str, revision: u64, operation: OwnerOperation) -> OwnerRequest {
+    OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new(id).unwrap(),
+        expected_revision: Cursor::new(revision),
+        operation,
+    }
+}
+
+#[cfg(unix)]
+fn assert_applied(reply: &OwnerReply) {
+    let OwnerResponse::Applied { operation } = &reply.response else {
+        panic!("not applied: {reply:?}");
+    };
+    assert_eq!(operation.result, OwnerResult::Applied, "{reply:?}");
+}
+
+/// A Save whose reply was lost has committed with no hook behind it, so the client's
+/// Reconcile, answered Committed, is what ends the project's open IDE. Its reply names no
+/// project, so every open IDE is compared with its saved policy (v21-ide-level-3 r1 F1).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconcile_of_a_save_whose_reply_was_lost_stops_the_projects_running_ide() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let owner = Usage::start().await;
+    let project = ProjectId::new("lost-reply").unwrap();
+    let revision = || {
+        let query = OwnerRead::Capabilities;
+        let request = owner_request("lost-reply-read", 0, OwnerOperation::Read { query });
+        let client = &owner.client;
+        async move {
+            let reply = client.request(request).await.unwrap();
+            let OwnerResponse::Read { state } = reply.response else {
+                panic!("the owner read failed: {reply:?}");
+            };
+            state.revision.value()
+        }
+    };
+    let created = owner
+        .client
+        .request(owner_request(
+            "lost-reply-project",
+            revision().await,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::CreateProject {
+                    project_id: project.clone(),
+                    spec: ProjectSpec {
+                        name: "lost reply".into(),
+                        repositories: vec![],
+                    },
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    assert_applied(&created);
+    let checkout = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let runtime = owner.runtime();
+    let servers = runtime.ide_servers();
+    servers
+        .open(
+            &project,
+            &std::fs::canonicalize(checkout.path()).unwrap(),
+            &crate::ide::server::tests::cached_build(),
+        )
+        .await
+        .unwrap();
+    let group = servers.group(&project).expect("the IDE runs");
+    let save = owner_request(
+        "lost-reply-save",
+        revision().await,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::SetProjectAgentPolicy {
+                project_id: project.clone(),
+                version: 0,
+                policy: AgentPolicy {
+                    access: AgentAccess::Full,
+                    ..AgentPolicy::default()
+                },
+            },
+        },
+    );
+    let admission = runtime.authority.authenticate(&owner.packet()).unwrap();
+    let committed = {
+        let _barrier = runtime.engine.owner_egress.write().await;
+        runtime
+            .engine
+            .dispatch_owner(admission, save.clone(), None)
+            .await
+            .unwrap()
+    };
+    assert_applied(&committed);
+    assert_eq!(
+        servers.group(&project),
+        Some(group),
+        "nothing has followed the commit yet"
+    );
+    let reconciled = owner
+        .client
+        .request(owner_request(
+            "lost-reply-reconcile",
+            revision().await,
+            OwnerOperation::Reconcile {
+                operation_id: save.request_id.clone(),
+                expected_hash: Some(save.mutation_hash().unwrap()),
+            },
+        ))
+        .await
+        .unwrap();
+    let OwnerResponse::Committed { operation } = &reconciled.response else {
+        panic!("the Reconcile did not find the Save: {reconciled:?}");
+    };
+    assert_eq!(operation.result, OwnerResult::Applied);
+    crate::ide::server::tests::gone(group).await;
+    assert_eq!(servers.group(&project), None);
+    owner.stop().await;
+}
+
+#[cfg(unix)]
 fn pack_checkout(setup: &std::path::Path, id: &str) -> std::path::PathBuf {
     let manifest = crate::setup::pack::default_pack().unwrap();
     let entry = manifest

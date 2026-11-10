@@ -88,6 +88,16 @@ test("Settings says beside the level choice that lowering it stops agents runnin
   assert.ok(tui.includes(`"${access.LOWERING_STOPS_AGENTS}"`));
 });
 
+test("every Save of agent access says a saved change restarts the project's IDE, in both UIs", () => {
+  assert.equal(access.POLICY_RESTARTS_IDE, "Changing the level, the IDE hooks switch below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.");
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /{view && <p className="pj-help">{LOWERING_STOPS_AGENTS}<\/p>}\n\s*{view && <p className="pj-help">{POLICY_RESTARTS_IDE}<\/p>}/);
+  const team = readFileSync(new URL("../src/screens/team/setup-rows.tsx", import.meta.url), "utf8");
+  assert.match(team, /{LOWERING_STOPS_AGENTS} {POLICY_RESTARTS_IDE}<\/span>/);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${access.POLICY_RESTARTS_IDE}"`));
+});
+
 test("agent access saves at the version the page read, and a stale save reads the saved access again", () => {
   assert.match(settings.ACCESS_STALE, /Agent access changed since you opened it\. The page now shows the saved access/);
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");

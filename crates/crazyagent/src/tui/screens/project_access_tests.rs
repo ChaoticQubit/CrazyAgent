@@ -2,7 +2,8 @@
 use super::project_access::FULL_ACCESS_WARNING;
 use super::project_access::{
     AccessEdit, AccessKey, IDE_GIT_HOOKS, IDE_GIT_HOOKS_LINE, LOWERING_STOPS_AGENTS,
-    NETWORK_IGNORED_UNDER_FULL, TOOLCHAIN_OFF_STOPS_AGENTS, network_help, summary,
+    NETWORK_IGNORED_UNDER_FULL, POLICY_RESTARTS_IDE, TOOLCHAIN_OFF_STOPS_AGENTS, network_help,
+    summary,
 };
 use crate::sandbox::policy::{
     AgentAccess, AgentNetwork, LevelView, NetworkView, PolicyView, ToolchainView,
@@ -242,4 +243,21 @@ fn the_access_box_saves_the_ide_hooks_switch_on_its_last_row_with_its_line() {
     off.cursor = 4;
     assert_eq!(off.key(key(KeyCode::Left)), AccessKey::Handled);
     assert!(!off.policy().ide_git_hooks);
+}
+
+#[test]
+fn the_access_box_says_beside_the_level_that_saving_restarts_the_projects_ide() {
+    let edit = AccessEdit::of(&view());
+    let look = super::new_project_view::Look::plain();
+    let rows: Vec<String> = edit
+        .rows(&look, usize::MAX)
+        .iter()
+        .map(|row| row.text())
+        .collect();
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        POLICY_RESTARTS_IDE,
+        "Changing the level, the IDE hooks switch below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute."
+    );
+    assert!(words(&rows.join(" ")).contains(POLICY_RESTARTS_IDE));
 }

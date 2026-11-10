@@ -2908,3 +2908,59 @@ async fn the_owner_reads_a_sub_agent_s_messages_timeline_and_saves_its_settings_
     drop(owner);
     engine.stop().await;
 }
+
+/// The Save both the desktop and the TUI send ends the project's open IDE once the new
+/// level is committed, so nothing keeps running at the level the owner just changed.
+#[tokio::test]
+async fn an_applied_access_save_stops_the_projects_running_ide() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let checkout = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let servers = engine
+        .service
+        .as_ref()
+        .unwrap()
+        .owner_runtime()
+        .unwrap()
+        .ide_servers();
+    servers
+        .open(
+            &project,
+            &std::fs::canonicalize(checkout.path()).unwrap(),
+            &crate::ide::server::tests::cached_build(),
+        )
+        .await
+        .unwrap();
+    assert!(servers.group(&project).is_some());
+    let view = owner.project_agent_policy(project.clone()).await.unwrap();
+    let full = AgentPolicy {
+        access: AgentAccess::Full,
+        ..AgentPolicy::default()
+    };
+    let saved = owner
+        .set_project_agent_policy(project.clone(), view.version, full, 2)
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    while servers.group(&project).is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the IDE kept running after its level was saved"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    engine.stop().await;
+}
