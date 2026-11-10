@@ -200,10 +200,11 @@ pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineE
 
 /// The agent folders rule a sandboxed IDE server or terminal of the project holds (DEC-124):
 /// the saved choice below Full access and Allow all changes at Full access, where no profile
-/// runs. It names the older agents root while engine-made worktrees stay there
-/// ([`older_agents`]), read only when the choice protects anything. Inputs: the engine root,
-/// the project, its folder, its level and its saved choice. Output: the rule, or the refusal
-/// of [`older_agents`].
+/// runs. When the choice protects anything it names the older agents root `<folder>/worktrees`
+/// for a project with no `.crazyagent` folder, where the engine puts every agent it starts
+/// later, and otherwise while engine-made worktrees stay there ([`older_agents`]). Inputs:
+/// the engine root, the project, its folder, its level and its saved choice. Output: the
+/// rule, or the refusal of [`older_agents`].
 pub fn agent_files_rule(
     root: &Path,
     project: &ProjectId,
@@ -216,7 +217,9 @@ pub fn agent_files_rule(
     } else {
         choice
     };
-    let older_agents = choice != IdeAgentFiles::AllowAll && older_agents(root, project, folder)?;
+    let older_agents = choice != IdeAgentFiles::AllowAll
+        && (crate::projects_home::state_folder(folder) == folder
+            || older_agents(root, project, folder)?);
     Ok(AgentFilesRule {
         choice,
         older_agents,
