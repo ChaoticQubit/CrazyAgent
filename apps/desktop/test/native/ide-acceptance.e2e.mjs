@@ -611,8 +611,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
             }
           }
           const said = readFileSync(path, "utf8");
-          const lines = said.split("
-");
+          const lines = said.split("\n");
           assert.ok(lines.some((line) => line.startsWith("git version ")), `${file}: ${said}`);
           if (owned) {
             assert.ok(lines.includes(OWNER_NAME), `${file}: ${said}`);
