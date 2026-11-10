@@ -447,6 +447,7 @@ const FILTER_OF: Record<ActivityKind, Exclude<ActivityFilter, "all"> | null> = {
   research_waiting: "task",
   task_started: "task",
   task_finished: "task",
+  task_failed: "task",
   task_stopped: "task",
   changes_ready: "change",
   accepted: "change",

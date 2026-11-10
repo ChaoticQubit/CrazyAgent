@@ -15,9 +15,9 @@ pub const LISTED_BYTES_MAX: usize = 48 * 1024;
 const ACTOR_BYTES_MAX: usize = 120;
 /// The most bytes of a change set id kept with an event.
 const CHANGE_SET_BYTES_MAX: usize = 128;
-/// The most events one project keeps besides its merges (`MERGES_KEPT_MAX`), split between
-/// the engine's and the owner's events and the agents' (`AGENT_LOGGED_KEPT_MAX`); the oldest
-/// of each share go first.
+/// The most events one project keeps besides its merges (`MERGES_KEPT_MAX`) and work verb
+/// rows (`WORK_KEPT_MAX`), split between the engine's and the owner's events and the
+/// agents' (`AGENT_LOGGED_KEPT_MAX`); the oldest of each share go first.
 const KEPT_PER_PROJECT_MAX: i64 = 10_000;
 /// The share of `KEPT_PER_PROJECT_MAX` for the phases and test runs agents log, which
 /// only push out their own oldest, never another kind of event.
@@ -26,6 +26,28 @@ const AGENT_LOGGED_KEPT_MAX: i64 = 1_000;
 /// merge into main are the only record the Merges count has, so other events never push
 /// them out, and at this many only the oldest merges go.
 const MERGES_KEPT_MAX: i64 = 50_000;
+/// The newest work verb rows a project keeps beyond `KEPT_PER_PROJECT_MAX`. An agent sets
+/// their pace with start_work and finish_work, so they push out only their own oldest and
+/// never the engine's and the owner's events.
+const WORK_KEPT_MAX: i64 = 2_000;
+/// The phases and test runs agents log, kept in `AGENT_LOGGED_KEPT_MAX`.
+const LOGGED_KINDS: [ActivityKind; 2] = [ActivityKind::Phase, ActivityKind::Test];
+/// The merges, kept in `MERGES_KEPT_MAX`.
+const MERGE_KINDS: [ActivityKind; 2] = [ActivityKind::LeadMerged, ActivityKind::MergedIntoMain];
+/// The start and the three ends of a unit of work, kept in `WORK_KEPT_MAX`.
+const WORK_KINDS: [ActivityKind; 4] = [
+    ActivityKind::WorkStarted,
+    ActivityKind::WorkReviewReady,
+    ActivityKind::WorkComplete,
+    ActivityKind::WorkClosed,
+];
+/// One listing first gives the rows agents set the pace of, `LOGGED_KINDS` and `WORK_KINDS`,
+/// at most one place and one byte in this many, so a team that logs fast never crowds the
+/// engine's and the owner's events out of what Overview reads; agent rows then fill what
+/// those events leave.
+const LISTED_PACED_SHARE: usize = 4;
+/// The words a task that could not finish is told with, after its agent's label.
+const TASK_FAILED_VERB: &str = "could not finish";
 /// The most phases and test runs one caller may log in `LOGGED_WINDOW_MS`.
 pub const LOGGED_PER_WINDOW_MAX: i64 = 30;
 /// The window a caller's logged rows are counted over: one hour.
@@ -45,6 +67,11 @@ const _: () = assert!(LIST_MAX as i64 <= KEPT_PER_PROJECT_MAX);
 const _: () = assert!(AGENT_LOGGED_KEPT_MAX > 0 && AGENT_LOGGED_KEPT_MAX < KEPT_PER_PROJECT_MAX);
 const _: () = assert!(LOGGED_PER_WINDOW_MAX > 0 && LOGGED_PER_WINDOW_MAX <= AGENT_LOGGED_KEPT_MAX);
 const _: () = assert!(MERGES_KEPT_MAX > KEPT_PER_PROJECT_MAX);
+const _: () = assert!(WORK_KEPT_MAX > 0 && WORK_KEPT_MAX < KEPT_PER_PROJECT_MAX);
+const _: () = assert!(LISTED_PACED_SHARE > 1 && LISTED_PACED_SHARE <= LIST_MAX);
+const _: () = assert!(
+    TEXT_BYTES_MAX + GOAL_BYTES_MAX + ACTOR_BYTES_MAX + 512 < LISTED_BYTES_MAX / LISTED_PACED_SHARE
+);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS project_activity (
@@ -81,6 +108,7 @@ pub enum ActivityKind {
     ResearchWaiting,
     TaskStarted,
     TaskFinished,
+    TaskFailed,
     TaskStopped,
     ChangesReady,
     Accepted,
@@ -99,7 +127,7 @@ pub enum ActivityKind {
 }
 
 impl ActivityKind {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Created,
         Self::ResearchStarted,
         Self::ResearchSaved,
@@ -107,6 +135,7 @@ impl ActivityKind {
         Self::ResearchWaiting,
         Self::TaskStarted,
         Self::TaskFinished,
+        Self::TaskFailed,
         Self::TaskStopped,
         Self::ChangesReady,
         Self::Accepted,
@@ -144,6 +173,7 @@ impl ActivityKind {
             Self::ResearchWaiting => "research_waiting",
             Self::TaskStarted => "task_started",
             Self::TaskFinished => "task_finished",
+            Self::TaskFailed => "task_failed",
             Self::TaskStopped => "task_stopped",
             Self::ChangesReady => "changes_ready",
             Self::Accepted => "accepted",
@@ -226,12 +256,19 @@ pub struct NewActivity<'a> {
     pub change_set: Option<&'a str>,
 }
 
-/// Creates the activity tables when they are missing, then brings each project's history
-/// in once (`backfill`); a project whose backfill fails is logged by its plain code and
-/// tried again at the next start, so the engine always starts. Takes the engine database.
-/// Returns Ok, or the SQLite failure of the tables.
+/// Creates the activity tables when they are missing, moves rows stored before their kind
+/// existed (`move_old_kinds`), then brings each project's history in once (`backfill`); a
+/// failed move or backfill is logged by its plain code and tried again at the next start,
+/// so the engine always starts. Takes the engine database. Returns Ok, or the SQLite
+/// failure of the tables.
 pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(state)?;
+    if let Err(error) = move_old_kinds(db) {
+        eprintln!(
+            "activity_kinds_not_moved cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
     let projects: Vec<String> = {
         let mut statement = db.prepare("SELECT id FROM projects").map_err(state)?;
         statement
@@ -254,14 +291,47 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Moves rows stored before a task that could not finish and a research run parked for a
+/// pool had kinds of their own to `TaskFailed` and `ResearchWaiting`, matched on the exact
+/// words their writers used after the actor, so a finished task whose title holds those
+/// words stays finished. A moved row no longer matches, so every start may run it. Takes
+/// the database. Returns Ok, or the SQLite failure.
+fn move_old_kinds(db: &Connection) -> Result<(), EngineError> {
+    let failed = format!(" {TASK_FAILED_VERB} ");
+    let waiting = research_line(research_verb(ActivityKind::ResearchWaiting), "");
+    assert!(failed.len() > 2 && waiting.ends_with(": "));
+    db.execute(
+        "UPDATE project_activity SET kind=?1 WHERE kind=?2
+         AND substr(text, 1, length(actor) + length(?3)) = actor || ?3",
+        params![
+            ActivityKind::TaskFailed.name(),
+            ActivityKind::TaskFinished.name(),
+            failed
+        ],
+    )
+    .map_err(state)?;
+    db.execute(
+        "UPDATE project_activity SET kind=?1 WHERE kind=?2
+         AND substr(text, 1, length(?3)) = ?3",
+        params![
+            ActivityKind::ResearchWaiting.name(),
+            ActivityKind::ResearchStopped.name(),
+            waiting
+        ],
+    )
+    .map_err(state)?;
+    Ok(())
+}
+
 /// Records one event: the actor, text and goal go through the change set subject's scrub
 /// (`shown`) and are cut to their bounds. The project keeps `KEPT_PER_PROJECT_MAX` events
 /// in two shares that never push each other out: its Created event with the newest other
 /// events of the engine and the owner, `KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX` in
 /// all, and the newest `AGENT_LOGGED_KEPT_MAX` phases and test runs agents logged. On top
-/// of those it keeps its newest `MERGES_KEPT_MAX` merges, which no other event pushes out.
-/// Takes the database, the project, the event and the time in ms. Returns the event id, or
-/// `activity_item_invalid` for an empty actor or text.
+/// of those it keeps its newest `MERGES_KEPT_MAX` merges and `WORK_KEPT_MAX` work verb
+/// rows, each pushed out only by its own kinds. Takes the database, the project, the event
+/// and the time in ms. Returns the event id, or `activity_item_invalid` for an empty actor
+/// or text.
 pub fn record(
     db: &Connection,
     project: &ProjectId,
@@ -302,28 +372,16 @@ pub fn record(
     .map_err(state)?;
     let id = db.last_insert_rowid();
     assert!(id > 0);
-    let (phase, test) = (ActivityKind::Phase.name(), ActivityKind::Test.name());
-    if item.kind.agent_logged() {
-        db.execute(
-            "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
-             WHERE project=?1 AND kind IN (?3,?4) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
-            params![project.as_str(), AGENT_LOGGED_KEPT_MAX, phase, test],
-        )
-        .map_err(state)?;
-        return Ok(id);
-    }
-    let (lead_merged, merged) = (
-        ActivityKind::LeadMerged.name(),
-        ActivityKind::MergedIntoMain.name(),
-    );
-    if item.kind.merge() {
-        db.execute(
-            "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
-             WHERE project=?1 AND kind IN (?3,?4) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
-            params![project.as_str(), MERGES_KEPT_MAX, lead_merged, merged],
-        )
-        .map_err(state)?;
-        return Ok(id);
+    let shares: [(&[ActivityKind], i64); 3] = [
+        (&LOGGED_KINDS, AGENT_LOGGED_KEPT_MAX),
+        (&MERGE_KINDS, MERGES_KEPT_MAX),
+        (&WORK_KINDS, WORK_KEPT_MAX),
+    ];
+    for (share, keep) in shares {
+        if share.contains(&item.kind) {
+            prune_share(db, project, (share, false), keep)?;
+            return Ok(id);
+        }
     }
     let created: i64 = db
         .query_row(
@@ -332,21 +390,42 @@ pub fn record(
             |row| row.get(0),
         )
         .map_err(state)?;
+    let apart: Vec<ActivityKind> = std::iter::once(ActivityKind::Created)
+        .chain(shares.iter().flat_map(|(share, _)| share.iter().copied()))
+        .collect();
+    let keep = (KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX - created).max(0);
+    prune_share(db, project, (&apart, true), keep)?;
+    Ok(id)
+}
+
+/// Drops a project's oldest events past the newest `keep` in one share of the store: the
+/// kinds in `share`, or every other kind when `others` is set. The kind names are the
+/// engine's own, so they go into the statement as text. Takes the database, the project,
+/// the share's kinds and whether it is every kind but those, and how many it keeps.
+/// Returns Ok, or the SQLite failure.
+fn prune_share(
+    db: &Connection,
+    project: &ProjectId,
+    (share, others): (&[ActivityKind], bool),
+    keep: i64,
+) -> Result<(), EngineError> {
+    assert!(!share.is_empty() && share.len() < ActivityKind::ALL.len());
+    assert!(keep >= 0);
+    let names: Vec<String> = share
+        .iter()
+        .map(|kind| format!("'{}'", kind.name()))
+        .collect();
+    let not = if others { "NOT " } else { "" };
     db.execute(
-        "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
-         WHERE project=?1 AND kind NOT IN (?3,?4,?5,?6,?7) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
-        params![
-            project.as_str(),
-            (KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX - created).max(0),
-            ActivityKind::Created.name(),
-            phase,
-            test,
-            lead_merged,
-            merged
-        ],
+        &format!(
+            "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
+             WHERE project=?1 AND kind {not}IN ({}) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
+            names.join(",")
+        ),
+        params![project.as_str(), keep],
     )
     .map_err(state)?;
-    Ok(id)
+    Ok(())
 }
 
 /// Records one phase or test run a caller logged with `log_activity`, unless that caller
@@ -485,9 +564,9 @@ pub fn note_task_stop(
 }
 
 /// Records that a team agent's task ended, named by its title and never by the agent's
-/// reply or failure text: finished, or could not finish for a failed one; a failure is
-/// logged by its plain code. Takes the database, the project, the agent, the task when the
-/// event names one, whether it failed and the time in ms.
+/// reply or failure text: finished, or could not finish under its own kind for a failed
+/// one; a failure is logged by its plain code. Takes the database, the project, the agent,
+/// the task when the event names one, whether it failed and the time in ms.
 pub fn note_task_end(
     db: &Connection,
     project: &ProjectId,
@@ -496,11 +575,10 @@ pub fn note_task_end(
     failed: bool,
     now_ms: i64,
 ) {
-    let kind = ActivityKind::TaskFinished;
-    let verb = if failed {
-        "could not finish"
+    let (kind, verb) = if failed {
+        (ActivityKind::TaskFailed, TASK_FAILED_VERB)
     } else {
-        "finished"
+        (ActivityKind::TaskFinished, "finished")
     };
     logged(
         kind,
@@ -753,13 +831,106 @@ pub struct Listed {
     pub more: bool,
 }
 
-/// Lists a project's events as `list` does and says whether older ones were left out.
-/// Takes the database, the project and the limit, 1 to `LIST_MAX`. Returns the read, or
-/// `activity_limit_invalid`.
+/// Lists a project's events as `list` does and says whether older ones were left out. Rows
+/// agents set the pace of first take at most one place and byte in `LISTED_PACED_SHARE`, the
+/// engine's and owner's events take the rest, then agent rows fill what those leave, so a fast
+/// team never crowds those events out and a quiet project still lists a full read. Takes the
+/// database, the project and the limit, 1 to `LIST_MAX`. Returns the read, or an error.
 pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<Listed, EngineError> {
     if limit == 0 || limit > LIST_MAX {
         return Err(failure("activity_limit_invalid"));
     }
+    let paced: Vec<String> = LOGGED_KINDS
+        .iter()
+        .chain(&WORK_KINDS)
+        .map(|kind| format!("'{}'", kind.name()))
+        .collect();
+    let paced = paced.join(",");
+    let paced_max = limit.div_ceil(LISTED_PACED_SHARE);
+    assert!(paced_max > 0 && paced_max <= limit);
+    let others = sized(listed_rows(
+        db,
+        project,
+        &format!("kind NOT IN ({paced})"),
+        limit + 1,
+    )?)?;
+    let agents = sized(listed_rows(
+        db,
+        project,
+        &format!("kind IN ({paced})"),
+        limit + 1,
+    )?)?;
+    let first = fitting(&agents, 0, paced_max, LISTED_BYTES_MAX / LISTED_PACED_SHARE);
+    let kept = fitting(&others, 0, limit - first.0, LISTED_BYTES_MAX - first.1);
+    let filled = fitting(
+        &agents,
+        first.0,
+        limit - first.0 - kept.0,
+        LISTED_BYTES_MAX - first.1 - kept.1,
+    );
+    let agents_kept = first.0 + filled.0;
+    let more = kept.0 < others.len() || agents_kept < agents.len();
+    let mut items: Vec<ActivityItem> = others
+        .into_iter()
+        .take(kept.0)
+        .chain(agents.into_iter().take(agents_kept))
+        .map(|(item, _)| item)
+        .collect();
+    items.sort_by_key(|item| std::cmp::Reverse((item.at_ms, item.id)));
+    assert!(items.len() <= limit);
+    assert!(first.1 + kept.1 + filled.1 <= LISTED_BYTES_MAX);
+    Ok(Listed { items, more })
+}
+
+/// Parses each read row's kind and sizes its JSON line, dropping a row whose kind this
+/// engine does not know. Takes the rows, newest first. Returns each item with its size in
+/// bytes, newline included, in the same order, or the encoding failure.
+fn sized(rows: Vec<(String, ActivityItem)>) -> Result<Vec<(ActivityItem, usize)>, EngineError> {
+    assert!(rows.len() <= LIST_MAX + 1);
+    let mut sized = Vec::with_capacity(rows.len());
+    for (kind, mut item) in rows {
+        let Some(kind) = ActivityKind::parse(&kind) else {
+            continue;
+        };
+        item.kind = kind;
+        let size = serde_json::to_vec(&item).map_err(state)?.len() + 1;
+        sized.push((item, size));
+    }
+    assert!(sized.iter().all(|(_, size)| *size > 1));
+    Ok(sized)
+}
+
+/// Counts the sized rows from `from` on that fit, newest first, in `places` more places and
+/// `bytes` more bytes, stopping at the first that does not fit. Takes the rows, the start
+/// and the two bounds. Returns the count and the bytes those rows take.
+fn fitting(
+    rows: &[(ActivityItem, usize)],
+    from: usize,
+    places: usize,
+    bytes: usize,
+) -> (usize, usize) {
+    let mut taken = (0, 0);
+    for (_, size) in rows.iter().skip(from) {
+        if taken.0 == places || taken.1 + size > bytes {
+            break;
+        }
+        taken = (taken.0 + 1, taken.1 + size);
+    }
+    assert!(taken.0 <= places);
+    assert!(taken.1 <= bytes);
+    taken
+}
+
+/// Reads a project's newest `rows` events whose kind passes `filter`, newest first, each
+/// with its stored kind name beside it. Takes the database, the project, the SQL filter
+/// on the kind and the row bound. Returns the rows, or the SQLite failure.
+fn listed_rows(
+    db: &Connection,
+    project: &ProjectId,
+    filter: &str,
+    rows: usize,
+) -> Result<Vec<(String, ActivityItem)>, EngineError> {
+    assert!(rows > 0 && rows <= LIST_MAX + 1);
     let accepted_in = if has_column(db, "landing_change_sets", "accepted_in")? {
         "CASE WHEN kind='accepted' THEN \
          (SELECT accepted_in FROM landing_change_sets WHERE id=project_activity.change_set) END"
@@ -775,12 +946,13 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
     let mut statement = db
         .prepare(&format!(
             "SELECT id,at_ms,kind,actor,goal,text,change_set,undone,{landed_on},{accepted_in} \
-             FROM project_activity WHERE project=?1 ORDER BY at_ms DESC, id DESC LIMIT ?2"
+             FROM project_activity WHERE project=?1 AND {filter} \
+             ORDER BY at_ms DESC, id DESC LIMIT ?2"
         ))
         .map_err(state)?;
-    let rows = statement
+    let read = statement
         .query_map(
-            params![project.as_str(), i64::try_from(limit + 1).map_err(state)?],
+            params![project.as_str(), i64::try_from(rows).map_err(state)?],
             |row| {
                 Ok((
                     row.get::<_, String>(2)?,
@@ -804,30 +976,11 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
                 ))
             },
         )
+        .map_err(state)?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(state)?;
-    let mut items = Vec::new();
-    let mut bytes = 0;
-    let mut more = false;
-    for row in rows {
-        let (kind, mut item) = row.map_err(state)?;
-        let Some(kind) = ActivityKind::parse(&kind) else {
-            continue;
-        };
-        if items.len() == limit {
-            more = true;
-            break;
-        }
-        item.kind = kind;
-        let size = serde_json::to_vec(&item).map_err(state)?.len() + 1;
-        if bytes + size > LISTED_BYTES_MAX {
-            more = true;
-            break;
-        }
-        bytes += size;
-        items.push(item);
-    }
-    assert!(items.len() <= limit && bytes <= LISTED_BYTES_MAX);
-    Ok(Listed { items, more })
+    assert!(read.len() <= rows);
+    Ok(read)
 }
 
 /// One event found in the project's older records by `backfill`.

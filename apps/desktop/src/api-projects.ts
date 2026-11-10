@@ -103,6 +103,7 @@ export type ActivityKind =
   | "research_waiting"
   | "task_started"
   | "task_finished"
+  | "task_failed"
   | "task_stopped"
   | "changes_ready"
   | "accepted"
