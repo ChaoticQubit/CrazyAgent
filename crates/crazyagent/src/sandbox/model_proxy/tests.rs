@@ -190,6 +190,23 @@ fn a_proxy_takes_a_port_of_the_fixed_block_and_skips_a_taken_one() {
     }
 }
 
+/// S4B-2W1: a port search whose every port is held, one on 127.0.0.1 and one on ::1 only,
+/// skips both and refuses plainly with `AddrInUse`, from any start.
+#[test]
+fn a_port_search_with_every_port_taken_refuses_plainly() {
+    let v4 = spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let v6 = spawn_gate::bind_tcp_std("[::1]:0").unwrap();
+    let taken = [
+        v4.local_addr().unwrap().port(),
+        v6.local_addr().unwrap().port(),
+    ];
+    for start in [0, 1, usize::MAX] {
+        let refused = free_pair(&taken, start).map(|_| ()).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::AddrInUse, "{start}");
+        assert_eq!(refused.to_string(), "every model proxy port is taken");
+    }
+}
+
 #[test]
 fn a_host_or_port_off_the_list_and_an_address_are_refused_with_403() {
     let proxy = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], None).unwrap();
