@@ -371,8 +371,13 @@ function RecountPanel({ status, money, onDone }: { status: RecountStatus; money:
     <td className="num">{compactCount(tokens.cache_read)}</td>
     {priced && <td className="num">{cost}</td>}
   </tr>;
-  const choose = (useNew: boolean) => void decideRecount(useNew).then(onDone);
+  const [refused, setRefused] = useState("");
+  const choose = (useNew: boolean) => void decideRecount(useNew).then((result) => {
+    setRefused(result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" }));
+    if (result.kind === "ok") onDone();
+  });
   return <Panel title="We recounted your history">
+    {refused && <LoadError message={refused} onRetry={() => { setRefused(""); onDone(); }} />}
     <table className="pj-table mx-table">
       <thead><tr><th scope="col" /><th scope="col" className="num">Tokens</th><th scope="col" className="num">Cache read</th>{priced && <th scope="col" className="num">{COST_LABEL}</th>}</tr></thead>
       <tbody>{row("Old", status.old, "Not estimated")}{row("New", status.new, dollarText(status.new_cost_nanos))}</tbody>
