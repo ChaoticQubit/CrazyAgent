@@ -1,6 +1,8 @@
 use super::*;
 use crate::ide::workspace::{IdePolicy, ide_policy};
-use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
+use crate::sandbox::policy::{
+    AgentAccess, AgentFilesRule, AgentNetwork, AgentPolicy, IdeAgentFiles,
+};
 use crate::sandbox::{ProjectSandbox, SandboxNetwork};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1357,6 +1359,7 @@ fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsStr
                 access: AgentAccess::Sandboxed,
                 network: AgentNetwork::Open,
                 hooks: false,
+                agent_files: Default::default(),
             },
             kept_ports: &[],
         },
@@ -1546,6 +1549,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
                 access: AgentAccess::Sandboxed,
                 network: AgentNetwork::Open,
                 hooks: false,
+                agent_files: Default::default(),
             },
             kept_ports: &[],
         },
@@ -1985,6 +1989,19 @@ fn set_policy(data: &Path, project: &ProjectId, access: AgentAccess, hooks: bool
     crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
 }
 
+/// Saves a project's access level and agent folders choice in the engine database of a test
+/// data root, as the owner's Save does. Inputs: the data root, the project, the level and
+/// the choice.
+fn set_agent_files(data: &Path, project: &ProjectId, access: AgentAccess, choice: IdeAgentFiles) {
+    let db = crate::landing::open(data).unwrap();
+    let policy = AgentPolicy {
+        access,
+        ide_agent_files: choice,
+        ..AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+}
+
 /// Changes only the network choice of a project's saved policy in a test data root. Inputs:
 /// the data root, the project and the choice.
 fn set_network(data: &Path, project: &ProjectId, network: AgentNetwork) {
@@ -2154,6 +2171,7 @@ fn a_saved_network_change_only_matters_at_own_branch() {
         access,
         network,
         hooks: false,
+        agent_files: Default::default(),
     };
     let own = at(AgentAccess::OwnBranch, AgentNetwork::Open);
     let sandboxed = at(AgentAccess::Sandboxed, AgentNetwork::Open);
@@ -2163,6 +2181,69 @@ fn a_saved_network_change_only_matters_at_own_branch() {
     assert!(!own.holds(sandboxed));
     assert!(sandboxed.holds(at(AgentAccess::Sandboxed, AgentNetwork::None)));
     assert!(full.holds(at(AgentAccess::Full, AgentNetwork::Https)));
+}
+
+/// DEC-124: a server launched under one agent folders choice no longer holds once the owner
+/// saves another below Full access, so the save restarts the project's IDE; at Full access,
+/// where no profile runs, the choice never restarts it.
+#[test]
+fn a_saved_agent_folders_change_only_matters_below_full_access() {
+    let at = |access, agent_files| IdePolicy {
+        access,
+        network: AgentNetwork::Open,
+        hooks: false,
+        agent_files,
+    };
+    for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        for running in IdeAgentFiles::ALL {
+            for saved in IdeAgentFiles::ALL {
+                assert_eq!(
+                    at(access, running).holds(at(access, saved)),
+                    running == saved,
+                    "{access:?} {running:?} {saved:?}"
+                );
+            }
+        }
+    }
+    assert!(
+        at(AgentAccess::Full, IdeAgentFiles::AllowAll)
+            .holds(at(AgentAccess::Full, IdeAgentFiles::ReadOnly))
+    );
+}
+
+/// DEC-124: the agent folders choice the owner saved reaches the profile each launch
+/// installs below Full access, read from the engine database the way an open reads it;
+/// Allow all changes adds no rule.
+#[test]
+fn a_launch_profile_holds_the_saved_agent_folders_choice() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let rule = |choice| {
+        AgentFilesRule {
+            choice,
+            older_agents: false,
+        }
+        .seatbelt(&root)
+    };
+    let protecting = [IdeAgentFiles::NoDeleteOrRename, IdeAgentFiles::ReadOnly];
+    for (index, choice) in IdeAgentFiles::ALL.into_iter().enumerate() {
+        for (level, access) in [("s", AgentAccess::Sandboxed), ("o", AgentAccess::OwnBranch)] {
+            let id = project(&format!("files-{index}-{level}"));
+            set_agent_files(data.path(), &id, access, choice);
+            assert_eq!(ide_policy(data.path(), &id).unwrap().agent_files, choice);
+            let (_, folder) = built_server(&servers, &id, &root);
+            let profile = fs::read_to_string(folder.join(sandbox::PROFILE)).unwrap();
+            for held in protecting {
+                assert!(!rule(held).is_empty());
+                assert_eq!(
+                    profile.contains(&rule(held)),
+                    held == choice,
+                    "{choice:?} {access:?} {held:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

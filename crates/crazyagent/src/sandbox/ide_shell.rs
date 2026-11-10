@@ -1,5 +1,5 @@
 use super::SandboxError;
-use super::policy::{AgentAccess, AgentNetwork};
+use super::policy::{AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles};
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::protocol::ProjectId;
 use std::ffi::{OsStr, OsString};
@@ -48,20 +48,22 @@ const SHELLS: &str = "/etc/shells";
 const SHELLS_BYTES_MAX: u64 = 16 * 1024;
 
 /// Where a project lives for its IDE terminal: its canonical folder, the extra read-only
-/// folders the owner saved for its agents, and the level and network choice it saved.
+/// folders the owner saved for its agents, and the level, network choice and IDE agent
+/// folders choice it saved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     pub folder: PathBuf,
     pub extra_reads: Vec<PathBuf>,
     pub access: AgentAccess,
     pub network: AgentNetwork,
+    pub agent_files: IdeAgentFiles,
 }
 
 /// One Sandboxed IDE terminal launch: the engine data root, the project and its folder,
 /// where the terminal starts, the shell and its arguments (none starts a login shell), the
 /// terminal variables the engine passes, the project's extra read-only folders, the level
-/// the terminal runs at, the project's network choice and the owner's local model ports the
-/// terminal keeps free.
+/// the terminal runs at, the project's network choice, the owner's local model ports the
+/// terminal keeps free and what it may change in agent folders.
 #[derive(Debug, Clone, Copy)]
 pub struct Launch<'a> {
     pub root: &'a Path,
@@ -75,10 +77,11 @@ pub struct Launch<'a> {
     pub level: AgentAccess,
     pub network: AgentNetwork,
     pub kept_ports: &'a [u16],
+    pub agent_files: AgentFilesRule,
 }
 
-/// Reads the project's folder, its extra read-only folders and the level and network it
-/// saved from the engine database, opened read-only so a terminal launch never writes engine
+/// Reads the project's folder, its extra read-only folders and the level, network and agent
+/// folders choice it saved from the engine database, opened read-only so a terminal launch never writes engine
 /// state; a saved policy that cannot be read is an error, so no level is guessed. Inputs: the engine
 /// data root and the project. Output: the place, or an error naming what is missing.
 pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> {
@@ -113,6 +116,7 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
         extra_reads,
         access: policy.access,
         network: policy.network,
+        agent_files: policy.ide_agent_files,
     })
 }
 
@@ -122,7 +126,8 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
 /// folders readable, its own home and temp folders, and only the
 /// [`TERMINAL_VARIABLES`] given. The engine runs it outside every sandbox, since macOS
 /// refuses a second Seatbelt profile inside a sandboxed process such as the IDE server.
-/// Its listeners stay off the owner's local model ports.
+/// Its listeners stay off the owner's local model ports, and it keeps to the project's IDE
+/// agent folders choice (DEC-124).
 /// Input: the launch. Output: the command, or a refusal for an unlisted shell, a start
 /// outside the project folder, an unsafe root or Full access, which only the IDE server's own
 /// shell runs.
@@ -166,6 +171,7 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
         .keep_ports(launch.kept_ports)?
         .allow_tools(&Toolchains::detect(launch.folder, &homes))?
         .allow_scratch(&scratch)?
+        .protect_agent_files(launch.agent_files)
         .allow_extra_reads(launch.extra_reads)?;
     let profile = place.join("shell.sb");
     sandbox.install(&profile)?;

@@ -1,6 +1,8 @@
 use super::*;
 use crate::ide::bridge::engine_step::{FORWARD_REQUEST, FORWARDER_VARIABLES};
-use crate::sandbox::policy::{AgentAccess, AgentNetwork, ide_network};
+use crate::sandbox::policy::{
+    AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles, ide_network,
+};
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
@@ -87,7 +89,15 @@ fn a_process_launched_the_ide_way_reads_its_capability_but_no_owner_key_or_engin
         readable: &[token.as_path(), capability.as_path()],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     assert_eq!(profile, mine.join(PROFILE));
     let read = |path: &Path| run(&profile, "/bin/cat", &[path.as_os_str()]);
     for (path, text) in &files {
@@ -172,7 +182,9 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
         locked: &[],
     };
     assert_eq!(
-        profile(&grants, PORT, closed(), &[]).unwrap_err().0,
+        profile(&grants, PORT, closed(), &[], AgentFilesRule::default())
+            .unwrap_err()
+            .0,
         "ide_sandbox_invalid"
     );
     let elsewhere = tempfile::Builder::new()
@@ -184,9 +196,11 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
         root: &project,
         ..grants
     };
-    assert!(profile(&outside, PORT, closed(), &[]).is_ok());
+    assert!(profile(&outside, PORT, closed(), &[], AgentFilesRule::default()).is_ok());
     assert_eq!(
-        profile(&outside, 0, closed(), &[]).unwrap_err().0,
+        profile(&outside, 0, closed(), &[], AgentFilesRule::default())
+            .unwrap_err()
+            .0,
         "ide_sandbox_invalid"
     );
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
@@ -245,7 +259,15 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
         readable: &[],
         locked: &[machine.as_path()],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     let (read, printed) = run(&profile, "/bin/cat", &[settings.as_os_str()]);
     assert!(read);
     assert_eq!(printed, engine);
@@ -323,8 +345,12 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
         readable: &[],
         locked: &[machine.as_path()],
     };
-    assert!(profile(&grants, PORT, closed(), &[]).is_ok());
-    let invalid = |grants: &Grants| profile(grants, PORT, closed(), &[]).unwrap_err().0;
+    assert!(profile(&grants, PORT, closed(), &[], AgentFilesRule::default()).is_ok());
+    let invalid = |grants: &Grants| {
+        profile(grants, PORT, closed(), &[], AgentFilesRule::default())
+            .unwrap_err()
+            .0
+    };
     for locked in [extensions.as_path(), home.as_path(), mine.as_path()] {
         let locks = [locked];
         assert_eq!(
@@ -439,7 +465,15 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         readable: &[workspace.as_path()],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     let read = |path: &Path| run(&profile, "/bin/cat", &[path.as_os_str()]);
     for path in &refused {
         let (ran, printed) = read(path);
@@ -758,7 +792,15 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let refuse_agents = |mode: &str| {
         for (agent, _) in &agents {
@@ -1030,7 +1072,15 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     crate::ide::settings::write(
         &mine,
         &home,
@@ -1148,7 +1198,15 @@ fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     crate::ide::settings::write(
         &mine,
         &home,
@@ -1259,7 +1317,15 @@ fn a_research_worktree_keeps_its_git_stop_after_the_project_gains_a_crazyagent_f
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     crate::ide::settings::write(
         &mine,
         &home,
@@ -1354,7 +1420,15 @@ fn ide_git_never_prunes_an_agent_worktree() {
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     crate::ide::settings::write(
         &mine,
         &home,
@@ -1450,7 +1524,15 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     crate::ide::settings::write(
         &mine,
         &home,
@@ -1536,7 +1618,15 @@ fn kept_profile(network: SandboxNetwork, kept_ports: &[u16]) -> (tempfile::TempD
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, network, kept_ports).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        network,
+        kept_ports,
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     (scratch, profile)
 }
 
@@ -1638,6 +1728,12 @@ struct Server {
 
 /// Makes a [`Server`]. Output: the server.
 fn server() -> Server {
+    server_with(AgentFilesRule::default())
+}
+
+/// Makes a [`Server`] whose profile holds an agent folders rule. Input: the rule. Output:
+/// the server.
+fn server_with(agent_files: AgentFilesRule) -> Server {
     let scratch = tempfile::Builder::new()
         .prefix("ca-ides-")
         .tempdir_in(fs::canonicalize("/tmp").unwrap())
@@ -1667,7 +1763,7 @@ fn server() -> Server {
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(&mine, &grants, PORT, closed(), &[], agent_files).unwrap();
     crate::ide::settings::write(
         &mine,
         &home,
@@ -2097,7 +2193,15 @@ fn ide_sandboxed_code_cannot_plant_a_case_variant_commondir() {
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT, closed(), &[]).unwrap();
+    let profile = install(
+        &mine,
+        &grants,
+        PORT,
+        closed(),
+        &[],
+        AgentFilesRule::default(),
+    )
+    .unwrap();
     let wrote = sh(&profile, "printf x > \"$1\"", &root.join(".git/COMMONDIR"));
     let planted: Vec<String> = fs::read_dir(root.join(".git"))
         .unwrap()
@@ -2227,4 +2331,255 @@ fn a_rebase_after_a_global_option_from_the_ide_stops_with_a_plain_line() {
     assert!(!s.root.join(".git/rebase-merge").exists());
     assert!(s.no_private_files());
     crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// One linked agent and its teammate under a [`Server`]'s agents root, as the team runtime
+/// makes them, each holding a committed file and an untracked folder with a file in it, an
+/// owner's own `worktrees` folder beside them, and an owner file in the project.
+struct AgentFolders {
+    agents: PathBuf,
+    agent: PathBuf,
+    teammate: PathBuf,
+    owner_worktrees: PathBuf,
+    owner_file: PathBuf,
+}
+
+/// Makes the [`AgentFolders`] of a server with real git, outside every sandbox. Input: the
+/// server. Output: the folders.
+fn agent_folders(s: &Server) -> AgentFolders {
+    let agents = s.root.join(".crazyagent").join("worktrees");
+    let agent = agents.join("agent-4");
+    let teammate = agent.join(crate::agent_git::TEAMMATES_FOLDER).join("t2");
+    setup(
+        &s.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-4",
+            agent.to_str().unwrap(),
+        ],
+    );
+    setup(
+        &agent,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-4--t2",
+            teammate.to_str().unwrap(),
+        ],
+    );
+    for checkout in [&agent, &teammate] {
+        fs::create_dir_all(checkout.join("work")).unwrap();
+        fs::write(checkout.join("work").join("notes.txt"), "agent\n").unwrap();
+    }
+    let owner_worktrees = s.root.join("worktrees").join("mine");
+    fs::create_dir_all(&owner_worktrees).unwrap();
+    fs::write(owner_worktrees.join("own.txt"), "owner\n").unwrap();
+    let owner_file = s.root.join("own.txt");
+    fs::write(&owner_file, "owner\n").unwrap();
+    AgentFolders {
+        agents,
+        agent,
+        teammate,
+        owner_worktrees,
+        owner_file,
+    }
+}
+
+/// What each IDE change did in agent folders under one agent folders choice: a delete, a
+/// folder delete, a rename, a folder rename, moving the agent folder and the agents root
+/// aside, a delete through a case variant, an in-place edit, a new file, and the save
+/// "Edit anyway" lets the owner make, written in place and written beside and renamed over.
+/// Each is true when the change landed.
+#[derive(Debug, PartialEq, Eq)]
+struct Changes {
+    delete: bool,
+    delete_folder: bool,
+    rename: bool,
+    rename_folder: bool,
+    move_agent: bool,
+    move_agents_root: bool,
+    delete_case_variant: bool,
+    edit_in_place: bool,
+    create: bool,
+    edit_anyway_in_place: bool,
+    edit_anyway_renamed_over: bool,
+}
+
+/// Makes every change of [`Changes`] under the profile of a fresh server holding `choice`,
+/// checks that what a refused change aimed at is still there with its content, and that the
+/// owner's own files outside the agents root stay changeable. Input: the choice. Output:
+/// what landed.
+fn changes_under(choice: IdeAgentFiles) -> Changes {
+    let s = server_with(AgentFilesRule {
+        choice,
+        older_agents: false,
+    });
+    let f = agent_folders(&s);
+    let teammate_file = f.teammate.join("a.txt");
+    let agent_file = f.agent.join("a.txt");
+    let teammate_notes = f.teammate.join("work").join("notes.txt");
+    let agent_work = f.agent.join("work");
+    let content = |path: &Path| fs::read_to_string(path).unwrap_or_default();
+    let delete = sh(&s.profile, "rm -f \"$1\"", &teammate_file);
+    assert_eq!(delete, !teammate_file.exists());
+    let delete_folder = sh(&s.profile, "rm -rf \"$1\"", &f.teammate.join("work"));
+    assert_eq!(delete_folder, !teammate_notes.exists());
+    let rename = sh(&s.profile, "mv \"$1\" \"$1.moved\"", &agent_file);
+    assert_eq!(rename, !agent_file.exists());
+    let rename_folder = sh(&s.profile, "mv \"$1\" \"$1-aside\"", &agent_work);
+    assert_eq!(rename_folder, !agent_work.exists());
+    let variant = PathBuf::from(f.agent.to_str().unwrap().replace(
+        ".crazyagent/worktrees/agent-4",
+        ".CRAZYAGENT/WorkTrees/AGENT-4",
+    ));
+    let delete_case_variant =
+        !rename_folder && sh(&s.profile, "rm -f \"$1/work/notes.txt\"", &variant);
+    assert_eq!(
+        delete_case_variant,
+        !rename_folder && !agent_work.join("notes.txt").exists()
+    );
+    let readme = f.teammate.join("README.md");
+    fs::write(&readme, "agent\n").unwrap();
+    let edit_in_place = sh(&s.profile, "printf edited > \"$1\"", &readme);
+    assert_eq!(edit_in_place, content(&readme) == "edited");
+    let created = f.teammate.join("new.txt");
+    let create = sh(&s.profile, "printf new > \"$1\"", &created);
+    assert_eq!(create, created.exists());
+    let unlocked = f.teammate.join("unlocked.txt");
+    fs::write(&unlocked, "agent\n").unwrap();
+    let edit_anyway_in_place = sh(&s.profile, "printf owner > \"$1\"", &unlocked);
+    assert_eq!(edit_anyway_in_place, content(&unlocked) == "owner");
+    let edit_anyway_renamed_over = sh(
+        &s.profile,
+        "printf saved > \"$1.tmp\" && mv -f \"$1.tmp\" \"$1\"",
+        &unlocked,
+    );
+    assert_eq!(edit_anyway_renamed_over, content(&unlocked) == "saved");
+    let move_agent = sh(&s.profile, "mv \"$1\" \"$1-aside\"", &f.agent);
+    assert_eq!(move_agent, !f.agent.exists());
+    let move_agents_root = !move_agent && sh(&s.profile, "mv \"$1\" \"$1-aside\"", &f.agents);
+    assert_eq!(move_agents_root, !move_agent && !f.agents.exists());
+    assert!(sh(&s.profile, "printf changed > \"$1\"", &f.owner_file));
+    assert_eq!(content(&f.owner_file), "changed");
+    assert!(sh(&s.profile, "rm -rf \"$1\"", &f.owner_worktrees));
+    assert!(!f.owner_worktrees.exists());
+    assert!(sh(&s.profile, "rm -f \"$1\"", &f.owner_file));
+    assert!(!f.owner_file.exists());
+    Changes {
+        delete,
+        delete_folder,
+        rename,
+        rename_folder,
+        move_agent,
+        move_agents_root,
+        delete_case_variant,
+        edit_in_place,
+        create,
+        edit_anyway_in_place,
+        edit_anyway_renamed_over,
+    }
+}
+
+/// DEC-124, Allow all changes: the IDE changes agent folders as before the setting, and the
+/// rule adds nothing to its profile.
+#[test]
+fn allow_all_changes_lets_the_ide_delete_rename_and_edit_in_agent_folders() {
+    assert_eq!(AgentFilesRule::default().choice, IdeAgentFiles::AllowAll);
+    for older_agents in [false, true] {
+        let rule = AgentFilesRule {
+            choice: IdeAgentFiles::AllowAll,
+            older_agents,
+        };
+        assert_eq!(rule.seatbelt(Path::new("/tmp/project")), "");
+    }
+    assert_eq!(
+        changes_under(IdeAgentFiles::AllowAll),
+        Changes {
+            delete: true,
+            delete_folder: true,
+            rename: true,
+            rename_folder: true,
+            move_agent: true,
+            move_agents_root: false,
+            delete_case_variant: false,
+            edit_in_place: true,
+            create: true,
+            edit_anyway_in_place: true,
+            edit_anyway_renamed_over: true,
+        }
+    );
+}
+
+/// DEC-124, No delete or rename: nothing in an agent folder, a teammate's included, is
+/// removed or renamed, not through a case variant, not by moving the agent folder or the
+/// agents root aside, while edits in place, new files and the in-place save "Edit anyway"
+/// allows still land. A save written beside and renamed over is printed, not assumed.
+#[test]
+fn no_delete_or_rename_keeps_every_agent_file_and_folder_while_edits_land() {
+    let changes = changes_under(IdeAgentFiles::NoDeleteOrRename);
+    eprintln!(
+        "edit_anyway_renamed_over={}",
+        changes.edit_anyway_renamed_over
+    );
+    assert_eq!(
+        changes,
+        Changes {
+            delete: false,
+            delete_folder: false,
+            rename: false,
+            rename_folder: false,
+            move_agent: false,
+            move_agents_root: false,
+            delete_case_variant: false,
+            edit_in_place: true,
+            create: true,
+            edit_anyway_in_place: true,
+            edit_anyway_renamed_over: changes.edit_anyway_renamed_over,
+        }
+    );
+}
+
+/// DEC-124, Read only: no write of any kind lands in an agent folder, a teammate's included:
+/// no delete, rename, move aside, edit, new file or "Edit anyway" save.
+#[test]
+fn read_only_refuses_every_write_in_agent_folders() {
+    assert_eq!(
+        changes_under(IdeAgentFiles::ReadOnly),
+        Changes {
+            delete: false,
+            delete_folder: false,
+            rename: false,
+            rename_folder: false,
+            move_agent: false,
+            move_agents_root: false,
+            delete_case_variant: false,
+            edit_in_place: false,
+            create: false,
+            edit_anyway_in_place: false,
+            edit_anyway_renamed_over: false,
+        }
+    );
+}
+
+/// The older agents root `<project>/worktrees` is held only while engine-made worktrees stay
+/// there; until then it may be the owner's own folder, which stays changeable.
+#[test]
+fn the_older_agents_root_is_held_only_while_agents_stay_there() {
+    for (older_agents, held) in [(false, false), (true, true)] {
+        let s = server_with(AgentFilesRule {
+            choice: IdeAgentFiles::NoDeleteOrRename,
+            older_agents,
+        });
+        let agent = s.root.join("worktrees").join("agent-1");
+        fs::create_dir_all(&agent).unwrap();
+        let file = agent.join("a.txt");
+        fs::write(&file, "agent\n").unwrap();
+        assert_eq!(sh(&s.profile, "rm -f \"$1\"", &file), !held);
+        assert_eq!(file.exists(), held);
+    }
 }

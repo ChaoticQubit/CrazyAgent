@@ -1,12 +1,12 @@
 #[cfg(target_os = "macos")]
 use super::project_access::FULL_ACCESS_WARNING;
 use super::project_access::{
-    AccessEdit, AccessKey, IDE_GIT_HOOKS, IDE_GIT_HOOKS_LINE, LOWERING_STOPS_AGENTS,
-    NETWORK_IGNORED_UNDER_FULL, POLICY_RESTARTS_IDE, TOOLCHAIN_OFF_STOPS_AGENTS, network_help,
-    summary,
+    AGENT_FILES_IGNORED_UNDER_FULL, AccessEdit, AccessKey, IDE_AGENT_FILES, IDE_GIT_HOOKS,
+    IDE_GIT_HOOKS_LINE, LOWERING_STOPS_AGENTS, NETWORK_IGNORED_UNDER_FULL, POLICY_RESTARTS_IDE,
+    TOOLCHAIN_OFF_STOPS_AGENTS, agent_files_help, network_help, summary,
 };
 use crate::sandbox::policy::{
-    AgentAccess, AgentNetwork, LevelView, NetworkView, PolicyView, ToolchainView,
+    AgentAccess, AgentNetwork, IdeAgentFiles, LevelView, NetworkView, PolicyView, ToolchainView,
 };
 use crate::sandbox::toolchains::Toolchain;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -51,6 +51,7 @@ fn view() -> PolicyView {
             },
         ],
         ide_git_hooks: false,
+        ide_agent_files: Default::default(),
         version: 0,
     }
 }
@@ -200,10 +201,10 @@ fn the_access_box_says_beside_the_toolchains_that_turning_one_off_stops_agents_r
 }
 
 #[test]
-fn the_access_box_saves_the_ide_hooks_switch_on_its_last_row_with_its_line() {
+fn the_access_box_saves_the_ide_hooks_switch_on_its_row_with_its_line() {
     let mut edit = AccessEdit::of(&view());
     assert!(!edit.ide_git_hooks);
-    for _ in 0..6 {
+    for _ in 0..4 {
         assert_eq!(edit.key(key(KeyCode::Down)), AccessKey::Handled);
     }
     assert_eq!(edit.cursor, 4);
@@ -245,6 +246,76 @@ fn the_access_box_saves_the_ide_hooks_switch_on_its_last_row_with_its_line() {
     assert!(!off.policy().ide_git_hooks);
 }
 
+/// DEC-124: the agent folders choice is the box's last row, cycles through its three choices
+/// with each one's help, says it does not apply at Full access and is what Save sends.
+#[test]
+fn the_access_box_saves_the_agent_folders_choice_on_its_last_row_with_its_help() {
+    let mut edit = AccessEdit::of(&view());
+    assert_eq!(edit.ide_agent_files, IdeAgentFiles::AllowAll);
+    for _ in 0..8 {
+        assert_eq!(edit.key(key(KeyCode::Down)), AccessKey::Handled);
+    }
+    assert_eq!(edit.cursor, 5);
+    let look = super::new_project_view::Look::plain();
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let shown = |edit: &AccessEdit| -> Vec<String> {
+        edit.rows(&look, usize::MAX)
+            .iter()
+            .map(|row| row.text())
+            .collect()
+    };
+    let mut seen = Vec::new();
+    for _ in 0..IdeAgentFiles::ALL.len() {
+        let rows = shown(&edit);
+        let row = rows
+            .iter()
+            .position(|row| row.contains(IDE_AGENT_FILES))
+            .expect("the agent folders row");
+        assert!(rows[row].starts_with("> "), "{}", rows[row]);
+        assert!(
+            rows[row].contains(&format!("< {} >", edit.ide_agent_files.label())),
+            "{}",
+            rows[row]
+        );
+        assert!(
+            words(&rows[row..].join(" ")).contains(agent_files_help(edit.ide_agent_files)),
+            "{rows:?}"
+        );
+        assert!(!words(&rows.join(" ")).contains(AGENT_FILES_IGNORED_UNDER_FULL));
+        seen.push(edit.ide_agent_files);
+        assert_eq!(edit.key(key(KeyCode::Right)), AccessKey::Handled);
+    }
+    assert_eq!(seen, IdeAgentFiles::ALL);
+    assert_eq!(edit.ide_agent_files, IdeAgentFiles::AllowAll);
+    assert_eq!(edit.key(key(KeyCode::Left)), AccessKey::Handled);
+    assert_eq!(edit.ide_agent_files, IdeAgentFiles::ReadOnly);
+    assert!(!edit.ide_git_hooks);
+    let AccessKey::Save(policy) = edit.key(key(KeyCode::Enter)) else {
+        panic!("Enter saves");
+    };
+    assert_eq!(policy.ide_agent_files, IdeAgentFiles::ReadOnly);
+    assert_eq!(policy.access, AgentAccess::Sandboxed);
+    assert!(!policy.ide_git_hooks);
+
+    let saved = AccessEdit::of(&PolicyView {
+        ide_agent_files: IdeAgentFiles::NoDeleteOrRename,
+        access: AgentAccess::Full,
+        ..view()
+    });
+    assert_eq!(saved.ide_agent_files, IdeAgentFiles::NoDeleteOrRename);
+    assert_eq!(
+        saved.policy().ide_agent_files,
+        IdeAgentFiles::NoDeleteOrRename
+    );
+    assert!(words(&shown(&saved).join(" ")).contains(AGENT_FILES_IGNORED_UNDER_FULL));
+    assert_eq!(
+        AGENT_FILES_IGNORED_UNDER_FULL,
+        "Full access runs the IDE without a sandbox, so this choice does not apply."
+    );
+    assert!(agent_files_help(IdeAgentFiles::ReadOnly).contains("Edit anyway"));
+    assert!(agent_files_help(IdeAgentFiles::NoDeleteOrRename).contains("Edit anyway included"));
+}
+
 #[test]
 fn the_access_box_says_beside_the_level_that_saving_restarts_the_projects_ide() {
     let edit = AccessEdit::of(&view());
@@ -257,7 +328,7 @@ fn the_access_box_says_beside_the_level_that_saving_restarts_the_projects_ide() 
     let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(
         POLICY_RESTARTS_IDE,
-        "Changing the level, the IDE hooks switch below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute."
+        "Changing the level, the IDE hooks switch or the agent folders choice below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute."
     );
     assert!(words(&rows.join(" ")).contains(POLICY_RESTARTS_IDE));
 }

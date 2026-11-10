@@ -1129,8 +1129,8 @@ fn confined_git(data: &Path, launch: &Launch<'_>) -> Result<OsString, EngineErro
 /// The launcher's command at the project's level: under the Seatbelt profile installed for
 /// this launch at Sandboxed and Own branch, with the network
 /// [`crate::sandbox::policy::ide_network`] gives that level, and with no profile at Full
-/// access. The profile keeps the Remote settings folder locked and the extensions folder read
-/// only. Inputs: the launch, the server's info and its places. Output: the command, or the
+/// access. The profile keeps the Remote settings folder locked, the extensions folder read
+/// only and agent folders as the owner chose ([`super::workspace::agent_files_rule`]). Inputs: the launch, the server's info and its places. Output: the command, or the
 /// profile's refusal.
 fn launcher_command(
     launch: &Launch<'_>,
@@ -1162,12 +1162,20 @@ fn launcher_command(
         locked: &[machine.as_path()],
     };
     let network = crate::sandbox::policy::ide_network(level, launch.policy.network);
+    let agent_files = super::workspace::agent_files_rule(
+        places.data,
+        launch.project,
+        launch.root,
+        level,
+        launch.policy.agent_files,
+    )?;
     let profile = sandbox::install(
         launch.folder,
         &grants,
         info.server_port,
         network,
         launch.kept_ports,
+        agent_files,
     )?;
     Ok(sandbox::command(&profile, &launcher))
 }

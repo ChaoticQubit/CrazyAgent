@@ -207,6 +207,13 @@ pub(super) fn prepare(
         .map_err(|_| failure("ide_terminal_project_unavailable"))?;
     let level = terminal_level(place.access, asked).map_err(failure)?;
     let kept_ports = crate::ide::workspace::kept_ports(settings)?;
+    let agent_files = crate::ide::workspace::agent_files_rule(
+        root,
+        project,
+        &place.folder,
+        place.access,
+        place.agent_files,
+    )?;
     let shell = ide_shell::owner_shell().map_err(|_| failure("ide_terminal_shell_unknown"))?;
     let incoming: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(variable, _)| {
@@ -228,6 +235,7 @@ pub(super) fn prepare(
             level,
             network: place.network,
             kept_ports: &kept_ports,
+            agent_files,
         },
         place.access,
     )
