@@ -2295,8 +2295,8 @@ fn line_took(wanted: &[diff::PathMove], line: &[diff::PathMove]) -> bool {
 /// Closes a change set the branch it lands on already took (HB-S4) as a discard the owner
 /// can undo within the restore window, alone, since its workers' sets are not on that
 /// branch, and says so in the project's activity, even when a later step of the close
-/// failed. The caller holds [`hold`] on its repository. Inputs: the store and the open
-/// change set. Output: Ok once closed.
+/// failed, but not when the store refused the close itself. The caller holds [`hold`] on
+/// its repository. Inputs: the store and the open change set. Output: Ok once closed.
 fn close_taken(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     assert!(record.is_open() && record.intent.is_none());
     assert!(!record.restored);

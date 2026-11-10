@@ -2363,6 +2363,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
             allowed: !rust.allowed,
         }],
         ide_git_hooks: true,
+        tool_cache: Default::default(),
         ide_agent_files: Default::default(),
     };
     let saved = owner
@@ -2382,6 +2383,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 access: AgentAccess::Sandboxed,
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
+                tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
             },
@@ -2425,6 +2427,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
             },
         ],
         ide_git_hooks: false,
+        tool_cache: Default::default(),
         ide_agent_files: Default::default(),
     };
     assert_eq!(twice.validate(), Err("agent_policy_invalid"));
@@ -2448,6 +2451,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         network: crate::sandbox::policy::AgentNetwork::default(),
         toolchains: Vec::new(),
         ide_git_hooks: false,
+        tool_cache: Default::default(),
         ide_agent_files: Default::default(),
     };
     let saved = owner
@@ -2525,6 +2529,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 access: AgentAccess::Full,
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
+                tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
             },
@@ -2550,6 +2555,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 access: AgentAccess::OwnBranch,
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
+                tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
             },

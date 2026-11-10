@@ -903,7 +903,7 @@ pub(super) const POINTER_MOVED_ON: &str = "changes_agent_busy";
 /// read-tree moves its index and tracked files and refuses, changing nothing, when a path
 /// it would change was edited, staged or is in its way untracked; then HEAD moves only
 /// while it still holds `from` and must still be the agent's pointer after. When HEAD did
-/// not move, the files go back unless the agent committed them meanwhile; when the pointer
+/// not move, each file goes back unless the agent committed it meanwhile; when the pointer
 /// left, HEAD goes back and the files too when the agent's checkout holds `from`. A stop
 /// between the steps leaves a state an engine start can finish. Inputs: the worktree and
 /// both commits.
@@ -939,7 +939,7 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
         .move_head(Some(from), target, "CrazyAgent: reset")
         .is_err()
     {
-        files_back(agent, from, target);
+        files_back(agent, target);
         return Ok(false);
     }
     #[cfg(test)]
@@ -954,7 +954,7 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
             return Err(failure(POINTER_MOVED_ON));
         }
         if agent.repo.commit_of("HEAD").ok().flatten().as_deref() == Some(from) {
-            files_back(agent, from, target);
+            files_back(agent, target);
         }
         return Ok(false);
     }
@@ -972,25 +972,18 @@ pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<
     }
 }
 
-/// Puts an agent worktree's index and files back from `target` to `from` after its reset
-/// did not hold, with the same two-tree read-tree, so an edit the agent made meanwhile is
-/// never overwritten: git refuses, writing nothing, and the refusal is logged. An index
-/// equal to HEAD stays: the agent committed what the reset moved, and putting it back would
-/// stage a reversal of that commit. Inputs: the worktree and both commits. Output: none.
-fn files_back(agent: &Agent, from: &str, target: &str) {
-    let committed = agent.repo.exec(
-        &["diff-index", "--quiet", "--cached", "HEAD", "--"],
-        None,
-        &[],
-        4096,
-    );
-    if committed.is_ok_and(|committed| committed.code == 0) {
-        return;
-    }
+/// Puts an agent worktree's index and files back after its reset did not hold, moving them
+/// from `target` to whatever HEAD now holds with the same two-tree read-tree, path by path:
+/// a path the agent committed meanwhile is at HEAD already and stays, so no reversal of
+/// that commit is staged, and the rest go back to the commit HEAD holds. An edit the agent
+/// made meanwhile is never overwritten: git refuses, writing nothing, and the refusal is
+/// logged. Inputs: the worktree and the reset's target. Output: none.
+fn files_back(agent: &Agent, target: &str) {
+    assert!(is_object_id(target));
     let back = agent
         .repo
         .confined(Writes::WorkTree)
-        .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096));
+        .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, "HEAD"], None, &[], 4096));
     if !back.is_ok_and(|back| back.code == 0) {
         eprintln!("landing_reset_files_back_refused");
     }
@@ -2451,34 +2444,48 @@ fn logged_claims(result: Result<(), EngineError>) {
 }
 
 /// Discards one open change set holding no intent, as [`discard`] does once it checked the
-/// owner's reviewed head. The caller holds [`hold`] on its repository. Inputs: the store,
-/// the change set and the time now. Output: the time it stays restorable until.
+/// owner's reviewed head. When the store refuses the closed state, the change set is left
+/// open as the store still holds it, and its discarded ref goes again, since pruning reads
+/// discarded sets only; a failed drop of that ref is logged. The caller holds [`hold`] on
+/// its repository. Inputs: the store, the change set and the time now. Output: the time it
+/// stays restorable until.
 pub(super) fn discard_held(
     db: &Connection,
     record: &mut Record,
     now: u64,
 ) -> Result<u64, EngineError> {
     assert!(record.is_open() && record.intent.is_none());
+    let open = record.clone();
     let id = record.id.clone();
     let shared = shared(&record.repository)?;
     let target = shared
         .commit_of("HEAD")?
         .ok_or_else(|| failure("changes_git_failed"))?;
+    let until = now
+        .checked_add(RESTORE_WINDOW_MS)
+        .ok_or_else(|| failure("changes_unavailable"))?;
     set_engine_ref(
         &shared,
         &record.repository,
         &discarded_ref(&id),
         Some(&record.head),
     )?;
-    let until = now
-        .checked_add(RESTORE_WINDOW_MS)
-        .ok_or_else(|| failure("changes_unavailable"))?;
     record.state = ChangeState::Discarded;
     record.restorable_until_ms = Some(until);
     record.pruned = false;
     record.conflicts.clear();
     record.updated_ms = now;
-    store::save(db, record)?;
+    if let Err(error) = store::save(db, record) {
+        *record = open;
+        if let Err(dropped) = set_engine_ref(&shared, &record.repository, &discarded_ref(&id), None)
+        {
+            eprintln!(
+                "landing_discard_ref_failed cause={}",
+                crate::protocol::plain_code(&dropped.0)
+            );
+        }
+        return Err(error);
+    }
     release_agent_claims(db, record);
     set_engine_ref(&shared, &record.repository, &pending_ref(&id), None)?;
     let head = record.head.clone();

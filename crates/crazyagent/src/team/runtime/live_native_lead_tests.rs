@@ -466,7 +466,10 @@ fn team_prompt(token: &str) -> String {
 /// engine's own terminal host gets the teammates' server's anchor as `TMUX` and
 /// `TMUX_PANE`. The teammate it creates is split off that anchor's window in the teammates'
 /// server and never appears in the lead's own server, the lead's own tmux client inside its
-/// profile reads that pane, and a turn of the lead ends in success with the run's word.
+/// profile reads that pane, and a turn of the lead ends in success with the run's word. A
+/// wait that fails prints what decides why before it panics: the watcher's view, both
+/// servers' screens, the team folders' files with their sizes and both transcripts' team
+/// calls (row 5, live22).
 #[test]
 #[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_lead_splits_teammates_into_mates_server() {
@@ -516,11 +519,46 @@ fn live_native_lead_splits_teammates_into_mates_server() {
     );
     let (anchor, window) = mates.into_iter().next().unwrap();
     let done = AtomicBool::new(false);
-    let (reports, seen) = std::thread::scope(|scope| {
+    let (waited, seen) = std::thread::scope(|scope| {
         let watcher = scope.spawn(|| servers.watch(&anchor, &token, &done, TEAM_TURN));
-        let reports = team.reports_until(TEAM_TURN, |report| token_turn(report, &token).is_some());
+        let waited = team.reports_within(TEAM_TURN, |report| token_turn(report, &token).is_some());
         done.store(true, Ordering::SeqCst);
-        (reports, watcher.join().unwrap())
+        (waited, watcher.join().unwrap())
+    });
+    let reports = waited.unwrap_or_else(|(why, earlier)| {
+        println!(
+            "watcher own={:?} mates={:?} read={:?} misses={}",
+            seen.own, seen.mates, seen.read, seen.misses
+        );
+        for (socket, pane, text) in servers.screens() {
+            println!("screen {} {pane}:\n{text}", socket.display());
+        }
+        let sized = |files: Vec<PathBuf>| -> Vec<(PathBuf, u64)> {
+            files
+                .into_iter()
+                .map(|file| {
+                    let bytes = std::fs::symlink_metadata(&file).map_or(0, |found| found.len());
+                    (file, bytes)
+                })
+                .collect()
+        };
+        let mates = crate::launch_context::mates_home(&team.home);
+        println!(
+            "mates transcripts={:?} teams={:?} tasks={:?}",
+            sized(files_under(&mates.join("projects"), 3)),
+            sized(files_under(&team.home.join("teams"), 3)),
+            sized(files_under(&team.home.join("tasks"), 2))
+        );
+        println!(
+            "lead team calls={:?} teammate team calls={:?}",
+            team_calls(&files_under(&team.home.join("projects"), 3)),
+            team_calls(&files_under(&mates.join("projects"), 3))
+        );
+        panic!(
+            "{why}, after {} others: {:?}",
+            earlier.len(),
+            shown(&earlier)
+        )
     });
     let (end, text) = reports
         .last()
@@ -657,12 +695,18 @@ fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
 }
 
 /// Every file under `root`, at most `depth` folders down and `FILES_MAX` in all, read by
-/// the test from outside every sandbox. Inputs: the folder and the depth. Output: the files.
+/// the test from outside every sandbox. No link is followed: a linked root or folder is
+/// never opened and a linked entry is never listed, so an agent's link in its home cannot
+/// point the failure printout at files outside it. Inputs: the folder and the depth.
+/// Output: the plain files.
 fn files_under(root: &Path, depth: usize) -> Vec<PathBuf> {
     const FILES_MAX: usize = 4096;
     let mut found = Vec::new();
     let mut folders = vec![(root.to_path_buf(), 0)];
     while let Some((folder, level)) = folders.pop() {
+        if !std::fs::symlink_metadata(&folder).is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
@@ -678,6 +722,28 @@ fn files_under(root: &Path, depth: usize) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+/// row5-diag r1 L1: the failure printout's walk never follows a link, neither a linked root
+/// nor a linked folder or file inside a plain root, so it lists only the root's own files.
+#[test]
+fn files_under_follows_no_link() {
+    let base = tempfile::tempdir().unwrap();
+    let outside = base.path().join("outside");
+    std::fs::create_dir_all(outside.join("deep")).unwrap();
+    std::fs::write(outside.join("secret.jsonl"), "{}\n").unwrap();
+    std::fs::write(outside.join("deep").join("more.jsonl"), "{}\n").unwrap();
+    let root = base.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("own.jsonl"), "{}\n").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.jsonl"), root.join("file.jsonl")).unwrap();
+    let linked_root = base.path().join("linked-root");
+    std::os::unix::fs::symlink(&root, &linked_root).unwrap();
+
+    assert_eq!(files_under(&root, 3), vec![root.join("own.jsonl")]);
+    assert_eq!(files_under(&linked_root, 3), Vec::<PathBuf>::new());
+    assert_eq!(files_under(&root.join("linked"), 3), Vec::<PathBuf>::new());
 }
 
 /// The team tool uses Claude Code transcripts record and the result each got: every

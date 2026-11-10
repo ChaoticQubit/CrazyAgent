@@ -416,21 +416,70 @@ pub(super) fn delete_settle(db: &Connection, exchange: Option<u64>) -> Result<()
     Ok(())
 }
 
-/// Finishes at engine start the engine files a delete recorded and never removed, on a thread
-/// of its own so no owner job waits on a folder, and clears through the job the live path
-/// uses: the record's names only, at most `DELETE_FILES_PER_START` a start. Inputs: the
-/// connection, the database path and the storage queue. Output: Ok once the thread started,
-/// or at once with nothing recorded.
+/// The tool caches (T8) of a project removed from the dashboard, for the record its row
+/// removal writes, so a different project added later at one of its folders starts with
+/// none (T8 r1 secreview L2): those of its folder and the repositories it declares, each
+/// left out while another project still names that folder, whose agents use the cache.
+/// Inputs: the transaction, the database path and the project. Output: the records, none
+/// for an unknown project.
+pub(super) fn forgotten_caches(
+    tx: &Transaction<'_>,
+    path: &Path,
+    project: &ProjectId,
+) -> Result<Vec<home::RecordedFile>, EngineError> {
+    let projects = guarded(tx)?;
+    let Some(found) = projects.iter().find(|other| &other.project_id == project) else {
+        return Ok(Vec::new());
+    };
+    let kept: Vec<&PathBuf> = projects
+        .iter()
+        .filter(|other| &other.project_id != project)
+        .flat_map(|other| std::iter::once(&other.folder).chain(&other.repositories))
+        .collect();
+    let folders: Vec<PathBuf> = std::iter::once(&found.folder)
+        .chain(&found.repositories)
+        .filter(|folder| !kept.contains(folder))
+        .cloned()
+        .collect();
+    Ok(home::tool_cache_files(path, &folders))
+}
+
+/// Records engine files in the caller's write, for the live and the start-time finish to
+/// remove. Inputs: the transaction and the records. Output: Ok, or any SQLite failure.
+pub(super) fn record_files(
+    tx: &Transaction<'_>,
+    files: &[home::RecordedFile],
+) -> Result<(), EngineError> {
+    for (name, inode) in files {
+        tx.execute(
+            "INSERT OR IGNORE INTO projects_delete_files(name,inode) VALUES (?1,?2)",
+            params![name, inode],
+        )
+        .map_err(error)?;
+    }
+    Ok(())
+}
+
+/// Finishes the engine files a delete or a Remove from dashboard recorded and never removed,
+/// at engine start and right after a Remove from dashboard, on a thread of its own so no
+/// owner job waits on a folder, and clears through the job the live path uses: the record's
+/// names starting with `prefix` only, at most `DELETE_FILES_PER_START` a call. Inputs: the
+/// connection, the database path, the storage queue and the prefix. Output: Ok once the
+/// thread started, or at once with nothing recorded.
 pub(super) fn delete_files_finish(
     db: &Connection,
     path: &Path,
     jobs: mpsc::Sender<Job>,
+    prefix: &str,
 ) -> Result<(), EngineError> {
     let mut query = db
-        .prepare("SELECT name, inode FROM projects_delete_files ORDER BY name LIMIT ?1")
+        .prepare(
+            "SELECT name, inode FROM projects_delete_files
+             WHERE substr(name, 1, length(?2)) = ?2 ORDER BY name LIMIT ?1",
+        )
         .map_err(error)?;
     let files = query
-        .query_map([DELETE_FILES_PER_START], |row| {
+        .query_map(params![DELETE_FILES_PER_START, prefix], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
         .map_err(error)?

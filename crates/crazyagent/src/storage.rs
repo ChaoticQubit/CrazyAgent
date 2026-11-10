@@ -280,6 +280,7 @@ impl Storage {
     ) -> Result<(Self, EffectiveConfig), EngineError> {
         let (sender, mut receiver) = mpsc::channel(config.settings.queue_capacity);
         let delete_files_jobs = (!readonly).then(|| sender.clone());
+        let forgotten_jobs = delete_files_jobs.as_ref().map(mpsc::Sender::downgrade);
         let path = path.to_path_buf();
         let (ready_send, ready_receive) = oneshot::channel();
         std::thread::Builder::new()
@@ -334,7 +335,7 @@ impl Storage {
                     }
                     if let Some(jobs) = delete_files_jobs
                         && let Err(e) =
-                            projects_home::delete_files_finish(&connection, &path, jobs)
+                            projects_home::delete_files_finish(&connection, &path, jobs, "")
                     {
                         eprintln!("project_delete_files_not_cleared cause={}", e.0);
                     }
@@ -756,12 +757,34 @@ impl Storage {
                                         | OwnerMutation::MoveProjectsHome { .. }
                                 }
                             );
+                            let forgetting = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::RemoveProject { .. }
+                                }
+                            );
                             let result =
                                 owner_apply(&mut connection, &config, &path, &admission, &request);
                             let restart = set_home && result.is_ok();
+                            let forgotten = forgetting
+                                && result
+                                    .as_ref()
+                                    .is_ok_and(|applied| applied.result == OwnerResult::Applied);
                             let _ = reply.send(result);
                             if restart {
                                 home_watch.restart(&connection);
+                            }
+                            if forgotten
+                                && let Some(jobs) =
+                                    forgotten_jobs.as_ref().and_then(mpsc::WeakSender::upgrade)
+                                && let Err(e) = projects_home::delete_files_finish(
+                                    &connection,
+                                    &path,
+                                    jobs,
+                                    crate::projects_home::TOOL_CACHE_PREFIX,
+                                )
+                            {
+                                eprintln!("project_tool_cache_not_removed cause={}", e.0);
                             }
                         }
                         Job::OwnerRead(admission, query, reply) => {
@@ -1023,6 +1046,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::projects_home::initialize(connection)?;
     crate::sandbox_settings::initialize(connection)?;
     crate::cleanup_settings::initialize(connection)?;
+    crate::quit_settings::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
@@ -1368,6 +1392,7 @@ fn apply(
             | Command::OwnerProfile { .. }
             | Command::OwnerSandbox { .. }
             | Command::OwnerAgentCleanup { .. }
+            | Command::OwnerAgentQuit { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1554,6 +1579,7 @@ fn execute(
         Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
         Command::OwnerSandbox { settings } => crate::sandbox_settings::save(tx, settings),
         Command::OwnerAgentCleanup { settings } => crate::cleanup_settings::save(tx, settings),
+        Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -1565,7 +1591,17 @@ fn execute(
         Command::CreateProject { project_id, spec } => create_project(tx, project_id, spec),
         Command::OwnerSetup { action } => setup::apply_owner(tx, path, action),
         Command::ProjectSetup { action } => {
-            crate::project_setup::execute(tx, config, action, revision)
+            let caches = match action {
+                crate::project_setup::SetupAction::Remove { project_id } => {
+                    projects_home::forgotten_caches(tx, path, project_id)?
+                }
+                _ => Vec::new(),
+            };
+            let outcome = crate::project_setup::execute(tx, config, action, revision)?;
+            if outcome == Outcome::Applied {
+                projects_home::record_files(tx, &caches)?;
+            }
+            Ok(outcome)
         }
         Command::ProjectsHome { action } => projects_home::execute(tx, path, action),
         Command::AccountSchedule { change, version } => crate::scheduling::apply(
@@ -2687,6 +2723,7 @@ fn owner_read(
         OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
         OwnerRead::SandboxSettings => crate::sandbox_settings::read(&tx)?,
         OwnerRead::CleanupSettings => crate::cleanup_settings::read(&tx)?,
+        OwnerRead::QuitSettings => crate::quit_settings::read(&tx)?,
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
         },

@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const { ProjectAccountOrderView, planFor, planLine, poolStrategy, projectStrategy, rankInput, reserveInput, strategyOptions, STRATEGIES } = await import("../src/screens/settings/account-choice.tsx");
-const { plainError } = await import("../src/api.ts");
+const { plainError, setAccountSchedule } = await import("../src/api.ts");
 
 const schedule = {
   strategy: "manual_rank",
@@ -46,6 +46,22 @@ test("stored choices read back per pool, project and account with defaults for t
 test("every scheduling refusal reads as a sentence", () => {
   for (const code of ["account_rank_invalid", "account_reserve_invalid", "account_schedule_invalid", "account_schedule_full", "connection_not_found", "pool_not_found", "project_not_found"]) {
     assert.doesNotMatch(plainError(code), /Something went wrong/, code);
+  }
+});
+
+test("a refused account order save for a gone project comes back as its sentence, never the code (PROTO-4 F3)", async () => {
+  const sent = [];
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command) {
+    sent.push(command);
+    return { outcome: "rejected", pending: false, rejection: "project_not_found" };
+  } } };
+  try {
+    const result = await setAccountSchedule({ kind: "project_strategy", project: "project-gone", strategy: "balanced" }, 3);
+    assert.deepEqual(sent, ["desktop_set_account_schedule"]);
+    assert.deepEqual(result, { kind: "error", code: "project_not_found", message: "This project no longer exists." });
+  } finally {
+    globalThis.window = before;
   }
 });
 

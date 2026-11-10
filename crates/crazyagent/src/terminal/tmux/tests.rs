@@ -1470,6 +1470,69 @@ fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server, u64) {
     (host, server, bound)
 }
 
+/// Starts a host whose holder reads its deadline every loop and ends its server after two
+/// passed reads, on a fresh server in `home` running one agent (FBTMUX-P1). Takes the home
+/// and the agent. Returns the host and its server.
+#[cfg(target_os = "macos")]
+fn fast_deadline(home: &Path, agent: &AgentId) -> (Tmux, Server) {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = home.join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder).with_deadline_checks(1, 2);
+    let server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "120".into()],
+        cwd: home.to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(agent, &command).unwrap();
+    assert_eq!(host.alive().unwrap(), vec![agent.clone()]);
+    (host, server)
+}
+
+/// FBTMUX-P1: a server's holder ends it with its agents once the deadline the engine set
+/// has passed, while a server renewed ahead in time keeps running and one no engine ever
+/// renewed keeps today's bound, its socket alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_holder_ends_a_server_only_once_its_renewed_deadline_passed() {
+    let agent = AgentId::team(1).unwrap();
+    let (never, kept, ending) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let (unrenewed, _unrenewed) = fast_deadline(never.path(), &agent);
+    let (renewed, _renewed) = fast_deadline(kept.path(), &agent);
+    let (late, _late) = fast_deadline(ending.path(), &agent);
+    let ahead = || SystemTime::now() + Duration::from_secs(3);
+    late.renew(ahead()).unwrap();
+    let listens = |host: &Tmux| crate::spawn_gate::connect_unix_std(host.socket()).is_ok();
+    let until = Instant::now() + Duration::from_secs(30);
+    while listens(&late) {
+        assert!(
+            Instant::now() < until,
+            "the holder ends a server past its deadline"
+        );
+        renewed.renew(ahead()).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert_eq!(late.alive().unwrap(), Vec::<AgentId>::new());
+    let held = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < held {
+        renewed.renew(ahead()).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert_eq!(renewed.alive().unwrap(), vec![agent.clone()]);
+    assert_eq!(unrenewed.alive().unwrap(), vec![agent]);
+}
+
 /// A server ended from outside leaves its socket file behind. Once its control saw it end
 /// and nothing listens, the host has no live agents, forgets the socket and starts no server.
 #[cfg(target_os = "macos")]

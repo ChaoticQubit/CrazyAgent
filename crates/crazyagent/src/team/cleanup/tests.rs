@@ -359,7 +359,14 @@ impl Case {
     }
 
     fn sweep(&self, mode: CleanupMode, days: u16, after: i64, now_ms: i64) -> Swept {
-        sweep(&self.db, &CleanupSettings { mode, days }, after, now_ms).unwrap()
+        sweep(
+            &self.db,
+            self.team.parent().unwrap(),
+            &CleanupSettings { mode, days },
+            after,
+            now_ms,
+        )
+        .unwrap()
     }
 
     fn known(&self, id: i64) -> bool {
@@ -378,7 +385,14 @@ impl Case {
     }
 
     fn remove(&self, agents: &[i64]) -> Removal {
-        remove(&self.db, &self.project, agents, NOW).unwrap()
+        remove(
+            &self.db,
+            self.team.parent().unwrap(),
+            &self.project,
+            agents,
+            NOW,
+        )
+        .unwrap()
     }
 
     fn retiring(&self) -> Vec<i64> {
@@ -933,7 +947,7 @@ fn a_change_after_the_read_is_caught_inside_the_removal_and_nothing_is_removed()
     assert!(case.kept(1) && case.kept(3));
     let other = ProjectId::new("project-2").unwrap();
     assert_eq!(
-        remove(&case.db, &other, &[1], NOW).unwrap(),
+        remove(&case.db, case.team.parent().unwrap(), &other, &[1], NOW).unwrap(),
         refused("cleanup_agent_not_found")
     );
     let over = i64::try_from(RECLAIMABLE_MAX).unwrap() + 1;
@@ -1517,6 +1531,51 @@ impl Drop for Unlocked {
     }
 }
 
+/// T8 r2 L1: a folder an agent's leftover process swaps for a link to an owner folder while
+/// Clean up clears a pinned file of its cache sends no flag change there, since the flags go
+/// through the open entry and never a path. The owner's file keeps its flag and the cache
+/// still goes.
+#[cfg(target_os = "macos")]
+#[test]
+fn clearing_a_pinned_cache_file_never_changes_an_owner_file_a_swapped_folder_points_to() {
+    use std::os::macos::fs::MetadataExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner");
+    write(&owner.join("pinned"), b"the owner's\n");
+    assert!(chflags("uchg", &owner.join("pinned")));
+    let _owner = Unlocked(owner.join("pinned"));
+    let cache = root.join("cache");
+    write(&cache.join("sub/pinned"), b"the agent's\n");
+    assert!(chflags("uchg", &cache.join("sub/pinned")));
+    let _agent = Unlocked(cache.join("moved/pinned"));
+    let (sub, moved, target) = (cache.join("sub"), cache.join("moved"), owner.clone());
+    AFTER_UNPIN_OPEN.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(&sub, &moved).unwrap();
+            std::os::unix::fs::symlink(&target, &sub).unwrap();
+        }));
+    });
+    remove_agent_tree(&cache).unwrap();
+    assert!(
+        AFTER_UNPIN_OPEN.with(|step| step.borrow().is_none()),
+        "no pinned entry was opened"
+    );
+    assert!(!cache.exists());
+    let flags = std::fs::symlink_metadata(owner.join("pinned"))
+        .unwrap()
+        .st_flags();
+    assert_eq!(
+        flags & nix::sys::stat::FileFlag::UF_IMMUTABLE.bits(),
+        nix::sys::stat::FileFlag::UF_IMMUTABLE.bits(),
+        "the owner's file lost its flag"
+    );
+    assert_eq!(
+        std::fs::read(owner.join("pinned")).unwrap(),
+        b"the owner's\n"
+    );
+}
+
 /// When git drops an agent's worktree record but leaves a file the engine cannot delete,
 /// the agent stays offered for removal with its record waiting, and a later removal
 /// finishes once the file can go, instead of refusing it as an invalid worktree for good
@@ -1615,4 +1674,68 @@ fn a_removal_preview_names_each_agent_s_unlanded_work_without_running_git_in_a_c
     for id in [1, 2, 3, 4, 6] {
         assert!(case.kept(id), "a preview changes nothing for agent {id}");
     }
+}
+
+/// T8 design 9: Clean up takes the tool caches One per agent gave the agent whose worktree
+/// it removes, at each level, with its native teammates' and their priming records, and
+/// keeps another agent's and the shared caches, since a removed agent never runs again.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agents_worktree_takes_its_own_tool_caches_and_keeps_the_shared_ones() {
+    use crate::sandbox::policy::{AgentAccess, ToolCacheScope};
+    use crate::sandbox::tool_cache::{CacheShape, key, prepare, project_folder};
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    let runtime = case.team.parent().unwrap();
+    let project = case.repo.to_str().unwrap();
+    let names: Vec<String> = [
+        (
+            ToolCacheScope::PerAgent,
+            AgentAccess::Sandboxed,
+            CacheShape::Worktree,
+            "1",
+        ),
+        (
+            ToolCacheScope::PerAgent,
+            AgentAccess::OwnBranch,
+            CacheShape::Clone,
+            "1",
+        ),
+        (
+            ToolCacheScope::PerAgent,
+            AgentAccess::Sandboxed,
+            CacheShape::Teammate,
+            "1-teammates",
+        ),
+        (
+            ToolCacheScope::PerAgent,
+            AgentAccess::Sandboxed,
+            CacheShape::Worktree,
+            "2",
+        ),
+        (
+            ToolCacheScope::Shared,
+            AgentAccess::Sandboxed,
+            CacheShape::Worktree,
+            "1",
+        ),
+    ]
+    .into_iter()
+    .map(|(scope, access, shape, agent)| key(scope, access, shape, agent).unwrap())
+    .collect();
+    let folder = project_folder(runtime, project);
+    for name in &names {
+        prepare(runtime, project, name, None).unwrap();
+        write(&folder.join(format!("{name}.primed")), b"record\n");
+    }
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    let left = |name: &str| std::fs::symlink_metadata(folder.join(name)).is_ok();
+    for name in &names[..3] {
+        assert!(!left(name) && !left(&format!("{name}.primed")), "{name}");
+    }
+    for name in &names[3..] {
+        assert!(left(name) && left(&format!("{name}.primed")), "{name}");
+    }
+    assert!(case.history_kept(1) && case.kept(2));
 }

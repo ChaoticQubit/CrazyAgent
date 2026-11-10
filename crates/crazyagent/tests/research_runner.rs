@@ -379,6 +379,7 @@ fn turning_a_toolchain_off_stops_running_research_and_queues_it_again() {
             allowed,
         }],
         ide_git_hooks: false,
+        tool_cache: Default::default(),
         ide_agent_files: Default::default(),
         network: crazyagent::sandbox::policy::AgentNetwork::default(),
     };

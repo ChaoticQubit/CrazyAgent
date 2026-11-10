@@ -335,7 +335,7 @@ impl SubAgent {
             .await
             .unwrap()
             .unwrap();
-        tokio::task::spawn_blocking(move || crazyagent::terminal::quit(terminal.as_ref()))
+        tokio::task::spawn_blocking(move || crazyagent::terminal::quit(terminal.as_ref(), true))
             .await
             .unwrap()
             .unwrap();
