@@ -10,12 +10,12 @@ const LATER = NOW + 90 * 60000;
 const AT = atText(LATER, NOW);
 
 const WHY = [
-  [{ kind: "use_last" }, "Pinned to Use last, so it goes after every other account."],
+  [{ kind: "use_last" }, "Pinned to Use last, so it goes after accounts that are not."],
   [{ kind: "limit_reported" }, "A run just reported it at a limit, so it goes after accounts that have room."],
-  [{ kind: "no_reading" }, "No usage read yet, so it goes after accounts with a reading."],
+  [{ kind: "no_reading" }, "Its weekly use or reset is not known yet, so it goes after accounts where it is."],
   [{ kind: "resets_soonest", resets_ms: LATER }, `Its weekly limit resets soonest, ${AT}.`],
   [{ kind: "resets_later", resets_ms: LATER }, `Its weekly limit resets later, ${AT}.`],
-  [{ kind: "least_used" }, "Least weekly use in this pool."],
+  [{ kind: "least_used" }, "Least weekly use of the accounts ready now."],
   [{ kind: "more_used" }, "More weekly use than the one above."],
   [{ kind: "more_five_hour_used" }, "Same weekly use as the one above, more of its 5 hours used."],
   [{ kind: "ranked", rank: 3 }, "You ranked it 3."],

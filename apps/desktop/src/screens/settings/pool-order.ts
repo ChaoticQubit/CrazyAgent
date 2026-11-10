@@ -8,12 +8,12 @@ import { atText, STRATEGIES } from "./account-choice";
 export const HELD_HEAD = "Held now, in pool order. Each one rejoins the order when its reason ends.";
 
 const WHY: { [K in OrderWhy["kind"]]: (why: Extract<OrderWhy, { kind: K }>, nowMs: number) => string } = {
-  use_last: () => "Pinned to Use last, so it goes after every other account.",
+  use_last: () => "Pinned to Use last, so it goes after accounts that are not.",
   limit_reported: () => "A run just reported it at a limit, so it goes after accounts that have room.",
-  no_reading: () => "No usage read yet, so it goes after accounts with a reading.",
+  no_reading: () => "Its weekly use or reset is not known yet, so it goes after accounts where it is.",
   resets_soonest: (why, nowMs) => `Its weekly limit resets soonest, ${atText(why.resets_ms, nowMs)}.`,
   resets_later: (why, nowMs) => `Its weekly limit resets later, ${atText(why.resets_ms, nowMs)}.`,
-  least_used: () => "Least weekly use in this pool.",
+  least_used: () => "Least weekly use of the accounts ready now.",
   more_used: () => "More weekly use than the one above.",
   more_five_hour_used: () => "Same weekly use as the one above, more of its 5 hours used.",
   ranked: (why) => `You ranked it ${why.rank}.`,
