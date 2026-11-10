@@ -3120,9 +3120,9 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
         turn: turn.into(),
         prompt_line: "Another turn".into(),
     };
-    let quiet = crate::landing_turns::record(&db, &workspace, &end("quiet-turn")).unwrap();
+    let quiet = crate::landing_turns::record(&db, &workspace, &end("quiet-turn"), None).unwrap();
     fs::write(prepared.cwd.join("MORE.md"), "More from the master.\n").unwrap();
-    let more = crate::landing_turns::record(&db, &workspace, &end("more-turn")).unwrap();
+    let more = crate::landing_turns::record(&db, &workspace, &end("more-turn"), None).unwrap();
     drop(db);
     drop(prepared);
     case.finish().await;
@@ -3201,7 +3201,7 @@ async fn a_master_head_pointed_away_from_its_lease_branch_is_refused_and_moves_n
         turn: "away-turn".into(),
         prompt_line: "Write past the lease".into(),
     };
-    let refused = crate::landing_turns::record(&db, &workspace, &end).unwrap_err();
+    let refused = crate::landing_turns::record(&db, &workspace, &end, None).unwrap_err();
     assert_eq!(refused.0, "changes_workspace_invalid");
     assert_eq!(branches(), before);
     assert!(

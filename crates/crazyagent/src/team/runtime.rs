@@ -6617,7 +6617,9 @@ impl TeamRuntime {
                 prompt_line: format!("Work of teammate {name}"),
             };
             let tries = self.teammate_turn_tries.entry(lead).or_default();
-            if let Err(problem) = crate::landing_turns::record(&db, &workspace, &ended) {
+            if let Err(problem) =
+                crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref())
+            {
                 let code = crate::landing::refusal_code(&problem).to_owned();
                 eprintln!("teammate_turn_failed cause={code}");
                 let tried = tries.entry(teammate).or_insert(0);
@@ -8284,7 +8286,8 @@ impl TeamRuntime {
             prompt_line: line.lines().next().unwrap_or_default().to_owned(),
         };
         let landed = crate::landing::open(&self.root).and_then(|db| {
-            let landed = crate::landing_turns::record(&db, &workspace, &ended);
+            let landed =
+                crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref());
             if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
                 eprintln!(
                     "landing_settle_failed cause={}",

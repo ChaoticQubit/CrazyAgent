@@ -574,6 +574,7 @@ impl OwnerRuntimeHandle {
                 .map(std::path::Path::to_path_buf)
         });
         let lease = prepared.lease.clone();
+        let settings = self.ide_servers().settings_files();
         let landed = tokio::task::spawn_blocking(move || {
             let root = root.ok_or_else(|| failure("changes_unavailable"))?;
             let db = crate::landing::open(&root)?;
@@ -584,7 +585,7 @@ impl OwnerRuntimeHandle {
                 worktree,
                 git_dir: crate::worktrees::lease_git_dir(&db, &lease)?,
             };
-            let landed = crate::landing_turns::record(&db, &workspace, &end)?;
+            let landed = crate::landing_turns::record(&db, &workspace, &end, settings.as_ref())?;
             let merged = match &landed {
                 crate::landing_turns::Landed::Added(id) => master_landed_note(&db, id),
                 _ => None,

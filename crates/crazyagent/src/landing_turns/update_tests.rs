@@ -168,7 +168,7 @@ impl Case {
             );
         }
         before(&db, member, &mut workspace);
-        let recorded = record(&db, &workspace, &end);
+        let recorded = record(&db, &workspace, &end, None);
         let id = match &recorded {
             Ok(Landed::Added(id) | Landed::Waiting(id)) => id.clone(),
             _ => landing::list(&db, &project)
@@ -382,7 +382,7 @@ fn change_sets_the_listed_32_leave_out_are_still_found_by_their_id() {
         prompt_line: "Change nothing".into(),
     };
     assert_eq!(
-        record(&case.db, &case.workspace, &quiet).unwrap(),
+        record(&case.db, &case.workspace, &quiet, None).unwrap(),
         Landed::Waiting(case.id.clone()),
         "a turn that added nothing is not announced as new edits"
     );
@@ -440,7 +440,7 @@ fn conflicting_file_names_with_line_separators_reach_the_resolve_prompt_escaped_
         prompt_line: "Add the files".into(),
     };
     assert_eq!(
-        record(&case.db, &case.workspace, &end).unwrap(),
+        record(&case.db, &case.workspace, &end, None).unwrap(),
         Landed::Waiting(case.id.clone()),
         "the turn end sends the clashing set back and hands over its resolve work"
     );
@@ -492,7 +492,7 @@ fn conflicting_file_names_with_newlines_stay_one_resolve_prompt_line_each() {
         prompt_line: "Add the files".into(),
     };
     assert_eq!(
-        record(&case.db, &case.workspace, &end).unwrap(),
+        record(&case.db, &case.workspace, &end, None).unwrap(),
         Landed::Waiting(case.id.clone()),
         "the turn end sends the clashing set back and hands over its resolve work"
     );
