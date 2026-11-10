@@ -2027,39 +2027,90 @@ fn native_team_refuses_a_teammates_home_in_the_lead_s_or_a_lead_home_the_project
 }
 
 /// SECAUDIT team-mailbox-reply-forgery-shared-native-lead: no agent of a native team makes or
-/// changes an answer in the tool mailbox the team shares, by any route or spelling, so the
-/// answer another agent reads is the engine's. Reading and listing stay open.
+/// changes an answer in the tool mailbox the team shares, by any route or spelling or by
+/// moving the folder itself, so the answer another agent reads is the engine's. Reading and
+/// listing stay open. Each door has its own name and every door left open is listed at once.
 #[test]
 fn no_agent_of_a_native_team_can_forge_or_change_an_answer_in_the_tool_mailbox() {
     let team = LiveTeam::start();
     let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let folded = team
+        .case
+        .tmp
+        .join(crazyagent::team::tool::MAILBOX_FOLDER.to_uppercase());
+    let volume_folds = folded.exists();
     let attempts = |id: u32| {
         let at = |suffix: &str| quoted(&mailbox.join(format!("{id:032x}{suffix}")));
-        let (reply, upper, side, part) =
-            (at(".reply"), at(".REPLY"), at(".side"), at(".reply-part"));
+        let (forge, upper, moved, linked) = (
+            at("-forge.reply"),
+            at("-upper.REPLY"),
+            at("-moved.reply"),
+            at("-linked.reply"),
+        );
+        let (symlinked, cloned, part) = (
+            at("-symlinked.reply"),
+            at("-cloned.reply"),
+            at(".reply-part"),
+        );
+        let (side, other, control) = (at(".side"), at(".other"), at(".control"));
         let engine = quoted(&mailbox.join(format!("{:032x}.reply", id + 1)));
+        let in_case = quoted(&folded.join(format!("{id:032x}-case.reply")));
+        let spelled = quoted(&folded);
         format!(
-            "printf forged > {reply}; echo forge=$?\n\
+            "swap() {{ /usr/bin/perl -e '$r = syscall(488, -2, $ARGV[0], -2, $ARGV[1], 2); exit($r == 0 ? 0 : 1)' \"$1\" \"$2\"; }}\n\
+             printf forged > {forge}; echo forge=$?\n\
              printf forged > {upper}; echo upper=$?\n\
-             printf forged > {side}; /bin/mv {side} {reply}; echo moved=$?\n\
-             printf forged > {side}; /bin/ln {side} {reply}; echo linked=$?\n\
-             /bin/ln -s {side} {reply}; echo symlinked=$?\n\
+             printf forged > {side}; /bin/mv {side} {moved}; echo moved=$?\n\
+             printf forged > {side}; /bin/ln {side} {linked}; echo linked=$?\n\
+             /bin/ln -s {side} {symlinked}; echo symlinked=$?\n\
              printf forged >> {engine}; echo changed=$?\n\
              /usr/bin/touch {part}; echo plant=$?\n\
-             /bin/cat {engine} > /dev/null; echo read=$?\n"
+             /bin/cat {engine} > /dev/null; echo read=$?\n\
+             printf forged > {side}; /bin/cp -c {side} {control}; echo cloneok=$?\n\
+             /bin/cp -c {side} {cloned}; echo cloned=$?\n\
+             /bin/mv -f {side} {engine}; echo overwrote=$?\n\
+             printf forged > {side}; printf other > {other}; swap {side} {other}; echo swapok=$?\n\
+             swap {side} {engine}; echo swapped=$?\n\
+             printf forged > {in_case}; echo foldercase=$?\n\
+             /bin/ls {spelled} > /dev/null; echo resolves=$?\n"
         )
     };
+    let moves = |id: u32, who: &str| {
+        let answer = format!("{id:032x}-folder.reply");
+        let place = |name: &str| team.case.tmp.join(format!("{name}-{who}"));
+        let (aside, made) = (place("aside"), place("built"));
+        let (aside_answer, made_answer) =
+            (quoted(&aside.join(&answer)), quoted(&made.join(&answer)));
+        let (aside, made, gone, again) = (
+            quoted(&aside),
+            quoted(&made),
+            quoted(&place("gone")),
+            quoted(&place("again")),
+        );
+        let (folder, spelled) = (quoted(&mailbox), quoted(&folded));
+        format!(
+            "/bin/mv {folder} {aside}; echo aside=$?\n\
+             printf forged > {aside_answer}; /bin/mv {aside} {folder}; echo back=$?\n\
+             /bin/mkdir {made}; echo built=$?; printf forged > {made_answer}\n\
+             /bin/mv {folder} {gone}; echo away=$?\n\
+             /usr/bin/perl -e 'exit(rename($ARGV[0], $ARGV[1]) ? 0 : 1)' {made} {folder}; echo replaced=$?\n\
+             /bin/mv {spelled} {again}; echo asidecase=$?\n"
+        )
+    };
+    let mut open = Vec::new();
     for (who, id) in [("teammate", 20_u32), ("lead", 30_u32)] {
         let engine = mailbox.join(format!("{:032x}.reply", id + 1));
         fs::write(&engine, b"engine").unwrap();
-        let script = attempts(id);
-        let output = if who == "lead" {
-            team.as_lead(&script)
-        } else {
-            team.teammate(&script)
+        let run = |script: &str| {
+            if who == "lead" {
+                team.as_lead(script)
+            } else {
+                team.teammate(script)
+            }
         };
+        let output = run(&attempts(id));
         let text = String::from_utf8_lossy(&output.stdout).into_owned();
-        let errors = String::from_utf8_lossy(&output.stderr);
+        let errors = String::from_utf8_lossy(&output.stderr).into_owned();
         for name in [
             "forge",
             "upper",
@@ -2068,44 +2119,91 @@ fn no_agent_of_a_native_team_can_forge_or_change_an_answer_in_the_tool_mailbox()
             "symlinked",
             "changed",
             "plant",
+            "cloned",
+            "overwrote",
+            "swapped",
+            "foldercase",
         ] {
-            assert_ne!(status_of(&text, name), "0", "{who} {name}: {errors}");
+            if status_of(&text, name) == "0" {
+                open.push(format!("{who} {name}"));
+            }
         }
-        assert_eq!(status_of(&text, "read"), "0", "{who}: {errors}");
-        for name in [".reply", ".reply-part"] {
-            let made = mailbox.join(format!("{id:032x}{name}"));
-            assert!(fs::symlink_metadata(&made).is_err(), "{who} {name}");
+        for name in ["read", "cloneok", "swapok"] {
+            assert_eq!(status_of(&text, name), "0", "{who} {name}: {errors}");
         }
-        assert_eq!(fs::read(&engine).unwrap(), b"engine", "{who}");
+        assert_eq!(
+            status_of(&text, "resolves") == "0",
+            volume_folds,
+            "{who}: {errors}"
+        );
+        for name in [
+            "-forge.reply",
+            "-upper.REPLY",
+            "-moved.reply",
+            "-linked.reply",
+            "-symlinked.reply",
+            "-cloned.reply",
+            ".reply-part",
+            "-case.reply",
+        ] {
+            if fs::symlink_metadata(mailbox.join(format!("{id:032x}{name}"))).is_ok() {
+                open.push(format!("{who} made {name}"));
+            }
+        }
+        if fs::read(&engine).unwrap() != b"engine" {
+            open.push(format!("{who} engine bytes"));
+        }
+        let output = run(&moves(id, who));
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&output.stderr).into_owned();
+        for name in ["aside", "back", "away", "replaced", "asidecase"] {
+            if status_of(&text, name) == "0" {
+                open.push(format!("{who} {name}"));
+            }
+        }
+        if who == "lead" {
+            assert_eq!(status_of(&text, "built"), "0", "{who}: {errors}");
+        }
+        if mailbox.join(format!("{id:032x}-folder.reply")).exists() {
+            open.push(format!("{who} folder forged"));
+        }
     }
+    assert_eq!(open, Vec::<String>::new(), "doors left open");
 }
 
-/// What a teammate's tool server does stays open beside that rule: it sends a call and
-/// removes the answer it has read.
+/// What the tool server of each agent of a native team does stays open beside those rules:
+/// it sends a call and removes the answer it has read.
 #[test]
-fn a_native_teammate_still_sends_a_call_and_removes_the_answer_it_read() {
+fn native_team_agents_still_send_a_call_and_remove_the_answer_they_read() {
     let team = LiveTeam::start();
     let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
-    let id = format!("{:032x}", 40);
-    let answer = mailbox.join(format!("{id}.reply"));
-    fs::write(&answer, b"{}").unwrap();
-    let call = mailbox.join(format!("{id}.call"));
-    let (part, sent, reply) = (
-        quoted(&mailbox.join(format!("{id}.part"))),
-        quoted(&call),
-        quoted(&answer),
-    );
-    let output = team.teammate(&format!(
-        "/usr/bin/touch {part}; echo part=$?\n\
-         /bin/mv {part} {sent}; echo call=$?\n\
-         /bin/cat {reply} > /dev/null; echo read=$?\n\
-         /bin/rm {reply}; echo removed=$?\n"
-    ));
-    let text = String::from_utf8_lossy(&output.stdout).into_owned();
-    let errors = String::from_utf8_lossy(&output.stderr);
-    for name in ["part", "call", "read", "removed"] {
-        assert_eq!(status_of(&text, name), "0", "{name}: {errors}");
+    for (who, number) in [("teammate", 40_u32), ("lead", 50_u32)] {
+        let id = format!("{number:032x}");
+        let answer = mailbox.join(format!("{id}.reply"));
+        fs::write(&answer, b"{}").unwrap();
+        let call = mailbox.join(format!("{id}.call"));
+        let (part, sent, reply) = (
+            quoted(&mailbox.join(format!("{id}.part"))),
+            quoted(&call),
+            quoted(&answer),
+        );
+        let script = format!(
+            "/usr/bin/touch {part}; echo part=$?\n\
+             /bin/mv {part} {sent}; echo call=$?\n\
+             /bin/cat {reply} > /dev/null; echo read=$?\n\
+             /bin/rm {reply}; echo removed=$?\n"
+        );
+        let output = if who == "lead" {
+            team.as_lead(&script)
+        } else {
+            team.teammate(&script)
+        };
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&output.stderr);
+        for name in ["part", "call", "read", "removed"] {
+            assert_eq!(status_of(&text, name), "0", "{who} {name}: {errors}");
+        }
+        assert!(call.exists(), "{who}");
+        assert!(!answer.exists(), "{who}");
     }
-    assert!(call.exists());
-    assert!(!answer.exists());
 }
