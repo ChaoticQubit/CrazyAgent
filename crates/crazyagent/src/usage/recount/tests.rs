@@ -503,3 +503,49 @@ fn a_project_removed_during_the_recount_is_not_put_back() {
         (2, 0)
     );
 }
+
+#[test]
+fn seeding_leaves_a_larger_live_key_as_it_is() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    message(&home.join("projects/-repo/s1.jsonl"), "msg_a", 100);
+    old_row(&db, "s1", 400, 0);
+    db.execute(
+        "INSERT INTO usage_messages (id,input,output,cache_read,cache_write,web,last_ms)
+         VALUES ('claude:msg_a',500,9,0,0,0,?1)",
+        [NOW],
+    )
+    .unwrap();
+    recount_all(&db, &home);
+    let live: (i64, i64) = db
+        .query_row(
+            "SELECT input,output FROM usage_messages WHERE id='claude:msg_a'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(live, (500, 9));
+}
+
+#[test]
+fn a_chunk_read_while_its_project_is_removed_files_under_the_removed_name() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    message(&home.join("projects/-repo/s1.jsonl"), "msg_a", 100);
+    begin(&db, &[home_of(home)], NOW).unwrap();
+    assert!(step(&db, 1, NOW).unwrap(), "the listing spends the budget");
+    db.execute_batch(
+        "CREATE TEMP TRIGGER removed_during_the_read AFTER UPDATE OF attempts ON usage_recount_files
+         BEGIN UPDATE usage_recount_homes SET project='<removed>' WHERE home=NEW.home; END;",
+    )
+    .unwrap();
+    step(&db, BYTES_PER_STEP, NOW).unwrap();
+    let staged: Vec<String> = db
+        .prepare("SELECT DISTINCT project FROM usage_recount_rows")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(staged, vec![crate::usage::REMOVED_PROJECTS.to_owned()]);
+}

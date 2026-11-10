@@ -369,3 +369,59 @@ fn an_older_health_table_takes_the_recount_step_after_an_upgrade() {
         UsageStep::Recount
     );
 }
+
+fn no_access() -> ModelAccess {
+    ModelAccess {
+        accounts: Vec::new(),
+        connections: Vec::new(),
+        pools: Vec::new(),
+    }
+}
+
+#[test]
+fn a_removed_projects_research_run_is_recounted_under_its_removed_name() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    let home = root.join("research/run-1/home");
+    append(&home.join("projects/f/s1.jsonl"), &assistant("m1", 30));
+    db.execute(
+        "INSERT INTO usage_runs (home,kind,project,account,agent,harness,started_ms)
+         VALUES (?1,'research','alpha','acct','research-1','claude-code',?2)",
+        rusqlite::params![home.to_string_lossy(), NOW],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
+         VALUES (3600000,'research','alpha','','acct','research-1','claude-code','s1',400,1,0,0)",
+        [],
+    )
+    .unwrap();
+    crate::usage::forget_project(&db, "alpha").unwrap();
+    let usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    for _ in 0..16 {
+        usage.recount(&no_access(), NOW).unwrap();
+    }
+    let status = recount::status(&db).unwrap().unwrap();
+    assert_eq!((status.old.input, status.new.input), (400, 30));
+    assert_eq!(
+        (status.sessions_recounted, status.sessions_kept_old),
+        (1, 0)
+    );
+}
+
+#[test]
+fn a_team_table_that_cannot_be_read_does_not_start_the_recount() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    db.execute_batch("CREATE TABLE team_agents (id INTEGER PRIMARY KEY);")
+        .unwrap();
+    let usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    assert!(usage.recount(&no_access(), NOW).is_err());
+    assert!(!recount::started(&db).unwrap());
+}
