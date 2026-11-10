@@ -724,15 +724,10 @@ pub fn session_state(
             )
         })
         .take(STATE_ROWS_MAX)
-        .map(|change| {
-            format!(
-                "{} ({} files, +{} -{}), waiting for the owner",
-                change.agent.label, change.files, change.added, change.removed
-            )
-        })
+        .map(|change| crate::landing::open_set_line(&change))
         .collect();
     if !changes.is_empty() {
-        sections.push(listed("Pending change sets:", &changes));
+        sections.push(listed("Open change sets:", &changes));
     }
     if sections.is_empty() {
         return Ok(None);

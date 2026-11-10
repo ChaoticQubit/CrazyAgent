@@ -40,6 +40,8 @@ pub const NEW_FOLDER_REFUSED: &str = "changes_new_folder_too_large";
 
 /// The most change sets one list reply carries, newest first.
 pub const LIST_MAX: usize = 32;
+/// The most bytes of conflicting file names one open set's line carries.
+const OPEN_SET_FILES_MAX: usize = 400;
 /// The most bytes an owner-edited Accept message may hold.
 pub const MESSAGE_BYTES_MAX: usize = 4096;
 
@@ -1589,6 +1591,34 @@ pub fn change_set_name(set: &ChangeSetView) -> String {
         ),
         None => agent,
     }
+}
+
+/// One open change set as the owner's Changes view reads it: its name, its size, the
+/// view's state words and the files it conflicts on, so a master and the owner mean the
+/// same set (HB-S5-J). Input: the open change set. Output: the line.
+pub fn open_set_line(set: &ChangeSetView) -> String {
+    let state = match set.state {
+        ChangeState::Pending => "Ready to review",
+        ChangeState::Conflict => "Conflicts with the owner's branch",
+        ChangeState::Updating if set.waiting => "Updated, waiting for the agent",
+        ChangeState::Updating if !set.conflicts.is_empty() => "Agent is fixing conflicts with main",
+        ChangeState::Updating => "Agent is updating",
+        ChangeState::Accepted | ChangeState::Discarded => {
+            unreachable!("only an open change set has a line")
+        }
+    };
+    let files = if set.conflicts.is_empty() {
+        String::new()
+    } else {
+        let joined = set.conflicts.join(", ");
+        format!(": {}", crate::team::bound_text(&joined, OPEN_SET_FILES_MAX))
+    };
+    format!(
+        "{}, +{} -{}, {state}{files}",
+        change_set_name(set),
+        set.added,
+        set.removed
+    )
 }
 
 /// The words a sentence names a change set by: "change set #16 (Wren: checkout UI, 7

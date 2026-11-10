@@ -2030,7 +2030,7 @@ fn changes(answering: &Answering<'_>) -> (String, bool) {
             )
         })
         .take(CHANGES_LISTED_MAX)
-        .map(open_set_line)
+        .map(|set| format!("- {}", crate::landing::open_set_line(set)))
         .collect();
     if open.is_empty() {
         return ("No change set is waiting for the owner.".into(), false);
@@ -2042,39 +2042,6 @@ fn changes(answering: &Answering<'_>) -> (String, bool) {
             open.join("\n")
         ),
         false,
-    )
-}
-
-/// One open change set as the owner's Changes view reads it: its name, its size, the
-/// view's state words and the files it conflicts on, so the master and the owner mean
-/// the same set (HB-S5-J). Takes the open set. Returns the line.
-fn open_set_line(set: &crate::landing::ChangeSetView) -> String {
-    use crate::landing::ChangeState;
-    let state = match set.state {
-        ChangeState::Pending => "waiting for review",
-        ChangeState::Conflict => "conflicts with the owner's branch",
-        ChangeState::Updating if set.waiting => "updated, waiting for its agent",
-        ChangeState::Updating if !set.conflicts.is_empty() => {
-            "its agent is fixing conflicts with main"
-        }
-        ChangeState::Updating => "being updated",
-        ChangeState::Accepted | ChangeState::Discarded => {
-            unreachable!("only open change sets are listed")
-        }
-    };
-    let files = if set.conflicts.is_empty() {
-        String::new()
-    } else {
-        format!(
-            ": {}",
-            super::bound_text(&set.conflicts.join(", "), merge::FILES_SHOWN_MAX)
-        )
-    };
-    format!(
-        "- {}, +{} -{}, {state}{files}",
-        crate::landing::change_set_name(set),
-        set.added,
-        set.removed
     )
 }
 
