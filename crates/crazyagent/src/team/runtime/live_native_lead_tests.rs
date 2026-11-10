@@ -718,6 +718,28 @@ fn files_under(root: &Path, depth: usize) -> Vec<PathBuf> {
     found
 }
 
+/// row5-diag r1 L1: the failure printout's walk never follows a link, neither a linked root
+/// nor a linked folder or file inside a plain root, so it lists only the root's own files.
+#[test]
+fn files_under_follows_no_link() {
+    let base = tempfile::tempdir().unwrap();
+    let outside = base.path().join("outside");
+    std::fs::create_dir_all(outside.join("deep")).unwrap();
+    std::fs::write(outside.join("secret.jsonl"), "{}\n").unwrap();
+    std::fs::write(outside.join("deep").join("more.jsonl"), "{}\n").unwrap();
+    let root = base.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("own.jsonl"), "{}\n").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.jsonl"), root.join("file.jsonl")).unwrap();
+    let linked_root = base.path().join("linked-root");
+    std::os::unix::fs::symlink(&root, &linked_root).unwrap();
+
+    assert_eq!(files_under(&root, 3), vec![root.join("own.jsonl")]);
+    assert_eq!(files_under(&linked_root, 3), Vec::<PathBuf>::new());
+    assert_eq!(files_under(&root.join("linked"), 3), Vec::<PathBuf>::new());
+}
+
 /// The team tool uses Claude Code transcripts record and the result each got: every
 /// `TeamCreate`, `Agent` and `SendMessage` call with its input, then its tool result, each
 /// cut to `SHOWN_MAX` characters, so a failed wait shows whether a lead tried to start a
