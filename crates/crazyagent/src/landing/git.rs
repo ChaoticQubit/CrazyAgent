@@ -138,12 +138,21 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
 /// recursion, protocols or upkeep, and with every filter
 /// driver the repository's own config names blanked. A work tree also honours the
 /// owner's global ignore file, so what the owner's git ignores the engine never stages.
+#[derive(Clone)]
 pub(super) struct Repo {
     git_dir: PathBuf,
     work_tree: Option<PathBuf>,
     overrides: Vec<String>,
     excludes: Option<String>,
     index: Option<PathBuf>,
+}
+
+/// What one confined git step may write besides the worktree's index: the object store,
+/// for a step that only reads the work tree, or the work tree, for one that fills it.
+#[derive(Clone, Copy)]
+pub(super) enum Writes {
+    Objects,
+    WorkTree,
 }
 
 impl Repo {
@@ -225,6 +234,12 @@ impl Repo {
     pub(super) fn private_index(mut self, index: &Path) -> Self {
         self.index = Some(index.to_path_buf());
         self
+    }
+
+    /// This repository for one step on an agent's work tree. Input: what the step may
+    /// write. Output: the repository.
+    pub(super) fn confined(&self, _writes: Writes) -> Result<Self, EngineError> {
+        Ok(self.clone())
     }
 
     fn check_version(&self) -> Result<(), EngineError> {

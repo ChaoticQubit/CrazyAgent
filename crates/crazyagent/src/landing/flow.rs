@@ -1,6 +1,6 @@
 use super::clone;
 use super::diff::{self, plain};
-use super::git::{Repo, failure, is_object_id, object_id};
+use super::git::{Repo, Writes, failure, is_object_id, object_id};
 use super::store::{self, Intent, Record};
 use super::{AgentKind, ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
 use crate::agent_git::{self, Layout};
@@ -945,9 +945,12 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
     }
     #[cfg(test)]
     run_planted(&BEFORE_READ_TREE, agent);
-    let moved = agent
-        .repo
-        .exec(&["read-tree", "-u", "-m", from, target], None, &[], 4096)?;
+    let moved = agent.repo.confined(Writes::WorkTree)?.exec(
+        &["read-tree", "-u", "-m", from, target],
+        None,
+        &[],
+        4096,
+    )?;
     if moved.code != 0 {
         return Ok(false);
     }
@@ -1007,7 +1010,8 @@ fn files_back(agent: &Agent, from: &str, target: &str) {
     }
     let back = agent
         .repo
-        .exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096);
+        .confined(Writes::WorkTree)
+        .and_then(|repo| repo.exec(&["read-tree", "-u", "-m", target, from], None, &[], 4096));
     if !back.is_ok_and(|back| back.code == 0) {
         eprintln!("landing_reset_files_back_refused");
     }
@@ -1843,7 +1847,8 @@ fn commit_worktree(
     message: &str,
 ) -> Result<Option<String>, EngineError> {
     check_bounds(repo, worktree, bounds)?;
-    repo.run(&["add", "-A", "--", ":(top)", &teammates_left_out()])?;
+    repo.confined(Writes::Objects)?
+        .run(&["add", "-A", "--", ":(top)", &teammates_left_out()])?;
     let tree = object_id(&repo.run(&["write-tree"])?)?;
     if tree == repo.tree_of(head)? {
         return Ok(None);

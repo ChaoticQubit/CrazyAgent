@@ -13162,3 +13162,278 @@ fn the_owners_accept_names_the_set_by_its_number_in_the_activity() {
         vec!["You accepted change set #1 (Agent 1: Add the fourth line, 1 file)".to_owned()]
     );
 }
+
+/// How long a landing race row runs: `CRAZYAGENT_LANDING_RACE_SECONDS` for a longer run at a
+/// red, else a few seconds. Output: the seconds.
+#[cfg(target_os = "macos")]
+fn race_seconds() -> u64 {
+    std::env::var("CRAZYAGENT_LANDING_RACE_SECONDS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(5)
+}
+
+/// The engine's git on the case's agent worktree, confined for one step. Inputs: the case and
+/// what the step may write. Output: the repository.
+#[cfg(target_os = "macos")]
+fn confined_agent(case: &Case, writes: git::Writes) -> git::Repo {
+    git::Repo::open(
+        &case.repo,
+        &case.workspace.git_dir,
+        Some(&case.workspace.worktree),
+    )
+    .unwrap()
+    .confined(writes)
+    .unwrap()
+}
+
+/// SECAUDIT unconfined-git-add-reads-through-raced-symlink, with no timing: a step on the work
+/// tree cannot read a file behind a link, while a plain file in the work tree still reads.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_git_step_cannot_read_a_file_behind_a_link() {
+    let case = Case::new();
+    let outside = case.home.join("marker");
+    write(&outside, "secret\n");
+    let worktree = &case.workspace.worktree;
+    std::os::unix::fs::symlink(&outside, worktree.join("link")).unwrap();
+    write(&worktree.join("plain"), "plain\n");
+    let repo = confined_agent(&case, git::Writes::Objects);
+    let hash = |path: &str| {
+        repo.exec(&["hash-object", "--", path], None, &[], 4096)
+            .unwrap()
+            .code
+    };
+    assert_eq!(hash("plain"), 0);
+    assert_ne!(hash("link"), 0, "a step read the file behind the link");
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree, with no timing: a step writes
+/// only what it names. Neither step reaches the owner's hooks or anywhere outside, a step
+/// filling the work tree writes no git metadata, and a step adding the work tree writes
+/// nothing in it. What each may write still works.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_git_step_writes_only_what_it_names_and_never_the_git_folder() {
+    use super::git::Writes::{Objects, WorkTree};
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let folder = case.repo.join(".git");
+    let private = case.workspace.git_dir.clone();
+    let outside = case.home.join("outside");
+    let checkout = |writes: git::Writes, into: &Path| {
+        let prefix = format!("--prefix={}/", into.display());
+        confined_agent(&case, writes)
+            .exec(&["checkout-index", "-a", "-f", &prefix], None, &[], 4096)
+            .unwrap()
+    };
+    for (writes, into) in [
+        (WorkTree, outside.clone()),
+        (WorkTree, folder.join("hooks")),
+        (WorkTree, folder.join("objects")),
+        (WorkTree, private),
+        (Objects, worktree.join("out")),
+        (Objects, outside),
+        (Objects, folder.join("hooks")),
+    ] {
+        checkout(writes, &into);
+        assert!(
+            std::fs::symlink_metadata(into.join("README")).is_err(),
+            "a step wrote in {}",
+            into.display()
+        );
+    }
+    assert_eq!(checkout(WorkTree, &worktree.join("ok")).code, 0);
+    assert!(worktree.join("ok/README").is_file());
+    assert_eq!(checkout(Objects, &folder.join("objects/ok")).code, 0);
+    assert!(folder.join("objects/ok/README").is_file());
+}
+
+/// SECAUDIT unconfined-git-add-reads-through-raced-symlink: a file an agent keeps swapping for
+/// a link while its turn ends leaves no blob of what the link points at.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_file_swapped_for_a_link_during_the_turn_end_leaves_no_blob_of_what_it_points_at() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let case = Case::new();
+    let marker = format!("{}\n", "S".repeat(63));
+    let secret = case.home.join("marker");
+    std::fs::write(&secret, &marker).unwrap();
+    let decoy = case.workspace.worktree.join("decoy.txt");
+    std::fs::write(&decoy, format!("{}\n", "D".repeat(63))).unwrap();
+    let side = case.home.join("swap");
+    std::fs::create_dir_all(&side).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(race_seconds());
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = std::thread::spawn({
+        let (stop, decoy, secret) = (stop.clone(), decoy.clone(), secret.clone());
+        move || {
+            let (plain, link) = (side.join("plain"), side.join("link"));
+            let mut round = 0u64;
+            while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+                std::fs::write(&plain, format!("{round:063}\n")).unwrap();
+                let _ = std::fs::rename(&plain, &decoy);
+                let _ = std::fs::remove_file(&link);
+                std::os::unix::fs::symlink(&secret, &link).unwrap();
+                let _ = std::fs::rename(&link, &decoy);
+                round += 1;
+            }
+        }
+    });
+    let mut turns = 0u32;
+    while turns < 200 && Instant::now() < deadline {
+        let turn = TurnEnd {
+            outcome: TurnOutcome::Succeeded,
+            turn: format!("turn-{turns}"),
+            prompt_line: "Probe".into(),
+        };
+        let _ = record_turn_end(&case.db, &case.workspace, &turn);
+        turns += 1;
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    assert!(turns > 0);
+    let listing = git_in(
+        &case.home,
+        &case.repo,
+        &["cat-file", "--batch-all-objects", "--batch-check"],
+    );
+    let found = listing
+        .lines()
+        .filter(|line| line.ends_with(" blob 64"))
+        .filter_map(|line| line.split(' ').next())
+        .any(|sha| git_in(&case.home, &case.repo, &["cat-file", "-p", sha]) == marker);
+    assert!(!found, "a blob holds the bytes behind the link");
+}
+
+/// One attempt of the read-tree race: a lead's worktree on its branch holding `x/keep.txt`
+/// from one landed set, and a waiting second set adding `x/planted.bin` with `known`.
+/// Input: the file's text. Output: the case, the lead and the waiting set.
+#[cfg(target_os = "macos")]
+fn read_tree_attempt(known: &str) -> (Case, Workspace, ChangeSetId) {
+    let case = Case::new();
+    let agents = case
+        .repo
+        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join("worktrees");
+    std::fs::create_dir_all(&agents).unwrap();
+    let worktree = agents.join("agent-2");
+    case.owner(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        worktree.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let lead = Workspace {
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-2".into(),
+            label: "Agent 2".into(),
+        },
+        worktree,
+        git_dir: case.repo.join(".git/worktrees/agent-2"),
+        ..case.workspace.clone()
+    };
+    assert_eq!(named(&case, &lead).unwrap(), "crazyagent/agent-2");
+    case.edit("x/keep.txt", "keep\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let landed = accept_into(
+        &case.db,
+        &case.home,
+        &id,
+        &case.view(&id).head,
+        None,
+        "crazyagent/agent-2",
+    )
+    .unwrap();
+    assert!(matches!(landed, AcceptOutcome::Landed { .. }));
+    case.edit("x/planted.bin", known);
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    (case, lead, second)
+}
+
+/// SECAUDIT unconfined-read-tree-u-in-agent-writable-worktree: a folder of a lead's worktree
+/// swapped for a link while its worker's set lands writes nothing outside the worktree, and
+/// the same landing with no swap still fills the worktree under the confined step.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_swapped_for_a_link_during_a_landing_writes_nothing_outside_the_worktree() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let known: String = (0..)
+        .map(|n: u32| format!("{n:08}\n"))
+        .take(466_034)
+        .collect();
+    let (case, lead, second) = read_tree_attempt(&known);
+    let landed = accept_into(
+        &case.db,
+        &case.home,
+        &second,
+        &case.view(&second).head,
+        None,
+        "crazyagent/agent-2",
+    )
+    .unwrap();
+    assert!(
+        matches!(landed, AcceptOutcome::Landed { .. })
+            && lead.worktree.join("x/planted.bin").is_file(),
+        "the landing with no swap did not fill the worktree"
+    );
+    let deadline = Instant::now() + Duration::from_secs(race_seconds());
+    let (mut tried, mut hits) = (0u32, 0u32);
+    while tried < 100 && Instant::now() < deadline {
+        let (case, lead, second) = read_tree_attempt(&known);
+        let outside = tempfile::tempdir().unwrap();
+        let go = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let x = lead.worktree.join("x");
+        let aside = lead.worktree.join("x.aside");
+        let swapper = std::thread::spawn({
+            let (go, done, x, aside) = (go.clone(), done.clone(), x.clone(), aside.clone());
+            let target = outside.path().to_path_buf();
+            move || {
+                while !go.load(Ordering::Relaxed) {
+                    if done.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::yield_now();
+                }
+                while !done.load(Ordering::Relaxed) {
+                    let _ = std::fs::rename(&x, &aside);
+                    let _ = std::os::unix::fs::symlink(&target, &x);
+                    let _ = std::fs::remove_file(&x);
+                    let _ = std::fs::rename(&aside, &x);
+                }
+            }
+        });
+        let head = case.view(&second).head;
+        let _ = owner::accept_to(
+            &case.db,
+            &case.home,
+            &second,
+            &head,
+            None,
+            Some("crazyagent/agent-2"),
+            owner::By::Named(crate::activity::ENGINE_ACTOR),
+            &|step| {
+                if step == owner::Step::Recorded {
+                    go.store(true, Ordering::Relaxed);
+                }
+                false
+            },
+        );
+        done.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        tried += 1;
+        if std::fs::read(outside.path().join("planted.bin"))
+            .is_ok_and(|bytes| bytes == known.as_bytes())
+        {
+            hits += 1;
+        }
+    }
+    assert!(tried > 0);
+    assert_eq!(hits, 0, "planted.bin was written outside the worktree");
+}
