@@ -10,7 +10,6 @@ import { entry } from "../new-project/wizard";
 import { TerminalPanel } from "../team";
 import { changeNote } from "../team/controls";
 import "../team/team-graph.css";
-import { readMasterInput } from "../../state";
 import { ConversationTab, MasterSettingsButton } from "./conversation";
 import { SessionsBar, SwitchDivider } from "./sessions";
 import { savedStale } from "./settings";
@@ -63,7 +62,7 @@ export type Live =
   | { kind: "starting" }
   | { kind: "not_ready" }
   | { kind: "refused"; code: string; copy: string }
-  | { kind: "stopped"; problem: string | null }
+  | { kind: "stopped"; problem: string | null; idle: boolean }
   | { kind: "paused" }
   | { kind: "running"; node: GraphNode | null };
 
@@ -88,6 +87,12 @@ export function teamPaused(team: Result<TeamStatus> | undefined, projectId: stri
 export function liveSwitch(team: Result<TeamStatus> | undefined, projectId: string): { on: boolean | null; problem: string | null; version: number } | undefined {
   if (team?.kind !== "ok" || team.value.project_id !== projectId) return undefined;
   return { on: team.value.live_master ?? null, problem: team.value.live_problem ?? null, version: team.value.settings_version ?? 0 };
+}
+
+/** Whether the team read says an idle stop ended the live master. Inputs: the read and the
+ * project. Output: the answer. */
+export function idleStopped(team: Result<TeamStatus> | undefined, projectId: string): boolean {
+  return team?.kind === "ok" && team.value.project_id === projectId && team.value.live_idle_stopped === true;
 }
 
 /** Whether opening the area turns the live master on now: only once a team read shows a
@@ -250,6 +255,10 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   }, [on, data.team.at]);
 
   useEffect(() => {
+    if (on === true) asked.current = true;
+  }, [on]);
+
+  useEffect(() => {
     if (on !== true) return;
     const id = data.id;
     let stopped = false;
@@ -272,7 +281,7 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   const shown: Live = live.kind === "not_ready" ? live
     : teamPaused(data.team.result, data.id) ? { kind: "paused" }
     : live.kind === "refused" ? live
-    : on === false ? { kind: "stopped", problem: engine?.problem ?? null }
+    : on === false ? { kind: "stopped", problem: engine?.problem ?? null, idle: idleStopped(data.team.result, data.id) }
     : live;
   return <LiveMasterView data={data} harness={harness} live={shown} onStart={() => start()} onSession={() => start(false)} sessions={sessions} openNote={openNote} />;
 }
@@ -342,16 +351,15 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
 /** The live master area in one state: one console whose head names the master, its state
  * and account, then New session and Sessions, which restart the live terminal on a fresh or
  * resumed conversation and start the live master when it is stopped, above the master's
- * terminal filling the rest, typed into as the owner's Master input setting says, under the
+ * terminal filling the rest, typed into as the owner's Terminal input setting says, under the
  * engine's line while that terminal waits to start, or a line while it starts, can't or is
- * stopped; a stopped team (Stop all) says so and offers
- * Start all. An engine that says the master has no terminal app
+ * stopped, with Start again, the start of coming back to the tab, after an idle stop; a
+ * stopped team (Stop all) says so and offers Start all. An engine that says the master has no terminal app
  * gets today's conversation instead. Inputs: the project data, the master harness id, the
  * state, the start action, the session check Start all sends once the team runs again, the
  * area's sessions when its owner already holds them and why the owner's Open opened no
  * session, if it did not. Output: the area. */
 export function LiveMasterView({ data, harness, live, onStart, onSession, sessions: held, openNote = null }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void>; onSession?: () => Promise<void>; sessions?: MasterSessions; openNote?: string | null }) {
-  const [input] = useState(readMasterInput);
   const [resuming, setResuming] = useState(false);
   const [resumeNote, setResumeNote] = useState("");
   const own = useMasterSessions(data.id, held === undefined);
@@ -392,6 +400,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
     </div>}
     {live.kind === "stopped" && <div className={`pj-note${live.problem ? " warn" : ""}`} role={live.problem ? "alert" : "status"}>
       <p>{displayText(live.problem ?? STOPPED)}</p>
+      {live.idle && <Button size="small" variant="primary" onClick={() => void onStart()}>Start again</Button>}
     </div>}
     {live.kind === "paused" && <div className="pj-note warn" role="status">
       <p>{PAUSED}</p>
@@ -405,6 +414,6 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
     </div>}
     {live.kind === "starting" && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Starting the master ({displayText(name(harness))})...</p>}
     {live.kind === "running" && (!live.node || waits !== null) && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(waits ?? WAITING)}</p>}
-    {live.kind === "running" && live.node && <TerminalPanel key={`${live.node.terminal ?? live.node.id}:${sessions.liveId ?? ""}`} node={live.node} harness={name} embedded input={input} follow />}
+    {live.kind === "running" && live.node && <TerminalPanel key={`${live.node.terminal ?? live.node.id}:${sessions.liveId ?? ""}`} node={live.node} harness={name} embedded follow />}
   </div>;
 }

@@ -31,11 +31,14 @@ const LISTING_BYTES_MAX: usize = 1 << 20;
 const VERSION_TIME: Duration = Duration::from_secs(30);
 const REGENERATE_TIME: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_millis(20);
+/// The most regenerations one repository runs at once; further sets go to Task 7's update.
+const RUNNING_PER_REPOSITORY_MAX: usize = 2;
 const ENV: &str = "/usr/bin/env";
 const SCRATCH_FOLDER: &str = "regenerate";
 
-/// The change sets a regeneration is rewriting now, by id: one at a time for each set.
-static RUNNING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// The change sets a regeneration is rewriting now, by id with their repository: one at a
+/// time for each set.
+static RUNNING: Mutex<BTreeMap<String, PathBuf>> = Mutex::new(BTreeMap::new());
 
 #[cfg(test)]
 /// Stand-in tools a landing test commits into its repository: the owner checkout maps to the
@@ -131,7 +134,7 @@ enum Regenerated {
 }
 
 /// Marks one set's regeneration as running until it is dropped, also when it panics.
-struct Running(String);
+pub(super) struct Running(String);
 
 impl Drop for Running {
     fn drop(&mut self) {
@@ -140,8 +143,23 @@ impl Drop for Running {
 }
 
 /// The ids of the sets whose regeneration runs now. Output: the locked set.
-fn running() -> MutexGuard<'static, BTreeSet<String>> {
+fn running() -> MutexGuard<'static, BTreeMap<String, PathBuf>> {
     RUNNING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Counts a stand-in regeneration of a repository as running until the guard drops, for the
+/// rows on the repository limit. Inputs: the repository and a unique id. Output: the guard.
+#[cfg(test)]
+pub(super) fn occupy(repository: &Path, id: &str) -> Running {
+    running().insert(id.to_owned(), repository.to_path_buf());
+    Running(id.to_owned())
+}
+
+/// Tells whether a set's regeneration still runs, for the rows that wait for its end. Input:
+/// the set. Output: the answer.
+#[cfg(test)]
+pub(super) fn is_running(id: &ChangeSetId) -> bool {
+    running().contains_key(id.as_str())
 }
 
 /// The engine runtime folder of the store, where regenerations keep their scratch. Input:
@@ -169,7 +187,8 @@ fn current(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 
 /// Starts rewriting a clash made of known lockfiles only off the caller's thread (OS-8), so
 /// a turn end never waits on a tool or holds the repository while one runs. One runs at a
-/// time for each set; a set already being rewritten counts as started. When it ends without
+/// time for each set and at most `RUNNING_PER_REPOSITORY_MAX` for a repository, past which
+/// none starts; a set already being rewritten counts as started. When it ends without
 /// landing, `after` gets the set and whether another regeneration may start: false after a
 /// refusal, which hands the clash to the agent, true after the set or main moved. Inputs:
 /// the store, the set, its clashing paths and what runs after. Output: whether one runs now.
@@ -190,8 +209,19 @@ pub(super) fn regenerate_later(
     let Some(runtime) = runtime_of(db) else {
         return Ok(false);
     };
-    if !running().insert(record.id.as_str().to_owned()) {
-        return Ok(true);
+    {
+        let mut running = running();
+        if running.contains_key(record.id.as_str()) {
+            return Ok(true);
+        }
+        let here = running
+            .values()
+            .filter(|repository| **repository == record.repository)
+            .count();
+        if here >= RUNNING_PER_REPOSITORY_MAX {
+            return Ok(false);
+        }
+        running.insert(record.id.as_str().to_owned(), record.repository.clone());
     }
     let guard = Running(record.id.as_str().to_owned());
     let (id, paths) = (record.id.clone(), paths.to_vec());
@@ -823,7 +853,7 @@ pub(super) fn sweep(db: &Connection) -> Result<usize, EngineError> {
     let Some(runtime) = runtime_of(db) else {
         return Ok(0);
     };
-    let busy = running().clone();
+    let busy: BTreeSet<String> = running().keys().cloned().collect();
     let mut removed = 0;
     for repository in crate::worktrees::known_repositories(db)? {
         let Ok(root) = repository.canonicalize() else {

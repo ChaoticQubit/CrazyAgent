@@ -111,8 +111,8 @@ const REASK_EMPTY: &str = "Your master got no reply text from your last turn. Re
 /// Bounds every team agent obeys. The task, session and sub-agent idle limits are the
 /// owner's team settings, read per project when a turn or an agent starts or an idle agent
 /// is checked, so none is set here. `output_bytes` caps the harness output of one process,
-/// `attempts_max` the tries per task, `master_idle_stop` how long an idle master is kept
-/// once no work is in flight and `rate_limit_pause` how long an account that hit its limit
+/// `attempts_max` the tries per task, `master_idle_stop` the bound for an idle master, which
+/// the project's choice scales, once no work is in flight and `rate_limit_pause` how long an account that hit its limit
 /// is skipped.
 #[derive(Debug, Clone, Copy)]
 pub struct TeamLimits {
@@ -517,6 +517,7 @@ struct Worker {
     restarting: bool,
     warm: bool,
     worked: bool,
+    ended_well: bool,
     managed: bool,
     tools: bool,
     team_tool: bool,
@@ -3634,13 +3635,20 @@ impl TeamRuntime {
     /// starts it again only once the owner turns it on, and says why in one team note and
     /// the master's problem line. Takes the project and the reason. Returns any SQLite failure.
     fn live_off(&mut self, project: &ProjectId, reason: &str) -> Result<(), EngineError> {
-        super::master::set_live(&self.connection, project, false)?;
-        self.live_starts.remove(project);
         let line = full_stop(format!(
             "{LIVE_STOPPED}: {reason}. Start it again from the master view"
         ));
-        if super::master::problem(&self.connection, project, Some(&line))? {
-            self.note(project, &line)?;
+        self.live_ended(project, &line)
+    }
+
+    /// Turns a project's live master off, so the runtime starts it again only once the owner
+    /// turns it on, and says why in one team note and the master's problem line. Takes the
+    /// project and the line. Returns any SQLite failure.
+    fn live_ended(&mut self, project: &ProjectId, line: &str) -> Result<(), EngineError> {
+        super::master::set_live(&self.connection, project, false)?;
+        self.live_starts.remove(project);
+        if super::master::problem(&self.connection, project, Some(line))? {
+            self.note(project, line)?;
         }
         Ok(())
     }
@@ -5003,7 +5011,13 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
-            if !delivery::intend(&self.connection, Busy::Task(task), agent, &prompt, None)? {
+            let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
+            let task_text = if waiting.is_empty() && prompt == super::master::WAKE_TASK {
+                super::master::WAKE_DELIVERED
+            } else {
+                prompt.as_str()
+            };
+            if !delivery::intend(&self.connection, Busy::Task(task), agent, task_text, None)? {
                 continue;
             }
             let handoff = if woken_fresh {
@@ -5023,12 +5037,6 @@ impl TeamRuntime {
             let layout = self
                 .agent_layout(&stored.project_id, agent)
                 .map_err(error)?;
-            let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
-            let task_text = if waiting.is_empty() && prompt == super::master::WAKE_TASK {
-                super::master::WAKE_DELIVERED
-            } else {
-                prompt.as_str()
-            };
             let mut prompt = sub_agent_prompt(
                 &stored.name,
                 &worktree.map_or(folder.clone(), |worktree| folder.join(worktree)),
@@ -5180,49 +5188,58 @@ impl TeamRuntime {
     /// with the owner's idle stop Off, every idle sub-agent. An agent past its session limit
     /// stops even when kept warm. A master is never idle while its project has work in
     /// flight, so its idle time counts from the moment the last of that work ended and its
-    /// session is ended at its next turn. Takes the project. Returns any SQLite failure.
+    /// session is ended at its next turn. A live master stops as idle only under a choice the
+    /// owner saved, once quiet, and its switch goes off so it stays stopped. Takes the project.
+    /// Returns any SQLite failure.
     fn reap_idle(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let warm = super::keep_warm(&self.connection, project)?;
         let floor = usize::from(stored.team.min_agents.saturating_sub(1));
         let mut live_subs = self.live(project, AgentRole::Sub, None);
+        let chosen = super::master_idle_stop(&self.connection, project)?;
+        let stops_live = chosen.is_some_and(|choice| choice != super::MasterIdleStop::Off);
         let ids: Vec<i64> = self
             .workers
             .iter()
             .filter(|(_, w)| {
-                &w.project == project
-                    && w.busy.is_none()
-                    && w.own_turn.is_none()
-                    && !w.stopping
-                    && !w.live
+                &w.project == project && w.busy.is_none() && w.own_turn.is_none() && !w.stopping
             })
             .map(|(id, _)| *id)
             .collect();
         if ids.is_empty() {
             return Ok(());
         }
-        let masters = ids
-            .iter()
-            .any(|id| self.workers[id].role == AgentRole::Master);
+        let masters = ids.iter().any(|id| {
+            let worker = &self.workers[id];
+            worker.role == AgentRole::Master && (!worker.live || stops_live)
+        });
         let in_flight = masters && self.work_in_flight(project)?;
         let limits = super::time_limits(&self.connection, project)?;
         for id in ids {
+            if self.workers[&id].live && !self.live_master_idles(id, project, stops_live) {
+                continue;
+            }
             let waits = self.workers[&id].kept_session && self.lead_waits(id)?;
             let worker = self.workers.get_mut(&id).expect("worker exists");
             if worker.role == AgentRole::Master && in_flight {
                 worker.idle_since = Instant::now();
                 continue;
             }
-            let ended = limits
-                .session_time()
-                .is_some_and(|session| worker.ran() >= session);
+            let ended = !worker.live
+                && limits
+                    .session_time()
+                    .is_some_and(|session| worker.ran() >= session);
             if !ended && waits {
                 worker.idle_since = Instant::now();
                 continue;
             }
+            let choice = super::MasterIdleStop::effective(chosen, worker.live);
             if !ended {
                 let limit = match worker.role {
-                    AgentRole::Master => self.limits.master_idle_stop,
+                    AgentRole::Master => match choice.after(self.limits.master_idle_stop) {
+                        Some(limit) => limit,
+                        None => continue,
+                    },
                     AgentRole::Sub => match limits.idle_time() {
                         Some(limit) => limit,
                         None => continue,
@@ -5238,10 +5255,33 @@ impl TeamRuntime {
             if worker.role == AgentRole::Sub {
                 live_subs -= 1;
             }
+            let live = worker.live;
             worker.stopping = true;
             let _ = worker.orders.send(Order::Stop);
+            if live {
+                self.live_ended(project, &super::master::idle_stopped_line(choice.label()))?;
+            }
         }
         Ok(())
+    }
+
+    /// Tells whether a live master counts as idle for the owner's idle stop: a saved choice
+    /// can stop one, no turn is open and it is quiet. Otherwise its idle time starts over, so
+    /// a choice saved later counts from then. Takes the agent, the project and whether the
+    /// choice can stop a live master. Returns the answer.
+    fn live_master_idles(&mut self, id: i64, project: &ProjectId, stops_live: bool) -> bool {
+        let quiet = stops_live
+            && self.workers[&id].turn_started.is_none()
+            && super::master::quiet(
+                &self.connection,
+                self.agents.as_deref().map(Agents::typing),
+                project,
+                now_ms(),
+            );
+        if !quiet {
+            self.workers.get_mut(&id).expect("worker exists").idle_since = Instant::now();
+        }
+        quiet
     }
 
     /// Makes room at a full limit for a task that may not reuse an idle agent: stops one idle
@@ -5941,6 +5981,7 @@ impl TeamRuntime {
                 restarting: false,
                 warm: false,
                 worked: false,
+                ended_well: false,
                 managed,
                 tools: seat.tools,
                 team_tool,
@@ -7611,6 +7652,7 @@ impl TeamRuntime {
                 }
                 worker.idle_since = Instant::now();
                 worker.worked = true;
+                worker.ended_well = end == TurnEnd::Success;
                 let connection = worker.connection.clone();
                 let project = worker.project.clone();
                 let held = worker.held;
@@ -7669,6 +7711,7 @@ impl TeamRuntime {
             Report::Turn { end: None, .. } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 worker.turn_started = Some(now_ms());
+                worker.ended_well = false;
                 if let Some(hosted) = &worker.hosted {
                     hosted.set_busy(true);
                 }
@@ -7692,6 +7735,7 @@ impl TeamRuntime {
                 let started = worker.turn_started.take();
                 worker.idle_since = Instant::now();
                 worker.worked = true;
+                worker.ended_well = end == TurnEnd::Success;
                 if let Some(hosted) = &worker.hosted {
                     hosted.text(&text);
                     hosted.set_busy(false);
@@ -7742,6 +7786,7 @@ impl TeamRuntime {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 assert!(worker.kept_session);
                 worker.own_turn = Some(now_ms());
+                worker.ended_well = false;
                 worker.idle_since = Instant::now();
                 let idle = worker.busy.is_none();
                 if let Some(hosted) = worker.hosted.as_ref().filter(|_| idle) {
@@ -7761,6 +7806,7 @@ impl TeamRuntime {
                 worker.own_rules = None;
                 worker.idle_since = Instant::now();
                 worker.worked = true;
+                worker.ended_well = end == TurnEnd::Success;
                 let idle = worker.busy.is_none();
                 if let Some(hosted) = worker.hosted.as_ref().filter(|_| idle) {
                     hosted.text(&text);
@@ -7844,7 +7890,10 @@ impl TeamRuntime {
                         TurnEnd::Closed,
                     )?;
                 }
-                let status = if problem.is_some() && !worker.stopping {
+                let outlived = worker.busy.is_none()
+                    && worker.ended_well
+                    && problem.as_deref().is_some_and(only_left_running);
+                let status = if problem.is_some() && !worker.stopping && !outlived {
                     AgentStatus::Failed
                 } else {
                     AgentStatus::Stopped
@@ -8874,7 +8923,18 @@ fn live_serve(
         drop(held);
         return None;
     }
-    settle_stop(session.stop(), held).or(problem)
+    ended_with(settle_stop(session.stop(), held), problem)
+}
+
+/// What a harness's end reports: what its stop left to say and the problem that ended it,
+/// both when there are both. The problem comes last because the agent's status reads the
+/// last code, so a command left running never hides that the process closed.
+/// Inputs: the stop's report and the ending problem. Output: the report, if either.
+fn ended_with(stopped: Option<String>, problem: Option<String>) -> Option<String> {
+    match (stopped, problem) {
+        (Some(stopped), Some(problem)) => Some(format!("{stopped} {problem}")),
+        (stopped, problem) => stopped.or(problem),
+    }
 }
 
 /// The account's credential copy and lease an agent's harness holds while it runs.
@@ -9376,7 +9436,7 @@ fn serve(
         let _ = session.interrupt();
         session.leave();
     } else {
-        return settle_stop(session.stop(), held).or(problem);
+        return ended_with(settle_stop(session.stop(), held), problem);
     }
     drop(held);
     problem
@@ -9490,9 +9550,10 @@ fn per_turn(
                 end,
                 TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
             );
-        let closed = stopped.or_else(|| {
-            (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()))
-        });
+        let closed = ended_with(
+            stopped,
+            (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref())),
+        );
         if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
             return closed;
         }
@@ -9815,7 +9876,7 @@ const RESUME_REFUSED: &str = "launch_resume_unavailable";
 const LIVE_STARTS_MAX: usize = 3;
 const GIT_POINTER_BYTES_MAX: u64 = 4096;
 const LIVE_STARTS_WINDOW: Duration = Duration::from_secs(10 * 60);
-const LIVE_STOPPED: &str = "The live master was turned off";
+const LIVE_STOPPED: &str = super::master::LIVE_STOPPED;
 const WARM_STOPPED: &str = "Keeping sub-agents warm was turned off because a warm sub-agent stopped before it did any work";
 
 /// Says which of the owner's time limits cut a turn and where to change it. Inputs: the
@@ -9878,6 +9939,16 @@ fn with_code(sentence: &str, cause: Option<&str>) -> String {
         }
         None => sentence.to_owned(),
     }
+}
+
+/// Whether a closing problem says only that commands an agent started were still running
+/// when it ended, which says nothing against its finished work. Input: the problem, worded
+/// by [`with_code`]. Output: true when its code is `LEFT` or `SANDBOX_LEFT`.
+fn only_left_running(problem: &str) -> bool {
+    use crate::harnesses::leftovers::{LEFT, SANDBOX_LEFT};
+    [LEFT, SANDBOX_LEFT]
+        .iter()
+        .any(|code| problem.ends_with(&format!(" ({code})")))
 }
 
 /// Ends an owner line with one full stop, leaving a line that already ends with a sentence

@@ -87,8 +87,9 @@ const MAILBOX_SCAN_MAX: usize = 256;
 const AGENT_NAME_BYTES_MAX: usize = 64;
 const CALL_SUFFIX: &str = ".call";
 const TAKEN_SUFFIX: &str = ".taken";
-const REPLY_SUFFIX: &str = ".reply";
+pub(crate) const REPLY_SUFFIX: &str = ".reply";
 const PART_SUFFIX: &str = ".part";
+pub(crate) const ANSWER_PART_SUFFIX: &str = ".reply-part";
 const PANE_KEY: &str = "pane";
 const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 const REPLY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
@@ -598,7 +599,7 @@ fn spec(name: &str) -> Value {
             }, "required": ["work", "version", "action"], "additionalProperties": false}),
         ),
         FINISH_WORK_TOOL => (
-            "Finish a unit of work with evidence, such as the commands you ran and what they showed. review_ready asks your lead or the master to check it; complete and closed end it and release its claims. A lead cannot complete its work while a teammate's or sub-agent's branch is not merged into its own; this names them.",
+            "Finish a unit of work with evidence, such as the commands you ran and what they showed. review_ready asks your lead or the master to check it; complete and closed end it and keep its claims until the change set carrying the work lands, or its turn ends with nothing to land. A lead cannot complete its work while a teammate's or sub-agent's branch is not merged into its own; this names them.",
             json!({"type": "object", "properties": {
                 "work": work,
                 "version": version,
@@ -1557,8 +1558,9 @@ pub fn call_digest(bytes: &[u8]) -> [u8; CALL_DIGEST_BYTES] {
     sha2::Sha256::digest(bytes).into()
 }
 
-/// Answers one call in the mailbox: the answer is written beside it under a part name and
-/// renamed into place, so the server never reads half an answer. Takes the mailbox, the
+/// Answers one call in the mailbox: the answer is written beside it under a part name no
+/// agent of a shared mailbox can make, and renamed into place, so the server never reads
+/// half an answer. Takes the mailbox, the
 /// call id `take_calls` returned, the text, bounded to `REPLY_TEXT_MAX`, and whether it is
 /// an error. Returns the I/O failure; a planted part file, or a link at the mailbox or the
 /// master's temporary folder, makes the answer fail, never land elsewhere.
@@ -1571,7 +1573,7 @@ pub fn answer_call(mailbox: &Path, id: &str, text: &str, error: bool) -> std::io
     let bytes = serde_json::to_vec(&reply).map_err(std::io::Error::other)?;
     assert!(bytes.len() as u64 <= REPLY_BYTES_MAX);
     let mailbox = Mailbox::open_for_engine(mailbox)?;
-    let part = format!("{id}{PART_SUFFIX}");
+    let part = format!("{id}{ANSWER_PART_SUFFIX}");
     let written = mailbox
         .create(&part)
         .and_then(|mut file| file.write_all(&bytes));

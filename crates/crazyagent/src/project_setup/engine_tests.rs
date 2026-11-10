@@ -1533,6 +1533,7 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             INSERT INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
             VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');
             INSERT INTO team_owner_turns(message,project) VALUES (1,'setup-pooled');
+            INSERT INTO team_master_idle_stop(project,choice) VALUES ('setup-pooled','off');
             INSERT INTO team_events(project,agent,task,kind,text,state,created_ms)
             VALUES ('setup-pooled',1,NULL,'question','Which theme?','delivered',0);
             INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms)
@@ -1607,6 +1608,7 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             "the words kept for its agents' timelines",
         ),
         ("team_message_settings", "its Messages settings"),
+        ("team_master_idle_stop", "its master idle stop choice"),
     ] {
         assert_eq!(
             engine.rows(&format!(

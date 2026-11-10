@@ -15,7 +15,7 @@ import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, changesLine, de
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Button, Drawer, Menu, type Tone } from "../../ui";
-import { OnSwitchSetting, ReaskSetting, SettingGroup, SettingRow, type SettingGroupInfo } from "../team/controls";
+import { MasterIdleSetting, OnSwitchSetting, ReaskSetting, SettingGroup, SettingRow, type SettingGroupInfo } from "../team/controls";
 import { DeliverySetting, QuestionsSetting, coordination } from "../team/coordination";
 import { AccountSetting, MasterHarnessSetting, useTeam } from "../team/setup-rows";
 import { ApplySwitch } from "./settings";
@@ -314,7 +314,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
 
 const MASTER_GROUPS: readonly SettingGroupInfo[] = [
   { id: "master", title: "Master", icon: "brain", rows: ["Harness", "Account"] },
-  { id: "conversation", title: "Conversation", icon: "message-square", rows: ["On master harness switch", "Apply a master harness change"] },
+  { id: "conversation", title: "Conversation", icon: "message-square", rows: ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"] },
   { id: "messages", title: "Messages", icon: "send", rows: ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"] },
   { id: "access", title: "Access", icon: "shield-check", rows: ["Full access"] },
 ];
@@ -344,6 +344,7 @@ export function MasterSettings({ data, onLeave = () => {} }: { data: ProjectData
     </SettingGroup>
     <SettingGroup group={talk} prefix={prefix} level={3}>
       <OnSwitchSetting projectId={data.id} status={status} reload={data.reloadTeam} />
+      <MasterIdleSetting projectId={data.id} status={status} reload={data.reloadTeam} />
       <SettingRow label="Apply a master harness change"><ApplySwitch data={data} /></SettingRow>
     </SettingGroup>
     <SettingGroup group={messages} prefix={prefix} level={3}>

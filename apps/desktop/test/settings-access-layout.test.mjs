@@ -328,12 +328,12 @@ test("Profile then Appearance, each field on its own line", async () => {
   const sections = await onProfile({}, read);
   assert.deepEqual(sections.map((section) => section.heading), ["Profile", "Appearance"]);
   assert.deepEqual(sections[0].rows.map((row) => row.label), ["Name", "Role", "Short bio", "Preferred stack", "Replies", "Before acting"]);
-  assert.deepEqual(sections[1].rows.map((row) => row.label), ["Theme", "Master input"]);
+  assert.deepEqual(sections[1].rows.map((row) => row.label), ["Theme", "Terminal input"]);
   const by = Object.fromEntries(sections.flatMap((section) => section.rows).map((row) => [row.label, row]));
-  for (const label of ["Name", "Role", "Replies", "Before acting", "Theme", "Master input"]) assert.ok(by[label].controlLeft > by[label].labelRight, `${label} ${JSON.stringify(by[label])}`);
+  for (const label of ["Name", "Role", "Replies", "Before acting", "Theme", "Terminal input"]) assert.ok(by[label].controlLeft > by[label].labelRight, `${label} ${JSON.stringify(by[label])}`);
   for (const label of ["Short bio", "Preferred stack"]) assert.ok(by[label].controlLeft < by[label].labelRight, `${label} stacks ${JSON.stringify(by[label])}`);
   assert.equal(by.Theme.help, "System follows your Mac. This choice is kept in this app only.");
-  assert.match(by["Master input"].help, /Where you type to a live master/);
+  assert.match(by["Terminal input"].help, /Where you type to the master and every agent, on every screen/);
 });
 
 test("each field has its one label, the wide fields fill their line, and the helpers stay linked", async () => {
@@ -387,6 +387,23 @@ test("a save the engine refuses says so inside the section", async () => {
     assert.match((await alert(page)).words, /Couldn't save your profile\./);
     assert.equal(await count(page, '.set-group [role="alert"]'), 1);
   });
+});
+
+test("Terminal input offers its three choices and starts on Terminal only", async () => {
+  const seen = await onProfile({}, (page) => page.evaluate(`[...document.querySelectorAll('[role=radiogroup][aria-label="Terminal input"] button')].map((button) => [button.textContent.trim(), button.getAttribute("aria-checked")])`));
+  assert.deepEqual(seen, [["Terminal only", "true"], ["Message box only", "false"], ["Both", "false"]]);
+});
+
+test("choosing Both saves it under the Terminal input key alone and it reads back when Profile opens again", async () => {
+  const group = '[role=radiogroup][aria-label="Terminal input"]';
+  const seen = await onProfile({}, async (page) => {
+    await page.evaluate(`Object.defineProperty(window, "localStorage", { configurable: true, value: (() => { const kept = new Map(); window.keptInput = kept; return { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) }; })() }); true`);
+    await press(page, `${group} button`, "Both");
+    const saved = await page.evaluate("[...window.keptInput.entries()]");
+    await page.evaluate(`Fixture.mount(${JSON.stringify({ tab: "profile" })}, "light")`);
+    return { saved, chosen: await page.evaluate(`[...document.querySelectorAll('${group} button[aria-checked="true"]')].map((button) => button.textContent.trim())`) };
+  });
+  assert.deepEqual(seen, { saved: [["crazyagent.terminal-input", "both"]], chosen: ["Both"] });
 });
 
 test("Theme changes the app's look from its line", async () => {

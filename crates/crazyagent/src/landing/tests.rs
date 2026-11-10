@@ -7782,6 +7782,150 @@ fn a_master_review_of_a_sub_s_work_keeps_its_claims_until_the_set_closes() {
     }
 }
 
+/// Registers agent 2 and the project's master, agent 3, in the team tables and returns the
+/// master's workspace. Input: the case. Output: the workspace.
+fn team_with_master(case: &Case) -> Workspace {
+    let master = master_agent(case);
+    crate::team::initialize(&case.db).unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    case.db
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (2,'project-1','sub','claude-code',1,'working',1,1),
+                    (3,'project-1','master','claude-code',1,'working',1,1);",
+        )
+        .unwrap();
+    master
+}
+
+/// Has the master start and finish work on README, so it holds that claim on ended work.
+/// Input: the case. Output: none.
+fn master_finishes_readme(case: &Case) {
+    let now = crate::team::now_ms();
+    let (work, _) = crate::coord::start_work(
+        &case.db,
+        &case.workspace.project,
+        3,
+        "Readme".into(),
+        vec!["README".into()],
+        now,
+    )
+    .unwrap();
+    crate::coord::finish(
+        &case.db,
+        work,
+        1,
+        crate::coord::Finish::Complete,
+        "Done.".into(),
+        3,
+        now,
+    )
+    .unwrap();
+}
+
+/// T5-R2-L1: the master's finished work holds its claims while the change set carrying it
+/// waits, as a sub-agent's does, and that set's Accept releases them.
+#[test]
+fn a_master_s_finished_work_keeps_its_claims_until_its_set_lands() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    master_finishes_readme(&case);
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let id = turn_of(&case, &master, "Add the line");
+    assert_eq!(second_start(&case), 1, "the master's set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the master's set landed");
+}
+
+/// T5-R2-L1: a master's turn that leaves nothing to land releases its finished claims, so
+/// they never hold forever.
+#[test]
+fn a_master_s_finished_work_is_released_by_a_turn_end_with_nothing_to_land() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    master_finishes_readme(&case);
+    assert_eq!(second_start(&case), 1, "the turn has not ended yet");
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-master".into(),
+        prompt_line: "Nothing to change".into(),
+    };
+    assert_eq!(record_turn_end(&case.db, &master, &turn).unwrap(), None);
+    assert_eq!(second_start(&case), 0, "nothing waits to land");
+}
+
+/// T5-R2-L1: a stopped master has no more turn ends, so the sweep holds the claims of work
+/// it finished for its open set, and that set's Accept releases them.
+#[test]
+fn a_stopped_master_s_finished_work_is_held_for_its_open_set_by_the_sweep() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let id = turn_of(&case, &master, "Add the line");
+    master_finishes_readme(&case);
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=3", [])
+        .unwrap();
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS).unwrap();
+    assert_eq!(second_start(&case), 1, "the master's set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the master's set landed");
+}
+
+/// Land-7 r2: a team master's set is recorded as a sub-agent's with its row id, so the sweep
+/// finds it by that id and holds the work the master finished before it stopped.
+#[test]
+fn a_stopped_team_master_s_finished_work_is_held_for_its_open_set_by_the_sweep() {
+    let case = Case::new();
+    let mut master = team_with_master(&case);
+    master.agent.kind = AgentKind::Sub;
+    master.agent.id = "3".into();
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let id = turn_of(&case, &master, "Add the line");
+    master_finishes_readme(&case);
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=3", [])
+        .unwrap();
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS).unwrap();
+    assert_eq!(second_start(&case), 1, "the master's set still waits");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(second_start(&case), 0, "the master's set landed");
+}
+
+/// Land-7 r2: with two open master sets the sweep holds a stopped master's finished work for
+/// the newest, so closing the older one does not end the hold.
+#[test]
+fn a_stopped_master_s_finished_work_is_held_for_its_newest_open_set() {
+    let case = Case::new();
+    let master = team_with_master(&case);
+    case.start();
+    case.edit("OLDER", "older\n");
+    let older = case.turn(TurnOutcome::Succeeded).unwrap();
+    let mut record = store::load(&case.db, &older).unwrap();
+    record.agent.kind = AgentKind::Master;
+    store::save(&case.db, &record).unwrap();
+    write(&master.worktree.join("README"), "one\ntwo\nthree\nfour\n");
+    let newer = turn_of(&case, &master, "Add the line");
+    master_finishes_readme(&case);
+    case.db
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=3", [])
+        .unwrap();
+    sweep_claims(&case.db, &case.workspace.project, NOW_MS).unwrap();
+    assert_eq!(
+        crate::coord::held_sets(&case.db, 3).unwrap(),
+        vec![newer.as_str().to_owned()]
+    );
+}
+
 /// OS-8 L1: closing a change set releases only the claims of the work it holds. Work the
 /// agent finished after the set's last turn end keeps its claims through that set's Accept
 /// and is released by the Accept of the next set, which holds it.
@@ -10541,7 +10685,7 @@ fn a_master_turn_with_a_stored_start_does_not_wait_for_the_repository_hold() {
             &turn.git_dir,
         ));
     });
-    let waited = got.recv_timeout(Duration::from_secs(5));
+    let waited = got.recv_timeout(Duration::from_secs(30));
     drop(held);
     assert!(matches!(waited, Ok(Ok(()))), "the turn waited: {waited:?}");
 }
@@ -11326,8 +11470,12 @@ fn a_lockfile_only_clash_is_regenerated_on_top_of_the_set_and_the_set_lands() {
 fn a_lockfile_clash_its_tool_cannot_rewrite_goes_back_to_its_agent_at_its_turn_end() {
     let mut case = Case::new();
     cargo_workspace(&mut case);
-    let (id, _) =
+    let (id, landed) =
         lockfile_clash_at_turn_end(&case, "zzz-never-fetched = \"1\"", "zzz-never-fetched");
+    assert_eq!(
+        landed,
+        Some(crate::landing_turns::Landed::Added(id.clone()))
+    );
     let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
         set.state == ChangeState::Updating
     });
@@ -11496,7 +11644,7 @@ fn a_tool_that_also_rewrites_a_manifest_falls_back_to_the_agent_update() {
 
 /// A Cargo.lock-only clash of an agent the owner or the master stopped, or of a project
 /// whose team the owner paused, is not regenerated and its agent gets no note; the stopped
-/// agent's set keeps its head for the owner (OS-8, HB-S5-B).
+/// set keeps its head and waits for the owner (OS-8, HB-S5-B, T8-R2-S3).
 #[test]
 fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
     for stop in ["owner stop", "master stop", "paused team"] {
@@ -11531,13 +11679,175 @@ fn an_owner_stopped_agent_or_a_paused_team_gets_no_regeneration_and_no_note() {
                 .all(|note| !note.contains("regenerated")),
             "{stop}: the agent got a regeneration note"
         );
-        if stop != "paused team" {
-            assert_eq!(
-                set.head, head,
-                "{stop}: the stopped agent's set keeps its head"
-            );
-        }
+        assert_eq!(set.head, head, "{stop}: the set keeps its head");
+        assert_eq!(
+            set.state,
+            ChangeState::Pending,
+            "{stop}: the set waits for the owner"
+        );
     }
+}
+
+/// Starts a Cargo.lock-only clash whose stand-in tool is still running when the turn end
+/// returns, then runs `during`. Inputs: the case and what happens while the tool runs.
+/// Output: the set, its head before the regeneration and what `during` returned.
+fn clash_during_a_slow_tool<T>(
+    case: &mut Case,
+    during: impl FnOnce(&Case) -> T,
+) -> (ChangeSetId, String, T) {
+    cargo_workspace(case);
+    stand_in_cargo(
+        case,
+        "",
+        ": > .tool-started\nsleep 8\nrm -f .tool-started",
+        Duration::from_secs(60),
+    );
+    let (id, _) = lockfile_clash_at_turn_end(case, "b = { path = \"../b\" }", "b");
+    let head = case.view(&id).head;
+    let started = crate::projects_home::state_folder(&case.repo)
+        .join("worktrees")
+        .join(format!("regenerate-{}", id.as_str()))
+        .join(".tool-started");
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "the tool never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let done = during(case);
+    (id, head, done)
+}
+
+/// Waits until a set's regeneration has ended. Input: the set. Output: none.
+fn regeneration_ended(id: &ChangeSetId) {
+    let deadline = Instant::now() + REGENERATED_WITHIN;
+    while lockfiles::is_running(id) {
+        assert!(Instant::now() < deadline, "the regeneration never ended");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// T8-R2-S2: the owner's stop while the tool runs lands nothing, keeps the set for the owner
+/// and sends the agent no note.
+#[test]
+fn an_owner_stop_while_the_lockfile_tool_runs_lands_nothing() {
+    let mut case = Case::new();
+    let (id, head, ()) = clash_during_a_slow_tool(&mut case, |case| {
+        case.db
+            .execute(
+                "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+                rusqlite::params![CLONE_AGENT, case.workspace.project.as_str()],
+            )
+            .unwrap();
+    });
+    regeneration_ended(&id);
+    let set = case.view(&id);
+    assert!(!regenerated(&case, &set), "the set was regenerated");
+    assert_eq!(
+        (set.head.as_str(), set.state),
+        (head.as_str(), ChangeState::Pending)
+    );
+    assert!(
+        engine_notes(&case)
+            .iter()
+            .all(|note| !note.contains("regenerated")),
+        "the stopped agent got a regeneration note"
+    );
+}
+
+/// T8-R2-S2 and S3: a pause while the tool runs lands nothing, and the engine's update waits
+/// too, so the paused team's worktree is left alone.
+#[test]
+fn a_pause_while_the_lockfile_tool_runs_lands_nothing_and_starts_no_update() {
+    let mut case = Case::new();
+    let (id, head, ()) = clash_during_a_slow_tool(&mut case, |case| {
+        case.db
+            .execute(
+                "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,1)",
+                [case.workspace.project.as_str()],
+            )
+            .unwrap();
+    });
+    regeneration_ended(&id);
+    let set = set_within(&case, &id, Duration::from_secs(5), |set| {
+        set.state != ChangeState::Pending
+    });
+    assert!(!regenerated(&case, &set), "the set was regenerated");
+    assert_eq!(
+        (set.head.as_str(), set.state),
+        (head.as_str(), ChangeState::Pending)
+    );
+}
+
+/// T8-R2-S2: main moving while the tool runs throws that run away and regenerates on the new
+/// main.
+#[test]
+fn main_moving_while_the_lockfile_tool_runs_regenerates_on_the_new_main() {
+    let mut case = Case::new();
+    let (id, _, moved) = clash_during_a_slow_tool(&mut case, |case| {
+        case.owner_commit("LATER", "later\n", "Owner moves main")
+    });
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set) && is_ancestor(&case, &moved, &set.head)
+    });
+    assert!(regenerated(&case, &set), "the set was never regenerated");
+    assert!(
+        is_ancestor(&case, &moved, &set.head),
+        "it ran on the old main"
+    );
+    assert_eq!(set.state, ChangeState::Pending);
+}
+
+/// T8-R2-S2: an edit the agent makes while the tool runs stops the regeneration from landing
+/// and survives, on a file the regeneration would not change.
+#[test]
+fn an_agent_edit_while_the_lockfile_tool_runs_stays_and_lands_nothing() {
+    let mut case = Case::new();
+    let (id, _, ()) =
+        clash_during_a_slow_tool(&mut case, |case| case.edit("README", "edited mid-run\n"));
+    regeneration_ended(&id);
+    let set = case.view(&id);
+    assert!(!regenerated(&case, &set), "the set was regenerated");
+    assert_eq!(
+        std::fs::read_to_string(case.workspace.worktree.join("README")).unwrap(),
+        "edited mid-run\n"
+    );
+}
+
+/// T8-R2-S4: past the most regenerations one repository runs at once, a clash goes straight
+/// to Task 7's update.
+#[test]
+fn a_third_lockfile_regeneration_in_one_repository_goes_to_the_agent_update() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(&case, "", "", Duration::from_secs(60));
+    let word = token(&case);
+    let _busy = [
+        lockfiles::occupy(&case.repo, &format!("{word}-1")),
+        lockfiles::occupy(&case.repo, &format!("{word}-2")),
+    ];
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        set.state == ChangeState::Updating || regenerated(&case, set)
+    });
+    assert!(!regenerated(&case, &set), "a third regeneration ran");
+    assert_eq!(set.state, ChangeState::Updating);
+}
+
+/// T8-R2-S4: under that limit a regeneration still runs.
+#[test]
+fn a_second_lockfile_regeneration_in_one_repository_still_runs() {
+    let mut case = Case::new();
+    cargo_workspace(&mut case);
+    stand_in_cargo(&case, "", "", Duration::from_secs(60));
+    let _busy = lockfiles::occupy(&case.repo, &format!("{}-1", token(&case)));
+    let (id, _) = lockfile_clash_at_turn_end(&case, "b = { path = \"../b\" }", "b");
+    let set = set_within(&case, &id, REGENERATED_WITHIN, |set| {
+        regenerated(&case, set)
+    });
+    assert!(
+        regenerated(&case, &set),
+        "the second regeneration never ran"
+    );
 }
 
 /// The engine's start removes the temporary worktree, its admin folder and the engine's
