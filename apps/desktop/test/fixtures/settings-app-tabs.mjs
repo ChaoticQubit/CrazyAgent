@@ -53,6 +53,8 @@ function answer(scene, command, args) {
     case "desktop_folder_size": return { bytes: 3 * 1024 ** 3 };
     case "desktop_sandbox_settings": return read(scene.sandbox, command, { linux_sockets: scene.stored ?? "tcp_only" });
     case "desktop_set_sandbox_settings": throw FAILURE;
+    case "desktop_cleanup_settings": return read(scene.finished, command, { mode: "after_days", days: 1 });
+    case "desktop_set_cleanup_settings": throw FAILURE;
     case "desktop_team_events": return read(scene.events, command, { rule: null, rule_version: 0, effective: SHIPPED, notifications: scene.events === "none" ? [] : NOTES, unseen: 3, projects: [] });
     case "desktop_system_notifications": return "available";
     case "desktop_update_settings": return read(scene.updates, command, { current_version: "0.2.0", channel: scene.channel ?? "stable" });

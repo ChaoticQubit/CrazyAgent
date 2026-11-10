@@ -1274,9 +1274,7 @@ fn accept_held(
         Target::Ref => {}
         Target::Agent(agent) => {
             let teammates = format!("/{}/", crate::agent_git::TEAMMATES_FOLDER);
-            if agent.head()? != tip
-                || !flow::holds_only_except(&agent.repo, &tip, Some(&teammates))?
-            {
+            if agent.head()? != tip || !flow::holds_only_except(&agent.repo, &tip, &[&teammates])? {
                 return Err(failure("changes_agent_busy"));
             }
         }

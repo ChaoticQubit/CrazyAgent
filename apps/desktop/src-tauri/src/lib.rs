@@ -22,6 +22,7 @@ use bridge::{
 };
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::agents::{AccountUse, AgentView};
+use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::coord::tool_switches::Switch;
@@ -2616,6 +2617,29 @@ async fn desktop_set_sandbox_settings(
 }
 
 #[tauri::command]
+async fn desktop_cleanup_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<CleanupSettings, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.cleanup_settings().await
+}
+
+#[tauri::command]
+async fn desktop_set_cleanup_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: CleanupSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_cleanup_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_pool_summaries(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4243,6 +4267,8 @@ native_commands! {
     desktop_save_owner_profile,
     desktop_sandbox_settings,
     desktop_set_sandbox_settings,
+    desktop_cleanup_settings,
+    desktop_set_cleanup_settings,
     desktop_pool_summaries,
     desktop_account_schedule,
     desktop_account_ranking,

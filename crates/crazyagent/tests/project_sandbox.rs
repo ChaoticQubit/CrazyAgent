@@ -806,6 +806,90 @@ fn an_agent_cannot_move_or_redirect_the_git_metadata_the_owner_git_reads() {
     assert!(!root_commit.status.success());
 }
 
+/// One different-case rename: its name, the script that runs it and the path it must leave.
+type CaseRename = (&'static str, &'static str, fn(&Case) -> PathBuf);
+
+/// DEC-123 rv-secreview L2: on the case-insensitive disk a name may be typed in any letter
+/// case, so each move deny on the project, its worktrees folders, a checkout and a checkout's
+/// `.git` file holds whatever case a rename uses, and a different-case rename never carries
+/// one aside for a link to take its place before the engine removes it. A plain folder's
+/// different-case rename still goes, so each refusal is the sandbox's.
+#[test]
+fn a_different_case_rename_never_moves_the_worktrees_folders_or_a_checkout() {
+    let attacks: [CaseRename; 9] = [
+        ("WORKTREES", "mv WORKTREES w", |case| {
+            case.project.join("worktrees")
+        }),
+        (
+            "WORKTREES/engine-one",
+            "mv WORKTREES/engine-one w",
+            |case| case.project.join("worktrees/engine-one"),
+        ),
+        (
+            "worktrees/ENGINE-ONE",
+            "mv worktrees/ENGINE-ONE w",
+            |case| case.project.join("worktrees/engine-one"),
+        ),
+        (
+            "worktrees/engine-one/.GIT",
+            "mv worktrees/engine-one/.GIT g",
+            |case| case.project.join("worktrees/engine-one/.git"),
+        ),
+        (
+            ".crazyagent/WORKTREES",
+            "mv .crazyagent/WORKTREES .crazyagent/w",
+            |case| case.project.join(".crazyagent/worktrees"),
+        ),
+        (
+            ".CRAZYAGENT/worktrees",
+            "mv .CRAZYAGENT/worktrees .crazyagent/w",
+            |case| case.project.join(".crazyagent/worktrees"),
+        ),
+        (
+            ".crazyagent/WORKTREES/agent-1",
+            "mv .crazyagent/WORKTREES/agent-1 w",
+            |case| case.project.join(".crazyagent/worktrees/agent-1"),
+        ),
+        (".git/WORKTREES", "mv .git/WORKTREES .git/w", |case| {
+            case.project.join(".git/worktrees")
+        }),
+        ("PROJECT", "mv ../PROJECT ../moved", |case| {
+            case.project.clone()
+        }),
+    ];
+    let (case, sandbox, profile, _) = git_case();
+    fs::create_dir_all(case.project.join("plain")).unwrap();
+    let control = run(&sandbox, &profile, "mv PLAIN p");
+    assert!(control.status.success(), "{control:?}");
+    assert!(case.project.join("p").is_dir());
+    let mut moved = Vec::new();
+    for (name, script, target) in attacks {
+        let (case, sandbox, profile, _) = git_case();
+        let agent = case.project.join(".crazyagent/worktrees/agent-1");
+        fs::create_dir_all(&agent).unwrap();
+        let before = fs::symlink_metadata(target(&case)).unwrap();
+        let output = run(&sandbox, &profile, script);
+        let after = fs::symlink_metadata(target(&case));
+        let stayed = after.as_ref().is_ok_and(|after| {
+            std::os::unix::fs::MetadataExt::ino(after)
+                == std::os::unix::fs::MetadataExt::ino(&before)
+        });
+        let denied = String::from_utf8_lossy(&output.stderr).contains("not permitted");
+        if !stayed || !denied {
+            moved.push((
+                name,
+                stayed,
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+    }
+    assert_eq!(
+        moved,
+        Vec::<(&str, bool, String)>::new(),
+        "a different-case rename moved these or failed without a sandbox deny"
+    );
+}
+
 /// Checks that `script`, run under `sandbox` and `profile`, cannot create `target`: the
 /// command fails and the file is absent. Input: the sandbox, the profile, the script and
 /// the target path.
@@ -2591,6 +2675,8 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
         .unwrap()
         .confine_to_clone(&clone)
         .unwrap()
+        .lead_branch(task)
+        .unwrap()
         .native_team(
             &tmp.join("tmux.sock"),
             &tmp.join("teammates-0123456789abcdef.sock"),
@@ -2793,6 +2879,212 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
         fs::read_dir(&lead_only).unwrap().next().is_none(),
         "nothing lands in the lead's folder"
     );
+}
+
+/// AGENT-REF-ALLOW-NARROW, a tightening: a clone lead's teammates write only the refs of
+/// `<lead's branch>--<name>` teammate branches. The lead's branch has a teammate branch's
+/// shape here only to pin the rule, since a native lead is master-started on
+/// `crazyagent/<task>`. A teammate commits on its own branch, but never writes the lead's
+/// branch, its reflog or lock, nor another task's teammate branch.
+#[test]
+fn a_native_lead_s_teammates_never_move_a_lead_branch_of_teammate_shape() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let task = "crazyagent/write-the-page--lead";
+    let switched = owner_git(&clone, &case.home, &["switch", "-q", "-c", task]);
+    assert!(switched.status.success(), "{switched:?}");
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(case.home.join(folder)).unwrap();
+    }
+    let mates_home = case.home.with_file_name("mates-home");
+    fs::create_dir_all(&mates_home).unwrap();
+    fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .lead_branch(task)
+            .is_err(),
+        "only a clone lead's sandbox names its branch"
+    );
+    for branch in ["main", "agent/agent-1", "crazyagent/write-the-page/lead"] {
+        assert!(
+            sandbox(&case, SandboxNetwork::Only(Vec::new()))
+                .confine_to_clone(&clone)
+                .unwrap()
+                .lead_branch(branch)
+                .is_err(),
+            "{branch}"
+        );
+    }
+    let (lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_scratch(&tmp)
+        .unwrap()
+        .confine_to_clone(&clone)
+        .unwrap()
+        .lead_branch(task)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            &mates_home,
+        )
+        .unwrap();
+    let (lead_profile, teammates_profile) = (
+        case.profiles.join("lead.sb"),
+        case.profiles.join("teammates.sb"),
+    );
+    let greet = clone
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    let added = run(
+        &lead,
+        &lead_profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b {task}--greet {} HEAD",
+            quoted(&clone),
+            quoted(&greet)
+        ),
+    );
+    assert!(added.status.success(), "{added:?}");
+    let committed = run(
+        &teammates,
+        &teammates_profile,
+        &format!(
+            "cd {} && printf 'hello\\n' > greet.txt && {AGENT_GIT} add greet.txt && {AGENT_GIT} -c user.name=greet -c user.email=greet@local -c core.hooksPath=/dev/null commit -q -m greet",
+            quoted(&greet)
+        ),
+    );
+    assert!(
+        committed.status.success(),
+        "a teammate commits on its own branch: {}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let git = clone.join(".git");
+    let (heads, logs) = (
+        git.join("refs").join("heads"),
+        git.join("logs").join("refs").join("heads"),
+    );
+    for file in [heads.join(task), logs.join(task)] {
+        let before = fs::read(&file).unwrap();
+        let output = run(
+            &teammates,
+            &teammates_profile,
+            &format!("printf 'x\\n' >> {}", quoted(&file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(fs::read(&file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        heads.join(format!("{task}.lock")),
+        heads.join("crazyagent").join("other-task--x"),
+        logs.join("crazyagent").join("other-task--x"),
+    ] {
+        write_refused(
+            &teammates,
+            &teammates_profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+}
+
+/// AGENT-REF-ALLOW-NARROW: the engine's setup git for a linked lead's native teammates
+/// writes the refs of that lead's own teammate branches, `<lead's branch>--<name>`, and
+/// nothing else under `crazyagent/`: not the lead's branch when it has a teammate branch's
+/// shape, its reflog or lock, nor another task's teammate branch.
+#[test]
+fn the_teammates_setup_git_writes_only_its_lead_s_teammate_branches() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let lead_worktree = worktrees.join("agent-1");
+    let task = "crazyagent/write-the-page--lead";
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            task,
+            lead_worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    for branch in ["main", "agent/agent-1", "crazyagent/write-the-page/lead"] {
+        assert!(
+            sandbox(&case, SandboxNetwork::Only(Vec::new()))
+                .confine_to_teammates_setup(&lead_worktree, branch)
+                .is_err(),
+            "{branch}"
+        );
+    }
+    let setup = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_teammates_setup(&lead_worktree, task)
+        .unwrap();
+    let profile = case.profiles.join("setup.sb");
+    let greet = lead_worktree
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    let made = run(
+        &setup,
+        &profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b {task}--greet {} HEAD",
+            quoted(&lead_worktree),
+            quoted(&greet)
+        ),
+    );
+    assert!(
+        made.status.success(),
+        "the setup git adds a teammate's worktree: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let git = case.project.join(".git");
+    let (heads, logs) = (
+        git.join("refs").join("heads"),
+        git.join("logs").join("refs").join("heads"),
+    );
+    assert!(heads.join(format!("{task}--greet")).is_file());
+    for file in [heads.join(task), logs.join(task)] {
+        let before = fs::read(&file).unwrap();
+        let output = run(
+            &setup,
+            &profile,
+            &format!("printf 'x\\n' >> {}", quoted(&file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(fs::read(&file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        heads.join(format!("{task}.lock")),
+        heads.join("crazyagent").join("other-task--x"),
+        logs.join("crazyagent").join("other-task--x"),
+    ] {
+        write_refused(
+            &setup,
+            &profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
 }
 
 /// OP-9b (plan step 2): a native lead in a linked worktree (the Sandboxed default) has

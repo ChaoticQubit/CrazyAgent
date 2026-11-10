@@ -177,6 +177,34 @@ pub fn unread(db: &Connection, to: AgentId, limit: usize) -> Result<Vec<Message>
     Ok(found)
 }
 
+/// Lists the messages one agent has not read that a harness conversation started at
+/// `started` has not seen, oldest first: receipt Sent, and Delivered or Typed only when
+/// that receipt was set at or before `started`, so a message typed into this conversation
+/// is not given to it again. Takes the database, the agent, the conversation's start in ms
+/// and the most to return, capped at `PENDING_MAX`. Returns the messages.
+pub fn unseen(
+    db: &Connection,
+    to: AgentId,
+    started: i64,
+    limit: usize,
+) -> Result<Vec<Message>, EngineError> {
+    let limit = i64::try_from(limit.min(PENDING_MAX)).map_err(state)?;
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM coord_messages
+             WHERE to_kind='agent' AND to_agent=?1
+               AND (receipt='sent' OR (receipt IN ('delivered','typed') AND receipt_at<=?3))
+             ORDER BY id LIMIT ?2"
+        ))
+        .map_err(state)?;
+    let rows = statement
+        .query_map(params![to, limit, started], message_from_row)
+        .map_err(state)?;
+    let found = rows.collect::<Result<Vec<_>, _>>().map_err(state)?;
+    assert!(found.len() <= PENDING_MAX);
+    Ok(found)
+}
+
 /// Lists the messages one agent sent, newest first, with how far each got. Takes the
 /// database, the agent and the most to return, capped at `PENDING_MAX`. Returns them.
 pub fn outbox(db: &Connection, from: AgentId, limit: usize) -> Result<Vec<Message>, EngineError> {

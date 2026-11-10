@@ -639,6 +639,7 @@ impl NativeBridge {
             OwnerMutation::ModelAccess { .. } => ("model_access", None, None),
             OwnerMutation::SaveOwnerProfile { .. } => ("owner_profile", None, None),
             OwnerMutation::SetSandboxSettings { .. } => ("sandbox_settings", None, None),
+            OwnerMutation::SetCleanupSettings { .. } => ("cleanup_settings", None, None),
             OwnerMutation::CreateProject { project_id, .. } => {
                 ("create_project", Some(project_id.as_str().to_owned()), None)
             }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::cleanup_settings::{CleanupMode, CleanupSettings};
 use crate::github::GitHubMethod;
 use crate::sandbox::LinuxSockets;
 use crate::sandbox_settings::SandboxSettings;
@@ -174,7 +175,8 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
             AppSetupJob::Status,
             AppSetupJob::Home,
             AppSetupJob::GitHub,
-            AppSetupJob::Sandbox
+            AppSetupJob::Sandbox,
+            AppSetupJob::Cleanup
         ]
     ));
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
@@ -183,6 +185,9 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
     shell.arrive(event(AppSetupEvent::Sandbox(Ok(SandboxSettings {
         linux_sockets,
     }))));
+    shell.arrive(event(AppSetupEvent::Cleanup(
+        Ok(CleanupSettings::default()),
+    )));
     shell
 }
 
@@ -866,4 +871,175 @@ fn choosing_tcp_ports_saves_it_and_a_refused_save_says_why() {
     shell.key(Key::Char('l'));
     shell.key(Key::Esc);
     assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+}
+
+fn cleanup_chosen(shell: &mut Shell) -> CleanupSettings {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetCleanup { settings, .. }] = sent.as_slice() else {
+        panic!(
+            "one finished agents change required, got {} jobs",
+            sent.len()
+        )
+    };
+    *settings
+}
+
+fn stored(shell: &mut Shell, mode: CleanupMode, days: u16) {
+    shell.arrive(event(AppSetupEvent::Cleanup(Ok(CleanupSettings {
+        mode,
+        days,
+    }))));
+}
+
+fn clear(shell: &mut Shell) {
+    for _ in 0..3 {
+        shell.key(Key::Backspace);
+    }
+}
+
+#[test]
+fn settings_show_finished_agents_one_day_after_by_default_and_what_stays() {
+    let mut shell = settings(160, 60);
+    let rows = render(&mut shell, 160, 60);
+    assert!(find(&rows, "Finished agents  ").contains("1 day after the agent finishes"));
+    find(
+        &rows,
+        "Only the worktree goes: the code checkout and its build files.",
+    );
+    assert!(rows.last().unwrap().contains("f Finished agents"));
+    shell.key(Key::Char('f'));
+    let rows = render(&mut shell, 160, 60);
+    find(
+        &rows,
+        "when CrazyAgent removes a finished agent's worktree on its own",
+    );
+    for title in [
+        "> 1 day after the agent finishes",
+        "  Once its work lands",
+        "  Only when I click Clean up",
+    ] {
+        find(&rows, title);
+    }
+    find(
+        &rows,
+        "The agent's conversations, history, logs and messages stay.",
+    );
+    shell.key(Key::Enter);
+    find(
+        &render(&mut shell, 160, 60),
+        "Days after the agent finishes",
+    );
+    shell.key(Key::Enter);
+    assert!(jobs(&mut shell).is_empty(), "the stored days save nothing");
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn after_n_days_saves_the_typed_days_and_refuses_days_outside_one_to_365() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('f'));
+    shell.key(Key::Enter);
+    for refused in ["0", "366", "1.5", "-2", "ten", ""] {
+        clear(&mut shell);
+        typed(&mut shell, refused);
+        shell.key(Key::Enter);
+        assert!(jobs(&mut shell).is_empty(), "{refused:?} is not sent");
+        assert_eq!(lead(&shell), "Enter a whole number of days from 1 to 365.");
+        find(
+            &render(&mut shell, 120, 60),
+            "Days after the agent finishes",
+        );
+    }
+    clear(&mut shell);
+    typed(&mut shell, "30");
+    shell.key(Key::Enter);
+    assert_eq!(
+        cleanup_chosen(&mut shell),
+        CleanupSettings {
+            mode: CleanupMode::AfterDays,
+            days: 30
+        }
+    );
+    shell.arrive(event(AppSetupEvent::CleanupSet(Ok(()))));
+    assert_eq!(
+        lead(&shell),
+        "Finished agents: 30 days after the agent finishes."
+    );
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Cleanup)),
+        "a saved change reads the setting back"
+    );
+}
+
+#[test]
+fn once_its_work_lands_saves_it_and_keeps_the_stored_days() {
+    let mut shell = settings(120, 60);
+    stored(&mut shell, CleanupMode::AfterDays, 7);
+    assert!(
+        find(&render(&mut shell, 120, 60), "Finished agents  ")
+            .contains("7 days after the agent finishes")
+    );
+    shell.key(Key::Char('f'));
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> Once its work lands");
+    shell.key(Key::Enter);
+    assert_eq!(
+        cleanup_chosen(&mut shell),
+        CleanupSettings {
+            mode: CleanupMode::OnceLanded,
+            days: 7
+        }
+    );
+    shell.arrive(event(AppSetupEvent::CleanupSet(Ok(()))));
+    assert_eq!(lead(&shell), "Finished agents: Once its work lands.");
+}
+
+#[test]
+fn only_when_i_click_clean_up_saves_manual_and_a_refused_save_says_why() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('f'));
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> Only when I click Clean up");
+    shell.key(Key::Enter);
+    assert_eq!(
+        cleanup_chosen(&mut shell),
+        CleanupSettings {
+            mode: CleanupMode::Manual,
+            days: 1
+        }
+    );
+    shell.arrive(event(AppSetupEvent::CleanupSet(Err("busy".into()))));
+    assert_ne!(lead(&shell), "Finished agents: Only when I click Clean up.");
+    assert!(!lead(&shell).is_empty());
+    stored(&mut shell, CleanupMode::Manual, 1);
+    assert!(
+        find(&render(&mut shell, 120, 60), "Finished agents  ")
+            .contains("Only when I click Clean up")
+    );
+    shell.key(Key::Char('f'));
+    find(&render(&mut shell, 120, 60), "> Only when I click Clean up");
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+}
+
+#[test]
+fn a_stored_finished_agents_setting_this_version_does_not_know_is_not_offered() {
+    let mut shell = settings(120, 60);
+    shell.arrive(event(AppSetupEvent::Cleanup(Err(
+        "cleanup_settings_invalid".into(),
+    ))));
+    let rows = render(&mut shell, 120, 60);
+    let row = find(&rows, "Finished agents  ");
+    assert!(row.contains("Failed to read it."), "{row}");
+    assert!(row.contains("not one this version knows"), "{row}");
+    shell.key(Key::Char('f'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(
+        lead(&shell),
+        "The finished agents setting is not known yet."
+    );
 }

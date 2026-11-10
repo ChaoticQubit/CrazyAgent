@@ -1,4 +1,5 @@
 use super::{AGENT_COLUMNS, AgentRole, TeamAgent, agent_row};
+use crate::cleanup_settings::CleanupSettings;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -8,15 +9,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 pub const RECLAIMABLE_MAX: usize = 32;
-const CANDIDATES_MAX: usize = 2 * RECLAIMABLE_MAX;
+pub const CANDIDATES_MAX: usize = 2 * RECLAIMABLE_MAX;
 const DISK_ENTRIES_MAX: usize = 200_000;
 const LOSSES_MAX: usize = 256;
 
 static RUNNING: Mutex<()> = Mutex::new(());
 
-/// One finished team agent whose worktree and agent folder the owner may remove: its id,
-/// role, label and harness, when it stopped, and the bytes both hold on disk, with
-/// `counted_all` false when the count stopped at its bound and the size is a floor.
+/// One finished team agent that still holds a worktree: its id, role, label and harness,
+/// when it stopped, the bytes its worktree holds on disk, with `counted_all` false when the
+/// count stopped at its bound and the size is a floor, and the plain code of the check that
+/// keeps it, None when the owner may remove its worktree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FinishedAgent {
@@ -27,9 +29,11 @@ pub struct FinishedAgent {
     pub stopped_ms: Option<i64>,
     pub bytes: u64,
     pub counted_all: bool,
+    #[serde(default)]
+    pub kept: Option<String>,
 }
 
-/// What one removal did: the agents whose worktree, folder and profile are gone, in the
+/// What one removal did: the agents whose worktree is gone, in the
 /// order asked, and the plain code of the agent it kept when it stopped before the end.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -334,6 +338,29 @@ fn place(
     .map_err(unavailable)
 }
 
+/// Says whether a worktree record names a place cleanup may delete (DEC-123 rv-secreview
+/// L1): its repository is this project's own folder as the runtime records it, canonical,
+/// and the worktree is a named folder directly inside that folder's `.crazyagent/worktrees`,
+/// or `worktrees` on the old layout. Inputs: the store, the project and the place. Output:
+/// the answer, false for a project with no stored setup or a folder that no longer resolves.
+fn placed(db: &Connection, project: &ProjectId, place: &Place) -> Result<bool, EngineError> {
+    let Some(stored) = crate::project_setup::load_setup(db, project).map_err(unavailable)? else {
+        return Ok(false);
+    };
+    let Ok(folder) = stored.project_folder().canonicalize() else {
+        return Ok(false);
+    };
+    assert!(folder.is_absolute());
+    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let parent = place.worktree.parent();
+    let inside = place.worktree.file_name().is_some()
+        && [state.join("worktrees"), folder.join("worktrees")]
+            .iter()
+            .any(|worktrees| parent == Some(worktrees.as_path()));
+    assert!(!inside || place.worktree.starts_with(&folder));
+    Ok(inside && place.repository == folder)
+}
+
 /// Says why a team agent's own row keeps it: not this project's, still running, the master
 /// the runtime starts again in this worktree (picked by `runtime::last_master`, so aliases
 /// of its harness count), or with an unfinished task pinned to it. Inputs: the store, the
@@ -408,6 +435,9 @@ fn check(
             None => return Ok(Err("cleanup_agent_not_found")),
         },
     };
+    if !placed(db, project, &target.place)? {
+        return Ok(Err("cleanup_worktree_invalid"));
+    }
     if target.worktree_removed() {
         return Ok(Ok(target));
     }
@@ -456,16 +486,16 @@ fn settle(db: &Connection, project: &ProjectId, now: u64) -> Result<(), EngineEr
     unclaim(db, project, &back)
 }
 
-/// Lists a project's finished agents the owner may remove, newest first: ended, not the
-/// master the runtime starts again, with no unfinished task pinned to it, no open or
-/// restorable change set and a worktree that holds exactly the commit its next change set
-/// would open above; or confirmed before and stopped part way, such as by a folder that
-/// could not be deleted. It reads at most `CANDIDATES_MAX` ended agents and returns at
-/// most `RECLAIMABLE_MAX`. Inputs: the store, the team state folder, the project and the
-/// time now. Output: the agents with their size on disk.
+/// Lists a project's finished agents that still hold a worktree, newest first: each one the
+/// owner may remove, with the size of its worktree on disk, and each one a check keeps, with
+/// the plain code a removal would answer. An agent may go when it ended, is not the master the
+/// runtime starts again, has no unfinished task pinned to it, no open or restorable change set
+/// and a worktree that holds exactly the commit its next change set would open above, or when
+/// it was confirmed before and stopped part way, such as by a leftover git could not delete.
+/// It reads at most `CANDIDATES_MAX` ended agents and returns at most `RECLAIMABLE_MAX` of
+/// each kind. Inputs: the store, the project and the time now. Output: the agents.
 pub fn finished(
     db: &Connection,
-    team: &Path,
     project: &ProjectId,
     now_ms: i64,
 ) -> Result<Vec<FinishedAgent>, EngineError> {
@@ -490,20 +520,26 @@ pub fn finished(
             .map_err(unavailable)?
     };
     let mut found = Vec::new();
+    let (mut removable, mut kept) = (0, 0);
     let mut budget = DISK_ENTRIES_MAX;
     for agent in candidates {
-        if found.len() == RECLAIMABLE_MAX {
-            break;
-        }
-        let Ok(target) = check(db, project, agent.id, now)? else {
-            continue;
+        let (bytes, counted_all, code) = match check(db, project, agent.id, now)? {
+            Ok(_) if removable == RECLAIMABLE_MAX => continue,
+            Ok(target) => {
+                removable += 1;
+                let (bytes, all) = if missing(&target.place.worktree) {
+                    (0, true)
+                } else {
+                    disk_bytes(&target.place.worktree, &mut budget)
+                };
+                (bytes, all, None)
+            }
+            Err(_) if kept == RECLAIMABLE_MAX => continue,
+            Err(code) => {
+                kept += 1;
+                (0, true, Some(code.to_owned()))
+            }
         };
-        let (worktree, all_worktree) = if missing(&target.place.worktree) {
-            (0, true)
-        } else {
-            disk_bytes(&target.place.worktree, &mut budget)
-        };
-        let (folder, all_folder) = disk_bytes(&agent_folder(team, agent.id), &mut budget);
         let label = if agent.role == AgentRole::Sub
             && super::events::name_reaches_running(db, project, agent.id)?
         {
@@ -517,25 +553,151 @@ pub fn finished(
             label,
             harness: agent.harness,
             stopped_ms: agent.stopped_ms,
-            bytes: worktree.saturating_add(folder),
-            counted_all: all_worktree && all_folder,
+            bytes,
+            counted_all,
+            kept: code,
         });
     }
-    assert!(found.len() <= RECLAIMABLE_MAX);
+    assert!(removable <= RECLAIMABLE_MAX && kept <= RECLAIMABLE_MAX);
+    assert_eq!(found.len(), removable + kept);
     Ok(found)
 }
 
-/// Removes the owner's chosen finished agents in the order asked: every agent is checked
-/// and claimed in one store transaction, which moves its worktree record to
+/// What one pass of the engine's own cleanup did: the agents whose worktree it removed, in
+/// id order, the id the next pass starts after, 0 once this pass read the last finished agent
+/// so agents a check keeps never hold the others back, one line for each agent the engine
+/// could not check or remove, and one for each agent its check let through but its removal
+/// then kept, with the plain code that kept it, at most `CANDIDATES_MAX` lines in all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Swept {
+    pub removed: Vec<i64>,
+    pub after: i64,
+    pub failures: Vec<String>,
+    pub kept: Vec<String>,
+}
+
+/// Removes, on the engine's own schedule, the worktrees of finished agents in every project
+/// the owner's setting lets go: past its wait since the agent finished, an agent with no
+/// finish time counting as past it, each one checked and removed as Clean up does, one at a
+/// time, so one a check keeps never stops the others. Nothing goes when only the owner's
+/// Clean up removes. A pass reads at most `CANDIDATES_MAX` agents with an id above `after`
+/// and removes at most `RECLAIMABLE_MAX`. Inputs: the store, the setting, where the last
+/// pass stopped and the time now. Output: what this pass did.
+pub fn sweep(
+    db: &Connection,
+    settings: &CleanupSettings,
+    after: i64,
+    now_ms: i64,
+) -> Result<Swept, EngineError> {
+    assert!(after >= 0);
+    let Some(wait_ms) = settings.wait_ms() else {
+        return Ok(Swept {
+            removed: Vec::new(),
+            after: 0,
+            failures: Vec::new(),
+            kept: Vec::new(),
+        });
+    };
+    let now = landing_time(now_ms)?;
+    let candidates: Vec<(i64, String)> = {
+        let _running = running();
+        initialize(db)?;
+        let mut statement = db
+            .prepare(
+                "SELECT id,project FROM team_agents AS agent WHERE id>?1
+                 AND status IN ('stopped','failed')
+                 AND (stopped_ms IS NULL OR stopped_ms<=?2)
+                 AND (id IN (SELECT agent FROM team_worktrees WHERE project=agent.project)
+                      OR id IN (SELECT agent FROM team_retiring WHERE project=agent.project))
+                 ORDER BY id LIMIT ?3",
+            )
+            .map_err(unavailable)?;
+        statement
+            .query_map(
+                params![after, now_ms.saturating_sub(wait_ms), CANDIDATES_MAX as i64],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(unavailable)?
+            .collect::<Result<_, _>>()
+            .map_err(unavailable)?
+    };
+    let mut swept = Swept {
+        removed: Vec::new(),
+        after: 0,
+        failures: Vec::new(),
+        kept: Vec::new(),
+    };
+    for (id, project) in &candidates {
+        if swept.removed.len() == RECLAIMABLE_MAX {
+            break;
+        }
+        assert!(*id > swept.after);
+        swept.after = *id;
+        if let Err(problem) = sweep_one(db, project, *id, now, now_ms, &mut swept) {
+            swept.failures.push(format!(
+                "agent={id} cause={}",
+                crate::protocol::plain_code(&problem.0)
+            ));
+        }
+    }
+    if candidates.len() < CANDIDATES_MAX
+        && candidates.last().map(|last| last.0) == Some(swept.after)
+    {
+        swept.after = 0;
+    }
+    assert!(swept.removed.len() <= RECLAIMABLE_MAX);
+    assert!(candidates.len() <= CANDIDATES_MAX);
+    assert!(swept.removed.len() + swept.kept.len() + swept.failures.len() <= candidates.len());
+    Ok(swept)
+}
+
+/// Checks one agent as Clean up would and removes its worktree when nothing keeps it. Inputs:
+/// the store, its project, the agent, the time now in both forms and the pass it adds to:
+/// the agent once removed, or the code its removal kept it with. Output: Ok whether it went
+/// or stayed, or the problem that stopped the check.
+fn sweep_one(
+    db: &Connection,
+    project: &str,
+    id: i64,
+    now: u64,
+    now_ms: i64,
+    swept: &mut Swept,
+) -> Result<(), EngineError> {
+    let project = ProjectId::new(project).map_err(unavailable)?;
+    let free = {
+        let _running = running();
+        check(db, &project, id, now)?.is_ok()
+    };
+    if !free {
+        return Ok(());
+    }
+    let removal = remove(db, &project, &[id], now_ms)?;
+    match removal.kept {
+        None => {
+            assert_eq!(removal.agents, [id]);
+            swept.removed.push(id);
+        }
+        Some(code) => {
+            assert!(removal.agents.is_empty());
+            swept.kept.push(format!(
+                "agent={id} kept={}",
+                crate::protocol::plain_code(&code)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Removes the worktrees of the owner's chosen finished agents in the order asked: every
+/// agent is checked and claimed in one store transaction, which moves its worktree record to
 /// `team_retiring` so no task or revive picks it up meanwhile, then every worktree is
-/// checked again, then each is removed with git, never forcing, followed by its agent
-/// folder and sandbox profile, and only then its record. A stop hands back the record of
-/// every claimed agent whose worktree is still there. The agents' rows stay as history.
-/// Inputs: the store, the team state folder, the project, the agents and the time now.
-/// Output: the agents removed and the plain code of the first one kept.
+/// checked again, then each is removed with git, never forcing, and only then its record.
+/// A stop hands back the record of every claimed agent whose worktree is still there. The
+/// agent's folder with its conversations, its sandbox profile, its rows, messages and logs
+/// stay as history. Inputs: the store, the project, the agents and the time now. Output:
+/// the agents removed and the plain code of the first one kept.
 pub fn remove(
     db: &Connection,
-    team: &Path,
     project: &ProjectId,
     agents: &[i64],
     now_ms: i64,
@@ -556,7 +718,7 @@ pub fn remove(
         Err(code) => return Ok(Removal::refused(code)),
     };
     let mut removed = Vec::new();
-    let kept = match retire_claimed(db, team, project, &claimed, now, &mut removed) {
+    let kept = match retire_claimed(db, project, &claimed, now, &mut removed) {
         Ok(None) => None,
         Ok(Some(code)) => Some(code.to_owned()),
         Err(problem) => Some(problem.0),
@@ -577,22 +739,25 @@ pub fn remove(
     })
 }
 
-/// Checks every claimed worktree again, then per agent checks its row once more, removes
-/// its worktree, deleting what git left when it removed its record only part way, then its
-/// agent folder and sandbox profile and last its waiting record, in claim order. A
-/// worktree whose leftover cannot be deleted marks its waiting record, so a later removal
-/// deletes the leftover without asking git again (RVD-C-N1). Inputs:
-/// the store, the team state folder, the project, the claims, the time now and the list
-/// each removed agent joins. Output: None once all are removed, or the plain code of the
-/// first one kept.
+/// Checks every claimed worktree again, then per agent checks its row once more and removes
+/// its worktree, deleting what git left when it removed its record only part way, and last
+/// its waiting record, in claim order. A worktree whose leftover cannot be deleted marks its
+/// waiting record, so a later removal deletes the leftover without asking git again
+/// (RVD-C-N1). Inputs: the store, the project, the claims, the time now and the list each
+/// removed agent joins. Output: None once all are removed, or the plain code of the first
+/// one kept.
 fn retire_claimed(
     db: &Connection,
-    team: &Path,
     project: &ProjectId,
     claimed: &[Target],
     now: u64,
     removed: &mut Vec<i64>,
 ) -> Result<Option<&'static str>, EngineError> {
+    for target in claimed {
+        if !placed(db, project, &target.place)? {
+            return Ok(Some("cleanup_worktree_invalid"));
+        }
+    }
     for target in claimed.iter().filter(|target| !target.worktree_removed()) {
         let place = &target.place;
         if let Some(code) = crate::landing::retire_blocker(
@@ -638,25 +803,6 @@ fn retire_claimed(
                 Err(code) => return Ok(Some(code)),
             }
         }
-        if remove_agent_files(team, target.id).is_err() {
-            return Ok(Some("cleanup_folder_failed"));
-        }
-        #[cfg(target_os = "macos")]
-        if let (Some(runtime), Some(project_root)) = (team.parent(), place.repository.to_str())
-            && crate::sandbox::tool_cache::remove_agent(
-                runtime,
-                project_root,
-                &target.id.to_string(),
-            )
-            .is_err()
-        {
-            return Ok(Some("cleanup_folder_failed"));
-        }
-        db.execute(
-            "DELETE FROM team_agent_conversations WHERE agent=?1 AND project=?2",
-            params![target.id, project.as_str()],
-        )
-        .map_err(unavailable)?;
         db.execute(
             "DELETE FROM team_retiring WHERE agent=?1 AND project=?2",
             params![target.id, project.as_str()],
@@ -686,6 +832,9 @@ fn claim(
             return Ok(Err(code));
         }
         if let Some(place) = place(&tx, Record::Retiring, project, *id)? {
+            if !placed(&tx, project, &place)? {
+                return Ok(Err("cleanup_worktree_invalid"));
+            }
             claimed.push(Target {
                 id: *id,
                 place,
@@ -697,6 +846,9 @@ fn claim(
         let Some(place) = place(&tx, Record::Live, project, *id)? else {
             return Ok(Err("cleanup_agent_not_found"));
         };
+        if !placed(&tx, project, &place)? {
+            return Ok(Err("cleanup_worktree_invalid"));
+        }
         tx.execute(
             "INSERT INTO team_retiring(agent,project,repository,worktree,git_dir,since_ms)
              SELECT agent,project,repository,worktree,git_dir,?3 FROM team_worktrees
@@ -747,7 +899,7 @@ fn unclaim(db: &Connection, project: &ProjectId, agents: &[i64]) -> Result<(), E
     tx.commit().map_err(unavailable)
 }
 
-/// Deletes a removed agent's folder and sandbox profile from the team state, with a native
+/// Deletes the agent folder and sandbox profile of a deleted project's agent, with a native
 /// lead's teammates' profile, teammates' setup profile and the records of its teammates'
 /// socket name and server pid (rv-audit TTDL F2, OP-9b, PLC c PC-L1), making its read-only
 /// folders writable first, such as a module cache a toolchain left. The folder goes last, so

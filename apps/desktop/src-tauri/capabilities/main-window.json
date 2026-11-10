@@ -167,6 +167,8 @@
     "allow-desktop-save-owner-profile",
     "allow-desktop-sandbox-settings",
     "allow-desktop-set-sandbox-settings",
+    "allow-desktop-cleanup-settings",
+    "allow-desktop-set-cleanup-settings",
     "allow-desktop-pool-summaries",
     "allow-desktop-account-schedule",
     "allow-desktop-account-ranking",

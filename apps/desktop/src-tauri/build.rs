@@ -165,6 +165,8 @@ fn main() {
         "desktop_save_owner_profile",
         "desktop_sandbox_settings",
         "desktop_set_sandbox_settings",
+        "desktop_cleanup_settings",
+        "desktop_set_cleanup_settings",
         "desktop_pool_summaries",
         "desktop_account_schedule",
         "desktop_account_ranking",
