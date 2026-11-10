@@ -314,10 +314,51 @@ export function sharedLoad<T>(key: string | null, fresh: boolean, read: () => Pr
   return started;
 }
 
-/** A choice the owner saved on a control and the read value it replaced. */
+/** A choice the owner saved on a control, the read value it replaced and, once its save was
+ * applied, how many reads had started by the time it answered. */
 export interface Held<T> {
   choice: T;
   from: T;
+  answered?: number;
+}
+
+let readsStarted = 0;
+const readStarts = new WeakMap<object, number>();
+
+/** Numbers one engine read as it starts, so a hold can tell a read begun after its save
+ * answered from one already on its way. Output: the read's number. */
+export function startRead(): number {
+  readsStarted += 1;
+  return readsStarted;
+}
+
+/** Notes which read produced a result and its value, keeping the first note when mounts share
+ * one answer. Inputs: the result and the read's number from startRead. */
+export function stampRead(result: Result<unknown>, started: number) {
+  if (!(Number.isSafeInteger(started) && started > 0 && started <= readsStarted)) throw new Error(`a read number comes from startRead: ${started}`);
+  for (const read of [result, result.kind === "ok" ? result.value : null]) {
+    if (typeof read === "object" && read !== null && !readStarts.has(read)) readStarts.set(read, started);
+  }
+}
+
+/** The hold an applied save leaves: the pick, noted with the reads started by the time the save
+ * answered, so a read begun later can end it; nothing after a refused or unconfirmed save.
+ * Inputs: the held choice and the save's note. Output: the hold to keep, or null. */
+export function answeredHold<T>(held: Held<T>, note: string): Held<T> | null {
+  const kept = afterSave(held, note);
+  return kept === null ? null : { ...kept, answered: readsStarted };
+}
+
+/** Whether a held pick lets go: once a read moves the value it replaced, or once its save
+ * answered and a read that started after that answer lands, whatever it shows, so another
+ * writer putting the old value back is not hidden. Inputs: the hold, the read value, how two
+ * values compare and the read it came from. Output: true when it lets go. */
+export function holdEnds<T>(held: Held<T> | null, current: T, same: (a: T, b: T) => boolean, read: unknown): boolean {
+  if (held === null) return false;
+  if (!same(held.from, current)) return true;
+  if (held.answered === undefined || typeof read !== "object" || read === null) return false;
+  const started = readStarts.get(read);
+  return started !== undefined && started > held.answered;
 }
 
 /** What a control keeps after a save: the choice once the engine applied it, so the control
@@ -345,19 +386,24 @@ export function sameJson(a: unknown, b: unknown): boolean {
 export type Hold<T> = (choice: T) => (note: string) => void;
 
 /** Keeps a control on the owner's pick from the moment of the pick until a read moves the value
- * it replaced, or until its save is refused: without this a control falls back to the old read
+ * it replaced, until its save is refused or, given the read the value came from, until a read
+ * that started after the save answered lands: without this a control falls back to the old read
  * value after its save, and a native select cannot be picked back to the value it already shows.
- * Inputs: the value read and how two values compare. Output: the value to show and `hold`. */
-export function useHeld<T>(current: T, same: (a: T, b: T) => boolean = Object.is): [T, Hold<T>] {
+ * Inputs: the value read, how two values compare and the read it came from. Output: the value
+ * to show and `hold`. */
+export function useHeld<T>(current: T, same: (a: T, b: T) => boolean = Object.is, read?: unknown): [T, Hold<T>] {
   const [held, setHeld] = useState<Held<T> | null>(null);
-  const moved = held !== null && !same(held.from, current);
+  const moved = holdEnds(held, current, same, read);
   useEffect(() => { if (moved) setHeld(null); }, [moved]);
   const hold: Hold<T> = (choice) => {
     const kept = { choice, from: current };
     setHeld(kept);
-    return (note) => setHeld((now) => now === kept ? afterSave(kept, note) : now);
+    return (note) => {
+      const answered = answeredHold(kept, note);
+      setHeld((now) => now === kept ? answered : now);
+    };
   };
-  return [shownChoice(held, current, same), hold];
+  return [moved ? current : shownChoice(held, current, same), hold];
 }
 
 /** Loads one engine read for a screen and reloads it when the session revision or the given
@@ -378,11 +424,13 @@ export function useLoad<T>(read: () => Promise<Result<T>>, keys: unknown[] = [],
     const same = shownKey.current === key;
     shownKey.current = key;
     setValue((old) => cached ?? (old.kind === "ok" && same ? old : { kind: "loading" }));
+    const started = startRead();
     const reading = sharedLoad(key === null ? null : `${key}\n${session?.revision ?? 0}`, fresh.current, read);
     fresh.current = false;
     void reading.then((result) => {
       if (!live) return;
       const noted = session ? session.noteResult(result) : result;
+      stampRead(noted, started);
       if (key !== null) cacheLoad(key, noted);
       setValue(noted);
     });
