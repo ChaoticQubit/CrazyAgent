@@ -1,8 +1,9 @@
 #![cfg(unix)]
 
+#[cfg(target_os = "macos")]
+use crazyagent::landing::MergeOutcome;
 use crazyagent::landing::{
-    self, AcceptOutcome, AgentKind, ChangeAgent, ChangeSetId, MergeOutcome, TurnEnd, TurnOutcome,
-    Workspace,
+    self, AcceptOutcome, AgentKind, ChangeAgent, ChangeSetId, TurnEnd, TurnOutcome, Workspace,
 };
 use crazyagent::protocol::ProjectId;
 use rusqlite::{Connection, params};
@@ -69,6 +70,7 @@ struct Agent {
 /// own clone on `crazyagent/lead`, recorded as the engine records a team agent's worktree.
 struct Team {
     _temp: tempfile::TempDir,
+    #[cfg(target_os = "macos")]
     root: PathBuf,
     project: PathBuf,
     home: PathBuf,
@@ -117,6 +119,7 @@ impl Team {
         };
         let team = Self {
             _temp: temp,
+            #[cfg(target_os = "macos")]
             root,
             project,
             home,

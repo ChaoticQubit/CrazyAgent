@@ -1582,7 +1582,9 @@ fn a_server_ended_from_outside_has_no_live_agents_while_its_control_still_reads(
     assert_eq!(answers, vec![(Ok(Vec::new()), false); ROUNDS]);
 }
 
+#[cfg(target_os = "macos")]
 const PROBE_FOLDER: &str = "CRAZYAGENT_TMUX_PROBE_FOLDER";
+#[cfg(target_os = "macos")]
 const PROBE_HELPER: &str = "terminal::tmux::tests::probing_a_live_server_out_of_descriptors";
 
 /// A probe of a live server that fails without a refusal keeps the server's socket. A helper

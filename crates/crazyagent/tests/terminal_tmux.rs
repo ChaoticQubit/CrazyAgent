@@ -1559,6 +1559,7 @@ fn pane_process_writes_its_environment() {
 /// One engine root with team agent 1 ready to lead in its own server: its home, its short
 /// private temp folder that holds its own and its teammates' sockets and allow-default
 /// installed profiles for it and its teammates.
+#[cfg(target_os = "macos")]
 struct Lead {
     root: tempfile::TempDir,
     tmux: PathBuf,
@@ -1568,6 +1569,7 @@ struct Lead {
     mates: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl Lead {
     fn new() -> Self {
         let root = root();
@@ -1643,6 +1645,7 @@ impl Lead {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for Lead {
     fn drop(&mut self) {
         for socket in [
@@ -1667,6 +1670,7 @@ impl Drop for Lead {
 
 /// Waits until nothing accepts connections at `socket`, as after kill-server, whose server
 /// ends a moment after the command returns. Takes the socket.
+#[cfg(target_os = "macos")]
 fn until_refused(socket: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while crazyagent::spawn_gate::connect_unix_std(socket).is_ok() {
@@ -2142,6 +2146,7 @@ fn an_adopted_teammate_survives_one_failed_connect_to_its_teammates_server() {
 /// once the engine's server there ended, shaped like the engine's: its session and holder
 /// window, whose one pane is tagged as the lead's. Takes the tmux program, the socket and
 /// the lead.
+#[cfg(target_os = "macos")]
 fn stand_in(tmux: &Path, socket: &Path, lead: &AgentId) {
     match std::fs::remove_file(socket) {
         Ok(()) => {}

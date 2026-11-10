@@ -142,7 +142,7 @@ impl Registry {
 
     /// A registry at another base, a loopback server in tests. Input: the base ending in
     /// `/`. Output: the registry.
-    #[cfg(all(test, unix))]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn at(base: &str) -> Self {
         assert!(base.ends_with('/'));
         Self {

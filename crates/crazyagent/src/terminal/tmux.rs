@@ -285,7 +285,7 @@ impl Tmux {
     /// Has a server this host starts read its deadline every `loops` holder loops and end
     /// after `late` passed reads, so a row sees the bound within seconds. Takes the spacing
     /// and the count. Returns the host.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn with_deadline_checks(mut self, loops: u32, late: u32) -> Self {
         assert!(loops >= 1 && late >= 1);
         self.deadline_checks = (loops, late);

@@ -1,9 +1,15 @@
+#[cfg(target_os = "macos")]
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
 pub(crate) const FORWARD_REQUEST: &str = "forward-request";
+#[cfg(target_os = "macos")]
 const FORWARD_ANSWER: &str = "forward-answer";
+#[cfg(target_os = "macos")]
 const ENGINE_STEP_TIME: std::time::Duration = std::time::Duration::from_secs(180);
 pub(crate) const FORWARDER_VARIABLES: [&str; 3] = [
     "CRAZYAGENT_IDE_GIT_NODE",
@@ -15,6 +21,7 @@ pub(crate) const FORWARDER_VARIABLES: [&str; 3] = [
 /// script in the server's data folder that names its slot and waits for the engine's code,
 /// and returns the variables the shim reads. Input: the server's data folder. Output: the
 /// variables.
+#[cfg(target_os = "macos")]
 pub(crate) fn forwarder_env(home: &Path) -> [(&'static str, std::ffi::OsString); 3] {
     let script = home.join("forward.sh");
     let (request, answer) = (home.join(FORWARD_REQUEST), home.join(FORWARD_ANSWER));
@@ -37,6 +44,7 @@ pub(crate) fn forwarder_env(home: &Path) -> [(&'static str, std::ffi::OsString);
 /// forwarder names goes through the real engine step outside the sandbox. Inputs: the
 /// command, the server's data folder, in the engine's folder, and the project folder.
 /// Output: the process's output.
+#[cfg(target_os = "macos")]
 pub(crate) fn output_with_engine(
     command: &mut Command,
     home: &Path,

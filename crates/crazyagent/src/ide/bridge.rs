@@ -1178,7 +1178,7 @@ async fn git_call(
 
 /// The engine's index step for a row that plays the relay. Inputs: the private folder, the
 /// engine's folder, the project folder and the slot. Output: the exit code the shim reads.
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn carry_index(private: &Path, engine: &Path, project: &Path, slot: &str) -> i32 {
     remote_git::index::carry(&Mutex::new(()), private, engine, project, slot)
         .unwrap()
