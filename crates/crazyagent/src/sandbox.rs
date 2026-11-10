@@ -1383,7 +1383,9 @@ impl ProjectSandbox {
     /// neither swaps its own listener in there (rv-secreview RH2R2-1). The lead's part of the
     /// relay mailbox is hidden from the teammates but for its `relay.json`, which they only
     /// read, and they never move or re-permission the mailbox or the temp folder holding it
-    /// (relay mailbox forgery C1). Inputs: the three sockets, the canonical tmux program and
+    /// (relay mailbox forgery C1). Neither the lead nor a teammate moves the tool mailbox, so
+    /// no answer is written outside the rule that keeps answers the engine's. Inputs: the
+    /// three sockets, the canonical tmux program and
     /// the teammates' home beside the lead's, its team folders already made, with the
     /// mailbox in the agent temp folder. Output: the lead's and the teammates' sandboxes,
     /// `Invalid`, or `Unavailable` off macOS.
@@ -1453,6 +1455,7 @@ impl ProjectSandbox {
             .reach_unix_socket(callers)?
             .reach_unix_socket(mates)?
             .shut_unix_socket(&binding)?;
+        lead.fixed.push(answers.clone());
         lead.answers = Some(answers);
         Ok((lead, teammates))
     }
