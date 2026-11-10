@@ -2202,8 +2202,17 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     host.spawn_own_server(&refused, &lead.confined("one$ ", &["/bin/sh"]))
         .unwrap();
-    host.spawn_own_server(&next, &lead.confined("two$ ", &["/bin/sh"]))
-        .unwrap();
+    let next_profile = crazyagent::team::runtime::agent_profile(&team, 2);
+    let next_command = lead.shell(
+        "two$ ",
+        &[
+            crazyagent::sandbox::SANDBOX_EXEC,
+            "-f",
+            next_profile.to_str().unwrap(),
+            "/bin/sh",
+        ],
+    );
+    host.spawn_own_server(&next, &next_command).unwrap();
     host.spawn(
         &AgentId::team(3).unwrap(),
         &lead.shell("three$ ", &["/bin/sh"]),
