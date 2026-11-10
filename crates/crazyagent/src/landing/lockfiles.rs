@@ -190,11 +190,9 @@ fn current(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 /// time for each set and at most `RUNNING_PER_REPOSITORY_MAX` for a repository, past which
 /// none starts; a set already being rewritten counts as started. When it ends without
 /// landing, `after` gets the set and whether another regeneration may start: false after a
-/// refusal, which hands the clash to the agent, true after the set or main moved. A clash
-/// in a `uv.lock` never starts one and goes straight to the agent, logged by its plain code:
-/// uv writes a `.git` marker into every cache it makes, `--no-cache` included, which the
-/// sandbox's nested-git rule refuses in every folder the tool may write. Inputs: the store,
-/// the set, its clashing paths and what runs after. Output: whether one runs now.
+/// refusal, which hands the clash to the agent, true after the set or main moved. Inputs:
+/// the store, the set, its clashing paths and what runs after. Output: whether one runs
+/// now.
 pub(super) fn regenerate_later(
     db: &Connection,
     record: &Record,
@@ -207,10 +205,6 @@ pub(super) fn regenerate_later(
         || paths.iter().any(|path| program_for(path).is_none())
         || !current(db, record)?
     {
-        return Ok(false);
-    }
-    if paths.iter().any(|path| program_for(path) == Some("uv")) {
-        eprintln!("landing_regenerate_skipped code=uv_cache_git_marker_refused");
         return Ok(false);
     }
     let Some(runtime) = runtime_of(db) else {
@@ -584,10 +578,16 @@ fn read_plain(worktree: &Path, path: &str) -> Option<Vec<u8>> {
     (bytes.len() <= LOCKFILE_BYTES_MAX).then_some(bytes)
 }
 
+/// The folder name of the tool cache one regeneration primes in its scratch folder (T8).
+#[cfg(target_os = "macos")]
+const REGENERATE_CACHE: &str = "regenerate";
+
 /// Builds the sandbox a lockfile's tool runs in, as an agent's is built: the project's
 /// network choice with no model, its toolchains, hidden folders and the engine's guarded
-/// secrets, written to the given worktree only beside its own home and temp folders, and
-/// installs its profile. Inputs: the store, the change set, the owner checkout's canonical
+/// secrets, written to the given worktree only beside its own home and temp folders and,
+/// when the tool's PATH finds a uv the engine may run, a tool cache primed for this run in
+/// the scratch folder, so uv's `.git` cache markers are the engine's `/dev/null` links the
+/// SM1-R rule allows (T8), and installs its profile. Inputs: the store, the change set, the owner checkout's canonical
 /// root, the engine runtime folder, the temporary worktree and the scratch folders. Output:
 /// the sandbox, or the plain code of what refused it.
 fn confined(
@@ -616,6 +616,19 @@ fn confined(
     .and_then(|sandbox| sandbox.allow_scratch(&tmp))
     .and_then(|sandbox| sandbox.confine_to_worktree(worktree))
     .map_err(|_| "sandbox_refused")?;
+    #[cfg(target_os = "macos")]
+    if let Some(uv) = sandbox.tool_program("uv") {
+        let project = root.to_str().ok_or("tool_cache_project_name")?;
+        let cache = crate::sandbox::tool_cache::prepare(
+            &scratch.folder,
+            project,
+            REGENERATE_CACHE,
+            Some(&uv),
+        )?;
+        sandbox = sandbox
+            .allow_tool_cache(&cache.root, cache.uv)
+            .map_err(|_| "sandbox_refused")?;
+    }
     for folder in &hidden {
         sandbox = sandbox.hide(folder).map_err(|_| "sandbox_refused")?;
     }
