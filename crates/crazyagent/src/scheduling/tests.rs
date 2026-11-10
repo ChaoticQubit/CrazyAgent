@@ -1484,7 +1484,10 @@ fn doubted(connection: &Connection, id: &str) {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(held, 1, "only a sign-in that passes the pick can be doubted");
+    assert_eq!(
+        held, 1,
+        "only a sign-in that passes the pick can be doubted"
+    );
 }
 
 /// Records a sign-in whose profile a check still holds. Inputs: the store and the account.
@@ -1579,7 +1582,9 @@ fn the_ranking_reads_next_exactly_when_the_real_pick_would_take_the_account() {
         ("proved", true, |store| signed_in(store, "a")),
         ("doubted", false, |store| doubted(store, "a")),
         ("fenced", false, |store| fenced(store, "a")),
-        ("earlier run", false, |store| from_an_earlier_run(store, "a")),
+        ("earlier run", false, |store| {
+            from_an_earlier_run(store, "a")
+        }),
         ("no sign-in", false, |_| {}),
         ("rejected", false, |store| {
             signed_in(store, "a");

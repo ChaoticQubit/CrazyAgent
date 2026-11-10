@@ -984,9 +984,9 @@ pub struct PoolRanking {
 }
 
 /// Ranks every pool's accounts with the same choice team, research and master work make
-/// (DEC-096 item 8): a signed-out or paused account is held, the rest go through
-/// `Choice::order`, each with why it stands where it does. Live load and the account work
-/// already runs on only break ties, so they are left out.
+/// (DEC-096 item 8): an account the pick's own sign-in check refuses, or a paused one, is held,
+/// the rest go through `Choice::order`, each with why it stands where it does. Live load and the
+/// account work already runs on only break ties, so they are left out.
 /// Takes the engine connection, model access and clock. Returns one ranking per pool.
 pub fn ranking(
     connection: &Connection,
@@ -995,6 +995,7 @@ pub fn ranking(
 ) -> Result<Vec<PoolRanking>, EngineError> {
     let pauses = table_exists(connection, "team_paused_accounts")?;
     let sign_ins = table_exists(connection, "native_auth_operations")?;
+    let run = active_run(connection)?;
     let mut pools = Vec::with_capacity(access.pools.len());
     for pool in &access.pools {
         let choice = Choice::read(connection, access, None, &[&pool.id], now_ms)?;
@@ -1004,8 +1005,10 @@ pub fn ranking(
         for (index, member) in pool.members.iter().enumerate() {
             let held_now = if choice.schedule.plan(member).pin == Some(Pin::NeverUse) {
                 None
-            } else if signed_out(connection, sign_ins, access, member)? {
-                Some(Standing::NotSignedIn)
+            } else if let Some(standing) =
+                sign_in_hold(connection, sign_ins, run.as_ref(), access, member)?
+            {
+                Some(standing)
             } else {
                 paused_until(connection, pauses, member, now_ms)?
                     .map(|until_ms| Standing::Paused { until_ms })
@@ -1064,30 +1067,59 @@ pub fn ranking(
     Ok(pools)
 }
 
-/// Whether the real pick skips this member for its sign-in: a native managed account whose
-/// latest sign-in did not end authenticated, or whose sign-in a provider rejected. An account
-/// being re-proved after a restart keeps its authenticated fact, so it is not named here, as
-/// the pick reads that as checking. Takes the store, whether it has sign-ins at all, the
-/// model access and the member. Returns the answer.
-fn signed_out(
+/// Reads the engine run the real pick proves a sign-in against. Takes the store. Returns its
+/// stamp, or none while no run is active, when the pick takes no managed account either.
+fn active_run(
+    connection: &Connection,
+) -> Result<Option<crate::engine::owner::HostStamp>, EngineError> {
+    if !table_exists(connection, "owner_meta")? {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1 AND schema_version=1 AND runtime_state='active'",
+            [],
+            |row| {
+                Ok(crate::engine::owner::HostStamp {
+                    db_instance: row.get(0)?,
+                    engine_epoch: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(error)
+}
+
+/// Says how the real pick's sign-in check holds this member, if it does. A native managed
+/// account is not signed in when its latest sign-in did not end authenticated or a provider
+/// rejected it. One whose sign-in stands but fails `native_sign_in`, as a doubted sign-in, a
+/// profile a check still holds or a sign-in proved under an earlier run does, needs a check.
+/// Takes the store, whether it has sign-ins at all, the active run, the model access and the
+/// member. Returns the held standing, or none when the pick can take it.
+fn sign_in_hold(
     connection: &Connection,
     sign_ins: bool,
+    run: Option<&crate::engine::owner::HostStamp>,
     access: &ModelAccess,
     member: &CredentialRef,
-) -> Result<bool, EngineError> {
+) -> Result<Option<Standing>, EngineError> {
     if !sign_ins {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(model) = access.connections.iter().find(|item| &item.id == member) else {
-        return Ok(false);
+        return Ok(None);
     };
     if !matches!(model.auth, ModelAuthentication::NativeManaged { .. }) {
-        return Ok(false);
+        return Ok(None);
     }
-    Ok(
-        !crate::storage::latest_sign_in_authenticated(connection, model)?
-            || crate::model_gateway::sign_in_rejected(connection, model)?,
-    )
+    if !crate::storage::latest_sign_in_authenticated(connection, model)?
+        || crate::model_gateway::sign_in_rejected(connection, model)?
+    {
+        return Ok(Some(Standing::NotSignedIn));
+    }
+    let proved =
+        run.is_some_and(|run| crate::storage::native_sign_in(connection, run, model, None).is_ok());
+    Ok((!proved).then_some(Standing::SignInUnconfirmed))
 }
 
 fn paused_until(

@@ -2351,18 +2351,18 @@ pub(super) fn native_members(
 }
 
 /// Proves the latest sign-in of a native managed connection can authorize a launch on
-/// this engine run, the same check every master turn uses. Input: the transaction, the
+/// this engine run, the same check every master turn uses. Input: the database, the
 /// active host, the connection and, for a master, the account its route names. Output:
 /// the authenticated sign-in fact, or the unknown or stale code; while the profile's latest
 /// operation still holds its fence it reads stale, as it does while it checks the account.
 pub(crate) fn native_sign_in(
-    tx: &Transaction<'_>,
+    db: &Connection,
     host: &HostStamp,
     connection: &ModelConnection,
     account_ref: Option<&crate::protocol::CredentialRef>,
 ) -> Result<crate::engine::owner::native_auth::NativeAuthFact, EngineError> {
-    let fact = proved_sign_in(tx, host, connection, account_ref, None)?;
-    if super::native_auth::doubted(tx, connection, fact.generation)? {
+    let fact = proved_sign_in(db, host, connection, account_ref, None)?;
+    if super::native_auth::doubted(db, connection, fact.generation)? {
         return Err(error("master_authentication_stale"));
     }
     Ok(fact)
@@ -2382,10 +2382,10 @@ pub(super) fn sign_in_at(
 }
 
 /// Proves a connection's latest sign-in, or the one with the given generation, can
-/// authorize a launch under the host's run. Inputs: the transaction, host, connection,
+/// authorize a launch under the host's run. Inputs: the database, host, connection,
 /// the account a master route names and the generation, if any. Output: the fact or code.
 fn proved_sign_in(
-    tx: &Transaction<'_>,
+    db: &Connection,
     host: &HostStamp,
     connection: &ModelConnection,
     account_ref: Option<&crate::protocol::CredentialRef>,
@@ -2397,7 +2397,7 @@ fn proved_sign_in(
     let key = crate::memory::hash(profile_ref.as_str().as_bytes());
     let wanted = generation.map(signed).transpose()?;
     type OperationRow = (String, i64, String, Vec<u8>, Vec<u8>);
-    let row: Option<OperationRow> = tx.query_row(
+    let row: Option<OperationRow> = db.query_row(
         "SELECT id,generation,phase,request,fact FROM native_auth_operations WHERE profile_key=?1 AND (?2 IS NULL OR generation=?2) ORDER BY generation DESC LIMIT 1",
         params![&key, wanted], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     ).optional().map_err(error)?;
@@ -2407,7 +2407,7 @@ fn proved_sign_in(
         return Err(error("native_auth_request_bounds"));
     }
     let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
-    if super::native_auth::profile_fenced(tx, &key)? {
+    if super::native_auth::profile_fenced(db, &key)? {
         return Err(error("master_authentication_stale"));
     }
     if let Some(gap) = sign_in_gap(fact.phase) {
@@ -2433,7 +2433,7 @@ fn proved_sign_in(
         || fact.binding.engine_epoch != host.engine_epoch
         || fact.binding.connection != *connection
         || account_ref.is_some_and(|account| &fact.binding.connection.account_ref != account)
-        || fact.binding.at_revision.value() > owner_revision(tx)?
+        || fact.binding.at_revision.value() > owner_revision(db)?
     {
         return Err(error("master_authentication_stale"));
     }
