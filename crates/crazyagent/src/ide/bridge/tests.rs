@@ -1854,6 +1854,37 @@ async fn input_after_its_capability_was_revoked_never_reaches_the_terminal() {
     case.stop().await;
 }
 
+/// V21-SEC-2-L1: an open Sandboxed terminal that sends and receives nothing still closes as
+/// revoked as soon as its capability is revoked, well inside the periodic grant check, and
+/// its pane ends then, so neither its output nor its pane outlives the revoke.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn an_idle_terminal_closes_as_soon_as_its_capability_is_revoked() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "level": "sandboxed" } }),
+    );
+    let (mut stream, name) = open_terminal(&socket, ide, &body).await;
+    let host = case.runtime.terminal().unwrap();
+    output_until(&mut stream, None).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    revoke(&case.runtime, &alpha).unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(2), closing(&mut stream))
+        .await
+        .expect("the terminal waited for the periodic grant check");
+    assert_eq!(
+        closed,
+        json!({ "kind": "closed", "reason": "ide_capability_revoked" })
+    );
+    assert!(!host.alive().unwrap().contains(&name));
+    case.stop().await;
+}
+
 /// A terminal asked for above the project's level is refused before any pane starts.
 #[cfg(target_os = "macos")]
 #[tokio::test]

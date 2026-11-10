@@ -32,6 +32,7 @@ pub const LEAD_PART: &str = "lead";
 /// The text that opens every message a session reads, followed by the id and `]`, which
 /// the read receipt scan finds in the session's transcript.
 pub(crate) const MARK: &str = "[crazyagent msg ";
+const NOTIFICATION: &str = "<task-notification>";
 pub(crate) const ROSTER_FILE: &str = "relay.json";
 pub(crate) const INBOX: &str = ".inbox";
 pub(crate) const SHOWN: &str = ".shown";
@@ -1350,7 +1351,7 @@ fn scan_transcript(
         if !seen.is_empty() && answered(format, text) {
             tails.read.append(&mut seen);
         }
-        for id in marks(text) {
+        for id in marks(format, text) {
             if unread.contains(&id) {
                 tails.shown.insert(id);
                 if !tails.read.contains(&id) {
@@ -1372,22 +1373,87 @@ fn scan_transcript(
     }
 }
 
-/// The message ids marked in one line of text: each `[crazyagent msg <digits>]`.
-fn marks(text: &str) -> Vec<MessageId> {
+/// The message ids one session record line marks as handed to the session: each
+/// `[crazyagent msg <digits>]` that starts a line of a text the session was given
+/// ([`given`]), outside a task notification. A mark the agent or a tool wrote, or one
+/// quoted in a letter's body, starts no such line and counts for nothing (SECAUDIT-2-F3).
+/// Takes the format and the line. Returns the ids.
+fn marks(format: Format, text: &str) -> Vec<MessageId> {
     let mut found = Vec::new();
-    let mut rest = text;
-    while let Some(at) = rest.find(MARK) {
-        rest = &rest[at + MARK.len()..];
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        if digits > 0
-            && digits <= 18
-            && rest.as_bytes().get(digits) == Some(&b']')
-            && let Ok(id) = rest[..digits].parse::<MessageId>()
-        {
-            found.push(id);
+    if !text.contains(MARK) {
+        return found;
+    }
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(text) else {
+        return found;
+    };
+    let mut texts = Vec::new();
+    if let Some(input) = given(format, &record) {
+        strings(input, &mut texts);
+    }
+    for text in texts {
+        if text.starts_with(NOTIFICATION) {
+            continue;
+        }
+        for line in text.split(crate::team::events::line_break) {
+            let Some(rest) = line.strip_prefix(MARK) else {
+                continue;
+            };
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0
+                && digits <= 18
+                && rest.as_bytes().get(digits) == Some(&b']')
+                && let Ok(id) = rest[..digits].parse::<MessageId>()
+            {
+                found.push(id);
+            }
         }
     }
     found
+}
+
+/// The part of one session record that is input handed to the session, never its own
+/// answer or a tool's output: a Claude Code user message holding no tool result, or a
+/// hook's output or queued prompt attachment; a Codex user message or its `user_message`
+/// event. Takes the format and the parsed record. Returns that part, or none.
+fn given(format: Format, record: &serde_json::Value) -> Option<&serde_json::Value> {
+    match format {
+        Format::Claude => match record["type"].as_str()? {
+            "user" => {
+                let content = &record["message"]["content"];
+                let tool = content
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|part| part["type"] == "tool_result"));
+                (!tool).then_some(content)
+            }
+            "attachment" => {
+                let kind = record["attachment"]["type"].as_str()?;
+                (kind == "queued_command" || kind.starts_with("hook_"))
+                    .then_some(&record["attachment"])
+            }
+            _ => None,
+        },
+        Format::Codex => {
+            let payload = &record["payload"];
+            match (record["type"].as_str()?, payload["type"].as_str()?) {
+                ("response_item", "message") if payload["role"] == "user" => {
+                    Some(&payload["content"])
+                }
+                ("event_msg", "user_message") => Some(&payload["message"]),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Collects every string inside a JSON value, in document order. Takes the value and the
+/// list to extend.
+fn strings<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::String(text) => out.push(text),
+        serde_json::Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+        serde_json::Value::Object(fields) => fields.values().for_each(|field| strings(field, out)),
+        _ => {}
+    }
 }
 
 /// Says whether a path is a real folder, not a link to one.

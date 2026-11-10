@@ -21587,6 +21587,50 @@ fn the_project_graph_is_copied_only_where_real_git_ignores_graphify_out() {
     }
 }
 
+/// DEC123B-L2: a teammate of an own-clone lead is a linked worktree of the lead's clone, so
+/// the clone's `info/exclude` decides whether it gets the graph, not the project
+/// repository's, in either direction.
+#[test]
+fn an_own_clone_leads_teammate_follows_the_clones_exclude() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let project = published_graph(&base);
+    let project_exclude = project.join(".git").join("info").join("exclude");
+    std::fs::create_dir_all(project_exclude.parent().unwrap()).unwrap();
+    let teammate = |lead: &str, exclude: &str| -> PathBuf {
+        let clone = project
+            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join("worktrees")
+            .join(lead);
+        std::fs::create_dir_all(clone.join(".git").join("info")).unwrap();
+        std::fs::write(clone.join(".git").join("info").join("exclude"), exclude).unwrap();
+        let mate = clone.join(crate::agent_git::TEAMMATES_FOLDER).join("mate");
+        std::fs::create_dir_all(&mate).unwrap();
+        std::fs::write(
+            mate.join(".git"),
+            format!("gitdir: {}/.git/worktrees/mate\n", clone.display()),
+        )
+        .unwrap();
+        mate
+    };
+
+    std::fs::write(&project_exclude, ".crazyagent/\n").unwrap();
+    let ignored = teammate("agent-1", "/.worktrees/\n/graphify-out/\n");
+    expose_graph(&project, &ignored, &[]);
+    assert!(
+        copied(&ignored),
+        "the clone's exclude keeps the graph out of its teammate's changes"
+    );
+
+    std::fs::write(&project_exclude, ".crazyagent/\ngraphify-out/\n").unwrap();
+    let tracked = teammate("agent-2", "/.worktrees/\n");
+    expose_graph(&project, &tracked, &[]);
+    assert!(
+        !tracked.join(GRAPH_FOLDER).exists(),
+        "the project repository's exclude does not decide for a clone's teammate"
+    );
+}
+
 /// A worktree whose repository's exclude keeps the graph out of git gets its copy: an own
 /// clone by its own exclude, a linked worktree by the project repository's, which the
 /// engine writes; a `.gitignore` line taking the graph back wins (DEC-123).
