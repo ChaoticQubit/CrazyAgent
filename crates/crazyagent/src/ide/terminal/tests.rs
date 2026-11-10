@@ -222,13 +222,15 @@ fn the_sandboxed_terminal_pane_says_it_cannot_stage_before_its_shell_starts() {
         extra_reads: &[],
     })
     .unwrap();
+    let typed = case.root.join("typed");
+    std::fs::write(&typed, "echo started\n").unwrap();
     let mut command = std::process::Command::new(&pane.argv[0]);
     command
         .args(&pane.argv[1..])
         .current_dir(&pane.cwd)
         .env_clear()
         .envs(pane.env.iter().map(|(name, value)| (name, value)))
-        .stdin(std::process::Stdio::null())
+        .stdin(std::fs::File::open(&typed).unwrap())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let output = crate::spawn_gate::output(&mut command).unwrap();
@@ -238,6 +240,7 @@ fn the_sandboxed_terminal_pane_says_it_cannot_stage_before_its_shell_starts() {
         Some("This terminal can't stage or commit. Use Source Control, or a Full access terminal."),
         "{output:?}"
     );
+    assert_eq!(said.lines().nth(1), Some("started"), "{output:?}");
 }
 
 /// Git answers in a Sandboxed IDE terminal, whose home is its own, so no config the sandbox

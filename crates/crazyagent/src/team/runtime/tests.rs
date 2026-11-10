@@ -9237,6 +9237,16 @@ fn a_held_task_that_ends_posts_its_change_set_with_its_background_work_and_no_st
     let mut team = check_runtime(&fixture, &host, &mid_turn_background(), None, None);
     fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
     let agent = subs(&fixture)[0];
+    assert!(
+        stand_in_file(&fixture, agent, "held").exists(),
+        "the turn waited held on its command"
+    );
+    let (_, result, _) = check_end(&fixture).unwrap();
+    let result = result.unwrap_or_default();
+    assert!(
+        result.contains("Waiting for the check.") && result.contains("Check passed."),
+        "{result}"
+    );
     let landing = crate::landing::open(&fixture.base).unwrap();
     let sets = crate::landing::list(&landing, &fixture.setup.project_id).unwrap();
     assert_eq!(sets.len(), 1, "{sets:#?}");
@@ -9299,6 +9309,16 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
     let mut team = check_runtime(&fixture, &host, &script, None, None);
     fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
     let agent = subs(&fixture)[0];
+    assert!(
+        stand_in_file(&fixture, agent, "held").exists(),
+        "the turn waited held on its command"
+    );
+    let (_, result, _) = check_end(&fixture).unwrap();
+    let result = result.unwrap_or_default();
+    assert!(
+        result.contains("Waiting for the check.") && result.contains("Check passed."),
+        "{result}"
+    );
     assert_eq!(
         std::fs::read_to_string(stand_in_file(&fixture, agent, "commit-code")).unwrap(),
         "0",
