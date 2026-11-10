@@ -138,7 +138,7 @@ pub(super) fn start_work(
         let more = if more == 0 {
             String::new()
         } else {
-            format!(", and {more} more that {}() shows", tool::INSPECT_WORK_TOOL)
+            format!(", and {more} more between this work and yours")
         };
         let note = format!(
             "{me} started work #{work} \"{}\" claiming {}, which overlaps your claim {} on work #{}: {reasons}{more}. This note takes no reply; agree who does what with update_work (kind note, to {agent}) before you edit it.",
