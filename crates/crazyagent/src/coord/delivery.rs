@@ -316,8 +316,9 @@ fn bridge(
 
 /// Reads the first process of an agent's pane, whose process group the agent's app-server
 /// runs in. Takes the reach and the agent. Returns its id, none with no host or no pane.
-fn pane_of(_reach: &Reach<'_>, _agent: AgentId) -> Option<u32> {
-    None
+fn pane_of(reach: &Reach<'_>, agent: AgentId) -> Option<u32> {
+    let pane = crate::terminal::AgentId::team(agent).ok()?;
+    reach.host?.pane_pid(&pane).ok().flatten()
 }
 
 /// What the owner sees on an agent that the project's Delivery setting leaves with no way
