@@ -199,7 +199,75 @@ pub(crate) struct ManagedAgent {
     role: AgentRole,
     stamp: HostStamp,
     binding: NativeProfileBinding,
-    _root: tempfile::TempDir,
+    _root: Root,
+}
+
+/// The variable a live run sets to a folder that keeps a row's Codex rollouts after the
+/// row's test folder goes (G1-DIAG).
+pub(crate) const LIVE_KEEP: &str = "CRAZYAGENT_LIVE_KEEP";
+
+/// The most rollouts one test folder copies into the [`LIVE_KEEP`] folder.
+const ROLLOUTS_KEPT_MAX: usize = 64;
+
+/// A managed agent's test folder, removed when dropped. When [`LIVE_KEEP`] names an absolute
+/// folder, it first copies the Codex rollouts under the agent home there with
+/// [`keep_rollouts`], so a failed live row keeps them. Holds the folder and the agent home.
+struct Root {
+    folder: tempfile::TempDir,
+    home: PathBuf,
+}
+
+impl Drop for Root {
+    /// Copies the rollouts when [`LIVE_KEEP`] is set, logging a failure without panicking,
+    /// since a failed row drops its folder while it unwinds. Takes the folder.
+    fn drop(&mut self) {
+        let Some(keep) = std::env::var_os(LIVE_KEEP).map(PathBuf::from) else {
+            return;
+        };
+        assert!(self.folder.path().is_absolute());
+        if !keep.is_absolute() {
+            eprintln!("live_keep_not_absolute");
+            return;
+        }
+        match keep_rollouts(&self.home.join("sessions"), &keep) {
+            Ok(copied) => eprintln!("live_keep_rollouts copied={copied}"),
+            Err(error) => eprintln!("live_keep_failed kind={:?}", error.kind()),
+        }
+    }
+}
+
+/// Copies each regular `.jsonl` file below `sessions` into `keep`, made when missing, under
+/// its own file name, at most [`ROLLOUTS_KEPT_MAX`] files. Links are neither followed nor
+/// copied, so an agent's planted link never copies a file from outside its home. Inputs: the
+/// sessions folder and the keep folder. Output: how many files were copied, none when
+/// `sessions` does not exist, or the first error.
+pub(super) fn keep_rollouts(sessions: &Path, keep: &Path) -> std::io::Result<usize> {
+    let (mut pending, mut copied) = (vec![sessions.to_path_buf()], 0);
+    while let Some(folder) = pending.pop() {
+        let items = match std::fs::read_dir(&folder) {
+            Ok(items) => items,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for item in items {
+            let item = item?;
+            let (kind, path) = (item.file_type()?, item.path());
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl")
+                && copied < ROLLOUTS_KEPT_MAX
+            {
+                std::fs::create_dir_all(keep)?;
+                std::fs::copy(&path, keep.join(item.file_name()))?;
+                copied += 1;
+            }
+        }
+    }
+    assert!(copied <= ROLLOUTS_KEPT_MAX);
+    Ok(copied)
 }
 
 fn reference(value: &str) -> CredentialRef {
@@ -615,6 +683,10 @@ impl ManagedAgent {
         let tmp = runtime.agent_folder(AGENT).join("tmp");
         let sandbox_profile = plan.sandbox_profile.clone();
         let working_dir = plan.working_dir.clone();
+        let root = Root {
+            folder: root,
+            home: home.clone(),
+        };
         Self {
             runtime,
             plan,
@@ -1057,7 +1129,7 @@ pub(super) struct NativeTeam {
     pub(super) runtime: TeamRuntime,
     pub(super) home: PathBuf,
     pane: (Arc<dyn Host>, AgentId),
-    _root: tempfile::TempDir,
+    _root: Root,
 }
 
 impl NativeTeam {
