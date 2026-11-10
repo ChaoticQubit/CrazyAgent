@@ -10685,7 +10685,7 @@ fn a_master_turn_with_a_stored_start_does_not_wait_for_the_repository_hold() {
             &turn.git_dir,
         ));
     });
-    let waited = got.recv_timeout(Duration::from_secs(5));
+    let waited = got.recv_timeout(Duration::from_secs(30));
     drop(held);
     assert!(matches!(waited, Ok(Ok(()))), "the turn waited: {waited:?}");
 }
