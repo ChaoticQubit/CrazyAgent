@@ -17493,6 +17493,11 @@ fn a_linked_lead_s_record_of_landed_teammate_work_is_tried_again_until_it_is_kep
     let linked = LinkedTeam::new(&fixture, &mut team);
     let start = linked.tip(&linked.branch);
     std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    let bulk = linked.teammate("greet").join("bulk");
+    std::fs::create_dir(&bulk).unwrap();
+    for index in 0..101 {
+        std::fs::write(bulk.join(format!("{index}.txt")), "bulk\n").unwrap();
+    }
     linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
     team.record_teammate_turns(&linked.project, linked.lead)
         .unwrap();
@@ -17515,11 +17520,6 @@ fn a_linked_lead_s_record_of_landed_teammate_work_is_tried_again_until_it_is_kep
         [PROJECT],
     )
     .unwrap();
-    let bulk = linked.worktree.join("bulk");
-    std::fs::create_dir(&bulk).unwrap();
-    for index in 0..101 {
-        std::fs::write(bulk.join(format!("{index}.txt")), "bulk\n").unwrap();
-    }
     let finish_again = |fixture: &Fixture| {
         linked
             .notes(fixture)
@@ -17546,7 +17546,11 @@ fn a_linked_lead_s_record_of_landed_teammate_work_is_tried_again_until_it_is_kep
         0,
         "the lead is told to finish over work the owner cannot see"
     );
-    std::fs::remove_dir_all(&bulk).unwrap();
+    db.execute(
+        "UPDATE team_new_folder_limit SET files=1000 WHERE project=?1",
+        [PROJECT],
+    )
+    .unwrap();
 
     team.land_teammates(&linked.project, linked.lead).unwrap();
 
