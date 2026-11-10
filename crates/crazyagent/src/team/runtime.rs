@@ -10205,7 +10205,8 @@ const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX)
 /// The most owner-stopped native teammates one tick ends, so a long list never stalls it.
 const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;
 /// The looks a native teammate's end takes while the host calls it unknown but the socket
-/// of its lead's teammates' server stays, since one refused connect proves no end (SEC2-R2).
+/// of its lead's teammates' server stays and refuses a connect, since one refused connect
+/// proves no end (SEC2-R2).
 const UNKNOWN_LOOKS_MAX: u32 = 5;
 /// The pause between two of those looks.
 const UNKNOWN_LOOK_PAUSE: Duration = Duration::from_millis(200);
@@ -10252,16 +10253,16 @@ fn over_cap_note(cap: u8, ended: &[String]) -> String {
 }
 
 /// Ends a native teammate's left pane as [`end_left_pane`] does, looking again while the
-/// host calls it unknown but the socket of its lead's teammates' server is still there, since
-/// one refused connect proves no end (SEC2-R2). Once `UNKNOWN_LOOKS_MAX` looks ran out the
-/// end is not proven, so its row says the cleanup is uncertain. Takes the host, the teammate
-/// and that socket, if any. Returns whether the end was proven, or the host's failure.
+/// host calls it unknown but the socket of its lead's teammates' server is still there and
+/// refuses a connect, since one refused connect proves no end (SEC2-R2). Once
+/// `UNKNOWN_LOOKS_MAX` looks ran out its row says the cleanup is uncertain. Takes the host,
+/// the teammate and that socket, if any. Returns whether the end was proven, or the failure.
 fn end_teammate(
     host: &dyn Host,
     agent: &AgentId,
     mates: Option<&Path>,
 ) -> Result<bool, crate::terminal::HostError> {
-    let stays = || mates.is_some_and(socket_present);
+    let stays = || mates.is_some_and(socket_refuses);
     for look in 1..=UNKNOWN_LOOKS_MAX {
         match end_left_pane(host, agent, "team") {
             Err(problem) if problem.0 == "terminal_agent_unknown" && stays() => {
@@ -10275,17 +10276,20 @@ fn end_teammate(
     Ok(false)
 }
 
-/// Whether a path names a socket now, read without following a link. Takes the path.
-/// Returns the answer, false where sockets are not files.
+/// Whether a path names a socket now, read without following a link, that refuses a connect
+/// through the spawn gate, as a server that stopped answering does (TEAM-LOWS r1 L1). Takes
+/// the path. Returns the answer, false where sockets are not files.
 #[cfg(unix)]
-fn socket_present(path: &Path) -> bool {
+fn socket_refuses(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
     std::fs::symlink_metadata(path).is_ok_and(|found| found.file_type().is_socket())
+        && crate::spawn_gate::connect_unix_std(path).is_err()
 }
 
-/// Whether a path names a socket now, never on this platform. Takes the path. Returns false.
+/// Whether a path names a socket that refuses a connect, never on this platform. Takes the
+/// path. Returns false.
 #[cfg(not(unix))]
-fn socket_present(_: &Path) -> bool {
+fn socket_refuses(_: &Path) -> bool {
     false
 }
 
