@@ -176,7 +176,7 @@ test("the idle stop says when an idle master stops, which the master's own setti
 
 test("Live terminal is a switch that shows the engine's setting and says what it does (DEC-117 Q4)", () => {
   assert.equal(typeof controls.LiveTerminalSetting, "function", "the setting exists");
-  const row = (master_live_terminal) => renderToStaticMarkup(createElement(controls.LiveTerminalSetting, { projectId: "chores", status: status({ master_live_terminal }), reload() {} }));
+  const row = (master_live_terminal) => renderToStaticMarkup(createElement(controls.LiveTerminalSetting, { projectId: "chores", liveHarness: true, status: status({ master_live_terminal }), reload() {} }));
   const on = /id="tg-live-terminal-chores"[^>]*role="switch"[^>]*aria-checked="true"/;
   const off = /id="tg-live-terminal-chores"[^>]*role="switch"[^>]*aria-checked="false"/;
   assert.match(row(undefined), on, "on with nothing saved");
