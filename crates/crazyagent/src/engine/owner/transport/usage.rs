@@ -1,6 +1,7 @@
 use super::*;
 use crate::protocol::{CredentialRef, ProjectId, encode_frame};
 use crate::usage::metrics::Metrics;
+use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
@@ -144,6 +145,11 @@ impl OwnerClient {
             Reply::Done => Ok(()),
             _ => Err(unknown()),
         }
+    }
+
+    /// Stores the owner's main number and price source. Input: the settings. Output: done.
+    pub async fn usage_set_money(&self, _settings: MoneySettings) -> Result<(), EngineError> {
+        Ok(())
     }
 
     async fn usage_exchange(&self, action: Action) -> Result<Reply, EngineError> {

@@ -1,5 +1,6 @@
 use super::capture::{Attribution, Format, Tokens};
 use super::health::{StepHealth, health};
+use super::money::MoneyView;
 use super::{AccountLimits, all_limits, failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
@@ -44,6 +45,8 @@ pub struct UsageRow {
     pub last_ms: i64,
     #[serde(default)]
     pub not_reported_by: Option<String>,
+    #[serde(default)]
+    pub cost_nanos: i64,
 }
 
 /// Tokens counted on one local day, which starts at `day_ms`.
@@ -106,6 +109,8 @@ pub struct UsageReport {
     #[serde(default)]
     pub health: Vec<StepHealth>,
     pub partial_homes: u64,
+    #[serde(default)]
+    pub money: MoneyView,
 }
 
 /// Tells whether the engine counts a harness's usage: from its session records (Claude
@@ -212,6 +217,7 @@ fn flag_unreported(
                         runs: 0,
                         last_ms: *last_ms,
                         not_reported_by: None,
+                        cost_nanos: 0,
                     },
                 };
                 row.not_reported_by = Some(harness_name(harness));
@@ -323,6 +329,7 @@ fn rows(
                 runs: count(row.get(5)?),
                 last_ms: row.get(6)?,
                 not_reported_by: None,
+                cost_nanos: 0,
             })
         })
         .map_err(storage)?
@@ -565,6 +572,7 @@ pub fn report(
         not_reported_by: unreported_harnesses(db, project, since)?,
         health: health(db)?,
         partial_homes,
+        money: MoneyView::default(),
     })?;
     assert!(report.projects.len() <= 2 * ROWS_MAX && report.days.len() <= DAYS_MAX);
     assert!(report.agents.len() <= 2 * ROWS_MAX && report.agent_lines.len() <= ROWS_MAX);

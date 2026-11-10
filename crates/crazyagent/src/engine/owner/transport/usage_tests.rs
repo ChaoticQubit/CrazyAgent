@@ -153,6 +153,22 @@ async fn a_usage_report_past_one_frame_is_trimmed_and_answered() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_money_choice_is_stored_and_reaches_the_report() {
+    use crate::usage::money::{self, MainNumber, MoneySettings, PriceSource};
+    let usage = Usage::start().await;
+    let settings = MoneySettings {
+        main_number: MainNumber::Tokens,
+        prices: PriceSource::Off,
+    };
+    usage.client.usage_set_money(settings).await.unwrap();
+    let report = usage.client.usage_report(None, None, 0).await.unwrap();
+    assert_eq!(report.money.settings, settings);
+    let db = crate::usage::open(&usage.engine_root).unwrap();
+    assert_eq!(money::read(&db).unwrap(), settings);
+    usage.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_usage_change_holds_the_owner_barrier_until_it_is_committed() {
     let usage = Usage::start().await;
     let held = crate::usage::open(&usage.engine_root).unwrap();

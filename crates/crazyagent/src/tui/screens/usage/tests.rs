@@ -32,6 +32,7 @@ fn usage_row(key: &str) -> UsageRow {
         },
         runs: 2,
         last_ms: NOW - 5 * MINUTE,
+        cost_nanos: 0,
         not_reported_by: None,
     }
 }
@@ -98,6 +99,7 @@ fn report() -> UsageReport {
         not_reported_by: Vec::new(),
         health: Vec::new(),
         partial_homes: 0,
+        money: Default::default(),
     }
 }
 
