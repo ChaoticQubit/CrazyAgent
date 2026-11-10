@@ -25075,6 +25075,18 @@ fn an_agent_refused_for_an_mcp_secret_in_its_command_names_the_server_and_the_se
     );
 }
 
+/// CTX-M1 residual (rv-secreview r2 I3): a Codex launch refused because skills an earlier run
+/// locked into its home could not be removed says so in words, with its code kept.
+#[test]
+fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
+    assert_eq!(
+        start_problem(&LaunchError("launch_context_skills_kept".into(), None)),
+        "The agent could not start: an earlier run locked skills into its Codex home, so \
+         CrazyAgent could not remove them and Codex would have loaded them. \
+         (launch_context_skills_kept)"
+    );
+}
+
 /// A start that a projects home move holds back leaves its work waiting (HMC-N1): a
 /// delegated task stays queued with no attempt spent and no error, the owner's Keep warm
 /// switch stays on with no note, and the owner's restart of the master waits; once the move

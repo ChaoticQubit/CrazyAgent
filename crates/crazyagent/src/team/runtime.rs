@@ -10322,12 +10322,20 @@ fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, Tur
     }
 }
 
+/// The owner's line for a Codex launch refused because skills an earlier run locked into its
+/// home could not be removed (CTX-M1 r2 I3).
+const SKILLS_KEPT_PROBLEM: &str = "The agent could not start: an earlier run locked skills into \
+     its Codex home, so CrazyAgent could not remove them and Codex would have loaded them";
+
 /// The owner's line for an agent whose harness could not start: a command that would hold
-/// an MCP secret names its server and secret, any other refusal names its plain code.
-/// Input: the launch error. Output: the line.
+/// an MCP secret names its server and secret, skills left in a Codex home say so, and any
+/// other refusal names its plain code. Input: the launch error. Output: the line.
 fn start_problem(problem: &LaunchError) -> String {
     match crate::launch_context::secret_in_command_text(problem) {
         Some(sentence) => format!("The agent could not start. {sentence}"),
+        None if problem.0 == crate::launch_context::SKILLS_KEPT => {
+            with_code(SKILLS_KEPT_PROBLEM, Some(&problem.0))
+        }
         None => with_code("The agent could not start", Some(&problem.0)),
     }
 }
