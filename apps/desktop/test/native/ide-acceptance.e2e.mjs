@@ -438,11 +438,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       });
 
       await t.test("a saved access level restarts the IDE, and the Save's words match what happens to an unsaved edit", async () => {
-        await keys.key("P", PRIMARY);
-        await ide.until("quick open", ide.rows);
-        await keys.text("notes.md");
-        await pause(SETTLE_MS);
-        await ide.pick("notes.md", FOLDER);
+        await ide.run("File: New Untitled Text File");
         await ide.until("the editor focused", `document.activeElement?.closest(".monaco-editor") !== null`);
         await keys.text(UNSAVED);
         await ide.until("the edit marked unsaved", `document.querySelector(".tabs-container .tab.active.dirty") !== null`);
