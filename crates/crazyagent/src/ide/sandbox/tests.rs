@@ -2228,3 +2228,150 @@ fn a_rebase_after_a_global_option_from_the_ide_stops_with_a_plain_line() {
     assert!(s.no_private_files());
     crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
 }
+
+/// IDE-SANDBOX-AGENT-FOLDERS (a) under the installed `server.sb`: the IDE writes nothing
+/// under the project's `.git/worktrees`, in any letter case, nor below an agent folder's
+/// `.git`, whatever makes the write: a shell, real git by path, or git through the shim,
+/// an alias included. Agents' admin files keep their bytes and nothing is planted there.
+/// Status, `worktree list`, a commit at the project folder and a gc, with agent reflogs
+/// and without, still work.
+#[test]
+fn the_ide_writes_nothing_under_an_agent_s_git_admin_folders() {
+    let s = server();
+    let agents = s.root.join(".crazyagent").join("worktrees");
+    let admins = s.root.join(".git").join("worktrees");
+    let agent = agents.join("agent-4");
+    let teammate = agent.join(crate::agent_git::TEAMMATES_FOLDER).join("t2");
+    let renamed = agents.join("agent-6");
+    for (dir, branch, path) in [
+        (&s.root, "agent-4", &agent),
+        (&agent, "agent-4--t2", &teammate),
+        (&s.root, "agent-6", &renamed),
+    ] {
+        setup(
+            dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().unwrap(),
+            ],
+        );
+    }
+    let clone = agents.join("agent-5");
+    setup(&s.root, &["clone", "-q", ".", clone.to_str().unwrap()]);
+    let clone_teammate = clone.join(crate::agent_git::TEAMMATES_FOLDER).join("t1");
+    setup(
+        &clone,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-5--t1",
+            clone_teammate.to_str().unwrap(),
+        ],
+    );
+    let names = ["agent-4", "t2", "agent-6"];
+    let mut heads: Vec<PathBuf> = names
+        .iter()
+        .flat_map(|name| ["HEAD", "index"].map(|file| admins.join(name).join(file)))
+        .collect();
+    heads.push(clone.join(".git").join("HEAD"));
+    heads.push(clone.join(".git").join("worktrees").join("t1").join("HEAD"));
+    let logs: Vec<PathBuf> = names
+        .iter()
+        .map(|name| admins.join(name).join("logs").join("HEAD"))
+        .collect();
+    let read = |files: &[PathBuf]| -> Vec<Vec<u8>> {
+        files.iter().map(|file| fs::read(file).unwrap()).collect()
+    };
+    let collect = |step: &str| {
+        let (worked, said) = s.git(&["gc", "-q"]);
+        assert!(worked, "gc {step}: {said}");
+    };
+
+    let (worked, said) = s.git(&["status", "--porcelain"]);
+    assert!(worked, "{said}");
+    let listed = ide_git_output(
+        &s.profile,
+        &s.shim,
+        &s.home,
+        &s.root,
+        &s.root,
+        &["worktree", "list", "--porcelain"],
+    );
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("agent-4--t2"));
+    fs::write(s.root.join("b.txt"), "ide\n").unwrap();
+    for args in [&["add", "b.txt"][..], &["commit", "-q", "-m", "ide"]] {
+        let (worked, said) = s.git(args);
+        assert!(worked, "{args:?}: {said}");
+    }
+    assert_eq!(setup(&s.root, &["log", "-1", "--format=%s"]), "ide\n");
+    assert!(logs.iter().all(|file| file.is_file()));
+    collect("with agent reflogs");
+    let before = read(&heads);
+    let logged = read(&logs);
+
+    for file in heads.iter().chain(&logs) {
+        assert!(!sh(&s.profile, "rm -f \"$1\"", file), "{}", file.display());
+        assert!(
+            !sh(&s.profile, "printf x > \"$1\"", file),
+            "{}",
+            file.display()
+        );
+    }
+    for planted in [
+        admins.join("planted"),
+        s.root.join(".GIT/Worktrees/planted"),
+    ] {
+        assert!(
+            !sh(&s.profile, "mkdir \"$1\"", &planted),
+            "{}",
+            planted.display()
+        );
+    }
+    assert!(!admins.join("planted").exists());
+    let lock = admins.join("agent-4").join("locked");
+    assert!(!sh(&s.profile, ": > \"$1\"", &lock));
+    let commit = setup(&s.root, &["rev-parse", "agent-4"]);
+    let (moved, said) = ide_git(
+        &s.profile,
+        Path::new(REAL_GIT),
+        &s.home,
+        &s.root,
+        &s.root,
+        &[
+            "update-ref",
+            "--no-deref",
+            "worktrees/agent-4/HEAD",
+            commit.trim(),
+        ],
+    );
+    assert!(!moved, "{said}");
+    let (locked, said) = s.git(&["worktree", "lock", agent.to_str().unwrap()]);
+    assert!(!locked, "{said}");
+    assert!(!lock.exists());
+    assert_eq!(read(&heads), before);
+    assert_eq!(read(&logs), logged);
+
+    for file in &logs {
+        fs::remove_file(file).unwrap();
+    }
+    collect("without agent reflogs");
+    let (moved, said) = s.git(&["branch", "-m", "agent-6", "agent-x"]);
+    assert!(!moved, "{said}");
+    let (removed, said) = s.git(&[
+        "-c",
+        "alias.x=worktree remove --force --force",
+        "x",
+        teammate.to_str().unwrap(),
+    ]);
+    assert!(!removed, "{said}");
+    assert_eq!(read(&heads), before);
+    assert!(s.no_private_files());
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
