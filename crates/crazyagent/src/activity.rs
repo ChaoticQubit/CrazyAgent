@@ -979,10 +979,15 @@ fn past_accepts(db: &Connection, project: &ProjectId) -> Result<Vec<Past>, Engin
     } else {
         "NULL"
     };
+    let message = if has_column(db, "landing_change_sets", "message")? {
+        "message"
+    } else {
+        "''"
+    };
     let mut statement = db
         .prepare(&format!(
-            "SELECT id,label,prompt_line,updated_ms,agent_kind,files,{number} FROM landing_change_sets
-             WHERE project=?1 AND state='accepted'"
+            "SELECT id,label,prompt_line,updated_ms,agent_kind,files,{number},{message} \
+             FROM landing_change_sets WHERE project=?1 AND state='accepted'"
         ))
         .map_err(state)?;
     let rows = statement
@@ -991,16 +996,17 @@ fn past_accepts(db: &Connection, project: &ProjectId) -> Result<Vec<Past>, Engin
                 "master" => crate::landing::AgentKind::Master,
                 _ => crate::landing::AgentKind::Sub,
             };
-            let agent = crate::landing::agent_title(kind, &row.get::<_, String>(1)?);
+            let label = row.get::<_, String>(1)?;
+            let agent = crate::landing::agent_title(kind, &label);
             let number = row
                 .get::<_, Option<i64>>(6)?
                 .and_then(|number| u64::try_from(number).ok());
-            let named = crate::landing::change_set_words(
-                number,
-                &agent,
+            let message = crate::landing::change_set_message(
+                &row.get::<_, String>(7)?,
                 &row.get::<_, String>(2)?,
-                row.get(5)?,
+                &label,
             );
+            let named = crate::landing::change_set_words(number, &agent, &message, row.get(5)?);
             Ok(Past {
                 kind: ActivityKind::Accepted,
                 at_ms: row.get(3)?,
