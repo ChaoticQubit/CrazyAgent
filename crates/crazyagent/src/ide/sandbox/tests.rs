@@ -1803,3 +1803,50 @@ fn a_rebase_from_the_ide_stops_with_a_plain_line() {
     assert!(s.no_private_files());
     crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
 }
+
+/// SECAUDIT ide-git-commondir-case-variant-config-redirect: IDE-sandboxed code cannot plant a
+/// case-variant `commondir` in the project's git folder.
+#[test]
+fn ide_sandboxed_code_cannot_plant_a_case_variant_commondir() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    fs::write(base.join("CaseProbe"), "").unwrap();
+    assert!(
+        base.join("caseprobe").exists(),
+        "needs a case-insensitive volume"
+    );
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    for path in [&home, &build, &root] {
+        folder(path);
+    }
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    setup(&root, &["init", "-q"]);
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    let wrote = sh(&profile, "printf x > \"$1\"", &root.join(".git/COMMONDIR"));
+    let planted: Vec<String> = fs::read_dir(root.join(".git"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.eq_ignore_ascii_case("commondir"))
+        .collect();
+    assert!(!wrote, "the write ran: {planted:?}");
+    assert!(planted.is_empty(), "{planted:?}");
+}
