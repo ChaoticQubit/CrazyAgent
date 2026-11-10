@@ -97,6 +97,124 @@ fn a_mapping_paused_with_no_end_in_sight_asks_for_its_account_again_after_a_whil
     assert_eq!(claimed(&database).as_deref(), Some("shop"));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_waiting_onboarding_step_halts_a_refresh_build() {
+    let database = database();
+    let running = || false;
+    assert!(!gives_way(&database, &running)());
+    assert!(
+        gives_way(&database, &|| true)(),
+        "the engine's stop halts it"
+    );
+
+    waiting_to_map(&database, "paused", 1);
+    pause(&database, "paused", now_ms() + 60 * 60 * 1000);
+    assert!(
+        !gives_way(&database, &running)(),
+        "a step paused on its account lets the build run"
+    );
+
+    waiting_to_map(&database, "fresh", 2);
+    let stop = gives_way(&database, &running);
+    assert!(stop(), "a waiting step halts the build");
+    assert!(stop(), "and the stop stays");
+    assert_eq!(claimed(&database).as_deref(), Some("fresh"));
+    assert!(
+        !gives_way(&database, &running)(),
+        "a claimed step halts no later build"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_mapping_rechecking_its_account_pause_never_halts_a_refresh_build() {
+    let database = database();
+    let running = || false;
+    waiting_to_map(&database, "rechecking", 1);
+    pause(&database, "rechecking", i64::MAX);
+    database
+        .execute(
+            "UPDATE onboarding SET updated_ms=?1 WHERE project='rechecking'",
+            [now_ms() - PAUSE_RECHECK_MS],
+        )
+        .unwrap();
+    assert!(
+        !gives_way(&database, &running)(),
+        "a pause recheck waits one build"
+    );
+    assert_eq!(
+        claimed(&database).as_deref(),
+        Some("rechecking"),
+        "the claim still rechecks it"
+    );
+
+    waiting_to_map(&database, "ended", 2);
+    pause(&database, "ended", now_ms() + 60 * 60 * 1000);
+    assert!(!gives_way(&database, &running)());
+    database
+        .execute(
+            "UPDATE onboarding SET mapping_reason=?1 WHERE project='ended'",
+            [(now_ms() - 1).to_string()],
+        )
+        .unwrap();
+    assert!(
+        gives_way(&database, &running)(),
+        "a pause that ended halts the build"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_project_with_no_onboarding_row_gets_its_main_graph_refreshed() {
+    let database = database();
+    database
+        .execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    let projects: [(&str, &[&str]); 5] = [
+        ("alone", &["/repos/alone", "/repos/second"]),
+        ("bare", &[]),
+        ("building", &["/repos/building"]),
+        ("onboarded", &["/repos/declared"]),
+        ("taken", &["/repos/taken"]),
+    ];
+    for (id, repositories) in projects {
+        let body = serde_json::json!({
+            "project_id": id,
+            "spec": {"name": id, "repositories": repositories}
+        });
+        database
+            .execute(
+                "INSERT INTO projects(id,body) VALUES (?1,?2)",
+                params![id, body.to_string()],
+            )
+            .unwrap();
+    }
+    for (project, created_ms) in [("onboarded", 1), ("building", 2), ("taken", 3), ("gone", 4)] {
+        waiting_to_map(&database, project, created_ms);
+    }
+    database
+        .execute(
+            "UPDATE onboarding SET graph_state='waiting' WHERE project='building'",
+            [],
+        )
+        .unwrap();
+    database
+        .execute(
+            "UPDATE onboarding SET claimer='claim-test' WHERE project='taken'",
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(
+        refreshable(&database).unwrap(),
+        [
+            ("alone".to_owned(), PathBuf::from("/repos/alone")),
+            ("onboarded".to_owned(), PathBuf::from("/repos/onboarded")),
+        ]
+    );
+}
+
 #[test]
 fn run_names_differ_between_onboardings_of_one_project_id_and_stay_in_bound() {
     let database = database();

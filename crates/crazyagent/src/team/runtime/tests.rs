@@ -20904,49 +20904,98 @@ fn a_real_endpoint_turn_under_no_network_reaches_only_its_model() {
     team.shutdown().unwrap();
 }
 
-#[test]
-fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out() {
-    let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
+/// The folder graphify keeps its graph in, in the project and in each agent's worktree.
+const GRAPH_FOLDER: &str = "graphify-out";
+
+/// Publishes a project graph for the graph copy rows (DEC-123): `graph.json` holding `{}`,
+/// a report and a wiki page in `<base>/project/graphify-out`, published at one tip. Takes
+/// the base folder. Returns the project folder.
+fn published_graph(base: &Path) -> PathBuf {
     let project = base.join("project");
     let graph = project.join(GRAPH_FOLDER);
     std::fs::create_dir_all(graph.join("wiki")).unwrap();
+    std::fs::create_dir_all(project.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
     std::fs::write(graph.join("graph.json"), "{}").unwrap();
     std::fs::write(graph.join("GRAPH_REPORT.md"), "report\n").unwrap();
+    std::fs::write(graph.join("wiki").join("index.md"), "wiki\n").unwrap();
+    let build = crate::onboarding::main_graph::Build {
+        tip: "a".repeat(40),
+        built_ms: 1_000,
+        hidden: crate::onboarding::main_graph::hidden_digest(&[]),
+    };
+    assert!(crate::onboarding::main_graph::publish(&project, &build).unwrap());
+    project
+}
+
+/// Whether a worktree holds its own copy of the published graph: a plain `graph.json`
+/// holding the published text. Takes the worktree. Returns the answer.
+fn copied(worktree: &Path) -> bool {
+    let graph = worktree.join(GRAPH_FOLDER).join("graph.json");
+    std::fs::symlink_metadata(&graph).is_ok_and(|found| found.file_type().is_file())
+        && std::fs::read_to_string(&graph).is_ok_and(|text| text == "{}")
+}
+
+/// An agent worktree gets its own copy of the published project graph, never a link to it,
+/// only where git ignores `graphify-out` there (DEC-123). What the agent made there is kept,
+/// the read-only links an older engine placed (I3) give way to a copy, and a graph the
+/// engine never published is never copied.
+#[test]
+fn the_project_graph_is_copied_into_an_agent_worktree_only_when_it_ignores_graphify_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let project = published_graph(&base);
     let worktree = |name: &str, ignore: &str| -> PathBuf {
         let folder = base.join(name);
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join(".gitignore"), ignore).unwrap();
         folder
     };
-    let linked = |folder: &Path, entry: &str| -> Option<PathBuf> {
-        std::fs::read_link(folder.join(GRAPH_FOLDER).join(entry)).ok()
-    };
 
     let ignoring = worktree("ignoring", "target\n/graphify-out/\n");
-    expose_graph(&project, &ignoring);
-    expose_graph(&project, &ignoring);
-    for entry in GRAPH_ENTRIES {
-        assert_eq!(linked(&ignoring, entry), Some(graph.join(entry)), "{entry}");
+    expose_graph(&project, &ignoring, &[]);
+    expose_graph(&project, &ignoring, &[]);
+    assert!(copied(&ignoring));
+    for entry in ["GRAPH_REPORT.md", "wiki"] {
+        let found = std::fs::symlink_metadata(ignoring.join(GRAPH_FOLDER).join(entry)).unwrap();
+        assert!(!found.file_type().is_symlink(), "{entry}");
     }
+    assert_eq!(
+        std::fs::read_to_string(ignoring.join(GRAPH_FOLDER).join("wiki").join("index.md")).unwrap(),
+        "wiki\n"
+    );
 
     let owned = worktree("owned", "graphify-out\n");
     std::fs::create_dir(owned.join(GRAPH_FOLDER)).unwrap();
     std::fs::write(owned.join(GRAPH_FOLDER).join("graph.json"), "mine").unwrap();
     std::os::unix::fs::symlink(&base, owned.join(GRAPH_FOLDER).join("wiki")).unwrap();
-    expose_graph(&project, &owned);
+    expose_graph(&project, &owned, &[]);
     assert_eq!(
         std::fs::read_to_string(owned.join(GRAPH_FOLDER).join("graph.json")).unwrap(),
         "mine"
     );
-    assert_eq!(linked(&owned, "wiki"), Some(graph.join("wiki")));
     assert_eq!(
-        linked(&owned, "GRAPH_REPORT.md"),
-        Some(graph.join("GRAPH_REPORT.md"))
+        std::fs::read_link(owned.join(GRAPH_FOLDER).join("wiki")).unwrap(),
+        base
+    );
+    assert!(std::fs::symlink_metadata(owned.join(GRAPH_FOLDER).join("GRAPH_REPORT.md")).is_err());
+
+    let older = worktree("older", "graphify-out/\n");
+    std::fs::create_dir(older.join(GRAPH_FOLDER)).unwrap();
+    for entry in ["graph.json", "GRAPH_REPORT.md", "wiki"] {
+        std::os::unix::fs::symlink(
+            project.join(GRAPH_FOLDER).join(entry),
+            older.join(GRAPH_FOLDER).join(entry),
+        )
+        .unwrap();
+    }
+    expose_graph(&project, &older, &[]);
+    assert!(
+        copied(&older),
+        "the links of an older engine give way to a copy"
     );
 
     let tracking = worktree("tracking", "target\ngraphify-out/wiki\n");
-    expose_graph(&project, &tracking);
+    expose_graph(&project, &tracking, &[]);
     assert!(!tracking.join(GRAPH_FOLDER).exists());
 
     let linked_ignore = base.join("linked-ignore");
@@ -20956,28 +21005,30 @@ fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out
         linked_ignore.join(".gitignore"),
     )
     .unwrap();
-    expose_graph(&project, &linked_ignore);
+    expose_graph(&project, &linked_ignore, &[]);
     assert!(!linked_ignore.join(GRAPH_FOLDER).exists());
 
     let bare_project = base.join("bare-project");
-    std::fs::create_dir(&bare_project).unwrap();
+    std::fs::create_dir_all(bare_project.join(GRAPH_FOLDER)).unwrap();
+    std::fs::write(bare_project.join(GRAPH_FOLDER).join("graph.json"), "{}").unwrap();
     let fresh = worktree("fresh", "graphify-out/\n");
-    expose_graph(&bare_project, &fresh);
-    assert!(!fresh.join(GRAPH_FOLDER).exists());
+    expose_graph(&bare_project, &fresh, &[]);
+    assert!(
+        !fresh.join(GRAPH_FOLDER).exists(),
+        "a graph the engine never published is never copied"
+    );
 }
 
-/// The graph shows in a worktree only where git itself ignores the graph folder (T3-L1): a
-/// line with leading spaces names another path and any `!` line naming the folder takes it
-/// back, as each case's real git says, while trailing spaces are git's own trim.
+/// The graph is copied into a worktree only where git itself ignores the graph folder
+/// (T3-L1): a line with leading spaces names another path and any `!` line naming the
+/// folder takes it back, as each case's real git says, while trailing spaces are git's own
+/// trim.
 #[cfg(target_os = "macos")]
 #[test]
-fn the_shared_graph_shows_only_where_real_git_ignores_graphify_out() {
+fn the_project_graph_is_copied_only_where_real_git_ignores_graphify_out() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
-    let project = base.join("project");
-    let graph = project.join(GRAPH_FOLDER);
-    std::fs::create_dir_all(&graph).unwrap();
-    std::fs::write(graph.join("graph.json"), "{}").unwrap();
+    let project = published_graph(&base);
     let home = base.join("home");
     std::fs::create_dir(&home).unwrap();
     for (name, ignore, exclude, ignored) in [
@@ -21008,23 +21059,23 @@ fn the_shared_graph_shows_only_where_real_git_ignores_graphify_out() {
             "{name}: {checked:?}"
         );
         assert_eq!(checked.status.success(), ignored, "{name}: real git");
-        expose_graph(&project, &clone);
+        expose_graph(&project, &clone, &[]);
         assert_eq!(
-            std::fs::symlink_metadata(clone.join(GRAPH_FOLDER).join("graph.json")).is_ok(),
+            copied(&clone),
             ignored,
-            "{name}: the graph shows only where git ignores it"
+            "{name}: the graph is copied only where git ignores it"
         );
     }
 }
 
+/// A worktree whose repository's exclude keeps the graph out of git gets its copy: an own
+/// clone by its own exclude, a linked worktree by the project repository's, which the
+/// engine writes; a `.gitignore` line taking the graph back wins (DEC-123).
 #[test]
-fn the_shared_graph_shows_in_a_worktree_whose_repository_excludes_graphify_out() {
+fn the_project_graph_is_copied_into_a_worktree_whose_repository_excludes_graphify_out() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
-    let project = base.join("project");
-    let graph = project.join(GRAPH_FOLDER);
-    std::fs::create_dir_all(&graph).unwrap();
-    std::fs::write(graph.join("graph.json"), "{}").unwrap();
+    let project = published_graph(&base);
     std::fs::create_dir_all(project.join(".git").join("info")).unwrap();
     std::fs::write(
         project.join(".git").join("info").join("exclude"),
@@ -21049,37 +21100,34 @@ fn the_shared_graph_shows_in_a_worktree_whose_repository_excludes_graphify_out()
         .unwrap();
         folder
     };
-    let shown = |folder: &Path| std::fs::read_link(folder.join(GRAPH_FOLDER).join("graph.json"));
 
     let own = clone(
         "own",
         ".crazyagent/\ntarget/\n",
         "/.worktrees/\n/graphify-out/\n",
     );
-    expose_graph(&project, &own);
-    assert_eq!(
-        shown(&own).ok(),
-        Some(graph.join("graph.json")),
-        "an Own branch clone whose own exclude keeps the graph out of git shows it"
+    expose_graph(&project, &own, &[]);
+    assert!(
+        copied(&own),
+        "an Own branch clone whose own exclude keeps the graph out of git gets a copy"
     );
 
     let sandboxed = linked("sandboxed", ".crazyagent/\ntarget/\n");
-    expose_graph(&project, &sandboxed);
-    assert_eq!(
-        shown(&sandboxed).ok(),
-        Some(graph.join("graph.json")),
+    expose_graph(&project, &sandboxed, &[]);
+    assert!(
+        copied(&sandboxed),
         "a linked worktree shares the project repository's exclude, which the engine writes"
     );
 
     let older = clone("older", "target/\n", "/.worktrees/\n");
-    expose_graph(&project, &older);
+    expose_graph(&project, &older, &[]);
     assert!(
         !older.join(GRAPH_FOLDER).exists(),
         "a clone made before its exclude named the graph never shows it as a change"
     );
 
     let negated = linked("negated", "target/\n!graphify-out/\n");
-    expose_graph(&project, &negated);
+    expose_graph(&project, &negated, &[]);
     assert!(
         !negated.join(GRAPH_FOLDER).exists(),
         "a .gitignore line taking the graph back into git wins over the exclude"
@@ -21090,7 +21138,7 @@ fn the_shared_graph_shows_in_a_worktree_whose_repository_excludes_graphify_out()
         "graphify-out/\n!/graphify-out/\n",
         "/.worktrees/\n",
     );
-    expose_graph(&project, &unignored);
+    expose_graph(&project, &unignored, &[]);
     assert!(
         !unignored.join(GRAPH_FOLDER).exists(),
         "the last .gitignore line about the graph decides"

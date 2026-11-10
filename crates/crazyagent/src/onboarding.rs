@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod draft;
 pub(crate) mod graph;
+#[cfg(unix)]
+pub(crate) mod main_graph;
 pub mod service;
 
 #[cfg(test)]

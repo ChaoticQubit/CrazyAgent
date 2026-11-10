@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -143,6 +143,12 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       const steps = settled.split("Overview")[0];
       if (graphify.state.state === "found") {
         assert.match(steps, /Build the code graph\s*Done/, "the Graphify skill is on and the engine found its command, so the graph step is done");
+        const published = join(repo, ".crazyagent", "graph");
+        const record = readFileSync(join(published, "current"), "utf8");
+        const [, tip, built] = record.match(/^v2 ([0-9a-f]{40}|[0-9a-f]{64}) (\d+) [0-9a-f]{64}\n$/) ?? [];
+        assert.ok(tip, `the engine published the graph it built for agents to copy, with the tip it was built at (DEC-123): ${record}`);
+        assert.ok(statSync(join(published, `g-${built}`, "graph.json")).isFile(), "the published copy holds the graph as a plain file");
+        assert.match(readFileSync(join(repo, ".git", "info", "exclude"), "utf8"), /^graphify-out\/$/m, "the project's git keeps every agent's graph copy out of its changes");
       } else {
         assert.doesNotMatch(steps, /Build the code graph\s*Done/, "the engine reports the Graphify command missing, so the graph step cannot claim done");
       }
