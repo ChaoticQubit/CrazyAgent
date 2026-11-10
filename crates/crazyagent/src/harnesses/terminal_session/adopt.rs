@@ -286,6 +286,10 @@ impl TerminalSession {
             replay(&mut reader, &limits, &mut events)?;
         }
         let unkept = host.unkept(&agent);
+        let unconfined = !matches!(
+            record.access,
+            Some(AgentAccess::Sandboxed | AgentAccess::OwnBranch)
+        );
         let on_menu = matches!(record.source, RecordSource::CodexRollouts { .. })
             && host
                 .screen(&agent)
@@ -316,11 +320,10 @@ impl TerminalSession {
             stopped: false,
             group_ended: false,
             uncertain: false,
-            unconfined: !matches!(
-                record.access,
-                Some(AgentAccess::Sandboxed | AgentAccess::OwnBranch)
-            ),
+            unconfined,
             unkept,
+            lineage: super::lineage_of(record.pid, unkept, unconfined),
+            followed: Instant::now(),
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: context,

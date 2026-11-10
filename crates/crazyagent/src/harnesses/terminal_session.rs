@@ -31,6 +31,9 @@ const OWN_FACTS_MAX: usize = 4096;
 const BACKGROUND_MAX: usize = 64;
 const ALIVE_EVERY: Duration = Duration::from_secs(1);
 const GROUP_FRESH: Duration = Duration::from_secs(5);
+/// How often a pane whose stop checks its lineage reads the process table while it runs, so
+/// a process it starts in a session of its own is known before the pane can end.
+const FOLLOW_EVERY: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const KEEPER_WAIT: Duration = Duration::from_secs(6);
 #[cfg(target_os = "macos")]
@@ -71,6 +74,8 @@ pub struct TerminalSession {
     uncertain: bool,
     unconfined: bool,
     unkept: bool,
+    lineage: Option<Result<Lineage, Unstopped>>,
+    followed: Instant,
     record: Option<PaneRecord>,
     _key: Option<KeyFile>,
     _context: Option<Installed>,
@@ -335,6 +340,8 @@ impl TerminalSession {
             uncertain: false,
             unconfined: request.unconfined,
             unkept,
+            lineage: lineage_of(pane.pid, unkept, request.unconfined),
+            followed: Instant::now(),
             record: PaneRecord::new(
                 &command.transcript,
                 &command.cwd,
@@ -543,7 +550,7 @@ impl TerminalSession {
     /// kill every process in the sandbox, sessions of their own included; then every process
     /// left in the pane's process group is killed, as a dev server started in the background.
     /// A Full access pane has no Seatbelt and so no keeper, whose warden only arms inside a
-    /// sandbox, so the processes found in its lineage before the end are checked after it. A
+    /// sandbox, so the processes found in its lineage while the pane ran are checked after it. A
     /// pane its host runs without the keeper, as a native lead's own server does, has no
     /// warden either: its lineage is checked the same way. Output: none, since a pane reports no exit code,
     /// [`Unstopped::Uncertain`] when the keeper did not confirm in time, or the group outlived
@@ -551,11 +558,12 @@ impl TerminalSession {
     /// [`Unstopped::Left`] naming what a Full access pane, or one run without the keeper,
     /// left running.
     pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
-        let lineage = if self.unkept {
-            Some(Lineage::of_sandboxed(self.pid))
-        } else {
-            self.unconfined.then(|| Lineage::of(self.pid))
-        };
+        let lineage = self.lineage.take().map(|lineage| {
+            lineage.map(|mut lineage| {
+                lineage.follow();
+                lineage
+            })
+        });
         self.halt();
         if self.uncertain {
             return Err(Unstopped::Uncertain);
@@ -801,6 +809,13 @@ impl TerminalSession {
                 self.queue.push_back(LaunchEvent::Exited { code: None });
             }
         }
+        if !self.exited
+            && self.followed.elapsed() >= FOLLOW_EVERY
+            && let Some(Ok(lineage)) = &mut self.lineage
+        {
+            lineage.follow();
+            self.followed = Instant::now();
+        }
         Ok(())
     }
 
@@ -862,6 +877,18 @@ impl TerminalSession {
         } else {
             None
         }
+    }
+}
+
+/// The lineage a pane's stop checks, read from the pane's start so a process that later
+/// leaves the pane's session is still known (SECAUDIT-SETSID-LEFTOVER): sandboxed for a pane
+/// its host runs without the keeper, Full access for an unconfined one, none otherwise.
+/// Inputs: the pane's first process and the two answers. Output: the lineage, if any.
+fn lineage_of(pid: u32, unkept: bool, unconfined: bool) -> Option<Result<Lineage, Unstopped>> {
+    if unkept {
+        Some(Lineage::of_sandboxed(pid))
+    } else {
+        unconfined.then(|| Lineage::of(pid))
     }
 }
 

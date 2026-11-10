@@ -292,6 +292,14 @@ impl Lineage {
         })
     }
 
+    /// Reads the process table again while the agent runs, and once more just before its
+    /// stop, so a process that later leaves the leader's session and loses its parent stays
+    /// known (SECAUDIT-SETSID-LEFTOVER). Only the last read decides whether the lineage is
+    /// unchecked; a failed read keeps what was known. Input: the lineage. Output: none.
+    pub(crate) fn follow(&mut self) {
+        self.unchecked = self.refresh().is_err();
+    }
+
     /// Finds a lineage as [`Self::of`] does with the processes listed by `table`.
     /// Inputs: the leader and the listing command. Output: as for [`Self::of`].
     #[cfg(unix)]
