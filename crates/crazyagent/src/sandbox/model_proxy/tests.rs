@@ -207,6 +207,38 @@ fn a_port_search_with_every_port_taken_refuses_plainly() {
     }
 }
 
+/// A port the system just handed out on 127.0.0.1 and freed again, other than any of `not`,
+/// for a port search that needs a free port. Input: the ports it must not be. Output: the
+/// port.
+fn loose_port(not: &[u16]) -> u16 {
+    loop {
+        let listener = spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        if !not.contains(&port) {
+            return port;
+        }
+    }
+}
+
+/// S4B-2W1 r1 (rv-code L1, rv-secreview L2): a port search skips a port this user holds on
+/// 127.0.0.1, ::1, 0.0.0.0 or ::, each bound as `std` binds, with `SO_REUSEADDR`, and takes
+/// the next one, so a proxy never sits beside an owner's wildcard listener and takes its
+/// loopback connections.
+#[test]
+fn a_port_search_skips_a_port_held_on_any_address_of_this_user() {
+    for holder in ["127.0.0.1:0", "[::1]:0", "0.0.0.0:0", "[::]:0"] {
+        let held = spawn_gate::bind_tcp_std(holder).unwrap();
+        let taken = held.local_addr().unwrap().port();
+        let free = loose_port(&[taken]);
+        let bound = free_pair(&[taken, free], 0).unwrap();
+        for (listener, address) in bound.iter().zip(["127.0.0.1", "::1"]) {
+            let local = listener.local_addr().unwrap();
+            assert_eq!(local.port(), free, "{holder}");
+            assert_eq!(local.ip().to_string(), address, "{holder}");
+        }
+    }
+}
+
 #[test]
 fn a_host_or_port_off_the_list_and_an_address_are_refused_with_403() {
     let proxy = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], None).unwrap();
