@@ -270,7 +270,7 @@ test("flipping Live terminal leaves the Master settings drawer open with focus o
     await evaluate('Fixture.mountArea("codex", true)');
     await evaluate("Fixture.settle()");
     for (const [terminal, keyboard] of [[false, true], [true, true], [false, false], [true, false]]) {
-      if (keyboard) await evaluate('Fixture.focusButton("Master settings")');
+      await evaluate(keyboard ? 'Fixture.focusButton("Master settings")' : "Fixture.leaveFocus()");
       await evaluate('Fixture.click("Master settings")');
       await evaluate("Fixture.settle()");
       const focused = await evaluate("Fixture.focusSwitch()");

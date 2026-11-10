@@ -147,6 +147,13 @@ export function focusButton(text) {
   return button !== undefined && document.activeElement === button;
 }
 
+/** Leaves focus on the page, where a mouse click in the app's web view finds it. Output:
+ * whether the page holds focus. */
+export function leaveFocus() {
+  document.activeElement?.blur();
+  return document.activeElement === document.body;
+}
+
 /** Puts keyboard focus on the drawer's Live terminal switch, as Tab does. Output: whether the
  * switch holds focus. */
 export function focusSwitch() {
