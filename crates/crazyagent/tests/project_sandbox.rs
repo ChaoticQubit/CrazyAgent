@@ -599,7 +599,8 @@ fn write_refused(sandbox: &ProjectSandbox, profile: &Path, script: &str, target:
 
 /// SECAUDIT-GIT-STATE-FILES and SECAUDIT-IDE-SERVER-INDEX: a sandboxed process cannot take
 /// the project's index lock or plant git state that names a program or another repository,
-/// by the plain name or a case variant. An agent's own git folder keeps its rebase state.
+/// such as the cherry-pick and revert sequencer's merge strategy, by the plain name or a
+/// case variant. An agent's own git folder keeps its rebase and sequencer state.
 #[test]
 fn a_sandbox_refuses_git_state_that_names_a_program_or_another_repository() {
     let (case, sandbox, profile, _worktree) = git_case();
@@ -610,7 +611,9 @@ fn a_sandbox_refuses_git_state_that_names_a_program_or_another_repository() {
         "rebase-apply/next",
         "remotes/origin",
         "branches/origin",
+        "sequencer/opts",
         "REBASE-MERGE/git-rebase-todo",
+        "SEQUENCER/opts",
     ] {
         let target = git.join(below);
         let script = format!(
@@ -620,19 +623,61 @@ fn a_sandbox_refuses_git_state_that_names_a_program_or_another_repository() {
         );
         write_refused(&sandbox, &profile, &script, &target);
     }
-    let own = git
-        .join("worktrees")
-        .join("engine-one")
-        .join("rebase-merge");
+    let own = git.join("worktrees").join("engine-one");
     let output = run(
         &sandbox,
         &profile,
         &format!(
-            "mkdir -p {own} && : > {own}/git-rebase-todo",
+            "mkdir -p {own}/rebase-merge {own}/sequencer && : > {own}/rebase-merge/git-rebase-todo && : > {own}/sequencer/opts",
             own = quoted(&own)
         ),
     );
     assert!(output.status.success(), "{output:?}");
+}
+
+/// SECAUDIT-WORKTREE-ADMIN-PLANT: a project-writable sandbox cannot plant a checkout in a
+/// worktrees folder, by a `.git` file naming git data it made or by moving that data in as
+/// `.git`, in any letter case, since the owner's git in that checkout would run the config
+/// it found there. Only the engine's worktree-add step makes a checkout's `.git`.
+#[test]
+fn a_sandbox_refuses_to_plant_a_checkout_the_owner_git_would_enter() {
+    let (case, sandbox, profile, _worktree) = git_case();
+    let evil = case.project.join("evil");
+    let made = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "mkdir -p {evil}/objects {evil}/refs && echo 'ref: refs/heads/main' > {evil}/HEAD && : > {evil}/config",
+            evil = quoted(&evil)
+        ),
+    );
+    assert!(made.status.success(), "{made:?}");
+    for below in [
+        ".crazyagent/worktrees/linked/.git",
+        "worktrees/linked/.git",
+        "worktrees/cased/.GIT",
+        ".CRAZYAGENT/WORKTREES/linked/.git",
+    ] {
+        let link = case.project.join(below);
+        let script = format!(
+            "mkdir -p {} && printf 'gitdir: %s\\n' {} > {}",
+            quoted(link.parent().unwrap()),
+            quoted(&evil),
+            quoted(&link)
+        );
+        write_refused(&sandbox, &profile, &script, &link);
+    }
+    for below in [".crazyagent/worktrees/moved/.git", "worktrees/moved/.git"] {
+        let link = case.project.join(below);
+        let script = format!(
+            "mkdir -p {} && mv {} {}",
+            quoted(link.parent().unwrap()),
+            quoted(&evil),
+            quoted(&link)
+        );
+        write_refused(&sandbox, &profile, &script, &link);
+    }
+    assert!(evil.join("config").is_file());
 }
 
 #[test]

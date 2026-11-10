@@ -1744,8 +1744,9 @@ impl Server {
 
 /// SECAUDIT-IDE-SERVER-INDEX and SECAUDIT-GIT-STATE-FILES under the installed `server.sb`:
 /// no door reaches the real index or its lock, by the plain name or a case variant, and
-/// nothing can be planted under the folders that carry a program or another repository.
-/// The private index folder stays writable and each tool used by a door works elsewhere.
+/// nothing can be planted under the folders that carry a program or another repository,
+/// nor a checkout link in a worktrees folder (SECAUDIT-WORKTREE-ADMIN-PLANT). The private
+/// index folder stays writable and each tool used by a door works elsewhere.
 #[test]
 fn the_server_reaches_the_real_index_and_the_program_carrying_files_by_no_door() {
     let s = server();
@@ -1821,8 +1822,11 @@ fn the_server_reaches_the_real_index_and_the_program_carrying_files_by_no_door()
         ".git/branches/origin",
         ".git/modules/x/hooks/post-checkout",
         ".git/modules/x/config",
+        ".git/sequencer/opts",
         ".GIT/REBASE-MERGE/git-rebase-todo",
         ".git/Remotes/origin",
+        ".git/Sequencer/opts",
+        "worktrees/planted/.git",
     ] {
         let target = s.root.join(below);
         let ran = sh(
