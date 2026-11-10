@@ -311,6 +311,7 @@ impl Storage {
                             )
                         },
                     )
+                    .and_then(|()| store_config(&connection, &config))
                 };
                 if let Err(e) = recovered {
                     drop(connection);
