@@ -19,6 +19,7 @@ fn build(digit: char, built_ms: i64) -> Build {
     Build {
         tip: digit.to_string().repeat(40),
         built_ms,
+        hidden: hidden_digest(&[]),
     }
 }
 
@@ -104,7 +105,7 @@ fn a_publish_records_its_tip_and_keeps_only_the_latest() {
     assert_eq!(latest(&root), Some(build('b', 2_000)));
     assert_eq!(
         read(store.join("current")),
-        format!("v1 {} 2000\n", "b".repeat(40))
+        format!("v2 {} 2000 {}\n", "b".repeat(40), hidden_digest(&[]))
     );
     let mut left: Vec<String> = fs::read_dir(&store)
         .unwrap()
@@ -192,23 +193,62 @@ fn no_copy_is_made_without_a_published_graph() {
 #[test]
 fn a_graph_is_due_when_missing_or_the_tip_moved() {
     let tip = "a".repeat(40);
-    assert!(due(None, &tip));
-    assert!(!due(Some(&build('a', 1_000)), &tip));
-    assert!(due(Some(&build('b', 1_000)), &tip));
+    let none = hidden_digest(&[]);
+    assert!(due(None, &tip, &none));
+    assert!(!due(Some(&build('a', 1_000)), &tip, &none));
+    assert!(due(Some(&build('b', 1_000)), &tip, &none));
 
     let written = build('c', 42);
     assert_eq!(Build::parse(&written.record()), Some(written));
+    let tip = "c".repeat(40);
     for text in [
-        format!("v2 {} 42\n", "c".repeat(40)),
-        format!("v1 {} 42\n", "C".repeat(40)),
-        format!("v1 {} 42\n", "c".repeat(39)),
-        format!("v1 {} 0\n", "c".repeat(40)),
-        format!("v1 {} 42 x\n", "c".repeat(40)),
-        format!("v1 {} 42", "c".repeat(40)),
+        format!("v1 {tip} 42\n"),
+        format!("v1 {tip} 42 {none}\n"),
+        format!("v2 {tip} 42\n"),
+        format!("v2 {} 42 {none}\n", "C".repeat(40)),
+        format!("v2 {} 42 {none}\n", "c".repeat(39)),
+        format!("v2 {tip} 0 {none}\n"),
+        format!("v2 {tip} 42 {}\n", none.to_uppercase()),
+        format!("v2 {tip} 42 {}\n", &none[1..]),
+        format!("v2 {tip} 42 {none} x\n"),
+        format!("v2 {tip} 42 {none}"),
     ] {
         assert_eq!(Build::parse(&text), None, "{text:?}");
     }
     assert!(tip_valid(&"0f".repeat(32)));
+}
+
+/// A graph built before the owner hid another folder is due again, and so is one built
+/// while a folder now shown was hidden, so no agent copies the nodes of a folder hidden
+/// since its build; the folders' order and repeats do not count (DEC-123).
+#[test]
+fn a_graph_is_due_when_the_hidden_folders_changed() {
+    let tip = "a".repeat(40);
+    let secrets = [PathBuf::from("/repos/p/secrets")];
+    assert!(due(
+        Some(&build('a', 1_000)),
+        &tip,
+        &hidden_digest(&secrets)
+    ));
+
+    let hid = Build {
+        hidden: hidden_digest(&secrets),
+        ..build('a', 2_000)
+    };
+    assert!(!due(Some(&hid), &tip, &hidden_digest(&secrets)));
+    assert!(due(Some(&hid), &tip, &hidden_digest(&[])));
+
+    let both = [
+        PathBuf::from("/repos/p/secrets"),
+        PathBuf::from("/repos/p/keys"),
+    ];
+    let turned = [both[1].clone(), both[0].clone(), both[1].clone()];
+    assert_eq!(hidden_digest(&both), hidden_digest(&turned));
+    assert_ne!(hidden_digest(&both), hidden_digest(&secrets));
+    assert_ne!(
+        hidden_digest(&[PathBuf::from("ab"), PathBuf::from("c")]),
+        hidden_digest(&[PathBuf::from("a"), PathBuf::from("bc")])
+    );
 }
 
 /// A folder something else made where a copy goes, such as an agent process still running

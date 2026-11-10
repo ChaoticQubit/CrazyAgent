@@ -20743,6 +20743,7 @@ fn published_graph(base: &Path) -> PathBuf {
     let build = crate::onboarding::main_graph::Build {
         tip: "a".repeat(40),
         built_ms: 1_000,
+        hidden: crate::onboarding::main_graph::hidden_digest(&[]),
     };
     assert!(crate::onboarding::main_graph::publish(&project, &build).unwrap());
     project

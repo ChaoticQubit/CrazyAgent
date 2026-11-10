@@ -1,12 +1,13 @@
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use rustix::fs::{AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags};
 use rustix::io::Errno;
+use sha2::{Digest, Sha256};
 use std::ffi::{CStr, CString};
 use std::io;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const GRAPH_OUT: &CStr = c"graphify-out";
@@ -16,7 +17,7 @@ const RECORD: &CStr = c"current";
 const RECORD_NEXT: &CStr = c"current.next";
 const LOCK: &CStr = c"lock";
 const COPY_PREFIX: &[u8] = b"g-";
-const RECORD_VERSION: &str = "v1";
+const RECORD_VERSION: &str = "v2";
 const RECORD_BYTES_MAX: u64 = 256;
 const DEPTH_MAX: usize = 16;
 const ENTRIES_MAX: usize = 200_000;
@@ -32,11 +33,13 @@ pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
 const _: () = assert!(RETRY_AFTER.as_secs() > CHECK_EVERY.as_secs());
 
 /// One published build of a project's main graph (DEC-123): the main branch tip it was
-/// built at and when, in milliseconds since the epoch.
+/// built at, when, in milliseconds since the epoch, and the digest of the folders it hid
+/// ([`hidden_digest`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Build {
     pub(crate) tip: String,
     pub(crate) built_ms: i64,
+    pub(crate) hidden: String,
 }
 
 impl Build {
@@ -46,27 +49,65 @@ impl Build {
         CString::new(format!("g-{}", self.built_ms)).expect("digits hold no NUL")
     }
 
-    /// The text `current` holds for this build. Output: `v1 <tip> <built_ms>` and a newline.
+    /// The text `current` holds for this build. Output: `v2 <tip> <built_ms> <hidden>` and
+    /// a newline.
     fn record(&self) -> String {
         assert!(tip_valid(&self.tip));
         assert!(self.built_ms > 0);
-        format!("{RECORD_VERSION} {} {}\n", self.tip, self.built_ms)
+        assert!(digest_valid(&self.hidden));
+        format!(
+            "{RECORD_VERSION} {} {} {}\n",
+            self.tip, self.built_ms, self.hidden
+        )
     }
 
-    /// Reads a build back from the text `current` holds, as [`Build::record`] writes it.
-    /// Input: the text. Output: the build, or None for any other text.
+    /// Reads a build back from the text `current` holds, as [`Build::record`] writes it; a
+    /// record of an older version reads as none, so its graph is built again. Input: the
+    /// text. Output: the build, or None for any other text.
     fn parse(text: &str) -> Option<Self> {
         let mut words = text.strip_suffix('\n')?.split(' ');
-        let (version, tip, built) = (words.next()?, words.next()?, words.next()?);
+        let (version, tip) = (words.next()?, words.next()?);
+        let (built, hidden) = (words.next()?, words.next()?);
         if words.next().is_some() || version != RECORD_VERSION || !tip_valid(tip) {
+            return None;
+        }
+        if !digest_valid(hidden) {
             return None;
         }
         let built_ms = built.parse::<i64>().ok().filter(|ms| *ms > 0)?;
         Some(Self {
             tip: tip.to_owned(),
             built_ms,
+            hidden: hidden.to_owned(),
         })
     }
+}
+
+/// The digest of the folders a project hides from its agents, as one main graph build hid
+/// them (DEC-123), so a graph built before the owner hid another folder is due again; their
+/// order and repeats do not count. Input: the folders. Output: 64 lower-case hex digits, the
+/// SHA-256 of each distinct folder's length and bytes, in byte order.
+pub(crate) fn hidden_digest(hidden: &[PathBuf]) -> String {
+    let mut folders: Vec<&[u8]> = hidden
+        .iter()
+        .map(|path| path.as_os_str().as_bytes())
+        .collect();
+    folders.sort_unstable();
+    folders.dedup();
+    let mut hasher = Sha256::new();
+    for folder in folders {
+        hasher.update((folder.len() as u64).to_le_bytes());
+        hasher.update(folder);
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    assert!(digest_valid(&digest));
+    digest
+}
+
+/// Whether a text is a digest as [`hidden_digest`] writes it: 64 lower-case hex digits.
+/// Input: the text. Output: the answer.
+fn digest_valid(text: &str) -> bool {
+    text.len() == 64 && tip_valid(text)
 }
 
 /// Whether a commit id is one git writes: 40 or 64 lower-case hex digits. Input: the text.
@@ -79,11 +120,13 @@ pub(crate) fn tip_valid(tip: &str) -> bool {
 }
 
 /// Whether a project's main graph needs a build (DEC-123): none is published yet, or the
-/// published one was built at another tip than the main branch holds now. Inputs: the
-/// published build and the tip now. Output: the answer.
-pub(crate) fn due(published: Option<&Build>, tip: &str) -> bool {
+/// published one was built at another tip than the main branch holds now, or while the
+/// project hid other folders than it hides now. Inputs: the published build, the tip now
+/// and the digest of the hidden folders now. Output: the answer.
+pub(crate) fn due(published: Option<&Build>, tip: &str, hidden: &str) -> bool {
     assert!(tip_valid(tip));
-    published.is_none_or(|build| build.tip != tip)
+    assert!(digest_valid(hidden));
+    published.is_none_or(|build| build.tip != tip || build.hidden != hidden)
 }
 
 /// Whether a project whose last main graph build failed still waits before the next try

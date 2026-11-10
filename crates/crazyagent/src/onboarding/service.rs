@@ -580,7 +580,7 @@ fn graph_step(
         #[cfg(unix)]
         Ok(GraphEnding::Built) => {
             if let Some(tip) = tip {
-                publish_main(&claimed.repo, tip);
+                publish_main(&claimed.repo, tip, &hidden);
             }
             Step::Done
         }
@@ -609,9 +609,9 @@ struct Refresh {
 /// (DEC-123): only while the code graph switch is on and the system builds graphs, for an
 /// onboarded project with a `.crazyagent` folder whose graph step is over and whose
 /// published graph is missing or was built at another tip than its main branch holds now,
-/// which covers every landing and the owner's own commits. The first pass runs at engine
-/// start. Takes the work, the worker's database, what earlier passes saw and `halted`.
-/// Returns whether a build ran.
+/// which covers every landing and the owner's own commits, or while the project hid other
+/// folders than it hides now. The first pass runs at engine start. Takes the work, the
+/// worker's database, what earlier passes saw and `halted`. Returns whether a build ran.
 #[cfg(unix)]
 fn refresh_step(
     work: &Work,
@@ -645,10 +645,18 @@ fn refresh_step(
         let Some(tip) = main_tip(database, project, repo) else {
             continue;
         };
-        if !main_graph::due(main_graph::latest(repo).as_ref(), &tip) {
+        let Ok(hidden) = crate::sandbox::hidden_paths::load(database, project) else {
+            continue;
+        };
+        let published = main_graph::latest(repo);
+        if !main_graph::due(
+            published.as_ref(),
+            &tip,
+            &main_graph::hidden_digest(&hidden),
+        ) {
             continue;
         }
-        match refresh_build(work, database, project, repo, tip, halted) {
+        match refresh_build(work, database, project, repo, tip, &hidden, halted) {
             Refreshed::Published => {
                 refresh.failed.remove(project);
             }
@@ -760,10 +768,11 @@ enum Refreshed {
 }
 
 /// Rebuilds one project's main graph in place through the confined graph build and
-/// publishes it at `tip` ([`publish_main`]), then removes the build's run folder and
-/// profile unless its processes may still run. The build stops as soon as an onboarding
-/// step waits ([`gives_way`]). Takes the work, the worker's database, the project, its
-/// folder, the tip read before the build and `halted`. Returns how the refresh ended.
+/// publishes it at `tip` with the folders it hid ([`publish_main`]), then removes the
+/// build's run folder and profile unless its processes may still run. The build stops as
+/// soon as an onboarding step waits ([`gives_way`]). Takes the work, the worker's database,
+/// the project, its folder, the tip read before the build, the project's hidden folders
+/// and `halted`. Returns how the refresh ended.
 #[cfg(unix)]
 fn refresh_build(
     work: &Work,
@@ -771,12 +780,10 @@ fn refresh_build(
     project: &str,
     repo: &Path,
     tip: String,
+    hidden: &[PathBuf],
     halted: &dyn Fn() -> bool,
 ) -> Refreshed {
     let Some(graphify) = (work.graphify)() else {
-        return Refreshed::Failed;
-    };
-    let Ok(hidden) = crate::sandbox::hidden_paths::load(database, project) else {
         return Refreshed::Failed;
     };
     let name = refresh_name(project, now_ms());
@@ -785,7 +792,7 @@ fn refresh_build(
         repo,
         work.runner.state(),
         &name,
-        &hidden,
+        hidden,
         work.limits.graph_time,
         &gives_way(database, halted),
     );
@@ -793,7 +800,7 @@ fn refresh_build(
         forget_run(work.runner.state(), &name);
     }
     match ending {
-        Ok(GraphEnding::Built) if publish_main(repo, tip) => Refreshed::Published,
+        Ok(GraphEnding::Built) if publish_main(repo, tip, hidden) => Refreshed::Published,
         Ok(GraphEnding::Stopped) => Refreshed::GaveWay,
         _ => Refreshed::Failed,
     }
@@ -826,14 +833,15 @@ fn forget_run(state: &Path, name: &str) {
 }
 
 /// Publishes a graph just built for agents to copy ([`main_graph::publish`]), stamped with
-/// the tip read before its build and the time now; a failure is logged by its kind and
-/// leaves the last published graph. Takes the project folder and the tip. Returns whether
-/// it was published.
+/// the tip read before its build, the time now and the digest of the folders the build hid;
+/// a failure is logged by its kind and leaves the last published graph. Takes the project
+/// folder, the tip and the hidden folders. Returns whether it was published.
 #[cfg(unix)]
-fn publish_main(repo: &Path, tip: String) -> bool {
+fn publish_main(repo: &Path, tip: String, hidden: &[PathBuf]) -> bool {
     let build = main_graph::Build {
         tip,
         built_ms: now_ms(),
+        hidden: main_graph::hidden_digest(hidden),
     };
     match main_graph::publish(repo, &build) {
         Ok(published) => published,
