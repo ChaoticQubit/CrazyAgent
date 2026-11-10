@@ -2511,7 +2511,10 @@ fn perform(
             set_master_idle_stop(tx, project, *choice)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::MasterLiveTerminal { .. } => Ok(Outcome::Applied),
+        TeamAction::MasterLiveTerminal { on, .. } => {
+            master::set_live_terminal(tx, project, *on)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::TerminalsPerWindow { per_window, .. } => {
             wall::store(tx, project, *per_window)?;
             Ok(Outcome::Applied)
@@ -4823,7 +4826,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             master_idle_stop(connection, project)?,
             master::live(connection, project)?,
         ),
-        master_live_terminal: true,
+        master_live_terminal: master::live_terminal(connection, project)?,
         catch_up_main: catch_up_main(connection, project)?,
         reuse_idle: reuse_idle(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,

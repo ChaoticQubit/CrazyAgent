@@ -72,6 +72,11 @@ const MASTER_HELD_REST: &str =
     "What you typed so far goes in once it opens; the rest was not kept.";
 const MASTER_HELD_DROPPED: &str = "What you typed for the master was not sent.";
 const MASTER_HELD_AGAIN: &str = "Its terminal did not open. Type it again once it is open.";
+/// What the owner reads when the master view closes because Live terminal is Off.
+const LIVE_TERMINAL_OFF: &str = "Live terminal is off for this project.";
+/// Where that master's conversation is and how to change the setting.
+const LIVE_TERMINAL_HOW: &str =
+    "Its conversation is the console. V in the team settings turns it on.";
 /// The most keys kept while the master's terminal starts. Keys, not bytes: a key's bytes
 /// depend on the modes of the terminal, known once it opens; a kept key is at most 6
 /// bytes, so all of them come to at most 24 KiB, sent in `INPUT_BYTES_MAX` chunks.
@@ -751,6 +756,15 @@ impl Team {
             closed: None,
         });
         self.focus = Focus::Terminal;
+    }
+
+    /// Whether a team read says this project's "Live terminal" setting is Off, which closes
+    /// the master view, since that master's conversation is the console (DEC-117 Q4).
+    /// Input: the setup event. Output: true for a good team read of this project showing Off.
+    fn live_terminal_off(&self, event: &crate::tui::client::SetupEvent) -> bool {
+        self.master
+            && matches!(&event.query, SetupQuery::Team { project } if *project == self.project)
+            && matches!(&event.result, Ok(SetupView::Team(status)) if !status.master_live_terminal)
     }
 
     fn detach(&mut self, ctx: &mut Ctx) {
@@ -1614,6 +1628,11 @@ impl Screen for Team {
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Process(event) => self.take_instructions(event),
                 OwnerEvent::Setup(event) => {
+                    if self.live_terminal_off(event) {
+                        self.detach(ctx);
+                        ctx.say(Message::warning(LIVE_TERMINAL_OFF, LIVE_TERMINAL_HOW));
+                        return Flow::Back;
+                    }
                     self.took_setup(&event.query, &event.result, ctx);
                     if let Some(view) = self.settings.as_mut() {
                         view.apply(&event.query, event.result.clone());
