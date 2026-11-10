@@ -102,12 +102,13 @@ export function answerSaves(receipt, delay = SAVE_MS) {
   saveDelay = delay;
 }
 
-/** Puts the focus on a segmented row's checked option, as Tab does. Input: the row's label.
- * Output: whether it took the focus. */
+/** Makes the agent policy read refuse from now on. Input: the engine's code. Output: none. */
 export function refusePolicy(code) {
   policyRefusal = code;
 }
 
+/** Puts the focus on a segmented row's checked option, as Tab does. Input: the row's label.
+ * Output: whether it took the focus. */
 export function focusChecked(row) {
   const radio = document.querySelector(`[data-setting="${row}"] [role="radio"][aria-checked="true"]`);
   radio?.focus();
