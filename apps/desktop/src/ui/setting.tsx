@@ -19,14 +19,15 @@ export function SettingRow({ label, wide = false, children }: { label: string; w
 
 /** One section of settings as the approved design draws it, named by its heading: the heading
  * and purpose line, any actions at the right, then its rows. Inputs: the title, the purpose
- * line, the actions, whether the whole section differs from what was saved and the rows.
+ * line, the actions, whether the whole section differs from what was saved and the rows; a title
+ * field shows and edits the title, and the heading then stays for a screen reader alone.
  * Output: the section. */
-export function SettingSection({ title, about, actions, changed = false, children }: {
-  title: ReactNode; about?: ReactNode; actions?: ReactNode; changed?: boolean; children: ReactNode;
+export function SettingSection({ title, titleField, about, actions, changed = false, children }: {
+  title: ReactNode; titleField?: ReactNode; about?: ReactNode; actions?: ReactNode; changed?: boolean; children: ReactNode;
 }) {
   const id = useId();
   return <section className="set-group" aria-labelledby={id}>
-    <div className="set-head"><div className="grow"><h3 id={id}>{title}{changed && <span className="set-changed">changed</span>}</h3>{about && <p>{about}</p>}</div>{actions}</div>
+    <div className="set-head"><div className="grow"><h3 id={id} className={titleField ? "visually-hidden" : undefined}>{title}{changed && <span className="set-changed">changed</span>}</h3>{titleField}{about && <p>{about}</p>}</div>{actions}</div>
     {children}
   </section>;
 }

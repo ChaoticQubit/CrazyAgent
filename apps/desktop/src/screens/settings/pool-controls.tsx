@@ -17,46 +17,54 @@ type PinChoice = "none" | AccountPin;
 const PIN_LABEL: Record<PinChoice, string> = { none: "None", use_last: "Use last", never_use: "Never use" };
 const PIN_CHOICES = (["none", "use_last", "never_use"] as const).map((value) => ({ value, label: PIN_LABEL[value] }));
 
-/** One change an owner made: how to build it from the schedule as it stands, and the line to
- * say once the engine applied it. */
-export interface MadeChange {
-  change: (now: AccountSchedule) => ScheduleChange;
-  done: string;
-}
+/** One change an owner made: a schedule change, built from the schedule as it stands, with the
+ * line to say once the engine applied it, or a step of its own that answers with that line, null
+ * for no line. */
+export type MadeChange =
+  | { change: (now: AccountSchedule) => ScheduleChange; done: string }
+  | { send: () => Promise<Result<string | null>> };
 
-/** Queues one change. Input: the change. Output: the engine's answer. */
-export type ApplyChange = (made: MadeChange) => Promise<Result<void>>;
+/** Queues one change. Input: the change. Output: the engine's answer, with the line it said. */
+export type ApplyChange = (made: MadeChange) => Promise<Result<string | null>>;
 
-/** Applies the owner's changes one at a time in the order made. Each reads the schedule first,
- * because a save answers with no version and the engine refuses a change naming an old one. The
- * reads after run once, when no change is left waiting, so a burst never shows a half-done state.
- * Inputs: the re-read of the page and where a refusal is said. Output: the saved line and `apply`. */
-export function useScheduleChanges(reread: () => void, refused: (sentence: string | undefined) => void): { saved: string | undefined; apply: ApplyChange } {
+/** Applies the owner's changes to the pools page one at a time in the order made. A schedule
+ * change reads the schedule first, because a save answers with no version and the engine refuses
+ * a change naming an old one. The reads after run once, when no change is left waiting, so a burst
+ * never shows a half-done state. Inputs: the re-read of the page, told whether a pool's own record
+ * moved, and where a refusal is said. Output: the saved line, `apply` and whether a change waits. */
+export function usePoolChanges(reread: (poolsMoved: boolean) => void, refused: (sentence: string | undefined) => void): { saved: string | undefined; apply: ApplyChange; changing: () => boolean } {
   const session = useAppSession();
   const [saved, setSaved] = useState<{ text: string } | null>(null);
   const tail = useRef<Promise<unknown>>(Promise.resolve());
   const waiting = useRef(0);
+  const poolsMoved = useRef(false);
   useEffect(() => {
     if (saved === null) return undefined;
     const timer = window.setTimeout(() => setSaved(null), SAVED_SHOWN_MS);
     return () => window.clearTimeout(timer);
   }, [saved]);
 
-  const save = async (made: MadeChange): Promise<Result<void>> => {
+  const save = async (made: MadeChange): Promise<Result<string | null>> => {
+    if ("send" in made) return made.send();
     const read = session.noteResult(await accountSchedule());
     if (read.kind !== "ok") return read;
-    return session.noteResult(await setAccountSchedule(made.change(read.value), read.value.version));
+    const answer = session.noteResult(await setAccountSchedule(made.change(read.value), read.value.version));
+    return answer.kind === "ok" ? { kind: "ok", value: made.done } : answer;
   };
 
-  const job = async (made: MadeChange): Promise<Result<void>> => {
+  const job = async (made: MadeChange): Promise<Result<string | null>> => {
     try {
+      poolsMoved.current ||= "send" in made;
       const result = await save(made);
-      if (result.kind === "ok") setSaved({ text: made.done });
-      else refused(result.kind === "not_ready" ? "Account choice isn't ready in this build." : result.message);
+      if (result.kind !== "ok") refused(result.kind === "not_ready" ? "Account choice isn't ready in this build." : result.message);
+      else if (result.value !== null) setSaved({ text: result.value });
       return result;
     } finally {
       waiting.current -= 1;
-      if (waiting.current === 0) reread();
+      if (waiting.current === 0) {
+        reread(poolsMoved.current);
+        poolsMoved.current = false;
+      }
     }
   };
 
@@ -72,19 +80,19 @@ export function useScheduleChanges(reread: () => void, refused: (sentence: strin
     return answer;
   };
 
-  return { saved: saved?.text, apply };
+  return { saved: saved?.text, apply, changing: () => waiting.current > 0 };
 }
 
 /** Holds a pick on its control and queues its change, letting go of the pick when the engine
  * does not apply it. Inputs: the queue, the control's hold, the pick and the change. */
-function applyHeld<T>(apply: ApplyChange, hold: Hold<T>, choice: T, made: MadeChange) {
+export function applyHeld<T>(apply: ApplyChange, hold: Hold<T>, choice: T, made: MadeChange) {
   const settled = hold(choice);
   void apply(made).then((result) => settled(result.kind === "ok" ? "" : result.kind));
 }
 
 /** Builds an account change that keeps the rest of the plan as the engine holds it now. Inputs:
  * the account and the part of its plan that changes. Output: the change's builder. */
-function accountChange(id: string, part: Partial<AccountPlan>): MadeChange["change"] {
+function accountChange(id: string, part: Partial<AccountPlan>): (now: AccountSchedule) => ScheduleChange {
   return (now) => ({ kind: "account", connection: id, plan: { ...planFor(now, id), ...part } });
 }
 
@@ -93,23 +101,27 @@ function focusedControl(): string | null {
   return document.activeElement?.closest<HTMLElement>("[data-control]")?.dataset.control ?? null;
 }
 
-/** Puts the focus on a row control by name, on the picked option of a choice group. */
-function focusControl(name: string) {
+/** Puts the focus on a row control by name, on the picked option of a choice group. Input: the
+ * control's name. Output: whether it found one to focus. */
+function focusControl(name: string): boolean {
   const found = [...document.querySelectorAll<HTMLElement>("[data-control]")].find((item) => item.dataset.control === name);
   const target = found?.matches("button, input") ? found : found?.querySelector<HTMLElement>('[aria-checked="true"]');
   target?.focus();
+  return target !== undefined && target !== null;
 }
 
 /** Keeps the keyboard on its control when a read moves the row: moving a keyed row, or taking it
- * into the held list, takes the focus off it. Focus the owner moved elsewhere stays there.
- * Input: the rows. Output: the rows. */
-export class KeepRowFocus extends Component<{ children: ReactNode }> {
+ * into the held list, takes the focus off it. Focus the owner moved elsewhere stays there. Inputs:
+ * the selector of what takes the focus when the control left the page, and the rows. Output: the
+ * rows. */
+export class KeepRowFocus extends Component<{ gone: string; children: ReactNode }> {
   getSnapshotBeforeUpdate(): string | null {
     return focusedControl();
   }
 
   componentDidUpdate(_props: unknown, _state: unknown, name: string | null) {
-    if (name !== null && (document.activeElement ?? document.body) === document.body) focusControl(name);
+    if (name === null || (document.activeElement ?? document.body) !== document.body) return;
+    if (!focusControl(name)) document.querySelector<HTMLElement>(this.props.gone)?.focus();
   }
 
   render() {
@@ -185,10 +197,10 @@ export function RowControls({ id, name, plan, open, onToggle, apply }: {
   onToggle: () => void;
   apply: ApplyChange;
 }) {
-  return <div className="pool-ctl">
+  return <>
     <PinControl id={id} name={name} plan={plan} apply={apply} />
     <Button size="small" aria-expanded={open} aria-label={`Schedule for ${name}`} data-control={`schedule:${id}`} onClick={onToggle}>Schedule</Button>
-  </div>;
+  </>;
 }
 
 
