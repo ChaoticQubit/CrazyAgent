@@ -476,13 +476,20 @@ impl TeamRuntime {
         worker.bound = bound.map(|(_, by)| by);
         match busy {
             Busy::Task(task) => {
-                self.connection
+                let now = now_ms();
+                let started = self
+                    .connection
                     .execute(
                         "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL
                          WHERE id=?1 AND status='queued'",
-                        params![task, run.agent, now_ms()],
+                        params![task, run.agent, now],
                     )
                     .map_err(error)?;
+                assert!(started <= 1);
+                if started == 1 {
+                    let project = &run.project;
+                    crate::activity::note_task(&self.connection, project, run.agent, task, now);
+                }
                 self.mark_agent(run.agent, AgentStatus::Working, Some(task))?;
             }
             Busy::Message(message) => {

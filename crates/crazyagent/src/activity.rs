@@ -78,8 +78,10 @@ pub enum ActivityKind {
     ResearchStarted,
     ResearchSaved,
     ResearchStopped,
+    ResearchWaiting,
     TaskStarted,
     TaskFinished,
+    TaskStopped,
     ChangesReady,
     Accepted,
     Discarded,
@@ -97,13 +99,15 @@ pub enum ActivityKind {
 }
 
 impl ActivityKind {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 22] = [
         Self::Created,
         Self::ResearchStarted,
         Self::ResearchSaved,
         Self::ResearchStopped,
+        Self::ResearchWaiting,
         Self::TaskStarted,
         Self::TaskFinished,
+        Self::TaskStopped,
         Self::ChangesReady,
         Self::Accepted,
         Self::Discarded,
@@ -137,8 +141,10 @@ impl ActivityKind {
             Self::ResearchStarted => "research_started",
             Self::ResearchSaved => "research_saved",
             Self::ResearchStopped => "research_stopped",
+            Self::ResearchWaiting => "research_waiting",
             Self::TaskStarted => "task_started",
             Self::TaskFinished => "task_finished",
+            Self::TaskStopped => "task_stopped",
             Self::ChangesReady => "changes_ready",
             Self::Accepted => "accepted",
             Self::Discarded => "discarded",
@@ -408,7 +414,43 @@ pub fn note_task(db: &Connection, project: &ProjectId, agent: i64, task: i64, no
     let kind = ActivityKind::TaskStarted;
     logged(
         kind,
-        record_task(db, project, agent, Some(task), (kind, "started"), now_ms),
+        record_task(
+            db,
+            project,
+            agent,
+            Some(task),
+            (kind, "started", ""),
+            now_ms,
+        ),
+    );
+}
+
+/// Records that a team agent's running task stopped before it ended, named by its title:
+/// stopped for a cancelled one, and stopped and back in the queue for one that waits to run
+/// again, so no started row is left with no end; a failure is logged by its plain code.
+/// Takes the database, the project, the agent, the task, whether it waits again and the
+/// time in ms.
+pub fn note_task_stop(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    task: i64,
+    requeued: bool,
+    now_ms: i64,
+) {
+    assert!(task > 0);
+    let kind = ActivityKind::TaskStopped;
+    let tail = if requeued { ", back in the queue" } else { "" };
+    logged(
+        kind,
+        record_task(
+            db,
+            project,
+            agent,
+            Some(task),
+            (kind, "stopped", tail),
+            now_ms,
+        ),
     );
 }
 
@@ -432,7 +474,7 @@ pub fn note_task_end(
     };
     logged(
         kind,
-        record_task(db, project, agent, task, (kind, verb), now_ms),
+        record_task(db, project, agent, task, (kind, verb, ""), now_ms),
     );
 }
 
@@ -441,7 +483,7 @@ fn record_task(
     project: &ProjectId,
     agent: i64,
     task: Option<i64>,
-    (kind, verb): (ActivityKind, &str),
+    (kind, verb, tail): (ActivityKind, &str, &str),
     now_ms: i64,
 ) -> Result<(), EngineError> {
     let actor = agent_actor(db, agent)?;
@@ -450,9 +492,9 @@ fn record_task(
         None => String::new(),
     };
     let text = if title.is_empty() {
-        format!("{actor} {verb} a task")
+        format!("{actor} {verb} a task{tail}")
     } else {
-        format!("{actor} {verb} \u{201c}{title}\u{201d}")
+        format!("{actor} {verb} \u{201c}{title}\u{201d}{tail}")
     };
     let item = NewActivity {
         kind,
@@ -595,14 +637,14 @@ pub fn note_research(db: &Connection, job: i64, kind: ActivityKind, now_ms: i64)
     );
 }
 
-/// Records that a research run was parked until its project has a pool, as a stopped run
-/// that says it waits for one; a failure is logged by its plain code. Takes the database,
+/// Records that a research run was parked until its project has a pool, under its own kind
+/// so it never reads as stopped; a failure is logged by its plain code. Takes the database,
 /// the job id and the time in ms.
 pub fn note_research_waiting(db: &Connection, job: i64, now_ms: i64) {
-    let kind = ActivityKind::ResearchStopped;
+    let kind = ActivityKind::ResearchWaiting;
     logged(
         kind,
-        record_research(db, job, (kind, "waiting for a pool"), now_ms),
+        record_research(db, job, (kind, research_verb(kind)), now_ms),
     );
 }
 
@@ -1081,6 +1123,7 @@ fn research_verb(kind: ActivityKind) -> &'static str {
         ActivityKind::ResearchStarted => "started",
         ActivityKind::ResearchSaved => "saved",
         ActivityKind::ResearchStopped => "stopped",
+        ActivityKind::ResearchWaiting => "waiting for a pool",
         _ => unreachable!("research_text takes a research event"),
     }
 }
