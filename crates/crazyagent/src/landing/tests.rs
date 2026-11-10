@@ -11738,18 +11738,14 @@ fn runs_for_the_engine(program: &str) -> bool {
     .is_ok_and(|status| status.success())
 }
 
-/// A clash in one tool's lockfile alone is rewritten by the real tool in its sandbox, and
-/// the set lands with both sides locked; only `cargo update` ran in a row before
-/// (T8-R1-TOOLS). A tool this machine does not have is skipped. pnpm and uv have no row
-/// yet: neither regenerates in the tool sandbox today. Input: the tool.
-fn a_real_tool_rewrites_its_clashing_lockfile(tool: &RealTool) {
-    let program = tool.program;
-    if !runs_for_the_engine(program) {
-        eprintln!("skipped: {program} is not installed");
-        return;
-    }
-    let mut case = Case::new();
-    seat_team_agent(&mut case);
+/// Commits the tool's workspace on main, then the owner's and the agent's edits that clash in
+/// its lockfile alone, and ends the agent's turn. Inputs: the case and the tool. Output: the
+/// agent's change set and what the turn end reported.
+fn tool_clash_at_turn_end(
+    case: &mut Case,
+    tool: &RealTool,
+) -> (ChangeSetId, Option<crate::landing_turns::Landed>) {
+    seat_team_agent(case);
     for (path, text) in &tool.others {
         write(&case.repo.join(path), text);
     }
@@ -11765,13 +11761,29 @@ fn a_real_tool_rewrites_its_clashing_lockfile(tool: &RealTool) {
     case.owner(&["commit", "-q", "-m", "Depend on a"]);
     case.edit(tool.manifest, &tool.agent.0);
     case.edit(tool.lockfile, &tool.agent.1);
-    let landed = turn_end_within(&case, "turn-1", TURN_END_WITHIN);
+    let landed = turn_end_within(case, "turn-1", TURN_END_WITHIN);
     let id = list(&case.db, &case.workspace.project)
         .unwrap()
         .first()
         .expect("the agent's turn kept a change set")
         .id
         .clone();
+    (id, landed)
+}
+
+/// A clash in one tool's lockfile alone is rewritten by the real tool in its sandbox, and
+/// the set lands with both sides locked; only `cargo update` ran in a row before
+/// (T8-R1-TOOLS). A tool this machine does not have fails the row, so a missing tool is
+/// never counted as proof. pnpm has no row yet, since it does not regenerate in the tool
+/// sandbox today. Input: the tool.
+fn a_real_tool_rewrites_its_clashing_lockfile(tool: &RealTool) {
+    let program = tool.program;
+    assert!(
+        runs_for_the_engine(program),
+        "{program} is not installed for the engine, so this row cannot run"
+    );
+    let mut case = Case::new();
+    let (id, landed) = tool_clash_at_turn_end(&mut case, tool);
     assert_eq!(
         landed,
         Some(crate::landing_turns::Landed::Added(id.clone())),
@@ -11859,6 +11871,58 @@ fn real_npm_rewrites_a_clashing_package_lock() {
         ],
         keeps: ["\"a\": \"1.0.0\"", "\"b\": \"1.0.0\""],
     });
+}
+
+/// A uv workspace of two local packages whose app the owner and the agent each give one
+/// more dependency, so only uv.lock clashes. Output: the workspace.
+fn uv_workspace() -> RealTool {
+    let manifest = |dependencies: &str, dev: &str| {
+        format!(
+            "[project]\nname = \"app\"\nversion = \"1.0.0\"\nrequires-python = \">=3.9\"\ndependencies = [{dependencies}]\n\n[dependency-groups]\ndev = [{dev}]\n\n[tool.uv.sources]\na = {{ workspace = true }}\nb = {{ workspace = true }}\n\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n"
+        )
+    };
+    let lock = |python: &str| format!("version = 1\nrequires-python = \">={python}\"\n");
+    let member = |name: &str| {
+        format!(
+            "[project]\nname = \"{name}\"\nversion = \"1.0.0\"\nrequires-python = \">=3.9\"\ndependencies = []\n"
+        )
+    };
+    RealTool {
+        program: "uv",
+        lockfile: "uv.lock",
+        manifest: "pyproject.toml",
+        start: (manifest("", ""), lock("3.9")),
+        owner: (manifest("\"a\"", ""), lock("3.10")),
+        agent: (manifest("", "\"b\""), lock("3.11")),
+        others: vec![
+            ("packages/a/pyproject.toml", member("a")),
+            ("packages/b/pyproject.toml", member("b")),
+        ],
+        locks: ["name = \"a\"", "name = \"b\""],
+        keeps: ["dependencies = [\"a\"]", "dev = [\"b\"]"],
+    }
+}
+
+/// A clash in uv.lock alone goes straight back to its agent at the turn end: uv can never
+/// start in the tool sandbox, whose nested-git rule refuses the `.git` marker every uv cache
+/// writes, so no sandboxed run is tried and the owner is never told the edits wait in
+/// Changes (land-14). uv need not be installed.
+#[test]
+fn a_uv_lock_clash_goes_back_to_its_agent_at_the_turn_end_without_a_sandboxed_run() {
+    let mut case = Case::new();
+    let (id, landed) = tool_clash_at_turn_end(&mut case, &uv_workspace());
+    assert_eq!(
+        landed,
+        Some(crate::landing_turns::Landed::Waiting(id.clone())),
+        "the turn end sends it back at once"
+    );
+    let set = case.view(&id);
+    assert_eq!(
+        (set.state, set.conflicts.clone()),
+        (ChangeState::Updating, vec!["uv.lock".to_owned()])
+    );
+    assert!(!lockfiles::is_running(&id), "no regeneration started");
+    assert_eq!(regenerate_leftovers(&case), Vec::<String>::new());
 }
 
 /// A tool that changes a file other than the clashing lockfiles, here the manifest, lands
