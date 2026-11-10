@@ -1218,6 +1218,80 @@ fn a_lead_main_took_closes_after_its_workers_and_restore_gives_it_back_whole() {
     assert_ne!(team.pending_ref(&lead_set), "");
 }
 
+/// A real store trigger on this connection that refuses any update closing a change set as
+/// discarded, as a store that cannot write would. `DROP TRIGGER refuse_discard` lifts it.
+const REFUSE_DISCARD: &str =
+    "CREATE TEMP TRIGGER refuse_discard BEFORE UPDATE ON landing_change_sets
+     WHEN NEW.state='discarded' BEGIN SELECT RAISE(ABORT, 'refused'); END;";
+
+/// HB-S4-R2-LOWS (fix/v21-activity-save): when the store refuses the close of a lead's set
+/// main took, the set stays open and the project's activity says nothing, at that read or
+/// the next; once a read closes it, activity says so once. The refusal is a real store
+/// trigger on the change set's row.
+#[test]
+fn a_lead_main_took_whose_stored_close_fails_writes_no_activity_until_it_closes() {
+    let team = Team::new();
+    team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    owner_takes_the_lead_line(&team);
+    team.db.execute_batch(REFUSE_DISCARD).unwrap();
+    let noted = || {
+        crazyagent::activity::list(&team.db, &team.id, crazyagent::activity::LIST_MAX)
+            .unwrap()
+            .into_iter()
+            .filter(|item| {
+                item.kind == crazyagent::activity::ActivityKind::Discarded
+                    && item.change_set.as_deref() == Some(lead_set.as_str())
+            })
+            .count()
+    };
+    for read in ["first", "next"] {
+        landing::observe(&team.db, Some(&team.id)).unwrap();
+        assert_eq!(team.state(&lead_set).0, "pending", "{read} read");
+        assert_eq!(
+            noted(),
+            0,
+            "no row for a close the store refused, {read} read"
+        );
+    }
+    team.db
+        .execute_batch("DROP TRIGGER refuse_discard")
+        .unwrap();
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "discarded");
+    assert_eq!(noted(), 1);
+}
+
+/// HB-S4-R2-LOWS (fix/v21-activity-save): when the store refuses the close of a lead's set
+/// main took, the set, still open, keeps no discarded ref, which prune would never drop
+/// since it reads discarded sets only, and keeps its pending ref; once a read closes it, the
+/// discarded ref holds its head for a restore.
+#[test]
+fn a_lead_main_took_whose_stored_close_fails_keeps_no_discarded_ref() {
+    let team = Team::new();
+    team.commit(&team.lead, "README", "one\nlead\nthree\n", "Lead work");
+    let lead_set = team.turn_end(&team.lead);
+    owner_takes_the_lead_line(&team);
+    team.db.execute_batch(REFUSE_DISCARD).unwrap();
+    let discarded = format!("refs/crazyagent/discarded/{}", lead_set.as_str());
+    let held = || {
+        team.git(
+            &team.project,
+            &["for-each-ref", "--format=%(objectname)", &discarded],
+        )
+    };
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "pending");
+    assert_eq!(held(), "", "no discarded ref on a set the store kept open");
+    assert_ne!(team.pending_ref(&lead_set), "");
+    team.db
+        .execute_batch("DROP TRIGGER refuse_discard")
+        .unwrap();
+    landing::observe(&team.db, Some(&team.id)).unwrap();
+    assert_eq!(team.state(&lead_set).0, "discarded");
+    assert_eq!(held(), team.view_head(&lead_set));
+}
+
 /// The owner's branch holds a lead's README line outside the app and moves no further, so
 /// the next read judges the lead's set landed: by a merge of its head or by a port of the
 /// same line in a commit of its own. Takes the team, the lead's set and which of the two.
