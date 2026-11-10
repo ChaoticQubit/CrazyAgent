@@ -189,7 +189,7 @@ fn a_resumed_claude_agent_keeps_its_conversation_and_sees_an_edit_only_as_the_en
 
 /// The running processes whose command line holds `needle`, as `ps` lists them.
 /// Input: the text. Output: each process's pid and command line.
-fn processes_with(needle: &str) -> Vec<String> {
+pub(super) fn processes_with(needle: &str) -> Vec<String> {
     let listed = crate::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-axww", "-o", "pid=,command="])
@@ -337,6 +337,69 @@ fn a_real_claude_agent_whose_background_command_ends_mid_turn_ends_its_task_with
     assert!(
         took < MID_TURN,
         "the task stayed held until its time limit: {took:?}"
+    );
+}
+
+/// A script that runs `lsof` on its own shell, then on a loopback port its perl child
+/// listens on, and prints each `lsof` exit status as `lsof=` and `lsofport=`.
+const LSOF_SCRIPT: &str = r#"/usr/sbin/lsof -p $$ > /dev/null 2>&1
+echo "lsof=$?"
+/usr/bin/perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(Listen => 1, LocalAddr => "127.0.0.1", LocalPort => 0) or die "bind\n"; system("/usr/sbin/lsof -a -p $$ -iTCP:" . $s->sockport . " -sTCP:LISTEN > /dev/null 2>&1"); print "lsofport=", $? >> 8, "\n"'
+"#;
+
+/// The standard output of every command the agent ran with its Bash tool, from the
+/// transcript Claude Code keeps. Input: the transcript path. Output: the outputs in
+/// transcript order, joined by newlines.
+fn bash_output(record: &Path) -> String {
+    std::fs::read_to_string(record)
+        .unwrap_or_else(|problem| panic!("no transcript at {}: {problem}", record.display()))
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|entry| entry["toolUseResult"]["stdout"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// SECAUDIT-5-LIVE G2: a real Claude Code sub-agent in a pane, on the owner's signed-in
+/// account, runs a script with its Bash tool inside the agent's Seatbelt profile and its
+/// process-info deny: `lsof` on its own shell, then on a loopback port its own perl child
+/// listens on. The turn ends in success and the transcript shows both `lsof` runs exited
+/// 0, so the deny still lets the agent read its own processes. Runs in a live window only.
+#[test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+fn a_real_claude_agent_s_bash_runs_lsof_on_its_own_process_and_port_inside_the_agent_sandbox() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-live-lsof-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
+    let mut agent = ManagedAgent::in_pane("claude-code", &claude(), host.clone(), AgentRole::Sub);
+    let mut signed_in = SignedIn::claude();
+    let script = agent.working_dir.join("lsof-check.sh");
+    std::fs::write(&script, LSOF_SCRIPT).unwrap();
+    let prompt = format!(
+        "Use your Bash tool in the foreground to run `/bin/sh {}` exactly once. Then reply with exactly the word DONE and end your turn.",
+        script.display()
+    );
+    let turns = vec![(prompt.as_str(), signed_in.acquire("claude-live-lsof"))];
+    let (reports, problem) = agent.run_turns(None, turns, TURN);
+    host.close(&[]).unwrap();
+    let (text, end, cause, conversation) = outcome(&reports);
+    println!("real claude lsof: end={end:?} cause={cause:?} reply={text:?}");
+    assert_eq!(problem, None);
+    assert_eq!(end, TurnEnd::Success, "{cause:?}");
+    let conversation = conversation.expect("the turn records its conversation");
+    let printed = bash_output(&conversation.record);
+    println!("bash output: {printed:?}");
+    assert!(
+        printed.lines().any(|line| line.trim() == "lsof=0"),
+        "lsof on the agent's own shell failed: {printed}"
+    );
+    assert!(
+        printed.lines().any(|line| line.trim() == "lsofport=0"),
+        "lsof on the agent's own listening port failed: {printed}"
     );
 }
 
