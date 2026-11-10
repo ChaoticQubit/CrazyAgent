@@ -499,6 +499,28 @@ mod own_turns {
         assert_eq!(pane.session.stop().unwrap(), None);
     }
 
+    /// DOCS-LOWS-2-L1: an Esc pressed in the agent's own terminal, in a turn typed over the
+    /// hold after the held command ended, is not given either. No notice turn is left, so the
+    /// task ends as the held turn did: well, with no interrupt.
+    #[test]
+    fn an_interrupt_in_a_turn_typed_over_a_hold_after_its_command_ended_ends_as_the_held_turn_did()
+    {
+        let mut pane = start("over-hold-9");
+        held_turn(&mut pane);
+
+        pane.write(&[
+            &user("[crazyagent msg 1] Status?"),
+            BACKGROUND_NOTICE,
+            &user("[Request interrupted by user]"),
+        ]);
+        assert_eq!(
+            events(&mut pane),
+            vec![LaunchEvent::TurnFinished { success: true }]
+        );
+        assert!(!pane.session.held());
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
+
     /// The notice turn starts once the last command ended, so it is no turn typed over the
     /// hold: it decides the task, and its failure and rate limit are given.
     #[test]
