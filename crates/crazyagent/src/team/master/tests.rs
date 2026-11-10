@@ -2971,14 +2971,14 @@ fn inspect_work_reads_changes_as_the_owner_does() {
         .iter()
         .map(|set| {
             let state = if set.id == ready {
-                "waiting for review"
+                "Ready to review"
             } else if set.id == clash {
-                "conflicts with the owner's branch: README"
+                "Conflicts with the owner's branch: README"
             } else if set.id == fixing {
-                "its agent is fixing conflicts with main: notes.txt"
+                "Agent is fixing conflicts with main: notes.txt"
             } else {
                 assert_eq!(set.id, handed);
-                "updated, waiting for its agent"
+                "Updated, waiting for the agent"
             };
             format!(
                 "- {}, +{} -{}, {state}",
@@ -2993,6 +2993,38 @@ fn inspect_work_reads_changes_as_the_owner_does() {
         lines.join("\n")
     );
     assert!(inspected.ends_with(&expected), "{inspected}\n{expected}");
+}
+
+/// A new master session reads open change sets as the owner does: a set its agent is
+/// updating shows its number and the Changes view's words, and does not read as waiting
+/// for the owner (HB-S5-J).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_master_session_brief_reads_open_change_sets_as_the_owner_does() {
+    let fixture = Fixture::new();
+    known_project(&fixture);
+    let (repo, _remote) = project_repo(&fixture);
+    let (_, updating) = finished_harness(&fixture, &repo, "fixing", "fixing-task", "fixing\n");
+    let db = crate::landing::open(&fixture.base).unwrap();
+    db.execute(
+        "UPDATE landing_change_sets SET state='updating' WHERE id=?1",
+        params![updating.as_str()],
+    )
+    .unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let session = crate::protocol::SessionId::new("brief").unwrap();
+
+    let brief = crate::master_sessions::session_state(&db, &project, &session)
+        .unwrap()
+        .unwrap();
+
+    let listed = crate::landing::list(&db, &project).unwrap();
+    assert_eq!(listed.len(), 1);
+    let name = crate::landing::change_set_name(&listed[0]);
+    assert!(name.starts_with("Change set #"), "{name}");
+    assert!(brief.contains(&name), "{brief}");
+    assert!(brief.contains("Agent is updating"), "{brief}");
+    assert!(!brief.contains("waiting for the owner"), "{brief}");
 }
 
 /// With "Ask me before merging" on, the master's merge lands nothing: the change set stays
