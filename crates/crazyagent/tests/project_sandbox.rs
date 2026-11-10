@@ -2223,6 +2223,8 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
         .unwrap()
         .confine_to_clone(&clone)
         .unwrap()
+        .lead_branch(task)
+        .unwrap()
         .native_team(
             &tmp.join("tmux.sock"),
             &tmp.join("teammates-0123456789abcdef.sock"),
@@ -2451,10 +2453,28 @@ fn a_native_lead_s_teammates_never_move_a_lead_branch_of_teammate_shape() {
     let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
     fs::create_dir(&mailbox).unwrap();
     fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .lead_branch(task)
+            .is_err(),
+        "only a clone lead's sandbox names its branch"
+    );
+    for branch in ["main", "agent/agent-1", "crazyagent/write-the-page/lead"] {
+        assert!(
+            sandbox(&case, SandboxNetwork::Only(Vec::new()))
+                .confine_to_clone(&clone)
+                .unwrap()
+                .lead_branch(branch)
+                .is_err(),
+            "{branch}"
+        );
+    }
     let (lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
         .allow_scratch(&tmp)
         .unwrap()
         .confine_to_clone(&clone)
+        .unwrap()
+        .lead_branch(task)
         .unwrap()
         .native_team(
             &tmp.join("tmux.sock"),
@@ -2556,8 +2576,16 @@ fn the_teammates_setup_git_writes_only_its_lead_s_teammate_branches() {
         ],
     );
     assert!(added.status.success(), "{added:?}");
+    for branch in ["main", "agent/agent-1", "crazyagent/write-the-page/lead"] {
+        assert!(
+            sandbox(&case, SandboxNetwork::Only(Vec::new()))
+                .confine_to_teammates_setup(&lead_worktree, branch)
+                .is_err(),
+            "{branch}"
+        );
+    }
     let setup = sandbox(&case, SandboxNetwork::Only(Vec::new()))
-        .confine_to_teammates_setup(&lead_worktree)
+        .confine_to_teammates_setup(&lead_worktree, task)
         .unwrap();
     let profile = case.profiles.join("setup.sb");
     let greet = lead_worktree
