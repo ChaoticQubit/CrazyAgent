@@ -182,14 +182,18 @@ async function steadyPaste(terminal, start) {
 
 /** Pastes a message and presses Enter until its turn has started: a long paste followed at once
  * by Enter can sit unsent, and a first Enter can only clear a notice. The turn has started when
- * the caller's read says so or, with no such read, once the paste left the input area. Inputs:
+ * the caller's read says so or, with no such read, once an input area shows without the
+ * paste; a dialog drawn in the box's place is no input area. Inputs:
  * the terminal, { rows, paste, enter, pause }, the message and the read for a terminal that draws
  * no echo. Output: how many times Enter was pressed; throws when the paste stayed unsent. */
 export async function pasteAndSend(terminal, text, started) {
   const start = messageStart(text);
   await terminal.paste();
   if (!started) await steadyPaste(terminal, start);
-  const begun = started ?? (async () => !pasteWaiting(start, await terminal.rows()));
+  const begun = started ?? (async () => {
+    const rows = await terminal.rows();
+    return inputRows(rows).length > 0 && !pasteWaiting(start, rows);
+  });
   for (let presses = 1; presses <= ENTER_PRESSES_MAX; presses += 1) {
     await terminal.enter();
     for (let reads = 0; reads < ENTER_READS_MAX; reads += 1) {

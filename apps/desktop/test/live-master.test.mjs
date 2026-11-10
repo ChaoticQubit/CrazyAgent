@@ -622,3 +622,15 @@ test("Live terminal is unavailable with its plain reason for a master with no li
   assert.match(rows.codex.text, /You see and type into the master's own terminal\./);
   assert.doesNotMatch(rows.codex.text, /no live terminal/);
 });
+
+test("Live terminal stays available with no master known yet (OWNER-Q4-2-L3 F2)", async () => {
+  const row = await inPage(async ({ evaluate }) => {
+    await evaluate("Fixture.mountAreaNoMaster()");
+    await evaluate("Fixture.settle()");
+    await evaluate('Fixture.click("Master settings")');
+    await evaluate("Fixture.settle()");
+    return evaluate("Fixture.liveTerminalRow()");
+  });
+  assert.equal(row.disabled, null, `no master yet: available: ${row.text}`);
+  assert.doesNotMatch(row.text, /no live terminal/);
+});

@@ -3621,15 +3621,18 @@ impl TeamView {
 /// What V says for a master with no live terminal, whose conversation already is the console.
 const NO_LIVE_TERMINAL: &str = "This master has no live terminal: its conversation is the console.";
 
-/// Says whether the project's master runs in a live terminal, which "Live terminal" governs
-/// (OWNER-Q4-2-L3). Input: the team status. Output: true for a master harness the engine reads
-/// as a terminal app.
+/// Says whether "Live terminal" governs the project's master (OWNER-Q4-2-L3). Input: the team
+/// status. Output: true for a master harness the engine reads as a terminal app, and with no
+/// master yet, whose choice is stored for the master that comes.
 fn master_runs_live(status: &TeamStatus) -> bool {
-    status.harnesses.iter().any(|harness| {
-        harness.role == AgentRole::Master
-            && crate::harnesses::interactive::support(&harness.harness)
+    status
+        .harnesses
+        .iter()
+        .find(|harness| harness.role == AgentRole::Master)
+        .is_none_or(|harness| {
+            crate::harnesses::interactive::support(&harness.harness)
                 == crate::harnesses::interactive::Support::Terminal
-    })
+        })
 }
 
 /// Which cap on running agents a key moves.

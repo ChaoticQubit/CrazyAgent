@@ -62,7 +62,8 @@ const RANKINGS = { ok: [order(READY_ROWS), SPARE_ORDER], held: [order(HELD_ROWS)
 const SCHEDULE = { strategy: "use_it_or_lose_it", pools: [{ id: "pool-spare", strategy: "balanced" }], projects: [], accounts: [{ connection: "acct-1", plan: { rank: 2, reserve_percent: 10, pin: "use_last" } }], version: 4 };
 const reading = (used_percent) => (used_percent === null ? null : { used_percent, resets_at_ms: null });
 const limit = (index, weekly, fiveHour = null) => ({ account: `acct-${index}`, plan: null, weekly: reading(weekly), five_hour: reading(fiveHour), five_hour_reset_override_ms: null, weekly_reset_override_ms: null, source: "poll", observed_ms: 0, checked_ms: 0, failure: null });
-const LIMITS = { ok: [limit(2, 62, 18), limit(0, 30)], near: [limit(2, 80), limit(0, 79), limit(1, 100)], mixed: [limit(2, 80), limit(1, 100)] };
+const others = (count) => Array.from({ length: count }, (_, index) => limit(100 + index, 40));
+const LIMITS = { ok: [limit(2, 62, 18), limit(0, 30)], near: [limit(2, 80), limit(0, 79), limit(1, 100)], mixed: [limit(2, 80), limit(1, 100)], capped: others(64), uncapped: others(63) };
 
 /** Applies one change to the fake schedule and moves its version on, as the engine does.
  * Inputs: the schedule and the change. Output: the new schedule. */

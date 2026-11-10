@@ -2580,8 +2580,9 @@ fn owner_read(
                 .collect(),
         },
         OwnerRead::ProjectAgentPolicy { project_id } => {
-            let setup = crate::project_setup::load_setup(&tx, project_id)?
-                .ok_or_else(|| error("invalid_project"))?;
+            let Some(setup) = crate::project_setup::load_setup(&tx, project_id)? else {
+                return Err(error(no_setup_code(&tx, project_id)?));
+            };
             let homes = crate::sandbox::toolchains::ToolHomes::owner()
                 .map_err(|_| error("agent_policy_unreadable"))?;
             OwnerData::ProjectAgentPolicy {
@@ -2748,6 +2749,27 @@ fn stored_setup(
     project_id: &ProjectId,
 ) -> Result<crate::project_setup::StoredSetup, EngineError> {
     crate::project_setup::load_setup(tx, project_id)?.ok_or_else(|| error("project_setup_missing"))
+}
+
+/// Names why a project has no setup to read. Takes the transaction and the project. Returns
+/// `project_setup_missing` for a project the store holds, made before project setup, and
+/// `invalid_project` for one it does not hold.
+fn no_setup_code(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+) -> Result<&'static str, EngineError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(if exists {
+        "project_setup_missing"
+    } else {
+        "invalid_project"
+    })
 }
 
 /// Whether a native managed connection's latest sign-in ended authenticated. Takes the store

@@ -105,7 +105,8 @@ impl OwnerController {
 
     /// Reads a project's agent policy (DEC-101, DEC-102): its access level, every level with
     /// its availability here, and the toolchains its agents may read. Takes the project id.
-    /// Returns the policy view, or the engine's refusal for an unknown project.
+    /// Returns the policy view, or the engine's refusal: `invalid_project` for an unknown
+    /// project, `project_setup_missing` for one made before project setup.
     pub async fn project_agent_policy(
         &mut self,
         project_id: ProjectId,

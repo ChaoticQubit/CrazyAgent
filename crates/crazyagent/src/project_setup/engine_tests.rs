@@ -2282,6 +2282,45 @@ async fn a_removed_projects_sub_agent_nesting_and_new_folder_limit_go_with_it() 
 }
 
 #[tokio::test]
+async fn agent_access_of_a_project_made_before_setup_says_so_and_a_gone_project_stays_gone() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "DELETE FROM project_setups WHERE project='setup-pooled'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects WHERE id='setup-pooled'"),
+        1,
+        "the project itself is still there"
+    );
+    assert_eq!(
+        owner.project_agent_policy(project).await.unwrap_err().0,
+        "project_setup_missing"
+    );
+    let gone = ProjectId::new("setup-gone").unwrap();
+    assert_eq!(
+        owner.project_agent_policy(gone).await.unwrap_err().0,
+        "invalid_project"
+    );
+    engine.stop().await;
+}
+
+#[tokio::test]
 async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_policies() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
     use crate::sandbox::toolchains::Toolchain;

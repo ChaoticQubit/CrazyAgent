@@ -146,6 +146,22 @@ test("a sent message echoed on the row it was typed on, with the box moved below
   assert.equal(await reply.pasteAndSend(terminal, MESSAGE), 1);
 });
 
+test("a dialog drawn in place of the input box is not read as sent", async () => {
+  const DIALOG = ["Do you trust the files in this folder?", "  1. Yes, continue", "  2. No, exit", "Enter to confirm"];
+  const terminal = fakeTerminal((seen) => (seen.presses > 0 ? DIALOG : seen.pasted ? PASTED : IDLE));
+  await assert.rejects(reply.pasteAndSend(terminal, MESSAGE), /after 4 Enter presses: it was not sent/);
+  assert.equal(terminal.seen.presses, reply.ENTER_PRESSES_MAX);
+});
+
+test("an input box hidden for a moment after Enter and drawn empty again reads as sent on one press", async () => {
+  const terminal = fakeTerminal((seen) => {
+    if (seen.presses === 0) return seen.pasted ? PASTED : IDLE;
+    return seen.reads - seen.readsAtEnter[0] <= 3 ? ["Working"] : IDLE;
+  });
+  assert.equal(await reply.pasteAndSend(terminal, MESSAGE), 1);
+  assert.equal(terminal.seen.presses, 1);
+});
+
 test("a paste that never leaves the input area fails after the last Enter instead of reading as sent", async () => {
   const terminal = fakeTerminal((seen) => (seen.pasted ? PASTED : IDLE));
   await assert.rejects(reply.pasteAndSend(terminal, MESSAGE), /after 4 Enter presses: it was not sent/);

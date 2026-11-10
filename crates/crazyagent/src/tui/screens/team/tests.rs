@@ -4249,6 +4249,33 @@ fn a_master_idle_stopped_on_the_open_view_says_why_and_s_starts_it_again() {
     assert_eq!(starts_asked(&mut shell), 0, "one start for one stop");
 }
 
+/// Stop all over a master an idle stop ended: the team's Start all is the one start offered,
+/// and s asks for nothing, so no key starts the master under the owner's Stop all.
+#[test]
+fn a_master_idle_stopped_under_stop_all_offers_no_start_again() {
+    let mut shell = open_running_master();
+    shell.arrive(stopped_master_graph());
+    requests(&mut shell);
+    let mut status = master_status(Some(false), Some(IDLE_LINE), None);
+    status.live_idle_stopped = true;
+    status.paused = true;
+    shell.arrive(team_read(status));
+    assert_eq!(
+        starts_asked(&mut shell),
+        0,
+        "Stop all holds the master stopped"
+    );
+    let seen = render(&mut shell).join("\n");
+    assert!(!seen.contains("s starts it again"), "{seen}");
+    assert!(!seen.contains("Start again"), "{seen}");
+    shell.key(Key::Char('s'));
+    assert_eq!(
+        starts_asked(&mut shell),
+        0,
+        "s asks for no start under Stop all"
+    );
+}
+
 /// A master that stopped for any other reason keeps today's words and s does nothing.
 #[test]
 fn a_master_stopped_for_another_reason_offers_no_start_again() {
