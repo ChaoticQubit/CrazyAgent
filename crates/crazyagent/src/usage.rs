@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod money;
 pub mod poll;
 pub mod prices;
+pub mod recount;
 pub mod report;
 mod rules;
 pub mod service;
@@ -339,6 +340,7 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(report::SCHEMA).map_err(storage)?;
     db.execute_batch(money::SCHEMA).map_err(storage)?;
     db.execute_batch(turns::SCHEMA).map_err(storage)?;
+    db.execute_batch(recount::SCHEMA).map_err(storage)?;
     capture::count_rows(db)
 }
 

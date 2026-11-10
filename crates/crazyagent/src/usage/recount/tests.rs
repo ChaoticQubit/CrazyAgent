@@ -1,0 +1,505 @@
+use super::*;
+use crate::usage::capture::RunKind;
+use std::io::Write;
+
+const NOW: i64 = 1_795_000_000_000;
+
+pub(super) fn store() -> (tempfile::TempDir, Connection) {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    (root, db)
+}
+
+pub(super) fn who() -> Attribution {
+    Attribution {
+        kind: RunKind::Agent,
+        project: Some(ProjectId::new("alpha").unwrap()),
+        pool: None,
+        account: Some(CredentialRef::new("acct").unwrap()),
+        agent: "team-7".into(),
+        harness: "claude-code".into(),
+    }
+}
+
+pub(super) fn message(path: &Path, id: &str, input: u64) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-11-09T02:00:00.000Z",
+            "message": {"id": id, "model": "claude-opus-4-5", "stop_reason": "end_turn",
+                "usage": {"input_tokens": input, "output_tokens": 1}}
+        })
+    )
+    .unwrap();
+}
+
+pub(super) fn old_row(db: &Connection, session: &str, input: i64, read: i64) {
+    db.execute(
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
+         VALUES (3600000,'agent','alpha','','acct','team-7','claude-code',?1,?2,1,?3,0)",
+        params![session, input, read],
+    )
+    .unwrap();
+}
+
+pub(super) fn recount_all(db: &Connection, home: &Path) {
+    begin(
+        db,
+        &[Home {
+            path: home.to_path_buf(),
+            format: Format::Claude,
+            attribution: who(),
+        }],
+        NOW,
+    )
+    .unwrap();
+    while step(db, BYTES_PER_STEP, NOW).unwrap() {}
+}
+
+fn home_of(path: PathBuf) -> Home {
+    Home {
+        path,
+        format: Format::Claude,
+        attribution: who(),
+    }
+}
+
+#[test]
+fn the_recount_reports_old_and_new_totals_and_changes_no_row() {
+    let (root, db) = store();
+    let file = root.path().join("home/projects/-repo/s1.jsonl");
+    message(&file, "msg_a", 100);
+    message(&file, "msg_b", 50);
+    message(&file, "msg_a", 100);
+    old_row(&db, "s1", 400, 7);
+    recount_all(&db, &root.path().join("home"));
+    let status = status(&db).unwrap().unwrap();
+    assert_eq!((status.old.input, status.new.input), (400, 150));
+    assert_eq!(status.sessions_recounted, 1);
+    assert!(status.new_cost_nanos > 0);
+    let kept: i64 = db
+        .query_row("SELECT SUM(input) FROM usage_tokens", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(kept, 400);
+}
+
+#[test]
+fn a_session_whose_transcript_is_gone_keeps_its_old_numbers() {
+    let (root, db) = store();
+    let file = root.path().join("home/projects/-repo/s1.jsonl");
+    message(&file, "msg_a", 100);
+    old_row(&db, "s1", 400, 0);
+    old_row(&db, "gone", 900, 0);
+    recount_all(&db, &root.path().join("home"));
+    let status = status(&db).unwrap().unwrap();
+    assert_eq!((status.old.input, status.new.input), (1300, 1000));
+    assert_eq!(
+        (status.sessions_recounted, status.sessions_kept_old),
+        (1, 1)
+    );
+}
+
+#[test]
+fn a_home_that_is_gone_is_no_failure() {
+    let (root, db) = store();
+    old_row(&db, "s1", 400, 0);
+    recount_all(&db, &root.path().join("no-such-home"));
+    assert_eq!(status(&db).unwrap(), None);
+    assert_eq!(state(&db).unwrap().as_deref(), Some("nothing"));
+}
+
+#[test]
+fn a_step_stays_within_its_bytes_and_a_restart_goes_on() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    for index in 0..3 {
+        message(
+            &home.join(format!("projects/-repo/s{index}.jsonl")),
+            &format!("msg_{index}"),
+            10,
+        );
+    }
+    old_row(&db, "s0", 99, 0);
+    begin(
+        &db,
+        &[Home {
+            path: home.clone(),
+            format: Format::Claude,
+            attribution: who(),
+        }],
+        NOW,
+    )
+    .unwrap();
+    assert!(step(&db, 1, NOW).unwrap(), "the listing spends the budget");
+    assert!(step(&db, 1, NOW).unwrap());
+    let staged: i64 = db
+        .query_row("SELECT COUNT(*) FROM usage_recount_rows", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(staged, 1, "one byte of budget reads one chunk");
+    drop(db);
+    let db = crate::usage::open(root.path()).unwrap();
+    while step(&db, BYTES_PER_STEP, NOW).unwrap() {}
+    assert_eq!(status(&db).unwrap().unwrap().new.input, 30);
+}
+
+#[test]
+fn a_recount_runs_once() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    message(&home.join("projects/-repo/s1.jsonl"), "msg_a", 100);
+    old_row(&db, "s1", 400, 0);
+    recount_all(&db, &home);
+    assert!(started(&db).unwrap());
+    begin(&db, &[], NOW + 1).unwrap();
+    assert_eq!(status(&db).unwrap().unwrap().new.input, 100);
+}
+
+#[test]
+fn the_status_names_no_path_session_or_transcript_text() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    message(
+        &home.join("projects/-repo/secret-session.jsonl"),
+        "msg_private",
+        100,
+    );
+    old_row(&db, "secret-session", 400, 0);
+    recount_all(&db, &home);
+    let text = serde_json::to_string(&status(&db).unwrap().unwrap()).unwrap();
+    for word in [
+        "secret-session",
+        "msg_private",
+        "projects",
+        root.path().to_str().unwrap(),
+    ] {
+        assert!(!text.contains(word), "{word}");
+    }
+}
+
+#[test]
+fn a_line_is_filed_in_the_hour_it_was_written() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    message(&home.join("projects/-repo/s1.jsonl"), "msg_a", 100);
+    old_row(&db, "s1", 400, 0);
+    recount_all(&db, &home);
+    let hour: i64 = db
+        .query_row("SELECT hour_ms FROM usage_recount_rows", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        hour,
+        super::super::rules::timestamp_ms("2026-11-09T02:00:00Z").unwrap()
+    );
+}
+
+#[test]
+fn an_original_and_its_copy_count_once_in_either_read_order() {
+    for swapped in [false, true] {
+        let (root, db) = store();
+        let one = root.path().join("one");
+        let two = root.path().join("two");
+        message(&one.join("projects/-repo/s1.jsonl"), "msg_a", 100);
+        message(&two.join("projects/-repo/s2.jsonl"), "msg_a", 100);
+        message(&two.join("projects/-repo/s2.jsonl"), "msg_b", 5);
+        old_row(&db, "s1", 100, 0);
+        old_row(&db, "s2", 105, 0);
+        let homes = if swapped { [two, one] } else { [one, two] };
+        begin(&db, &homes.map(home_of), NOW).unwrap();
+        while step(&db, BYTES_PER_STEP, NOW).unwrap() {}
+        let status = status(&db).unwrap().unwrap();
+        assert_eq!(
+            (status.old.input, status.new.input),
+            (205, 105),
+            "swapped {swapped}"
+        );
+        assert_eq!(
+            (status.sessions_recounted, status.sessions_kept_old),
+            (2, 0),
+            "swapped {swapped}"
+        );
+    }
+}
+
+#[test]
+fn a_read_that_stopped_part_way_replaces_nothing() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    let big = home.join("projects/-repo/s1.jsonl");
+    for index in 0..capture::USAGES_PER_READ_MAX + 3 {
+        message(&big, &format!("msg_{index}"), 1);
+    }
+    message(&home.join("projects/-repo/s2.jsonl"), "msg_whole", 7);
+    old_row(&db, "s1", 400, 0);
+    old_row(&db, "s2", 50, 0);
+    begin(&db, &[home_of(home)], NOW).unwrap();
+    assert!(step(&db, 1, NOW).unwrap(), "the listing spends the budget");
+    while !db
+        .query_row(
+            "SELECT progress<>'' FROM usage_recount_files WHERE session='s1'",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap()
+    {
+        assert!(
+            step(&db, 1, NOW).unwrap(),
+            "the big file takes more than one chunk"
+        );
+    }
+    std::fs::remove_file(&big).unwrap();
+    while step(&db, BYTES_PER_STEP, NOW).unwrap() {}
+    let status = status(&db).unwrap().unwrap();
+    assert_eq!(
+        status.new.input, 407,
+        "s1 keeps 400 and its staged lines are not used"
+    );
+    assert_eq!(
+        (status.sessions_recounted, status.sessions_kept_old),
+        (1, 1)
+    );
+}
+
+#[test]
+fn a_last_line_still_being_written_does_not_stop_the_read() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    message(&file, "msg_a", 100);
+    let mut open = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    write!(open, "{{\"type\":\"assistant\"").unwrap();
+    old_row(&db, "s1", 400, 0);
+    recount_all(&db, &home);
+    let status = status(&db).unwrap().unwrap();
+    assert_eq!((status.new.input, status.sessions_recounted), (100, 1));
+}
+
+#[test]
+fn the_read_gives_the_live_table_its_keys() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    message(&home.join("projects/-repo/s1.jsonl"), "msg_a", 100);
+    old_row(&db, "s1", 400, 0);
+    recount_all(&db, &home);
+    let seeded: i64 = db
+        .query_row(
+            "SELECT input FROM usage_messages WHERE id='claude:msg_a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(seeded, 100);
+}
+
+#[test]
+fn seeding_moves_one_bounded_page_per_step() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    message(&home.join("projects/-repo/s1.jsonl"), "msg_a", 100);
+    old_row(&db, "s1", 400, 0);
+    begin(&db, &[home_of(home)], NOW).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?1)
+         INSERT INTO usage_recount_messages(id,input,output,cache_read,cache_write,web,last_ms)
+         SELECT printf('k%07d',i),1,0,0,0,0,0 FROM n",
+        [SEEDED_PER_STEP + 1],
+    )
+    .unwrap();
+    let keys = |db: &Connection| -> i64 {
+        db.query_row("SELECT COUNT(*) FROM usage_messages", [], |row| row.get(0))
+            .unwrap()
+    };
+    assert!(
+        step(&db, BYTES_PER_STEP, NOW).unwrap(),
+        "the step that read a chunk does not seed"
+    );
+    assert_eq!(keys(&db), 0);
+    assert!(step(&db, BYTES_PER_STEP, NOW).unwrap());
+    assert_eq!(keys(&db), SEEDED_PER_STEP);
+    assert!(step(&db, BYTES_PER_STEP, NOW).unwrap());
+    assert!(!step(&db, BYTES_PER_STEP, NOW).unwrap());
+    assert_eq!(keys(&db), SEEDED_PER_STEP + 2);
+}
+
+#[test]
+fn past_the_cap_a_live_key_is_not_noted() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    message(&file, "msg_a", 100);
+    recount_all(&db, &home);
+    let noted = |db: &Connection| -> i64 {
+        db.query_row("SELECT COUNT(*) FROM usage_recount_live", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    message(&file, "msg_y", 3);
+    capture::scan_home(&db, &home, Format::Claude, &who(), NOW + 1).unwrap();
+    assert_eq!(noted(&db), 1);
+    db.execute(
+        "UPDATE usage_row_counts SET rows=?1 WHERE name='usage_recount_live'",
+        [capture::TABLE_ROWS_MAX],
+    )
+    .unwrap();
+    message(&file, "msg_z", 7);
+    assert_eq!(
+        capture::scan_home(&db, &home, Format::Claude, &who(), NOW + 2)
+            .unwrap()
+            .input,
+        7
+    );
+    assert_eq!(noted(&db), 1);
+}
+
+#[test]
+fn a_thousand_tiny_files_cost_their_floor_and_a_listing_is_charged() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    for index in 0..1000 {
+        message(
+            &home.join(format!("projects/-repo/s{index}.jsonl")),
+            &format!("msg_{index}"),
+            1,
+        );
+    }
+    begin(&db, &[home_of(home)], NOW).unwrap();
+    assert!(step(&db, BYTES_PER_STEP, NOW).unwrap());
+    let done: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM usage_recount_files WHERE done=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        done as u64,
+        (BYTES_PER_STEP - LISTING_COST) / CHUNK_COST_MIN
+    );
+}
+
+#[test]
+fn a_file_swapped_after_its_listing_is_refused() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    let file = home.join("projects/-repo/s1.jsonl");
+    message(&file, "msg_a", 100);
+    message(&home.join("projects/-repo/s2.jsonl"), "msg_c", 5);
+    old_row(&db, "s1", 400, 0);
+    old_row(&db, "s2", 50, 0);
+    begin(&db, &[home_of(home)], NOW).unwrap();
+    assert!(step(&db, 1, NOW).unwrap(), "the listing spends the budget");
+    std::fs::rename(&file, root.path().join("aside.jsonl")).unwrap();
+    message(&file, "msg_b", 7);
+    while step(&db, BYTES_PER_STEP, NOW).unwrap() {}
+    let status = status(&db).unwrap().unwrap();
+    assert_eq!(status.new.input, 405);
+    assert_eq!(
+        (status.sessions_recounted, status.sessions_kept_old),
+        (1, 1)
+    );
+}
+
+#[test]
+fn a_line_time_out_of_range_files_at_the_file_time() {
+    for stamp in ["2099-01-01T00:00:00.000Z", "2001-01-01T00:00:00.000Z"] {
+        let (root, db) = store();
+        let home = root.path().join("home");
+        let file = home.join("projects/-repo/s1.jsonl");
+        message(&file, "msg_a", 100);
+        let moved = std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("2026-11-09T02:00:00.000Z", stamp);
+        std::fs::write(&file, moved).unwrap();
+        old_row(&db, "s1", 400, 0);
+        recount_all(&db, &home);
+        let hour: i64 = db
+            .query_row("SELECT hour_ms FROM usage_recount_rows", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            (LINE_TIME_FLOOR_MS..=NOW).contains(&hour),
+            "{stamp} filed at {hour}"
+        );
+    }
+}
+
+#[test]
+fn a_file_that_keeps_failing_is_given_up_after_three_tries() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    message(&home.join("projects/-repo/s1.jsonl"), "msg_a", 100);
+    message(&home.join("projects/-repo/s2.jsonl"), "msg_b", 5);
+    old_row(&db, "s1", 400, 0);
+    old_row(&db, "s2", 50, 0);
+    begin(&db, &[home_of(home)], NOW).unwrap();
+    assert!(step(&db, 1, NOW).unwrap(), "the listing spends the budget");
+    db.execute(
+        "UPDATE usage_recount_files SET attempts=?1 WHERE session='s1'",
+        [ATTEMPTS_MAX],
+    )
+    .unwrap();
+    while step(&db, BYTES_PER_STEP, NOW).unwrap() {}
+    let (done, complete): (bool, bool) = db
+        .query_row(
+            "SELECT done,complete FROM usage_recount_files WHERE session='s1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((done, complete), (true, false));
+    let status = status(&db).unwrap().unwrap();
+    assert_eq!((status.new.input, status.sessions_kept_old), (405, 1));
+}
+
+#[test]
+fn a_project_removed_during_the_recount_is_not_put_back() {
+    let (root, db) = store();
+    let home = root.path().join("home");
+    message(&home.join("projects/-repo/s1.jsonl"), "msg_a", 100);
+    message(&home.join("projects/-repo/s2.jsonl"), "msg_b", 5);
+    old_row(&db, "s1", 400, 0);
+    old_row(&db, "s2", 50, 0);
+    recount_all(&db, &home);
+    db.execute(
+        "INSERT INTO usage_recount_sessions (project,agent,session) VALUES (?1,'team-7','s2')",
+        [crate::usage::REMOVED_PROJECTS],
+    )
+    .unwrap();
+    crate::usage::forget_project(&db, "alpha").unwrap();
+    for table in [
+        "usage_recount_rows",
+        "usage_recount_homes",
+        "usage_recount_sessions",
+    ] {
+        let left: i64 = db
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE project='alpha'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "{table}");
+    }
+    let status = status(&db).unwrap().unwrap();
+    assert_eq!((status.old.input, status.new.input), (450, 105));
+    assert_eq!(
+        (status.sessions_recounted, status.sessions_kept_old),
+        (2, 0)
+    );
+}

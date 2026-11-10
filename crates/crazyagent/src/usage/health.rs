@@ -18,6 +18,7 @@ pub enum UsageStep {
     Poll,
     Team,
     Runs,
+    Recount,
 }
 
 impl UsageStep {
@@ -27,11 +28,12 @@ impl UsageStep {
             Self::Poll => "poll",
             Self::Team => "team",
             Self::Runs => "runs",
+            Self::Recount => "recount",
         }
     }
 
     fn named(name: &str) -> Option<Self> {
-        [Self::Poll, Self::Team, Self::Runs]
+        [Self::Poll, Self::Team, Self::Runs, Self::Recount]
             .into_iter()
             .find(|step| step.name() == name)
     }

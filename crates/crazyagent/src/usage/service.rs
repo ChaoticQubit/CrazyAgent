@@ -228,6 +228,14 @@ impl Usage {
         self.completed(UsageStep::Runs, now_ms)
     }
 
+    fn guarded_recount(
+        &mut self,
+        _: impl FnOnce(&Usage) -> Result<(), EngineError>,
+        _: i64,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+
     /// Marks a part that panicked earlier as working again once it completes, writing only
     /// on that change. Inputs: the part and the time. Output: done, or `usage_unavailable`.
     fn completed(&mut self, part: UsageStep, now_ms: i64) -> Result<(), EngineError> {

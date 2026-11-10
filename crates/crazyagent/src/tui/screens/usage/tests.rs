@@ -973,3 +973,22 @@ fn a_priced_row_at_80_columns_wraps_so_no_figure_or_label_is_cut() {
     );
     assert!(joined.contains("2 runs"), "{joined}");
 }
+
+#[test]
+fn a_recount_fault_reads_in_plain_words() {
+    let line = health_line(
+        &StepHealth {
+            step: UsageStep::Recount,
+            panics: 1,
+            last_ms: NOW - 30_000,
+            recovered_ms: None,
+        },
+        NOW,
+        0,
+    );
+    assert!(
+        line.starts_with("Recounting history hit an internal error once"),
+        "{line}"
+    );
+    assert!(line.contains("the comparison may arrive later"), "{line}");
+}

@@ -268,7 +268,7 @@ fn a_panicking_step_kind_is_counted_marked_working_again_and_forgotten_on_restar
     );
     assert_eq!(
         usage.doing,
-        UsageStep::Runs,
+        UsageStep::Recount,
         "a whole step ends in its last part"
     );
     let report = crate::usage::report::report(&db, None, None, 0, NOW + 11_000, &[]).unwrap();
@@ -323,5 +323,49 @@ fn a_panicking_step_kind_is_counted_marked_working_again_and_forgotten_on_restar
     assert!(
         crate::usage::health::health(&db).unwrap().is_empty(),
         "a new engine run starts with no counted panics"
+    );
+}
+
+#[test]
+fn a_recount_panic_is_charged_to_the_recount_and_the_live_step_goes_on() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    let mut usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    usage
+        .guarded_recount(|_| panic!("the recount broke an invariant"), NOW)
+        .unwrap();
+    assert_eq!(usage.doing, UsageStep::Recount);
+    let health = crate::usage::health::health(&db).unwrap();
+    assert_eq!(
+        (health[0].step, health[0].panics, health[0].recovered_ms),
+        (UsageStep::Recount, 1, None)
+    );
+    usage.guarded_recount(|_| Ok(()), NOW + 5_000).unwrap();
+    assert_eq!(
+        crate::usage::health::health(&db).unwrap()[0].recovered_ms,
+        Some(NOW + 5_000)
+    );
+}
+
+#[test]
+fn an_older_health_table_takes_the_recount_step_after_an_upgrade() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    db.execute_batch(
+        "DROP TABLE usage_health;
+         CREATE TABLE usage_health (step TEXT PRIMARY KEY CHECK(step IN ('poll','team','runs')),
+            panics INTEGER NOT NULL CHECK(panics >= 1), last_ms INTEGER NOT NULL,
+            recovered_ms INTEGER CHECK(recovered_ms IS NULL OR recovered_ms >= last_ms));",
+    )
+    .unwrap();
+    drop(db);
+    let db = crate::usage::open(root.path()).unwrap();
+    record_panic(&db, UsageStep::Recount, NOW).unwrap();
+    assert_eq!(
+        crate::usage::health::health(&db).unwrap()[0].step,
+        UsageStep::Recount
     );
 }

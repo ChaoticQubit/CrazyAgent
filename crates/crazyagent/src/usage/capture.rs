@@ -28,7 +28,7 @@ pub(super) const ROW_TOKENS_MAX: i64 = 1_000_000_000_000_000;
 const TOOLS_PER_READ_MAX: usize = 4096;
 const ARGUMENTS_BYTES_MAX: usize = 64 * 1024;
 /// The most records one read of one file parses before it stops at a line boundary.
-const USAGES_PER_READ_MAX: usize = 4096;
+pub(super) const USAGES_PER_READ_MAX: usize = 4096;
 /// The most rows transcript lines can create in each counted table.
 pub(super) const TABLE_ROWS_MAX: i64 = 4 * 1024 * 1024;
 /// The records at which one scan stops opening files, so one write under the store's lock
