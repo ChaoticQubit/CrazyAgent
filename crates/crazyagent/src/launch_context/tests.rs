@@ -1,6 +1,7 @@
 use super::*;
 use crate::plugins::{EffectiveSecret, EffectiveServer};
 use crate::project_setup::TeamPlan;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 fn stored(folder: &Path) -> StoredSetup {
