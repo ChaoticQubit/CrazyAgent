@@ -264,13 +264,26 @@ impl Usage {
     }
 
     /// Lists the homes the upkeep already scans. A store without team tables has only its
-    /// runs. Input: the live access. Output: the homes, or the store's failure.
+    /// runs; any other failure returns, so the once-only recount starts on a later step.
+    /// Input: the live access. Output: the homes, or the store's failure.
     fn recount_homes(&self, access: &ModelAccess) -> Result<Vec<recount::Home>, EngineError> {
         let mut homes = Vec::new();
-        if let Ok(mut statement) = self.db.prepare(
-            "SELECT id,project,role,harness,connection FROM team_agents
-             WHERE role<>'teammate' ORDER BY id DESC LIMIT ?1",
-        ) {
+        let has_team: bool = self
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_agents')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if has_team {
+            let mut statement = self
+                .db
+                .prepare(
+                    "SELECT id,project,role,harness,connection FROM team_agents
+                     WHERE role<>'teammate' ORDER BY id DESC LIMIT ?1",
+                )
+                .map_err(storage)?;
             let rows: Vec<(i64, String, String, String, Option<String>)> = statement
                 .query_map([RECOUNT_AGENTS_MAX], |row| {
                     Ok((
@@ -303,6 +316,7 @@ impl Usage {
                         connection.as_deref(),
                         access,
                     ),
+                    removed: false,
                 });
             }
         }
@@ -327,6 +341,7 @@ impl Usage {
         for (home, kind, project, account, agent, harness) in rows {
             let resolve =
                 |project: &str, account: &CredentialRef| pool_of(access, project, account);
+            let removed = project == super::REMOVED_PROJECTS;
             if let Some((format, attribution)) =
                 run_attribution(&kind, project, account, agent, harness, &resolve)
             {
@@ -334,6 +349,7 @@ impl Usage {
                     path: PathBuf::from(home),
                     format,
                     attribution,
+                    removed,
                 });
             }
         }

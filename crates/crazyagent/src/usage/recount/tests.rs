@@ -57,6 +57,7 @@ pub(super) fn recount_all(db: &Connection, home: &Path) {
             path: home.to_path_buf(),
             format: Format::Claude,
             attribution: who(),
+            removed: false,
         }],
         NOW,
     )
@@ -69,6 +70,7 @@ fn home_of(path: PathBuf) -> Home {
         path,
         format: Format::Claude,
         attribution: who(),
+        removed: false,
     }
 }
 
@@ -134,6 +136,7 @@ fn a_step_stays_within_its_bytes_and_a_restart_goes_on() {
             path: home.clone(),
             format: Format::Claude,
             attribution: who(),
+            removed: false,
         }],
         NOW,
     )
