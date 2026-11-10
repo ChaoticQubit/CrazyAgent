@@ -173,7 +173,7 @@ function ChangeNote({ note }: { note: string }) {
  * Inputs: the project id, the team status and a reload. Output: the row. */
 export function QuestionsSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
   const { note, change } = useChange(reload);
-  const [questionsTo, hold] = useHeld<QuestionsTo>(coordination(status).settings.questions_to);
+  const [questionsTo, hold] = useHeld<QuestionsTo>(coordination(status).settings.questions_to, Object.is, status);
   return <SettingRow label="Sub-agent questions go to">
     <span className="set-label" aria-hidden="true">Sub-agent questions go to</span>
     <Segmented label="Sub-agent questions go to" value={questionsTo} onValue={(value: QuestionsTo) => void change(() => saveCoordSettings(projectId, { questions_to: value }), "where questions go", () => hold(value))}
@@ -184,11 +184,11 @@ export function QuestionsSetting({ projectId, status, reload }: { projectId: str
 }
 
 /** How messages reach one harness kind's agents, as one row, on Agent settings and in the
- * master's settings. Inputs: the project id, the harness kind's row and a reload. Output: the
- * row. */
-export function DeliverySetting({ projectId, row, reload }: { projectId: string; row: HarnessCoordination; reload: () => void }) {
+ * master's settings. Inputs: the project id, the harness kind's row, the team status it came
+ * from and a reload. Output: the row. */
+export function DeliverySetting({ projectId, row, status, reload }: { projectId: string; row: HarnessCoordination; status: TeamStatus; reload: () => void }) {
   const { note, change } = useChange(reload);
-  const [delivery, hold] = useHeld<Delivery>(row.delivery);
+  const [delivery, hold] = useHeld<Delivery>(row.delivery, Object.is, status);
   const label = `Messages to ${HARNESS_NAMES[row.harness]} agents`;
   return <SettingRow label={label}>
     <Select id={`tg-delivery-${row.harness}-${projectId}`} label={label} value={delivery} options={DELIVERY_OPTIONS}
@@ -202,7 +202,7 @@ export function DeliverySetting({ projectId, row, reload }: { projectId: string;
  * defaults show for an older engine. Inputs: the project id, the latest team status and a
  * reload. Output: the rows. */
 export function ToolsControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
-  const [settings, hold] = useHeld(coordination(status).settings, sameJson);
+  const [settings, hold] = useHeld(coordination(status).settings, sameJson, status);
   const [skills] = useLoad(() => listSkills(projectId), [projectId], "skills");
   const { busy, note, change } = useChange(reload);
   const [counted, setCounted] = useState<string | null>(null);
@@ -253,10 +253,11 @@ export function ToolsControls({ projectId, status, reload }: { projectId: string
 }
 
 /** One harness kind's sub-agent mode as a row: Native agent teams only where that kind has them.
- * Inputs: the project id, the harness kind's row and a reload. Output: the row. */
-function SubAgentModeSetting({ projectId, row, reload }: { projectId: string; row: HarnessCoordination; reload: () => void }) {
+ * Inputs: the project id, the harness kind's row, the team status it came from and a reload.
+ * Output: the row. */
+function SubAgentModeSetting({ projectId, row, status, reload }: { projectId: string; row: HarnessCoordination; status: TeamStatus; reload: () => void }) {
   const { note, change } = useChange(reload);
-  const [mode, hold] = useHeld<SubagentMode>(row.mode);
+  const [mode, hold] = useHeld<SubagentMode>(row.mode, Object.is, status);
   return <SettingRow label={`${HARNESS_NAMES[row.harness]} sub-agents`}>
     <Select id={`tg-mode-${row.harness}-${projectId}`} label={`${HARNESS_NAMES[row.harness]} sub-agents`} value={mode} options={modeOptions(row.native)}
       onValue={(value) => { if (value === "app_spawned" || (value === "native" && row.native)) void change(() => setHarnessMode(projectId, row.harness, value as SubagentMode), "the sub-agent mode", () => hold(value as SubagentMode)); }}
@@ -275,11 +276,11 @@ function SubAgentModeSetting({ projectId, row, reload }: { projectId: string; ro
 export function CoordinationControls({ projectId, status, reload, children }: { projectId: string; status: TeamStatus; reload: () => void; children?: ReactNode }) {
   const view = coordination(status);
   const { note, change } = useChange(reload);
-  const [overlaps, holdOverlaps] = useHeld<string>(view.settings.overlaps);
-  const [perWindow, holdPerWindow] = useHeld(String(status.terminals_per_window ?? 6));
+  const [overlaps, holdOverlaps] = useHeld<string>(view.settings.overlaps, Object.is, status);
+  const [perWindow, holdPerWindow] = useHeld(String(status.terminals_per_window ?? 6), Object.is, status);
 
   return <>
-    {view.harnesses.map((row) => <SubAgentModeSetting key={row.harness} projectId={projectId} row={row} reload={reload} />)}
+    {view.harnesses.map((row) => <SubAgentModeSetting key={row.harness} projectId={projectId} row={row} status={status} reload={reload} />)}
     {children}
     <QuestionsSetting projectId={projectId} status={status} reload={reload} />
     <SettingRow label="Overlapping edits" wide>
@@ -306,10 +307,10 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
 export function PerHarnessControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
   const view = coordination(status);
   const { note, change } = useChange(reload);
-  const [display, holdDisplay] = useHeld<ClaudeDisplay>(view.settings.claude_display);
+  const [display, holdDisplay] = useHeld<ClaudeDisplay>(view.settings.claude_display, Object.is, status);
   return <>
     {view.harnesses.map((row) => <div className="set-harness" role="group" aria-label={HARNESS_NAMES[row.harness]} key={row.harness}>
-      <DeliverySetting projectId={projectId} row={row} reload={reload} />
+      <DeliverySetting projectId={projectId} row={row} status={status} reload={reload} />
       {row.harness === "claude-code" && <SettingRow label="Claude Code terminal display">
         <Select id={`tg-display-claude-code-${projectId}`} label="Claude Code terminal display" value={display} options={DISPLAY_OPTIONS}
           onValue={(value) => { if (value === "classic" || value === "fullscreen") void change(() => saveCoordSettings(projectId, { claude_display: value }), "the Claude Code terminal display", () => holdDisplay(value)); }}

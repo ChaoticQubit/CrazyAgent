@@ -175,7 +175,7 @@ test("the wall boots from main.tsx on its own address, Agents carries the button
   assert.match(source("main.tsx"), /wallRoute\(window\.location\.hash\)/u);
   assert.match(source("main.tsx"), /<TerminalWall /u);
   assert.match(source("screens/team/index.tsx"), />Open all terminals</u);
-  assert.match(source("screens/team/index.tsx"), /openTerminalWindows\(projectId, name, windows, true\)/u);
+  assert.match(source("screens/team/index.tsx"), /openTerminalWindows\(projectId, name, plan\.windows, true\)/u);
   assert.match(source("screens/project/agents.tsx"), /<TeamGraphView [^>]*perWindow=/u);
   const controls = source("screens/team/coordination.tsx");
   assert.match(controls, /label="Terminals per window"/u);

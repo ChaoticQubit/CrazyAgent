@@ -161,6 +161,19 @@ function projectLabel(filter: MetricsFilter | undefined, id: string): string {
   return id === REMOVED_PROJECTS ? REMOVED_LABEL : displayText(filter?.projects.find((project) => project.id === id)?.name ?? id);
 }
 
+/** The By pool table, which needs only the usage read: each pool's tokens, runs and when it
+ * was last used. Inputs: the usage read, now and the filter. Output: the first column's head,
+ * the own columns' heads, the rows and no Project column. */
+function poolTable(usage: UsageReport, nowMs: number, filter: MetricsFilter | undefined): { head: string; extra: string[]; rows: BreakdownRow[]; projectColumn: boolean } {
+  return {
+    head: "Pool", extra: ["Runs", "Last used"], projectColumn: false,
+    rows: usage.pools.map((row) => ({
+      key: row.key, name: filter?.limits.pools.get(row.key) ?? row.key, tokens: row.tokens, cost_nanos: row.cost_nanos,
+      notReportedBy: row.not_reported_by, extra: [String(row.runs), agoText(row.last_ms, nowMs)],
+    })),
+  };
+}
+
 /** The breakdown's rows and own columns for one choice. The app page (with a filter) adds By
  * project, names each agent's harnesses and accounts and each account's and harness's
  * projects, and shows a Project column on agents and runs across every project; the project
@@ -182,15 +195,7 @@ function breakdownRows(by: MetricsBy, projectId: string | null, usage: UsageRepo
       rows: metrics.projects.map((row) => ({ key: row.key, name: projectName(row.key), tokens: row.tokens, cost_nanos: row.cost_nanos, extra: [String(row.agents), String(row.runs), String(row.merges)] })),
     };
   }
-  if (by === "pool") {
-    return {
-      head: "Pool", extra: ["Runs", "Last used"], projectColumn,
-      rows: usage.pools.map((row) => ({
-        key: row.key, name: filter?.limits.pools.get(row.key) ?? row.key, tokens: row.tokens, cost_nanos: row.cost_nanos,
-        notReportedBy: row.not_reported_by, extra: [String(row.runs), agoText(row.last_ms, nowMs)],
-      })),
-    };
-  }
+  if (by === "pool") return poolTable(usage, nowMs, filter);
   if (by === "run") {
     return {
       head: "Run", extra: ["Agent", "Ended", "Result"], projectColumn,
@@ -374,6 +379,23 @@ function AppNotices({ usage, failure, nowMs }: { usage: UsageReport; failure: st
   </>;
 }
 
+/** What the app page keeps from the usage read alone while the metrics read fails: the usage
+ * notices, each account's limits with the next accounts, By pool, the lines changed and the
+ * tokens by day. Inputs: the usage read, the filter, the names, now and the viewer's offset. */
+function UsageOnly({ usage, filter, names, nowMs, offset }: { usage: UsageReport; filter: MetricsFilter; names: MetricsNames; nowMs: number; offset: number }) {
+  const pools = poolTable(usage, nowMs, filter);
+  return <>
+    <AppNotices usage={usage} failure={filter.limits.failure} nowMs={nowMs} />
+    <AccountLimitsPanel limits={usage.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} />
+    {filter.limits.next}
+    <div className="mx-panels">
+      <TokenPanel title="By pool" rows={pools.rows} money={usage.money}><BreakdownTable by="pool" {...pools} total={usage.total} money={usage.money} /></TokenPanel>
+      <LinesPanel rows={usage.lines} name={(key) => projectLabel(filter, key)} />
+    </div>
+    <DaysPanel days={usage.days} offset={offset} />
+  </>;
+}
+
 /** What the app page keeps while its reads are incomplete: a refused action's words and, once
  * the usage read holds, each account's limits and the next accounts. Without that read only
  * Check limits now stays. Inputs: the usage read, the filter, the names and now. */
@@ -482,7 +504,9 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
   }
   if (usage.kind === "error" || metrics.kind === "error") {
     const failed = usage.kind === "error" ? usage : metrics.kind === "error" ? metrics : null;
-    return <div className="stack">{head}{kept}{failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />}</div>;
+    const error = failed && <LoadError message={usageRefusal(failed)} onRetry={onRetry} />;
+    if (filter && usage.kind === "ok") return <div className="stack mx-page">{head}{error}<UsageOnly usage={usage.value} filter={filter} names={names} nowMs={nowMs} offset={offset} /></div>;
+    return <div className="stack">{head}{kept}{error}</div>;
   }
   if (usage.kind !== "ok" || metrics.kind !== "ok") return <div className="stack">{head}{kept}<Skeleton shape="card" count={3} /></div>;
   const empty = headlineTokens(usage.value.total) === 0 && usage.value.lines.length === 0 && (usage.value.not_reported_by ?? []).length === 0;

@@ -8,6 +8,7 @@ import "./load-source.mjs";
 const research = await import("../src/screens/project/research.ts");
 const team = await import("../src/screens/project/team.tsx");
 const controls = await import("../src/screens/team/controls.tsx");
+const state = await import("../src/state.ts");
 
 const MINUTE = 60_000;
 const agent = (id, status, extra = {}) => ({ id, role: "sub", label: `Sub-agent ${id}`, harness: "codex", tools: true, account: null, worktree: null, status, status_label: "",
@@ -128,4 +129,43 @@ test("the Wake button sends the team wake by agent id, never the agent register'
   const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
   assert.match(client, /invoke<IntentReceipt>\("desktop_team_wake_agent", \{ id, agent, generation \}\)/);
   assert.match(client, /invoke<IntentReceipt>\("desktop_team_finished_agents", \{ id, show, version, generation \}\)/);
+});
+
+test("an applied save's hold ends at the first read that started after the save answered, even one showing the old value again (UI1-R2)", () => {
+  for (const name of ["startRead", "stampRead", "answeredHold", "holdEnds"]) assert.equal(typeof state[name], "function", `state has ${name}`);
+  const held = { choice: "show", from: "hide" };
+  const before = { finished_agents: "hide" };
+  const early = state.startRead();
+  const kept = state.answeredHold(held, "");
+  assert.equal(kept.choice, "show", "an applied save keeps the pick");
+  state.stampRead({ kind: "ok", value: before }, early);
+  assert.equal(state.holdEnds(kept, "hide", Object.is, before), false, "a read already on its way when the save answered keeps the pick");
+  const after = { finished_agents: "hide" };
+  state.stampRead({ kind: "ok", value: after }, state.startRead());
+  assert.equal(state.holdEnds(kept, "hide", Object.is, after), true, "a read that started after the answer ends the hold, even at the old value another writer put back");
+  state.stampRead({ kind: "ok", value: before }, state.startRead());
+  assert.equal(state.holdEnds(kept, "hide", Object.is, before), false, "a read keeps the start it was first noted with");
+  assert.equal(state.holdEnds(kept, "other", Object.is, before), true, "a read that moves the value still ends it");
+  assert.equal(state.holdEnds(held, "hide", Object.is, after), false, "a hold whose save has not answered stays");
+  assert.equal(state.holdEnds(kept, "hide", Object.is, undefined), false, "with no read given only a moved value ends it");
+  assert.equal(state.answeredHold(held, "Refused."), null, "a refused save holds nothing");
+  assert.equal(state.holdEnds(null, "hide", Object.is, after), false);
+  for (const file of ["controls.tsx", "coordination.tsx"]) {
+    const source = readFileSync(new URL(`../src/screens/team/${file}`, import.meta.url), "utf8");
+    const calls = [...source.matchAll(/useHeld(?:<[^>]+>)?\(([^;]*?)\);/gu)].map((match) => match[1]);
+    assert.ok(calls.length > 0, file);
+    for (const call of calls) assert.match(call, /, status$/u, `${file} gives its hold the read: ${call}`);
+  }
+  const team = readFileSync(new URL("../src/screens/project/team.tsx", import.meta.url), "utf8");
+  assert.match(team, /const started = startRead\(\);[\s\S]*stampRead\(result, started\);/u, "the team poller notes when each read started");
+});
+
+test("every other hold on a loaded read gives that read, so a later read ends it too (UI1-R2 r1 L2)", () => {
+  const reads = [["settings/updates.tsx", "Object.is, settings"], ["process.tsx", "sameJson, settings"], ["settings/memory.tsx", "Object.is, saved"], ["project/settings.tsx", "Object.is, status"]];
+  for (const [file, read] of reads) {
+    const source = readFileSync(new URL(`../src/screens/${file}`, import.meta.url), "utf8");
+    const calls = [...source.matchAll(/useHeld(?:<[^>]+>)?\(([^;]*?)\);/gu)].map((match) => match[1]);
+    assert.equal(calls.length, 1, file);
+    assert.ok(calls[0].endsWith(`, ${read}`), `${file} gives its hold the read: ${calls[0]}`);
+  }
 });

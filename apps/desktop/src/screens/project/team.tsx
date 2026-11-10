@@ -11,6 +11,7 @@ import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
 import { agentKey, finishedLabel, finishedRows, liveAgent, teamPanel } from "./research";
 import type { FinishedRow, TeamAgentRow, TeamFilter, TeamTaskRow, TeammateRow } from "./research";
+import { startRead, stampRead } from "../../state";
 import { NotReady } from "./shared";
 import type { ProjectData, TeamRead } from "./shared";
 
@@ -24,11 +25,15 @@ export function useTeam(id: string): [TeamRead, () => void] {
   useEffect(() => {
     let live = true;
     let timer: number | undefined;
-    const read = () => void loadTeamStatus(id).then((result) => {
-      if (!live) return;
-      setTeam({ result, at: Date.now() });
-      if (result.kind === "not_ready" && timer !== undefined) window.clearInterval(timer);
-    });
+    const read = () => {
+      const started = startRead();
+      void loadTeamStatus(id).then((result) => {
+        stampRead(result, started);
+        if (!live) return;
+        setTeam({ result, at: Date.now() });
+        if (result.kind === "not_ready" && timer !== undefined) window.clearInterval(timer);
+      });
+    };
     read();
     timer = window.setInterval(read, TEAM_POLL_MS);
     return () => { live = false; window.clearInterval(timer); };

@@ -77,7 +77,7 @@
 .pool-app-hint { font-size: 12px; line-height: 16px; color: var(--text-2); }
 .pool-saved { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; min-height: 20px; font-size: 12px; line-height: 16px; color: var(--ok); }
 .pool-order-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.pool-order-pick .segmented button, .pool-ctl .segmented button { height: 22px; padding: 0 7px; font-size: 12px; }
+.pool-order-pick .segmented button, .pool-ctl .segmented button { min-height: 22px; padding: 0 7px; font-size: 12px; }
 .pool-right { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .pool-ctl { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
 .pool-sched { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }

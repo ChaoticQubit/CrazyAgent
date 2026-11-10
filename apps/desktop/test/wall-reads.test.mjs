@@ -51,7 +51,7 @@ function openAll(mount) {
     await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
     for (const type of ["mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
     const reads = await evaluate(`Fixture.seen("${GRAPH}", ${before + 1}, ${WALL_READ_WAIT_MS})`);
-    return { opened: await evaluate(`Fixture.seen("${OPEN}", 1, 500)`), reads: reads.length - before };
+    return { opened: await evaluate(`Fixture.seen("${OPEN}", 1, 500)`), reads: reads.length - before, note: await evaluate("Fixture.note()") };
   });
 }
 
@@ -75,4 +75,13 @@ test("Open all terminals opens nothing when the fresh read has no terminals left
   const { opened, reads } = await openAll("Fixture.mountToolbar(9, 6, [{ terminals: 0 }], 6)");
   assert.equal(reads, 1, "the click read the team");
   assert.deepEqual(opened, []);
+});
+
+test("Open all terminals opens no window and says why when the fresh read finds the project removed (UI-5-F2)", async () => {
+  for (const code of ["project_missing", "project_setup_missing"]) {
+    const { opened, reads, note } = await openAll(`Fixture.mountToolbar(9, 6, [{ fail: "${code}" }], 6)`);
+    assert.equal(reads, 1, `${code}: the click read the team`);
+    assert.deepEqual(opened, [], `${code}: no window opens to shut again`);
+    assert.match(note ?? "", /removed/u, `${code}: the row says why nothing opened`);
+  }
 });

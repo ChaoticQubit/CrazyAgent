@@ -233,7 +233,7 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
   failure: string;
   onSave: (settings: InstructionSettings) => Promise<string>;
 }) {
-  const [current, hold] = useHeld<InstructionSettings>(settings.kind === "ok" ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS, sameJson);
+  const [current, hold] = useHeld<InstructionSettings>(settings.kind === "ok" ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS, sameJson, settings);
   if (settings.kind === "loading") return <Skeleton shape="card" count={1} />;
   if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
   const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[0];
