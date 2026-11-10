@@ -1020,6 +1020,7 @@ fn finished_team() -> crate::team::TeamStatus {
         master_lands: None,
         reask_empty_reply: true,
         master_idle_stop: crate::team::MasterIdleStop::default(),
+        master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -1735,6 +1736,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         master_lands: None,
         reask_empty_reply: true,
         master_idle_stop: crate::team::MasterIdleStop::default(),
+        master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -2169,6 +2171,7 @@ fn master_status(
         master_lands: None,
         reask_empty_reply: true,
         master_idle_stop: crate::team::MasterIdleStop::default(),
+        master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -2571,6 +2574,44 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
         ),
         "a wide view shows both session keys"
     );
+}
+
+/// A master view on a project with Live terminal Off starts nothing and goes back to the
+/// console, whatever the run flag says (DEC-117 Q4).
+#[test]
+fn a_master_view_on_live_terminal_off_starts_nothing_and_goes_back() {
+    for on in [None, Some(false), Some(true)] {
+        let mut ctx = Ctx::new(
+            Depth::NoColor,
+            Colors::Dark,
+            Appearance::Dark,
+            &UNICODE,
+            String::new(),
+        );
+        ctx.width = 80;
+        ctx.height = 24;
+        ctx.link = Link::Ready;
+        let place = Place::Master {
+            id: project(),
+            name: "Tidepool".into(),
+        };
+        let mut screen = open(&place, &mut ctx);
+        screen.shown(&mut ctx);
+        std::iter::from_fn(|| ctx.next_screen_request()).for_each(drop);
+        let mut status = master_status(on, None, None);
+        status.master_live_terminal = false;
+        let flow = screen.arrive(&team_read(status), &mut ctx);
+        assert!(
+            matches!(flow, crate::tui::screens::Flow::Back),
+            "the view goes back with the switch at {on:?}"
+        );
+        let sent: Vec<Request> = std::iter::from_fn(|| ctx.next_screen_request()).collect();
+        assert!(sent.is_empty(), "nothing starts: {sent:?}");
+        assert_eq!(
+            ctx.message().map(|message| message.lead.as_str()),
+            Some("Live terminal is off for this project.")
+        );
+    }
 }
 
 #[test]

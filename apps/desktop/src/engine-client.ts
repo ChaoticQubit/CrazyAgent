@@ -929,6 +929,7 @@ export interface TeamStatus {
   master_lands?: MasterLands | null;
   reask_empty_reply?: boolean;
   master_idle_stop?: MasterIdleStop;
+  master_live_terminal?: boolean;
   catch_up_main?: CatchUpMain;
   reuse_idle?: ReuseIdle;
   new_folder_files_max?: number;

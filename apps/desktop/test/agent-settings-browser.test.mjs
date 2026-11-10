@@ -28,7 +28,7 @@ const GROUPS = [
   ["Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
 ];
 const MASTER = [
-  ["Master", ["Harness", "Account"]],
+  ["Master", ["Harness", "Account", "Live terminal"]],
   ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
   ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"]],
   ["Access", ["Full access"]],

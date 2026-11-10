@@ -10,7 +10,7 @@ import { entry } from "../new-project/wizard";
 import { TerminalPanel } from "../team";
 import { changeNote } from "../team/controls";
 import "../team/team-graph.css";
-import { ConversationTab, MasterSettingsButton } from "./conversation";
+import { ConversationTab, MasterSettingsButton, MasterSettingsDrawer } from "./conversation";
 import { SessionsBar, SwitchDivider } from "./sessions";
 import { savedStale } from "./settings";
 import { NotReady, valueOf } from "./shared";
@@ -95,6 +95,13 @@ export function idleStopped(team: Result<TeamStatus> | undefined, projectId: str
   return team?.kind === "ok" && team.value.project_id === projectId && team.value.live_idle_stopped === true;
 }
 
+/** Whether the engine says this project's Live terminal setting is Off (DEC-117 Q4). Inputs:
+ * the team read and the project shown. Output: true only for a good read of this project
+ * showing Off, so a failed read never closes a running terminal. */
+export function liveTerminalOff(team: Result<TeamStatus> | undefined, projectId: string): boolean {
+  return team?.kind === "ok" && team.value.project_id === projectId && team.value.master_live_terminal === false;
+}
+
 /** Whether opening the area turns the live master on now: only once a team read shows a
  * switch that is not on, nothing was asked and the read is newer than a start the engine
  * refused as stale, so a refused start waits for the fresh read instead of retrying the old
@@ -168,14 +175,16 @@ export function liveStaleNote(name: string): string {
  * The plan's master is read through the harness catalog, so an alias such as "claude" is the
  * same Claude Code master (OP-28), and nothing is shown before the plan and catalog are read.
  * Input: the project data. Output: the area;
- * any other master, a project without a team plan and a plan that couldn't be read keep the
- * engine-driven conversation. */
+ * any other master, a project with Live terminal off, a project without a team plan and a plan
+ * that couldn't be read keep the engine-driven conversation. */
 export function MasterArea({ data }: { data: ProjectData }) {
   if (data.setup === undefined || data.harnesses === undefined) return <p className="pj-small pj-muted" role="status">Loading the master...</p>;
   const stored = valueOf(data.setup)?.team.master;
   const harness = stored === undefined ? undefined : entry(valueOf(data.harnesses), stored)?.id ?? stored;
-  if (harness === undefined || !runsLive(harness)) return <ConversationTab data={data} />;
-  return <LiveMaster key={data.id} data={data} harness={harness} />;
+  const area = harness === undefined || !runsLive(harness) || liveTerminalOff(data.team.result, data.id)
+    ? <ConversationTab data={data} />
+    : <LiveMaster key={data.id} data={data} harness={harness} />;
+  return <MasterSettingsDrawer data={data}>{area}</MasterSettingsDrawer>;
 }
 
 function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
@@ -387,7 +396,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
       <span className={`pj-console-state ${state.tone}`}>{state.word}</span>
       {account && <span className="pj-console-detail">{displayText(account)}</span>}
       {head.waits && <span className="pj-console-detail" data-testid="master-switch-waits">{displayText(head.waits)}</span>}
-      <span className="pj-console-actions"><MasterSettingsButton data={data} /></span>
+      <span className="pj-console-actions"><MasterSettingsButton /></span>
     </div>
     {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} mark={live.kind === "running" ? live.node?.status ?? null : null} onSwitched={async () => {
       await sessions.reread();

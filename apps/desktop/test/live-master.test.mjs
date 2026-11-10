@@ -247,6 +247,55 @@ test("the owner's switch change holds until a team read after the engine accepte
   assert.equal(live.wantSettled({ on: true, after: 4_000 }, 4_001), true, "the next read decides, even when the engine already turned it off");
 });
 
+test("with Live terminal off the area shows the conversation and starts nothing, whatever the run flag says (DEC-117 Q4)", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    const views = {};
+    for (const on of [null, false, true]) {
+      await evaluate(`Fixture.mountAreaOff("codex", ${JSON.stringify(on)})`);
+      views[String(on)] = await evaluate("Fixture.settle()");
+    }
+    return { views, starts: await evaluate("Fixture.teamReloads()") };
+  });
+  for (const [on, view] of Object.entries(seen.views)) {
+    assert.equal(view.live, false, `${on}: no live master area: ${view.text}`);
+    assert.equal(view.terminal, false, `${on}: no terminal`);
+    assert.equal(view.conversation, true, `${on}: the conversation view`);
+  }
+  assert.equal(seen.starts, 0, "nothing turned the master on");
+});
+
+test("flipping Live terminal leaves the Master settings drawer open with focus on the switch, both ways, and closing it returns to the button of the view now shown, opened by keyboard or by mouse (DEC-117 Q4)", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    const flips = [];
+    await evaluate('Fixture.mountArea("codex", true)');
+    await evaluate("Fixture.settle()");
+    for (const [terminal, keyboard] of [[false, true], [true, true], [false, false], [true, false]]) {
+      await evaluate(keyboard ? 'Fixture.focusButton("Master settings")' : "Fixture.leaveFocus()");
+      await evaluate('Fixture.click("Master settings")');
+      await evaluate("Fixture.settle()");
+      const focused = await evaluate("Fixture.focusSwitch()");
+      await evaluate(`Fixture.readSwitch("codex", true, { master_live_terminal: ${terminal} })`);
+      const view = await evaluate("Fixture.settle()");
+      const flipped = await evaluate("Fixture.focusState()");
+      await evaluate("Fixture.closeDrawer()");
+      await evaluate("Fixture.settle()");
+      flips.push({ terminal, keyboard, focused, live: view.live, conversation: view.conversation, flipped, closed: await evaluate("Fixture.focusState()") });
+    }
+    return flips;
+  });
+  assert.equal(seen.length, 4);
+  for (const flip of seen) {
+    const way = `${flip.terminal ? "On" : "Off"}, ${flip.keyboard ? "keyboard" : "mouse"}`;
+    assert.equal(flip.focused, true, `${way}: the switch took focus`);
+    assert.equal(flip.live, flip.terminal, `${way}: the area swapped`);
+    assert.equal(flip.conversation, !flip.terminal, `${way}: the area swapped`);
+    assert.equal(flip.flipped.drawer, true, `${way}: the drawer stays open`);
+    assert.equal(flip.flipped.id, "tg-live-terminal-alpha", `${way}: focus stays on the switch`);
+    assert.equal(flip.closed.drawer, false, `${way}: Close shuts the drawer`);
+    assert.equal(flip.closed.text, "Master settings", `${way}: focus returns to the new view's button`);
+  }
+});
+
 test("a master harness with no terminal app keeps today's conversation, also when the engine says so", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate('Fixture.mountArea("rcli")');

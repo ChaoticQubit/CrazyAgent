@@ -3085,7 +3085,8 @@ impl TeamRuntime {
     /// Sends a project's oldest pending message to its master, starting a per-message master
     /// when none runs. Nothing is sent while a master of the project is still stopping or
     /// restarting, as after the live switch goes off, so the project never runs two masters
-    /// at once. A master that keeps running gets the owner's instruction edit at the start of
+    /// at once, nor to a live master finishing its turn under Live terminal Off, which would
+    /// drop it. A master that keeps running gets the owner's instruction edit at the start of
     /// its next message under the Next task choice (DEC-111 QR1), once. Takes the setup, live
     /// access and paused accounts.
     fn feed_master(
@@ -3102,7 +3103,9 @@ impl TeamRuntime {
             &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
         });
         let master = self.master(project);
-        if settling || master.is_some_and(|id| self.workers[&id].busy.is_some()) {
+        if settling
+            || master.is_some_and(|id| self.workers[&id].live || self.workers[&id].busy.is_some())
+        {
             return Ok(());
         }
         let pending: Option<(i64, String, String)> = self
@@ -3300,7 +3303,9 @@ impl TeamRuntime {
     /// stopped and starts it again in its own worktree and home. A master that cannot start
     /// leaves one team note per distinct reason. A start after the master stopped for an
     /// owner instruction edit (DEC-111 QR1 Restart) never counts toward the starts that turn
-    /// the live master off. Takes the setup, live access and paused accounts.
+    /// the live master off. The owner's Live terminal Off ends the master at its next stop,
+    /// once no turn is open and the owner is not typing, and clears those starts, so switching
+    /// it off and on never counts as a crash. Takes the setup, live access and paused accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -3316,14 +3321,18 @@ impl TeamRuntime {
         }
         let session = crate::master_sessions::live_session(&self.connection, project)?;
         if let Some(id) = self.master(project) {
+            let chosen_off = !on
+                && self.workers[&id].live
+                && super::master::switch(&self.connection, project)?.0 == Some(true);
+            let held = chosen_off && !self.live_master_idles(id, project, true);
             let worker = self.workers.get_mut(&id).expect("master worker exists");
             let moved = on && worker.live && worker.session != session;
             if worker.live != on || moved {
-                if worker.busy.is_none() {
+                if worker.busy.is_none() && !held {
                     worker.stopping = true;
                     let _ = worker.orders.send(Order::Stop);
                 }
-                if moved {
+                if moved || (chosen_off && worker.stopping) {
                     self.live_starts.remove(project);
                 }
                 return Ok(());
@@ -5268,7 +5277,7 @@ impl TeamRuntime {
     /// Tells whether a live master counts as idle for the owner's idle stop: a saved choice
     /// can stop one, no turn is open and it is quiet. Otherwise its idle time starts over, so
     /// a choice saved later counts from then. Takes the agent, the project and whether the
-    /// choice can stop a live master. Returns the answer.
+    /// choice can stop a live master, always so for Live terminal Off. Returns the answer.
     fn live_master_idles(&mut self, id: i64, project: &ProjectId, stops_live: bool) -> bool {
         let quiet = stops_live
             && self.workers[&id].turn_started.is_none()

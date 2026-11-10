@@ -1168,6 +1168,21 @@ async fn desktop_team_master_idle_stop(
 }
 
 #[tauri::command]
+async fn desktop_team_master_live_terminal(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_master_live_terminal(&id, on, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_reuse_idle(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4083,6 +4098,7 @@ native_commands! {
     desktop_team_reask_empty_reply,
     desktop_team_catch_up_main,
     desktop_team_master_idle_stop,
+    desktop_team_master_live_terminal,
     desktop_team_reuse_idle,
     desktop_team_new_folder_limit,
     desktop_team_coordination,

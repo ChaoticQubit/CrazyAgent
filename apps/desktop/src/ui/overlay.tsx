@@ -45,19 +45,20 @@ function useCover(open: boolean) {
   useEffect(() => (open ? cover() : undefined), [open]);
 }
 
-function useModal(open: boolean) {
+function useModal(open: boolean, returnFocus?: () => HTMLElement | null) {
   const ref = useRef<HTMLDialogElement>(null);
   useCover(open);
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog || !open) return;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const active = document.activeElement;
+    const opener = active instanceof HTMLElement && active !== document.body ? active : null;
     if (!dialog.open) dialog.showModal();
     const first = dialog.querySelector<HTMLElement>("[data-autofocus], input:not([type=hidden]), textarea, select");
     first?.focus();
     return () => {
       if (dialog.open) dialog.close();
-      opener?.focus();
+      (opener?.isConnected ? opener : returnFocus?.())?.focus();
     };
   }, [open]);
   return ref;
@@ -93,15 +94,17 @@ export function Dialog({ open, title, onClose, onBack, children, footer, wide = 
 }
 
 /** A right-side drawer (480 px) on the native dialog element; Esc closes it.
- * Inputs: open, title, close handler, body, footer. */
-export function Drawer({ open, title, onClose, children, footer }: {
+ * Inputs: open, title, close handler, body, footer, and where focus goes when the element
+ * that opened the drawer has left the page. */
+export function Drawer({ open, title, onClose, children, footer, returnFocus }: {
   open: boolean;
   title: string;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  returnFocus?: () => HTMLElement | null;
 }) {
-  const ref = useModal(open);
+  const ref = useModal(open, returnFocus);
   const titleId = useId();
   if (!open) return null;
   return <dialog ref={ref} className="drawer" aria-labelledby={titleId} onCancel={(event) => { event.preventDefault(); onClose(); }}>

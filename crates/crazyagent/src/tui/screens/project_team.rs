@@ -747,6 +747,7 @@ impl TeamView {
             KeyCode::Char('E') => self.master_lands(),
             KeyCode::Char('R') => self.reask_empty_reply(),
             KeyCode::Char('I') => self.master_idle_stop(),
+            KeyCode::Char('V') => self.live_terminal(),
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('W') => self.terminals_per_window(),
             KeyCode::Char('B') => self.background_at_end(),
@@ -2122,6 +2123,32 @@ impl TeamView {
         })
     }
 
+    /// Turns "Live terminal" off or on, each way with its plain notice (DEC-117 Q4). Output:
+    /// the change to send, or Handled with a notice while loading or saving.
+    fn live_terminal(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let on = !status.master_live_terminal;
+        let words = if on {
+            "Live terminal is on: the master runs in a terminal you see and type into."
+        } else {
+            "Live terminal is off: the master ends at its next stop and its conversation is the console."
+        };
+        self.changing = Some(words.to_owned());
+        TeamReply::Change(TeamAction::MasterLiveTerminal {
+            project_id: self.project.clone(),
+            on,
+        })
+    }
+
     /// Moves "Terminals per window", how many terminals each terminal wall window holds,
     /// to its next choice: 4, 6, 9 and back to 4. Output: the change to send, or Handled
     /// with a notice while loading or saving.
@@ -3026,8 +3053,8 @@ impl TeamView {
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
     /// harness change applies, Sub-agent depth,
-    /// Worker lands, Agent branches, Max harnesses, Max teammates, Spread accounts, Token
-    /// budget, Master's branch, Land on, Ask before merge, New folder limit, Background
+    /// Worker lands, Agent branches, Max harnesses, Live terminal, Max teammates, Spread accounts,
+    /// Token budget, Master's branch, Land on, Ask before merge, New folder limit, Background
     /// commands), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
@@ -3119,6 +3146,15 @@ impl TeamView {
                 branch_words(status.agent_branches).to_owned(),
             ),
             setting("Max harnesses", cap_words(status.max_harnesses)),
+            setting(
+                "Live terminal",
+                if status.master_live_terminal {
+                    "On"
+                } else {
+                    "Off"
+                }
+                .to_owned(),
+            ),
             setting("Max teammates", cap_words(status.max_teammates)),
             setting(
                 "Spread accounts",
@@ -3532,6 +3568,7 @@ impl TeamView {
             ("E", "Master merges"),
             ("R", "Re-ask empty reply"),
             ("I", "Stop the master when idle after"),
+            ("V", "Live terminal"),
             ("F", "New folder limit"),
             ("W", "Terminals per window"),
             ("B", "Background commands"),

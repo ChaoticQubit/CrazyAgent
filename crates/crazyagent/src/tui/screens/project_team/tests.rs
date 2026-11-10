@@ -162,6 +162,7 @@ fn team() -> TeamStatus {
         master_lands: None,
         reask_empty_reply: true,
         master_idle_stop: crate::team::MasterIdleStop::default(),
+        master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
@@ -2716,6 +2717,48 @@ fn the_idle_limit_notice_says_what_the_masters_own_choice_does() {
         applied(&mut view, reply);
         let notice = format!("{:?}", view.notice);
         assert!(notice.contains(words), "{notice}");
+    }
+}
+
+/// V turns "Live terminal" off and on, each way with its plain notice (DEC-117 Q4).
+#[test]
+fn capital_v_turns_live_terminal_off_and_on() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('V'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(view.help().contains(&("V", "Live terminal")));
+    let steps = [
+        (
+            "On",
+            false,
+            "Live terminal is off: the master ends at its next stop and its conversation is the console.",
+        ),
+        (
+            "Off",
+            true,
+            "Live terminal is on: the master runs in a terminal you see and type into.",
+        ),
+    ];
+    for (at, next, words) in steps {
+        let line = format!("Live terminal  {at}");
+        assert!(shows(&view, &line), "{line}");
+        let reply = view.key(press(KeyCode::Char('V')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::MasterLiveTerminal {
+                project_id: project(),
+                on: next,
+            })
+        );
+        applied(&mut view, reply);
+        assert_eq!(view.notice, Some(Notice::plain(words)));
+        let mut shown = team();
+        shown.master_live_terminal = next;
+        reread(&mut view, shown, NOW + 10);
     }
 }
 

@@ -1,6 +1,6 @@
 import { nextGeneration } from "../../api";
 import type { Result } from "../../api";
-import { useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { formatRoute } from "../../ui";
 import { cancelMasterTurn, endMaster, failureCopy, openMasterProject, readMaster, readMasterTurns, receiptState, sendToMaster, startMaster } from "../../api-projects";
 import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
@@ -15,13 +15,24 @@ import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, changesLine, de
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Button, Drawer, Menu, type Tone } from "../../ui";
-import { MasterIdleSetting, OnSwitchSetting, ReaskSetting, SettingGroup, SettingRow, type SettingGroupInfo } from "../team/controls";
+import { LiveTerminalSetting, MasterIdleSetting, OnSwitchSetting, ReaskSetting, SettingGroup, SettingRow, type SettingGroupInfo } from "../team/controls";
 import { DeliverySetting, QuestionsSetting, coordination } from "../team/coordination";
 import { AccountSetting, MasterHarnessSetting, useTeam } from "../team/setup-rows";
 import { ApplySwitch } from "./settings";
 import { SessionsBar, ownerText, switchDivider, withOwnerLines } from "./sessions";
 
 const READ_ONLY = "Read-only: the master runs live in its terminal now.";
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+/** What the Master settings button takes from the drawer above it: the action that opens the
+ * drawer and the id the button wears so closing the drawer can find it. A button with no
+ * drawer above it fails when clicked. */
+const MasterSettingsHost = createContext<{ open: () => void; button?: string }>({
+  open: () => assert(false, "the Master settings button needs MasterSettingsDrawer above it"),
+});
 const sentByProject = new Map<string, Record<string, string>>();
 const sentAtByProject = new Map<string, Record<string, number>>();
 
@@ -287,7 +298,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
     {!readOnly && <div className="pj-convo-head">
       <span>{masterLine}</span>
       <span className="pj-row"><Badge word={status} tone={tones[status] ?? "neutral"} />
-        <MasterSettingsButton data={data} />
+        <MasterSettingsButton />
         <Menu label="Conversation actions" items={[
           ...(active && !working ? [{ label: "End conversation", icon: "circle-stop" as const, onSelect: () => void end() }] : []),
           { label: "Change master", icon: "settings", onSelect: () => data.navigate(`${settings}?section=team`) },
@@ -313,7 +324,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
 }
 
 const MASTER_GROUPS: readonly SettingGroupInfo[] = [
-  { id: "master", title: "Master", icon: "brain", rows: ["Harness", "Account"] },
+  { id: "master", title: "Master", icon: "brain", rows: ["Harness", "Account", "Live terminal"] },
   { id: "conversation", title: "Conversation", icon: "message-square", rows: ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"] },
   { id: "messages", title: "Messages", icon: "send", rows: ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"] },
   { id: "access", title: "Access", icon: "shield-check", rows: ["Full access"] },
@@ -341,6 +352,7 @@ export function MasterSettings({ data, onLeave = () => {} }: { data: ProjectData
     <SettingGroup group={masterGroup} prefix={prefix} level={3}>
       <MasterHarnessSetting rows={harnessRows} data={data} label="Harness" id={`${prefix}-harness`} helper="A change reaches the running master as Apply a master harness change says." />
       <AccountSetting data={data} id={`${prefix}-account`} />
+      <LiveTerminalSetting projectId={data.id} status={status} reload={data.reloadTeam} />
     </SettingGroup>
     <SettingGroup group={talk} prefix={prefix} level={3}>
       <OnSwitchSetting projectId={data.id} status={status} reload={data.reloadTeam} />
@@ -364,12 +376,24 @@ export function MasterSettings({ data, onLeave = () => {} }: { data: ProjectData
   </div>;
 }
 
-/** The Master settings button of a conversation head and the drawer it opens. Input: the
- * project data. Output: the button and its drawer. */
-export function MasterSettingsButton({ data }: { data: ProjectData }) {
+/** Holds the project's Master settings drawer above the view that opens it, so a setting that
+ * swaps that view leaves the drawer and the owner's place in it alone, and closing the drawer
+ * returns to the button of the view now shown (DEC-117 Q4). Inputs: the project data and the
+ * view. Output: the view and its drawer. */
+export function MasterSettingsDrawer({ data, children }: { data: ProjectData; children: ReactNode }) {
   const [open, setOpen] = useState(false);
-  return <>
-    <Button size="small" icon="settings" onClick={() => setOpen(true)}>Master settings</Button>
-    <Drawer open={open} title="Master settings" onClose={() => setOpen(false)}><MasterSettings data={data} onLeave={() => setOpen(false)} /></Drawer>
-  </>;
+  const button = useId();
+  return <MasterSettingsHost.Provider value={{ open: () => setOpen(true), button }}>
+    {children}
+    <Drawer open={open} title="Master settings" onClose={() => setOpen(false)} returnFocus={() => document.getElementById(button)}>
+      <MasterSettings data={data} onLeave={() => setOpen(false)} />
+    </Drawer>
+  </MasterSettingsHost.Provider>;
+}
+
+/** The Master settings button of a conversation head; it opens the drawer held above the
+ * view. Output: the button. */
+export function MasterSettingsButton() {
+  const host = useContext(MasterSettingsHost);
+  return <Button id={host.button} size="small" icon="settings" onClick={host.open}>Master settings</Button>;
 }

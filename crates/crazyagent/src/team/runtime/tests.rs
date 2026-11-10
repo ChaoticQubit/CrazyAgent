@@ -6330,6 +6330,208 @@ fn a_master_is_not_stopped_as_idle_while_a_sub_agent_works() {
     team.shutdown().unwrap();
 }
 
+/// Saves the owner's "Live terminal" setting. Inputs: the fixture and the setting. Output:
+/// none.
+#[cfg(target_os = "macos")]
+fn choose_live_terminal(fixture: &Fixture, on: bool) {
+    owner(
+        fixture,
+        &[crate::team::TeamAction::MasterLiveTerminal {
+            project_id: fixture.setup.project_id.clone(),
+            on,
+        }],
+    );
+}
+
+/// Off ends a running live master at its next stop. It stays stopped, the run flag stays as
+/// it was, and no note says it was turned off, since the owner chose that (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn live_terminal_off_ends_a_running_live_master_at_its_next_stop_and_it_stays_stopped() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_secs(3600));
+    choose_live_terminal(&fixture, false);
+    fixture.until(&mut team, "the live master stops", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
+    });
+    idle_ticks(&mut team);
+    assert_eq!(masters(&fixture.connection), [id], "it did not start again");
+    assert_eq!(
+        super::super::master::switch(&fixture.connection, &fixture.setup.project_id)
+            .unwrap()
+            .0,
+        Some(true),
+        "the run flag stays as it was"
+    );
+    assert!(
+        !fixture
+            .status()
+            .messages
+            .iter()
+            .any(|message| message.text.contains("The live master was turned off")),
+        "Off is the owner's own choice"
+    );
+}
+
+/// Off runs the owner's message in the conversation and starts no live terminal, with the
+/// run flag on (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn live_terminal_off_runs_the_owners_message_in_the_conversation_and_starts_no_terminal() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    let project_id = fixture.setup.project_id.clone();
+    choose_live_terminal(&fixture, false);
+    super::super::master::set_live(&fixture.connection, &project_id, true).unwrap();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Message {
+            project_id,
+            text: "Plan the page".into(),
+        }],
+    );
+    fixture.until(&mut team, "the master answered the owner", |f| {
+        f.status()
+            .messages
+            .iter()
+            .any(|m| matches!(m.state, MessageState::Answered | MessageState::Reply))
+    });
+    assert_eq!(
+        live_agent(&fixture.connection),
+        None,
+        "no live terminal ran"
+    );
+}
+
+/// On brings the live master back after Off, under the run flag that stayed on (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn live_terminal_on_brings_the_live_master_back_after_off() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_secs(3600));
+    choose_live_terminal(&fixture, false);
+    fixture.until(&mut team, "the live master stops", |f| {
+        f.agent_status(id).0 == AgentStatus::Stopped
+    });
+    choose_live_terminal(&fixture, true);
+    fixture.until(&mut team, "the live master runs again", |f| {
+        live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
+    });
+}
+
+/// The resuming stand-in with one more kind of turn: a line saying "until told" holds its
+/// turn open until the next line arrives, so a row ends an open live turn when it wants.
+/// Output: the script.
+#[cfg(target_os = "macos")]
+fn told_codex() -> String {
+    let script = RESUMING_CODEX.replace(
+        "  /bin/sleep 0.3\n",
+        "  case \"$line\" in *\"until told\"*) IFS= read -r line ;; esac\n  /bin/sleep 0.3\n",
+    );
+    assert!(
+        script.contains("until told"),
+        "the stand-in holds its turn open"
+    );
+    script
+}
+
+/// Live terminal Off waits for the master's next stop: a turn the owner typed stays open past
+/// many ticks, the master stops once it ends, and a message sent during the wait waits too
+/// and is answered in the conversation after it (DEC-117 Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn live_terminal_off_waits_for_the_open_turn_and_answers_a_message_sent_meanwhile() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let limits = TeamLimits {
+        master_idle_stop: Duration::from_secs(3600),
+        ..TeamLimits::default()
+    };
+    let mut team = limited_runtime(&fixture, &host, &told_codex(), limits);
+    let id = idle_codex_master(&fixture, &host, &mut team);
+    let agent = AgentId::team(id).unwrap();
+    host.input(&agent, b"Work until told\r").unwrap();
+    fixture.until(&mut team, "the owner's turn opens", |f| {
+        live_turns(&f.connection).1
+    });
+    choose_live_terminal(&fixture, false);
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Message {
+            project_id: fixture.setup.project_id.clone(),
+            text: "Plan the page".into(),
+        }],
+    );
+    idle_ticks(&mut team);
+    idle_ticks(&mut team);
+    assert!(live_turns(&fixture.connection).1, "the turn is still open");
+    assert_ne!(
+        fixture.agent_status(id).0,
+        AgentStatus::Stopped,
+        "Off cut the turn the owner typed"
+    );
+    let plan = |f: &Fixture| {
+        f.status()
+            .messages
+            .into_iter()
+            .find(|message| message.text == "Plan the page")
+            .map(|message| message.state)
+    };
+    assert!(
+        matches!(plan(&fixture), Some(MessageState::Pending)),
+        "the message waits for the stop"
+    );
+    host.input(&agent, b"go\r").unwrap();
+    fixture.until(&mut team, "the message is answered after the turn", |f| {
+        matches!(plan(f), Some(MessageState::Answered | MessageState::Reply))
+    });
+    assert_eq!(
+        live_turns(&fixture.connection),
+        (2, false),
+        "the open turn ended by itself"
+    );
+    team.shutdown().unwrap();
+}
+
+/// Turning Live terminal Off and On is the owner's own choice: however often it is done
+/// within the guard's window, no start counts as a crash and the run flag stays on (DEC-117
+/// Q4).
+#[cfg(target_os = "macos")]
+#[test]
+fn repeated_live_terminal_off_and_on_never_trips_the_start_guard() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_secs(3600));
+    for _ in 0..=LIVE_STARTS_MAX {
+        choose_live_terminal(&fixture, false);
+        fixture.until(&mut team, "the live master stops", |f| {
+            f.agent_status(id).0 == AgentStatus::Stopped
+        });
+        choose_live_terminal(&fixture, true);
+        fixture.until(&mut team, "the live master runs again", |f| {
+            live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
+        });
+    }
+    assert_eq!(
+        super::super::master::switch(&fixture.connection, &fixture.setup.project_id)
+            .unwrap()
+            .0,
+        Some(true),
+        "the run flag stays as it was"
+    );
+    assert!(
+        !fixture
+            .status()
+            .messages
+            .iter()
+            .any(|message| message.text.contains("had to start")),
+        "the owner's own switching is not a crash"
+    );
+}
+
 /// Runs a master that is not live until it has answered the owner once, so it is idle,
 /// under a test-sized idle bound with the owner's choice saved first, which runs each
 /// "Stop the master when idle after" choice at its real ratio without waiting 15 minutes.

@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { click, shown } from "./settings-steps.mjs";
-import { run, tab, until } from "./trial-kit.mjs";
+import { reopen, run, until } from "./trial-kit.mjs";
 
 const root = process.env.MS_ROOT;
 const GIT = "/usr/bin/git";
@@ -71,9 +71,10 @@ export async function newProject(name) {
 }
 
 /** Opens the project's Master settings drawer as the owner does and waits for a control in
- * it. Input: the control's selector. Output: none. */
+ * it, leaving the tab first so a drawer an earlier row left open is gone. Input: the control's
+ * selector. Output: none. */
 export async function openMasterSettings(control) {
-  await tab("conversation");
+  await reopen("conversation");
   await click("button=Master settings");
   await until(() => shown(control), UI_MS, `the Master settings drawer never showed ${control}`);
 }

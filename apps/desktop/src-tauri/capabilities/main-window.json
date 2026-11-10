@@ -53,6 +53,7 @@
     "allow-desktop-team-reask-empty-reply",
     "allow-desktop-team-catch-up-main",
     "allow-desktop-team-master-idle-stop",
+    "allow-desktop-team-master-live-terminal",
     "allow-desktop-team-reuse-idle",
     "allow-desktop-team-new-folder-limit",
     "allow-desktop-team-coordination",

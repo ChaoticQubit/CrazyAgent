@@ -1357,6 +1357,12 @@ export function setMasterIdleStop(id: string, choice: MasterIdleStop): Promise<R
   return call<IntentReceipt>("desktop_team_master_idle_stop", { id, choice, generation: nextGeneration() });
 }
 
+/** Saves a project's "Live terminal" setting (DEC-117 Q4). Inputs: the project id and whether
+ * it is on. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterLiveTerminal(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_live_terminal", { id, on, generation: nextGeneration() });
+}
+
 /** Sets the project's "Reuse idle agents" setting: off starts a new agent for each new task, on
  * the current branch; on lets an idle agent of the same lead take it, on the history it already has.
  * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */

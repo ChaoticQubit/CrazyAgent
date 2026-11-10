@@ -80,6 +80,15 @@ export function mountArea(master, on, catalog = true) {
   flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, catalog ? CATALOG : undefined) })));
 }
 
+/** Mounts the project's master area with the Live terminal setting Off. Inputs: the master
+ * harness and the engine's run flag. Output: none. */
+export function mountAreaOff(master, on) {
+  const panel = page();
+  root = createRoot(panel);
+  const team = { kind: "ok", value: teamStatus({ live_master: on, live_problem: null, master_live_terminal: false }) };
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, team, CATALOG) })));
+}
+
 /** Renders the mounted master area again with the engine's live switch read as `on`, as the
  * team read after an idle stop does. Inputs: the master harness, the switch and more fields
  * of the read. Output: none. */
@@ -127,6 +136,44 @@ export function click(text) {
   const button = [...document.querySelectorAll("button")].find((item) => item.textContent.trim() === text);
   if (!button) return false;
   flushSync(() => button.click());
+  return true;
+}
+
+/** Puts keyboard focus on the button with this exact text, as Tab does. A mouse click in the
+ * app's web view leaves focus where it was. Output: whether the button holds focus. */
+export function focusButton(text) {
+  const button = [...document.querySelectorAll("button")].find((item) => item.textContent.trim() === text);
+  button?.focus();
+  return button !== undefined && document.activeElement === button;
+}
+
+/** Leaves focus on the page, where a mouse click in the app's web view finds it. Output:
+ * whether the page holds focus. */
+export function leaveFocus() {
+  document.activeElement?.blur();
+  return document.activeElement === document.body;
+}
+
+/** Puts keyboard focus on the drawer's Live terminal switch, as Tab does. Output: whether the
+ * switch holds focus. */
+export function focusSwitch() {
+  const field = document.getElementById("tg-live-terminal-alpha");
+  field?.focus();
+  return field !== null && document.activeElement === field;
+}
+
+/** Where the Master settings drawer and keyboard focus are. Output: whether the drawer is open
+ * and the focused element's id and text. */
+export function focusState() {
+  const active = document.activeElement;
+  return { drawer: document.querySelector("dialog.drawer")?.open === true, id: active?.id ?? "", text: active?.textContent?.trim() ?? "" };
+}
+
+/** Closes the Master settings drawer with its Close button. Output: whether one was open. */
+export function closeDrawer() {
+  const close = document.querySelector('dialog.drawer [aria-label="Close"]');
+  if (!close) return false;
+  flushSync(() => close.click());
   return true;
 }
 
