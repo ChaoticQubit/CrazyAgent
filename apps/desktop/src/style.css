@@ -91,7 +91,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .checkbox input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent-solid); }
 
 .segmented { display: inline-flex; justify-self: start; align-self: flex-start; max-width: 100%; flex-wrap: wrap; border: 1px solid var(--border-input); border-radius: var(--radius-control); padding: 2px; background: var(--surface); gap: 2px; }
-.segmented button { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; border: 0; border-radius: var(--radius-segment); background: transparent; cursor: pointer; color: var(--text-2); }
+.segmented button { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 12px; border: 0; border-radius: var(--radius-segment); background: transparent; cursor: pointer; color: var(--text-2); }
 .segmented button:hover { color: var(--text); }
 .segmented button[aria-checked="true"] { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
 
