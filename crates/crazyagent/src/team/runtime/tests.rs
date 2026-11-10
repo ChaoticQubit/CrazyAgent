@@ -6190,8 +6190,8 @@ fn live_terminal_on_brings_the_live_master_back_after_off() {
         f.agent_status(id).0 == AgentStatus::Stopped
     });
     choose_live_terminal(&fixture, true);
-    fixture.until(&mut team, "a new live master runs", |f| {
-        live_agent(&f.connection).is_some_and(|agent| agent != id)
+    fixture.until(&mut team, "the live master runs again", |f| {
+        live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
     });
 }
 
