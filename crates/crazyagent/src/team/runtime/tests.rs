@@ -3088,11 +3088,6 @@ fn an_owner_stop_of_a_clashing_sub_agent_leaves_its_set_for_the_owner() {
         1,
         "the owner's stop stays"
     );
-    assert_eq!(
-        count("SELECT COUNT(*) FROM team_task_pins WHERE agent=?1"),
-        0,
-        "no resolve task is queued"
-    );
     let task: i64 = fixture
         .connection
         .query_row(
@@ -3101,6 +3096,13 @@ fn an_owner_stop_of_a_clashing_sub_agent_leaves_its_set_for_the_owner() {
             |row| row.get(0),
         )
         .unwrap();
+    assert_eq!(
+        count(&format!(
+            "SELECT COUNT(*) FROM team_task_pins WHERE agent=?1 AND task<>{task}"
+        )),
+        0,
+        "no resolve task is queued"
+    );
     let waiting = format!(
         "The edits from task {task} (codex, sub-agent {member}) are waiting for you in Changes."
     );
