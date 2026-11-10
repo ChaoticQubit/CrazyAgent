@@ -110,7 +110,8 @@ pub(crate) fn wanted(switch: Option<bool>, os: &str) -> bool {
 /// records the build in `current` by rename and removes every older copy, all under the
 /// store's exclusive lock, so no copy reads a graph mid-write. Inputs: the project folder and
 /// the build. Output: true once published, false for a project with no real `.crazyagent`
-/// folder; an error leaves the last published graph as it was.
+/// folder; an error, also a `current` that does not read back as written, leaves the last
+/// published graph or the new one in place, and the caller counts the try as failed.
 pub(crate) fn publish(root: &Path, build: &Build) -> io::Result<bool> {
     assert!(tip_valid(&build.tip));
     crate::projects_home::exclude_from_git(root).map_err(|error| io::Error::other(error.0))?;
@@ -136,7 +137,9 @@ pub(crate) fn publish(root: &Path, build: &Build) -> io::Result<bool> {
     rustix::fs::renameat(&store, &part, &store, &folder)?;
     write_record(&store, build)?;
     prune(&store, &folder)?;
-    assert_eq!(read_record(&store).as_ref(), Some(build));
+    if read_record(&store).as_ref() != Some(build) {
+        return Err(io::Error::other("graph_record_reads_back_different"));
+    }
     Ok(true)
 }
 
