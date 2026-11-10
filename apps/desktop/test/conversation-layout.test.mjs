@@ -34,7 +34,16 @@ test("the master and the Team bar fill the panel's height instead of a guess at 
 
 test("below 1000px the Team bar narrows to 240px beside the master and never stacks under it, and an open agent terminal keeps its wider split", () => {
   const narrow = activity.slice(activity.indexOf("@media (max-width: 1000px)"));
-  assert.match(narrow, /^@media \(max-width: 1000px\) \{\s*\.ta-split \{\s*grid-template-columns: minmax\(0, 1fr\) 240px;\s*\}\s*\}/u);
+  assert.match(narrow, /^@media \(max-width: 1000px\) \{\s*\.ta-split \{\s*grid-template-columns: minmax\(0, 1fr\) 240px;\s*\}/u);
   assert.doesNotMatch(activity, /height: 360px/u);
   assert.match(activity, /\.ta-split\.with-terminal \{\s*grid-template-columns: minmax\(0, 1fr\) minmax\(420px, 1fr\);\s*\}/u);
+});
+
+test("below 1000px an open agent terminal gives way to a 320px master floor, so the 760px minimum window leaves the master at least 300px", () => {
+  const narrow = activity.slice(activity.indexOf("@media (max-width: 1000px)"));
+  const rule = narrow.match(/\.ta-split\.with-terminal \{\s*grid-template-columns: minmax\((\d+)px, 1fr\) minmax\(0, 1fr\);\s*\}\s*\}/u);
+  assert.ok(rule, "the narrow media block sets its own split for an open terminal, after the Team bar rule");
+  const floor = Number(rule[1]);
+  const content = 760 - 220 - 48;
+  assert.ok(floor >= 300 && floor <= content - 16, `the master floor fits the 760px window's ${content}px content column: ${floor}`);
 });

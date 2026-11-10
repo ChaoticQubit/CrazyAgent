@@ -4,7 +4,10 @@ import { bundle, withPage } from "./browser.mjs";
 
 const fixture = await bundle(new URL("./fixtures/conversation-fixed.mjs", import.meta.url).pathname);
 const SIZES = [{ width: 1280, height: 800, side: 300 }, { width: 900, height: 640, side: 240 }];
+const TERMINAL_SIZES = [...SIZES, { width: 760, height: 560 }];
 const BOTTOM_PX = 24;
+const NARROW_PX = 1000;
+const MASTER_FLOOR_PX = 300;
 
 /** Opens the Conversation tab fixture in a window of the given size, lets it settle and
  * hands the page to the check. Inputs: the size, the fixture options and the check. Output:
@@ -63,15 +66,20 @@ for (const size of SIZES) {
     assertFixed(seen.listed, size);
     assertFixed(seen.after, size);
   });
+}
 
-  test(`at ${size.width}x${size.height} an agent terminal opened from the Team bar fills the right column and the page still does not scroll`, { timeout: 60000 }, async () => {
+for (const size of TERMINAL_SIZES) {
+  test(`at ${size.width}x${size.height} an agent terminal opened from the Team bar fills the right column, the master keeps room beside it and the page still does not scroll`, { timeout: 60000 }, async () => {
     const seen = await conversation(size, { agents: 30, terminal: true }, ({ evaluate }) => evaluate("Fixture.measure()"));
     assertFixed(seen, size);
     assert.ok(seen.terminal, "the terminal is in the right column");
     for (const edge of ["top", "bottom", "left", "right"]) {
       assert.ok(Math.abs(seen.terminal[edge] - seen.side[edge]) <= 1, `the terminal's ${edge} is the column's: ${seen.terminal[edge]} vs ${seen.side[edge]}`);
     }
-    assert.ok(seen.side.width >= 420 - 1, "the opened terminal keeps its wider split");
+    if (size.width > NARROW_PX) {
+      assert.ok(seen.side.width >= 420 - 1, `above ${NARROW_PX}px the opened terminal keeps its wider split: ${seen.side.width}`);
+    }
+    assert.ok(seen.left.width >= MASTER_FLOOR_PX, `the master keeps at least ${MASTER_FLOOR_PX}px beside the open terminal: ${seen.left.width}`);
     assert.ok(seen.side.left >= seen.left.right, "the terminal is beside the master, not under it");
   });
 }
