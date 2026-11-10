@@ -5621,22 +5621,24 @@ fn a_delivery_intent_stores_only_the_cut_first_line() {
     let sub = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
     ledger::initialize(&fixture.connection).unwrap();
     drop(crate::recovery::open(&fixture.base).unwrap());
+    let marker_of = |text: &str| {
+        let task = running_task(&fixture, sub, text);
+        assert!(delivery::intend(&fixture.connection, Busy::Task(task), sub, text, None).unwrap());
+        let action = ledger::pending_key(
+            &fixture.connection,
+            ledger::ActionKind::Dispatch,
+            &format!("team-task/{task}"),
+        )
+        .unwrap()
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&action.payload).unwrap();
+        payload["marker"].as_str().unwrap().to_owned()
+    };
     let first = format!("a{}", "é".repeat(1_000));
-    let text = format!("\n{first}\nThe second line");
-    let task = running_task(&fixture, sub, &text);
-    assert!(delivery::intend(&fixture.connection, Busy::Task(task), sub, &text, None).unwrap());
-    let action = ledger::pending_key(
-        &fixture.connection,
-        ledger::ActionKind::Dispatch,
-        &format!("team-task/{task}"),
-    )
-    .unwrap()
-    .unwrap();
-    let payload: serde_json::Value = serde_json::from_str(&action.payload).unwrap();
-    let marker = payload["marker"].as_str().unwrap();
+    let marker = marker_of(&format!("\n{first}\nThe second line"));
     assert_eq!(marker.len(), delivery::MARKER_BYTES_MAX - 1);
-    assert!(first.starts_with(marker), "{marker}");
-    assert!(!action.payload.contains("The second line"));
+    assert!(first.starts_with(&marker), "{marker}");
+    assert_eq!(marker_of("\nA short line\nThe second line"), "A short line");
 }
 
 /// A message its master was answering when the engine stopped is held for the master's

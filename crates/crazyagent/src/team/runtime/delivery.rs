@@ -99,7 +99,7 @@ pub(super) fn intend(
         record,
         offset,
         at_ms: u64::try_from(now_ms()).unwrap_or(0),
-        marker: flat(
+        marker: marker_of(
             text.lines()
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or_default(),
@@ -386,16 +386,23 @@ fn item_id(action: &Action) -> Option<i64> {
     action.key.rsplit('/').next()?.parse().ok()
 }
 
-/// Flattens every whitespace run to one space and cuts the text to `MARKER_BYTES_MAX`
-/// bytes on a character boundary, so typed and recorded text compare alike.
-/// Input: the text. Output: at most `MARKER_BYTES_MAX` bytes.
+/// Flattens every whitespace run to one space, so typed and recorded text compare alike.
+/// Input: the text. Output: the flattened text, whole.
 fn flat(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut end = flat.len().min(MARKER_BYTES_MAX);
-    while !flat.is_char_boundary(end) {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The part of an item the ledger stores, to find the item again in what was typed: its
+/// text flattened and cut to `MARKER_BYTES_MAX` bytes on a character boundary.
+/// Input: the item's first line. Output: at most `MARKER_BYTES_MAX` bytes.
+fn marker_of(text: &str) -> String {
+    let mut marker = flat(text);
+    let mut end = marker.len().min(MARKER_BYTES_MAX);
+    while !marker.is_char_boundary(end) {
         end -= 1;
     }
-    flat[..end].to_owned()
+    marker.truncate(end);
+    marker
 }
 
 /// Reads the newest session record of every agent, or of one: its live pane's record, else
