@@ -2052,6 +2052,35 @@ fn a_full_access_launch_runs_the_launcher_with_no_seatbelt() {
     assert!(built.get_program().to_string_lossy().ends_with(LAUNCHER));
 }
 
+/// A launch's profile follows the project's saved level: on the same Open choice a Sandboxed
+/// launch cannot reach a listener on this machine and an Own branch launch can.
+#[test]
+fn a_launch_builds_its_profile_at_the_projects_level() {
+    let (checkout, data) = (scratch(), scratch());
+    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let reaches = |level, name: &str| {
+        let id = project(name);
+        set_level(data.path(), &id, level);
+        let (_, folder) = built_server(&servers, &id, &root);
+        let mut probe = sandbox::command(&folder.join(sandbox::PROFILE), Path::new("/usr/bin/nc"));
+        probe
+            .args(["-z", "-G", "5", "127.0.0.1", &port])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::spawn_gate::output(&mut probe)
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(!reaches(AgentAccess::Sandboxed, "at-sandboxed"));
+    assert!(reaches(AgentAccess::OwnBranch, "at-own-branch"));
+}
+
 /// Full access git is the owner's own: no forced key stops the project's hook or hides the
 /// owner's identity, and the shim's count line, which needs those keys, is not written.
 #[test]
