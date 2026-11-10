@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { toggleMember, notSignedInNote, deleteCopy, poolReadiness, poolUse, PoolEditorView, PoolsView, POOL_FULL } = await import("../src/screens/settings/pools.tsx");
+const { toggleMember, notSignedInNote, deleteCopy, poolReadiness, poolUse, PoolEditorView, PoolsScreenView, POOL_FULL } = await import("../src/screens/settings/pools.tsx");
 const { poolInput, POOL_MEMBER_MAX } = await import("../src/api.ts");
 
 const account = (index, patch = {}) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT / Codex",
@@ -100,13 +100,17 @@ test("a new pool starts empty and windows a long account list", () => {
   assert.match(none, /href="#\/settings\/accounts\?action=add"/);
 });
 
-test("the pool list shows count, readiness and use with Edit and Delete on the row", () => {
-  const markup = renderToStaticMarkup(createElement(PoolsView, { pools: { kind: "ok", value: [pool(4, { project_count: 1 })] },
-    onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden }));
-  assert.match(markup, />4 ChatGPT\. 4 of 15, 4 ready\. Used by 1 project\.</);
+const NOT_READ = { kind: "loading" };
+const screen = (pools) => renderToStaticMarkup(createElement(PoolsScreenView, { pools: { kind: "ok", value: pools }, accounts: NOT_READ, schedule: NOT_READ, ranking: NOT_READ, limits: NOT_READ, nowMs: 0,
+  selected: undefined, onSelect: forbidden, onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden, onRetryOrder: forbidden }));
+
+test("the pool list shows count, readiness and use, and the selected pool has Edit and Delete", () => {
+  const markup = screen([pool(4, { project_count: 1 })]);
+  assert.match(markup, />4 of 15</);
+  assert.match(markup, />4 ready\. Used by 1 project\.</);
   assert.match(markup, /aria-label="Edit pool Main"[^>]*>Edit pool</);
   assert.match(markup, /aria-label="Delete pool Main"[^>]*>Delete pool</);
-  const empty = renderToStaticMarkup(createElement(PoolsView, { pools: { kind: "ok", value: [] }, onNew: forbidden, onEdit: forbidden, onDelete: forbidden, onRetry: forbidden }));
+  const empty = screen([]);
   assert.match(empty, /<h2>No pools yet<\/h2>/);
   assert.match(empty, /A pool groups up to 15 accounts for your projects to use\./);
 });

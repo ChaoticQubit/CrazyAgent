@@ -246,7 +246,7 @@ async function openAll({ project, me, page, tiles: all, site, log }, perWindow, 
     assert.deepEqual(wall.tools, ["Back to Agents", ...Array.from({ length: windows }, (_, index) => `Window ${index + 1} of ${windows}`)], "the mockup's tools row");
     assert.deepEqual(wall.tiles, slice.map((tile) => tile.label), `window ${number} shows its terminals in order, the master first`);
     assert.equal(wall.free, perWindow - slice.length, "only the last window has free slots, up to the setting");
-    assert.equal(wall.messages, slice.length, "each tile has Message");
+    assert.equal(wall.messages, 0, "Terminal only is the default, so no tile has Message");
     assert.equal(wall.stops, slice.filter((tile) => !tile.master).length, "each agent's tile has Stop; the master's has none");
     const extend = await asked(log, mark, windows);
     assert.ok(extend.every((call) => call.args.id === project), `window ${number} asks only for its own project's windows: ${JSON.stringify(extend)}`);

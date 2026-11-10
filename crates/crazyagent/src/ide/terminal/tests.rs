@@ -67,6 +67,58 @@ fn quoted(path: &std::path::Path) -> String {
     format!("'{text}'")
 }
 
+/// Git answers in a Sandboxed IDE terminal, whose home is its own, so no config the sandbox
+/// denies stands in its way as the owner's home does for the IDE server's git.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandboxed_terminals_git_answers_in_the_project() {
+    let case = Case::new();
+    let mut init = std::process::Command::new(crate::research::runner::setup_git());
+    init.args(["init", "-q"])
+        .current_dir(&case.folder)
+        .env_clear()
+        .env("HOME", &case.folder)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    assert!(
+        crate::spawn_gate::output(&mut init)
+            .unwrap()
+            .status
+            .success()
+    );
+    let script = format!(
+        "{git} --version && {git} status --porcelain",
+        git = quoted(crate::research::runner::sandboxed_git())
+    );
+    let project = ProjectId::new(PROJECT).unwrap();
+    let shell_arguments = arguments(&["-c", &script]);
+    let launch = ide_shell::Launch {
+        root: &case.root,
+        project: &project,
+        folder: &case.folder,
+        cwd: &case.folder,
+        shell: std::path::Path::new("/bin/sh"),
+        arguments: &shell_arguments,
+        incoming: &[],
+        extra_reads: &[],
+    };
+    let mut command = ide_shell::command(&launch).unwrap();
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{said}");
+    assert!(!said.contains("unable to access"), "{said}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("git version "),
+        "{said}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {

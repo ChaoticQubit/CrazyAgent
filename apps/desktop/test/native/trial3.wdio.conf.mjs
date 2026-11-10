@@ -46,7 +46,7 @@ process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE = join(evidence, "screenshots");
 process.env[PICKS_VARIABLE] = join(evidence, "picks");
 const picks = { [PICKS_VARIABLE]: process.env[PICKS_VARIABLE] };
 const appEnv = fixture
-  ? { CRAZYAGENT_DESKTOP_SOCKET: process.env.CRAZYAGENT_DESKTOP_SOCKET, HOME: join(fixture, "home"), TMPDIR: join(fixture, "tmp"), ...picks }
+  ? { CRAZYAGENT_DESKTOP_SOCKET: process.env.CRAZYAGENT_DESKTOP_SOCKET, HOME: join(fixture, "home"), CFFIXED_USER_HOME: join(fixture, "home"), TMPDIR: join(fixture, "tmp"), ...picks }
   : { CRAZYAGENT_DESKTOP_SOCKET: process.env.CRAZYAGENT_DESKTOP_SOCKET, ...picks };
 
 /** Runs git with no system or user config. Inputs: the folder and git's arguments.

@@ -983,9 +983,10 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
         .collect())
 }
 
-/// The stat of a checkout's `.git/HEAD`. With the files ref format git rewrites that file
-/// through a new lock file on every branch switch, detach or rename of the current branch, so
-/// an equal stamp means the checked-out branch is the one read before.
+/// The stat of the file a checkout's branch is stamped by: `.git/HEAD`, or for a reftable
+/// checkout, whose HEAD is a stub, `.git/reftable/tables.list`. Git replaces that file through
+/// a new lock file on every branch switch, detach or rename of the current branch, so an
+/// equal stamp means the checked-out branch is the one read before.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct HeadStamp {
     file: u64,
@@ -993,17 +994,18 @@ struct HeadStamp {
     modified: SystemTime,
 }
 
-/// Stats a checkout's `.git/HEAD`. Inputs: the checkout root. Output: the stamp, or None when
-/// that file cannot be read as a plain file, as in a linked worktree whose `.git` is a file,
-/// or when `.git/reftable` exists or cannot be checked: a reftable checkout's HEAD is a stub
-/// that no switch changes.
+/// Stats the file that stamps a checkout's branch. Inputs: the checkout root. Output: the
+/// stamp, or None when that file cannot be read as a plain file, as in a linked worktree
+/// whose `.git` is a file, or when `.git/reftable` cannot be checked or is no folder.
 fn head_stamp(root: &Path) -> Option<HeadStamp> {
     let git = root.join(".git");
-    match fs::symlink_metadata(git.join("reftable")) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    let store = git.join("reftable");
+    let stamped = match fs::symlink_metadata(&store) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => git.join("HEAD"),
+        Ok(meta) if meta.is_dir() => store.join("tables.list"),
         _ => return None,
-    }
-    let meta = fs::symlink_metadata(git.join("HEAD")).ok()?;
+    };
+    let meta = fs::symlink_metadata(stamped).ok()?;
     if !meta.is_file() {
         return None;
     }

@@ -20,13 +20,14 @@ function builtInHarness(id: string): string {
 }
 
 /** One terminal in a wall window, the same terminal as the Agents panel: its head with the
- * agent's name, harness, state, role and branch, Message, which moves the cursor to the
- * "Type to" box under the terminal, Stop for an agent that can be stopped, and the terminal
- * itself, typed into directly or through the box, attached for its project. Inputs: the
+ * agent's name, harness, state, role and branch, Message when the Terminal input shows the box,
+ * which moves the cursor to the "Type to" box under the terminal, Stop for an agent that can be
+ * stopped, and the terminal itself, typed into as the owner's Terminal input says, attached for
+ * its project. Inputs: the
  * project id, the node, whether it can be stopped and the stop action. Output: the tile. */
 function WallTile({ projectId, node, stoppable, onStop }: { projectId: string; node: GraphNode; stoppable: boolean; onStop: () => void }) {
   return <div className="tw-tile">
-    <TerminalPanel node={node} projectId={projectId} tile input="both" harness={builtInHarness} onStop={stoppable ? onStop : undefined} />
+    <TerminalPanel node={node} projectId={projectId} tile harness={builtInHarness} onStop={stoppable ? onStop : undefined} />
   </div>;
 }
 

@@ -15,12 +15,17 @@ pub const LISTED_BYTES_MAX: usize = 48 * 1024;
 const ACTOR_BYTES_MAX: usize = 120;
 /// The most bytes of a change set id kept with an event.
 const CHANGE_SET_BYTES_MAX: usize = 128;
-/// The most events one project keeps, split between the engine's and the owner's events
-/// and the agents' (`AGENT_LOGGED_KEPT_MAX`); the oldest of each share go first.
+/// The most events one project keeps besides its merges (`MERGES_KEPT_MAX`), split between
+/// the engine's and the owner's events and the agents' (`AGENT_LOGGED_KEPT_MAX`); the oldest
+/// of each share go first.
 const KEPT_PER_PROJECT_MAX: i64 = 10_000;
 /// The share of `KEPT_PER_PROJECT_MAX` for the phases and test runs agents log, which
 /// only push out their own oldest, never another kind of event.
 const AGENT_LOGGED_KEPT_MAX: i64 = 1_000;
+/// The newest merges a project keeps beyond `KEPT_PER_PROJECT_MAX`. A lead's merge and a
+/// merge into main are the only record the Merges count has, so other events never push
+/// them out, and at this many only the oldest merges go.
+const MERGES_KEPT_MAX: i64 = 50_000;
 /// The most phases and test runs one caller may log in `LOGGED_WINDOW_MS`.
 pub const LOGGED_PER_WINDOW_MAX: i64 = 30;
 /// The window a caller's logged rows are counted over: one hour.
@@ -39,6 +44,7 @@ const _: () = assert!(TEXT_BYTES_MAX + GOAL_BYTES_MAX + ACTOR_BYTES_MAX + 512 < 
 const _: () = assert!(LIST_MAX as i64 <= KEPT_PER_PROJECT_MAX);
 const _: () = assert!(AGENT_LOGGED_KEPT_MAX > 0 && AGENT_LOGGED_KEPT_MAX < KEPT_PER_PROJECT_MAX);
 const _: () = assert!(LOGGED_PER_WINDOW_MAX > 0 && LOGGED_PER_WINDOW_MAX <= AGENT_LOGGED_KEPT_MAX);
+const _: () = assert!(MERGES_KEPT_MAX > KEPT_PER_PROJECT_MAX);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS project_activity (
@@ -117,6 +123,11 @@ impl ActivityKind {
     /// Whether agents log the kind themselves with `log_activity`: a phase or a test run.
     pub fn agent_logged(self) -> bool {
         matches!(self, Self::Phase | Self::Test)
+    }
+
+    /// Whether the kind is a merge, which `record` keeps in a share of its own.
+    pub fn merge(self) -> bool {
+        matches!(self, Self::LeadMerged | Self::MergedIntoMain)
     }
 
     /// The stored name of the kind, the same as its JSON name.
@@ -211,8 +222,9 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
 /// (`shown`) and are cut to their bounds. The project keeps `KEPT_PER_PROJECT_MAX` events
 /// in two shares that never push each other out: its Created event with the newest other
 /// events of the engine and the owner, `KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX` in
-/// all, and the newest `AGENT_LOGGED_KEPT_MAX` phases and test runs agents logged. Takes
-/// the database, the project, the event and the time in ms. Returns the event id, or
+/// all, and the newest `AGENT_LOGGED_KEPT_MAX` phases and test runs agents logged. On top
+/// of those it keeps its newest `MERGES_KEPT_MAX` merges, which no other event pushes out.
+/// Takes the database, the project, the event and the time in ms. Returns the event id, or
 /// `activity_item_invalid` for an empty actor or text.
 pub fn record(
     db: &Connection,
@@ -264,6 +276,19 @@ pub fn record(
         .map_err(state)?;
         return Ok(id);
     }
+    let (lead_merged, merged) = (
+        ActivityKind::LeadMerged.name(),
+        ActivityKind::MergedIntoMain.name(),
+    );
+    if item.kind.merge() {
+        db.execute(
+            "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
+             WHERE project=?1 AND kind IN (?3,?4) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
+            params![project.as_str(), MERGES_KEPT_MAX, lead_merged, merged],
+        )
+        .map_err(state)?;
+        return Ok(id);
+    }
     let created: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM project_activity WHERE project=?1 AND kind=?2",
@@ -273,13 +298,15 @@ pub fn record(
         .map_err(state)?;
     db.execute(
         "DELETE FROM project_activity WHERE id IN (SELECT id FROM project_activity
-         WHERE project=?1 AND kind NOT IN (?3,?4,?5) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
+         WHERE project=?1 AND kind NOT IN (?3,?4,?5,?6,?7) ORDER BY at_ms DESC, id DESC LIMIT -1 OFFSET ?2)",
         params![
             project.as_str(),
             (KEPT_PER_PROJECT_MAX - AGENT_LOGGED_KEPT_MAX - created).max(0),
             ActivityKind::Created.name(),
             phase,
-            test
+            test,
+            lead_merged,
+            merged
         ],
     )
     .map_err(state)?;

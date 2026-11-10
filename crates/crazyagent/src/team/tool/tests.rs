@@ -546,14 +546,22 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
         read_reply(&mailbox.join(format!("{first}{REPLY_SUFFIX}"))),
         Some(("Two agents are working.".into(), false))
     );
-    assert!(!mailbox.join(format!("{first}{PART_SUFFIX}")).exists());
+    assert!(
+        !mailbox
+            .join(format!("{first}{ANSWER_PART_SUFFIX}"))
+            .exists()
+    );
     let long = "é".repeat(REPLY_TEXT_MAX);
     answer_call(&mailbox, &second, &long, true).unwrap();
     let (text, error) = read_reply(&mailbox.join(format!("{second}{REPLY_SUFFIX}"))).unwrap();
     assert!(error && text.len() <= REPLY_TEXT_MAX && text.chars().all(|c| c == 'é'));
 
     let planted = "4".repeat(32);
-    symlink(&secret, mailbox.join(format!("{planted}{PART_SUFFIX}"))).unwrap();
+    symlink(
+        &secret,
+        mailbox.join(format!("{planted}{ANSWER_PART_SUFFIX}")),
+    )
+    .unwrap();
     assert!(answer_call(&mailbox, &planted, "never", false).is_err());
     assert_eq!(std::fs::read(&secret).unwrap(), b"{\"tool\":\"changes\"}");
 }

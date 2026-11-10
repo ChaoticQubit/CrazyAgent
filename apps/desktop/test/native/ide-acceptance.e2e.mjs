@@ -88,6 +88,8 @@ function ownerRepo(folder, remote, url) {
   git(remote, "init", "-q", "--bare", "-b", "main");
   git(folder, "remote", "add", "origin", url);
   git(folder, "push", "-q", "-u", "origin", "main");
+  git(folder, "config", "--unset", "user.name");
+  git(folder, "config", "--unset", "user.email");
   return git(folder, "rev-parse", "HEAD");
 }
 
@@ -321,6 +323,7 @@ connections = [
 ]
 pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
 `, { mode: 0o600 });
+  writeFileSync(join(home, ".gitconfig"), `[user]\n\tname = ${OWNER_NAME}\n\temail = ${OWNER_EMAIL}\n`);
   const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
   const log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
   let generation = 0;
@@ -585,6 +588,58 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await pause(SETTLE_MS * 2);
         await me.capture("terminal");
         assert.equal(await page.evaluate(`document.querySelectorAll(".terminal-initial-hint").length`), 0, "the terminal shows no AI hint");
+      });
+
+      await t.test("git answers in the Sandboxed terminal, and with the owner's name in the IDE shell", async () => {
+        const centre = (found) => `(() => {
+          const label = ${found};
+          if (!label) return null;
+          const rect = label.getBoundingClientRect();
+          return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        })()`;
+        const menuOpener = centre(`document.querySelector(".part.panel .monaco-dropdown-with-primary .dropdown-action-container .action-label")`);
+        const menuShell = centre(`[document, ...[...document.querySelectorAll(".shadow-root-host")].map((host) => host.shadowRoot).filter(Boolean)]
+          .flatMap((root) => [...root.querySelectorAll(".monaco-menu .action-label")]).find((item) => item.textContent.trim().startsWith("IDE shell"))`);
+        const answers = async (file, owned) => {
+          await ide.until("the terminal has the keyboard", `document.activeElement?.classList.contains("xterm-helper-textarea") === true`);
+          await keys.text(`cd ${repo} && { git --version; git config user.name; git config user.email; echo "HOME=$HOME"; echo finished; } > ${file} 2>&1`);
+          await keys.key("Enter");
+          const path = join(repo, file);
+          for (const deadline = Date.now() + STEP_MS; !existsSync(path) || !readFileSync(path, "utf8").includes("finished"); await pause(POLL_MS)) {
+            if (Date.now() > deadline) {
+              await me.capture(`no-git-answer-${file}`);
+              assert.fail(`no git answer in ${file}`);
+            }
+          }
+          const said = readFileSync(path, "utf8");
+          const lines = said.split("\n");
+          assert.ok(lines.some((line) => line.startsWith("git version ")), `${file}: ${said}`);
+          assert.equal(lines.some((line) => line.startsWith("HOME=") && line.includes("/ide-shell/")), !owned, `${file}: ${said}`);
+          if (owned) {
+            assert.ok(lines.includes(OWNER_NAME), `${file}: ${said}`);
+            assert.ok(lines.includes(OWNER_EMAIL), `${file}: ${said}`);
+          }
+          assert.doesNotMatch(said, /fatal|unable to access/, `${file}: ${said}`);
+        };
+        await keys.key("Escape");
+        await ide.run("Terminal: Create New Terminal");
+        await pause(SETTLE_MS);
+        await ide.pick(FOLDER);
+        await pause(SETTLE_MS * 2);
+        await ide.run("Terminal: Focus Terminal");
+        await ide.until("the Sandboxed terminal in the panel", `document.querySelectorAll(".part.panel .xterm").length > 0`);
+        await me.capture("sandboxed-terminal");
+        assert.equal(await page.evaluate(`document.querySelectorAll(".terminal-initial-hint").length`), 0, "the open terminal shows no AI hint");
+        await answers("sandboxed-terminal-git.txt", false);
+        await ide.until("the terminal's profile menu button", menuOpener);
+        await keys.click(await page.evaluate(menuOpener));
+        await ide.until("the IDE shell in the profile menu", menuShell);
+        await pause(SETTLE_MS);
+        await keys.click(await page.evaluate(menuShell));
+        await ide.until("the IDE shell in the panel", `document.querySelector(".part.panel").innerText.includes("IDE shell")`);
+        await pause(SETTLE_MS);
+        await me.capture("ide-shell");
+        await answers("ide-shell-git.txt", true);
       });
 
       await t.test("nothing the workbench asked for left the machine, and the agent host never started", async () => {

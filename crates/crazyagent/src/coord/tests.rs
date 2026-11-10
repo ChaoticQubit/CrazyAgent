@@ -1022,6 +1022,51 @@ fn one_agent_s_flood_of_claimed_work_refuses_only_that_agent() {
     assert!(overlaps.is_empty(), "{overlaps:?}");
 }
 
+/// Land-7 r2: a master's finished work counts against its claims limit until its set closes,
+/// as a sub-agent's does, so past the limit its next start is refused.
+#[cfg(unix)]
+#[test]
+fn a_master_at_its_claims_limit_is_refused_new_work() {
+    let connection = db();
+    let master = agent(&connection, "master", None);
+    let claims = |unit: usize| -> Vec<String> {
+        (0..super::CLAIMS_PER_WORK_MAX)
+            .map(|file| format!("done/{unit}/{file}.rs"))
+            .collect()
+    };
+    for unit in 0..super::AGENT_CLAIMS_MAX / super::CLAIMS_PER_WORK_MAX {
+        let (work, _) = start_work(
+            &connection,
+            &project(),
+            master,
+            format!("Unit {unit}"),
+            claims(unit),
+            NOW,
+        )
+        .unwrap();
+        finish(
+            &connection,
+            work,
+            1,
+            Finish::Complete,
+            "Done.".into(),
+            master,
+            NOW,
+        )
+        .unwrap();
+    }
+    let refused = start_work(
+        &connection,
+        &project(),
+        master,
+        "One more".into(),
+        vec!["done/more.rs".into()],
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(refused.0, "coord_agent_claims_full");
+}
+
 /// OS-8 r2 M1: a stopped agent's claims on work it was still on leave the overlap check, so
 /// built-up claims of agents that never run again stop no one; they are not released, and
 /// they count and overlap again once the agent is resumed under its own id.
@@ -1733,7 +1778,7 @@ fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {
     );
     assert_eq!(
         code(end(2, Finish::ReviewReady, "Again.", sub)),
-        "coord_transfer_refused"
+        "coord_work_review_ready"
     );
     assert_eq!(
         code(end(2, Finish::Complete, "Mine.", other)),
@@ -2051,11 +2096,11 @@ fn the_master_completing_or_closing_review_ready_work_keeps_the_sub_agent_s_clai
     }
 }
 
-/// OS-8: the master's own work has no sub-agent change set to wait for, so finishing it
-/// releases its claims at every end, review-ready included, and nothing holds them forever.
+/// T5-R2-L1: the master's own finished work holds its claims at every end, as any agent's
+/// does, until the change set carrying it lands or its turn ends with nothing to land.
 #[cfg(unix)]
 #[test]
-fn a_master_s_own_finished_work_releases_its_claims_at_every_end() {
+fn a_master_s_own_finished_work_keeps_its_claims_at_every_end() {
     let connection = db();
     let master = agent(&connection, "master", None);
     for (index, outcome) in [Finish::ReviewReady, Finish::Complete, Finish::Closed]
@@ -2072,7 +2117,7 @@ fn a_master_s_own_finished_work_releases_its_claims_at_every_end() {
         )
         .unwrap();
         finish(&connection, work, 1, outcome, "Done.".into(), master, NOW).unwrap();
-        assert_eq!(held(&connection, master, work), 0, "{outcome:?}");
+        assert_eq!(held(&connection, master, work), 1, "{outcome:?}");
     }
 }
 

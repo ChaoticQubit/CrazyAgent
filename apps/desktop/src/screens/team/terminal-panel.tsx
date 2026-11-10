@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
 import type { InputChoice } from "./terminal-io";
+import { readTerminalInput } from "../../state";
 import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
@@ -74,20 +75,22 @@ export function teammatePane(node: GraphNode): string | null {
 }
 
 /** The note under a live terminal: who reads what the owner types. A native teammate known
- * only by its pane gets it in that pane, with no master told. Input: the node. Output: one
- * sentence. */
-export function typingNote(node: GraphNode): string {
+ * only by its pane gets it in that pane, with no master told. Only a terminal with a message
+ * box under it speaks of that box. Inputs: the node and whether the box is there. Output: the
+ * sentences. */
+export function typingNote(node: GraphNode, box: boolean): string {
   if (node.kind === "master") return "Typing goes straight to the master.";
   if (teammatePane(node)) return "Typing goes straight to this teammate's pane and is not kept or told to the master.";
-  return "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.";
+  const kept = "Typing goes straight to this agent and is not kept.";
+  return box ? `${kept} Only a prompt you send below is also told to its master.` : kept;
 }
 
-/** The status line's note on where the owner's typing goes. Inputs: the node and the input
- * choice. Output: one sentence. */
+/** The status line's note on where the owner's typing goes. Inputs: the node and the owner's
+ * Terminal input. Output: the sentences. */
 export function inputNote(node: GraphNode, input: InputChoice): string {
   if (input === "box") return `The terminal shows ${node.label}; type in the message box below.`;
-  if (input === "terminal") return `${typingNote(node)} Enter sends, Shift+Enter adds a line.`;
-  return typingNote(node);
+  if (input === "terminal") return `${typingNote(node, false)} Enter sends, Shift+Enter adds a line.`;
+  return typingNote(node, true);
 }
 
 /** The composer's label and placeholder for one agent. Input: the node. Output: both texts. */
@@ -284,11 +287,12 @@ export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at:
  * harness and a state badge, Message, which puts the cursor in the box under the terminal,
  * Stop when the agent can be stopped and Close when the view can be closed, then the agent's
  * role, branch, account and harness report, and the swap hint for the one panel beside the
- * graph. A wall tile shows Message and Stop as icons. Inputs: the node, the harness lookup,
- * the tile layout, whether a box takes the message, the actions, the report and the hint.
- * Output: the head. */
-function TerminalHead({ node, harness, tile, boxed, onMessage, onStop, onClose, reported, swaps }: {
-  node: GraphNode; harness: (id: string) => string; tile: boolean; boxed: boolean; onMessage: () => void;
+ * graph. A wall tile shows Message and Stop as icons. With no box in the owner's Terminal
+ * input there is no Message at all. Inputs: the node, the harness lookup, the tile layout,
+ * whether this terminal has a message box, whether it can take a message now, the actions,
+ * the report and the hint. Output: the head. */
+function TerminalHead({ node, harness, tile, message, boxed, onMessage, onStop, onClose, reported, swaps }: {
+  node: GraphNode; harness: (id: string) => string; tile: boolean; message: boolean; boxed: boolean; onMessage: () => void;
   onStop?: () => void; onClose?: () => void; reported?: string; swaps: boolean;
 }) {
   const status = nodeStatus(node);
@@ -301,9 +305,9 @@ function TerminalHead({ node, harness, tile, boxed, onMessage, onStop, onClose, 
       {status && <StatusBadge word={displayText(status.word)} tone={status.tone} />}
     </span>
     <span className="tg-terminal-actions">
-      {tile
+      {message && (tile
         ? <Button variant="quiet" size="small" icon="send" iconOnly={`Message ${label}`} disabled={!boxed} onClick={onMessage} />
-        : <Button size="small" icon="send" disabled={!boxed} onClick={onMessage}>Message</Button>}
+        : <Button size="small" icon="send" disabled={!boxed} onClick={onMessage}>Message</Button>)}
       {onStop && (tile
         ? <Button variant="danger-text" size="small" icon="circle-stop" iconOnly={`Stop ${label}`} onClick={onStop} />
         : <Button variant="danger-text" size="small" icon="circle-stop" onClick={onStop}>Stop</Button>)}
@@ -327,12 +331,12 @@ function TerminalHead({ node, harness, tile, boxed, onMessage, onStop, onClose, 
  * Inputs: the graph node, a harness name lookup, the close action when the panel can be
  * closed, the stop action when the agent can be stopped, `embedded` when a console around
  * it owns the head, `tile` for a terminal wall tile, `swaps` for the one panel a graph click
- * replaces, where the owner types (the terminal, the message box under it, or both),
- * `follow` when an ended terminal opens again on its own, cleared, for an agent that
- * restarts in a new pane, and the one-line report of what the agent's harness loaded and
- * invoked, shown in the head, and the project id a wall window attaches for. Output: the
- * panel. */
-export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, input = "both", follow = false, reported, projectId }: {
+ * replaces, `follow` when an ended terminal opens again on its own, cleared, for an agent
+ * that restarts in a new pane, and the one-line report of what the agent's harness loaded and
+ * invoked, shown in the head, and the project id a wall window attaches for. Where the owner
+ * types (the terminal, the message box under it, or both) is the one Terminal input in
+ * Settings, for every agent on every screen. Output: the panel. */
+export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
@@ -340,13 +344,13 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   embedded?: boolean;
   tile?: boolean;
   swaps?: boolean;
-  input?: InputChoice;
   follow?: boolean;
   reported?: string;
   projectId?: string;
 }) {
   if (embedded && tile) throw new Error("a terminal is either embedded in a console or a wall tile, never both");
   if (embedded && swaps) throw new Error("only a terminal with its own head says it swaps");
+  const input = readTerminalInput();
   const mode = inputMode(input);
   const box = useRef<HTMLTextAreaElement>(null);
   const following = useRef(follow);
@@ -503,7 +507,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
 
   const boxed = mode.box && Boolean(name) && view.kind !== "not_ready";
   return <section className={embedded ? "tg-terminal embedded" : tile ? "tg-terminal wall-tile" : "tg-terminal"} aria-label={`${node.label} terminal`}>
-    {!embedded && <TerminalHead node={node} harness={harness} tile={tile} boxed={boxed} onMessage={() => box.current?.focus()}
+    {!embedded && <TerminalHead node={node} harness={harness} tile={tile} message={mode.box} boxed={boxed} onMessage={() => box.current?.focus()}
       onStop={onStop} onClose={onClose} reported={reported} swaps={swaps} />}
     {!name && <p className="tg-terminal-state" role="status">This agent has no terminal yet. It opens once the agent starts.</p>}
     {view.kind === "not_ready" && <NotReady what="Agent terminals" compact />}

@@ -1078,6 +1078,26 @@ mod import {
         );
         assert!(run(&["checkout", "-q", "--detach"]).status.success());
         assert_eq!(checked_out(), None);
+        let canonical = fs::canonicalize(&folder).unwrap();
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            crate::landing::checked_out_branch(&canonical)
+        };
+        assert!(run(&["checkout", "-q", "main"]).status.success());
+        let main = Some("main".to_owned());
+        assert_eq!(branch_of(&canonical, read), main);
+        assert_eq!(branch_of(&canonical, read), main);
+        assert_eq!(reads.get(), 1, "an unchanged ref table is not read again");
+        assert!(run(&["checkout", "-q", "release/2.0"]).status.success());
+        let release = Some("release/2.0".to_owned());
+        assert_eq!(branch_of(&canonical, read), release);
+        assert_eq!(branch_of(&canonical, read), release);
+        assert_eq!(
+            reads.get(),
+            2,
+            "a switch rewrites the ref table, so it is read once"
+        );
     }
 
     #[test]

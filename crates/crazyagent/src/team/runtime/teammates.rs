@@ -122,7 +122,7 @@ pub(super) fn register(
         let known: Option<(i64, bool)> = connection
             .query_row(
                 "SELECT id, status IN ('starting','idle','working')
-                        OR error IS NULL OR error NOT IN (?5,?6,?7)
+                        OR error IS NULL OR error NOT IN (?5,?6,?7,?8,?9)
                  FROM team_agents
                  WHERE project=?1 AND parent=?2 AND role='teammate' AND pane=?3
                  AND (status IN ('starting','idle','working') OR stopped_ms>=?4)
@@ -133,6 +133,8 @@ pub(super) fn register(
                     member.pane,
                     since,
                     super::OWNER_STOPPED_TEAMMATE,
+                    super::MASTER_STOPPED_TEAMMATE,
+                    super::LEAD_STOPPED_TEAMMATE,
                     super::LEAD_ENDED_TEAMMATE,
                     super::OVER_TEAMMATE_CAP
                 ],

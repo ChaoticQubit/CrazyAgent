@@ -366,6 +366,7 @@ fn server_env_holds_only_allowlisted_names() {
         ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
         ("GIT_CONFIG_VALUE_0", "/private/tmp/evil-monitor"),
         ("GIT_CEILING_DIRECTORIES", "/private/tmp/forged-ceiling"),
+        ("GIT_CONFIG_GLOBAL", "/private/tmp/forged-config"),
     ];
     let source = given
         .iter()
@@ -374,7 +375,8 @@ fn server_env_holds_only_allowlisted_names() {
     let socket = Path::new("/private/tmp/data/engine/owner.sock");
     let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
     let ceiling = std::ffi::OsStr::new("/private/tmp/project/.crazyagent/worktrees");
-    let built = env::server_env(source, capability, socket, locked, ceiling);
+    let git_config = Path::new("/private/tmp/ide/project/gitconfig");
+    let built = env::server_env(source, capability, socket, locked, ceiling, git_config);
     assert!(built.len() <= env::ENV_MAX);
     let mut command = Command::new("/usr/bin/env");
     command
@@ -406,6 +408,8 @@ fn server_env_holds_only_allowlisted_names() {
         "/private/tmp/project/.crazyagent/worktrees",
     ));
     expected.extend(crate::ide::git::CONFIG_ENV);
+    expected.push(("GIT_CONFIG_GLOBAL", "/private/tmp/ide/project/gitconfig"));
+    expected.push(("GIT_CONFIG_NOSYSTEM", "1"));
     expected.sort();
     assert_eq!(seen, expected);
     assert!(seen.contains(&("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules")));
@@ -415,6 +419,8 @@ fn server_env_holds_only_allowlisted_names() {
             || *name == env::SOCKET_VARIABLE
             || *name == crate::ide::settings::LOCKED_VARIABLE
             || *name == crate::ide::git::CEILING_VARIABLE
+            || *name == "GIT_CONFIG_GLOBAL"
+            || *name == "GIT_CONFIG_NOSYSTEM"
             || crate::ide::git::CONFIG_ENV
                 .iter()
                 .any(|(fixed, _)| name == fixed)
@@ -1047,6 +1053,152 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
     assert!(head.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"));
     drop(stream);
     servers.stop_all().await;
+}
+
+/// One project's real server launch, for running its git without starting the server.
+/// Inputs: the register, the project and its folder. Output: the command the engine built
+/// and the project's IDE folder.
+fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command, PathBuf) {
+    let folder = servers.prepare(project).unwrap();
+    let (token_path, _) = token::issue(&folder).unwrap();
+    let info = ServerInfo {
+        url: "http://127.0.0.1:47963/".to_owned(),
+        port: 47_963,
+        server_port: 47_961,
+        token_path,
+        capability_path: folder.join(CAPABILITY),
+        workspace: folder.join(WORKSPACE),
+    };
+    let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
+    let built = command(
+        Launch {
+            project,
+            build: &cached_build(),
+            folder: &folder,
+            root,
+            socket: &servers.socket,
+        },
+        &info,
+        writer,
+        false,
+    )
+    .unwrap();
+    (built, folder)
+}
+
+/// Runs git as a built IDE server starts it: the engine's shim under the server's installed
+/// profile and environment, with the owner's home as `HOME`, as the app has it. Inputs: the
+/// built command, the IDE folder, the owner's home, the working folder and git's arguments.
+/// Output: git's output.
+fn server_git(
+    built: &Command,
+    folder: &Path,
+    owner: &Path,
+    cwd: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
+    let mut git = sandbox::command(&folder.join(sandbox::PROFILE), &shim);
+    git.args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .envs(
+            built
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .env("HOME", owner)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::spawn_gate::output(&mut git).unwrap()
+}
+
+/// An owner home holding git config files the IDE profile denies: `.gitconfig` with an
+/// identity whose name needs quoting, and git's default ignore file. Output: the folder.
+fn owner_home_with_git_config() -> tempfile::TempDir {
+    let home = scratch();
+    fs::write(
+        home.path().join(".gitconfig"),
+        "[user]\n\tname = \"Dana \\\"Q\\\" O\\\\wner\"\n\temail = dana@example.invalid\n",
+    )
+    .unwrap();
+    let xdg = home.path().join(".config").join("git");
+    fs::create_dir_all(&xdg).unwrap();
+    fs::write(xdg.join("ignore"), "*.denied\n").unwrap();
+    home
+}
+
+/// Makes an owner repository holding one uncommitted file, with none of the owner's config.
+/// Input: its folder.
+fn owner_repository(root: &Path) {
+    let mut init = Command::new(crate::research::runner::setup_git());
+    init.args(["init", "-q"])
+        .current_dir(root)
+        .env_clear()
+        .env("HOME", root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    assert!(
+        crate::spawn_gate::output(&mut init)
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::write(root.join("a.txt"), "owner\n").unwrap();
+}
+
+/// Git dies on a user config it may not read instead of treating it as missing, which the
+/// owner saw as "Git not found" in every project: with the owner's real home as `HOME`, every
+/// git the IDE server starts reads a config its profile allows.
+#[test]
+fn the_servers_git_runs_beside_a_config_the_profile_denies_in_the_owners_home() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let (built, folder) = built_server(&servers, &project("denied-config"), &root);
+    for args in [&["--version"][..], &["status", "--porcelain"]] {
+        let output = server_git(&built, &folder, owner.path(), &root, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// A commit made from the IDE carries the name and email of the owner's own git config,
+/// which the engine hands the server because the server may not read it, and git's default
+/// ignore file in the owner's home, denied too, draws no warning.
+#[test]
+fn a_commit_from_the_ide_carries_the_name_and_email_of_the_owners_config() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let (built, folder) = built_server(&servers, &project("owner-identity"), &root);
+    crate::ide::git::write_global(&folder, &root, Some(owner.path())).unwrap();
+    let run = |args: &[&str]| server_git(&built, &folder, owner.path(), &root, args);
+    let status = run(&["status", "--porcelain"]);
+    let said = String::from_utf8_lossy(&status.stderr).into_owned();
+    assert!(status.status.success(), "{said}");
+    assert!(!said.contains("unable to access"), "{said}");
+    for args in [&["add", "a.txt"][..], &["commit", "-q", "-m", "first"]] {
+        let output = run(args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let log = run(&["log", "-1", "--format=%an <%ae>"]);
+    assert_eq!(
+        String::from_utf8_lossy(&log.stdout).trim(),
+        "Dana \"Q\" O\\wner <dana@example.invalid>"
+    );
 }
 
 /// The git ceiling one built server command hands the IDE server. Inputs: the register,

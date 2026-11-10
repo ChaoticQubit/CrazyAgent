@@ -183,7 +183,7 @@ export const config = {
   services: [["@wdio/tauri-service", {
     driverProvider: "embedded", autoInstallTauriDriver: false, embeddedPort: port,
     appArgs: [], startTimeout: 60000, captureBackendLogs: true, backendLogLevel: "info",
-    env: { CRAZYAGENT_DESKTOP_SOCKET: socket, HOME: home },
+    env: { CRAZYAGENT_DESKTOP_SOCKET: socket, HOME: home, CFFIXED_USER_HOME: home },
   }]],
   framework: "mocha",
   reporters: ["spec"],
