@@ -66,7 +66,7 @@ test("the Sandboxed terminal opens, types, resizes and closes with the engine's 
     assert.equal((await peer.frame()).toString("hex"), terminal.requests[0].frame);
     pty.setDimensions({ columns: 120, rows: 40 });
     assert.equal((await peer.frame()).toString("hex"), terminal.requests[1].frame);
-    await until(() => seen.shown.join("") === "café ✓\r\n");
+    await until(() => seen.shown.join("") === "This terminal can't stage or commit. Use Source Control, or a Full access terminal.\r\ncafé ✓\r\n");
     assert.ok(!seen.shown.join("").includes("�"));
     connection.write(end);
     await until(() => seen.closed === 1);

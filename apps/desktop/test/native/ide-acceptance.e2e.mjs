@@ -617,12 +617,12 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         const lines = said.split("\n");
         assert.ok(lines.some((line) => line.startsWith("git version ")), `${file}: ${said}`);
         assert.equal(lines.some((line) => line.startsWith("HOME=") && line.includes("/ide-shell/")), sandboxed, `${file}: ${said}`);
-        assert.ok(lines.includes(OWNER_NAME), `${file}: ${said}`);
-        assert.ok(lines.includes(OWNER_EMAIL), `${file}: ${said}`);
+        assert.equal(lines.includes(OWNER_NAME), !sandboxed, `${file}: ${said}`);
+        assert.equal(lines.includes(OWNER_EMAIL), !sandboxed, `${file}: ${said}`);
         assert.doesNotMatch(said, /fatal|unable to access/, `${file}: ${said}`);
       };
 
-      await t.test("the Sandboxed terminal commits under the owner's name", async () => {
+      await t.test("the Sandboxed terminal reads git but cannot stage or commit", async () => {
         await keys.key("Escape");
         await ide.run("Terminal: Create New Terminal");
         await pause(SETTLE_MS);
@@ -633,8 +633,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("sandboxed-terminal");
         assert.equal(await page.evaluate(`document.querySelectorAll(".terminal-initial-hint").length`), 0, "the open terminal shows no AI hint");
         await answers("sandboxed-terminal-git.txt", true);
-        const committed = await ran("sandboxed-terminal-commit-git.txt", `echo staged > terminal-commit.txt && git add terminal-commit.txt && git commit -q -m "From the Sandboxed terminal" && git log -1 --format='%an <%ae>'`);
-        assert.ok(committed.split("\n").includes(`${OWNER_NAME} <${OWNER_EMAIL}>`), committed);
+        const refused = await ran("sandboxed-terminal-refused-git.txt", `echo staged > terminal-refused.txt; git add terminal-refused.txt; echo "add=$?"; git -c user.name=o -c user.email=o@example.invalid commit -q -m no; echo "commit=$?"; git status --porcelain`);
+        assert.match(refused, /^add=[1-9]/m, refused);
+        assert.match(refused, /^commit=[1-9]/m, refused);
+        assert.match(refused, /^\?\? terminal-refused\.txt$/m, refused);
       });
 
       await t.test("git in the IDE shell knows the owner and prints nothing on stderr", async () => {

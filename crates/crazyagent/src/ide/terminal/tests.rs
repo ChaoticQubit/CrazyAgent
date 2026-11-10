@@ -238,6 +238,61 @@ fn the_sandboxed_terminal_cannot_write_the_projects_git_config() {
     assert_eq!(std::fs::read(&config).unwrap(), before, "{said}");
 }
 
+/// Every file under the project's `.git` and its bytes, leaving out `objects`, where a
+/// refused `git add` still leaves the blob it wrote before the index. Input: the project
+/// folder. Output: the files.
+#[cfg(target_os = "macos")]
+fn git_files(folder: &std::path::Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut pending = vec![folder.join(".git")];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.is_dir() {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            } else if !path.ends_with("objects") {
+                pending.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// `git add` is refused in a Sandboxed terminal: a crafted index is what lets a process in
+/// it write outside the project through the owner's next `git restore .` (rv-code H1).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandboxed_terminal_cannot_stage() {
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    let before = git_files(&case.folder);
+    let git = quoted(crate::research::runner::sandboxed_git());
+    let output = in_terminal(&case, "", &format!("{git} add README"));
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(!output.status.success(), "{said}");
+    assert!(said.contains("unable to write new index file"), "{said}");
+    assert_eq!(git_files(&case.folder), before, "{said}");
+}
+
+/// `git commit` of what the owner staged is refused in a Sandboxed terminal. The row gives a
+/// name and email, so the index is the only thing that stops it.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandboxed_terminal_cannot_commit() {
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    setup_git(&case.folder, &["add", "README"]);
+    let before = git_files(&case.folder);
+    let git = quoted(crate::research::runner::sandboxed_git());
+    let identity = "-c user.name=Owner -c user.email=owner@example.invalid";
+    let script = format!("{git} {identity} commit -q -m first");
+    let output = in_terminal(&case, "", &script);
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(!output.status.success(), "{said}");
+    assert!(said.contains("unable to write new index file"), "{said}");
+    assert_eq!(git_files(&case.folder), before, "{said}");
+}
+
 /// A sandbox gives back the project's git index only when asked, so no agent profile holds
 /// the rule, and the rule comes after the deny it undoes.
 #[cfg(target_os = "macos")]
