@@ -288,6 +288,14 @@ impl Tmux {
         }
     }
 
+    /// The process the kernel names as the listener at this host's socket, read from a raw
+    /// connection, never a tmux client, so no reply of the server decides it. Output: its
+    /// pid, or none when nothing there answers.
+    fn server_pid(&self) -> Option<u32> {
+        let stream = crate::spawn_gate::connect_unix_std(self.address().ok()?).ok()?;
+        crate::team::caller::peer_pid(&stream).filter(|pid| *pid > 1)
+    }
+
     /// Gives the control connection the host already holds while it still reads.
     /// Output: that control, or none when there is none or it closed.
     fn open_control(&self) -> Option<Arc<Control>> {
