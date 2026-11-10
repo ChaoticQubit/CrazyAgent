@@ -24861,7 +24861,7 @@ fn a_native_lead_whose_pane_ended_first_still_names_a_process_it_started_on_its_
         let AgentSession::Terminal(mut session) = session else {
             panic!("the native lead runs in a terminal");
         };
-        let followed = Instant::now() + Duration::from_secs(3);
+        let followed = Instant::now() + Duration::from_secs(5);
         while Instant::now() < followed {
             session.next_event(Duration::from_millis(200)).unwrap();
         }

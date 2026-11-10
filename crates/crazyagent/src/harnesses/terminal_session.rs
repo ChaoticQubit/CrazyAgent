@@ -4,7 +4,7 @@ use super::launch::{
     Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id,
     route, validate,
 };
-use super::leftovers::{Lineage, Unstopped};
+use super::leftovers::{FOLLOW_EVERY, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
@@ -31,9 +31,6 @@ const OWN_FACTS_MAX: usize = 4096;
 const BACKGROUND_MAX: usize = 64;
 const ALIVE_EVERY: Duration = Duration::from_secs(1);
 const GROUP_FRESH: Duration = Duration::from_secs(5);
-/// How often a pane whose stop checks its lineage reads the process table while it runs, so
-/// a process it starts in a session of its own is known before the pane can end.
-const FOLLOW_EVERY: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const KEEPER_WAIT: Duration = Duration::from_secs(6);
 #[cfg(target_os = "macos")]
@@ -285,6 +282,11 @@ impl TerminalSession {
         if command.transcript == Transcript::Unavailable {
             return Err(failure("launch_transcript_unavailable"));
         }
+        let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
+        let mut command = command;
+        command
+            .env
+            .push((LINEAGE_VARIABLE.to_owned(), token.as_str().to_owned()));
         if let Some(context) = context {
             context.refuse_exposed(
                 command.argv.iter().map(String::as_bytes).chain(
@@ -340,7 +342,7 @@ impl TerminalSession {
             uncertain: false,
             unconfined: request.unconfined,
             unkept,
-            lineage: lineage_of(pane.pid, unkept, request.unconfined),
+            lineage: lineage_of(pane.pid, unkept, request.unconfined, Some(token.clone())),
             followed: Instant::now(),
             record: PaneRecord::new(
                 &command.transcript,
@@ -353,6 +355,7 @@ impl TerminalSession {
                 resumed,
                 context: installed.as_ref().and_then(Installed::files).cloned(),
                 proxy: installed.as_ref().and_then(Installed::model_proxy),
+                lineage: Some(token),
                 ..record
             }),
             _key: key,
@@ -550,17 +553,17 @@ impl TerminalSession {
     /// kill every process in the sandbox, sessions of their own included; then every process
     /// left in the pane's process group is killed, as a dev server started in the background.
     /// A Full access pane has no Seatbelt and so no keeper, whose warden only arms inside a
-    /// sandbox, so the processes found in its lineage while the pane ran are checked after it. A
-    /// pane its host runs without the keeper, as a native lead's own server does, has no
-    /// warden either: its lineage is checked the same way. Output: none, since a pane reports no exit code,
-    /// [`Unstopped::Uncertain`] when the keeper did not confirm in time, or the group outlived
-    /// the wait or was found by an id no longer proven to be this pane's, or
-    /// [`Unstopped::Left`] naming what a Full access pane, or one run without the keeper,
-    /// left running.
+    /// sandbox, so the processes found in its lineage while the pane ran, and those carrying
+    /// its launch's token, are checked after it. A pane its host runs without the keeper, as
+    /// a native lead's own server does, has no warden either: its lineage is checked the same
+    /// way. Output: none, since a pane reports no exit code, [`Unstopped::Uncertain`] when the
+    /// keeper did not confirm in time, or the group outlived the wait or was found by an id no
+    /// longer proven to be this pane's, or [`Unstopped::Left`] naming what a Full access pane,
+    /// or one run without the keeper, left running.
     pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
         let lineage = self.lineage.take().map(|lineage| {
             lineage.map(|mut lineage| {
-                lineage.follow();
+                lineage.before_stop();
                 lineage
             })
         });
@@ -881,14 +884,20 @@ impl TerminalSession {
 }
 
 /// The lineage a pane's stop checks, read from the pane's start so a process that later
-/// leaves the pane's session is still known (SECAUDIT-SETSID-LEFTOVER): sandboxed for a pane
-/// its host runs without the keeper, Full access for an unconfined one, none otherwise.
-/// Inputs: the pane's first process and the two answers. Output: the lineage, if any.
-fn lineage_of(pid: u32, unkept: bool, unconfined: bool) -> Option<Result<Lineage, Unstopped>> {
+/// leaves the pane's session is still known, and keyed by the launch's token so one that
+/// also lost its parent is found at the stop (SECAUDIT-SETSID-LEFTOVER): sandboxed for a
+/// pane its host runs without the keeper, Full access for an unconfined one, none otherwise.
+/// Inputs: the pane's first process, the two answers and the token. Output: the lineage.
+fn lineage_of(
+    pid: u32,
+    unkept: bool,
+    unconfined: bool,
+    token: Option<LineageToken>,
+) -> Option<Result<Lineage, Unstopped>> {
     if unkept {
-        Some(Lineage::of_sandboxed(pid))
+        Some(Lineage::of_sandboxed(pid, token))
     } else {
-        unconfined.then(|| Lineage::of(pid))
+        unconfined.then(|| Lineage::of(pid, token))
     }
 }
 
@@ -912,7 +921,9 @@ pub fn end_left_pane(host: &dyn Host, agent: &AgentId, owner: &str) -> Result<bo
     let pid = host.pane_pid(agent)?;
     let held = pid.and_then(Ending::claim);
     let unkept = host.unkept(agent);
-    let lineage = pid.filter(|_| unkept).map(Lineage::of_sandboxed);
+    let lineage = pid
+        .filter(|_| unkept)
+        .map(|pid| Lineage::of_sandboxed(pid, None));
     #[cfg(target_os = "macos")]
     let kept = pid.is_none_or(|pid| stop_keeper(host, agent, pid));
     #[cfg(not(target_os = "macos"))]

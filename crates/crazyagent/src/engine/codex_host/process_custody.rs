@@ -3,7 +3,7 @@ use super::process::{
 };
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
-use crate::harnesses::leftovers::{Lineage, Unstopped};
+use crate::harnesses::leftovers::{LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use crate::sandbox::warden::{self, Warden};
 #[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -38,6 +38,7 @@ struct OwnedChild {
     child: Child,
     warden: Option<Warden>,
     unconfined: bool,
+    token: LineageToken,
     lineage: Option<Result<Lineage, Unstopped>>,
     profile: Option<NativeProfileUse>,
     stdin: Option<ChildStdin>,
@@ -117,6 +118,8 @@ fn start(
         return Err("codex_host_start_cancelled");
     }
     let mut command = selected_command(command);
+    let token = LineageToken::new().ok_or("codex_host_spawn_failed")?;
+    command.env(LINEAGE_VARIABLE, token.as_str());
     let (child, warden) = warden::spawn(
         command
             .stdin(Stdio::piped())
@@ -128,6 +131,7 @@ fn start(
         child,
         warden,
         unconfined,
+        token,
         lineage: None,
         profile,
         stdin: None,
@@ -292,7 +296,7 @@ impl OwnedChild {
     /// the run completes. Takes nothing.
     fn stop(&mut self) {
         if self.unconfined && self.lineage.is_none() {
-            self.lineage = Some(Lineage::of(self.child.id()));
+            self.lineage = Some(Lineage::of(self.child.id(), Some(self.token.clone())));
         }
         self.stopped_at.get_or_insert_with(Instant::now);
         self.stdin = None;
@@ -449,7 +453,7 @@ impl OwnedChild {
             let lineage = self
                 .lineage
                 .take()
-                .unwrap_or_else(|| Lineage::of(self.child.id()));
+                .unwrap_or_else(|| Lineage::of(self.child.id(), Some(self.token.clone())));
             if let Err(unstopped) = lineage.and_then(Lineage::settle) {
                 left = Some(unstopped.code());
                 self.shared.fail(unstopped.code());

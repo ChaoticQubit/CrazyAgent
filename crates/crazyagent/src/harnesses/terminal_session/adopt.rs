@@ -4,6 +4,7 @@ use super::{
 };
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
+use crate::harnesses::leftovers::LineageToken;
 use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{Installed, InstalledFiles};
 use crate::sandbox::policy::{AgentAccess, AgentNetwork};
@@ -59,6 +60,8 @@ pub struct PaneRecord {
     pub proxy: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<AgentNetwork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<LineageToken>,
 }
 
 impl PaneRecord {
@@ -94,6 +97,7 @@ impl PaneRecord {
             toolchains: None,
             proxy: None,
             network: None,
+            lineage: None,
         })
     }
 
@@ -322,7 +326,7 @@ impl TerminalSession {
             uncertain: false,
             unconfined,
             unkept,
-            lineage: super::lineage_of(record.pid, unkept, unconfined),
+            lineage: super::lineage_of(record.pid, unkept, unconfined, record.lineage.clone()),
             followed: Instant::now(),
             record: Some(record.clone()),
             _key: record.key_file(),
