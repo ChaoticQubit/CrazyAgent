@@ -1595,7 +1595,9 @@ pub fn change_set_name(set: &ChangeSetView) -> String {
 
 /// One open change set as the owner's Changes view reads it: its name, its size, the
 /// view's state words and the files it conflicts on, so a master and the owner mean the
-/// same set (HB-S5-J). Input: the open change set. Output: the line.
+/// same set (HB-S5-J). Names and paths come from agents, so the whole line stays one line
+/// with its control and hidden characters replaced. Input: the open change set. Output: the
+/// line.
 pub fn open_set_line(set: &ChangeSetView) -> String {
     let state = match set.state {
         ChangeState::Pending => "Ready to review",
@@ -1613,12 +1615,13 @@ pub fn open_set_line(set: &ChangeSetView) -> String {
         let joined = set.conflicts.join(", ");
         format!(": {}", crate::team::bound_text(&joined, OPEN_SET_FILES_MAX))
     };
-    format!(
+    let line = format!(
         "{}, +{} -{}, {state}{files}",
         change_set_name(set),
         set.added,
         set.removed
-    )
+    );
+    crate::memory::visible_text(&line.replace(char::is_control, "\u{fffd}"))
 }
 
 /// The words a sentence names a change set by: "change set #16 (Wren: checkout UI, 7
