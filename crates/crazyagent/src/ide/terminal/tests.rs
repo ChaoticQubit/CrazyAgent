@@ -649,12 +649,12 @@ fn only_a_full_access_project_offers_a_shell_hosted_in_the_ide_server() {
     );
 }
 
-/// The terminal settings hide every detected shell, offer only the labelled IDE shell as a
-/// local profile, run tasks there, start no task on its own, and default to the
-/// extension's Sandboxed profile, which the built-in extension's manifest contributes under
-/// the same id and title and activates on.
+/// At Sandboxed the terminal settings hide every shell, run tasks in the server's own shell,
+/// start no task on their own, and default to the extension's Sandboxed profile. The built-in
+/// extension's manifest contributes both its profiles under the same ids and titles and
+/// activates on them.
 #[test]
-fn terminal_profiles_label_the_ide_shell_and_default_to_the_extension_sandboxed_profile() {
+fn terminal_profiles_hide_every_shell_and_default_to_the_extension_sandboxed_profile() {
     let owner_shell = PathBuf::from("/bin/zsh");
     for (platform, os, ide_shell) in [
         (
@@ -686,14 +686,13 @@ fn terminal_profiles_label_the_ide_shell_and_default_to_the_extension_sandboxed_
         let listed = settings[&format!("terminal.integrated.profiles.{os}")]
             .as_object()
             .unwrap();
-        assert_eq!(listed[IDE_SHELL], ide_shell);
         assert!(!listed.contains_key(SANDBOXED), "{os}");
         let offered: Vec<&String> = listed
             .iter()
             .filter(|(_, profile)| !profile.is_null())
             .map(|(name, _)| name)
             .collect();
-        assert_eq!(offered, vec![IDE_SHELL], "{os}");
+        assert!(offered.is_empty(), "{os}: {offered:?}");
         assert!(listed.len() > 1, "{os}: detected shells must be hidden");
         let keys = if platform == Platform::Windows { 5 } else { 4 };
         assert_eq!(settings.len(), keys, "{os}");
@@ -709,10 +708,8 @@ fn terminal_profiles_label_the_ide_shell_and_default_to_the_extension_sandboxed_
             );
         }
     }
-    assert!(IDE_SHELL.starts_with("IDE shell"), "{IDE_SHELL}");
     let unavailable = crate::sandbox::ide_shell::UNAVAILABLE;
-    assert!(unavailable.contains("\"IDE shell\""), "{unavailable}");
-    assert!(IDE_SHELL.contains("IDE sandbox"), "{IDE_SHELL}");
+    assert!(!unavailable.contains("IDE shell"), "{unavailable}");
     let windows = profiles(Platform::Windows, &owner_shell, AgentAccess::Sandboxed);
     assert_eq!(windows["terminal.integrated.useWslProfiles"], json!(false));
     let (name, manifest) = crate::ide::bridge::EXTENSION_FILES[0];
@@ -720,14 +717,14 @@ fn terminal_profiles_label_the_ide_shell_and_default_to_the_extension_sandboxed_
     let manifest: serde_json::Value = serde_json::from_slice(manifest).unwrap();
     assert_eq!(
         manifest["contributes"]["terminal"]["profiles"],
-        json!([{ "id": SANDBOXED_PROFILE, "title": SANDBOXED, "icon": "shield" }])
+        json!([
+            { "id": SANDBOXED_PROFILE, "title": SANDBOXED, "icon": "shield" },
+            { "id": OWN_BRANCH_PROFILE, "title": OWN_BRANCH, "icon": "shield" },
+        ])
     );
-    assert!(
-        manifest["activationEvents"]
-            .as_array()
-            .unwrap()
-            .contains(&json!(format!("onTerminalProfile:{SANDBOXED_PROFILE}")))
-    );
+    let events = manifest["activationEvents"].as_array().unwrap();
+    assert!(events.contains(&json!(format!("onTerminalProfile:{SANDBOXED_PROFILE}"))));
+    assert!(events.contains(&json!(format!("onTerminalProfile:{OWN_BRANCH_PROFILE}"))));
     let embedded = |wanted: &str| {
         crate::ide::bridge::EXTENSION_FILES
             .iter()
@@ -741,7 +738,12 @@ fn terminal_profiles_label_the_ide_shell_and_default_to_the_extension_sandboxed_
         serde_json::to_string(unavailable).unwrap()
     )));
     let provider = embedded("out/terminal.js");
-    for (export, literal) in [("PROFILE", SANDBOXED_PROFILE), ("TITLE", SANDBOXED)] {
+    for (export, literal) in [
+        ("PROFILE", SANDBOXED_PROFILE),
+        ("TITLE", SANDBOXED),
+        ("OWN_BRANCH_PROFILE", OWN_BRANCH_PROFILE),
+        ("OWN_BRANCH_TITLE", OWN_BRANCH),
+    ] {
         let line = format!(
             "exports.{export} = {};",
             serde_json::to_string(literal).unwrap()
@@ -776,8 +778,9 @@ fn machine_profiles_use_this_platform_and_the_owners_login_shell() {
     );
     let automation = &settings[&format!("terminal.integrated.automationProfile.{os}")];
     assert_eq!(automation["path"], json!(shell.to_string_lossy()));
+    let full = machine_profiles(AgentAccess::Full).unwrap();
     assert_eq!(
-        &settings[&format!("terminal.integrated.profiles.{os}")][IDE_SHELL],
+        &full[&format!("terminal.integrated.profiles.{os}")]["Full access"],
         automation
     );
 }

@@ -177,10 +177,18 @@ fn ended(killed: Result<(), HostError>) -> Result<(), EngineError> {
 /// the level asked. Output: the level, or `ide_terminal_above_project` for a wider ask, or
 /// `ide_terminal_level_refused` for Full, which only the IDE server's own shell runs.
 pub(super) fn terminal_level(
-    _project: AgentAccess,
-    _asked: AgentAccess,
+    project: AgentAccess,
+    asked: AgentAccess,
 ) -> Result<AgentAccess, &'static str> {
-    Err("ide_terminal_level_refused")
+    if asked == AgentAccess::Full {
+        return Err("ide_terminal_level_refused");
+    }
+    if asked.wider_than(project) {
+        return Err("ide_terminal_above_project");
+    }
+    assert!(!asked.wider_than(project));
+    assert_ne!(asked, AgentAccess::Full);
+    Ok(asked)
 }
 
 /// Builds the pane command for the owner's login shell under the project's agent sandbox,
