@@ -38,6 +38,10 @@
   .ta-split {
     grid-template-columns: minmax(0, 1fr) 240px;
   }
+
+  .ta-split.with-terminal {
+    grid-template-columns: minmax(320px, 1fr) minmax(0, 1fr);
+  }
 }
 
 .ta-head {
