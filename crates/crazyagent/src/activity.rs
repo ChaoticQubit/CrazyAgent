@@ -912,6 +912,18 @@ pub fn backfill(db: &Connection, project: &ProjectId) -> Result<usize, EngineErr
     Ok(added)
 }
 
+/// Tells whether a table has a column, false when the table is missing too. Inputs: the
+/// store, the table and the column. Output: the answer.
+fn has_column(db: &Connection, table: &str, column: &str) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+        params![table, column],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .map_err(state)
+}
+
 fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
@@ -927,10 +939,15 @@ fn past_accepts(db: &Connection, project: &ProjectId) -> Result<Vec<Past>, Engin
     } else {
         "NULL"
     };
+    let message = if has_column(db, "landing_change_sets", "message")? {
+        "message"
+    } else {
+        "''"
+    };
     let mut statement = db
         .prepare(&format!(
-            "SELECT id,label,prompt_line,updated_ms,agent_kind,files,{number} FROM landing_change_sets
-             WHERE project=?1 AND state='accepted'"
+            "SELECT id,label,prompt_line,updated_ms,agent_kind,files,{number},{message} \
+             FROM landing_change_sets WHERE project=?1 AND state='accepted'"
         ))
         .map_err(state)?;
     let rows = statement
@@ -939,16 +956,17 @@ fn past_accepts(db: &Connection, project: &ProjectId) -> Result<Vec<Past>, Engin
                 "master" => crate::landing::AgentKind::Master,
                 _ => crate::landing::AgentKind::Sub,
             };
-            let agent = crate::landing::agent_title(kind, &row.get::<_, String>(1)?);
+            let label = row.get::<_, String>(1)?;
+            let agent = crate::landing::agent_title(kind, &label);
             let number = row
                 .get::<_, Option<i64>>(6)?
                 .and_then(|number| u64::try_from(number).ok());
-            let named = crate::landing::change_set_words(
-                number,
-                &agent,
+            let message = crate::landing::change_set_message(
+                &row.get::<_, String>(7)?,
                 &row.get::<_, String>(2)?,
-                row.get(5)?,
+                &label,
             );
+            let named = crate::landing::change_set_words(number, &agent, &message, row.get(5)?);
             Ok(Past {
                 kind: ActivityKind::Accepted,
                 at_ms: row.get(3)?,

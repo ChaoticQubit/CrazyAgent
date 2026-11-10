@@ -3000,10 +3000,13 @@ fn without_agent_commits_the_message_is_the_prompt_line_with_local_paths_cut_at_
     assert_eq!(case.landed_message(&commit), message);
     let roots = [case.repo.as_path()];
     let long = "x".repeat(80);
-    assert_eq!(flow::subject(&long, &roots), "x".repeat(72));
-    assert_eq!(flow::subject(&format!("Rename {long}"), &roots), "Rename");
+    assert_eq!(super::commit_subject(&long, &roots), "x".repeat(72));
     assert_eq!(
-        flow::subject("Fix\u{202E}\ttabs  and /api/users routes", &roots),
+        super::commit_subject(&format!("Rename {long}"), &roots),
+        "Rename"
+    );
+    assert_eq!(
+        super::commit_subject("Fix\u{202E}\ttabs  and /api/users routes", &roots),
         "Fix tabs and /api/users routes"
     );
 }
@@ -3107,7 +3110,7 @@ fn hidden_characters_in_an_agent_subject_reach_the_owner_and_the_commit_only_as_
     );
     let roots = [case.repo.as_path()];
     assert_eq!(
-        flow::subject("Fix\u{2060}the\u{e0001} parser", &roots),
+        super::commit_subject("Fix\u{2060}the\u{e0001} parser", &roots),
         "Fix\\u2060the\\u{e0001} parser"
     );
     case.db

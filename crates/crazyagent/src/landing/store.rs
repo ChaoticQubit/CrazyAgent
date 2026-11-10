@@ -263,17 +263,7 @@ impl Record {
     /// cannot see shown as an escape, so one stored before subjects were escaped is shown
     /// and landed visibly too. Output: the message.
     pub(super) fn message(&self) -> String {
-        let message = if !self.message.is_empty() {
-            self.message.clone()
-        } else if !self.prompt_line.is_empty() {
-            self.prompt_line.clone()
-        } else {
-            format!(
-                "Changes from {}",
-                super::flow::subject(&self.agent.label, &[])
-            )
-        };
-        crate::memory::visible_text(&message)
+        super::change_set_message(&self.message, &self.prompt_line, &self.agent.label)
     }
 
     pub(super) fn is_open(&self) -> bool {

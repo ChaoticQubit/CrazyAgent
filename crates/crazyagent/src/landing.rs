@@ -405,6 +405,7 @@ pub const BRANCH_BYTES_MAX: usize = 255;
 pub(crate) const BUSY_WAIT: Duration = Duration::from_secs(5);
 
 const SUBJECT_CHARS_MAX: usize = 48;
+const COMMIT_SUBJECT_CHARS_MAX: usize = 72;
 
 fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
@@ -1656,6 +1657,45 @@ pub fn agent_title(kind: AgentKind, label: &str) -> String {
         AgentKind::Master => "Master".to_owned(),
         AgentKind::Sub => label.to_owned(),
     }
+}
+
+/// A commit subject from free text: its first line through `scrubbed`, ended at the last
+/// whole word within `COMMIT_SUBJECT_CHARS_MAX` characters. A first word longer than that is
+/// cut to fit. Inputs: the text and the folders, innermost first. Output: the subject, maybe
+/// empty.
+pub(crate) fn commit_subject(text: &str, roots: &[&Path]) -> String {
+    let line = scrubbed(text.lines().next().unwrap_or_default(), roots);
+    let mut subject = String::new();
+    for word in line.split(' ').filter(|word| !word.is_empty()) {
+        let (used, more) = (subject.chars().count(), word.chars().count());
+        if used == 0 && more > COMMIT_SUBJECT_CHARS_MAX {
+            return word.chars().take(COMMIT_SUBJECT_CHARS_MAX).collect();
+        }
+        if used + usize::from(used > 0) + more > COMMIT_SUBJECT_CHARS_MAX {
+            break;
+        }
+        if used > 0 {
+            subject.push(' ');
+        }
+        subject.push_str(word);
+    }
+    assert!(subject.chars().count() <= COMMIT_SUBJECT_CHARS_MAX);
+    subject
+}
+
+/// The message a change set goes by in Changes and in the project's activity, live or
+/// backfilled: its stored message, the owner's or the proposed one, else its agent's prompt,
+/// else "Changes from <agent>", with hidden characters shown as escapes. Inputs: the stored
+/// message, the prompt line and the agent's label. Output: the message.
+pub fn change_set_message(message: &str, prompt_line: &str, label: &str) -> String {
+    let message = if !message.is_empty() {
+        message.to_owned()
+    } else if !prompt_line.is_empty() {
+        prompt_line.to_owned()
+    } else {
+        format!("Changes from {}", commit_subject(label, &[]))
+    };
+    crate::memory::visible_text(&message)
 }
 
 /// The first line of a commit message, cut to `SUBJECT_CHARS_MAX` characters ending in

@@ -21,7 +21,6 @@ const LAYOUT_NAMES: [&str; 4] = ["head", "objects", "refs", "commondir"];
 const LAYOUT_FOLDERS_MAX: usize = 64;
 const LINK_HEADER_BYTES_MAX: usize = 128;
 const NAME_BYTES_MAX: usize = 128;
-const SUBJECT_CHARS_MAX: usize = 72;
 /// The most closed change sets holding claims one claims sweep releases.
 const SWEPT_SETS_MAX: usize = 16;
 const PROPOSED_BYTES_MAX: usize = 1024;
@@ -278,30 +277,6 @@ fn name(text: &str) -> Result<String, EngineError> {
     Ok(text.to_owned())
 }
 
-/// A commit subject from free text: its first line through `landing::scrubbed`, ended
-/// at the last whole word within `SUBJECT_CHARS_MAX` characters. A first word longer than
-/// that is cut to fit. Inputs: the text and the folders, innermost first. Output: the
-/// subject, maybe empty.
-pub(super) fn subject(text: &str, roots: &[&Path]) -> String {
-    let line = super::scrubbed(text.lines().next().unwrap_or_default(), roots);
-    let mut subject = String::new();
-    for word in line.split(' ').filter(|word| !word.is_empty()) {
-        let (used, more) = (subject.chars().count(), word.chars().count());
-        if used == 0 && more > SUBJECT_CHARS_MAX {
-            return word.chars().take(SUBJECT_CHARS_MAX).collect();
-        }
-        if used + usize::from(used > 0) + more > SUBJECT_CHARS_MAX {
-            break;
-        }
-        if used > 0 {
-            subject.push(' ');
-        }
-        subject.push_str(word);
-    }
-    assert!(subject.chars().count() <= SUBJECT_CHARS_MAX);
-    subject
-}
-
 /// The message an Accept proposes from the commits above the set's measured-from point: the
 /// latest subject, then earlier ones newest first as a list. Engine commits, merges and
 /// commits on the landing branch are left out; a lead's worker on Land on main lists the
@@ -332,7 +307,7 @@ fn proposed(
         .0
         .iter()
         .filter(|commit| commit[0] != ENGINE.1)
-        .map(|commit| subject(commit[1], roots))
+        .map(|commit| super::commit_subject(commit[1], roots))
         .filter(|line| !line.is_empty());
     let Some(mut message) = subjects.next() else {
         return Ok(String::new());
@@ -2083,7 +2058,7 @@ pub(super) fn record(
     }
     super::merges::refuse_outside_merges(db, workspace, &shared, &head)?;
     let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
-    let line = subject(&turn.prompt_line, &roots);
+    let line = super::commit_subject(&turn.prompt_line, &roots);
     let message = format!(
         "{}\n\nTurn {turn_id} ended: {}.\n",
         if line.is_empty() { "Agent turn" } else { &line },
