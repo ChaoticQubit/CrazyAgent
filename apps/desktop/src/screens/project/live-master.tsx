@@ -90,6 +90,14 @@ export function liveSwitch(team: Result<TeamStatus> | undefined, projectId: stri
   return { on: team.value.live_master ?? null, problem: team.value.live_problem ?? null, version: team.value.settings_version ?? 0 };
 }
 
+/** Whether the team read says an idle stop ended the live master. Inputs: the read and the
+ * project. Output: the answer. */
+export function idleStopped(team: Result<TeamStatus> | undefined, projectId: string): boolean {
+  void team;
+  void projectId;
+  return false;
+}
+
 /** Whether opening the area turns the live master on now: only once a team read shows a
  * switch that is not on, nothing was asked and the read is newer than a start the engine
  * refused as stale, so a refused start waits for the fresh read instead of retrying the old

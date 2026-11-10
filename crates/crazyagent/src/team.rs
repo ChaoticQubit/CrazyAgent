@@ -3152,6 +3152,10 @@ pub struct TeamStatus {
     pub live_master: Option<bool>,
     #[serde(default)]
     pub live_problem: Option<String>,
+    /// Whether the line above is the one an idle stop left, so the master view offers Start
+    /// again. Never set while the live master is on.
+    #[serde(default)]
+    pub live_idle_stopped: bool,
     #[serde(default)]
     pub settings_version: u64,
     pub min_agents: u8,
@@ -4817,6 +4821,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         terminals_per_window: terminals_per_window(connection, project)?,
         live_master,
         live_problem,
+        live_idle_stopped: false,
         settings_version: settings_version(connection, project)?,
         min_agents: plan.min_agents,
         max_agents: plan.max_agents,
