@@ -1,5 +1,5 @@
 use super::prices::Charged;
-use super::rules::{CodexState, Usage, advisor_usages, claude_usage, codex_usage};
+use super::rules::{CodexState, Usage, advisor_usages, claude_usage, codex_usage, timestamp_ms};
 use super::{LimitSource, LimitWindow, Observation, failure, record_observation, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
@@ -319,9 +319,11 @@ impl<'a> Seen<'a> {
     }
 }
 
-/// Follows the turn one line belongs to and keeps the turn once it ends, unless it is a copy.
-/// Inputs: the line, its format, the progress, the key of the line's own record, what the scan
-/// saw and the read. Output: whether the line belongs to a copied turn.
+/// Follows the turn one line belongs to and keeps the turn once it ends, unless it is a copy or
+/// it ends on a line the live scan filed before Use new set the record back. Inputs: the line,
+/// its format, the progress, the key of the line's own record, what the scan saw, the read
+/// and whether the line is past what was filed. Output: whether the line belongs to a copied
+/// turn.
 fn follow_turn(
     value: &Value,
     format: Format,
@@ -329,6 +331,7 @@ fn follow_turn(
     key: Option<&str>,
     seen: Option<&mut Seen<'_>>,
     reading: &mut Reading,
+    filing: bool,
 ) -> bool {
     let replayed = format == Format::Codex && progress.codex.replayed;
     if replayed {
@@ -355,6 +358,7 @@ fn follow_turn(
             .map_or(progress.turn.repeat(), |closed| closed.repeat);
     if let Some(closed) = closed
         && !closed.repeat
+        && filing
         && reading.turns.len() < TURNS_PER_READ_MAX
     {
         reading.turns.push(closed);
@@ -786,6 +790,13 @@ fn read_record(
     read_opened(opened, format, progress, now_ms, &session_name(path))
 }
 
+/// One tool call a record shows, and when its line was written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ToolCall {
+    pub name: String,
+    pub at_ms: Option<i64>,
+}
+
 /// Reads what one record gained since its stored progress and follows the turns of its new
 /// lines. Inputs: the record, its progress, the time, where to collect the tool calls, if
 /// anywhere, and what the scan saw. Output: the records, the finished turns and the last limits.
@@ -794,7 +805,7 @@ fn read_record_with(
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
-    tools: Option<&mut Vec<String>>,
+    tools: Option<&mut Vec<ToolCall>>,
     seen: Option<&mut Seen<'_>>,
 ) -> (
     Vec<Usage>,
@@ -848,7 +859,7 @@ fn read_opened_with(
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
-    mut tools: Option<&mut Vec<String>>,
+    mut tools: Option<&mut Vec<ToolCall>>,
     fallback_thread: &str,
     mut seen: Option<&mut Seen<'_>>,
 ) -> (
@@ -918,6 +929,7 @@ fn read_opened_with(
                 limits = observed.or(limits);
             }
         }
+        let already_filed = progress.offset + consumed <= progress.filed_to;
         let copied = follow_turn(
             &value,
             format,
@@ -925,16 +937,17 @@ fn read_opened_with(
             key.as_deref(),
             seen.as_deref_mut(),
             &mut reading,
+            !already_filed,
         );
-        let already_filed = progress.offset + consumed <= progress.filed_to;
         if let Some(tools) = tools.as_deref_mut().filter(|_| !copied && !already_filed) {
             let called = match format {
                 Format::Claude => claude_tools(&value),
                 Format::Codex => codex_tools(&value),
             };
-            for tool in called {
+            let at_ms = value["timestamp"].as_str().and_then(timestamp_ms);
+            for name in called {
                 if tools.len() < TOOLS_PER_READ_MAX {
-                    tools.push(tool);
+                    tools.push(ToolCall { name, at_ms });
                 }
             }
         }
@@ -1050,6 +1063,7 @@ fn scan(
     }
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
     let tracking = super::recount::keeps_live_keys(&tx)?;
+    let recount_started = super::recount::started_ms(&tx)?;
     let mut added = Tokens::default();
     let mut limits = None;
     for (key, session, before, progress, usages, turns, observed, tools) in changed {
@@ -1058,7 +1072,7 @@ fn scan(
         }
         if let Some(agent) = counting {
             for tool in &tools {
-                crate::coord::record_tool(&tx, agent, tool, now_ms)?;
+                crate::coord::record_tool(&tx, agent, &tool.name, now_ms)?;
             }
         }
         tx.execute(
@@ -1072,7 +1086,7 @@ fn scan(
             now_ms - now_ms.rem_euclid(HOUR_MS),
             attribution.project.as_ref().map_or("", ProjectId::as_str),
             &attribution.agent,
-            &turns,
+            &super::activity::live_turns(turns, recount_started),
         )?;
         for (model, growth) in count_usages(
             &tx,
@@ -1113,9 +1127,12 @@ fn text(value: Option<&str>) -> &str {
 }
 
 /// What one bounded read of a record gave the recount: its records, the record's progress,
-/// the bytes consumed, whether the record is finished and whether it was read to its end.
+/// the bytes consumed, whether the record is finished, whether it was read to its end, and
+/// the turns and tool calls it finished.
 pub(super) struct RecountRead {
     pub usages: Vec<Usage>,
+    pub turns: Vec<super::activity::Closed>,
+    pub tools: Vec<ToolCall>,
     pub progress: String,
     pub read: u64,
     pub done: bool,
@@ -1124,9 +1141,11 @@ pub(super) struct RecountRead {
 
 /// Reads one more chunk of a record for the recount, through the live scan's open and parser.
 /// A record that cannot be opened, is no longer the file that was listed or has shrunk is
-/// finished and not complete. Inputs: the record, its format, the stored progress (empty at
-/// the start), the identity it was listed with and the time. Output: the read.
+/// finished and not complete. A turn is a copy when the recount already counted its first
+/// message. Inputs: the store, the record, its format, the stored progress (empty at the
+/// start), the identity it was listed with and the time. Output: the read.
 pub(super) fn recount_read(
+    db: &Connection,
     path: &Path,
     format: Format,
     stored: &str,
@@ -1137,6 +1156,8 @@ pub(super) fn recount_read(
     let before = progress.offset;
     let stopped = RecountRead {
         usages: Vec::new(),
+        turns: Vec::new(),
+        tools: Vec::new(),
         progress: stored.to_owned(),
         read: 1,
         done: true,
@@ -1149,14 +1170,16 @@ pub(super) fn recount_read(
     if !crate::file_identity::same_files(&[listed], &[identity]) || length < before {
         return stopped;
     }
-    let (usages, _, _) = read_opened_with(
+    let mut tools = Vec::new();
+    let mut seen = Seen::new(db, "usage_recount_messages");
+    let (usages, turns, _) = read_opened_with(
         opened,
         format,
         &mut progress,
         now_ms,
-        None,
+        Some(&mut tools),
         &session_name(path),
-        None,
+        Some(&mut seen),
     );
     let whole = progress.offset >= length;
     let done = whole || progress.offset == before;
@@ -1165,6 +1188,8 @@ pub(super) fn recount_read(
     let progress = serde_json::to_string(&progress).expect("progress always serializes");
     RecountRead {
         usages,
+        turns,
+        tools,
         progress,
         read,
         done,

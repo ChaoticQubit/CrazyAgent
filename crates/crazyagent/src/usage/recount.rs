@@ -1,7 +1,9 @@
+use super::activity::{add_turns, history_turns};
 use super::capture::{
-    self, Added, Attribution, Format, Messages, ROW_TOKENS_MAX, Tokens, all_records, clamp,
-    count_usages, recount_read,
+    self, Added, Attribution, Format, Messages, ROW_TOKENS_MAX, RecountRead, Tokens, all_records,
+    clamp, count_usages, recount_read,
 };
+use super::report::has_table;
 use super::{failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, ProjectId};
@@ -47,6 +49,7 @@ CREATE TABLE IF NOT EXISTS usage_recount_homes (
     account TEXT NOT NULL,
     agent TEXT NOT NULL,
     harness TEXT NOT NULL,
+    team_agent INTEGER,
     listed INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS usage_recount_homes_todo ON usage_recount_homes(listed) WHERE listed=0;
@@ -174,10 +177,15 @@ pub(super) fn begin(db: &Connection, homes: &[Home], now_ms: i64) -> Result<(), 
             let who = &home.attribution;
             tx.execute(
                 "INSERT OR IGNORE INTO usage_recount_homes
-                 (home,format,kind,project,pool,account,agent,harness) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                 (home,format,kind,project,pool,account,agent,harness,team_agent)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![
                     home.path.to_string_lossy(),
-                    if home.format == Format::Claude { "claude" } else { "codex" },
+                    if home.format == Format::Claude {
+                        "claude"
+                    } else {
+                        "codex"
+                    },
                     who.kind.name(),
                     if home.removed {
                         super::REMOVED_PROJECTS
@@ -188,6 +196,7 @@ pub(super) fn begin(db: &Connection, homes: &[Home], now_ms: i64) -> Result<(), 
                     who.account.as_ref().map_or("", CredentialRef::as_str),
                     who.agent,
                     crate::harnesses::canonical(&who.harness),
+                    home.team_agent,
                 ],
             )
             .map_err(storage)?;
@@ -257,13 +266,63 @@ fn line_time(at_ms: Option<i64>, fallback_ms: i64, now_ms: i64) -> i64 {
         .unwrap_or_else(|| fallback_ms.min(now_ms).max(LINE_TIME_FLOOR_MS))
 }
 
+/// When the recount started. Input: the store. Output: the time, None before it starts.
+pub(super) fn started_ms(db: &Connection) -> Result<Option<i64>, EngineError> {
+    db.query_row(
+        "SELECT started_ms FROM usage_recount WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(storage)
+}
+
+/// Files the history a chunk showed, in the hour each turn began and each tool was called. A
+/// time before the floor files at the record's own time. Inputs: the open transaction, the
+/// chunk, the recount's start and the record's time, the project, the agent and its team id.
+/// Output: done, or `usage_unavailable`.
+fn add_history(
+    tx: &Connection,
+    read: &mut RecountRead,
+    (started, fallback_ms): (i64, i64),
+    (project, agent, team_agent): (&str, &str, Option<i64>),
+) -> Result<(), EngineError> {
+    for turn in history_turns(std::mem::take(&mut read.turns), started) {
+        let began = line_time(turn.began_ms, fallback_ms, started);
+        add_turns(
+            tx,
+            began - began.rem_euclid(HOUR_MS),
+            project,
+            agent,
+            std::slice::from_ref(&turn),
+        )?;
+    }
+    let Some(team_agent) = team_agent else {
+        return Ok(());
+    };
+    if !has_table(tx, "coord_tool_hours")? {
+        return Ok(());
+    }
+    for call in read
+        .tools
+        .iter()
+        .filter(|call| call.at_ms.is_some_and(|at| at < started))
+    {
+        let at = line_time(call.at_ms, fallback_ms, started);
+        crate::coord::add_tool_hour(tx, at - at.rem_euclid(HOUR_MS), team_agent, &call.name)
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
 /// Reads one chunk of one record into the staging tables, in one write with its cursor, so a
 /// restart repeats no line. The try is counted first, so a record that panics or fails is
 /// given up on after `ATTEMPTS_MAX`. Who it counts against is read inside that write, so a
-/// project removed during the read files under its removed name. Inputs: the store, the record
-/// and the time. Output: the budget the read costs.
+/// project removed during the read files under its removed name. The turns and tool calls
+/// begun before the recount started are filed in the same write. Inputs: the store, the
+/// record and the time. Output: the budget the read costs.
 fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineError> {
-    type Who = (String, String, String, String, String, String);
+    type Who = (String, String, String, String, String, String, Option<i64>);
     let format: String = db
         .query_row(
             "SELECT format FROM usage_recount_homes WHERE home=?1",
@@ -281,7 +340,8 @@ fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineE
         [&file.path],
     )
     .map_err(storage)?;
-    let read = recount_read(
+    let mut read = recount_read(
+        db,
         Path::new(&file.path),
         format,
         &file.progress,
@@ -289,9 +349,9 @@ fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineE
         now_ms,
     );
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
-    let (kind, project, pool, account, agent, harness): Who = tx
+    let (kind, project, pool, account, agent, harness, team_agent): Who = tx
         .query_row(
-            "SELECT kind,project,pool,account,agent,harness FROM usage_recount_homes WHERE home=?1",
+            "SELECT kind,project,pool,account,agent,harness,team_agent FROM usage_recount_homes WHERE home=?1",
             [&file.home],
             |row| {
                 Ok((
@@ -301,6 +361,7 @@ fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineE
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
@@ -321,6 +382,19 @@ fn read_chunk(db: &Connection, file: Listed, now_ms: i64) -> Result<u64, EngineE
             )?;
         }
     }
+    let started: i64 = tx
+        .query_row(
+            "SELECT started_ms FROM usage_recount WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    add_history(
+        &tx,
+        &mut read,
+        (started, file.fallback_ms),
+        (&project, &agent, team_agent),
+    )?;
     tx.execute(
         "UPDATE usage_recount_files SET progress=?2,done=?3,complete=?4,attempts=0 WHERE path=?1",
         params![file.path, read.progress, read.done, read.complete],

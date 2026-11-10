@@ -1728,5 +1728,6 @@ fn a_tool_filed_before_a_rewind_is_not_collected_again() {
         Some(&mut tools),
         None,
     );
-    assert_eq!(tools, ["Read".to_owned()]);
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(names, ["Read"]);
 }

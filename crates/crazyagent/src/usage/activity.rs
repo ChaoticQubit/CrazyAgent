@@ -1,5 +1,5 @@
 use super::capture::{MODELS_PER_HOUR_MAX, has_room};
-use super::rules::model_name;
+use super::rules::{model_name, timestamp_ms};
 use super::storage;
 use crate::coord::adoption::SHELL_TOOLS;
 use crate::engine::EngineError;
@@ -506,9 +506,10 @@ pub(super) struct OpenTurn {
     retries: u32,
     judged: bool,
     repeat: bool,
+    began_ms: Option<i64>,
 }
 
-/// One finished turn.
+/// One finished turn, and when its first user line was written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Closed {
     pub activity: Activity,
@@ -516,6 +517,7 @@ pub(super) struct Closed {
     pub edit: bool,
     pub first_try: bool,
     pub repeat: bool,
+    pub began_ms: Option<i64>,
 }
 
 fn fnv(text: &str) -> u64 {
@@ -579,10 +581,11 @@ pub(super) fn read_shaped(command: &str) -> bool {
 }
 
 impl OpenTurn {
-    fn begin(&mut self, text: &str) {
+    fn begin(&mut self, text: &str, began_ms: Option<i64>) {
         *self = OpenTurn {
             started: true,
             words: words_of(text),
+            began_ms,
             ..OpenTurn::default()
         };
     }
@@ -597,6 +600,7 @@ impl OpenTurn {
             edit: self.tools.edits,
             first_try: self.tools.edits && self.retries == 0,
             repeat: self.repeat,
+            began_ms: self.began_ms,
         };
         *self = OpenTurn::default();
         Some(closed)
@@ -682,7 +686,7 @@ pub(super) fn claude_line(value: &Value, turn: &mut OpenTurn) -> Option<Closed> 
         "user" if value["isMeta"] != true => {
             let text = user_text(&value["message"]["content"])?;
             let closed = turn.close();
-            turn.begin(&text);
+            turn.begin(&text, line_ms(value));
             closed
         }
         "assistant" if turn.started => {
@@ -753,7 +757,7 @@ pub(super) fn codex_line(value: &Value, turn: &mut OpenTurn) -> Option<Closed> {
         ("event_msg", Some("user_message")) => {
             let text = payload["message"].as_str()?;
             let closed = turn.close();
-            turn.begin(text);
+            turn.begin(text, line_ms(value));
             closed
         }
         ("event_msg", Some("task_complete")) => turn.close(),
@@ -803,6 +807,33 @@ pub(super) fn codex_line(value: &Value, turn: &mut OpenTurn) -> Option<Closed> {
         }
         _ => None,
     }
+}
+
+/// The time a line was written. Input: the line. Output: the time, None when it has none.
+fn line_ms(value: &Value) -> Option<i64> {
+    value["timestamp"].as_str().and_then(timestamp_ms)
+}
+
+/// Keeps the turns the live scan owns: those begun at or after the recount's start, and those
+/// with no time. Until a recount has started, history is the recount's. Inputs: the finished
+/// turns and the recount's start. Output: the turns to count now.
+pub(super) fn live_turns(closed: Vec<Closed>, recount_started: Option<i64>) -> Vec<Closed> {
+    let Some(started_ms) = recount_started else {
+        return Vec::new();
+    };
+    closed
+        .into_iter()
+        .filter(|turn| turn.began_ms.is_none_or(|at| at >= started_ms))
+        .collect()
+}
+
+/// Keeps the turns the recount owns: those begun before its start. Inputs: the finished turns
+/// and the recount's start. Output: the turns it files.
+pub(super) fn history_turns(closed: Vec<Closed>, started_ms: i64) -> Vec<Closed> {
+    closed
+        .into_iter()
+        .filter(|turn| turn.began_ms.is_some_and(|at| at < started_ms))
+        .collect()
 }
 
 /// Files finished turns. Inputs: the open transaction, the hour, the project and agent that
