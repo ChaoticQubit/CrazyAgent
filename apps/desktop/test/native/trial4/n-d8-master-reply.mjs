@@ -127,23 +127,55 @@ export async function terminalLive(kit, timeout) {
   return filled;
 }
 
-/** Lists the rows a paste drew. Inputs: the rows before and after it. Output: [{ at, row }]. */
+/** Lists the rows a paste drew: those with a letter or digit that differ from the rows before
+ * it. A rule or box edge is left out, as the next box edge can land on its row once the message
+ * is sent. Inputs: the rows before and after the paste. Output: [{ at, row }]. */
 export function drawnRows(before, after) {
-  return [];
+  return after.flatMap((row, at) => (row !== before[at] && /[\p{L}\p{N}]/u.test(row) ? [{ at, row }] : []));
 }
 
-/** Says whether a drawn paste still sits on the terminal. Inputs: its rows and the terminal's
- * rows now. Output: a boolean. */
+/** Says whether a drawn paste still sits on the terminal: any of its rows reads as it did.
+ * Inputs: its rows and the terminal's rows now. Output: a boolean. */
 export function pasteWaiting(drawn, rows) {
-  return false;
+  return drawn.some(({ at, row }) => rows[at] === row);
 }
 
-/** Pastes and presses Enter. Inputs: the terminal and the caller's read of a started turn.
- * Output: how many times Enter was pressed. */
+/** Waits until a paste has drawn and stopped changing: the rows that differ from before it and
+ * held still since the last read are the same on two reads in a row, so an animated row neither
+ * holds this up nor counts. Inputs: the terminal and the rows before the paste. Output: the
+ * drawn rows; throws when none held still, so no Enter is pressed on an unseen paste. */
+async function steadyPaste(terminal, before) {
+  let last = before;
+  let held = [];
+  for (let reads = 0; reads < DRAW_READS_MAX; reads += 1) {
+    await terminal.pause();
+    const rows = await terminal.rows();
+    const kept = drawnRows(before, rows).filter(({ at, row }) => last[at] === row);
+    if (kept.length > 0 && JSON.stringify(kept) === JSON.stringify(held)) return kept;
+    held = kept;
+    last = rows;
+  }
+  throw new Error("the paste never drew on the master terminal: Enter was not pressed");
+}
+
+/** Pastes a message and presses Enter until its turn has started: a long paste followed at once
+ * by Enter can sit unsent, and a first Enter can only clear a notice. The turn has started when
+ * the caller's read says so or, with no such read, once the drawn paste left the terminal.
+ * Inputs: the terminal, { rows, paste, enter, pause }, and the read for a terminal that draws no
+ * echo. Output: how many times Enter was pressed; throws when the paste stayed unsent. */
 export async function pasteAndSend(terminal, started) {
+  const before = await terminal.rows();
   await terminal.paste();
-  await terminal.enter();
-  return 1;
+  const drawn = started ? [] : await steadyPaste(terminal, before);
+  const begun = started ?? (async () => !pasteWaiting(drawn, await terminal.rows()));
+  for (let presses = 1; presses <= ENTER_PRESSES_MAX; presses += 1) {
+    await terminal.enter();
+    for (let reads = 0; reads < ENTER_READS_MAX; reads += 1) {
+      await terminal.pause();
+      if (await begun()) return presses;
+    }
+  }
+  throw new Error(`the paste stayed on the master terminal after ${ENTER_PRESSES_MAX} Enter presses: it was not sent`);
 }
 
 /** Sends one message to the live master as the owner does: through the message box when the

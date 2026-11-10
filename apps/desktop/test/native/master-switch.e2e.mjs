@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
+import { shownView } from "./agents-cards.mjs";
 import { TURN_S } from "./master-switch.wdio.conf.mjs";
 import { click, shown, toasts, unfold } from "./settings-steps.mjs";
-import { go, paste, pick, reopen, run, tab, until, waitFor } from "./trial-kit.mjs";
-import { masterRows, sendToMaster, startIfPaused, terminalLive } from "./trial4/n-d8-master-reply.mjs";
+import { go, paste, pick, reopen, run, segment, tab, until, waitFor } from "./trial-kit.mjs";
+import { masterRows, sendToMaster, startIfPaused, teamNodes, terminalLive } from "./trial4/n-d8-master-reply.mjs";
 
 const root = process.env.MS_ROOT;
 const GIT = "/usr/bin/git";
@@ -22,6 +23,8 @@ const TITLE = ".pj-master-live .pj-console-title";
 const WAITS = "[data-testid=master-switch-waits]";
 const DIVIDER = "[data-testid=harness-switch]";
 const STOP = "//dialog[@open]//button[normalize-space(.)=\"Stop all\"]";
+const INPUT_KEY = "crazyagent.terminal-input";
+const STORE = join(root, "home", "Library", "WebKit", basename(process.env.WD_APP));
 const kit = { go, tab, pick, paste, reopen, until, waitFor, project: () => run.project };
 let generation = 0;
 
@@ -33,6 +36,27 @@ async function invoke(command, args) {
   }, command, args);
   if (answer.failed !== undefined) throw new Error(`${command} failed: ${answer.failed}`);
   return answer.value;
+}
+
+/** Proves this window's web store is the fixture's own before any row can write to it: WebKit
+ * made its folder under the fixture home when the page loaded and no Terminal input is saved
+ * there. Fails when the store stayed in the real user Library. Output: none. */
+async function storeIsTheFixtures() {
+  await until(() => existsSync(join(STORE, "WebsiteData")), UI_MS, `the window's web store never appeared at ${STORE}`);
+  assert.equal(await browser.execute((key) => window.localStorage.getItem(key), INPUT_KEY), null, "a fixture's web store starts with no Terminal input");
+}
+
+/** Reads whether the fixture's own web store holds a saved key, from WebKit's files and never
+ * through the window. Input: the key. Output: a boolean. */
+function fixtureStoreHolds(key) {
+  return readdirSync(STORE, { recursive: true }).filter((path) => basename(path) === "localstorage.sqlite3").some((path) => {
+    const store = new DatabaseSync(join(STORE, path), { readOnly: true });
+    try {
+      return store.prepare("SELECT 1 FROM ItemTable WHERE key=?").get(key) !== undefined;
+    } finally {
+      store.close();
+    }
+  });
 }
 
 /** Makes an owner repository with one commit, run with no system or user git config. Input:
@@ -109,7 +133,8 @@ async function area() {
 
 /** Checks the running Master tab in the real window against the Terminal input this app has
  * saved, reading the store and never writing it: no text area beside the terminal with
- * nothing saved or Terminal only, exactly one with a box choice. Logs what the store held. */
+ * nothing saved or Terminal only, exactly one with a box choice. Logs what the store held.
+ * Output: { saved, boxes }. */
 async function masterFollowsSavedInput() {
   const seen = await browser.execute(() => ({
     saved: window.localStorage.getItem("crazyagent.terminal-input"),
@@ -117,6 +142,39 @@ async function masterFollowsSavedInput() {
   }));
   console.log(`Master tab, saved Terminal input and text areas: ${JSON.stringify(seen)}`);
   assert.equal(seen.boxes, seen.saved === "box" || seen.saved === "both" ? 1 : 0, JSON.stringify(seen));
+  return seen;
+}
+
+/** Saves a Terminal input option on Settings, Profile, as the owner does, and reads it back after
+ * leaving the page and opening it again. Input: the option's label. */
+async function saveInput(option) {
+  const choice = segment("Terminal input", option);
+  await go("#/settings/profile");
+  await until(() => shown(choice), UI_MS, "Settings, Profile never showed Terminal input");
+  await click(choice);
+  await go("#/settings/process");
+  await go("#/settings/profile");
+  await until(async () => (await shown(choice)) && (await $(choice).getAttribute("aria-checked")) === "true", UI_MS, `Terminal input did not read ${option} after opening Settings again`);
+}
+
+/** Starts one sub-agent through the app's own command, opens its terminal from its card and
+ * reads what the owner is offered there. Input: the project id. Output: { label, boxes }. */
+async function subAgentOffers(id) {
+  const receipt = await invoke("desktop_team_delegate", { id, harness: "claude-code", prompt: "Stand by.", generation: ++generation });
+  assert.equal(receipt.outcome, "applied", `the sub-agent is asked for: ${JSON.stringify(receipt)}`);
+  let agent;
+  await waitFor(async () => {
+    const nodes = await teamNodes(id);
+    agent = nodes.find((node) => node.kind !== "master" && node.terminal);
+    return { done: agent !== undefined, seen: JSON.stringify(nodes).slice(0, 400) };
+  }, SWITCH_MS, "no sub-agent terminal ever started");
+  await tab("agents");
+  await shownView(kit, agent.label);
+  const boxes = await browser.execute((label) => {
+    const panel = [...document.querySelectorAll("section.tg-terminal")].find((node) => node.getAttribute("aria-label") === `${label} terminal` && node.getClientRects().length);
+    return [...panel.querySelectorAll("textarea.tg-composer-input")].filter((item) => item.getClientRects().length > 0).length;
+  }, agent.label);
+  return { label: agent.label, boxes };
 }
 
 /** Opens the master area with the live master running and its terminal showing a harness's
@@ -135,10 +193,11 @@ async function liveMaster(name) {
 /** Sends one owner line to the live master and waits until its turn shows on the terminal.
  * Inputs: the line and the harness name the stand-in prints. Output: none. */
 async function ownerTurn(line, name) {
-  const turns = (await masterRows()).filter((row) => row.includes(`${name} stand-in turn`)).length;
-  await sendToMaster(kit, line);
+  const shownTurns = async () => (await masterRows()).filter((row) => row.includes(`${name} stand-in turn`)).length;
+  const turns = await shownTurns();
+  await sendToMaster(kit, line, async () => (await shownTurns()) > turns);
   await waitFor(async () => {
-    const now = (await masterRows()).filter((row) => row.includes(`${name} stand-in turn`)).length;
+    const now = await shownTurns();
     return { done: now > turns, seen: `${now} ${name} turns on the terminal` };
   }, UI_MS, `${name} never started a turn for "${line}"`);
 }
@@ -181,6 +240,7 @@ async function switchedTo(name) {
 describe("A saved master harness change reaches the live master as the owner's Apply a master harness change says", () => {
   before(async () => {
     await until(() => browser.execute(() => Boolean(window.__TAURI_INTERNALS__)), 120000, "the app window never loaded");
+    await storeIsTheFixtures();
     await until(async () => (await invoke("desktop_connect").catch(() => ({}))).connected === true, 60000, "the app never connected to the test engine");
     assert.equal((await invoke("desktop_save_owner_profile", { profile: { name: "E2E Owner" }, generation: ++generation })).outcome, "applied");
     mkdirSync(join(root, "projects"), { mode: 0o700 });
@@ -246,4 +306,18 @@ describe("A saved master harness change reaches the live master as the owner's A
     await switchedTo("Codex");
     assert.deepEqual(switches(id), ["codex"], "the engine wrote one switch row, to Codex");
   });
+
+  for (const [option, saved, name] of [["Message box only", "box", "box-shop"], ["Both", "both", "both-shop"]]) {
+    it(`${option}: saved in Settings, the Master tab and a sub-agent offer the box and one message goes through the real engine`, async () => {
+      const id = await newProject(name);
+      await saveMaster("claude-code");
+      await saveInput(option);
+      await until(() => fixtureStoreHolds(INPUT_KEY), UI_MS, `Terminal input never reached the fixture's own web store at ${STORE}`);
+      await liveMaster("Claude");
+      assert.equal((await masterFollowsSavedInput()).saved, saved);
+      await ownerTurn(`Through ${option}.`, "Claude");
+      const offered = await subAgentOffers(id);
+      assert.equal(offered.boxes, 1, `${offered.label} offers one message box`);
+    });
+  }
 });
