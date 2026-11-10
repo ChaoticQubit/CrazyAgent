@@ -642,8 +642,17 @@ export function accountSchedule(): Promise<Result<AccountSchedule>> {
   return call<AccountSchedule>("desktop_account_schedule");
 }
 
+/** Why a ready account stands where it does in its pool's ranking. */
+export type OrderWhy =
+  | { kind: "use_last" } | { kind: "limit_reported" } | { kind: "no_reading" }
+  | { kind: "resets_soonest"; resets_ms: number } | { kind: "resets_later"; resets_ms: number }
+  | { kind: "least_used" } | { kind: "more_used" } | { kind: "more_five_hour_used" }
+  | { kind: "ranked"; rank: number } | { kind: "unranked" }
+  | { kind: "tied_rank"; rank: number | null } | { kind: "tied_order" };
+
 export type AccountStanding =
-  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean }
+  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean; why: OrderWhy }
+  | { kind: "not_signed_in" }
   | { kind: "paused"; until_ms: number }
   | { kind: "never_use" }
   | { kind: "five_hour_cap"; until_ms: number | null }
@@ -658,6 +667,7 @@ export interface PoolRanking {
   pool: string;
   strategy: AccountStrategy;
   accounts: RankedAccount[];
+  own_order_projects: number;
 }
 
 /** Reads each pool's account ranking: the order work would try its accounts now, then each

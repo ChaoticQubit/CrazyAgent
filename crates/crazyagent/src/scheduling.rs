@@ -1,4 +1,4 @@
-use crate::config::ModelAccess;
+use crate::config::{ModelAccess, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome};
 use crate::storage::versioned;
@@ -983,8 +983,9 @@ pub struct PoolRanking {
 }
 
 /// Ranks every pool's accounts with the same choice team, research and master work make
-/// (DEC-096 item 8): a paused account is held, the rest go through `Choice::order`. Live
-/// load and the account work already runs on only break ties, so they are left out.
+/// (DEC-096 item 8): a signed-out or paused account is held, the rest go through
+/// `Choice::order`, each with why it stands where it does. Live load and the account work
+/// already runs on only break ties, so they are left out.
 /// Takes the engine connection, model access and clock. Returns one ranking per pool.
 pub fn ranking(
     connection: &Connection,
@@ -992,6 +993,7 @@ pub fn ranking(
     now_ms: i64,
 ) -> Result<Vec<PoolRanking>, EngineError> {
     let pauses = table_exists(connection, "team_paused_accounts")?;
+    let sign_ins = table_exists(connection, "native_auth_operations")?;
     let mut pools = Vec::with_capacity(access.pools.len());
     for pool in &access.pools {
         let choice = Choice::read(connection, access, None, &[&pool.id], now_ms)?;
@@ -999,8 +1001,16 @@ pub fn ranking(
         let mut candidates = Vec::new();
         let mut places = Vec::new();
         for (index, member) in pool.members.iter().enumerate() {
-            match paused_until(connection, pauses, member, now_ms)? {
-                Some(until_ms) => held.push((index, Standing::Paused { until_ms })),
+            let held_now = if choice.schedule.plan(member).pin == Some(Pin::NeverUse) {
+                None
+            } else if signed_out(connection, sign_ins, access, member)? {
+                Some(Standing::NotSignedIn)
+            } else {
+                paused_until(connection, pauses, member, now_ms)?
+                    .map(|until_ms| Standing::Paused { until_ms })
+            };
+            match held_now {
+                Some(standing) => held.push((index, standing)),
                 None => {
                     candidates.push(Candidate {
                         connection: member.clone(),
@@ -1012,14 +1022,17 @@ pub fn ranking(
             }
         }
         let order = choice.order(&candidates);
-        let mut accounts: Vec<RankedAccount> = order
-            .ready
-            .iter()
-            .map(|&at| RankedAccount {
+        let mut accounts = Vec::with_capacity(pool.members.len());
+        let mut above = None;
+        for &at in &order.ready {
+            let key = choice.key(&candidates[at], at);
+            let why = choice.why(&key, above.as_ref());
+            accounts.push(RankedAccount {
                 connection: candidates[at].connection.clone(),
-                standing: choice.next(&candidates[at], OrderWhy::TiedOrder),
-            })
-            .collect();
+                standing: choice.next(&candidates[at], why),
+            });
+            above = Some(key);
+        }
         held.extend(
             order
                 .excluded
@@ -1036,10 +1049,44 @@ pub fn ranking(
             pool: pool.id.clone(),
             strategy: choice.strategy,
             accounts,
-            own_order_projects: 0,
+            own_order_projects: u32::try_from(
+                choice
+                    .schedule
+                    .projects
+                    .iter()
+                    .filter(|scoped| pool.projects.contains(&scoped.id))
+                    .count(),
+            )
+            .map_err(error)?,
         });
     }
     Ok(pools)
+}
+
+/// Whether the real pick skips this member for its sign-in: a native managed account whose
+/// latest sign-in did not end authenticated, or whose sign-in a provider rejected. An account
+/// being re-proved after a restart keeps its authenticated fact, so it is not named here, as
+/// the pick reads that as checking. Takes the store, whether it has sign-ins at all, the
+/// model access and the member. Returns the answer.
+fn signed_out(
+    connection: &Connection,
+    sign_ins: bool,
+    access: &ModelAccess,
+    member: &CredentialRef,
+) -> Result<bool, EngineError> {
+    if !sign_ins {
+        return Ok(false);
+    }
+    let Some(model) = access.connections.iter().find(|item| &item.id == member) else {
+        return Ok(false);
+    };
+    if !matches!(model.auth, ModelAuthentication::NativeManaged { .. }) {
+        return Ok(false);
+    }
+    Ok(
+        !crate::storage::latest_sign_in_authenticated(connection, model)?
+            || crate::model_gateway::sign_in_rejected(connection, model)?,
+    )
 }
 
 fn paused_until(
@@ -1062,6 +1109,50 @@ fn paused_until(
 }
 
 impl Choice {
+    /// Says why a ready account follows the one above it: the first field of its sort key
+    /// that sets it apart. Takes its sort key and the key above it, if any. Returns the reason.
+    fn why(&self, key: &SortKey, above: Option<&SortKey>) -> OrderWhy {
+        assert!(
+            above.is_none_or(|row| row < key),
+            "the order sorted by these keys"
+        );
+        let (use_last, doubtful, primary, rank, ..) = *key;
+        if use_last {
+            return OrderWhy::UseLast;
+        }
+        if doubtful {
+            return OrderWhy::LimitReported;
+        }
+        if primary.0 {
+            return OrderWhy::NoReading;
+        }
+        let tie = || match above {
+            Some(row) if row.3 != rank => OrderWhy::TiedRank {
+                rank: (rank != u16::MAX).then_some(rank),
+            },
+            _ => OrderWhy::TiedOrder,
+        };
+        match self.strategy {
+            Strategy::ManualRank if rank == u16::MAX => OrderWhy::Unranked,
+            Strategy::ManualRank => OrderWhy::Ranked { rank },
+            Strategy::UseItOrLoseIt => match above {
+                None => OrderWhy::ResetsSoonest {
+                    resets_ms: primary.1,
+                },
+                Some(row) if row.2.1 < primary.1 => OrderWhy::ResetsLater {
+                    resets_ms: primary.1,
+                },
+                Some(_) => tie(),
+            },
+            Strategy::Balanced => match above {
+                None => OrderWhy::LeastUsed,
+                Some(row) if row.2.1 < primary.1 => OrderWhy::MoreUsed,
+                Some(row) if row.2.2 < primary.2 => OrderWhy::MoreFiveHourUsed,
+                Some(_) => tie(),
+            },
+        }
+    }
+
     fn next(&self, candidate: &Candidate, why: OrderWhy) -> Standing {
         let plan = self.schedule.plan(&candidate.connection);
         let (_, weekly) = self.windows(candidate);

@@ -1477,3 +1477,11 @@ fn a_ranking_counts_only_this_pools_projects_that_set_their_own_order() {
     );
     assert_eq!(count(&connection), 1);
 }
+
+#[test]
+#[should_panic(expected = "the order sorted by these keys")]
+fn a_why_read_against_a_key_that_should_follow_it_is_refused() {
+    let first: SortKey = (false, false, (false, 0, 0), 1, true, 0, 0);
+    let second: SortKey = (false, false, (false, 0, 0), 1, true, 0, 1);
+    Choice::default().why(&first, Some(&second));
+}
