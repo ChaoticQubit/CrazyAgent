@@ -631,6 +631,7 @@ fn agents(
                 more_accounts: 0,
                 tokens: Tokens::default(),
                 turns: None,
+                cost_nanos: 0,
             }),
     );
     assert!(rows.len() <= ROWS_MAX);
