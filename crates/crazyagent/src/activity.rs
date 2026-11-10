@@ -41,9 +41,10 @@ const WORK_KINDS: [ActivityKind; 4] = [
     ActivityKind::WorkComplete,
     ActivityKind::WorkClosed,
 ];
-/// One listing gives the rows agents set the pace of, `LOGGED_KINDS` and `WORK_KINDS`, at
-/// most one place in this many, so a team that logs fast never crowds the engine's and the
-/// owner's events out of what Overview reads.
+/// One listing first gives the rows agents set the pace of, `LOGGED_KINDS` and `WORK_KINDS`,
+/// at most one place and one byte in this many, so a team that logs fast never crowds the
+/// engine's and the owner's events out of what Overview reads; agent rows then fill what
+/// those events leave.
 const LISTED_PACED_SHARE: usize = 4;
 /// The words a task that could not finish is told with, after its agent's label.
 const TASK_FAILED_VERB: &str = "could not finish";
@@ -68,6 +69,9 @@ const _: () = assert!(LOGGED_PER_WINDOW_MAX > 0 && LOGGED_PER_WINDOW_MAX <= AGEN
 const _: () = assert!(MERGES_KEPT_MAX > KEPT_PER_PROJECT_MAX);
 const _: () = assert!(WORK_KEPT_MAX > 0 && WORK_KEPT_MAX < KEPT_PER_PROJECT_MAX);
 const _: () = assert!(LISTED_PACED_SHARE > 1 && LISTED_PACED_SHARE <= LIST_MAX);
+const _: () = assert!(
+    TEXT_BYTES_MAX + GOAL_BYTES_MAX + ACTOR_BYTES_MAX + 512 < LISTED_BYTES_MAX / LISTED_PACED_SHARE
+);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS project_activity (
@@ -827,11 +831,11 @@ pub struct Listed {
     pub more: bool,
 }
 
-/// Lists a project's events as `list` does and says whether older ones were left out. The
-/// phases, test runs and work verb rows agents set the pace of take at most one place in
-/// `LISTED_PACED_SHARE`, so a team that logs fast never crowds out the engine's and the
-/// owner's events. Takes the database, the project and the limit, 1 to `LIST_MAX`. Returns
-/// the read, or `activity_limit_invalid`.
+/// Lists a project's events as `list` does and says whether older ones were left out. Rows
+/// agents set the pace of first take at most one place and byte in `LISTED_PACED_SHARE`, the
+/// engine's and owner's events take the rest, then agent rows fill what those leave, so a fast
+/// team never crowds those events out and a quiet project still lists a full read. Takes the
+/// database, the project and the limit, 1 to `LIST_MAX`. Returns the read, or an error.
 pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<Listed, EngineError> {
     if limit == 0 || limit > LIST_MAX {
         return Err(failure("activity_limit_invalid"));
@@ -844,32 +848,77 @@ pub fn listed(db: &Connection, project: &ProjectId, limit: usize) -> Result<List
     let paced = paced.join(",");
     let paced_max = limit.div_ceil(LISTED_PACED_SHARE);
     assert!(paced_max > 0 && paced_max <= limit);
-    let mut rows = listed_rows(db, project, &format!("kind NOT IN ({paced})"), limit + 1)?;
-    let paced_rows = listed_rows(db, project, &format!("kind IN ({paced})"), paced_max + 1)?;
-    let mut more = paced_rows.len() > paced_max;
-    rows.extend(paced_rows.into_iter().take(paced_max));
-    rows.sort_by_key(|(_, item)| std::cmp::Reverse((item.at_ms, item.id)));
-    let mut items = Vec::new();
-    let mut bytes = 0;
+    let others = sized(listed_rows(
+        db,
+        project,
+        &format!("kind NOT IN ({paced})"),
+        limit + 1,
+    )?)?;
+    let agents = sized(listed_rows(
+        db,
+        project,
+        &format!("kind IN ({paced})"),
+        limit + 1,
+    )?)?;
+    let first = fitting(&agents, 0, paced_max, LISTED_BYTES_MAX / LISTED_PACED_SHARE);
+    let kept = fitting(&others, 0, limit - first.0, LISTED_BYTES_MAX - first.1);
+    let filled = fitting(
+        &agents,
+        first.0,
+        limit - first.0 - kept.0,
+        LISTED_BYTES_MAX - first.1 - kept.1,
+    );
+    let agents_kept = first.0 + filled.0;
+    let more = kept.0 < others.len() || agents_kept < agents.len();
+    let mut items: Vec<ActivityItem> = others
+        .into_iter()
+        .take(kept.0)
+        .chain(agents.into_iter().take(agents_kept))
+        .map(|(item, _)| item)
+        .collect();
+    items.sort_by_key(|item| std::cmp::Reverse((item.at_ms, item.id)));
+    assert!(items.len() <= limit);
+    assert!(first.1 + kept.1 + filled.1 <= LISTED_BYTES_MAX);
+    Ok(Listed { items, more })
+}
+
+/// Parses each read row's kind and sizes its JSON line, dropping a row whose kind this
+/// engine does not know. Takes the rows, newest first. Returns each item with its size in
+/// bytes, newline included, in the same order, or the encoding failure.
+fn sized(rows: Vec<(String, ActivityItem)>) -> Result<Vec<(ActivityItem, usize)>, EngineError> {
+    assert!(rows.len() <= LIST_MAX + 1);
+    let mut sized = Vec::with_capacity(rows.len());
     for (kind, mut item) in rows {
         let Some(kind) = ActivityKind::parse(&kind) else {
             continue;
         };
-        if items.len() == limit {
-            more = true;
-            break;
-        }
         item.kind = kind;
         let size = serde_json::to_vec(&item).map_err(state)?.len() + 1;
-        if bytes + size > LISTED_BYTES_MAX {
-            more = true;
+        sized.push((item, size));
+    }
+    assert!(sized.iter().all(|(_, size)| *size > 1));
+    Ok(sized)
+}
+
+/// Counts the sized rows from `from` on that fit, newest first, in `places` more places and
+/// `bytes` more bytes, stopping at the first that does not fit. Takes the rows, the start
+/// and the two bounds. Returns the count and the bytes those rows take.
+fn fitting(
+    rows: &[(ActivityItem, usize)],
+    from: usize,
+    places: usize,
+    bytes: usize,
+) -> (usize, usize) {
+    let mut taken = (0, 0);
+    for (_, size) in rows.iter().skip(from) {
+        if taken.0 == places || taken.1 + size > bytes {
             break;
         }
-        bytes += size;
-        items.push(item);
+        taken = (taken.0 + 1, taken.1 + size);
     }
-    assert!(items.len() <= limit && bytes <= LISTED_BYTES_MAX);
-    Ok(Listed { items, more })
+    assert!(taken.0 <= places);
+    assert!(taken.1 <= bytes);
+    taken
 }
 
 /// Reads a project's newest `rows` events whose kind passes `filter`, newest first, each
