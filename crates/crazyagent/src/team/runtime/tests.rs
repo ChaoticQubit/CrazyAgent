@@ -5551,6 +5551,94 @@ fn a_per_turn_agent_s_delivery_settles_from_the_session_record_of_its_running_tu
     );
 }
 
+/// A task that reached its agent reads as delivered when its first line sits past the first
+/// `MARKER_BYTES_MAX` bytes of what was typed, with its whitespace typed as it was written.
+/// A real sub-agent prompt opens with its project and worktree path, so a search cut to
+/// that length read the task as never typed and handed it out again (rv-code M1).
+#[test]
+fn a_delivered_task_behind_a_real_length_opening_is_not_typed_again() {
+    let fixture = Fixture::new(2);
+    let sub = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    ledger::initialize(&fixture.connection).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let written =
+        "Review the  login form and write what you found into the report the team reads last";
+    let task = running_task(&fixture, sub, written);
+    assert!(delivery::intend(&fixture.connection, Busy::Task(task), sub, written, None).unwrap());
+    std::thread::sleep(Duration::from_millis(5));
+    let typed = sub_agent_prompt(
+        "Panes",
+        Path::new(
+            "/Users/sample/CrazyAgent/panes-with-a-longer-name/.crazyagent/worktrees/agent-73",
+        ),
+        "",
+        written,
+        Layout::Linked,
+    );
+    let at = typed.find(written).unwrap();
+    assert!(at < delivery::MARKER_BYTES_MAX, "{at}");
+    assert!(at + written.len() > delivery::MARKER_BYTES_MAX, "{at}");
+    let file = fixture.base.join("session.jsonl");
+    let line = serde_json::json!({"type": "user", "message": {"content": typed}});
+    std::fs::write(&file, format!("{line}\n{TURN_DONE}\n")).unwrap();
+    let record = PaneRecord::new(
+        &Transcript::ClaudeSession { file },
+        &fixture.base,
+        SystemTime::now(),
+        4242,
+        None,
+    )
+    .unwrap();
+    crate::recovery::remember(&fixture.connection, sub, &record).unwrap();
+
+    drop(fixture.runtime());
+    let settled: (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        settled,
+        (
+            "failed".to_owned(),
+            Some(delivery::DELIVERED_TASK.to_owned())
+        )
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{task}")),
+        [Some("done".to_owned())]
+    );
+}
+
+/// What the ledger stores of a delivery is the text's first line cut to `MARKER_BYTES_MAX`
+/// bytes on a character boundary, however long the text typed, and nothing after that line.
+#[test]
+fn a_delivery_intent_stores_only_the_cut_first_line() {
+    let fixture = Fixture::new(2);
+    let sub = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    ledger::initialize(&fixture.connection).unwrap();
+    drop(crate::recovery::open(&fixture.base).unwrap());
+    let first = format!("a{}", "é".repeat(1_000));
+    let text = format!("\n{first}\nThe second line");
+    let task = running_task(&fixture, sub, &text);
+    assert!(delivery::intend(&fixture.connection, Busy::Task(task), sub, &text, None).unwrap());
+    let action = ledger::pending_key(
+        &fixture.connection,
+        ledger::ActionKind::Dispatch,
+        &format!("team-task/{task}"),
+    )
+    .unwrap()
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&action.payload).unwrap();
+    let marker = payload["marker"].as_str().unwrap();
+    assert_eq!(marker.len(), delivery::MARKER_BYTES_MAX - 1);
+    assert!(first.starts_with(marker), "{marker}");
+    assert!(!action.payload.contains("The second line"));
+}
+
 /// A message its master was answering when the engine stopped is held for the master's
 /// resume: the start neither fails it nor types it. A resume that fails keeps it held for
 /// the owner's retry; a retried resume that fails again gives the run up and lets the
@@ -13682,6 +13770,61 @@ fn a_wake_task_with_its_message_already_delivered_says_so() {
     assert!(!typed.contains(WAKE_TASK), "{typed}");
     assert!(typed.contains(WAKE_DELIVERED), "{typed}");
     assert!(!typed.contains("Messages for you"), "{typed}");
+    team.workers.clear();
+}
+
+/// The delivery intent of a wake task records the words its turn typed. With its message
+/// already delivered the turn says `WAKE_DELIVERED`, so that is the marker a restart looks
+/// for: a marker of the stored `WAKE_TASK` could never be found (rv-code L1).
+#[test]
+fn a_wake_task_s_intent_names_the_text_that_was_typed() {
+    use super::super::master::WAKE_DELIVERED;
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let woken = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    team.workers
+        .insert(woken, between_turns(&project, AgentRole::Sub, true, true));
+    let message = crate::coord::send(
+        &fixture.connection,
+        crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Agent(lead),
+            to: crate::coord::Party::Agent(woken),
+            kind: crate::coord::MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: "Merge your branch".into(),
+            idempotency_key: None,
+        },
+        1,
+    )
+    .unwrap();
+    let asleep = team.asleep(&project);
+    team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE coord_messages SET receipt='replied' WHERE id=?1",
+            [message],
+        )
+        .unwrap();
+    let (orders, turns) = channel();
+    team.workers.get_mut(&woken).unwrap().orders = orders;
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let Ok(Order::Turn(typed, None, _)) = turns.try_recv() else {
+        panic!("the woken agent's kept session got no turn");
+    };
+    let pending = ledger::pending(&fixture.connection, ledger::ActionKind::Dispatch).unwrap();
+    assert_eq!(pending.len(), 1);
+    let payload: serde_json::Value = serde_json::from_str(&pending[0].payload).unwrap();
+    assert_eq!(payload["marker"], WAKE_DELIVERED);
+    assert!(typed.contains(WAKE_DELIVERED), "{typed}");
     team.workers.clear();
 }
 
