@@ -228,7 +228,7 @@ pub fn prepare(
         rustix::fs::open(runtime, OPEN_FOLDER, Mode::empty()).map_err(|_| "tool_cache_unmade")?;
     let tools = engine_folder(&base, FOLDER)?;
     let owned = engine_folder(&tools, &digest(project, 32))?;
-    let cache = engine_folder(&owned, key)?;
+    let cache = reopened(engine_folder(&owned, key)?)?;
     agent_folder(&cache, PNPM)?;
     let store = agent_folder(&cache, UV)?;
     let root = project_folder(runtime, project).join(key);
@@ -287,12 +287,14 @@ fn open_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> {
 /// Makes or opens a folder in the agent's cache, which the agent may have moved, emptied or
 /// remade. A link or a file an agent left under the folder's name is unlinked, never
 /// followed, and a folder of this user it closed gets owner rwx again, once, so no agent at
-/// a Shared key keeps every later launch there from a cache (T8 r1 L2). Inputs: the open
-/// parent and the name. Output: the open folder, or the plain code that refused it.
+/// a Shared key keeps every later launch there from a cache (T8 r1 L2). A file it pinned
+/// there is unpinned before the unlink, and the open folder goes through [`reopened`]
+/// (T8-R2-N1). Inputs: the open parent and the name. Output: the open folder, or the plain
+/// code that refused it.
 fn agent_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> {
     match open_folder(parent, name) {
         Err("tool_cache_link") => {}
-        opened => return opened,
+        opened => return reopened(opened?),
     }
     let found = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|_| "tool_cache_link")?;
@@ -301,10 +303,30 @@ fn agent_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> {
             rustix::fs::chmodat(parent, name, Mode::RWXU, AtFlags::SYMLINK_NOFOLLOW)
         }
         FileType::Directory => return Err("tool_cache_link"),
-        _ => rustix::fs::unlinkat(parent, name, AtFlags::empty()),
+        _ => {
+            crate::team::cleanup::unpin(parent, name);
+            rustix::fs::unlinkat(parent, name, AtFlags::empty())
+        }
     };
     repaired.map_err(|_| "tool_cache_link")?;
-    open_folder(parent, name)
+    reopened(open_folder(parent, name)?)
+}
+
+/// Gives an open folder of the cache agents write back to its owner: clears the immutable
+/// and append-only flags an agent may set on it and owner rwx it took away, so no agent at a
+/// Shared key keeps every later launch there from making what it needs inside (T8-R2-N1).
+/// A folder of another user keeps its mode. A link pinned in a folder's place, or an entry
+/// pinned at mode 000, cannot be unpinned safely and still refuses the cache (T8-R2-F1).
+/// Input: the open folder. Output: the folder, or `tool_cache_unmade`.
+fn reopened(folder: OwnedFd) -> Result<OwnedFd, &'static str> {
+    crate::team::cleanup::unpin(&folder, c".");
+    let stat = rustix::fs::fstat(&folder).map_err(|_| "tool_cache_unmade")?;
+    if stat.st_uid == rustix::process::geteuid().as_raw()
+        && u32::from(stat.st_mode) & 0o700 != 0o700
+    {
+        rustix::fs::fchmod(&folder, Mode::RWXU).map_err(|_| "tool_cache_unmade")?;
+    }
+    Ok(folder)
 }
 
 /// Puts the uv marker in one cache bucket: makes `.git` as a link to exactly `/dev/null`,

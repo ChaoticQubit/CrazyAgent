@@ -744,8 +744,9 @@ pub fn remove(
 }
 
 /// Checks every claimed worktree again, then per agent checks its row once more and removes
-/// its worktree, deleting what git left when it removed its record only part way, and last
-/// its waiting record, in claim order. A worktree whose leftover cannot be deleted marks its
+/// its worktree, deleting what git left when it removed its record only part way, pinned
+/// entries included (T8-R2-N4), and last its waiting record, in claim order. A worktree
+/// whose leftover cannot be deleted marks its
 /// waiting record, so a later removal deletes the leftover without asking git again
 /// (RVD-C-N1). Inputs: the store, the project, the claims, the time now and the list each
 /// removed agent joins. Output: None once all are removed, or the plain code of the first
@@ -778,7 +779,7 @@ fn retire_claimed(
     for target in claimed {
         let place = &target.place;
         if target.worktree_removed() {
-            if !missing(&place.worktree) && remove_tree(&place.worktree).is_err() {
+            if !missing(&place.worktree) && remove_agent_tree(&place.worktree).is_err() {
                 return Ok(Some("cleanup_worktree_leftover"));
             }
         } else {
@@ -801,7 +802,7 @@ fn retire_claimed(
                         )
                         .map_err(unavailable)?;
                     assert_eq!(marked, 1);
-                    if remove_tree(&place.worktree).is_err() {
+                    if remove_agent_tree(&place.worktree).is_err() {
                         return Ok(Some("cleanup_worktree_leftover"));
                     }
                 }
@@ -956,9 +957,9 @@ pub(crate) fn remove_tree(folder: &Path) -> Result<(), EngineError> {
 
 /// Deletes a folder an agent wrote as [`remove_tree`] does and, when a plain delete stops,
 /// also clears the immutable and append-only flags of this user's entries on the way, so an
-/// agent's `chflags uchg` or `chmod 0500` in its own tool cache keeps neither Clean up nor a
-/// project's delete from removing it (T8 r1 L3). Input: the folder. Output: Ok once nothing
-/// has its name.
+/// agent's `chflags uchg` or `chmod 0500` in its own tool cache or worktree keeps neither
+/// Clean up nor a project's delete from removing it (T8 r1 L3, T8-R2-N4). Input: the
+/// folder. Output: Ok once nothing has its name.
 pub(crate) fn remove_agent_tree(folder: &Path) -> Result<(), EngineError> {
     if std::fs::remove_dir_all(folder).is_err() {
         writable(folder, true);
@@ -1063,9 +1064,10 @@ thread_local! {
 /// through `/dev/fd/<n>` of that open entry, so no path an agent can change is resolved and
 /// a folder or link it swaps in meanwhile is never followed (T8 r2 L1). An entry that will
 /// not open, such as one at mode 000, keeps its flags; the removal then stops on it and its
-/// caller reports what is left. Inputs: the entry's open parent and its name there.
+/// caller reports what is left. A launch clears its Shared tool cache folders the same way
+/// (T8-R2-N1). Inputs: the entry's open parent and its name there.
 #[cfg(target_os = "macos")]
-fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: P) {
+pub(crate) fn unpin<P: rustix::path::Arg>(parent: impl std::os::fd::AsFd, name: P) {
     use nix::sys::stat::FileFlag;
     use rustix::fs::{FileType, Mode, OFlags};
     use std::os::fd::AsRawFd;
