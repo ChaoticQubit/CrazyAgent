@@ -12878,6 +12878,7 @@ fn between_turns(
         restarting: false,
         warm: false,
         worked: true,
+        ended_well: false,
         managed,
         tools: true,
         team_tool: true,
@@ -13637,29 +13638,52 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
 #[test]
 fn an_agent_whose_work_ended_well_is_not_failed_for_a_command_that_outlived_it() {
     use crate::harnesses::leftovers::{LEFT, SANDBOX_LEFT, UNCHECKED};
-    for (end, busy, code, expected) in [
-        (TurnEnd::Success, false, LEFT, AgentStatus::Stopped),
-        (TurnEnd::Success, false, SANDBOX_LEFT, AgentStatus::Stopped),
-        (TurnEnd::Success, false, UNCHECKED, AgentStatus::Failed),
-        (TurnEnd::Success, false, PROCESS_CLOSED, AgentStatus::Failed),
-        (TurnEnd::Failed, false, LEFT, AgentStatus::Failed),
-        (TurnEnd::Success, true, LEFT, AgentStatus::Failed),
-    ] {
+    type Ended = fn(TurnEnd) -> Report;
+    let finished: Ended = |end| Report::Finished {
+        text: String::new(),
+        end,
+        cause: None,
+    };
+    let turn: Ended = |end| Report::Turn {
+        end: Some(end),
+        text: String::new(),
+    };
+    let own: Ended = |end| Report::Own {
+        end: Some(end),
+        text: String::new(),
+    };
+    let well = TurnEnd::Success;
+    let badly = TurnEnd::Failed;
+    let rows: [(Ended, &[TurnEnd], bool, &str, AgentStatus); 12] = [
+        (finished, &[well], false, LEFT, AgentStatus::Stopped),
+        (turn, &[well], false, LEFT, AgentStatus::Stopped),
+        (own, &[well], false, LEFT, AgentStatus::Stopped),
+        (finished, &[well], false, SANDBOX_LEFT, AgentStatus::Stopped),
+        (finished, &[well], false, UNCHECKED, AgentStatus::Failed),
+        (
+            finished,
+            &[well],
+            false,
+            PROCESS_CLOSED,
+            AgentStatus::Failed,
+        ),
+        (finished, &[badly], false, LEFT, AgentStatus::Failed),
+        (finished, &[well, badly], false, LEFT, AgentStatus::Failed),
+        (turn, &[well, badly], false, LEFT, AgentStatus::Failed),
+        (own, &[well, badly], false, LEFT, AgentStatus::Failed),
+        (finished, &[well], true, LEFT, AgentStatus::Failed),
+        (finished, &[], false, LEFT, AgentStatus::Failed),
+    ];
+    for (at, (ended, ends, busy, code, expected)) in rows.into_iter().enumerate() {
         let fixture = Fixture::new(1);
         let mut team = fixture.runtime();
         let project = ProjectId::new(PROJECT).unwrap();
         let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
         team.workers
             .insert(agent, between_turns(&project, AgentRole::Sub, true, true));
-        team.apply(
-            agent,
-            Report::Finished {
-                text: String::new(),
-                end,
-                cause: None,
-            },
-        )
-        .unwrap();
+        for end in ends {
+            team.apply(agent, ended(*end)).unwrap();
+        }
         if busy {
             fixture
                 .connection
@@ -13671,7 +13695,7 @@ fn an_agent_whose_work_ended_well_is_not_failed_for_a_command_that_outlived_it()
             let task = fixture.connection.last_insert_rowid();
             team.workers.get_mut(&agent).unwrap().busy = Some(Busy::Task(task));
         }
-        let problem = format!("Still running: 7 make. ({code})");
+        let problem = with_code("Still running: 7 make", Some(code));
         team.apply(
             agent,
             Report::Ended {
@@ -13687,12 +13711,8 @@ fn an_agent_whose_work_ended_well_is_not_failed_for_a_command_that_outlived_it()
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(
-            fixture.agent_status(agent).0,
-            expected,
-            "{end:?} busy {busy} {code}"
-        );
-        assert_eq!(shown, Some(problem), "{end:?} busy {busy} {code}");
+        assert_eq!(fixture.agent_status(agent).0, expected, "row {at}");
+        assert_eq!(shown, Some(problem), "row {at}");
     }
 }
 

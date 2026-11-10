@@ -517,6 +517,7 @@ struct Worker {
     restarting: bool,
     warm: bool,
     worked: bool,
+    ended_well: bool,
     managed: bool,
     tools: bool,
     team_tool: bool,
@@ -5941,6 +5942,7 @@ impl TeamRuntime {
                 restarting: false,
                 warm: false,
                 worked: false,
+                ended_well: false,
                 managed,
                 tools: seat.tools,
                 team_tool,
@@ -7611,6 +7613,7 @@ impl TeamRuntime {
                 }
                 worker.idle_since = Instant::now();
                 worker.worked = true;
+                worker.ended_well = end == TurnEnd::Success;
                 let connection = worker.connection.clone();
                 let project = worker.project.clone();
                 let held = worker.held;
@@ -7692,6 +7695,7 @@ impl TeamRuntime {
                 let started = worker.turn_started.take();
                 worker.idle_since = Instant::now();
                 worker.worked = true;
+                worker.ended_well = end == TurnEnd::Success;
                 if let Some(hosted) = &worker.hosted {
                     hosted.text(&text);
                     hosted.set_busy(false);
@@ -7761,6 +7765,7 @@ impl TeamRuntime {
                 worker.own_rules = None;
                 worker.idle_since = Instant::now();
                 worker.worked = true;
+                worker.ended_well = end == TurnEnd::Success;
                 let idle = worker.busy.is_none();
                 if let Some(hosted) = worker.hosted.as_ref().filter(|_| idle) {
                     hosted.text(&text);
@@ -7844,7 +7849,10 @@ impl TeamRuntime {
                         TurnEnd::Closed,
                     )?;
                 }
-                let status = if problem.is_some() && !worker.stopping {
+                let outlived = worker.busy.is_none()
+                    && worker.ended_well
+                    && problem.as_deref().is_some_and(only_left_running);
+                let status = if problem.is_some() && !worker.stopping && !outlived {
                     AgentStatus::Failed
                 } else {
                     AgentStatus::Stopped
@@ -9878,6 +9886,16 @@ fn with_code(sentence: &str, cause: Option<&str>) -> String {
         }
         None => sentence.to_owned(),
     }
+}
+
+/// Whether a closing problem says only that commands an agent started were still running
+/// when it ended, which says nothing against its finished work. Input: the problem, worded
+/// by [`with_code`]. Output: true when its code is `LEFT` or `SANDBOX_LEFT`.
+fn only_left_running(problem: &str) -> bool {
+    use crate::harnesses::leftovers::{LEFT, SANDBOX_LEFT};
+    [LEFT, SANDBOX_LEFT]
+        .iter()
+        .any(|code| problem.ends_with(&format!(" ({code})")))
 }
 
 /// Ends an owner line with one full stop, leaving a line that already ends with a sentence
