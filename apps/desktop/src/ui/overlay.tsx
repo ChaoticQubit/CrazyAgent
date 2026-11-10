@@ -70,7 +70,7 @@ function useModal(open: boolean, returnFocus?: () => HTMLElement | null) {
  * Inputs: open, title, close handler, optional Back handler, body, footer, wide layout, busy. */
 export function Dialog({ open, title, onClose, onBack, children, footer, wide = false, busy = false }: {
   open: boolean;
-  title: string;
+  title: ReactNode;
   onClose: () => void;
   onBack?: () => void;
   children: ReactNode;

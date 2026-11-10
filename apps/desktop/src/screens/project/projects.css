@@ -340,6 +340,7 @@ dialog.drawer .set-row { grid-template-columns: minmax(0, 1fr) minmax(0, max-con
 .pj-remove-losses > li { display: flex; gap: 4px; min-width: 0; max-width: 100%; }
 .pj-remove-who { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pj-remove-what { flex: none; white-space: nowrap; }
+.pj-remove-clip { display: inline-block; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .pj-remove-name { overflow-wrap: anywhere; }
 @media (max-height: 640px) {
   .pj-remove-deleting { gap: 8px; }

@@ -17,7 +17,7 @@ import { basicsErrors, draftOf, editRequest, poolName, researchChoices, teamVali
 import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
-import { RemoveDialogView, deleteReady } from "./remove-dialog";
+import { RemoveDialogView, deleteReady, removeTitle } from "./remove-dialog";
 import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
 import { SessionContext, useHeld, useLoad } from "../../state";
@@ -251,7 +251,7 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     <p>Remove {displayText(data.name)} from CrazyAgent? {displayText(line)}</p>
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><button type="button" className="btn danger" onClick={() => setConfirming(true)}>Remove project</button></div>
-    <Dialog open={confirming} title={`Remove ${displayText(data.name)} from CrazyAgent?`} onClose={() => setConfirming(false)} busy={busy} wide>
+    <Dialog open={confirming} title={removeTitle(displayText(data.name))} onClose={() => setConfirming(false)} busy={busy} wide>
       {preview === undefined
         ? <p className="pj-muted" role="status">Reading what removing would do...</p>
         : <>

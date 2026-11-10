@@ -198,7 +198,7 @@ dialog.dialog { padding: 0; width: min(560px, calc(100vw - 32px)); max-height: c
 dialog.dialog.wide { width: min(720px, calc(100vw - 32px)); }
 dialog.dialog::backdrop { background: var(--scrim); }
 .dialog-head { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--border); }
-.dialog-head h2 { flex: 1; }
+.dialog-head h2 { flex: 1; min-width: 0; }
 .dialog-body { padding: var(--space-5); display: grid; gap: var(--space-4); }
 .dialog-foot { display: flex; justify-content: flex-end; gap: var(--space-2); flex-wrap: wrap; padding: var(--space-3) var(--space-5); border-top: 1px solid var(--border); }
 dialog.drawer { margin: 0 0 0 auto; padding: 0; width: min(480px, 100vw); height: 100dvh; max-height: 100dvh; background: var(--surface); color: var(--text); border: 0; border-left: 1px solid var(--border); box-shadow: var(--elev-2); }
