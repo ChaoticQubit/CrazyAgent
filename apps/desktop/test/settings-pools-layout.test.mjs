@@ -378,11 +378,11 @@ test("Try again reads the pools a second time", async () => {
   assert.equal(reads.filter((command) => command === "desktop_pool_summaries").length, 2, JSON.stringify(reads));
 });
 
-test("Account choice stays below a list of pools and only there", async () => {
+test("How every pool picks an account stays under Your pools and only with a list of pools", async () => {
   const listed = await onPools({}, say);
-  assert.ok(listed.indexOf("Account choice") > listed.indexOf("Your pools"), listed);
+  assert.ok(listed.indexOf("How every pool picks an account") > listed.indexOf("Your pools"), listed);
   const none = await onPools({ pools: "empty" }, say);
-  assert.ok(!none.includes("Account choice"), none);
+  assert.ok(!none.includes("How every pool picks an account"), none);
 });
 
 test("Delete pool asks first, and a refused delete shows under the title", async () => {

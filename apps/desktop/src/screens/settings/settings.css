@@ -84,5 +84,5 @@
 .pool-sched .input { height: 28px; }
 .pool-sched-text { flex: 1 1 220px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--text-2); }
 .pool-sched-text b { display: block; font-weight: 600; color: var(--text); }
-.pool-refusal { position: sticky; top: 8px; z-index: 3; }
+.pool-refusal { position: sticky; top: 8px; z-index: 3; margin-bottom: var(--space-4); border-radius: var(--radius-panel); background: var(--bg); }
 @container (max-width: 560px) { .pool-ctl { justify-content: flex-start; } }
