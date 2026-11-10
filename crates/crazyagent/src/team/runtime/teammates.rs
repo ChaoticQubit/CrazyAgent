@@ -312,36 +312,52 @@ pub(super) fn resting(
 }
 
 /// Lists a lead's teammate rows that stopped or failed, the newest row of each name only
-/// and only while no running row of the lead holds that name, so the engine saves once the
-/// edits such a teammate left in its worktree, which no rest commits (team-20 r1 M1).
-/// Inputs: the connection, the project and the lead. Output: at most `MEMBERS_MAX` rows,
-/// newest first, or a SQLite failure.
+/// and only while no running row of the lead holds that name ([`crate::team::ENDED_TEAMMATE`]),
+/// so the engine saves the edits such a teammate left in its worktree, which no rest commits
+/// (team-20 r1 M1), each with whether the lead's finish asked for another save (team-20 r2
+/// R2-M1). Inputs: the connection, the project and the lead. Output: at most `MEMBERS_MAX`
+/// rows, newest first, or a SQLite failure.
 pub(super) fn ended(
     connection: &Connection,
     project: &ProjectId,
     lead: i64,
-) -> Result<Vec<i64>, EngineError> {
+) -> Result<Vec<(i64, bool)>, EngineError> {
     let mut statement = connection
-        .prepare(
-            "SELECT a.id FROM team_agents a JOIN team_teammate_names n ON n.agent=a.id
-             WHERE a.project=?1 AND a.parent=?2 AND a.role='teammate'
-             AND a.status IN ('stopped','failed')
-             AND NOT EXISTS (
-                 SELECT 1 FROM team_agents b JOIN team_teammate_names m ON m.agent=b.id
-                 WHERE b.project=?1 AND b.parent=?2 AND b.role='teammate' AND m.name=n.name
-                 AND (b.status IN ('starting','idle','working') OR b.id>a.id))
+        .prepare(&format!(
+            "SELECT a.id, IFNULL(n.save_refused='',0) FROM team_agents a
+             JOIN team_teammate_names n ON n.agent=a.id
+             WHERE a.project=?1 AND a.parent=?2 AND a.role='teammate' AND {}
              ORDER BY a.id DESC LIMIT ?3",
-        )
+            crate::team::ENDED_TEAMMATE
+        ))
         .map_err(error)?;
-    let rows: Vec<i64> = statement
+    let rows: Vec<(i64, bool)> = statement
         .query_map(params![project.as_str(), lead, MEMBERS_MAX as i64], |row| {
-            row.get(0)
+            Ok((row.get(0)?, row.get(1)?))
         })
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
     assert!(rows.len() <= MEMBERS_MAX);
     Ok(rows)
+}
+
+/// Keeps why the engine last gave up saving a native teammate's edits, or clears it once a
+/// save went through or found no worktree, so the lead's finish can name the cause and ask
+/// for another save (team-20 r2 R2-M1). Inputs: the connection, the teammate and the
+/// non-empty plain code, None to clear. Output: Ok, or a SQLite failure.
+pub(super) fn save_refused(
+    connection: &Connection,
+    teammate: i64,
+    code: Option<&str>,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "UPDATE team_teammate_names SET save_refused=?2 WHERE agent=?1",
+            params![teammate, code],
+        )
+        .map_err(error)?;
+    Ok(())
 }
 
 /// Lists a lead's running teammate rows with their pane ids, so the terminal host learns

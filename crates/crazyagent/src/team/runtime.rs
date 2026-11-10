@@ -6570,9 +6570,11 @@ impl TeamRuntime {
     /// as a linked agent's turn end does, so its work waits as its own change set; a
     /// teammate that works again is committed at its next rest. A teammate that stopped or
     /// failed before it rested is saved the same way once, through [`Self::save_teammate`],
-    /// so no edits it left are stranded (team-20 r1 M1). A turn the engine could not commit
-    /// is tried again at the next pass, up to `TEAMMATE_TURN_TRIES` times for each rest, then
-    /// the lead is told once that it stays in the teammate's worktree (OP9B-L1); a teammates'
+    /// so no edits it left are stranded (team-20 r1 M1), and once more each time the lead's
+    /// finish found its edits unsaved and asked for it (team-20 r2 R2-M1). A turn the engine
+    /// could not commit is tried again at the next pass, up to `TEAMMATE_TURN_TRIES` times for
+    /// each rest, then the lead is told once that it stays in the teammate's worktree
+    /// (OP9B-L1); a teammates'
     /// folder the engine cannot read is told to the lead once until it reads again (OP9B-L2).
     /// Takes the project and the lead. Returns Ok, or a SQLite or coordination failure.
     fn record_teammate_turns(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
@@ -6584,13 +6586,19 @@ impl TeamRuntime {
         };
         let rows = teammates::resting(&self.connection, project, lead)?;
         let ended = teammates::ended(&self.connection, project, lead)?;
+        let asked: Vec<i64> = ended
+            .iter()
+            .filter(|(_, asked)| *asked)
+            .map(|(teammate, _)| *teammate)
+            .collect();
+        let ended: Vec<i64> = ended.into_iter().map(|(teammate, _)| teammate).collect();
         let kept = |teammate: &i64| rows.contains(&(*teammate, true)) || ended.contains(teammate);
         self.teammate_turn_tries
             .entry(lead)
             .or_default()
             .retain(|teammate, _| kept(teammate));
         let rested = self.teammates_rested.entry(lead).or_default();
-        rested.retain(|teammate| kept(teammate));
+        rested.retain(|teammate| kept(teammate) && !asked.contains(teammate));
         let due: Vec<i64> = rows
             .iter()
             .filter(|(_, resting)| *resting)
@@ -6649,13 +6657,13 @@ impl TeamRuntime {
     }
 
     /// Saves one native teammate's edits for [`Self::record_teammate_turns`] as a turn end
-    /// on its own branch. A refused save counts against `TEAMMATE_TURN_TRIES` and the lead is
-    /// told once they run out; a teammate that ended before it rested is never promised a
-    /// later rest, and when its save added edits the lead hears they may be partial. Takes
-    /// the store, the project, the lead, the lead's repository, worktree and git folder, the
-    /// teammate, its name and whether it ended. Returns whether this rest is done, false when
-    /// a try is left or the worktree of a teammate that may still rest is not found, since an
-    /// ended one with none left nothing to save, or a coordination failure.
+    /// on its own branch; a worktree that cannot be read counts as a refused save (team-20 r2
+    /// R2-M1). When a save of a teammate that ended before it rested added edits, the lead
+    /// hears they may be partial. Takes the store, the project, the lead, the lead's
+    /// repository, worktree and git folder, the teammate and its name, and whether it ended.
+    /// Returns whether this rest is done, false when a try is left or the worktree of a
+    /// teammate that may still rest is not found, since an ended one with none left nothing
+    /// to save, or a coordination failure.
     fn save_teammate(
         &mut self,
         db: &Connection,
@@ -6665,52 +6673,80 @@ impl TeamRuntime {
         (teammate, name): (i64, &str),
         ended: bool,
     ) -> Result<bool, EngineError> {
-        let Ok(Some((own, own_git))) =
-            crate::landing::linked_teammate_place(db, worktree, git_dir, name)
-        else {
-            return Ok(ended);
-        };
-        let workspace = crate::landing::Workspace {
-            project: project.clone(),
-            agent: crate::landing::ChangeAgent {
-                kind: crate::landing::AgentKind::Sub,
-                id: teammate.to_string(),
-                label: format!("{name} \u{b7} teammate"),
-            },
-            repository: repository.to_path_buf(),
-            worktree: own,
-            git_dir: own_git,
-        };
-        let turn = crate::landing::TurnEnd {
-            outcome: crate::landing::TurnOutcome::Succeeded,
-            turn: format!("rest-{}", now_ms()),
-            prompt_line: format!("Work of teammate {name}"),
-        };
-        let folder = crate::agent_git::TEAMMATES_FOLDER;
-        let tries = self.teammate_turn_tries.entry(lead).or_default();
-        let problem = match crate::landing_turns::record(
-            db,
-            &workspace,
-            &turn,
-            self.settings.as_ref(),
-        ) {
-            Ok(saved) => {
-                tries.remove(&teammate);
-                if ended && matches!(saved, crate::landing_turns::Landed::Added(_)) {
-                    self.note_lead(
-                        project,
-                        lead,
-                        format!(
-                            "Teammate {name} ended before it rested, so CrazyAgent saved the edits it left in its worktree {folder}/{name} on its own branch; they may be partial. CrazyAgent lands them on your task branch while you are idle; review them before you finish."
-                        ),
-                    )?;
+        let saved = match crate::landing::linked_teammate_place(db, worktree, git_dir, name) {
+            Ok(None) => {
+                if ended {
+                    teammates::save_refused(&self.connection, teammate, None)?;
                 }
-                return Ok(true);
+                return Ok(ended);
             }
-            Err(problem) => problem,
+            Ok(Some((own, own_git))) => {
+                let workspace = crate::landing::Workspace {
+                    project: project.clone(),
+                    agent: crate::landing::ChangeAgent {
+                        kind: crate::landing::AgentKind::Sub,
+                        id: teammate.to_string(),
+                        label: format!("{name} \u{b7} teammate"),
+                    },
+                    repository: repository.to_path_buf(),
+                    worktree: own,
+                    git_dir: own_git,
+                };
+                let turn = crate::landing::TurnEnd {
+                    outcome: crate::landing::TurnOutcome::Succeeded,
+                    turn: format!("rest-{}", now_ms()),
+                    prompt_line: format!("Work of teammate {name}"),
+                };
+                crate::landing_turns::record(db, &workspace, &turn, self.settings.as_ref())
+            }
+            Err(problem) => Err(problem),
         };
-        let code = crate::landing::refusal_code(&problem).to_owned();
+        let saved = match saved {
+            Ok(saved) => saved,
+            Err(problem) => {
+                return self.refused_save(project, lead, (teammate, name), ended, &problem);
+            }
+        };
+        self.teammate_turn_tries
+            .entry(lead)
+            .or_default()
+            .remove(&teammate);
+        teammates::save_refused(&self.connection, teammate, None)?;
+        if ended && matches!(saved, crate::landing_turns::Landed::Added(_)) {
+            let folder = crate::agent_git::TEAMMATES_FOLDER;
+            self.note_lead(
+                project,
+                lead,
+                format!(
+                    "Teammate {name} ended before it rested, so CrazyAgent saved the edits it left in its worktree {folder}/{name} on its own branch; they may be partial. CrazyAgent lands them on your task branch while you are idle; review them before you finish."
+                ),
+            )?;
+        }
+        Ok(true)
+    }
+
+    /// Counts one refused save of a native teammate's edits for [`Self::save_teammate`]
+    /// against `TEAMMATE_TURN_TRIES`. Once they run out the lead is told once, and the cause
+    /// is kept for the lead's finish, which names it and asks for another save of a teammate
+    /// that ended (team-20 r2 R2-M1). Takes the project, the lead, the teammate and its name,
+    /// whether it ended and the refusal. Returns whether this rest is done, or a SQLite or
+    /// coordination failure.
+    fn refused_save(
+        &mut self,
+        project: &ProjectId,
+        lead: i64,
+        (teammate, name): (i64, &str),
+        ended: bool,
+        problem: &EngineError,
+    ) -> Result<bool, EngineError> {
+        let code = bound_text(crate::landing::refusal_code(problem), 128);
+        let code = if code.is_empty() {
+            "changes_save_refused".to_owned()
+        } else {
+            code
+        };
         eprintln!("teammate_turn_failed cause={code}");
+        let tries = self.teammate_turn_tries.entry(lead).or_default();
         let tried = tries.entry(teammate).or_insert(0);
         *tried += 1;
         assert!(*tried <= TEAMMATE_TURN_TRIES);
@@ -6718,6 +6754,7 @@ impl TeamRuntime {
             return Ok(false);
         }
         tries.remove(&teammate);
+        teammates::save_refused(&self.connection, teammate, Some(&code))?;
         let then = if ended {
             format!("{name} has ended, so ask the owner to look at it")
         } else {
@@ -6727,7 +6764,8 @@ impl TeamRuntime {
             project,
             lead,
             format!(
-                "CrazyAgent could not save teammate {name}'s work on its own branch ({code}), {TEAMMATE_TURN_TRIES} times. It stays uncommitted in its worktree {folder}/{name}; {then}."
+                "CrazyAgent could not save teammate {name}'s work on its own branch ({code}), {TEAMMATE_TURN_TRIES} times. It stays uncommitted in its worktree {}/{name}; {then}.",
+                crate::agent_git::TEAMMATES_FOLDER
             ),
         )?;
         Ok(true)
@@ -6789,7 +6827,10 @@ impl TeamRuntime {
         worktree: &Path,
         git_dir: &Path,
     ) -> Result<Option<(Vec<String>, String)>, EngineError> {
-        let ended = teammates::ended(&self.connection, project, lead)?;
+        let ended: Vec<i64> = teammates::ended(&self.connection, project, lead)?
+            .into_iter()
+            .map(|(teammate, _)| teammate)
+            .collect();
         let resting: Vec<i64> = teammates::resting(&self.connection, project, lead)?
             .into_iter()
             .filter(|(_, resting)| *resting)

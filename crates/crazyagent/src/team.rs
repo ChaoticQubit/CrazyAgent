@@ -1618,7 +1618,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             );
             CREATE TABLE IF NOT EXISTS team_teammate_names (
                 agent INTEGER PRIMARY KEY,
-                name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64)
+                name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64),
+                save_refused TEXT CHECK(save_refused IS NULL OR length(save_refused) <= 128)
             );
             CREATE TABLE IF NOT EXISTS team_agent_conversations (
                 agent INTEGER PRIMARY KEY,
@@ -3545,15 +3546,27 @@ pub fn agent_depth(connection: &Connection, agent: i64) -> Result<u8, EngineErro
 const DEPTH_WALK_MAX: i64 = 8;
 const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 
+/// The rows of a lead's native teammates that stopped or failed, the newest row of each
+/// name only and none whose name a running row of the lead holds (team-20 r1 M1), as a SQL
+/// test on `a` (team_agents) joined to `n` (team_teammate_names) with the project as ?1
+/// and the lead as ?2, so the engine's save and the lead's finish read the same rows.
+pub(crate) const ENDED_TEAMMATE: &str = "a.status IN ('stopped','failed')
+     AND NOT EXISTS (
+         SELECT 1 FROM team_agents b JOIN team_teammate_names m ON m.agent=b.id
+         WHERE b.project=?1 AND b.parent=?2 AND b.role='teammate' AND m.name=n.name
+         AND (b.status IN ('starting','idle','working') OR b.id>a.id))";
+
 /// Gives team tables made before later columns those columns, older rows taking the
 /// default: `team_agents.pane` (a native teammate's tmux pane id), `team_agents.mode` (the
 /// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
 /// for a lead's task), `team_agents.hookless` (1 when the agent's launch fires no hooks,
 /// DEC-104 bare-hooks), `team_agents.pane_pid` (the pane process a native teammate was
 /// first named by, PLC (b)), `team_task_pins.held` (1 when a hold pinned the task, not
-/// its own purpose) and `team_owner_stops.stopped_by` (who made the stop; one from before
-/// the column was the owner's). Runs on every open and adds each column once. Takes the
-/// engine connection. Returns any SQLite failure.
+/// its own purpose), `team_owner_stops.stopped_by` (who made the stop; one from before
+/// the column was the owner's) and `team_teammate_names.save_refused` (why the engine last
+/// gave up saving a teammate's edits, empty once the lead's finish asked for another save,
+/// team-20 r2 R2-M1). Runs on every open and adds each column once. Takes the engine
+/// connection. Returns any SQLite failure.
 fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
     for (table, column, definition) in [
         ("team_agents", "pane", "TEXT"),
@@ -3566,6 +3579,11 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
             "team_owner_stops",
             "stopped_by",
             "TEXT NOT NULL DEFAULT 'owner'",
+        ),
+        (
+            "team_teammate_names",
+            "save_refused",
+            "TEXT CHECK(save_refused IS NULL OR length(save_refused) <= 128)",
         ),
     ] {
         let present: bool = connection
