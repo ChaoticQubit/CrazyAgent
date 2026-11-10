@@ -898,10 +898,14 @@ impl ResearchRunner {
         toolchains::write_getconf(&home, false)?;
         toolchains::prepare_cargo_home(&home, &homes)?;
         let kept = match (&self.settings, job.tools) {
-            (Some((global, local)), true) => crate::config::resolve_config(global, local)
-                .ok()
-                .and_then(|config| config.settings.model_access)
-                .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access)),
+            (Some((global, local)), true) => crate::sandbox::settings_owner_ports(global, local)
+                .map_err(|_| {
+                    RunError::Invalid(format!(
+                        "the settings files {} and {} do not read, so the owner's model ports cannot be kept from the job",
+                        global.display(),
+                        local.display()
+                    ))
+                })?,
             _ => Vec::new(),
         };
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?.keep_ports(&kept)?;

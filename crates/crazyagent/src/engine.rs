@@ -545,14 +545,14 @@ impl Engine {
 
     /// The loopback ports of the owner's configured local model endpoints, read from the
     /// engine's settings files at each call, for a sandbox the engine starts to keep free
-    /// of the listeners of what it runs. Output: the ports; none when the engine has no
-    /// settings files or they do not read, as for team and research launches.
-    pub(crate) fn owner_ports(&self) -> Vec<u16> {
-        self.settings_files
-            .as_ref()
-            .and_then(|(global, project)| crate::config::resolve_config(global, project).ok())
-            .and_then(|config| config.settings.model_access)
-            .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
+    /// of the listeners of what it runs. Output: the ports, none when the engine has no
+    /// settings files, or [`crate::sandbox::OWNER_PORTS_UNREADABLE`] when they do not read,
+    /// so that sandbox does not start (OWNER-PORTS-FAIL-OPEN).
+    pub(crate) fn owner_ports(&self) -> Result<Vec<u16>, &'static str> {
+        match &self.settings_files {
+            Some((global, project)) => crate::sandbox::settings_owner_ports(global, project),
+            None => Ok(Vec::new()),
+        }
     }
 
     pub async fn open_with_settings_sources(

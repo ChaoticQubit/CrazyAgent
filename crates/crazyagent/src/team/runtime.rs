@@ -572,6 +572,7 @@ pub struct TeamRuntime {
     state: PathBuf,
     executables: BTreeMap<&'static str, PathBuf>,
     access: AccessSource,
+    settings: Option<(PathBuf, PathBuf)>,
     limits: TeamLimits,
     workers: BTreeMap<i64, Worker>,
     custody: Result<NativeProfileCustody, EngineError>,
@@ -871,6 +872,7 @@ impl TeamRuntime {
             state: state.to_path_buf(),
             executables,
             access,
+            settings: None,
             limits,
             workers: BTreeMap::new(),
             custody,
@@ -938,6 +940,15 @@ impl TeamRuntime {
     /// that team messaging is not available.
     pub fn with_events(mut self, events: super::master::TeamEvents) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    /// Reads the owner's configured local model ports from these two settings files at each
+    /// tools-on launch, so the agent cannot bind them, and refuses the launch when they do
+    /// not read (OWNER-PORTS-FAIL-OPEN). Without them the ports come from the model access
+    /// source. Takes the global and project settings files. Returns the runtime.
+    pub fn with_settings(mut self, global: &Path, project: &Path) -> Self {
+        self.settings = Some((global.to_path_buf(), project.to_path_buf()));
         self
     }
 
@@ -7157,10 +7168,22 @@ impl TeamRuntime {
         }
         toolchains::prepare_cargo_home(&home, &homes)
             .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
-        let kept = if tools {
-            (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
-        } else {
-            Vec::new()
+        let kept = match (tools, &self.settings) {
+            (true, Some((global, project))) => crate::sandbox::settings_owner_ports(global, project)
+                .map_err(|code| {
+                    with_code(
+                        &format!(
+                            "the settings files {} and {} do not read, so the owner's model ports cannot be kept from the agent",
+                            global.display(),
+                            project.display()
+                        ),
+                        Some(code),
+                    )
+                })?,
+            (true, None) => {
+                (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
+            }
+            (false, _) => Vec::new(),
         };
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
             .and_then(|sandbox| sandbox.keep_ports(&kept))
@@ -10984,7 +11007,8 @@ pub fn start_for_engine(
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
-    let (global, project) = (global.to_path_buf(), project.to_path_buf());
+    let settings = (global.to_path_buf(), project.to_path_buf());
+    let (global, project) = settings.clone();
     let access: AccessSource = Box::new(move || {
         crate::config::resolve_config(&global, &project)
             .ok()?
@@ -10999,7 +11023,8 @@ pub fn start_for_engine(
         TeamLimits::default(),
     )
     .map_err(|e| e.0)?
-    .with_events(super::master::EVENTS);
+    .with_events(super::master::EVENTS)
+    .with_settings(&settings.0, &settings.1);
     let runtime = match engine {
         Some(engine) => runtime.with_delegation_tool(engine).map_err(|e| e.0)?,
         None => runtime,

@@ -776,6 +776,35 @@ fn local_model_access(case: &Case, port: u16) -> crazyagent::config::ModelAccess
         .unwrap()
 }
 
+/// OWNER-PORTS-FAIL-OPEN: the owner's ports read from the settings files are the configured
+/// local model ports, none while no file exists, and a file that does not read, as broken
+/// TOML, bytes that are not UTF-8 or a folder, refuses instead of naming none.
+#[test]
+fn settings_owner_ports_fail_closed_on_a_file_that_does_not_read() {
+    use crazyagent::sandbox::{OWNER_PORTS_UNREADABLE, settings_owner_ports};
+    let case = case();
+    let (global, project) = (
+        case.root.join("global.toml"),
+        case.root.join("project.toml"),
+    );
+    assert_eq!(settings_owner_ports(&global, &project), Ok(Vec::new()));
+    local_model_access(&case, 4321);
+    assert_eq!(settings_owner_ports(&global, &project), Ok(vec![4321]));
+    for broken in [&b"[[[\n"[..], &b"version = 1\n\xff\n"[..]] {
+        fs::write(&global, broken).unwrap();
+        assert_eq!(
+            settings_owner_ports(&global, &project),
+            Err(OWNER_PORTS_UNREADABLE)
+        );
+    }
+    fs::remove_file(&global).unwrap();
+    fs::create_dir(&global).unwrap();
+    assert_eq!(
+        settings_owner_ports(&global, &project),
+        Err(OWNER_PORTS_UNREADABLE)
+    );
+}
+
 #[test]
 fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_on_it() {
     let case = case();
