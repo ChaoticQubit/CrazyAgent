@@ -721,6 +721,12 @@ fn dialable(address: IpAddr) -> bool {
     }
 }
 
+/// Tells whether one of this machine's interfaces holds `address`. Not written yet.
+/// Input: the address. Output: false.
+fn on_this_machine(_address: IpAddr) -> bool {
+    false
+}
+
 /// Passes bytes both ways until either side closes, the proxy stops or nothing moved for
 /// `IDLE_TIME`. Inputs: the client, the upstream connection and the stop flag. Output: none.
 fn pump(client: TcpStream, upstream: TcpStream, stop: &AtomicBool) {
