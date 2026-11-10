@@ -84,6 +84,8 @@ test("CB-E1 Dollars leads and every figure carries the label", OPTIONS, async (t
     assert.ok(shown.length > 0);
     assert.ok(shown.every(([main]) => /^<?\$/u.test(main)), JSON.stringify(shown));
     assert.ok(shown.every(([, title]) => title.startsWith(LABEL)), JSON.stringify(shown));
+    const wrapped = await page.evaluate(`[...document.querySelectorAll(".mx-share .mono")].filter((node) => node.getBoundingClientRect().height >= 2 * parseFloat(getComputedStyle(node).fontSize)).length`);
+    assert.equal(wrapped, 0, "every share percent stays on one line");
     await me.capture("metrics-money-dollars");
   });
 });
