@@ -1920,6 +1920,7 @@ fn model_rows_shrink_with_the_others_to_fit_one_reply() {
 
 #[test]
 fn models_with_prices_off_sort_by_tokens_not_hidden_dollars() {
+    use crate::usage::money::{self, MainNumber, MoneySettings};
     let (_directory, db) = database();
     priced_rows(
         &db,
