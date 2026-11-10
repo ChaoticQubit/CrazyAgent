@@ -9,12 +9,13 @@ const APPLIED = { pending: false, outcome: "applied", rejection: null };
 const SAVED_LINE_MS = 6000;
 let timers = [];
 let usageSince;
+let current = {};
 let schedule = null;
 let saves = [];
 let gated = null;
 let gatedAnswers = [];
 let savedLineTimers = [];
-const say =(node) => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
+const say = (node) => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
 const member = (index, kind = "chatgpt") => ({ id: `acct-${index}`, kind, provider: "chatgpt", status: "signed_in", status_label: "Signed in" });
 const account = (index) => ({ id: `acct-${index}`, name: `Account ${index}`, provider: "chatgpt", provider_name: "ChatGPT", method: "subscription", method_label: "Subscription", url: null, model: null, status: "signed_in", status_label: "Signed in" });
 const MAIN = { id: "pool-main", name: "Main pool", summary: "3 ChatGPT", members: [member(0, "api_key"), member(1), member(2)], project_count: 2 };
@@ -104,6 +105,7 @@ function answer(scene, command, args) {
  * pools and accounts reads as ok, full, waiting, long, empty, error, missing or pending, with
  * `start` for what the schedule starts as, and the theme. Output: nothing. */
 export async function mount(scene = {}, theme = "light") {
+  current = scene;
   timers = [];
   saves = [];
   gated = null;
@@ -220,6 +222,12 @@ export function panes() {
   const main = document.getElementById("main");
   const [list, pool] = [...document.querySelectorAll(".pool-screen > *")].map((pane) => pane.getBoundingClientRect());
   return { list: { left: list.left, right: list.right, top: list.top }, pool: { left: pool.left, right: pool.right, top: pool.top }, sideways: document.documentElement.scrollWidth > window.innerWidth || main.scrollWidth > main.clientWidth };
+}
+
+/** Changes what the fake engine answers from now on. Input: the parts of the scene that change.
+ * Output: nothing. */
+export function changeScene(parts) {
+  Object.assign(current, parts);
 }
 
 /** Lists the delays of the repeating timers the page started. Output: the delays in ms. */

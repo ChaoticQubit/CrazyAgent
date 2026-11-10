@@ -17,6 +17,7 @@ const ITEM = (at) => `.pool-items .pool-item:nth-child(${at})`;
 const RANKING = "desktop_account_ranking";
 const USAGE = "desktop_usage_report";
 const POOLS_READ = "desktop_pool_summaries";
+const ACCOUNTS_READ = "desktop_list_accounts";
 
 test("the screen shows the title and purpose, Your pools with New pool on the left, and the first pool selected on the right", async () => {
   const seen = await onPools({}, async (page) => ({ top: await page.evaluate("Fixture.top()"), sections: await read(page), items: await items(page), cap: await page.evaluate("Fixture.wordsOf('.pool-cap')") }));
@@ -159,15 +160,39 @@ test("the two panes stand side by side above 1180 px and stack at 1180 px, and r
   }
 });
 
-test("the page reads the ranking and the limits again once a minute and leaves the pools read alone", async () => {
+test("the page reads the ranking, the limits, the pools and the accounts again once a minute", async () => {
   const seen = await onPools({}, async (page) => {
     const delays = await page.evaluate("Fixture.timerDelays()");
-    const before = [await commandCount(page, RANKING), await commandCount(page, USAGE), await commandCount(page, POOLS_READ)];
+    const reads = async () => [await commandCount(page, RANKING), await commandCount(page, USAGE), await commandCount(page, POOLS_READ), await commandCount(page, ACCOUNTS_READ)];
+    const before = await reads();
     await page.evaluate("Fixture.fireTimer(60000)");
-    return { delays, before, after: [await commandCount(page, RANKING), await commandCount(page, USAGE), await commandCount(page, POOLS_READ)] };
+    return { delays, before, after: await reads() };
   });
   assert.equal(seen.delays.filter((delay) => delay === 60000).length, 1, JSON.stringify(seen.delays));
-  assert.deepEqual(seen.after, [seen.before[0] + 1, seen.before[1] + 1, seen.before[2]]);
+  assert.deepEqual(seen.after, seen.before.map((count) => count + 1));
+});
+
+test("an account that signs out while the page is open changes its badge, the left line and the note at the next tick", async () => {
+  const note = "1 account isn't signed in. Agents skip it until you sign in again.";
+  const seen = await onPools({}, async (page) => {
+    const before = { rows: await rows(page), items: await items(page), says: await pane(page) };
+    await page.evaluate(`Fixture.changeScene({ pools: "waiting", accounts: "waiting", ranking: "held" })`);
+    await page.evaluate("Fixture.fireTimer(60000)");
+    return { before, rows: await rows(page), items: await items(page), says: await pane(page) };
+  });
+  assert.deepEqual(seen.before.rows.find((row) => row.name === "Account 1").badges, ["Signed in"]);
+  assert.equal(seen.before.items[0].about, "3 ready. Used by 2 projects.");
+  assert.ok(!seen.before.says.includes(note), seen.before.says);
+  const row = seen.rows.find((item) => item.name === "Account 1");
+  assert.deepEqual(row.badges, ["Not signed in"]);
+  assert.match(row.why, /^Not signed in\. Agents skip it until you sign in again\./);
+  assert.equal(seen.items[0].about, "2 ready, 1 not signed in. Used by 2 projects.");
+  assert.ok(seen.says.includes(note), seen.says);
+});
+
+test("both order lists keep their list role for a screen reader", async () => {
+  const seen = await onPools({ ranking: "held" }, (page) => page.evaluate(`[document.querySelector("ol.pool-rows").getAttribute("role"), document.querySelector("ul.pool-rows").getAttribute("role")]`));
+  assert.deepEqual(seen, ["list", "list"]);
 });
 
 test("a deleted pool reads the pools and the order again", async () => {
