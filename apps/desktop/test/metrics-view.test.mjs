@@ -216,7 +216,7 @@ test("tokens lead when chosen and the dollars beside them still carry the label"
   const markup = priced(tokensLead());
   assert.match(markup, /<span class="mx-tile-key">Tokens<\/span><span class="mx-tile-value">2\.3K<\/span>/u);
   assert.match(markup, new RegExp(`<div class="mx-tile" title="${LABEL}, prices as of 2026-11-08"><span class="mx-tile-key">Tokens</span>`, "u"));
-  assert.match(markup, /<span class="mx-tile-detail">\$5\.00 · /u);
+  assert.match(markup, new RegExp(`<span class="mx-tile-detail">\\$5\\.00 ${LABEL} · `, "u"));
   assert.match(markup, /Tokens over time/u);
   assert.match(markup, /mx-legend/u);
   assert.match(markup, new RegExp(`title="${LABEL}, prices as of 2026-11-08"><b>[0-9.]+K?</b><small> \\$2\\.00</small>`, "u"));
