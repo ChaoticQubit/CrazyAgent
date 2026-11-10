@@ -546,7 +546,8 @@ impl Drop for MasterRuntimeFolder {
 /// sub-agents, Codex's own sandbox off inside the master's, and exactly one MCP server, the
 /// engine's team server served by exactly the expected engine executable on the turn's own
 /// drop file and mailbox with the team tools switched off. Every `-c` setting must be one the
-/// switch allows. Input: the command and, for tools on, the expected team server parts.
+/// switch allows, and the one recording the working folder's walk untrusted must be there.
+/// Input: the command and, for tools on, the expected team server parts.
 /// Output: Ok, `master_delegate_unverified` for any other server, or the
 /// unsupported-backend refusal.
 fn require_master_tool_policy(
@@ -554,6 +555,10 @@ fn require_master_tool_policy(
     tools: Option<crate::engine::claude_host::MasterTools<'_>>,
 ) -> Result<(), EngineError> {
     let refused = || failure("master_runtime_backend_unsupported");
+    let trust = command
+        .get_current_dir()
+        .and_then(|cwd| crate::harnesses::codex_folder::untrusted(cwd).ok())
+        .ok_or_else(refused)?;
     let required: &[&str] = if tools.is_some() {
         &[
             "sandbox_mode=\"danger-full-access\"",
@@ -606,11 +611,14 @@ fn require_master_tool_policy(
                     return Err(failure("master_delegate_unverified"));
                 }
             }
-            _ if fixed.contains(setting) || setting.starts_with("model=\"") => {}
+            _ if fixed.contains(setting)
+                || setting.starts_with("model=\"")
+                || *setting == trust => {}
             _ => return Err(refused()),
         }
     }
     if servers != usize::from(tools.is_some())
+        || !settings.iter().any(|setting| *setting == trust)
         || required.iter().any(|setting| !fixed.contains(setting))
         || fixed.iter().any(|setting| !settings.contains(setting))
     {
@@ -790,6 +798,9 @@ fn master_command(
     for config in fixed {
         command.arg("-c").arg(config);
     }
+    let trust = crate::harnesses::codex_folder::untrusted(cwd)
+        .map_err(|_| failure("master_runtime_binding"))?;
+    command.arg("-c").arg(trust);
     if let Some(tools) = tools {
         command.arg("-c").arg(delegate_servers(&tools)?);
     }

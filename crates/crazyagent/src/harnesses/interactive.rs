@@ -457,26 +457,23 @@ fn text(path: &Path) -> Result<String, LaunchError> {
         .ok_or_else(|| failure("launch_path_invalid"))
 }
 
-/// The settings a Codex terminal launch runs under. The working folder is recorded as
-/// untrusted, a decision that keeps Codex from loading a `.codex/config.toml` the repository
-/// brings; approval and sandbox come from these settings either way. Inputs: the request,
-/// whether context is on, the working folder and the key file. Output: the arguments.
+/// The settings a Codex terminal launch runs under. A repository that brings a `.codex`
+/// folder runs untrusted so Codex loads nothing from it, any other stays trusted so it
+/// never meets Codex's folder access screen; approval and sandbox come from these settings
+/// either way. Inputs: the request, whether context is on, the working folder and the key
+/// file. Output: the arguments.
 fn codex(
     request: &LaunchRequest,
     context: bool,
     cwd: &Path,
     key_file: Option<&str>,
 ) -> Result<Vec<String>, LaunchError> {
-    let folder = serde_json::to_string(&text(cwd)?)
-        .map_err(|_| failure("launch_working_dir_unavailable"))?;
+    let trust = super::codex_folder::terminal_entry(cwd)?;
     let mut arguments = Vec::new();
     for setting in codex_configuration(request, context, key_file)
         .into_iter()
         .chain((!request.tools).then(|| CODEX_NO_USER_INPUT.to_owned()))
-        .chain([
-            "check_for_update_on_startup=false".to_owned(),
-            format!("projects={{{folder}={{trust_level=\"untrusted\"}}}}"),
-        ])
+        .chain(["check_for_update_on_startup=false".to_owned(), trust])
     {
         arguments.push("-c".to_owned());
         arguments.push(setting);

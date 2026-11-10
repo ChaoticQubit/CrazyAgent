@@ -8779,7 +8779,8 @@ fn live_adopted(
 /// engine moves the master to another pool account. Nothing is typed into the pane at
 /// start; once the app reads keys by the rule a first prompt waits for, it tells the
 /// engine, which types no message before that, and a look that fails before the pane
-/// ends is tried again on the next pass. Takes the session, the worker's channels and
+/// ends is tried again on the next pass, except Codex's folder access step running out,
+/// which ends the session. Takes the session, the worker's channels and
 /// flags, whether a later engine may take the pane over, and the account's credential copy
 /// and lease the session holds, if any, which the stop settles (see [`settle_stop`]).
 /// Returns the problem that ended it, if any, a stop's own problem first.
@@ -8811,6 +8812,10 @@ fn live_serve(
                     let _ = reports.send(Report::InputReady);
                 }
                 Err(problem) if problem.0 == "launch_closed" => reads_keys = true,
+                Err(found) if crate::harnesses::codex_folder::ended_the_launch(&found) => {
+                    problem = Some(with_code(PROCESS_CLOSED, Some(&found.0)));
+                    break;
+                }
                 Err(_) => {}
             }
         }

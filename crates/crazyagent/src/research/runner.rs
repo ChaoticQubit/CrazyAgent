@@ -1870,6 +1870,9 @@ fn codex_arguments(
         })
         .env("CODEX_HOME", home)
         .env("RUST_LOG", CODEX_LOG);
+    let trust = crate::harnesses::codex_folder::untrusted(worktree)
+        .map_err(|_| RunError::Invalid("research worktree path".into()))?;
+    command.arg("-c").arg(trust);
     if !tools {
         for setting in crate::harnesses::launch::CODEX_TOOLS_OFF {
             command.arg("-c").arg(setting);
