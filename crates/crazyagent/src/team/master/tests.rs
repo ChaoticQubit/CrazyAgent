@@ -1981,6 +1981,42 @@ fn one_start_writes_one_overlap_note_to_each_agent() {
     assert!(!to_other[0].contains(" more that "), "{}", to_other[0]);
 }
 
+/// One start tells at most ten agents of an overlap, however many it overlaps.
+#[cfg(target_os = "macos")]
+#[test]
+fn one_start_notes_at_most_ten_agents() {
+    let mut fixture = Fixture::new();
+    let holders: Vec<i64> = (0..11)
+        .map(|index| named_sub(&fixture, &format!("holder-{index}"), "working"))
+        .collect();
+    let starter = named_sub(&fixture, "starter", "working");
+    for agent in holders {
+        let (said, refused) = as_sub(
+            &mut fixture,
+            agent,
+            tool::START_WORK_TOOL,
+            json!({"title": format!("Holder {agent}"), "claims": ["same.py"]}),
+        );
+        assert!(!refused, "{said}");
+    }
+    let (said, refused) = as_sub(
+        &mut fixture,
+        starter,
+        tool::START_WORK_TOOL,
+        json!({"title": "Last start", "claims": ["same.py"]}),
+    );
+    assert!(!refused, "{said}");
+    let noted: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_messages WHERE from_kind='engine' AND kind='note' AND body LIKE '%\"Last start\"%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(noted, 10);
+}
+
 /// Adds `count` claims `more/<i>.rs` to one unit of work, as a long backlog would. Takes the
 /// fixture, the work and the count.
 #[cfg(target_os = "macos")]
