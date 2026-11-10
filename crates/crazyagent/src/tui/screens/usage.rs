@@ -432,9 +432,8 @@ fn activity_lines(rows: &[ActivityRow], limit: usize, theme: &Theme) -> Vec<Line
     }
     lines.extend(and_more(rows.len(), theme));
     let edited: u64 = rows.iter().map(|row| row.edit_turns).sum();
-    if edited > 0 {
-        let first: u64 = rows.iter().map(|row| row.first_try_turns).sum();
-        let percent = (first * 100 + edited / 2) / edited;
+    let first: u64 = rows.iter().map(|row| row.first_try_turns).sum();
+    if let Some(percent) = (first * 100 + edited / 2).checked_div(edited) {
         let word = if edited == 1 { "turn" } else { "turns" };
         let rate = format!("{percent}% of {edited} editing {word} worked first try");
         lines.extend(

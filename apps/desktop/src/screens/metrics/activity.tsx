@@ -5,6 +5,7 @@ import { compactCount } from "../settings/usage";
 import { ACTIVITY_NAMES, COST_LABEL, Figure, dollarsBeside, firstTryText } from "./money";
 
 const DAY_MS = 86_400_000;
+const TOOLS_PER_BAR_MAX = 8;
 
 type BarLabel = (startMs: number, bucketMs: number) => string;
 
@@ -50,15 +51,19 @@ function toolBars(rows: ToolBucket[]): { start_ms: number; tools: ToolBucket[] }
   return Array.from(bars, ([start_ms, tools]) => ({ start_ms, tools }));
 }
 
-/** The most-used tools of each bar. Inputs: the rows, when counting began, the bar width and
- * the bar label. Output: the panel, nothing with no rows. */
+/** The most-used tools of each bar, saying so when a bar reaches the engine's cap. Inputs: the
+ * rows, when counting began, the bar width and the bar label. Output: the panel, nothing with no
+ * rows. */
 export function ToolsOverTime({ rows, since, bucketMs, label }: { rows: ToolBucket[]; since: number | null; bucketMs: number; label: BarLabel }) {
   if (rows.length === 0) return null;
+  const bars = toolBars(rows);
+  const cut = bars.some((bar) => bar.tools.length >= TOOLS_PER_BAR_MAX);
   return <Panel title="Tools over time" actions={<Since ms={since} label={label} />}>
     <table className="pj-table mx-tools-time">
       <thead><tr><th scope="col">When</th><th scope="col">Tools</th></tr></thead>
-      <tbody>{toolBars(rows).map((bar) => <tr key={bar.start_ms}><th scope="row">{label(bar.start_ms, bucketMs)}</th>
+      <tbody>{bars.map((bar) => <tr key={bar.start_ms}><th scope="row">{label(bar.start_ms, bucketMs)}</th>
         <td>{bar.tools.map((row) => `${displayText(row.tool)} ${compactCount(row.count)}`).join(", ")}</td></tr>)}</tbody>
     </table>
+    {cut && <p className="mx-tools-note">{`Each time shows at most its ${TOOLS_PER_BAR_MAX} most-used tools.`}</p>}
   </Panel>;
 }

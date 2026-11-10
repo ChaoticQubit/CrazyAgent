@@ -31,4 +31,4 @@
 .mx-models .num, .mx-activity .num, .mx-tools-time .num { text-align: right; font-family: var(--mono); white-space: nowrap; }
 .mx-models tbody th { white-space: normal; overflow-wrap: anywhere; }
 .mx-tools-time td { overflow-wrap: anywhere; }
-.mx-first-try { margin: var(--space-2) 0 0; color: var(--text-2); font-size: 13px; }
+.mx-first-try, .mx-tools-note { margin: var(--space-2) 0 0; color: var(--text-2); font-size: 13px; }
