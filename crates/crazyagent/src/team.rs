@@ -1555,6 +1555,14 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 stopped_ms INTEGER NOT NULL,
                 stopped_by TEXT NOT NULL DEFAULT 'owner'
             );
+            CREATE TABLE IF NOT EXISTS team_status_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                task INTEGER,
+                at_ms INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS team_caps (
                 project TEXT PRIMARY KEY,
                 harnesses INTEGER CHECK(harnesses IS NULL OR harnesses BETWEEN 1 AND 15),

@@ -2640,7 +2640,15 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
             [],
         )
         .unwrap();
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO team_status_log(project,agent,status,at_ms) VALUES ('setup-pooled',1,'idle',1)",
+            [],
+        )
+        .unwrap();
     let tables = [
+        "team_status_log",
         "team_caps",
         "team_token_budgets",
         "team_account_spread",

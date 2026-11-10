@@ -5552,6 +5552,67 @@ fn running_task(fixture: &Fixture, sub: i64, prompt: &str) -> i64 {
     fixture.connection.last_insert_rowid()
 }
 
+/// Every change of an agent's status leaves one row with its time, whichever code wrote it,
+/// and a write that keeps the status leaves none (HB-S5-I).
+#[test]
+fn every_agent_status_change_is_logged_with_its_time() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let direct = "UPDATE team_agents SET status=?2, heartbeat_ms=?3 WHERE id=?1";
+    for beat in [1, 2] {
+        fixture
+            .connection
+            .execute(direct, params![agent, "idle", beat])
+            .unwrap();
+    }
+    team.mark_agent(agent, AgentStatus::Working, None).unwrap();
+    let logged: Vec<(String, String, i64)> = fixture
+        .connection
+        .prepare("SELECT project,status,at_ms FROM team_status_log WHERE agent=?1 ORDER BY id")
+        .unwrap()
+        .query_map([agent], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let statuses: Vec<&str> = logged.iter().map(|row| row.1.as_str()).collect();
+    assert_eq!(statuses, ["idle", "working"]);
+    for (project, _, at_ms) in &logged {
+        assert_eq!(project, PROJECT);
+        assert!((now_ms() - at_ms).abs() < 60_000, "{at_ms}");
+    }
+}
+
+/// The status log keeps only its newest 20000 rows: a new row drops every row that far
+/// behind it and keeps the next one (HB-S5-I).
+#[test]
+fn the_status_log_keeps_only_its_newest_rows() {
+    let fixture = Fixture::new(1);
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    for id in [10_001, 10_002, 30_000] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_status_log(id,project,agent,status,at_ms) VALUES (?1,?2,?3,'idle',1)",
+                params![id, PROJECT, agent],
+            )
+            .unwrap();
+    }
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [agent])
+        .unwrap();
+    let ids: Vec<i64> = fixture
+        .connection
+        .prepare("SELECT id FROM team_status_log ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(ids, [10_002, 30_000, 30_001]);
+}
+
 /// An agent that starts its harness for each turn keeps no pane record, only the session
 /// record of its running turn. A start reads that record for a delivery intended before
 /// the session started, so a task the session shows is never handed out again, and never
