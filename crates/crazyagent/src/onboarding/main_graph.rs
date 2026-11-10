@@ -195,9 +195,12 @@ pub(crate) fn latest(root: &Path) -> Option<Build> {
 /// engine placed there into the project's graph (I3), which are removed first; anything else
 /// there is the agent's and is left alone. Links in the published graph are never followed
 /// nor copied. A copy that fails is removed whole, and a folder something else made there
-/// meanwhile is left alone ([`fill_new`]). Inputs: the project folder and the worktree.
-/// Output: true once copied, false when nothing was copied.
-pub(crate) fn copy_into(root: &Path, worktree: &Path) -> io::Result<bool> {
+/// meanwhile is left alone ([`fill_new`]). No copy is made of a graph built while the
+/// project hid other folders than it hides now, so a folder hidden since that build never
+/// reaches an agent; the next refresh rebuilds it. Inputs: the project folder, the worktree
+/// and the folders the project hides now. Output: true once copied, false when nothing was
+/// copied.
+pub(crate) fn copy_into(root: &Path, worktree: &Path, hidden: &[PathBuf]) -> io::Result<bool> {
     let tree = open_folder(CWD, worktree)?;
     match rustix::fs::statat(&tree, GRAPH_OUT, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(found) if FileType::from_raw_mode(found.st_mode) == FileType::Directory => {
@@ -217,6 +220,9 @@ pub(crate) fn copy_into(root: &Path, worktree: &Path) -> io::Result<bool> {
     let Some(build) = read_record(&store) else {
         return Ok(false);
     };
+    if build.hidden != hidden_digest(hidden) {
+        return Ok(false);
+    }
     let source = open_folder(&store, build.folder().as_c_str())?;
     fill_new(&tree, GRAPH_OUT, &source)?;
     Ok(true)

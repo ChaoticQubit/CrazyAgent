@@ -6278,6 +6278,9 @@ impl TeamRuntime {
                     sandbox: &sandbox,
                     profile: &profile,
                 };
+                #[cfg(unix)]
+                let hidden =
+                    crate::sandbox::hidden_paths::load(&self.connection, project.as_str()).ok();
                 for name in &wanted {
                     match crate::landing::add_teammate_worktree(
                         &self.connection,
@@ -6287,10 +6290,15 @@ impl TeamRuntime {
                         &git,
                     ) {
                         #[cfg(unix)]
-                        Ok(()) => expose_graph(
-                            Path::new(&repository),
-                            &worktree.join(crate::agent_git::TEAMMATES_FOLDER).join(name),
-                        ),
+                        Ok(()) => {
+                            if let Some(hidden) = &hidden {
+                                expose_graph(
+                                    Path::new(&repository),
+                                    &worktree.join(crate::agent_git::TEAMMATES_FOLDER).join(name),
+                                    hidden,
+                                );
+                            }
+                        }
                         #[cfg(not(unix))]
                         Ok(()) => {}
                         Err(problem) => eprintln!(
@@ -7177,7 +7185,7 @@ impl TeamRuntime {
             native_tmux = Some(tmux);
         }
         #[cfg(unix)]
-        expose_graph(&root, &working_dir);
+        expose_graph(&root, &working_dir, &hidden);
         #[cfg(not(unix))]
         expose_graph(&root, &working_dir)?;
         if let Some(engine) = self
@@ -10602,14 +10610,16 @@ fn expose_graph(_root: &Path, _worktree: &Path) -> Result<(), String> {
 /// graphify reminder hook find it and the agent may update it. Only when git ignores the
 /// folder there (see [`ignores_graph`]), so it never shows as a change; anything the agent
 /// made there itself is left alone, and the read-only links an older engine placed there
-/// (I3) give way to the copy. No link is followed. A missing or unreadable graph leaves the
-/// agent without one, never without its start. Takes the project folder and the worktree.
+/// (I3) give way to the copy. No link is followed. A graph built while the project hid other
+/// folders is not copied, so a folder hidden since reaches no agent. A missing or unreadable
+/// graph leaves the agent without one, never without its start. Takes the project folder,
+/// the worktree and the folders the project hides now.
 #[cfg(unix)]
-fn expose_graph(root: &Path, worktree: &Path) {
+fn expose_graph(root: &Path, worktree: &Path, hidden: &[PathBuf]) {
     if !ignores_graph(root, worktree) {
         return;
     }
-    if let Err(error) = crate::onboarding::main_graph::copy_into(root, worktree) {
+    if let Err(error) = crate::onboarding::main_graph::copy_into(root, worktree, hidden) {
         eprintln!("graph_copy_failed cause={:?}", error.kind());
     }
 }

@@ -20774,8 +20774,8 @@ fn the_project_graph_is_copied_into_an_agent_worktree_only_when_it_ignores_graph
     };
 
     let ignoring = worktree("ignoring", "target\n/graphify-out/\n");
-    expose_graph(&project, &ignoring);
-    expose_graph(&project, &ignoring);
+    expose_graph(&project, &ignoring, &[]);
+    expose_graph(&project, &ignoring, &[]);
     assert!(copied(&ignoring));
     for entry in ["GRAPH_REPORT.md", "wiki"] {
         let found = std::fs::symlink_metadata(ignoring.join(GRAPH_FOLDER).join(entry)).unwrap();
@@ -20790,7 +20790,7 @@ fn the_project_graph_is_copied_into_an_agent_worktree_only_when_it_ignores_graph
     std::fs::create_dir(owned.join(GRAPH_FOLDER)).unwrap();
     std::fs::write(owned.join(GRAPH_FOLDER).join("graph.json"), "mine").unwrap();
     std::os::unix::fs::symlink(&base, owned.join(GRAPH_FOLDER).join("wiki")).unwrap();
-    expose_graph(&project, &owned);
+    expose_graph(&project, &owned, &[]);
     assert_eq!(
         std::fs::read_to_string(owned.join(GRAPH_FOLDER).join("graph.json")).unwrap(),
         "mine"
@@ -20810,14 +20810,14 @@ fn the_project_graph_is_copied_into_an_agent_worktree_only_when_it_ignores_graph
         )
         .unwrap();
     }
-    expose_graph(&project, &older);
+    expose_graph(&project, &older, &[]);
     assert!(
         copied(&older),
         "the links of an older engine give way to a copy"
     );
 
     let tracking = worktree("tracking", "target\ngraphify-out/wiki\n");
-    expose_graph(&project, &tracking);
+    expose_graph(&project, &tracking, &[]);
     assert!(!tracking.join(GRAPH_FOLDER).exists());
 
     let linked_ignore = base.join("linked-ignore");
@@ -20827,14 +20827,14 @@ fn the_project_graph_is_copied_into_an_agent_worktree_only_when_it_ignores_graph
         linked_ignore.join(".gitignore"),
     )
     .unwrap();
-    expose_graph(&project, &linked_ignore);
+    expose_graph(&project, &linked_ignore, &[]);
     assert!(!linked_ignore.join(GRAPH_FOLDER).exists());
 
     let bare_project = base.join("bare-project");
     std::fs::create_dir_all(bare_project.join(GRAPH_FOLDER)).unwrap();
     std::fs::write(bare_project.join(GRAPH_FOLDER).join("graph.json"), "{}").unwrap();
     let fresh = worktree("fresh", "graphify-out/\n");
-    expose_graph(&bare_project, &fresh);
+    expose_graph(&bare_project, &fresh, &[]);
     assert!(
         !fresh.join(GRAPH_FOLDER).exists(),
         "a graph the engine never published is never copied"
@@ -20881,7 +20881,7 @@ fn the_project_graph_is_copied_only_where_real_git_ignores_graphify_out() {
             "{name}: {checked:?}"
         );
         assert_eq!(checked.status.success(), ignored, "{name}: real git");
-        expose_graph(&project, &clone);
+        expose_graph(&project, &clone, &[]);
         assert_eq!(
             copied(&clone),
             ignored,
@@ -20928,28 +20928,28 @@ fn the_project_graph_is_copied_into_a_worktree_whose_repository_excludes_graphif
         ".crazyagent/\ntarget/\n",
         "/.worktrees/\n/graphify-out/\n",
     );
-    expose_graph(&project, &own);
+    expose_graph(&project, &own, &[]);
     assert!(
         copied(&own),
         "an Own branch clone whose own exclude keeps the graph out of git gets a copy"
     );
 
     let sandboxed = linked("sandboxed", ".crazyagent/\ntarget/\n");
-    expose_graph(&project, &sandboxed);
+    expose_graph(&project, &sandboxed, &[]);
     assert!(
         copied(&sandboxed),
         "a linked worktree shares the project repository's exclude, which the engine writes"
     );
 
     let older = clone("older", "target/\n", "/.worktrees/\n");
-    expose_graph(&project, &older);
+    expose_graph(&project, &older, &[]);
     assert!(
         !older.join(GRAPH_FOLDER).exists(),
         "a clone made before its exclude named the graph never shows it as a change"
     );
 
     let negated = linked("negated", "target/\n!graphify-out/\n");
-    expose_graph(&project, &negated);
+    expose_graph(&project, &negated, &[]);
     assert!(
         !negated.join(GRAPH_FOLDER).exists(),
         "a .gitignore line taking the graph back into git wins over the exclude"
@@ -20960,7 +20960,7 @@ fn the_project_graph_is_copied_into_a_worktree_whose_repository_excludes_graphif
         "graphify-out/\n!/graphify-out/\n",
         "/.worktrees/\n",
     );
-    expose_graph(&project, &unignored);
+    expose_graph(&project, &unignored, &[]);
     assert!(
         !unignored.join(GRAPH_FOLDER).exists(),
         "the last .gitignore line about the graph decides"

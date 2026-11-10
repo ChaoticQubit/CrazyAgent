@@ -54,7 +54,7 @@ fn a_copy_holds_the_files_and_never_follows_a_link() {
 
     assert!(publish(&root, &build('a', 1_000)).unwrap());
     let agent = worktree(&base, "agent");
-    assert!(copy_into(&root, &agent).unwrap());
+    assert!(copy_into(&root, &agent, &[]).unwrap());
 
     let copy = agent.join("graphify-out");
     assert_eq!(read(copy.join("graph.json")), "{\"nodes\":1}");
@@ -80,7 +80,7 @@ fn a_copy_holds_the_files_and_never_follows_a_link() {
         "{\"nodes\":1}"
     );
     assert!(
-        !copy_into(&root, &agent).unwrap(),
+        !copy_into(&root, &agent, &[]).unwrap(),
         "the agent's copy is kept"
     );
     assert_eq!(read(copy.join("graph.json")), "updated by the agent");
@@ -114,7 +114,7 @@ fn a_publish_records_its_tip_and_keeps_only_the_latest() {
     left.sort();
     assert_eq!(left, ["current", "g-2000", "lock"]);
     let agent = worktree(&base, "agent");
-    assert!(copy_into(&root, &agent).unwrap());
+    assert!(copy_into(&root, &agent, &[]).unwrap());
     assert_eq!(read(agent.join("graphify-out").join("graph.json")), "two");
 }
 
@@ -151,7 +151,7 @@ fn no_copy_is_made_without_a_published_graph() {
     let base = dir.path().canonicalize().unwrap();
     let root = project(&base);
     let fresh = worktree(&base, "fresh");
-    assert!(!copy_into(&root, &fresh).unwrap());
+    assert!(!copy_into(&root, &fresh, &[]).unwrap());
     assert!(!fresh.join("graphify-out").exists());
 
     let bare = base.join("bare");
@@ -170,7 +170,7 @@ fn no_copy_is_made_without_a_published_graph() {
         owned.join("graphify-out").join("wiki"),
     )
     .unwrap();
-    assert!(!copy_into(&root, &owned).unwrap());
+    assert!(!copy_into(&root, &owned, &[]).unwrap());
     assert_eq!(read(owned.join("graphify-out").join("graph.json")), "mine");
 
     let older = worktree(&base, "older");
@@ -182,7 +182,7 @@ fn no_copy_is_made_without_a_published_graph() {
         )
         .unwrap();
     }
-    assert!(copy_into(&root, &older).unwrap());
+    assert!(copy_into(&root, &older, &[]).unwrap());
     let graph = older.join("graphify-out").join("graph.json");
     assert!(fs::symlink_metadata(&graph).unwrap().file_type().is_file());
     assert_eq!(read(graph), "{\"nodes\":1}");
@@ -248,6 +248,35 @@ fn a_graph_is_due_when_the_hidden_folders_changed() {
     assert_ne!(
         hidden_digest(&[PathBuf::from("ab"), PathBuf::from("c")]),
         hidden_digest(&[PathBuf::from("a"), PathBuf::from("bc")])
+    );
+}
+
+/// No agent copies a graph built while the project hid other folders than it hides now, so
+/// the nodes of a folder hidden after the build reach no agent before the rebuild publishes;
+/// once the hidden set matches the build again, the copy is made (DEC-123).
+#[test]
+fn no_copy_is_made_of_a_graph_built_before_a_folder_was_hidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = project(&base);
+    assert!(publish(&root, &build('a', 1_000)).unwrap());
+    let agent = worktree(&base, "agent");
+    let secrets = [root.join("secrets")];
+
+    assert!(!copy_into(&root, &agent, &secrets).unwrap());
+    assert!(!agent.join("graphify-out").exists());
+
+    let hid = Build {
+        hidden: hidden_digest(&secrets),
+        ..build('a', 2_000)
+    };
+    assert!(publish(&root, &hid).unwrap());
+    assert!(!copy_into(&root, &agent, &[]).unwrap());
+    assert!(!agent.join("graphify-out").exists());
+    assert!(copy_into(&root, &agent, &secrets).unwrap());
+    assert_eq!(
+        read(agent.join("graphify-out").join("graph.json")),
+        "{\"nodes\":1}"
     );
 }
 
