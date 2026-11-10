@@ -230,3 +230,20 @@ test("the Agents toolbar says how many ask the owner, and the drawer counts the 
   assert.equal(inbox.questionsTitle({ shown: { kind: "ok", value: read(1, 1, 0) }, stale: null }), "Questions for you (2)");
   assert.equal(inbox.questionsTitle({ shown: undefined, stale: null }), "Questions for you");
 });
+
+test("a row read later takes the keyboard only while the owner has not put it anywhere in the drawer (MOCKB2-BUTTON-FOCUS)", async () => {
+  const panel = await import("../src/screens/team/questions.tsx");
+  assert.equal(typeof panel.keyboardFree, "function", "the panel decides when a row may take the keyboard");
+  const doc = {};
+  const body = { ownerDocument: doc, closest: () => null };
+  doc.body = body;
+  const drawer = { ownerDocument: doc, contains: (node) => node.inside === true, closest: () => null };
+  const inDrawer = (head) => ({ ownerDocument: doc, inside: true, closest: (selector) => head && selector === ".dialog-head" ? drawer : null });
+  assert.equal(panel.keyboardFree(null, drawer), true, "nothing focused");
+  assert.equal(panel.keyboardFree(body, drawer), true, "the page");
+  assert.equal(panel.keyboardFree(drawer, drawer), true, "the drawer itself");
+  assert.equal(panel.keyboardFree(inDrawer(true), drawer), true, "the drawer's Close button, where a drawer with no field starts");
+  assert.equal(panel.keyboardFree(inDrawer(false), drawer), false, "a button the owner moved to, like Send answer");
+  assert.equal(panel.keyboardFree({ ...inDrawer(true), inside: false }, drawer), false, "another dialog's head");
+  assert.equal(panel.keyboardFree(inDrawer(false), null), false, "no drawer, a control keeps its focus");
+});
