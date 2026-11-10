@@ -24641,7 +24641,7 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
         .stored(&fixture.setup.project_id)
         .unwrap()
         .expect("the project is set up");
-    let paused = team.paused().unwrap();
+    let paused = team.paused(&fixture.setup.project_id).unwrap();
     team.dispatch(&stored, &fixture.access, &paused).unwrap();
     team.keep_warm(&stored, &fixture.access, &paused).unwrap();
     let restart = HostedRestart {
