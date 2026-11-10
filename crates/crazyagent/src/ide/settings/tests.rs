@@ -1,4 +1,5 @@
 use super::*;
+use crate::sandbox::policy::AgentAccess;
 use serde_json::json;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -65,7 +66,7 @@ fn built_in() -> &'static str {
 fn expected_machine(case: &Case) -> Value {
     let mut machine = expected_locks();
     machine["extensions.allowed"] = json!({ super::super::extensions::BUILT_IN: [built_in()] });
-    for (key, value) in super::super::terminal::machine_profiles().unwrap() {
+    for (key, value) in super::super::terminal::machine_profiles(AgentAccess::Sandboxed).unwrap() {
         machine[key.as_str()] = value;
     }
     machine["git.path"] = json!(case.shim());
@@ -108,6 +109,7 @@ fn a_launch_sweeps_the_private_index_and_follows_no_link() {
             &case.server_data,
             &case.data(),
             None,
+            AgentAccess::Sandboxed,
             Some(&project),
         )
         .unwrap();
@@ -131,7 +133,15 @@ fn a_launch_sweeps_the_private_index_and_follows_no_link() {
 #[test]
 fn written_remote_settings_hold_every_locked_key() {
     let case = Case::new();
-    let written = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let written = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     assert_eq!(written.machine, case.machine());
     assert_eq!(written.locked, case.folder.join(LOCKED_FILE));
 
@@ -189,7 +199,15 @@ fn written_remote_settings_hold_every_locked_key() {
     );
 
     let before = std::fs::symlink_metadata(&written.machine).unwrap().ino();
-    let again = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let again = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     assert_eq!(read(&again.machine), expected_machine(&case));
     assert_ne!(
         std::fs::symlink_metadata(&again.machine).unwrap().ino(),
@@ -204,11 +222,27 @@ fn written_remote_settings_hold_every_locked_key() {
 #[test]
 fn keys_the_engine_does_not_write_are_set_aside_never_carried_forward() {
     let case = Case::new();
-    write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     let earlier = r#"{"editor.fontSize": 15, "terminal.integrated.env.osx": {"PATH": "/x"}, "chat.disableAIFeatures": false, "update.mode": "start", "extensions.allowed": {"*": true}}"#;
     std::fs::write(case.machine(), earlier).unwrap();
 
-    let written = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let written = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         read(&written.machine),
         expected_machine(&case),
@@ -225,7 +259,15 @@ fn keys_the_engine_does_not_write_are_set_aside_never_carried_forward() {
         "other keys never join the lock"
     );
     std::fs::remove_file(case.machine().with_file_name(PREVIOUS)).unwrap();
-    let written = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let written = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     assert_eq!(read(&written.machine), expected_machine(&case));
     assert!(
         !case.machine().with_file_name(PREVIOUS).exists(),
@@ -234,7 +276,15 @@ fn keys_the_engine_does_not_write_are_set_aside_never_carried_forward() {
 
     let unreadable = "// my notes\n{\"editor.fontSize\": 16,}\n";
     std::fs::write(case.machine(), unreadable).unwrap();
-    let written = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let written = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     assert_eq!(read(&written.machine), expected_machine(&case));
     assert_eq!(
         std::fs::read_to_string(case.machine().with_file_name(UNREADABLE)).unwrap(),
@@ -246,7 +296,15 @@ fn keys_the_engine_does_not_write_are_set_aside_never_carried_forward() {
     std::fs::write(&elsewhere, r#"{"editor.fontSize": 18}"#).unwrap();
     std::fs::remove_file(case.machine()).unwrap();
     std::os::unix::fs::symlink(&elsewhere, case.machine()).unwrap();
-    let written = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let written = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     assert!(
         std::fs::symlink_metadata(&written.machine)
             .unwrap()
@@ -320,9 +378,16 @@ fn settings_outside_the_ide_folder_are_refused() {
         case.folder.join("..").join("server"),
     ] {
         assert_eq!(
-            write(&case.folder, &server_data, &case.data(), None, None)
-                .unwrap_err()
-                .0,
+            write(
+                &case.folder,
+                &server_data,
+                &case.data(),
+                None,
+                AgentAccess::Sandboxed,
+                None
+            )
+            .unwrap_err()
+            .0,
             "ide_settings_invalid",
             "{}",
             server_data.display()
@@ -331,9 +396,16 @@ fn settings_outside_the_ide_folder_are_refused() {
     assert!(!case.root.join("server").exists());
     for data in [case.root.join("other"), case.folder.clone()] {
         assert_eq!(
-            write(&case.folder, &case.server_data, &data, None, None)
-                .unwrap_err()
-                .0,
+            write(
+                &case.folder,
+                &case.server_data,
+                &data,
+                None,
+                AgentAccess::Sandboxed,
+                None
+            )
+            .unwrap_err()
+            .0,
             "ide_settings_invalid",
             "{}",
             data.display()
@@ -391,7 +463,15 @@ fn the_remote_settings_pin_exactly_the_owner_approved_extensions() {
     let (_server, registry) = registry(b"tool one");
     let pins = |written: &Written| read(&written.machine)["extensions.allowed"].clone();
 
-    let written = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let written = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         pins(&written),
         json!({ BUILT_IN: [built_in()] }),
@@ -409,7 +489,15 @@ fn the_remote_settings_pin_exactly_the_owner_approved_extensions() {
         .unwrap(),
         Asked::Confirm
     );
-    let written = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let written = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         pins(&written),
         json!({ BUILT_IN: [built_in()] }),
@@ -425,7 +513,15 @@ fn the_remote_settings_pin_exactly_the_owner_approved_extensions() {
         1_700_000_000_001,
     )
     .unwrap();
-    let written = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let written = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         pins(&written),
         json!({ "acme.tool": ["1.0.0"], BUILT_IN: [built_in()] }),
@@ -464,7 +560,14 @@ fn sandboxed(case: &Case, script: &str) -> bool {
         readable: &[locked.as_path()],
         locked: &[machine.as_path()],
     };
-    let profile = install(&case.folder, &grants, 45_733).unwrap();
+    let profile = install(
+        &case.folder,
+        &grants,
+        45_733,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        &[],
+    )
+    .unwrap();
     let mut shell = command(&profile, Path::new("/bin/sh"));
     shell
         .args(["-c", script])
@@ -482,7 +585,15 @@ fn sandboxed(case: &Case, script: &str) -> bool {
 #[test]
 fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
     let case = Case::new();
-    let written = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let written = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     let file = written.machine.display().to_string();
     let machine = case.server_data.join("data").join("Machine");
     let data = case.server_data.join("data");
@@ -583,7 +694,15 @@ fn shim_run(shim: &Path, env: &[(&str, &str)], args: &[&str]) -> std::process::O
 #[test]
 fn the_git_shim_hands_network_commands_to_the_extension_and_runs_the_rest() {
     let case = Case::new();
-    let written = write(&case.folder, &case.server_data, &case.data(), None, None).unwrap();
+    let written = write(
+        &case.folder,
+        &case.server_data,
+        &case.data(),
+        None,
+        AgentAccess::Sandboxed,
+        None,
+    )
+    .unwrap();
     assert_eq!(read(&written.machine)["git.path"], json!(case.shim()));
     let metadata = std::fs::symlink_metadata(case.shim()).unwrap();
     assert!(metadata.is_file());

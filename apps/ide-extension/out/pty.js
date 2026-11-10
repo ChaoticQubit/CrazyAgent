@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SandboxedPty = exports.BUSY = exports.UNAVAILABLE = exports.INPUT_BYTES_MAX = exports.SIZE_MAX = exports.SIZE_MIN = void 0;
+exports.SandboxedPty = exports.ABOVE_PROJECT = exports.BUSY = exports.UNAVAILABLE = exports.INPUT_BYTES_MAX = exports.SIZE_MAX = exports.SIZE_MIN = void 0;
 exports.gitFirstOnPath = gitFirstOnPath;
 exports.clampSize = clampSize;
 exports.stopped = stopped;
@@ -9,8 +9,9 @@ const engine_js_1 = require("./engine.js");
 exports.SIZE_MIN = 2;
 exports.SIZE_MAX = 1000;
 exports.INPUT_BYTES_MAX = 4096;
-exports.UNAVAILABLE = "The Sandboxed terminal is unavailable: this system has no qualified sandbox for it. \"IDE shell\" in the terminal menu runs inside the IDE's own sandbox instead.";
-exports.BUSY = "Too many Sandboxed terminals are open. Close one, then open a new terminal.";
+exports.UNAVAILABLE = "This terminal is unavailable: this system has no qualified sandbox for it.";
+exports.BUSY = "This terminal can't start: too many are open. Close one, then open a new terminal.";
+exports.ABOVE_PROJECT = "Raise project access to use this";
 const SIZE_DEFAULT = { columns: 80, rows: 24 };
 const CODE = /^[a-z0-9_]{1,64}$/;
 function gitFirstOnPath(collection, gitPath) {
@@ -41,7 +42,9 @@ function stopped(code) {
         return exports.UNAVAILABLE;
     if (code === "ide_terminals_busy")
         return exports.BUSY;
-    return `The Sandboxed terminal stopped (${CODE.test(code) ? code : "unknown"}).`;
+    if (code === "ide_terminal_above_project")
+        return exports.ABOVE_PROJECT;
+    return `This terminal stopped (${CODE.test(code) ? code : "unknown"}).`;
 }
 class SandboxedPty {
     #wrote = new Signal();
@@ -49,18 +52,20 @@ class SandboxedPty {
     onDidWrite = this.#wrote.event;
     onDidClose = this.#closed.event;
     #open;
+    #level;
     #text = new TextDecoder("utf-8");
     #socket;
     #size = SIZE_DEFAULT;
     #attached = false;
     #ended = false;
-    constructor(open) {
+    constructor(open, level) {
         this.#open = open;
+        this.#level = level;
     }
     open(initial) {
         const opened = clampSize(initial);
         this.#size = opened;
-        this.#open("ide.terminal", { cols: opened.columns, rows: opened.rows }).then((socket) => this.#attach(socket, opened), (error) => this.#stop(error instanceof Error ? error.message : "unknown"));
+        this.#open("ide.terminal", { cols: opened.columns, rows: opened.rows, level: this.#level }).then((socket) => this.#attach(socket, opened), (error) => this.#stop(error instanceof Error ? error.message : "unknown"));
     }
     #attach(socket, opened) {
         if (this.#ended) {

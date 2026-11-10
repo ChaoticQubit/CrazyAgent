@@ -4,6 +4,7 @@ use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::landing::ChangeSetId;
 use crate::platform::unix_socket::UnixStream;
 use crate::protocol::{ProjectId, RequestId, encode_frame, plain_code};
+use crate::sandbox::policy::AgentAccess;
 use crate::terminal::{AgentId, SIZE_MAX, SIZE_MIN};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -289,7 +290,11 @@ pub enum IdeCall {
     #[serde(rename = "ide.session")]
     Session {},
     #[serde(rename = "ide.terminal")]
-    Terminal { cols: u16, rows: u16 },
+    Terminal {
+        cols: u16,
+        rows: u16,
+        level: AgentAccess,
+    },
     #[serde(rename = "ide.git")]
     Git { args: Vec<String>, folder: String },
 }
@@ -360,7 +365,7 @@ impl IdeRequest {
             }
             IdeCall::Accept { message, .. } => message.len() <= TEXT_BYTES_MAX,
             IdeCall::AgentMessage { text, .. } => text.len() <= TEXT_BYTES_MAX,
-            IdeCall::Terminal { cols, rows } => {
+            IdeCall::Terminal { cols, rows, .. } => {
                 (SIZE_MIN..=SIZE_MAX).contains(cols) && (SIZE_MIN..=SIZE_MAX).contains(rows)
             }
             IdeCall::ExtensionRequest { id, version }
@@ -921,8 +926,8 @@ async fn serve_within(
             return;
         }
         #[cfg(unix)]
-        Ok(Ok((project, IdeCall::Terminal { cols, rows }))) => {
-            terminal::serve(stream, packet, runtime, project, (cols, rows)).await;
+        Ok(Ok((project, IdeCall::Terminal { cols, rows, level }))) => {
+            terminal::serve(stream, packet, runtime, project, (cols, rows), level).await;
             return;
         }
         #[cfg(not(unix))]

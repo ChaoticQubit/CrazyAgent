@@ -107,8 +107,8 @@ const GLOBAL_TEMPORARY: &str = "gitconfig.tmp";
 
 /// The variables that keep a git of the IDE server off every config its sandbox denies: the
 /// user-level config named by `config`, and no system config. Git dies on a denied config and
-/// only skips a missing one. A later Full access server, which keeps the owner's own config,
-/// leaves these out here. Input: the config's absolute path. Output: the variables.
+/// only skips a missing one. A Full access server keeps the owner's own config and gets none
+/// of these ([`super::env::ServerGit`]). Input: the config's absolute path. Output: the variables.
 pub fn global_env(config: &Path) -> [(OsString, OsString); 2] {
     assert!(config.is_absolute());
     let (name, value) = crate::sandbox::AGENT_GIT_ENV[0];

@@ -44,7 +44,7 @@ function watched(pty) {
 }
 
 async function opened(engine, server, size) {
-  const pty = new SandboxedPty((name, args) => engine.stream(name, args));
+  const pty = new SandboxedPty((name, args) => engine.stream(name, args), "sandboxed");
   const seen = watched(pty);
   const accepted = once(server, "connection");
   pty.open(size);
@@ -84,7 +84,7 @@ test("closing detaches, and long typing goes in frames the engine accepts", LIMI
   await withSession(async (engine, server) => {
     const { pty, seen, connection, gone, peer } = await opened(engine, server, { columns: 1, rows: 5000 });
     const open = JSON.parse((await peer.frame()).subarray(4).toString("utf8"));
-    assert.deepEqual(open.call, { name: "ide.terminal", args: { cols: 2, rows: 1000 } });
+    assert.deepEqual(open.call, { name: "ide.terminal", args: { cols: 2, rows: 1000, level: "sandboxed" } });
     connection.write(bytes(terminal.frames[0]));
     pty.handleInput("x".repeat(INPUT_BYTES_MAX + 1));
     for (const length of [INPUT_BYTES_MAX, 1]) {
@@ -105,7 +105,7 @@ test("a refused or broken terminal stays open and says why", LIMIT, async () => 
   await withSession(async (engine, server, socket) => {
     const refused = await opened(engine, server, undefined);
     const open = JSON.parse((await refused.peer.frame()).subarray(4).toString("utf8"));
-    assert.deepEqual(open.call.args, { cols: 80, rows: 24 });
+    assert.deepEqual(open.call.args, { cols: 80, rows: 24, level: "sandboxed" });
     refused.connection.write(encodeFrame({ kind: "rejected", code: "ide_terminal_unavailable" }));
     await until(() => refused.seen.shown.length === 1);
     assert.deepEqual(refused.seen, { shown: [`\r\n${UNAVAILABLE}\r\n`], closed: 0 });
@@ -116,7 +116,7 @@ test("a refused or broken terminal stays open and says why", LIMIT, async () => 
     dropped.connection.write(bytes(terminal.frames[0]));
     dropped.connection.end();
     await until(() => dropped.seen.shown.length === 1);
-    assert.deepEqual(dropped.seen, { shown: ["\r\nThe Sandboxed terminal stopped (ide_engine_closed).\r\n"], closed: 0 });
+    assert.deepEqual(dropped.seen, { shown: ["\r\nThis terminal stopped (ide_engine_closed).\r\n"], closed: 0 });
 
     const unready = new Engine(socket, join(socket, "missing"), memoryStore());
     const sessionless = new SandboxedPty((name, args) => unready.stream(name, args));
@@ -124,7 +124,7 @@ test("a refused or broken terminal stays open and says why", LIMIT, async () => 
     sessionless.open(undefined);
     sessionless.handleInput("ignored");
     await until(() => seen.shown.length === 1);
-    assert.deepEqual(seen, { shown: ["\r\nThe Sandboxed terminal stopped (ide_session_missing).\r\n"], closed: 0 });
+    assert.deepEqual(seen, { shown: ["\r\nThis terminal stopped (ide_session_missing).\r\n"], closed: 0 });
   });
 });
 
@@ -134,7 +134,23 @@ test("sizes stay in the engine's bounds and stop reasons stay plain", () => {
   assert.deepEqual(clampSize({ columns: Number.NaN, rows: 30.7 }), { columns: 80, rows: 30 });
   assert.equal(stopped("ide_terminal_unavailable"), UNAVAILABLE);
   assert.equal(stopped("ide_terminals_busy"), BUSY);
-  assert.equal(stopped("ide_capability_revoked"), "The Sandboxed terminal stopped (ide_capability_revoked).");
-  assert.equal(stopped("x\u001b[2J"), "The Sandboxed terminal stopped (unknown).");
-  assert.ok(UNAVAILABLE.includes('"IDE shell"'));
+  assert.equal(stopped("ide_capability_revoked"), "This terminal stopped (ide_capability_revoked).");
+  assert.equal(stopped("x\u001b[2J"), "This terminal stopped (unknown).");
+  assert.ok(!UNAVAILABLE.includes("IDE shell"), UNAVAILABLE);
+  assert.equal(UNAVAILABLE, "This terminal is unavailable: this system has no qualified sandbox for it.");
+  assert.equal(BUSY, "This terminal can't start: too many are open. Close one, then open a new terminal.");
+  assert.equal(stopped("ide_terminal_above_project"), "Raise project access to use this");
+});
+
+test("a terminal asks the engine for its profile's level and shows a refusal to raise access", LIMIT, async () => {
+  const asked = [];
+  const pty = new SandboxedPty((name, args) => {
+    asked.push([name, args]);
+    return Promise.reject(new Error("ide_terminal_above_project"));
+  }, "own_branch");
+  const seen = watched(pty);
+  pty.open({ columns: 80, rows: 24 });
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(asked, [["ide.terminal", { cols: 80, rows: 24, level: "own_branch" }]]);
+  assert.ok(seen.shown.join("").includes("Raise project access to use this"), seen.shown.join(""));
 });
