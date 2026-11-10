@@ -1349,6 +1349,7 @@ mod tests {
                 intake::known(CODE, &[], "intake_failed"),
             ),
             ("harness catalog", caused("owner_read_failed", CODE)),
+            ("master open", master::open_failure(CODE)),
         ];
         let dropped: Vec<&str> = mapped
             .iter()

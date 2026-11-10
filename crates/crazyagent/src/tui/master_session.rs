@@ -2646,7 +2646,8 @@ fn default_master_budget(capacities: &[ResourceBudget; 3]) -> ResourceBudget {
 /// first assigned, approved project_leader pool for the team plan's master harness, else for
 /// RCLI, then Codex, then Claude; its first account as the one tried first (the engine runs
 /// each turn on a ready account of that pool), the first allowed sandbox and the unit
-/// allowance; or a plain-language reason.
+/// allowance; or a plain-language reason, or the engine's `engine_version_mismatch` code
+/// when a read hit one, so the desktop can say restart (PROTO-SKEW-MASTER-OPEN).
 pub async fn default_master_open(
     controller: &mut OwnerController,
     project_id: &ProjectId,
@@ -2656,7 +2657,10 @@ pub async fn default_master_open(
     let planned = controller
         .project_setup(project_id.clone())
         .await
-        .map_err(|_| "The project's team plan could not be read".to_owned())?
+        .map_err(|error| match error.0.as_str() {
+            "engine_version_mismatch" => error.0,
+            _ => "The project's team plan could not be read".to_owned(),
+        })?
         .and_then(|setup| crate::team::master_backend(&setup.team.master));
     let order = [
         MasterBackend::Rcli,

@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { reduceNativeAuth } = await import("../src/native-auth.ts");
+const { reduceNativeAuth, nativeAuthFailureCode, nativeAuthError } = await import("../src/native-auth.ts");
 const { SignInPanel } = await import("../src/screens/settings/sign-in.tsx");
 
 function syntheticDetail() {
@@ -276,4 +276,13 @@ test("the sign-in panel offers no read or cancel without an operation, and the r
   assert.match(markup(unavailable), /Codex isn&#x27;t installed on this Mac, so ChatGPT sign-in isn&#x27;t available\./);
   assert.doesNotMatch(markup(unavailable), /native_auth_host_unavailable/);
   assert.doesNotMatch(markup(unavailable), /SYNTHETIC_STATE|SYNTHETIC_EMAIL/);
+});
+
+test("PROTO-3-LOWS: a busy engine reads as busy, never as an uncertain delivery", () => {
+  assert.equal(nativeAuthFailureCode({ code: "owner_busy" }), "owner_busy");
+  assert.equal(nativeAuthError("owner_busy"), "CrazyAgent is busy with other requests. Try again in a moment.");
+  assert.equal(
+    nativeAuthFailureCode({ code: "owner_busy_elsewhere" }),
+    "native_auth_outcome_unknown_read_same_operation",
+  );
 });
