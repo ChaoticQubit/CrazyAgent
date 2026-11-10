@@ -980,6 +980,12 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
         .collect())
 }
 
+/// What a reftable checkout's `.git/HEAD` holds: a stub naming a branch git never allows, as
+/// no branch name starts with a dot, while the real HEAD lives in `.git/reftable`.
+const REFTABLE_HEAD: &[u8] = b"ref: refs/heads/.invalid";
+/// The most bytes of `.git/HEAD` read to tell the reftable stub from a real HEAD.
+const HEAD_BYTES_MAX: u64 = 1024;
+
 /// The stat of the file a checkout's branch is stamped by: `.git/HEAD`, or for a reftable
 /// checkout, whose HEAD is a stub, `.git/reftable/tables.list`. Git replaces that file through
 /// a new lock file on every branch switch, detach or rename of the current branch, so an
@@ -991,18 +997,29 @@ struct HeadStamp {
     modified: SystemTime,
 }
 
-/// Stats the file that stamps a checkout's branch. Inputs: the checkout root. Output: the
-/// stamp, or None when that file cannot be read as a plain file, as in a linked worktree
-/// whose `.git` is a file, or when `.git/reftable` cannot be checked or is no folder.
+/// Stats the file that stamps a checkout's branch, chosen by what `.git/HEAD` holds and never
+/// by which folders exist, so a stray `.git/reftable` in a files checkout is not stamped
+/// (UI-9-L1): the reftable stub ([`REFTABLE_HEAD`]) stamps `.git/reftable/tables.list`, any
+/// other HEAD stamps itself. Inputs: the checkout root. Output: the stamp, or None when
+/// either file cannot be read as a plain file, as in a linked worktree whose `.git` is a file.
 fn head_stamp(root: &Path) -> Option<HeadStamp> {
     let git = root.join(".git");
-    let store = git.join("reftable");
-    let stamped = match fs::symlink_metadata(&store) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => git.join("HEAD"),
-        Ok(meta) if meta.is_dir() => store.join("tables.list"),
-        _ => return None,
+    let head = git.join("HEAD");
+    let head_meta = fs::symlink_metadata(&head).ok()?;
+    if !head_meta.is_file() {
+        return None;
+    }
+    let mut text = Vec::new();
+    fs::File::open(&head)
+        .ok()?
+        .take(HEAD_BYTES_MAX)
+        .read_to_end(&mut text)
+        .ok()?;
+    let meta = if text.trim_ascii_end() == REFTABLE_HEAD {
+        fs::symlink_metadata(git.join("reftable").join("tables.list")).ok()?
+    } else {
+        head_meta
     };
-    let meta = fs::symlink_metadata(stamped).ok()?;
     if !meta.is_file() {
         return None;
     }

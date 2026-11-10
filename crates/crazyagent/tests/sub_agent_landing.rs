@@ -604,6 +604,7 @@ fn lead_accept_closes_worker_sets_it_holds() {
         &team.view_head(&lead_set),
         None,
         "main",
+        crazyagent::activity::AcceptPlace::Changes,
     )
     .unwrap() else {
         panic!("the lead's accept conflicted");
@@ -678,6 +679,7 @@ fn a_lead_accept_accepts_covered_worker_sets_and_discards_the_rest() {
         &team.view_head(&lead_set),
         None,
         "main",
+        crazyagent::activity::AcceptPlace::Changes,
     )
     .unwrap() else {
         panic!("the lead's accept conflicted");
@@ -728,7 +730,16 @@ fn a_worker_set_left_open_by_its_closed_lead_stays_open_and_listed_but_a_newer_o
         let lead_set = team.turn_end(&team.lead);
         let head = team.view_head(&lead_set);
         if accepted {
-            landing::accept_into(&team.db, &team.home, &lead_set, &head, None, "main").unwrap();
+            landing::accept_into(
+                &team.db,
+                &team.home,
+                &lead_set,
+                &head,
+                None,
+                "main",
+                crazyagent::activity::AcceptPlace::Changes,
+            )
+            .unwrap();
         } else {
             landing::discard(&team.db, &lead_set, &head, now_ms()).unwrap();
         }
@@ -771,9 +782,16 @@ fn a_worker_set_its_closed_lead_holds_lands_at_the_next_read() {
         )
         .unwrap();
     let head = team.view_head(&lead_set);
-    let AcceptOutcome::Landed { commit, .. } =
-        landing::accept_into(&team.db, &team.home, &lead_set, &head, None, "main").unwrap()
-    else {
+    let AcceptOutcome::Landed { commit, .. } = landing::accept_into(
+        &team.db,
+        &team.home,
+        &lead_set,
+        &head,
+        None,
+        "main",
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap() else {
         panic!("the lead's accept conflicted");
     };
     assert_eq!(team.state(&worker_set).0, "pending");
@@ -805,9 +823,16 @@ fn a_land_finished_after_a_restart_leaves_a_worker_set_open_and_offered() {
     let lead_set = team.turn_end(&team.lead);
     let old = team.git(&team.project, &["rev-parse", "refs/heads/main"]);
     let head = team.view_head(&lead_set);
-    let AcceptOutcome::Landed { commit, .. } =
-        landing::accept_into(&team.db, &team.home, &lead_set, &head, None, "main").unwrap()
-    else {
+    let AcceptOutcome::Landed { commit, .. } = landing::accept_into(
+        &team.db,
+        &team.home,
+        &lead_set,
+        &head,
+        None,
+        "main",
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap() else {
         panic!("the lead's accept conflicted");
     };
     let step = serde_json::json!({
@@ -929,12 +954,29 @@ fn a_lead_accept_leaves_open_and_offers_a_worker_set_it_merged_without_the_work(
         team.commit(&team.lead, "lead.txt", "lead\n", "Lead work");
         let lead_set = team.turn_end(&team.lead);
         let head = team.view_head(&lead_set);
-        landing::accept_into(&team.db, &team.home, &lead_set, &head, None, "main").unwrap();
+        landing::accept_into(
+            &team.db,
+            &team.home,
+            &lead_set,
+            &head,
+            None,
+            "main",
+            crazyagent::activity::AcceptPlace::Changes,
+        )
+        .unwrap();
         assert_eq!(team.state(&lead_set).0, "accepted", "ours {ours}");
         assert_eq!(team.state(&worker_set).0, "pending", "ours {ours}");
         assert!(team.owner_listed().contains(&worker_set), "ours {ours}");
         let head = team.view_head(&worker_set);
-        let landed = landing::accept_into(&team.db, &team.home, &worker_set, &head, None, "main");
+        let landed = landing::accept_into(
+            &team.db,
+            &team.home,
+            &worker_set,
+            &head,
+            None,
+            "main",
+            crazyagent::activity::AcceptPlace::Changes,
+        );
         assert!(
             matches!(landed, Ok(AcceptOutcome::Landed { .. })),
             "ours {ours}: {landed:?}"

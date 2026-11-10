@@ -426,7 +426,7 @@ export const PROJECT_GOAL = "Project";
 export const RESEARCH_GOAL = "Research";
 export const RESEARCH_KEY = "research";
 const PROJECT_KEY = "project";
-const RESEARCH_KINDS: ActivityKind[] = ["research_started", "research_saved", "research_stopped"];
+const RESEARCH_KINDS: ActivityKind[] = ["research_started", "research_saved", "research_stopped", "research_waiting"];
 
 /** The filter chips over Overview activity, All first. */
 export type ActivityFilter = "all" | "merge" | "change" | "tests" | "task" | "phase";
@@ -444,8 +444,11 @@ const FILTER_OF: Record<ActivityKind, Exclude<ActivityFilter, "all"> | null> = {
   research_started: "task",
   research_saved: "task",
   research_stopped: "task",
+  research_waiting: "task",
   task_started: "task",
   task_finished: "task",
+  task_failed: "task",
+  task_stopped: "task",
   changes_ready: "change",
   accepted: "change",
   discarded: "change",

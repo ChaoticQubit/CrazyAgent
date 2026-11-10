@@ -1,5 +1,5 @@
 use super::interactive::KEY_FILE;
-use super::leftovers::{Lineage, Unstopped};
+use super::leftovers::{LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
@@ -1376,6 +1376,7 @@ pub struct Session {
     warden: Option<crate::sandbox::warden::Warden>,
     uncertain: bool,
     unconfined: bool,
+    token: LineageToken,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -1451,6 +1452,8 @@ impl Session {
         (relay, key): (Option<Relay>, Option<KeyFile>),
     ) -> Result<Self, LaunchError> {
         let (driver, startup) = Driver::new(&request)?;
+        let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
+        command.env(LINEAGE_VARIABLE, token.as_str());
         let output_bytes = request.limits.output_bytes;
         let (sender, lines) = channel();
         let mut child;
@@ -1503,6 +1506,7 @@ impl Session {
             warden,
             uncertain: false,
             unconfined: request.unconfined,
+            token,
             stdin,
             lines,
             driver,
@@ -1602,12 +1606,14 @@ impl Session {
 
     /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
     /// run's warden, when it has one, stop every process left in its sandbox. A Full access
-    /// run has no warden, so the processes found in its lineage before the kill are checked
-    /// after it. Output: the leader's exit code when it exited normally,
-    /// [`Unstopped::Uncertain`] when a warden did not confirm that its sandbox is empty, or
-    /// [`Unstopped::Left`] naming what a Full access run left running.
+    /// run has no warden, so the processes found in its lineage before the kill, and those
+    /// carrying its launch's token, are checked after it. Output: the leader's exit code when
+    /// it exited normally, [`Unstopped::Uncertain`] when a warden did not confirm that its
+    /// sandbox is empty, or [`Unstopped::Left`] naming what a Full access run left running.
     pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
-        let lineage = self.unconfined.then(|| Lineage::of(self.process_group()));
+        let lineage = self
+            .unconfined
+            .then(|| Lineage::of(self.process_group(), Some(self.token.clone())));
         let code = self.stop_group();
         assert!(self.stopped && self.warden.is_none());
         if self.uncertain {

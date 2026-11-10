@@ -393,3 +393,11 @@ test("every live Rust test target, named *_live, is left out of CI, which has no
     assert(skipped.has(name), `crates/crazyagent/tests/${name}.rs is a live target but is not in ENGINE_TESTS_EXCLUDE`);
   }
 });
+
+test("CI runs the price snapshot script's check on Linux, so a bad refresh fails a pull request", async () => {
+  const linux = steps(await workflow("ci.yml"), "linux");
+  assert(
+    linux.some((step) => /^ {8}run: make test-price-script$/m.test(step)),
+    "the linux job runs make test-price-script",
+  );
+});

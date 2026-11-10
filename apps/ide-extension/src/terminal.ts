@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
-import { ACCESS_ENV, type Level, SandboxedPty, accessOf, gitFirstOnPath } from "./pty.js";
+import { ABOVE_PROJECT, ACCESS_ENV, type Level, SandboxedPty, accessOf, gitFirstOnPath } from "./pty.js";
 
 /** The id of the Sandboxed terminal profile `package.json` contributes. */
 export const PROFILE = "crazyagent.sandboxed";
@@ -24,6 +24,13 @@ const OFFERED: readonly { id: string; name: string; level: Level; command: strin
 
 const ACCESS_KEY = "crazyagent.ideAccess";
 const FULL_COMMAND = "crazyagent.terminal.full";
+
+/**
+ * The palette's commands for the two levels above a project's. The palette drops a greyed
+ * command instead of greying it, so these stand in for the menu's greyed rows there and only
+ * say to raise project access.
+ */
+const ABOVE: readonly string[] = ["crazyagent.terminal.ownBranchAbove", "crazyagent.terminal.fullAbove"];
 
 /**
  * What an engine-hosted terminal opens with. Inputs: the bridge, the terminal's name and its
@@ -55,6 +62,13 @@ export function terminalMenu(context: vscode.ExtensionContext, engine: Engine): 
       vscode.commands.executeCommand("workbench.action.terminal.newWithProfile", { profileName: FULL_TITLE }),
     ),
   );
+  for (const command of ABOVE) {
+    context.subscriptions.push(
+      vscode.commands.registerCommand(command, () => {
+        void vscode.window.showInformationMessage(ABOVE_PROJECT);
+      }),
+    );
+  }
 }
 
 /**

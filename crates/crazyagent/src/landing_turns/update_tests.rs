@@ -181,7 +181,15 @@ impl Case {
         if !owner_first {
             german();
             let head = view(&db, &id).unwrap().unwrap().head;
-            let landed = landing::accept(&db, &home, &id, &head, None).unwrap();
+            let landed = landing::accept(
+                &db,
+                &home,
+                &id,
+                &head,
+                None,
+                crate::activity::AcceptPlace::Changes,
+            )
+            .unwrap();
             assert!(
                 matches!(landed, AcceptOutcome::Conflict { .. }),
                 "{landed:?}"

@@ -190,8 +190,11 @@ fn current(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 /// time for each set and at most `RUNNING_PER_REPOSITORY_MAX` for a repository, past which
 /// none starts; a set already being rewritten counts as started. When it ends without
 /// landing, `after` gets the set and whether another regeneration may start: false after a
-/// refusal, which hands the clash to the agent, true after the set or main moved. Inputs:
-/// the store, the set, its clashing paths and what runs after. Output: whether one runs now.
+/// refusal, which hands the clash to the agent, true after the set or main moved. A clash
+/// in a `uv.lock` never starts one and goes straight to the agent, logged by its plain code:
+/// uv writes a `.git` marker into every cache it makes, `--no-cache` included, which the
+/// sandbox's nested-git rule refuses in every folder the tool may write. Inputs: the store,
+/// the set, its clashing paths and what runs after. Output: whether one runs now.
 pub(super) fn regenerate_later(
     db: &Connection,
     record: &Record,
@@ -204,6 +207,10 @@ pub(super) fn regenerate_later(
         || paths.iter().any(|path| program_for(path).is_none())
         || !current(db, record)?
     {
+        return Ok(false);
+    }
+    if paths.iter().any(|path| program_for(path) == Some("uv")) {
+        eprintln!("landing_regenerate_skipped code=uv_cache_git_marker_refused");
         return Ok(false);
     }
     let Some(runtime) = runtime_of(db) else {
@@ -847,8 +854,9 @@ impl Drop for Scratch<'_> {
 }
 
 /// Removes what regenerations a stopped engine left (OS-8): in each repository the engine
-/// knows, every `regenerate-<set>` worktree the project state folder or `.git/worktrees`
-/// still holds, with its admin folder, then `git worktree prune`, and the engine's
+/// knows, any link at or in `.git/worktrees` first, every `regenerate-<set>` worktree the
+/// project state folder or `.git/worktrees` still holds, with its admin folder, then
+/// `git worktree prune`, and the engine's
 /// `regenerate` scratch folders, leaving those of a regeneration running now. Input: the
 /// store. Output: how many temporary worktrees it removed.
 pub(super) fn sweep(db: &Connection) -> Result<usize, EngineError> {
@@ -861,6 +869,10 @@ pub(super) fn sweep(db: &Connection) -> Result<usize, EngineError> {
         let Ok(root) = repository.canonicalize() else {
             continue;
         };
+        let unlinked = unlink_admin_links(&root);
+        if unlinked > 0 {
+            eprintln!("landing_worktree_admin_link_removed count={unlinked}");
+        }
         let Ok(owner) = Repo::open(&root, &root.join(".git"), None) else {
             continue;
         };
@@ -882,6 +894,41 @@ pub(super) fn sweep(db: &Connection) -> Result<usize, EngineError> {
     }
     let _ = std::fs::remove_dir(runtime.join(SCRATCH_FOLDER));
     Ok(removed)
+}
+
+/// Removes a link at `.git/worktrees`, or each link directly in it, by descriptor and on the
+/// link itself, never following one: git's `worktree prune` empties the folder such a link
+/// names, and an older build let a Sandboxed process or a Full access agent plant one
+/// (SECAUDIT-WORKTREE-ADMIN-PLANT). Input: the repository's canonical root. Output: how many
+/// links it removed.
+fn unlink_admin_links(root: &Path) -> usize {
+    use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, Stat, openat, statat, unlinkat};
+    let folders = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let link = |stat: rustix::io::Result<Stat>| {
+        stat.is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Symlink)
+    };
+    let Ok(git) = openat(CWD, root.join(".git"), folders, Mode::empty()) else {
+        return 0;
+    };
+    if link(statat(&git, "worktrees", AtFlags::SYMLINK_NOFOLLOW)) {
+        return usize::from(unlinkat(&git, "worktrees", AtFlags::empty()).is_ok());
+    }
+    let Ok(admin) = openat(&git, "worktrees", folders, Mode::empty()) else {
+        return 0;
+    };
+    let Ok(entries) = Dir::read_from(&admin) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if link(statat(&admin, name, AtFlags::SYMLINK_NOFOLLOW))
+            && unlinkat(&admin, name, AtFlags::empty()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// The set ids named by the entries of a folder that start with `prefix` and go on with

@@ -2401,3 +2401,103 @@ async fn a_saved_policy_that_cannot_be_read_stops_the_running_server() {
     assert!(servers.follow_level(&id).await);
     assert!(servers.group(&id).is_none());
 }
+
+/// Workspace trust stays off below Full access, where the sandbox limits the project's code,
+/// and is on at Full access, where nothing else does.
+#[test]
+fn only_a_full_access_launch_has_workspace_trust_on() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let (sandboxed, _) = built_server(&servers, &project("kept"), &root);
+    set_level(data.path(), &project("wide"), AgentAccess::Full);
+    let (full, _) = built_server(&servers, &project("wide"), &root);
+    assert!(
+        sandboxed
+            .get_args()
+            .any(|arg| arg == "--disable-workspace-trust")
+    );
+    assert!(
+        !full
+            .get_args()
+            .any(|arg| arg == "--disable-workspace-trust")
+    );
+}
+
+/// Only a Full access server gets a lineage token, the one its command carries; a confined
+/// server's processes stay in its sandbox.
+#[test]
+fn only_a_full_access_server_carries_a_lineage_token() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    set_level(data.path(), &project("wide"), AgentAccess::Full);
+    for (name, access) in [
+        ("kept", AgentAccess::Sandboxed),
+        ("wide", AgentAccess::Full),
+    ] {
+        let (mut built, _) = built_server(&servers, &project(name), &root);
+        let token = lineage_env(&mut built, access).unwrap();
+        assert_eq!(token.is_some(), access == AgentAccess::Full, "{name}");
+        let carried = built
+            .get_envs()
+            .find(|(key, _)| *key == LINEAGE_VARIABLE)
+            .and_then(|(_, value)| value)
+            .map(std::ffi::OsStr::to_owned);
+        assert_eq!(
+            carried,
+            token.map(|token| OsString::from(token.as_str())),
+            "{name}"
+        );
+    }
+}
+
+/// A Full access launch whose lineage could not be read, as a first follow whose listing
+/// failed keeps it, fails its stop's read and leaves UNLISTED for the next open, never
+/// none; a clean end leaves none (5b r1 rv-secreview L1).
+#[test]
+fn a_stop_whose_lineage_cannot_be_read_leaves_unlisted() {
+    let followed = Followed {
+        leader: std::process::id(),
+        token: LineageToken::new().unwrap(),
+        lineage: Mutex::new(Some(Err(Unstopped::Uncertain))),
+    };
+    let settled = followed.before_stop().and_then(Lineage::settle);
+    assert!(matches!(settled, Err(Unstopped::Uncertain)));
+    assert_eq!(left_names(settled).as_deref(), Some(leftovers::UNLISTED));
+    assert_eq!(left_names(Ok(())), None);
+}
+
+/// A process that carries a Full access launch's token but left its group, parent and
+/// session is named after the stop, for the next open only.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_full_access_stop_names_a_process_that_left_its_group() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let wide = project("left");
+    set_level(data.path(), &wide, AgentAccess::Full);
+    servers
+        .open(&wide, checkout.path(), &cached_build())
+        .await
+        .unwrap();
+    let token = servers
+        .lineage_token(&wide)
+        .expect("a Full access launch has a lineage token");
+    let (_, sleeper) = crate::harnesses::leftovers::tests::detached(
+        data.path(),
+        "left-sleeper",
+        &token,
+        ("CRAZYAGENT_TEST_IDE", "left"),
+    );
+    assert!(servers.stop(&wide).await);
+    let left = servers.left(&wide);
+    let _ = rustix::process::kill_process(Pid::from_raw(sleeper).unwrap(), Signal::KILL);
+    let left = left.expect("a process carrying the launch's token outlived the stop unnamed");
+    assert!(
+        left.split(", ")
+            .any(|named| named.starts_with(&format!("{sleeper} "))),
+        "{left}"
+    );
+    assert_eq!(servers.left(&wide), None, "the names are handed out once");
+}

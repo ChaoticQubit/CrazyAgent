@@ -39,7 +39,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     landed_on TEXT,
     restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1)),
     regenerated_head TEXT,
-    regenerated_files TEXT NOT NULL DEFAULT '[]'
+    regenerated_files TEXT NOT NULL DEFAULT '[]',
+    accepted_in TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
@@ -68,8 +69,8 @@ const NUMBER_PASS_MAX: i64 = 10_000;
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
     restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone,landed_on,\
-    restored,regenerated_head,regenerated_files";
-const ADDED_COLUMNS: [(&str, &str); 9] = [
+    restored,regenerated_head,regenerated_files,accepted_in";
+const ADDED_COLUMNS: [(&str, &str); 10] = [
     ("message", "message TEXT NOT NULL DEFAULT ''"),
     (
         "waiting",
@@ -94,6 +95,7 @@ const ADDED_COLUMNS: [(&str, &str); 9] = [
         "regenerated_files",
         "regenerated_files TEXT NOT NULL DEFAULT '[]'",
     ),
+    ("accepted_in", "accepted_in TEXT"),
 ];
 
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
@@ -191,7 +193,8 @@ impl Earlier {
 
 /// One stored change set with everything the engine needs to act on it. `made` says the
 /// set's own Accept committed `landed`, so an undo may revert it, on `landed_on`, the ref
-/// that Accept moved; `undone` is the commit that reverted it.
+/// that Accept moved; `undone` is the commit that reverted it; `accepted_in` is where the
+/// owner pressed that Accept, None for anyone else's or one stored before places were kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Record {
     pub(super) id: ChangeSetId,
@@ -225,6 +228,7 @@ pub(super) struct Record {
     pub(super) restored: bool,
     pub(super) regenerated_head: Option<String>,
     pub(super) regenerated_files: Vec<String>,
+    pub(super) accepted_in: Option<crate::activity::AcceptPlace>,
 }
 
 impl Record {
@@ -263,17 +267,7 @@ impl Record {
     /// cannot see shown as an escape, so one stored before subjects were escaped is shown
     /// and landed visibly too. Output: the message.
     pub(super) fn message(&self) -> String {
-        let message = if !self.message.is_empty() {
-            self.message.clone()
-        } else if !self.prompt_line.is_empty() {
-            self.prompt_line.clone()
-        } else {
-            format!(
-                "Changes from {}",
-                super::flow::subject(&self.agent.label, &[])
-            )
-        };
-        crate::memory::visible_text(&message)
+        super::change_set_message(&self.message, &self.prompt_line, &self.agent.label)
     }
 
     pub(super) fn is_open(&self) -> bool {
@@ -420,6 +414,10 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         restored: row.get::<_, bool>(30)?,
         regenerated_head: row.get(31)?,
         regenerated_files: serde_json::from_str(&text(32)?).map_err(|_| invalid(32))?,
+        accepted_in: row
+            .get::<_, Option<String>>(33)?
+            .map(|name| crate::activity::AcceptPlace::parse(&name).ok_or_else(|| invalid(33)))
+            .transpose()?,
     })
 }
 
@@ -461,7 +459,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
     db.execute(
         &format!(
             "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33) \
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34) \
              ON CONFLICT(id) DO UPDATE SET {updates}"
         ),
         params![
@@ -498,6 +496,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
             record.restored,
             record.regenerated_head,
             regenerated_files,
+            record.accepted_in.map(crate::activity::AcceptPlace::name),
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {

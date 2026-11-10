@@ -363,7 +363,14 @@ pub(crate) fn accept(
         return Err(failure("changes_stale"));
     }
     landing::ide::locate(db, project, id)?;
-    landing::accept(db, owner_home, id, expected_head, Some(message))
+    landing::accept(
+        db,
+        owner_home,
+        id,
+        expected_head,
+        Some(message),
+        crate::activity::AcceptPlace::Ide,
+    )
 }
 
 /// Answers `ide.discard`: discards a change set of the IDE's project, restorable for the

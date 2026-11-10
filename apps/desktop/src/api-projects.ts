@@ -100,8 +100,11 @@ export type ActivityKind =
   | "research_started"
   | "research_saved"
   | "research_stopped"
+  | "research_waiting"
   | "task_started"
   | "task_finished"
+  | "task_failed"
+  | "task_stopped"
   | "changes_ready"
   | "accepted"
   | "discarded"
@@ -127,6 +130,7 @@ export interface ActivityItem {
   change_set: string | null;
   undone: boolean;
   branch?: string | null;
+  place?: "changes" | "ide" | null;
 }
 
 export interface ContextItem {

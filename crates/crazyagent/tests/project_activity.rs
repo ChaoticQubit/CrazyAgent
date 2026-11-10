@@ -165,7 +165,16 @@ impl Project {
     }
 
     fn accept(&self, set: &ChangeSetId) -> AcceptOutcome {
-        landing::accept_into(&self.db, &self.home, set, &self.head(set), None, "main").unwrap()
+        landing::accept_into(
+            &self.db,
+            &self.home,
+            set,
+            &self.head(set),
+            None,
+            "main",
+            crazyagent::activity::AcceptPlace::Changes,
+        )
+        .unwrap()
     }
 
     fn event(&self, kind: EventKind, text: &str) {
@@ -344,7 +353,7 @@ fn a_task_row_names_its_task_and_never_carries_the_reply() {
         .filter(|item| {
             matches!(
                 item.kind,
-                ActivityKind::TaskStarted | ActivityKind::TaskFinished
+                ActivityKind::TaskStarted | ActivityKind::TaskFinished | ActivityKind::TaskFailed
             )
         })
         .map(|item| (item.kind, item.text.as_str()))
@@ -354,7 +363,7 @@ fn a_task_row_names_its_task_and_never_carries_the_reply() {
         tasks,
         vec![
             (
-                ActivityKind::TaskFinished,
+                ActivityKind::TaskFailed,
                 format!("Sub-agent 1 could not finish \u{201c}{title}\u{201d}").as_str()
             ),
             (

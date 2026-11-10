@@ -3,7 +3,7 @@ use super::{ClaudeHostLimits, Fault, Phase, Status, Turn, validate_command};
 use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
-use crate::harnesses::leftovers::{Lineage, Unstopped};
+use crate::harnesses::leftovers::{LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use crate::sandbox::InstalledSandbox;
 use crate::sandbox::warden::{self, Warden};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -50,6 +50,7 @@ struct Process {
     child: Child,
     warden: Option<Warden>,
     unconfined: bool,
+    token: LineageToken,
     group: Pid,
     group_absent: bool,
     profile: Option<NativeProfileUse>,
@@ -141,6 +142,14 @@ pub(super) fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
+    let Some(token) = LineageToken::new() else {
+        report.send_replace(Status {
+            phase: Phase::Retired,
+            fault: Some(Fault::Host("claude_host_spawn_failed")),
+        });
+        return;
+    };
+    command.env(LINEAGE_VARIABLE, token.as_str());
     let (child, warden) = match warden::spawn(&mut command) {
         Ok(started) => started,
         Err(_) => {
@@ -159,6 +168,7 @@ pub(super) fn run(
         child,
         warden,
         unconfined: sandbox.is_unconfined(),
+        token,
         profile: Some(profile),
         stdin: None,
         stdout: None,
@@ -534,7 +544,9 @@ impl Process {
     /// run, the turn ends with their code and the lease stays held until they end or the
     /// owner signs the account out. Takes nothing; records the run's last status.
     fn cleanup(&mut self) {
-        let lineage = self.unconfined.then(|| Lineage::of(self.child.id()));
+        let lineage = self
+            .unconfined
+            .then(|| Lineage::of(self.child.id(), Some(self.token.clone())));
         self.report.send_replace(Status {
             phase: Phase::Closing,
             fault: self.fault,

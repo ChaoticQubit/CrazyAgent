@@ -45,8 +45,11 @@ const KINDS: Record<ActivityKind, { icon: IconName; tone: "" | "ok" | "warn" | "
   research_started: { icon: "search", tone: "" },
   research_saved: { icon: "file-text", tone: "ok" },
   research_stopped: { icon: "circle-stop", tone: "warn" },
+  research_waiting: { icon: "hourglass", tone: "" },
   task_started: { icon: "circle-dashed", tone: "" },
   task_finished: { icon: "circle-check", tone: "ok" },
+  task_failed: { icon: "circle-x", tone: "bad" },
+  task_stopped: { icon: "circle-stop", tone: "warn" },
   changes_ready: { icon: "inbox", tone: "" },
   accepted: { icon: "check", tone: "ok" },
   discarded: { icon: "x", tone: "" },
@@ -81,10 +84,15 @@ function mergedBranch(item: ActivityItem): string {
   return /^The master merged its changes into (\S+): /u.exec(item.text)?.[1] ?? "its branch";
 }
 
-/** Who an activity row says acted: You for the owner, the master's own merge into main as
- * merged by itself at Full access, anyone else by name. Input: the event. Output: the line. */
+/** Who an activity row says acted: You for the owner, with where Accept was pressed when the
+ * row knows it, the master's own merge into main as merged by itself at Full access, anyone
+ * else by name. Input: the event. Output: the line. */
 function actorLine(item: ActivityItem): string {
-  if (item.actor === "Owner") return "You";
+  if (item.actor === "Owner") {
+    if (item.place === "changes") return "You, in Changes";
+    if (item.place === "ide") return "You, in the IDE";
+    return "You";
+  }
   if (item.kind === "merged_into_main" && item.actor === "Master") return "Master · Full access, merged by itself";
   return displayText(item.actor);
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
@@ -33,6 +33,20 @@ const MENU_ROWS = `(() => {
     at: centre(item),
   }));
   return rows.length ? rows : null;
+})()`;
+const TRUST = `(() => ({
+  asked: [...document.querySelectorAll(".monaco-dialog-box")].some((box) => (box.textContent ?? "").includes("Do you trust the authors of the files in this")),
+  restricted: [...document.querySelectorAll(".part.banner")].some((banner) => (banner.textContent ?? "").includes("Restricted Mode is intended for safe code browsing.")),
+}))()`;
+const DISTRUST = `(() => {
+  ${CENTRE}
+  const button = [...document.querySelectorAll(".monaco-dialog-box .monaco-button")].find((item) => (item.textContent ?? "").includes("No, I don't trust the authors"));
+  return button ? centre(button) : null;
+})()`;
+const CRAZYAGENT_VIEWS = ["Memories", "Agents", "Change sets", "Brief and documents"];
+const CRAZYAGENT_PANES = `(() => {
+  const titles = [...document.querySelectorAll(".part.sidebar .pane-header .title")].map((item) => (item.textContent ?? "").trim());
+  return ${JSON.stringify(CRAZYAGENT_VIEWS)}.every((name) => titles.includes(name)) ? titles : null;
 })()`;
 const LEVELS = [
   { access: "sandboxed", label: "Sandboxed", confined: true, report: ["net-no", "outside-no", "config-no", "hooks-no"], menu: [["Sandboxed", false], [`Own branch - ${RAISE}`, true], [`Full access - ${RAISE}`, true]] },
@@ -133,9 +147,9 @@ async function openTab(page, { site, project, opened, evidence }) {
   }
 }
 
-/** One level: a project saved at it, its IDE opened, then the server, the default terminal and
- * for Full access the owner's own shell, each checked in the real workbench. Inputs: the test
- * context, the level and what the run shares. Output: none. */
+/** One level: a project saved at it, its IDE opened, then the server, workspace trust, the
+ * default terminal and for Full access the owner's own shell, each checked in the real
+ * workbench. Inputs: the test context, the level and what the run shares. Output: none. */
 async function atLevel(t, level, shared) {
   const { bridge, projects, root, next, evidence, port } = shared;
   const repo = join(root, "repos", `level-${level.access.replace("_", "-")}`);
@@ -158,6 +172,24 @@ async function atLevel(t, level, shared) {
       return document.querySelector(".monaco-workbench .part.activitybar") !== null && explorer !== null && explorer.textContent.includes(${JSON.stringify(FOLDER)});
     })()`, WORKBENCH_MS);
     await pause(SETTLE_MS * 2);
+
+    if (level.confined) {
+      await t.test(`${level.label}: workspace trust is off`, async () => {
+        assert.deepEqual(await page.evaluate(TRUST), { asked: false, restricted: false });
+      });
+    }
+
+    if (level.access === "full") {
+      await t.test("Full access: workspace trust asks first and the extension's views load in Restricted Mode", async () => {
+        await ide.until("the workspace trust question", `${TRUST}.asked`);
+        await me.capture("level-full-trust-asked");
+        await keys.click(await ide.until("the answer that keeps the folder untrusted", DISTRUST));
+        await ide.until("the Restricted Mode banner", `${TRUST}.restricted`);
+        await ide.run("View: Show CrazyAgent");
+        assert.deepEqual(await ide.until("the CrazyAgent views in Restricted Mode", CRAZYAGENT_PANES), CRAZYAGENT_VIEWS);
+        await me.capture("level-full-restricted");
+      });
+    }
 
     await t.test(`${level.label}: the first terminal shows its panel`, async () => {
       await ide.run("Terminal: Create New Terminal");
@@ -237,6 +269,30 @@ async function atLevel(t, level, shared) {
         for (const word of report) assert.match(said, new RegExp(`^${word}$`, "m"), `${picked}: ${said}`);
       }
     });
+
+    if (level.access === "full") {
+      await t.test("Full access: a process its terminal left running is named when the IDE opens again", async () => {
+        const said = await ran("level-left.txt", `nohup node -e "setInterval(() => {}, 1000)" > /dev/null 2>&1 & echo $!`);
+        const pid = said.split("\n")[0];
+        assert.match(pid, /^\d+$/, said);
+        try {
+          await setLevel(bridge, project, "own_branch", next);
+          for (const deadline = Date.now() + STEP_MS; existsSync(server.token_path); await pause(POLL_MS)) {
+            assert.ok(Date.now() < deadline, "the Full access server kept running after its level was lowered");
+          }
+          await setLevel(bridge, project, "full", next);
+          const reopened = await value(bridge, "e2e_ide_open", { projectId: project });
+          writeFileSync(join(evidence, "level-full-left.txt"), `${reopened.left ?? "none"}\n`);
+          const named = (reopened.left ?? "").split(", ").some((item) => item.startsWith(`${pid} `));
+          assert.ok(named, `the open named ${JSON.stringify(reopened.left)}, not ${pid}`);
+        } finally {
+          try {
+            process.kill(Number(pid), "SIGKILL");
+          } catch {
+          }
+        }
+      });
+    }
   });
 }
 

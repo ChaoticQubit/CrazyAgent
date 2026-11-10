@@ -2,6 +2,7 @@ use super::ports::{self, Ports};
 use super::workspace::IdePolicy;
 use super::{bridge, env, extensions, output, proxy, sandbox, settings, token};
 use crate::engine::EngineError;
+use crate::harnesses::leftovers::{self, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use crate::protocol::ProjectId;
 use crate::sandbox::policy::AgentAccess;
 use rustix::process::{Pid, Signal};
@@ -120,6 +121,10 @@ impl Drop for DeleteHold<'_> {
 struct Slot {
     start: Arc<tokio::sync::Mutex<()>>,
     state: Mutex<Option<Running>>,
+    /// What the project's last Full access launch left running after its stop, by
+    /// [`Leftovers::names`](leftovers::Leftovers::names), until an open hands it out
+    /// ([`Servers::left`]).
+    left: Mutex<Option<String>>,
 }
 
 struct Running {
@@ -139,6 +144,41 @@ struct Running {
     /// holds its port. Only a ready launch is handed back to a later open.
     ready: bool,
     proxy: tokio::task::JoinHandle<()>,
+    /// A Full access launch's processes, followed while it runs and settled after its group
+    /// ends ([`finish`]); none below Full.
+    followed: Option<Arc<Followed>>,
+}
+
+/// A Full access launch's leader and lineage token, and its lineage once read, under a lock
+/// of its own so a table read never holds the slot. Only names processes, never signals one.
+struct Followed {
+    leader: u32,
+    token: LineageToken,
+    lineage: Mutex<Option<Result<Lineage, Unstopped>>>,
+}
+
+impl Followed {
+    /// Reads the launch's lineage the first time, then follows it through the engine's shared
+    /// table. Blocks up to one table read. Input: the launch's processes. Output: none.
+    fn follow(&self) {
+        let mut lineage = locked(&self.lineage);
+        match lineage.as_mut() {
+            Some(Ok(lineage)) => lineage.follow(),
+            Some(Err(_)) => {}
+            None => *lineage = Some(Lineage::of(self.leader, Some(self.token.clone()))),
+        }
+    }
+
+    /// Takes the lineage for the stop, reading it now if no follow did, with the stop's own
+    /// read before the group is killed. Blocks up to two table reads. Input: the launch's
+    /// processes. Output: the lineage, or why it cannot be read.
+    fn before_stop(&self) -> Result<Lineage, Unstopped> {
+        let taken = locked(&self.lineage).take();
+        let mut lineage =
+            taken.unwrap_or_else(|| Lineage::of(self.leader, Some(self.token.clone())))?;
+        lineage.before_stop();
+        Ok(lineage)
+    }
 }
 
 fn failure(code: &str) -> EngineError {
@@ -341,13 +381,22 @@ impl Servers {
                 kept_ports: &kept_ports,
             };
             let mut command = command_off_thread(launch, &info, output, &mut start).await?;
+            let lineage = lineage_env(&mut command, policy.access)?;
             self.prepare_extensions(&build, &folder).await?;
             self.spawn(project, &slot, &info, &mut command)
+                .map(|child| (child, lineage))
         }
         .await;
-        let child = started.inspect_err(|_| {
+        let (child, lineage) = started.inspect_err(|_| {
             let _ = token::remove(&folder);
         })?;
+        let followed = lineage.map(|token| {
+            Arc::new(Followed {
+                leader: child.id(),
+                token,
+                lineage: Mutex::new(None),
+            })
+        });
         let group = Pid::from_child(&child);
         assert!(group.as_raw_nonzero().get() > 1);
         record_group(&folder, group);
@@ -375,6 +424,7 @@ impl Servers {
             started: Instant::now(),
             ready: false,
             proxy,
+            followed,
         });
         tokio::spawn(watch(Arc::downgrade(&slot), launch, self.idle, self.start));
         let listening = ready(&slot, launch, server_port, group, self.start, &self.closed).await;
@@ -419,9 +469,27 @@ impl Servers {
         let running = locked(&slot.state).take();
         let stopped = running.is_some();
         if let Some(running) = running {
-            finish(running).await;
+            finish(&slot, running).await;
         }
         stopped
+    }
+
+    /// Hands out, once, what the project's last Full access launch left running after its
+    /// stop, for the IDE tab's next open to show. Input: the project. Output: the names, or
+    /// none.
+    pub fn left(&self, project: &ProjectId) -> Option<String> {
+        let slot = locked(&self.slots).get(project).cloned()?;
+        locked(&slot.left).take()
+    }
+
+    /// The lineage token of a project's running Full access launch, for tests that start a
+    /// process carrying it.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn lineage_token(&self, project: &ProjectId) -> Option<LineageToken> {
+        let slot = locked(&self.slots).get(project).cloned()?;
+        let state = locked(&slot.state);
+        let followed = state.as_ref()?.followed.as_ref()?;
+        Some(followed.token.clone())
     }
 
     /// The projects the register holds a slot for, at most `PROJECTS_MAX`. Output: their ids.
@@ -456,7 +524,7 @@ impl Servers {
         };
         let stopped = running.is_some();
         if let Some(running) = running {
-            finish(running).await;
+            finish(&slot, running).await;
         }
         stopped
     }
@@ -501,8 +569,9 @@ impl Servers {
         for slot in slots {
             let _start = tokio::time::timeout_at(deadline, slot.start.lock()).await;
             let running = locked(&slot.state).take();
-            if let Some(running) = running {
-                finish(running).await;
+            if let Some(mut running) = running {
+                running.followed = None;
+                finish(&slot, running).await;
             }
         }
     }
@@ -674,7 +743,7 @@ async fn reuse(slot: &Slot, policy: IdePolicy) -> Option<ServerInfo> {
         state.take()
     };
     if let Some(unusable) = unusable {
-        finish(unusable).await;
+        finish(slot, unusable).await;
     }
     None
 }
@@ -728,6 +797,7 @@ async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration, start: Duration) {
         let Some(slot) = weak.upgrade() else {
             return;
         };
+        follow(&slot, launch).await;
         match due(&slot, launch, idle, start) {
             None => return,
             Some(false) => continue,
@@ -759,19 +829,75 @@ fn due(slot: &Slot, launch: u64, idle: Duration, start: Duration) -> Option<bool
 async fn stop_launch(slot: &Slot, launch: u64) {
     let running = locked(&slot.state).take_if(|running| running.launch == launch);
     if let Some(running) = running {
-        finish(running).await;
+        finish(slot, running).await;
+    }
+}
+
+/// Follows a running Full access launch's processes on a blocking thread, once per watch
+/// tick, so a process that later leaves its group and its parent stays known
+/// ([`Followed::follow`]). Inputs: the slot and the launch. Output: none.
+async fn follow(slot: &Slot, launch: u64) {
+    let followed = locked(&slot.state)
+        .as_ref()
+        .filter(|running| running.launch == launch)
+        .and_then(|running| running.followed.clone());
+    if let Some(followed) = followed {
+        let _ = tokio::task::spawn_blocking(move || followed.follow()).await;
     }
 }
 
 /// Ends a launch: the proxy, its built-in extension's capability, the process group, its
-/// token and group record.
-async fn finish(mut running: Running) {
+/// token and group record. A Full access launch's lineage takes its stop read before the
+/// group ends and settles after, off the async runtime; what still runs then is named in
+/// the slot's [`Slot::left`], and a clean end clears it. Inputs: the slot and its launch.
+async fn finish(slot: &Slot, mut running: Running) {
     running.proxy.abort();
     let _ = running.grants.revoke(&running.project);
     let _ = (&mut running.proxy).await;
+    let lineage = match running.followed.take() {
+        Some(followed) => Some(
+            tokio::task::spawn_blocking(move || followed.before_stop())
+                .await
+                .unwrap_or(Err(Unstopped::Uncertain)),
+        ),
+        None => None,
+    };
     end_group(&mut running.child, running.group).await;
     let _ = token::remove(&running.folder);
     let _ = fs::remove_file(running.folder.join(GROUP));
+    if let Some(lineage) = lineage {
+        let settled = tokio::task::spawn_blocking(move || lineage.and_then(Lineage::settle))
+            .await
+            .unwrap_or(Err(Unstopped::Uncertain));
+        *locked(&slot.left) = left_names(settled);
+    }
+}
+
+/// What a Full access stop leaves for the next open: the names of what its lineage left,
+/// [`leftovers::UNLISTED`] when its processes could not be listed, none for a clean end.
+/// Input: the settled lineage. Output: the text, or none.
+fn left_names(settled: Result<(), Unstopped>) -> Option<String> {
+    settled.err().map(|unstopped| match unstopped {
+        Unstopped::Left(left) => left.names(),
+        Unstopped::Uncertain => leftovers::UNLISTED.to_owned(),
+    })
+}
+
+/// Gives a Full access server a new lineage token in [`LINEAGE_VARIABLE`], which every
+/// process it starts inherits, so its stop finds one that left its group and kept its
+/// environment. Inputs: the server's command and the level. Output: the token, none below
+/// Full, or `ide_server_start_failed` when no random bytes could be read.
+fn lineage_env(
+    command: &mut Command,
+    access: AgentAccess,
+) -> Result<Option<LineageToken>, EngineError> {
+    if access != AgentAccess::Full {
+        return Ok(None);
+    }
+    let token = LineageToken::new().ok_or_else(|| failure("ide_server_start_failed"))?;
+    command.env(LINEAGE_VARIABLE, token.as_str());
+    assert!(command.get_envs().count() <= env::ENV_MAX + 1);
+    Ok(Some(token))
 }
 
 /// Ends a server's process group: SIGTERM, then SIGKILL after [`STOP_GRACE`], and reaps
@@ -943,7 +1069,13 @@ fn command(
         home,
     };
     let mut command = launcher_command(&launch, info, &places)?;
-    server_arguments(&mut command, info, &places);
+    server_arguments(&mut command, info, &places, policy.access);
+    assert_eq!(
+        command
+            .get_args()
+            .any(|arg| arg == "--disable-workspace-trust"),
+        policy.access != AgentAccess::Full
+    );
     let git = ceiling.as_deref().map(|ceiling| env::ServerGit {
         ceiling,
         config: &places.git_config,
@@ -1042,10 +1174,17 @@ fn launcher_command(
 
 /// Adds the server's command line: 127.0.0.1 at the server port, the token file (never the
 /// token), its own server data folder, the user data folder inside it, the extensions folder,
-/// license accepted, telemetry off, workspace trust off and a 30 s reconnection grace, with
-/// its server data folder as the working directory, since a profile lets it read no folder
-/// above. Inputs: the command, the server's info and the launch's places.
-fn server_arguments(command: &mut Command, info: &ServerInfo, places: &Places<'_>) {
+/// license accepted, telemetry off, workspace trust off below Full access and a 30 s
+/// reconnection grace, with its server data folder as the working directory, since a profile
+/// lets it read no folder above. At Full access no sandbox limits the project's code, so
+/// workspace trust asks the owner first. Inputs: the command, the server's info, the launch's
+/// places and the project's level.
+fn server_arguments(
+    command: &mut Command,
+    info: &ServerInfo,
+    places: &Places<'_>,
+    access: AgentAccess,
+) {
     command
         .args(["--host", "127.0.0.1", "--port"])
         .arg(info.server_port.to_string())
@@ -1058,8 +1197,11 @@ fn server_arguments(command: &mut Command, info: &ServerInfo, places: &Places<'_
         .arg("--extensions-dir")
         .arg(&places.extensions)
         .arg("--accept-server-license-terms")
-        .args(["--telemetry-level", "off"])
-        .arg("--disable-workspace-trust")
+        .args(["--telemetry-level", "off"]);
+    if access != AgentAccess::Full {
+        command.arg("--disable-workspace-trust");
+    }
+    command
         .arg("--reconnection-grace-time")
         .arg(RECONNECTION_GRACE.as_secs().to_string())
         .current_dir(&places.home);

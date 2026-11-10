@@ -404,6 +404,13 @@ pub fn same(one: &str, other: &str) -> bool {
     }
 }
 
+/// The catalog id of a harness name as a team plan, agent row or connection stores it, or
+/// the name itself when the catalog does not know it.
+/// Input: the stored name. Output: one spelling per harness.
+pub fn canonical(id: &str) -> &str {
+    spec(id).map_or(id, |spec| spec.id)
+}
+
 const CONNECTION_NAMES: [(&str, &str); 1] = [("claude", "claude-code")];
 
 const NO_ADAPTER: &str = "installed, but CrazyAgent cannot start it yet";

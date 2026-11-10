@@ -613,10 +613,74 @@ pub struct TeamRuntime {
     #[cfg(unix)]
     caller_pins: BTreeMap<i64, Vec<(String, u32)>>,
     held_restarts: Vec<HostedRestart>,
+    unmanaged_ending: BTreeMap<i64, PendingEnd>,
+    unmanaged_ends: (Sender<PaneEnd>, Receiver<PaneEnd>),
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
+}
+
+/// One running task an engine step puts back in the queue or cancels: the task, its
+/// project and agent, and whether the owner asked to cancel it.
+struct LeftTask {
+    task: i64,
+    project: ProjectId,
+    agent: i64,
+    cancel: bool,
+}
+
+/// The most running tasks one engine step reads to tell how they ended; far past every
+/// project's agent cap together, so it never cuts a real step short.
+const LEFT_TASKS_READ: usize = 1024;
+
+/// Reads the running tasks with an agent that `filter` names ("1" for all of them) before
+/// the caller puts them back in the queue or cancels them, since the queue clears their
+/// agent, so each one's activity line can still name it. Takes the connection, the SQL
+/// filter on team_tasks and its parameters. Returns the tasks, or the SQLite failure.
+fn running_tasks(
+    connection: &Connection,
+    filter: &'static str,
+    values: impl rusqlite::Params,
+) -> Result<Vec<LeftTask>, EngineError> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT id,project,agent,cancel_requested FROM team_tasks
+             WHERE status='running' AND agent IS NOT NULL AND ({filter})
+             ORDER BY id LIMIT {LEFT_TASKS_READ}"
+        ))
+        .map_err(error)?;
+    let rows: Vec<(i64, String, i64, bool)> = statement
+        .query_map(values, |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= LEFT_TASKS_READ);
+    Ok(rows
+        .into_iter()
+        .filter_map(|(task, project, agent, cancel)| {
+            let project = ProjectId::new(project).ok()?;
+            Some(LeftTask {
+                task,
+                project,
+                agent,
+                cancel,
+            })
+        })
+        .collect())
+}
+
+/// Tells the project's activity how each task in `left` left its agent: stopped when the
+/// owner asked to cancel it, else stopped and back in the queue. Takes the connection, the
+/// tasks and the time in ms.
+fn note_left_tasks(connection: &Connection, left: &[LeftTask], now: i64) {
+    for item in left {
+        assert!(item.task > 0);
+        let (project, requeued) = (&item.project, !item.cancel);
+        crate::activity::note_task_stop(connection, project, item.agent, item.task, requeued, now);
+    }
 }
 
 /// How one agent start ended: started, held back because a projects home move holds the
@@ -753,7 +817,7 @@ impl TeamRuntime {
                 return Err(EngineError("team_executable_invalid".into()));
             }
         }
-        let connection = Connection::open_with_flags(
+        let mut connection = Connection::open_with_flags(
             database,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -776,19 +840,22 @@ impl TeamRuntime {
         }
         crate::recovery::capture(&connection, None)?;
         let now = now_ms();
-        connection
-            .execute_batch(&format!(
-                "BEGIN IMMEDIATE;
-                 UPDATE team_agents SET status='stopped', task=NULL, error='Stopped when CrazyAgent closed', stopped_ms={now}
-                   WHERE status IN ('starting','idle','working');
-                 UPDATE team_tasks SET status='queued', agent=NULL, cancel_requested=0
-                   WHERE status='running' AND cancel_requested=0;
-                 UPDATE team_tasks SET status='cancelled', agent=NULL, error='Cancelled by you', finished_ms={now}
-                   WHERE status='running' AND cancel_requested=1;
-                 UPDATE team_messages SET state='pending' WHERE state='sent';
-                 COMMIT;"
-            ))
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
+        let left = running_tasks(&tx, "1", ())?;
+        tx.execute_batch(&format!(
+            "UPDATE team_agents SET status='stopped', task=NULL, error='Stopped when CrazyAgent closed', stopped_ms={now}
+               WHERE status IN ('starting','idle','working');
+             UPDATE team_tasks SET status='queued', agent=NULL, cancel_requested=0
+               WHERE status='running' AND cancel_requested=0;
+             UPDATE team_tasks SET status='cancelled', agent=NULL, error='Cancelled by you', finished_ms={now}
+               WHERE status='running' AND cancel_requested=1;
+             UPDATE team_messages SET state='pending' WHERE state='sent';"
+        ))
+        .map_err(error)?;
+        note_left_tasks(&tx, &left, now);
+        tx.commit().map_err(error)?;
         delivery::settle(&connection)?;
         let custody = std::fs::symlink_metadata(database)
             .map_err(error)
@@ -842,6 +909,8 @@ impl TeamRuntime {
             master_restarts: BTreeSet::new(),
             restarted_for: BTreeMap::new(),
             held_restarts: Vec::new(),
+            unmanaged_ending: BTreeMap::new(),
+            unmanaged_ends: channel(),
             waited_for: BTreeMap::new(),
             #[cfg(test)]
             grant_waited: BTreeMap::new(),
@@ -1769,13 +1838,13 @@ impl TeamRuntime {
         self.tell_leads(&stopped)
     }
 
-    /// Ends the stopped sub-agents that no worker of this engine runs: native teammates a
-    /// lead's own agent team started (DEC-104 K5a), which the terminal host knows by their
-    /// own names once adopted. Each ends through `Host::kill`, never a tmux client of the
-    /// lead's server (K5c), and its row is marked stopped; a host that failed leaves it to
-    /// the next tick. Returns the agents stopped now and who stopped each, or any SQLite
-    /// failure.
+    /// Ends the stopped native teammates no worker of this engine runs (DEC-104 K5a) through
+    /// [`end_left_pane`]: terminate to the pane's first process, then kill to its group, never
+    /// a tmux client of the lead's server (K5c). Each end runs off the tick (S4B-B1-L1) and its
+    /// row is marked once it finished; a host failure leaves it to a later tick. Returns the
+    /// agents marked stopped now and who stopped each, or any SQLite failure.
     fn stop_unmanaged(&mut self) -> Result<Vec<(i64, ProjectId, StoppedBy)>, EngineError> {
+        let mut stopped = self.unmanaged_ended()?;
         let listed: Vec<(i64, String, String)> = {
             let mut statement = self
                 .connection
@@ -1794,52 +1863,115 @@ impl TeamRuntime {
                 .map_err(error)?
         };
         assert!(listed.len() <= UNMANAGED_STOPS_PER_TICK_MAX);
-        let mut stopped = Vec::new();
         for (id, project, by) in listed {
-            if self.workers.contains_key(&id) {
+            if self.workers.contains_key(&id) || self.unmanaged_ending.contains_key(&id) {
                 continue;
             }
             let Ok(project) = ProjectId::new(project) else {
                 continue;
             };
             let by = StoppedBy::named(&by);
-            if !self.end_unmanaged(id, stopped_teammate(by))? {
-                continue;
+            let end =
+                self.end_unmanaged(id, stopped_teammate(by), Told::Stop(project.clone(), by))?;
+            if end == UnmanagedEnd::Marked {
+                stopped.push((id, project, by));
             }
-            stopped.push((id, project, by));
         }
         Ok(stopped)
     }
 
-    /// Ends one sub-agent no worker runs, a native teammate, through the terminal host as
-    /// any left pane ends, and marks its row stopped with the reason, plus the uncertain
-    /// cleanup code when the host could not prove its processes gone (S4B-B1). Takes the
-    /// agent and the reason. Returns whether it ended: false while the host could not end
-    /// it, so the next tick tries again, or a SQLite failure.
-    fn end_unmanaged(&self, id: i64, reason: &str) -> Result<bool, EngineError> {
-        assert!(!self.workers.contains_key(&id));
-        let mut confirmed = true;
-        if let Some(host) = &self.terminal {
-            let name = AgentId::team(id).map_err(EngineError::from)?;
-            match end_left_pane(host.as_ref(), &name, "team") {
-                Ok(ended) => confirmed = ended,
-                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
-                Err(_) => return Ok(false),
+    /// Ends one sub-agent no worker runs, a native teammate, through the terminal host as any
+    /// left pane ends. That end can wait seconds on a pane that ignores terminate, so it runs
+    /// on a thread of its own and the tick goes on (S4B-B1-L1); [`Self::unmanaged_ended`] marks
+    /// the row once it finished. With no terminal host the row is marked at once. Takes the
+    /// agent, the reason and who is told once it is marked. Returns how it was taken.
+    fn end_unmanaged(
+        &mut self,
+        id: i64,
+        reason: &'static str,
+        told: Told,
+    ) -> Result<UnmanagedEnd, EngineError> {
+        assert!(!self.workers.contains_key(&id) && !self.unmanaged_ending.contains_key(&id));
+        let Some(host) = self.terminal.clone() else {
+            return Ok(if self.mark_unmanaged(id, reason, true)? {
+                UnmanagedEnd::Marked
+            } else {
+                UnmanagedEnd::Untouched
+            });
+        };
+        let name = AgentId::team(id).map_err(EngineError::from)?;
+        let sender = self.unmanaged_ends.0.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("team-end-{id}"))
+            .spawn(move || {
+                end_reported(id, sender, || end_left_pane(host.as_ref(), &name, "team"));
+            });
+        if spawned.is_err() {
+            return Ok(UnmanagedEnd::Untouched);
+        }
+        self.unmanaged_ending
+            .insert(id, PendingEnd { reason, told });
+        Ok(UnmanagedEnd::Handed)
+    }
+
+    /// Marks stopped each native teammate whose end a thread finished since the last call,
+    /// with the uncertain cleanup code when the end was not proven (S4B-B1); an unknown pane
+    /// counts as gone, any other host failure leaves the row to a later tick. Only rows it
+    /// marked are told: their owner's side stops are returned, and each over-cap lead gets one
+    /// note naming its ended teammates. Returns those stops, or a SQLite or store failure.
+    fn unmanaged_ended(&mut self) -> Result<Vec<(i64, ProjectId, StoppedBy)>, EngineError> {
+        let mut stopped = Vec::new();
+        let mut capped: BTreeMap<(ProjectId, i64, u8), Vec<String>> = BTreeMap::new();
+        while let Ok((id, outcome)) = self.unmanaged_ends.1.try_recv() {
+            let pending = self
+                .unmanaged_ending
+                .remove(&id)
+                .expect("an end finished only after it was handed over");
+            let confirmed = match outcome {
+                Ok(confirmed) => confirmed,
+                Err(problem) if problem.0 == "terminal_agent_unknown" => true,
+                Err(_) => continue,
+            };
+            if !self.mark_unmanaged(id, pending.reason, confirmed)? {
+                continue;
+            }
+            match pending.told {
+                Told::Stop(project, by) => stopped.push((id, project, by)),
+                Told::Lead { project, lead, cap } => {
+                    let name = names::name(&self.connection, id)?;
+                    capped
+                        .entry((project, lead, cap))
+                        .or_default()
+                        .push(names::label(AgentRole::Sub, id, name.as_ref()));
+                }
             }
         }
+        for ((project, lead, cap), ended) in capped {
+            self.note_lead(&project, lead, over_cap_note(cap, &ended))?;
+        }
+        Ok(stopped)
+    }
+
+    /// Marks one native teammate's row stopped with the reason, plus the uncertain cleanup
+    /// code when its end was not proven. Takes the agent, the reason and whether the end was
+    /// proven. Returns whether it marked the row, false for one already stopped elsewhere, or
+    /// any SQLite failure.
+    fn mark_unmanaged(&self, id: i64, reason: &str, confirmed: bool) -> Result<bool, EngineError> {
         let note = if confirmed {
             reason.to_owned()
         } else {
             with_code(reason, Some(crate::harnesses::leftovers::UNCERTAIN))
         };
-        self.connection
+        let marked = self
+            .connection
             .execute(
                 "UPDATE team_agents SET status='stopped', task=NULL, error=?2, stopped_ms=?3
                  WHERE id=?1 AND status IN ('starting','idle','working')",
                 params![id, note, now_ms()],
             )
             .map_err(error)?;
-        Ok(true)
+        assert!(marked <= 1);
+        Ok(marked == 1)
     }
 
     /// Marks stopped the native teammates of a lead that just ended. They run on their own
@@ -1878,11 +2010,11 @@ impl TeamRuntime {
     }
 
     /// Ends a running lead's newest native teammates past the owner's Max teammates per
-    /// harness, counted with its app-spawned sub-agents (DEC-104 K8). App-spawned ones are
-    /// never ended here: the engine admits them against the cap before they start. The lead
-    /// gets a note naming the ones ended. Takes the project, the lead and the cap. Returns
-    /// any SQLite or coordination store failure.
-    fn cap_native(&self, project: &ProjectId, lead: i64, cap: u8) -> Result<(), EngineError> {
+    /// harness, counted with its app-spawned sub-agents (DEC-104 K8), an end still running off
+    /// the tick counted as made. App-spawned ones are never ended here: the engine admits them
+    /// against the cap before they start. The lead is noted once their rows are marked. Takes the
+    /// project, the lead and the cap. Returns any SQLite or coordination store failure.
+    fn cap_native(&mut self, project: &ProjectId, lead: i64, cap: u8) -> Result<(), EngineError> {
         let running = super::caps::running_sub_agents(&self.connection, project, lead)?;
         if running <= u32::from(cap) {
             return Ok(());
@@ -1908,14 +2040,26 @@ impl TeamRuntime {
                 .collect::<Result<_, _>>()
                 .map_err(error)?
         };
-        let over = usize::try_from(running - u32::from(cap)).unwrap_or(usize::MAX);
-        let mut ended = Vec::new();
-        for id in native
+        let ending = native
+            .iter()
+            .filter(|id| self.unmanaged_ending.contains_key(id))
+            .count();
+        let over = usize::try_from(running - u32::from(cap))
+            .unwrap_or(usize::MAX)
+            .saturating_sub(ending);
+        let picked: Vec<i64> = native
             .into_iter()
-            .filter(|id| !self.workers.contains_key(id))
+            .filter(|id| !self.workers.contains_key(id) && !self.unmanaged_ending.contains_key(id))
             .take(over)
-        {
-            if self.end_unmanaged(id, OVER_TEAMMATE_CAP)? {
+            .collect();
+        let mut ended = Vec::new();
+        for id in picked {
+            let told = Told::Lead {
+                project: project.clone(),
+                lead,
+                cap,
+            };
+            if self.end_unmanaged(id, OVER_TEAMMATE_CAP, told)? == UnmanagedEnd::Marked {
                 let name = names::name(&self.connection, id)?;
                 ended.push(names::label(AgentRole::Sub, id, name.as_ref()));
             }
@@ -1924,14 +2068,7 @@ impl TeamRuntime {
         if ended.is_empty() {
             return Ok(());
         }
-        self.note_lead(
-            project,
-            lead,
-            format!(
-                "The owner allows at most {cap} sub-agents per harness, so the engine ended your newest teammates: {}. Keep at most {cap}.",
-                ended.join(", ")
-            ),
-        )
+        self.note_lead(project, lead, over_cap_note(cap, &ended))
     }
 
     /// Sends a lead, or any team agent, an engine note through the coordination layer
@@ -2259,11 +2396,13 @@ impl TeamRuntime {
             .map_err(error)?;
         crate::recovery::capture(&tx, Some(now))?;
         for id in ids {
+            let left = running_tasks(&tx, "agent=?1 AND cancel_requested=0", [id])?;
             tx.execute(
                 "UPDATE team_tasks SET status='queued', agent=NULL WHERE agent=?1 AND status='running' AND cancel_requested=0",
                 [id],
             )
             .map_err(error)?;
+            note_left_tasks(&tx, &left, now);
             let note = kept.contains(&id).then_some(LEFT_RUNNING_NOTE);
             tx.execute(
                 "UPDATE team_agents SET status='stopped', task=NULL, error=?3, stopped_ms=?2 WHERE id=?1 AND status IN ('starting','idle','working')",
@@ -2611,6 +2750,9 @@ impl TeamRuntime {
     fn release(&mut self, pin: Option<i64>, busy: Busy) -> Result<(), EngineError> {
         match busy {
             Busy::Task(task) => {
+                let now = now_ms();
+                let left = running_tasks(&self.connection, "id=?1", [task])?;
+                assert!(left.len() <= 1);
                 self.connection
                     .execute(
                         "UPDATE team_tasks SET status='queued', agent=NULL, attempts=MAX(attempts-1,0)
@@ -2632,9 +2774,10 @@ impl TeamRuntime {
                     .execute(
                         "UPDATE team_tasks SET status='cancelled', error='Cancelled by you', finished_ms=?2
                          WHERE id=?1 AND status='running'",
-                        params![task, now_ms()],
+                        params![task, now],
                     )
                     .map_err(error)?;
+                note_left_tasks(&self.connection, &left, now);
             }
             Busy::Message(message) => {
                 self.connection
@@ -6249,7 +6392,6 @@ impl TeamRuntime {
             return teammates::keep_worktrees(&self.connection, project, lead);
         };
         let (worktree, git_dir) = (PathBuf::from(worktree), PathBuf::from(git_dir));
-        let linked = git_dir != crate::agent_git::git_dir(&worktree);
         let made = crate::landing::teammate_worktrees(&self.connection, &worktree, &git_dir)
             .unwrap_or_default();
         let mut wanted = Vec::new();
@@ -6272,24 +6414,39 @@ impl TeamRuntime {
         if wanted.is_empty() {
             return teammates::keep_worktrees(&self.connection, project, lead);
         }
-        match self.teammates_git(Path::new(&repository), &worktree, lead, linked) {
+        match self.teammates_git(Path::new(&repository), &worktree, &git_dir, lead) {
             Ok((sandbox, profile)) => {
                 let git = crate::landing::LeadGit {
                     sandbox: &sandbox,
                     profile: &profile,
                 };
+                #[cfg(unix)]
+                let hidden =
+                    crate::sandbox::hidden_paths::load(&self.connection, project.as_str()).ok();
                 for name in &wanted {
-                    if let Err(problem) = crate::landing::add_teammate_worktree(
+                    match crate::landing::add_teammate_worktree(
                         &self.connection,
                         &worktree,
                         &git_dir,
                         name,
                         &git,
                     ) {
-                        eprintln!(
+                        #[cfg(unix)]
+                        Ok(()) => {
+                            if let Some(hidden) = &hidden {
+                                expose_graph(
+                                    Path::new(&repository),
+                                    &worktree.join(crate::agent_git::TEAMMATES_FOLDER).join(name),
+                                    hidden,
+                                );
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        Ok(()) => {}
+                        Err(problem) => eprintln!(
                             "teammate_worktree_failed cause={}",
                             crate::protocol::plain_code(&problem.0)
-                        );
+                        ),
                     }
                 }
             }
@@ -6300,15 +6457,15 @@ impl TeamRuntime {
 
     /// The sandbox and installed profile the engine's git runs under to make a lead's native
     /// teammates' worktrees: the lead's own launch profile for its own clone, or for a
-    /// linked lead its teammates' setup profile, installed now (OP-9b). Takes the project
-    /// folder, the lead's worktree, the lead and whether the worktree is linked. Returns
-    /// both, or the plain cause.
+    /// linked lead its teammates' setup profile on the lead's recorded branch, installed
+    /// now (OP-9b, AGENT-REF-ALLOW-NARROW). Takes the project folder, the lead's worktree,
+    /// its git folder and the lead. Returns both, or the plain cause.
     fn teammates_git(
         &self,
         repository: &Path,
         worktree: &Path,
+        git_dir: &Path,
         lead: i64,
-        linked: bool,
     ) -> Result<(ProjectSandbox, PathBuf), &'static str> {
         let unavailable = |_| "lead_sandbox_unavailable";
         let sandbox = ProjectSandbox::new(
@@ -6320,12 +6477,16 @@ impl TeamRuntime {
             SandboxNetwork::Only(Vec::new()),
         )
         .map_err(unavailable)?;
-        if !linked {
+        if git_dir == crate::agent_git::git_dir(worktree) {
             return Ok((sandbox, agent_profile(&self.state, lead)));
         }
         let setup = |_| "teammates_setup_unavailable";
+        let branch = crate::landing::agent_branch(&self.connection, worktree, git_dir)
+            .ok()
+            .flatten()
+            .ok_or("teammates_setup_unavailable")?;
         let sandbox = sandbox
-            .confine_to_teammates_setup(worktree)
+            .confine_to_teammates_setup(worktree, &branch)
             .map_err(setup)?;
         let profile = agent_teammates_setup_profile(&self.state, lead);
         sandbox.install(&profile).map_err(setup)?;
@@ -7163,6 +7324,18 @@ impl TeamRuntime {
                     Some("team_native_needs_sandbox"),
                 ));
             }
+            #[cfg(unix)]
+            if layout == Layout::Clone
+                && let Some(branch) = crate::landing::agent_branch(
+                    &self.connection,
+                    &working_dir,
+                    &crate::agent_git::git_dir(&working_dir),
+                )
+                .map_err(|e| with_code("the lead's branch could not be read", Some(&e.0)))?
+                .filter(|branch| crate::agent_git::is_agent_branch(branch))
+            {
+                sandbox = sandbox.lead_branch(&branch).map_err(sandboxed)?;
+            }
             let (lead, mates, tmux) =
                 self.native_sandboxes(id, &scratch, &home, &homes, &working_dir, sandbox)?;
             sandbox = lead;
@@ -7170,7 +7343,7 @@ impl TeamRuntime {
             native_tmux = Some(tmux);
         }
         #[cfg(unix)]
-        expose_graph(&root, &working_dir);
+        expose_graph(&root, &working_dir, &hidden);
         #[cfg(not(unix))]
         expose_graph(&root, &working_dir)?;
         if let Some(engine) = self
@@ -8190,6 +8363,8 @@ impl TeamRuntime {
         else {
             return Ok(());
         };
+        let left = running_tasks(&self.connection, "id=?1", [task])?;
+        assert!(left.len() <= 1);
         let retry = attempts < self.limits.attempts_max;
         let closed = with_code("The sub-agent stopped unexpectedly", cause);
         let timed = format!("The sub-agent was {}", cause.unwrap_or(TIME_LIMIT_NOTE));
@@ -8247,6 +8422,21 @@ impl TeamRuntime {
         assert!(changed <= 1);
         if changed == 1 {
             super::events::task_ended(&self.connection, task, now_ms())?;
+            if matches!(status, TaskStatus::Cancelled | TaskStatus::Queued) {
+                let requeued = status == TaskStatus::Queued;
+                for item in &left {
+                    let (project, agent) = (&item.project, item.agent);
+                    let now = now_ms();
+                    crate::activity::note_task_stop(
+                        &self.connection,
+                        project,
+                        agent,
+                        task,
+                        requeued,
+                        now,
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -9159,9 +9349,9 @@ fn native_session(
 /// a fresh custody use of the account, hands the credential to the lead's home again, then
 /// serves turns on the running session, so the lead and its teammates never run on without
 /// the account. A first order without the account ends the lead. A lead's end not proven
-/// gone reports the uncertain cleanup, and keeps a credential already handed over held
-/// (S4B-B1). Takes the adoption and the worker's channels and flags. Returns the problem
-/// that ended it, if any.
+/// gone reports the uncertain cleanup before the cause it ended for, and keeps a credential
+/// already handed over held (S4B-B1). Takes the adoption and the worker's channels and
+/// flags. Returns the problem that ended it, if any.
 fn native_adopted(
     adoption: Adoption,
     orders: &Receiver<Order>,
@@ -9202,10 +9392,11 @@ fn native_adopted(
     };
     let taken = first.is_some();
     let Some(grant) = grant else {
+        let cause = Some("The native lead was taken over without its signed-in account".into());
         if !end(taken, None) {
-            return settle_stop(Err(Unstopped::Uncertain), None);
+            return ended_with(settle_stop(Err(Unstopped::Uncertain), None), cause);
         }
-        return Some("The native lead was taken over without its signed-in account".into());
+        return cause;
     };
     let Grant { profile, .. } = *grant;
     let credential = match profile.hand_to_agent(
@@ -9215,13 +9406,14 @@ fn native_adopted(
     ) {
         Ok(credential) => credential,
         Err(problem) => {
-            if !end(taken, Some(problem.0.clone())) {
-                return settle_stop(Err(Unstopped::Uncertain), None);
-            }
-            return Some(with_code(
+            let cause = Some(with_code(
                 "The signed-in account could not reach the agent",
                 Some(&problem.0),
             ));
+            if !end(taken, Some(problem.0.clone())) {
+                return ended_with(settle_stop(Err(Unstopped::Uncertain), None), cause);
+            }
+            return cause;
         }
     };
     match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
@@ -9238,13 +9430,17 @@ fn native_adopted(
             leave,
         ),
         Err(problem) => {
-            if !end(taken, Some(problem.0.clone())) {
-                return settle_stop(Err(Unstopped::Uncertain), Some((credential, profile)));
-            }
-            Some(with_code(
+            let cause = Some(with_code(
                 "The agent's running terminal could not be taken over",
                 Some(&problem.0),
-            ))
+            ));
+            if !end(taken, Some(problem.0.clone())) {
+                return ended_with(
+                    settle_stop(Err(Unstopped::Uncertain), Some((credential, profile))),
+                    cause,
+                );
+            }
+            cause
         }
     }
 }
@@ -9651,6 +9847,81 @@ const _: () = assert!(TEAMMATE_WORKTREE_NAMES_MAX >= TEAMMATE_ROWS_KEPT as usize
 const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX);
 /// The most owner-stopped native teammates one tick ends, so a long list never stalls it.
 const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;
+
+/// One native teammate's end that ran on a thread of its own: the agent and the host's
+/// answer, whether its pane was proven gone, or the host's failure.
+type PaneEnd = (i64, Result<bool, crate::terminal::HostError>);
+
+/// Who learns of a native teammate's end once its row is marked: the owner's side stop, by
+/// its project and maker, or the lead whose cap it was over, by project, lead and cap.
+enum Told {
+    Stop(ProjectId, StoppedBy),
+    Lead {
+        project: ProjectId,
+        lead: i64,
+        cap: u8,
+    },
+}
+
+/// What a native teammate whose end runs on a thread gets once it finished: the reason its
+/// row is marked with, and who is told.
+struct PendingEnd {
+    reason: &'static str,
+    told: Told,
+}
+
+/// How one native teammate's end was taken: its row marked stopped now, its end handed to a
+/// thread whose answer a later tick marks, or neither, as for a row already stopped
+/// elsewhere or a thread that did not start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnmanagedEnd {
+    Marked,
+    Handed,
+    Untouched,
+}
+
+/// The note a lead gets for its newest teammates the engine ended over the owner's Max
+/// teammates per harness. Takes the cap and the ended teammates' labels. Returns the note.
+fn over_cap_note(cap: u8, ended: &[String]) -> String {
+    format!(
+        "The owner allows at most {cap} sub-agents per harness, so the engine ended your newest teammates: {}. Keep at most {cap}.",
+        ended.join(", ")
+    )
+}
+
+/// Runs one native teammate's end on its thread and sends what it found, also when the end
+/// panics: a guard then sends it as not proven, so its row is still marked, with the
+/// uncertain cleanup code, and no agent stays handed over (S4B-B1-L1 r1). Takes the agent,
+/// the channel and the end. Returns nothing.
+fn end_reported(
+    id: i64,
+    sender: Sender<PaneEnd>,
+    end: impl FnOnce() -> Result<bool, crate::terminal::HostError>,
+) {
+    let mut guard = EndGuard {
+        id,
+        sender: Some(sender),
+    };
+    let outcome = end();
+    if let Some(sender) = guard.sender.take() {
+        let _ = sender.send((id, outcome));
+    }
+}
+
+/// Sends a native teammate's end as not proven when its thread leaves before it sent a
+/// result, as on a panic.
+struct EndGuard {
+    id: i64,
+    sender: Option<Sender<PaneEnd>>,
+}
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send((self.id, Ok(false)));
+        }
+    }
+}
 const OWNER_STOPPED_TEAMMATE: &str = "The owner stopped this teammate.";
 const MASTER_STOPPED_TEAMMATE: &str = "The master stopped this teammate.";
 const LEAD_STOPPED_TEAMMATE: &str = "Its lead stopped this teammate.";
@@ -10573,12 +10844,6 @@ pub fn agent_home(state: &Path, id: i64) -> PathBuf {
         .join("home")
 }
 
-/// The project folder graphify keeps its graph in, and the entries of it an agent's
-/// worktree shows: the graph the CLI queries, its report and its wiki.
-#[cfg(unix)]
-const GRAPH_FOLDER: &str = "graphify-out";
-#[cfg(unix)]
-const GRAPH_ENTRIES: [&str; 3] = ["graph.json", "GRAPH_REPORT.md", "wiki"];
 /// The most bytes of a worktree's `.gitignore` read to see whether it ignores the graph.
 #[cfg(unix)]
 const GITIGNORE_BYTES_MAX: u64 = 256 * 1024;
@@ -10595,58 +10860,23 @@ fn expose_graph(_root: &Path, _worktree: &Path) -> Result<(), String> {
     ))
 }
 
-/// Shows the project's graphify graph read-only in an agent's worktree (I3): a real
-/// `graphify-out` folder there holds links to the project's graph, report and wiki, which the
-/// agent's sandbox reads but never writes, so `graphify query` and the graphify reminder hook
-/// find the graph from the worktree. Only when git ignores the folder there (see
-/// [`ignores_graph`]), so it never shows as a change; anything the agent made there itself
-/// is left alone, and every step works through the folder's own descriptor without following
-/// a link. A
-/// failure leaves the agent without the graph, never without its start. Takes the project
-/// folder and the worktree.
+/// Gives an agent's worktree its own copy of the project's main graph (DEC-123): the graph
+/// the engine last published, copied into the worktree's `graphify-out` as APFS clones on
+/// macOS ([`crate::onboarding::main_graph::copy_into`]), so `graphify query` and the
+/// graphify reminder hook find it and the agent may update it. Only when git ignores the
+/// folder there (see [`ignores_graph`]), so it never shows as a change; anything the agent
+/// made there itself is left alone, and the read-only links an older engine placed there
+/// (I3) give way to the copy. No link is followed. A graph built while the project hid other
+/// folders is not copied, so a folder hidden since reaches no agent. A missing or unreadable
+/// graph leaves the agent without one, never without its start. Takes the project folder,
+/// the worktree and the folders the project hides now.
 #[cfg(unix)]
-fn expose_graph(root: &Path, worktree: &Path) {
-    use rustix::fs::{
-        AtFlags, CWD, FileType, Mode, OFlags, mkdirat, openat, readlinkat, statat, symlinkat,
-        unlinkat,
-    };
-    let source = root.join(GRAPH_FOLDER);
-    let shared = std::fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_dir());
-    if !shared || !ignores_graph(root, worktree) {
+fn expose_graph(root: &Path, worktree: &Path, hidden: &[PathBuf]) {
+    if !ignores_graph(root, worktree) {
         return;
     }
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let Ok(tree) = openat(CWD, worktree, flags, Mode::empty()) else {
-        return;
-    };
-    match mkdirat(&tree, GRAPH_FOLDER, Mode::from_raw_mode(0o755)) {
-        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-        Err(_) => return,
-    }
-    let Ok(folder) = openat(&tree, GRAPH_FOLDER, flags, Mode::empty()) else {
-        return;
-    };
-    for entry in GRAPH_ENTRIES {
-        let target = source.join(entry);
-        if std::fs::symlink_metadata(&target).is_err() {
-            continue;
-        }
-        match statat(&folder, entry, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) if FileType::from_raw_mode(stat.st_mode) != FileType::Symlink => continue,
-            Ok(_) => {
-                let current = readlinkat(&folder, entry, Vec::new());
-                if current
-                    .is_ok_and(|named| named.as_bytes() == target.as_os_str().as_encoded_bytes())
-                {
-                    continue;
-                }
-                if unlinkat(&folder, entry, AtFlags::empty()).is_err() {
-                    continue;
-                }
-            }
-            Err(_) => {}
-        }
-        let _ = symlinkat(target.as_path(), &folder, entry);
+    if let Err(error) = crate::onboarding::main_graph::copy_into(root, worktree, hidden) {
+        eprintln!("graph_copy_failed cause={:?}", error.kind());
     }
 }
 

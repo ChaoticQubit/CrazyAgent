@@ -373,6 +373,59 @@ fn the_sandboxed_terminal_cannot_commit() {
     assert_eq!(git_files(&case.folder), before, "{said}");
 }
 
+/// Plants with `script` in a Sandboxed terminal of a fresh repository, `@OWNER@` naming a
+/// folder of the owner's outside the project, then runs the owner's own `git worktree
+/// prune`, which a commit also runs as maintenance. Inputs: whether the repository has a
+/// `.git/worktrees` folder and the script. Output: what the terminal printed and how many of
+/// the owner's two files are still there.
+#[cfg(target_os = "macos")]
+fn plant_then_prune(worktrees: bool, script: &str) -> (String, usize) {
+    let case = Case::new();
+    setup_git(&case.folder, &["init", "-q"]);
+    if worktrees {
+        std::fs::create_dir(case.folder.join(".git").join("worktrees")).unwrap();
+    }
+    let owner = case.folder.parent().unwrap().join("owner-files");
+    let files = [owner.join("keep.txt"), owner.join("sub").join("keep.txt")];
+    std::fs::create_dir_all(owner.join("sub")).unwrap();
+    for file in &files {
+        std::fs::write(file, "owner file\n").unwrap();
+    }
+    let output = in_terminal(&case, &script.replace("@OWNER@", &quoted(&owner)));
+    let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    setup_git(&case.folder, &["worktree", "prune"]);
+    (said, files.iter().filter(|file| file.is_file()).count())
+}
+
+/// A Sandboxed terminal cannot make `.git/worktrees`, or an entry in it, a link, in any
+/// letter case, by renaming or clone-copying one in either, while it still makes a real
+/// admin folder there as `git worktree add` does and links in the project itself. Git's
+/// `worktree prune` empties the folder such a link names, outside the project
+/// (SECAUDIT-WORKTREE-ADMIN-PLANT).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandboxed_terminal_cannot_link_git_worktrees_to_a_folder_the_owners_prune_empties() {
+    let (said, kept) = plant_then_prune(false, "ln -s @OWNER@ .git/worktrees; echo folder=$?");
+    assert!(said.contains("folder=1"), "{said}");
+    assert_eq!(kept, 2, "{said}");
+    let (said, kept) = plant_then_prune(
+        true,
+        "ln -s @OWNER@ .git/worktrees/planted; echo admin=$?; \
+         ln -s @OWNER@ .git/WORKTREES/cased; echo cased=$?; \
+         mkdir .git/worktrees/real; echo real=$?; \
+         ln -s @OWNER@ t && ln -s @OWNER@ u; echo linked=$?; \
+         mv t .git/worktrees/moved; echo moved=$?; \
+         cp -c -P u .git/worktrees/cloned; echo cloned=$?; \
+         cp -c -P u copied; echo copied=$?",
+    );
+    for code in [
+        "admin=1", "cased=1", "real=0", "linked=0", "moved=1", "cloned=1", "copied=0",
+    ] {
+        assert!(said.contains(code), "{code}: {said}");
+    }
+    assert_eq!(kept, 2, "{said}");
+}
+
 /// Runs a confined IDE terminal's pane as the host would, pins that its shell then starts,
 /// and answers what it says first, which is printed inside the pane because the pane host
 /// repaints the terminal as it attaches and wipes anything written from outside. Inputs: the
@@ -907,4 +960,143 @@ fn ide_shell_finds_the_project_folder_and_its_read_folders_in_the_engine_databas
     assert_eq!(std::fs::read(root.join("engine.db")).unwrap(), before);
     assert!(ide_shell::project_place(&root, &ProjectId::new("beta").unwrap()).is_err());
     assert!(ide_shell::project_place(&base.join("missing"), &project).is_err());
+}
+
+/// The built-in extension keeps working in Restricted Mode, where a Full access IDE starts
+/// until the owner trusts the folder: it runs none of the project's code.
+#[test]
+fn the_extension_declares_it_runs_in_restricted_mode() {
+    let (name, manifest) = crate::ide::bridge::EXTENSION_FILES[0];
+    assert_eq!(name, "package.json");
+    let manifest: serde_json::Value = serde_json::from_slice(manifest).unwrap();
+    assert_eq!(
+        manifest["capabilities"]["untrustedWorkspaces"]["supported"],
+        json!(true)
+    );
+}
+
+/// The command palette offers the terminal menu's levels with the menu's state and words. It
+/// drops a greyed command rather than greying it, so a level above the project's is its own
+/// palette command, titled as the menu's greyed row, that only says to raise project access.
+#[test]
+fn the_palette_offers_the_menus_levels_and_words() {
+    let (name, manifest) = crate::ide::bridge::EXTENSION_FILES[0];
+    assert_eq!(name, "package.json");
+    let manifest: serde_json::Value = serde_json::from_slice(manifest).unwrap();
+    let contributes = &manifest["contributes"];
+    let category = "New terminal at access level";
+    assert_eq!(contributes["submenus"][0]["label"], json!(category));
+    let command = |id: &str| {
+        contributes["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["command"] == json!(id))
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} is not contributed"))
+    };
+    for (id, title) in [
+        ("crazyagent.terminal.sandboxed", "Sandboxed"),
+        ("crazyagent.terminal.ownBranch", "Own branch"),
+        ("crazyagent.terminal.full", "Full access"),
+        (
+            "crazyagent.terminal.ownBranchAbove",
+            "Own branch - Raise project access to use this",
+        ),
+        (
+            "crazyagent.terminal.fullAbove",
+            "Full access - Raise project access to use this",
+        ),
+    ] {
+        assert_eq!(
+            command(id),
+            json!({"command": id, "title": title, "category": category})
+        );
+    }
+    for (raise, above) in [
+        (
+            "crazyagent.terminal.ownBranchRaise",
+            "crazyagent.terminal.ownBranchAbove",
+        ),
+        (
+            "crazyagent.terminal.fullRaise",
+            "crazyagent.terminal.fullAbove",
+        ),
+    ] {
+        assert_eq!(command(raise)["enablement"], json!("false"));
+        assert_eq!(command(raise)["title"], command(above)["title"]);
+    }
+    let menu = contributes["menus"]["crazyagent.terminalLevels"]
+        .as_array()
+        .unwrap();
+    let menu_when = |id: &str| {
+        menu.iter()
+            .find(|entry| entry["command"] == json!(id))
+            .map(|entry| entry["when"].clone())
+            .unwrap_or_else(|| panic!("{id} is not in the menu"))
+    };
+    let palette = contributes["menus"]["commandPalette"].as_array().unwrap();
+    let palette_when = |id: &str| {
+        palette
+            .iter()
+            .filter(|entry| entry["command"] == json!(id))
+            .map(|entry| entry["when"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(menu_when("crazyagent.terminal.sandboxed"), json!(null));
+    assert!(palette_when("crazyagent.terminal.sandboxed").is_empty());
+    for (shown, in_menu) in [
+        (
+            "crazyagent.terminal.ownBranch",
+            "crazyagent.terminal.ownBranch",
+        ),
+        (
+            "crazyagent.terminal.ownBranchAbove",
+            "crazyagent.terminal.ownBranchRaise",
+        ),
+        ("crazyagent.terminal.full", "crazyagent.terminal.full"),
+        (
+            "crazyagent.terminal.fullAbove",
+            "crazyagent.terminal.fullRaise",
+        ),
+    ] {
+        assert_eq!(palette_when(shown), [menu_when(in_menu)], "{shown}");
+    }
+    assert_eq!(
+        palette_when("crazyagent.terminal.ownBranchAbove"),
+        [json!("crazyagent.ideAccess == sandboxed")]
+    );
+    assert_eq!(
+        palette_when("crazyagent.terminal.fullAbove"),
+        [json!("crazyagent.ideAccess != full")]
+    );
+    for raise in [
+        "crazyagent.terminal.ownBranchRaise",
+        "crazyagent.terminal.fullRaise",
+    ] {
+        assert_eq!(palette_when(raise), [json!("false")], "{raise}");
+    }
+    assert!(
+        menu.iter()
+            .all(|entry| !entry["command"].as_str().unwrap().ends_with("Above"))
+    );
+    let embedded = |wanted: &str| {
+        crate::ide::bridge::EXTENSION_FILES
+            .iter()
+            .find(|(name, _)| *name == wanted)
+            .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap()
+    };
+    assert!(
+        embedded("out/pty.js")
+            .contains(r#"exports.ABOVE_PROJECT = "Raise project access to use this";"#)
+    );
+    let terminal = embedded("out/terminal.js");
+    for above in [
+        "crazyagent.terminal.ownBranchAbove",
+        "crazyagent.terminal.fullAbove",
+    ] {
+        assert!(terminal.contains(&format!("{above:?}")), "{above}");
+    }
+    assert!(terminal.contains("showInformationMessage(pty_js_1.ABOVE_PROJECT)"));
 }

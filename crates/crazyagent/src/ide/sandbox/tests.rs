@@ -2108,3 +2108,122 @@ fn ide_sandboxed_code_cannot_plant_a_case_variant_commondir() {
     assert!(!wrote, "the write ran: {planted:?}");
     assert!(planted.is_empty(), "{planted:?}");
 }
+
+/// An intent-to-add entry has no form the carry can bring across, so the shim stops every
+/// spelling of it in the project folder with a plain line before git runs, and nothing is
+/// staged (SECAUDIT-14-L1).
+#[test]
+fn an_intent_to_add_from_the_ide_stops_with_a_plain_line() {
+    let s = server();
+    fs::write(s.root.join("new.txt"), "eight by").unwrap();
+    let spellings: [&[&str]; 6] = [
+        &["add", "-N", "new.txt"],
+        &["add", "--intent-to-add", "new.txt"],
+        &["add", "-vN", "new.txt"],
+        &["stage", "--inten", "new.txt"],
+        &["reset", "-N"],
+        &["apply", "-N", "none.patch"],
+    ];
+    for args in spellings {
+        let (ran, said) = s.git(args);
+        assert!(!ran, "{args:?}");
+        assert!(
+            said.contains("does not mark files as intent to add from the IDE"),
+            "{args:?}: {said}"
+        );
+    }
+    assert!(s.no_private_files());
+    let (ran, said) = s.git(&["add", "--", "-N"]);
+    assert!(
+        !said.contains("intent to add"),
+        "a path after -- is a path: {said}"
+    );
+    assert!(!ran, "git finds no file named -N: {said}");
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// git takes any unique prefix of a long option, so every prefix of `--intent-to-add` that
+/// reset reads as it stops from the IDE in the project folder with the plain line
+/// (SECAUDIT-14-L1 r1 L1).
+#[test]
+fn a_reset_with_a_prefix_of_intent_to_add_from_the_ide_stops_with_a_plain_line() {
+    let s = server();
+    for prefix in ["--i", "--in", "--int", "--inte"] {
+        let (ran, said) = s.git(&["reset", prefix]);
+        assert!(!ran, "{prefix}");
+        assert!(
+            said.contains("does not mark files as intent to add from the IDE"),
+            "{prefix}: {said}"
+        );
+    }
+    assert!(s.no_private_files());
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// apply reads `--int` and `--inte` as `--intent-to-add`, so both stop from the IDE in the
+/// project folder with the plain line, while `--index` is still apply's own option
+/// (SECAUDIT-14-L1 r1 L1).
+#[test]
+fn an_apply_with_a_prefix_of_intent_to_add_from_the_ide_stops_with_a_plain_line() {
+    let s = server();
+    for prefix in ["--int", "--inte"] {
+        let (ran, said) = s.git(&["apply", prefix, "none.patch"]);
+        assert!(!ran, "{prefix}");
+        assert!(
+            said.contains("does not mark files as intent to add from the IDE"),
+            "{prefix}: {said}"
+        );
+    }
+    let (ran, said) = s.git(&["apply", "--index", "none.patch"]);
+    assert!(!said.contains("intent to add"), "--index: {said}");
+    assert!(!ran, "git finds no none.patch: {said}");
+    assert!(s.no_private_files());
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// A git option before the verb does not hide an intent-to-add from the shim: it stops from
+/// the IDE in the project folder with the plain line, and nothing is staged
+/// (SECAUDIT-14-L1 r1 L1).
+#[test]
+fn an_intent_to_add_after_a_global_option_from_the_ide_stops_with_a_plain_line() {
+    let s = server();
+    fs::write(s.root.join("new.txt"), "eight by").unwrap();
+    let spellings: [&[&str]; 4] = [
+        &["-c", "color.ui=never", "add", "-N", "new.txt"],
+        &["-C", ".", "add", "-N", "new.txt"],
+        &["--literal-pathspecs", "add", "-N", "new.txt"],
+        &["--git-dir", ".git", "add", "-N", "new.txt"],
+    ];
+    for args in spellings {
+        let (ran, said) = s.git(args);
+        assert!(!ran, "{args:?}");
+        assert!(
+            said.contains("does not mark files as intent to add from the IDE"),
+            "{args:?}: {said}"
+        );
+    }
+    assert!(s.no_private_files());
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}
+
+/// A git option before the verb does not hide a rebase from the shim: it stops from the IDE
+/// with the plain line and leaves no state folder (SECAUDIT-14-L1 r1 L1).
+#[test]
+fn a_rebase_after_a_global_option_from_the_ide_stops_with_a_plain_line() {
+    let s = server();
+    let spellings: [&[&str]; 2] = [
+        &["-c", "color.ui=never", "rebase", "main"],
+        &["-C", ".", "rebase", "main"],
+    ];
+    for args in spellings {
+        let (ran, said) = s.git(args);
+        assert!(!ran, "{args:?}");
+        assert!(
+            said.contains("does not run git rebase from the IDE"),
+            "{args:?}: {said}"
+        );
+    }
+    assert!(!s.root.join(".git/rebase-merge").exists());
+    assert!(s.no_private_files());
+    crate::sandbox::toolchains::remove_tmp(&s.home).unwrap();
+}

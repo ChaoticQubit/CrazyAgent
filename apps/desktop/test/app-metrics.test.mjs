@@ -25,9 +25,10 @@ const usage = {
   since_ms: SINCE, total: tokens(1200, 800, 300, 4000), runs: 3, projects: [], pools: [], accounts: [], agents: [], days: [],
   lines: [{ project: "alpha", change_sets: 3, added: 90, removed: 57, commits: 2, committed_added: 80, committed_removed: 55 }],
   agent_lines: [], limits: [], partial_homes: 0,
+  money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 },
 };
 const metrics = {
-  running: 2, tasks_waiting: 1, tasks_done: 6, tasks_failed: 0, merges: 19, merges_into_main: 5, merges_undone: 1, bucket_ms: 2 * HOUR,
+  running: 2, tasks_waiting: 1, tasks_done: 6, tasks_failed: 0, merges: 19, merges_into_main: 5, merges_undone: 1, bucket_ms: 2 * HOUR, models: [], activity: [], activity_since_ms: null, tools: [], tools_since_ms: null,
   series: [{ start_ms: SINCE, tokens: tokens(100, 50, 20, 999) }],
   runs: [
     { project: "alpha", agent: "team-8", session: "rollout-abc", task: 142, title: "Calendar API endpoints", status: "running", last_ms: NOW - 5 * MINUTE, tokens: ALPHA },
@@ -182,9 +183,10 @@ const limitsFor = (patch = {}) => ({
 });
 const withUsage = (patch) => ({ usage: { kind: "ok", value: { ...usage, ...patch } } });
 
-test("the app page says the numbers still use the old counting and what it counts", () => {
-  const words = text(render());
-  assert.match(words, /These numbers still use the old counting\. The recount comes in the next update, and you will see old and new side by side once\./);
+test("the app page says what it counts and the engine's counting notice, only while the engine has one", () => {
+  const words = text(render(withUsage({ counting_notice: "These numbers still use the old counting." })));
+  assert.match(words, /These numbers still use the old counting\./);
+  assert.doesNotMatch(text(render()), /old counting/);
   assert.match(words, /Tokens your agents used and each account's limits\. Counts come from each run's own record; limits are checked every 10 minutes\./);
 });
 
@@ -298,7 +300,7 @@ test("a refused Check limits says why on the failed-read page (r1 L2)", () => {
 });
 
 test("a picked project keeps the app page's notice and Account limits (r1 L3)", () => {
-  const words = text(render({ projectId: "alpha", ...withUsage({ limits: [limitsFor()] }) }));
+  const words = text(render({ projectId: "alpha", ...withUsage({ limits: [limitsFor()], counting_notice: "These numbers still use the old counting." }) }));
   assert.match(words, /These numbers still use the old counting\./);
   assert.match(words, /Account limits/);
   assert.match(words, /Set reset time/);

@@ -405,6 +405,7 @@ pub const BRANCH_BYTES_MAX: usize = 255;
 pub(crate) const BUSY_WAIT: Duration = Duration::from_secs(5);
 
 const SUBJECT_CHARS_MAX: usize = 48;
+const COMMIT_SUBJECT_CHARS_MAX: usize = 72;
 
 fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
@@ -488,14 +489,16 @@ fn named(db: &Connection, record: &store::Record) -> String {
     )
 }
 
-/// Records the Undone row of a finished undo, naming the sets its merge closed whose work
-/// it reverted too; a failure is logged by its plain code. Inputs: the store, the undone
-/// set, the labels of those sets and who undid it.
+/// Records the Undone row of a finished undo, naming the set as its Accept row does, by its
+/// agent's title and the subject of its message, and the sets its merge closed whose work it
+/// reverted too; a failure is logged by its plain code. Inputs: the store, the undone set,
+/// the labels of those sets and who undid it.
 #[cfg(unix)]
 fn note_undo(db: &Connection, record: &store::Record, closed: &[String], by: &str) {
     let mut text = format!(
         "Undid the changes of {}: {}",
-        record.agent.label, record.prompt_line
+        agent_title(record.agent.kind, &record.agent.label),
+        subject(&record.message())
     );
     if !closed.is_empty() {
         text.push_str(&format!(
@@ -696,6 +699,28 @@ pub fn land_on(
 ) -> Result<Option<(String, String)>, EngineError> {
     #[cfg(unix)]
     return owner::land_on_branch(db, repository, project);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, project);
+        Err(unavailable())
+    }
+}
+
+/// The tip of a project's main branch, which its main graph is built at and refreshed for
+/// (DEC-123): the Land on branch's tip ([`land_on`]), else the owner's HEAD commit, which
+/// new agents start from then. Inputs: the engine database, the owner checkout root and the
+/// project. Output: the tip, None while the owner's HEAD names no commit, or the refusal
+/// [`land_on`] gives.
+pub fn main_tip(
+    db: &Connection,
+    repository: &Path,
+    project: &ProjectId,
+) -> Result<Option<String>, EngineError> {
+    #[cfg(unix)]
+    return match land_on(db, repository, project)? {
+        Some((_, tip)) => Ok(Some(tip)),
+        None => flow::shared(repository)?.commit_of("HEAD"),
+    };
     #[cfg(not(unix))]
     {
         let _ = (db, repository, project);
@@ -1289,19 +1314,23 @@ pub fn diff(
 /// with the owner's git identity. Inputs: the store, the owner's home folder (where git
 /// finds the owner's own user.name and user.email), the change set, the head the owner
 /// reviewed and the owner's edited message, None for the proposed one. Output: the
-/// landed commit and branch, or the conflicting files.
+/// landed commit and branch, or the conflicting files. `place` is where the owner pressed
+/// Accept, which the project's activity names.
 pub fn accept(
     db: &Connection,
     owner_home: &Path,
     id: &ChangeSetId,
     expected_head: &str,
     message: Option<&str>,
+    place: crate::activity::AcceptPlace,
 ) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
-    return owner::accept(db, owner_home, id, expected_head, message, &|_| false);
+    return owner::accept(db, owner_home, id, expected_head, message, place, &|_| {
+        false
+    });
     #[cfg(not(unix))]
     {
-        let _ = (db, owner_home, id, expected_head, message);
+        let _ = (db, owner_home, id, expected_head, message, place);
         Err(unavailable())
     }
 }
@@ -1311,8 +1340,8 @@ pub fn accept(
 /// out nowhere by moving its ref only, leaving the owner's files untouched, or an agent's
 /// own branch through that agent's worktree, which must hold nothing uncommitted. Inputs:
 /// the store, the owner's home folder, the change set, the head the owner reviewed, the
-/// edited message, None for the proposed one, and the target branch. Output: the landed
-/// commit and branch, or the conflicting files.
+/// edited message, None for the proposed one, the target branch and where the owner pressed
+/// Accept. Output: the landed commit and branch, or the conflicting files.
 pub fn accept_into(
     db: &Connection,
     owner_home: &Path,
@@ -1320,16 +1349,32 @@ pub fn accept_into(
     expected_head: &str,
     message: Option<&str>,
     target_branch: &str,
+    place: crate::activity::AcceptPlace,
 ) -> Result<AcceptOutcome, EngineError> {
-    accept_into_as(
+    #[cfg(unix)]
+    return owner::accept_to(
         db,
         owner_home,
         id,
         expected_head,
         message,
-        target_branch,
-        crate::activity::OWNER_ACTOR,
-    )
+        Some(target_branch),
+        owner::By::Owner(Some(place)),
+        &|_| false,
+    );
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            db,
+            owner_home,
+            id,
+            expected_head,
+            message,
+            target_branch,
+            place,
+        );
+        Err(unavailable())
+    }
 }
 
 /// The refusal of a land the owner did not press while a worker below the set's agent
@@ -1341,8 +1386,9 @@ pub const WORKER_OPEN_TEXT: &str = "a worker's work under that agent is still op
 
 /// Lands a change set on a chosen local branch as [`accept_into`] does, for an Accept the
 /// owner did not make: the project's activity names who accepted it, the master or the
-/// engine. Inputs: as [`accept_into`], plus who accepts. Output: the landed commit and
-/// branch, or the conflicting files.
+/// engine. The owner's Accept goes through [`accept`] or [`accept_into`] instead, which know
+/// where it was pressed. Inputs: as [`accept_into`] without the place, plus who accepts.
+/// Output: the landed commit and branch, or the conflicting files.
 pub fn accept_into_as(
     db: &Connection,
     owner_home: &Path,
@@ -1352,6 +1398,11 @@ pub fn accept_into_as(
     target_branch: &str,
     by: &str,
 ) -> Result<AcceptOutcome, EngineError> {
+    assert_ne!(
+        by,
+        crate::activity::OWNER_ACTOR,
+        "the owner's Accept goes through accept or accept_into"
+    );
     #[cfg(unix)]
     return owner::accept_to(
         db,
@@ -1656,6 +1707,45 @@ pub fn agent_title(kind: AgentKind, label: &str) -> String {
         AgentKind::Master => "Master".to_owned(),
         AgentKind::Sub => label.to_owned(),
     }
+}
+
+/// A commit subject from free text: its first line through `scrubbed`, ended at the last
+/// whole word within `COMMIT_SUBJECT_CHARS_MAX` characters. A first word longer than that is
+/// cut to fit. Inputs: the text and the folders, innermost first. Output: the subject, maybe
+/// empty.
+pub(crate) fn commit_subject(text: &str, roots: &[&Path]) -> String {
+    let line = scrubbed(text.lines().next().unwrap_or_default(), roots);
+    let mut subject = String::new();
+    for word in line.split(' ').filter(|word| !word.is_empty()) {
+        let (used, more) = (subject.chars().count(), word.chars().count());
+        if used == 0 && more > COMMIT_SUBJECT_CHARS_MAX {
+            return word.chars().take(COMMIT_SUBJECT_CHARS_MAX).collect();
+        }
+        if used + usize::from(used > 0) + more > COMMIT_SUBJECT_CHARS_MAX {
+            break;
+        }
+        if used > 0 {
+            subject.push(' ');
+        }
+        subject.push_str(word);
+    }
+    assert!(subject.chars().count() <= COMMIT_SUBJECT_CHARS_MAX);
+    subject
+}
+
+/// The message a change set goes by in Changes and in the project's activity, live or
+/// backfilled: its stored message, the owner's or the proposed one, else its agent's prompt,
+/// else "Changes from <agent>", with hidden characters shown as escapes. Inputs: the stored
+/// message, the prompt line and the agent's label. Output: the message.
+pub fn change_set_message(message: &str, prompt_line: &str, label: &str) -> String {
+    let message = if !message.is_empty() {
+        message.to_owned()
+    } else if !prompt_line.is_empty() {
+        prompt_line.to_owned()
+    } else {
+        format!("Changes from {}", commit_subject(label, &[]))
+    };
+    crate::memory::visible_text(&message)
 }
 
 /// The first line of a commit message, cut to `SUBJECT_CHARS_MAX` characters ending in

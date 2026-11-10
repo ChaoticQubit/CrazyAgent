@@ -26,9 +26,11 @@ thread_local! {
 
 /// The settings every engine git call carries on top of the research runner's
 /// `GIT_SAFE`: no attributes file from outside the repository, no automatic upkeep, the
-/// case-folding path checks on, no signing, no untracked or split index caches and no
-/// reflog created for a ref update.
-const ENGINE_SETTINGS: [&str; 18] = [
+/// case-folding path checks on, no signing, no untracked or split index caches, no
+/// reflog created for a ref update and no commit-graph file, which a confined process could
+/// write to make git answer ancestry wrongly (land-19 r1 M1), and no advice about the grafts
+/// file the command's `GIT_GRAFT_FILE=/dev/null` names (land-19 r2).
+const ENGINE_SETTINGS: [&str; 22] = [
     "-c",
     "core.attributesFile=/dev/null",
     "-c",
@@ -47,6 +49,10 @@ const ENGINE_SETTINGS: [&str; 18] = [
     "core.splitIndex=false",
     "-c",
     "core.logAllRefUpdates=false",
+    "-c",
+    "core.commitGraph=false",
+    "-c",
+    "advice.graftFileDeprecated=false",
 ];
 
 pub(super) fn failure(code: &str) -> EngineError {
@@ -361,6 +367,7 @@ impl Repo {
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_GRAFT_FILE", "/dev/null")
             .envs(env.iter().copied())
             .envs(self.index.iter().map(|index| ("GIT_INDEX_FILE", index)))
             .arg("--no-optional-locks")

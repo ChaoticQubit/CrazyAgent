@@ -28,14 +28,15 @@ const report = (patch = {}) => ({
   projects: [row("project-harbor")], pools: [row("pool-main")], accounts: [row("acct-claude")], agents: [row("team-7"), row("research-scout")],
   days: [{ day_ms: NOW - 9 * HOUR, tokens: tokens({ input: 1200 }) }],
   lines: [{ project: "project-harbor", change_sets: 3, added: 90, removed: 57, commits: 2, committed_added: 80, committed_removed: 55 }],
-  limits: [limits()], partial_homes: 0, ...patch,
+  limits: [limits()], partial_homes: 0,
+  money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 }, ...patch,
 });
 const names = { agents: new Map(), accounts: new Map([["acct-claude", "Work Claude"]]) };
 const PROJECTS = [{ id: "project-harbor", name: "Harbor Notes" }];
 const LIMITS = { pools: new Map([["pool-main", "Main pool"]]), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
 const counted = (rows) => rows.filter((item) => !item.not_reported_by || usage.headlineTokens(item.tokens) > 0);
 const metricsFor = (value) => ({
-  running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: [], runs: [], harnesses: [],
+  running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, merges: 0, merges_into_main: 0, merges_undone: 0, bucket_ms: DAY, series: [], runs: [], harnesses: [], models: [], activity: [], activity_since_ms: null, tools: [], tools_since_ms: null,
   projects: counted(value.projects).map((item) => ({ key: item.key, tokens: item.tokens, agents: 1, runs: item.runs, projects: [item.key], merges: 0 })),
   agents: counted(value.agents).map((item) => ({ project: "project-harbor", agent: item.key, harnesses: ["codex"], accounts: ["acct-claude"], tokens: item.tokens })),
   accounts: counted(value.accounts).map((item) => ({ key: item.key, tokens: item.tokens, agents: 1, runs: item.runs, projects: ["project-harbor"] })),

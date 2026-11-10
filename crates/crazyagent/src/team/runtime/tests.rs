@@ -6373,6 +6373,148 @@ fn a_task_start_is_recorded_in_the_project_activity() {
     team.shutdown().unwrap();
 }
 
+/// Lists the text of the project's activity lines whose kind has the stored name `kind`,
+/// sorted, so a row compares them in any order and compiles before a new kind exists.
+/// Inputs: the fixture and the kind's name. Output: the sorted lines.
+fn activity_lines(fixture: &Fixture, kind: &str) -> Vec<String> {
+    let mut lines: Vec<String> = crate::activity::list(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        crate::activity::LIST_MAX,
+    )
+    .unwrap()
+    .into_iter()
+    .filter(|item| item.kind.name() == kind)
+    .map(|item| item.text)
+    .collect();
+    lines.sort();
+    lines
+}
+
+/// Inserts a task an agent runs, as the engine leaves it while the agent works on it, with
+/// the owner's cancel asked for when `cancel` is set. Inputs: the fixture, the agent, the
+/// prompt and the cancel. Output: the task id.
+fn task_in_flight(fixture: &Fixture, agent: i64, prompt: &str, cancel: bool) -> i64 {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,cancel_requested,created_ms,started_ms)
+             VALUES (?1,'master','codex',0,?2,'running',?3,1,?4,1,1)",
+            params![PROJECT, prompt, agent, cancel],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    assert!(task > 0);
+    task
+}
+
+/// A task still running when the engine starts again tells the project's activity how it
+/// ended (T10-R2-F2): back in the queue, or stopped when the owner had asked to cancel it.
+/// Its "started" line with no end would read as work still going on.
+#[test]
+fn a_task_left_running_at_an_engine_start_is_told_back_in_the_queue_or_stopped() {
+    let fixture = Fixture::new(1);
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let requeued = task_in_flight(&fixture, agent, "Write the page", false);
+    let cancelled = task_in_flight(&fixture, agent, "Write the index", true);
+
+    let _team = fixture.runtime();
+
+    assert_eq!(task_row(&fixture, requeued).0, "queued");
+    assert_eq!(task_row(&fixture, cancelled).0, "cancelled");
+    let label = crate::team::events::label(&fixture.connection, agent).unwrap();
+    assert_eq!(
+        activity_lines(&fixture, "task_stopped"),
+        vec![
+            format!("{label} stopped \u{201c}Write the index\u{201d}"),
+            format!("{label} stopped \u{201c}Write the page\u{201d}, back in the queue"),
+        ]
+    );
+}
+
+/// A running task whose turn ends cancelled or interrupted tells the project's activity it
+/// stopped, and one a rate limit sends back to the queue says so (T10-R2-F2), so no
+/// "started" line is left with no end and a second start follows the first one's end.
+#[test]
+fn a_task_turn_that_ends_cancelled_or_back_in_the_queue_is_told_so() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let cancelled = task_in_flight(&fixture, agent, "Write the page", false);
+    let interrupted = task_in_flight(&fixture, agent, "Write the index", false);
+    let limited = task_in_flight(&fixture, agent, "Write the notes", false);
+
+    team.finish_task(cancelled, "", TurnEnd::Cancelled, None)
+        .unwrap();
+    team.finish_task(interrupted, "", TurnEnd::Interrupted, None)
+        .unwrap();
+    team.finish_task(limited, "", TurnEnd::RateLimited, None)
+        .unwrap();
+
+    let states = [cancelled, interrupted, limited].map(|task| task_row(&fixture, task).0);
+    assert_eq!(states, ["cancelled", "cancelled", "queued"]);
+    let label = crate::team::events::label(&fixture.connection, agent).unwrap();
+    assert_eq!(
+        activity_lines(&fixture, "task_stopped"),
+        vec![
+            format!("{label} stopped \u{201c}Write the index\u{201d}"),
+            format!("{label} stopped \u{201c}Write the notes\u{201d}, back in the queue"),
+            format!("{label} stopped \u{201c}Write the page\u{201d}"),
+        ]
+    );
+}
+
+/// A held agent's running task that goes back to its queue, or is cancelled when the
+/// owner asked for that, tells the project's activity so (T10-R2-F2).
+#[test]
+fn a_released_task_is_told_back_in_the_queue_or_stopped() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let requeued = task_in_flight(&fixture, agent, "Write the page", false);
+    let cancelled = task_in_flight(&fixture, agent, "Write the index", true);
+
+    team.release(Some(agent), Busy::Task(requeued)).unwrap();
+    team.release(Some(agent), Busy::Task(cancelled)).unwrap();
+
+    assert_eq!(task_row(&fixture, requeued).0, "queued");
+    assert_eq!(task_row(&fixture, cancelled).0, "cancelled");
+    let label = crate::team::events::label(&fixture.connection, agent).unwrap();
+    assert_eq!(
+        activity_lines(&fixture, "task_stopped"),
+        vec![
+            format!("{label} stopped \u{201c}Write the index\u{201d}"),
+            format!("{label} stopped \u{201c}Write the page\u{201d}, back in the queue"),
+        ]
+    );
+}
+
+/// A sub-agent's running task that the engine puts back in the queue as it shuts down
+/// tells the project's activity so (T10-R2-F2).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_running_at_shutdown_is_told_back_in_the_queue() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    owner(&fixture, &[hand_off(&fixture, "Work for a long time")]);
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        task_of(f, "Work for a long time").0 == "running"
+    });
+    let agent = task_and_agent(&fixture, "Work for a long time").1.unwrap();
+
+    team.shutdown().unwrap();
+
+    assert_eq!(task_of(&fixture, "Work for a long time").0, "queued");
+    let label = crate::team::events::label(&fixture.connection, agent).unwrap();
+    assert_eq!(
+        activity_lines(&fixture, "task_stopped"),
+        vec![format!(
+            "{label} stopped \u{201c}Work for a long time\u{201d}, back in the queue"
+        )]
+    );
+}
+
 /// A master whose idle bound is tiny is not stopped while a sub-agent works on a task;
 /// once that task ends and its result reached the master, its idle time runs out and it stops.
 #[cfg(target_os = "macos")]
@@ -12706,9 +12848,15 @@ fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
         before.stdout,
         "nothing lands before Accept"
     );
-    let crate::landing::AcceptOutcome::Landed { commit, .. } =
-        crate::landing::accept(&landing, &home, &sets[0].id, &sets[0].head, None).unwrap()
-    else {
+    let crate::landing::AcceptOutcome::Landed { commit, .. } = crate::landing::accept(
+        &landing,
+        &home,
+        &sets[0].id,
+        &sets[0].head,
+        None,
+        crate::activity::AcceptPlace::Changes,
+    )
+    .unwrap() else {
         panic!("Accept lands the agent's commit");
     };
     let shown = level_git(&project, &home, &["show", &format!("{commit}:page.md")]);
@@ -16341,9 +16489,15 @@ fn a_linked_lead_with_unlanded_teammate_work_is_never_retired_whatever_hides_its
                     .unwrap()
                     .expect("the lead's change set reads")
                     .1;
-                let accepted =
-                    crate::landing::accept(&db, &linked.git_home, &set.id, &set.head, None)
-                        .unwrap();
+                let accepted = crate::landing::accept(
+                    &db,
+                    &linked.git_home,
+                    &set.id,
+                    &set.head,
+                    None,
+                    crate::activity::AcceptPlace::Changes,
+                )
+                .unwrap();
                 assert!(
                     matches!(accepted, crate::landing::AcceptOutcome::Landed { .. }),
                     "the owner lands the lead's .gitignore"
@@ -19402,56 +19556,73 @@ fn a_kept_lead_taken_over_with_a_held_task_resumes_it_in_its_pane_then_takes_its
         !team.workers[&lead].stopping,
         "with the idle stop Off the lead keeps running"
     );
+    let label = crate::team::events::label(&fixture.connection, lead).unwrap();
+    assert_eq!(
+        activity_lines(&fixture, "task_started"),
+        [
+            format!("{label} started \u{201c}Then write the index\u{201d}"),
+            format!("{label} started \u{201c}Write the release notes\u{201d}"),
+        ],
+        "the resumed task tells its start under the lead's kept name, as a dispatched one \
+         does (T10-R2-F2, TEAM-17-L1)"
+    );
     team.shutdown().unwrap();
 }
 
 /// S4B-B1: a native lead taken over and then stopped is proven gone like any other pane.
 /// One whose pane process ignores terminate is not confirmed, so the worker reports the
-/// cleanup uncertain instead of a clean stop.
+/// cleanup uncertain instead of a clean stop, followed by the cause the lead ended for when
+/// it had one, as a first order without the signed-in account.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
-    let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
-    let agent = AgentId::team(id).unwrap();
-    let adoption = Adoption {
-        host: host.clone(),
-        agent: agent.clone(),
-        record,
-        limits: LaunchLimits::default(),
-        live: false,
-        managed: Some(Managed {
-            home: fixture.base.join(format!("lead-home-{id}")),
-            executable: PathBuf::from("/bin/sh"),
-        }),
-        access: AgentAccess::Sandboxed,
-        toolchains: Some(Vec::new()),
-        network: crate::sandbox::policy::AgentNetwork::Open,
-        proxy: None,
-        task_start: None,
-    };
-    let (orders, ordered) = channel();
-    let (reports, _reported) = channel();
-    orders.send(Order::Stop).unwrap();
+    let uncertain = with_code(
+        crate::sandbox::warden::CLEANUP_UNCERTAIN,
+        Some(crate::harnesses::leftovers::UNCERTAIN),
+    );
+    for (first, expected) in [
+        (Order::Stop, uncertain.clone()),
+        (
+            Order::Start("Your brief".into(), None),
+            format!("{uncertain} The native lead was taken over without its signed-in account"),
+        ),
+    ] {
+        let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+        let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+        let agent = AgentId::team(id).unwrap();
+        let adoption = Adoption {
+            host: host.clone(),
+            agent: agent.clone(),
+            record,
+            limits: LaunchLimits::default(),
+            live: false,
+            managed: Some(Managed {
+                home: fixture.base.join(format!("lead-home-{id}")),
+                executable: PathBuf::from("/bin/sh"),
+            }),
+            access: AgentAccess::Sandboxed,
+            toolchains: Some(Vec::new()),
+            network: crate::sandbox::policy::AgentNetwork::Open,
+            proxy: None,
+            task_start: None,
+        };
+        let (orders, ordered) = channel();
+        let (reports, _reported) = channel();
+        orders.send(first).unwrap();
 
-    let problem = native_adopted(
-        adoption,
-        &ordered,
-        &reports,
-        &AtomicBool::new(false),
-        &AtomicBool::new(false),
-        &AtomicBool::new(false),
-    );
-    assert_eq!(
-        problem,
-        Some(with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
-            Some(crate::harnesses::leftovers::UNCERTAIN),
-        ))
-    );
-    assert!(!host.alive().unwrap().contains(&agent));
+        let problem = native_adopted(
+            adoption,
+            &ordered,
+            &reports,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(problem, Some(expected));
+        assert!(!host.alive().unwrap().contains(&agent));
+    }
 }
 
 /// Wiring test of engine mechanics, not Claude Code: a shell stand-in pane plays a native
@@ -20726,49 +20897,98 @@ fn a_real_endpoint_turn_under_no_network_reaches_only_its_model() {
     team.shutdown().unwrap();
 }
 
-#[test]
-fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out() {
-    let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
+/// The folder graphify keeps its graph in, in the project and in each agent's worktree.
+const GRAPH_FOLDER: &str = "graphify-out";
+
+/// Publishes a project graph for the graph copy rows (DEC-123): `graph.json` holding `{}`,
+/// a report and a wiki page in `<base>/project/graphify-out`, published at one tip. Takes
+/// the base folder. Returns the project folder.
+fn published_graph(base: &Path) -> PathBuf {
     let project = base.join("project");
     let graph = project.join(GRAPH_FOLDER);
     std::fs::create_dir_all(graph.join("wiki")).unwrap();
+    std::fs::create_dir_all(project.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
     std::fs::write(graph.join("graph.json"), "{}").unwrap();
     std::fs::write(graph.join("GRAPH_REPORT.md"), "report\n").unwrap();
+    std::fs::write(graph.join("wiki").join("index.md"), "wiki\n").unwrap();
+    let build = crate::onboarding::main_graph::Build {
+        tip: "a".repeat(40),
+        built_ms: 1_000,
+        hidden: crate::onboarding::main_graph::hidden_digest(&[]),
+    };
+    assert!(crate::onboarding::main_graph::publish(&project, &build).unwrap());
+    project
+}
+
+/// Whether a worktree holds its own copy of the published graph: a plain `graph.json`
+/// holding the published text. Takes the worktree. Returns the answer.
+fn copied(worktree: &Path) -> bool {
+    let graph = worktree.join(GRAPH_FOLDER).join("graph.json");
+    std::fs::symlink_metadata(&graph).is_ok_and(|found| found.file_type().is_file())
+        && std::fs::read_to_string(&graph).is_ok_and(|text| text == "{}")
+}
+
+/// An agent worktree gets its own copy of the published project graph, never a link to it,
+/// only where git ignores `graphify-out` there (DEC-123). What the agent made there is kept,
+/// the read-only links an older engine placed (I3) give way to a copy, and a graph the
+/// engine never published is never copied.
+#[test]
+fn the_project_graph_is_copied_into_an_agent_worktree_only_when_it_ignores_graphify_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let project = published_graph(&base);
     let worktree = |name: &str, ignore: &str| -> PathBuf {
         let folder = base.join(name);
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join(".gitignore"), ignore).unwrap();
         folder
     };
-    let linked = |folder: &Path, entry: &str| -> Option<PathBuf> {
-        std::fs::read_link(folder.join(GRAPH_FOLDER).join(entry)).ok()
-    };
 
     let ignoring = worktree("ignoring", "target\n/graphify-out/\n");
-    expose_graph(&project, &ignoring);
-    expose_graph(&project, &ignoring);
-    for entry in GRAPH_ENTRIES {
-        assert_eq!(linked(&ignoring, entry), Some(graph.join(entry)), "{entry}");
+    expose_graph(&project, &ignoring, &[]);
+    expose_graph(&project, &ignoring, &[]);
+    assert!(copied(&ignoring));
+    for entry in ["GRAPH_REPORT.md", "wiki"] {
+        let found = std::fs::symlink_metadata(ignoring.join(GRAPH_FOLDER).join(entry)).unwrap();
+        assert!(!found.file_type().is_symlink(), "{entry}");
     }
+    assert_eq!(
+        std::fs::read_to_string(ignoring.join(GRAPH_FOLDER).join("wiki").join("index.md")).unwrap(),
+        "wiki\n"
+    );
 
     let owned = worktree("owned", "graphify-out\n");
     std::fs::create_dir(owned.join(GRAPH_FOLDER)).unwrap();
     std::fs::write(owned.join(GRAPH_FOLDER).join("graph.json"), "mine").unwrap();
     std::os::unix::fs::symlink(&base, owned.join(GRAPH_FOLDER).join("wiki")).unwrap();
-    expose_graph(&project, &owned);
+    expose_graph(&project, &owned, &[]);
     assert_eq!(
         std::fs::read_to_string(owned.join(GRAPH_FOLDER).join("graph.json")).unwrap(),
         "mine"
     );
-    assert_eq!(linked(&owned, "wiki"), Some(graph.join("wiki")));
     assert_eq!(
-        linked(&owned, "GRAPH_REPORT.md"),
-        Some(graph.join("GRAPH_REPORT.md"))
+        std::fs::read_link(owned.join(GRAPH_FOLDER).join("wiki")).unwrap(),
+        base
+    );
+    assert!(std::fs::symlink_metadata(owned.join(GRAPH_FOLDER).join("GRAPH_REPORT.md")).is_err());
+
+    let older = worktree("older", "graphify-out/\n");
+    std::fs::create_dir(older.join(GRAPH_FOLDER)).unwrap();
+    for entry in ["graph.json", "GRAPH_REPORT.md", "wiki"] {
+        std::os::unix::fs::symlink(
+            project.join(GRAPH_FOLDER).join(entry),
+            older.join(GRAPH_FOLDER).join(entry),
+        )
+        .unwrap();
+    }
+    expose_graph(&project, &older, &[]);
+    assert!(
+        copied(&older),
+        "the links of an older engine give way to a copy"
     );
 
     let tracking = worktree("tracking", "target\ngraphify-out/wiki\n");
-    expose_graph(&project, &tracking);
+    expose_graph(&project, &tracking, &[]);
     assert!(!tracking.join(GRAPH_FOLDER).exists());
 
     let linked_ignore = base.join("linked-ignore");
@@ -20778,28 +20998,30 @@ fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out
         linked_ignore.join(".gitignore"),
     )
     .unwrap();
-    expose_graph(&project, &linked_ignore);
+    expose_graph(&project, &linked_ignore, &[]);
     assert!(!linked_ignore.join(GRAPH_FOLDER).exists());
 
     let bare_project = base.join("bare-project");
-    std::fs::create_dir(&bare_project).unwrap();
+    std::fs::create_dir_all(bare_project.join(GRAPH_FOLDER)).unwrap();
+    std::fs::write(bare_project.join(GRAPH_FOLDER).join("graph.json"), "{}").unwrap();
     let fresh = worktree("fresh", "graphify-out/\n");
-    expose_graph(&bare_project, &fresh);
-    assert!(!fresh.join(GRAPH_FOLDER).exists());
+    expose_graph(&bare_project, &fresh, &[]);
+    assert!(
+        !fresh.join(GRAPH_FOLDER).exists(),
+        "a graph the engine never published is never copied"
+    );
 }
 
-/// The graph shows in a worktree only where git itself ignores the graph folder (T3-L1): a
-/// line with leading spaces names another path and any `!` line naming the folder takes it
-/// back, as each case's real git says, while trailing spaces are git's own trim.
+/// The graph is copied into a worktree only where git itself ignores the graph folder
+/// (T3-L1): a line with leading spaces names another path and any `!` line naming the
+/// folder takes it back, as each case's real git says, while trailing spaces are git's own
+/// trim.
 #[cfg(target_os = "macos")]
 #[test]
-fn the_shared_graph_shows_only_where_real_git_ignores_graphify_out() {
+fn the_project_graph_is_copied_only_where_real_git_ignores_graphify_out() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
-    let project = base.join("project");
-    let graph = project.join(GRAPH_FOLDER);
-    std::fs::create_dir_all(&graph).unwrap();
-    std::fs::write(graph.join("graph.json"), "{}").unwrap();
+    let project = published_graph(&base);
     let home = base.join("home");
     std::fs::create_dir(&home).unwrap();
     for (name, ignore, exclude, ignored) in [
@@ -20830,23 +21052,23 @@ fn the_shared_graph_shows_only_where_real_git_ignores_graphify_out() {
             "{name}: {checked:?}"
         );
         assert_eq!(checked.status.success(), ignored, "{name}: real git");
-        expose_graph(&project, &clone);
+        expose_graph(&project, &clone, &[]);
         assert_eq!(
-            std::fs::symlink_metadata(clone.join(GRAPH_FOLDER).join("graph.json")).is_ok(),
+            copied(&clone),
             ignored,
-            "{name}: the graph shows only where git ignores it"
+            "{name}: the graph is copied only where git ignores it"
         );
     }
 }
 
+/// A worktree whose repository's exclude keeps the graph out of git gets its copy: an own
+/// clone by its own exclude, a linked worktree by the project repository's, which the
+/// engine writes; a `.gitignore` line taking the graph back wins (DEC-123).
 #[test]
-fn the_shared_graph_shows_in_a_worktree_whose_repository_excludes_graphify_out() {
+fn the_project_graph_is_copied_into_a_worktree_whose_repository_excludes_graphify_out() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
-    let project = base.join("project");
-    let graph = project.join(GRAPH_FOLDER);
-    std::fs::create_dir_all(&graph).unwrap();
-    std::fs::write(graph.join("graph.json"), "{}").unwrap();
+    let project = published_graph(&base);
     std::fs::create_dir_all(project.join(".git").join("info")).unwrap();
     std::fs::write(
         project.join(".git").join("info").join("exclude"),
@@ -20871,37 +21093,34 @@ fn the_shared_graph_shows_in_a_worktree_whose_repository_excludes_graphify_out()
         .unwrap();
         folder
     };
-    let shown = |folder: &Path| std::fs::read_link(folder.join(GRAPH_FOLDER).join("graph.json"));
 
     let own = clone(
         "own",
         ".crazyagent/\ntarget/\n",
         "/.worktrees/\n/graphify-out/\n",
     );
-    expose_graph(&project, &own);
-    assert_eq!(
-        shown(&own).ok(),
-        Some(graph.join("graph.json")),
-        "an Own branch clone whose own exclude keeps the graph out of git shows it"
+    expose_graph(&project, &own, &[]);
+    assert!(
+        copied(&own),
+        "an Own branch clone whose own exclude keeps the graph out of git gets a copy"
     );
 
     let sandboxed = linked("sandboxed", ".crazyagent/\ntarget/\n");
-    expose_graph(&project, &sandboxed);
-    assert_eq!(
-        shown(&sandboxed).ok(),
-        Some(graph.join("graph.json")),
+    expose_graph(&project, &sandboxed, &[]);
+    assert!(
+        copied(&sandboxed),
         "a linked worktree shares the project repository's exclude, which the engine writes"
     );
 
     let older = clone("older", "target/\n", "/.worktrees/\n");
-    expose_graph(&project, &older);
+    expose_graph(&project, &older, &[]);
     assert!(
         !older.join(GRAPH_FOLDER).exists(),
         "a clone made before its exclude named the graph never shows it as a change"
     );
 
     let negated = linked("negated", "target/\n!graphify-out/\n");
-    expose_graph(&project, &negated);
+    expose_graph(&project, &negated, &[]);
     assert!(
         !negated.join(GRAPH_FOLDER).exists(),
         "a .gitignore line taking the graph back into git wins over the exclude"
@@ -20912,7 +21131,7 @@ fn the_shared_graph_shows_in_a_worktree_whose_repository_excludes_graphify_out()
         "graphify-out/\n!/graphify-out/\n",
         "/.worktrees/\n",
     );
-    expose_graph(&project, &unignored);
+    expose_graph(&project, &unignored, &[]);
     assert!(
         !unignored.join(GRAPH_FOLDER).exists(),
         "the last .gitignore line about the graph decides"
@@ -22473,6 +22692,19 @@ fn a_lead_hears_who_stopped_its_sub_agent_and_nothing_of_a_stop_it_made() {
     team.shutdown().unwrap();
 }
 
+/// Calls `stop_unmanaged` until it reports the stops whose ends it handed over, at most
+/// `WAIT`. Input: the runtime. Output: the first stops it reports, or none at the deadline.
+fn stopped_unmanaged(team: &mut TeamRuntime) -> Vec<(i64, ProjectId, crate::team::StoppedBy)> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let stopped = team.stop_unmanaged().unwrap();
+        if !stopped.is_empty() || Instant::now() >= deadline {
+            return stopped;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// A native teammate a stop ends keeps the reason of who stopped it, and the stop reports
 /// who made it (HB-S5-B).
 #[cfg(target_os = "macos")]
@@ -22512,7 +22744,7 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
             )
             .unwrap();
         assert_eq!(
-            team.stop_unmanaged().unwrap(),
+            stopped_unmanaged(&mut team),
             vec![(mate, fixture.setup.project_id.clone(), by)],
             "{maker}"
         );
@@ -22527,9 +22759,192 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
     team.shutdown().unwrap();
 }
 
+/// S4B-B1-L1 r1: a native teammate's end that panics on its thread still reports, as not
+/// proven, so the stop leaves no agent handed over and marks its row with the uncertain
+/// cleanup code.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
+    use crate::team::StoppedBy;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+            params![mate, PROJECT],
+        )
+        .unwrap();
+    let project = fixture.setup.project_id.clone();
+    team.unmanaged_ending.insert(
+        mate,
+        PendingEnd {
+            reason: stopped_teammate(StoppedBy::Owner),
+            told: Told::Stop(project.clone(), StoppedBy::Owner),
+        },
+    );
+    let sender = team.unmanaged_ends.0.clone();
+    let ended = std::thread::spawn(move || {
+        end_reported(
+            mate,
+            sender,
+            || -> Result<bool, crate::terminal::HostError> { panic!("the end failed") },
+        );
+    })
+    .join();
+    assert!(ended.is_err(), "the end panicked");
+
+    assert_eq!(
+        stopped_unmanaged(&mut team),
+        vec![(mate, project, StoppedBy::Owner)]
+    );
+    assert!(team.unmanaged_ending.is_empty());
+    let error: Option<String> = fixture
+        .connection
+        .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        error.as_deref(),
+        Some("The owner stopped this teammate. (harness_cleanup_uncertain)")
+    );
+    team.shutdown().unwrap();
+}
+
+/// S4B-B1-L1 r1: a teammate's row stopped elsewhere while its end ran, as by its lead's
+/// end, keeps that first mark, and the finished end reports no stop for it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_row_stopped_elsewhere_while_its_end_ran_reports_no_stop() {
+    use crate::team::StoppedBy;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    let project = fixture.setup.project_id.clone();
+    team.unmanaged_ending.insert(
+        mate,
+        PendingEnd {
+            reason: stopped_teammate(StoppedBy::Owner),
+            told: Told::Stop(project, StoppedBy::Owner),
+        },
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='stopped', error=?2 WHERE id=?1",
+            params![mate, LEAD_ENDED_TEAMMATE],
+        )
+        .unwrap();
+    team.unmanaged_ends.0.send((mate, Ok(false))).unwrap();
+
+    assert_eq!(team.stop_unmanaged().unwrap(), Vec::new());
+    assert!(team.unmanaged_ending.is_empty());
+    let error: Option<String> = fixture
+        .connection
+        .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(error.as_deref(), Some(LEAD_ENDED_TEAMMATE));
+    team.shutdown().unwrap();
+}
+
+/// S4B-B1-L1 r1: a lead over its cap is noted once its teammate's end is marked, not when
+/// the end is handed over: an end the host failed leaves the row running and the lead
+/// unnoted, and the next end that finishes notes it once.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_over_cap_lead_is_noted_once_its_teammates_end_is_marked() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    let project = fixture.setup.project_id.clone();
+    let label = names::label(
+        AgentRole::Sub,
+        mate,
+        names::name(&fixture.connection, mate).unwrap().as_ref(),
+    );
+    let note = over_cap_note(1, &[label]);
+    let notes = || -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT count(*) FROM coord_messages WHERE to_agent=?1 AND body=?2",
+                params![lead, note],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let hand = |team: &mut TeamRuntime, outcome: Result<bool, crate::terminal::HostError>| {
+        team.unmanaged_ending.insert(
+            mate,
+            PendingEnd {
+                reason: OVER_TEAMMATE_CAP,
+                told: Told::Lead {
+                    project: project.clone(),
+                    lead,
+                    cap: 1,
+                },
+            },
+        );
+        team.unmanaged_ends.0.send((mate, outcome)).unwrap();
+        assert_eq!(team.stop_unmanaged().unwrap(), Vec::new());
+        assert!(team.unmanaged_ending.is_empty());
+    };
+
+    hand(
+        &mut team,
+        Err(crate::terminal::HostError("terminal_host_failed".into())),
+    );
+    assert_eq!(notes(), 0, "a failed end noted the lead");
+    let status: String = fixture
+        .connection
+        .query_row(
+            "SELECT status FROM team_agents WHERE id=?1",
+            [mate],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "working");
+
+    hand(&mut team, Ok(true));
+    assert_eq!(notes(), 1, "the marked end noted the lead once");
+    team.shutdown().unwrap();
+}
+
 /// S4B-B1: a native teammate a stop ends is proven gone like any other pane. One whose
 /// pane process ignores terminate is not confirmed, so its row says the cleanup is
-/// uncertain, and its pane is still closed.
+/// uncertain, and its pane is still closed. S4B-B1-L1: that end waits seconds on the pane,
+/// so the tick hands it over and returns at once; the row is marked once it finished.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
@@ -22554,7 +22969,18 @@ fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
         )
         .unwrap();
 
-    assert_eq!(team.stop_unmanaged().unwrap().len(), 1);
+    let started = Instant::now();
+    assert_eq!(
+        team.stop_unmanaged().unwrap(),
+        Vec::new(),
+        "the tick waited for the pane's end"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the tick took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(stopped_unmanaged(&mut team).len(), 1);
     let error: Option<String> = fixture
         .connection
         .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
@@ -24634,6 +25060,44 @@ fn a_left_native_lead_s_end_is_not_confirmed_while_a_process_it_started_on_its_o
         "the lead's own process outlived the end: {ended:?}"
     );
     assert_eq!(ended, Ok(false));
+}
+
+/// SECAUDIT-SETSID-LEFTOVER: a native lead's pane that ends before its stop, as when it is
+/// killed, still has its stop name a process the lead started in a session of its own while
+/// the pane ran, whose parent the pane's end took with it, since the session followed the
+/// pane's processes while the pane lived.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_whose_pane_ended_first_still_names_a_process_it_started_on_its_own() {
+    let (stopped, running) = ended_native_lead(LEAVING_CLAUDE, |session, host, lead| {
+        let AgentSession::Terminal(mut session) = session else {
+            panic!("the native lead runs in a terminal");
+        };
+        let followed = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < followed {
+            session.next_event(Duration::from_millis(200)).unwrap();
+        }
+        host.kill(lead).unwrap();
+        let deadline = Instant::now() + WAIT;
+        loop {
+            match session.next_event(Duration::from_millis(200)) {
+                Ok(Some(LaunchEvent::Exited { .. })) | Err(_) => break,
+                Ok(_) => assert!(
+                    Instant::now() < deadline,
+                    "the session never saw its pane end"
+                ),
+            }
+        }
+        session.stop()
+    });
+    assert!(
+        running,
+        "the lead's own process outlived its pane: {stopped:?}"
+    );
+    assert!(
+        matches!(&stopped, Err(Unstopped::Left(left)) if left.code() == "harness_sandbox_left"),
+        "{stopped:?}"
+    );
 }
 
 /// T23-R1-F2: the status column a project's delete waits on is written after the lead's stop

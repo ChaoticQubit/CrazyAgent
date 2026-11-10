@@ -423,7 +423,7 @@ fn token_sums_past_the_integer_range_still_report_saturated() {
     ] {
         db.execute(
             &format!(
-                "INSERT INTO usage_tokens VALUES
+                "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write) VALUES
                  (?1,'agent','alpha','pool-a','claude-a','team-1','claude-code','s1',{input},1,0,0)"
             ),
             params![hour_ms],
@@ -798,7 +798,7 @@ pub(crate) fn fill_past_one_frame(db: &Connection, now_ms: i64) {
         )
         .unwrap();
         db.execute(
-            "INSERT INTO usage_tokens VALUES
+            "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write) VALUES
              (?1,'agent',?2,?3,?4,?5,'claude-code','s',?6,?6,?6,?6)",
             params![
                 now_ms - index as i64 * DAY,
@@ -971,4 +971,154 @@ fn a_window_past_its_reset_reads_as_not_read_when_the_last_read_failed() {
     assert_eq!(row("healthy").five_hour, Some(passed));
     assert_eq!(row("mixed").five_hour, Some(ahead));
     assert_eq!(row("mixed").weekly, None);
+}
+
+fn priced_store() -> (tempfile::TempDir, Connection) {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    db.execute_batch(
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos)
+         VALUES (3600000,'agent','alpha','main','a','team-1','codex','s1','gpt-5',100,10,0,0,900),
+                (3600000,'agent','beta','main','a','team-2','codex','s2','gpt-5',100,10,0,0,40),
+                (0,'agent','alpha','main','a','team-1','codex','s3','gpt-5',100,10,0,0,2)",
+    )
+    .unwrap();
+    (root, db)
+}
+
+fn dollars(report: &UsageReport) -> [i64; 5] {
+    [
+        report.projects[0].cost_nanos,
+        report.pools[0].cost_nanos,
+        report.accounts[0].cost_nanos,
+        report.agents[0].cost_nanos,
+        report.money.cost_nanos,
+    ]
+}
+
+#[test]
+fn every_report_row_carries_its_dollars_and_the_money_view() {
+    let (_root, db) = priced_store();
+    let whole = report(&db, None, None, 0, 7_200_000, &[]).unwrap();
+    assert_eq!(dollars(&whole), [902, 942, 942, 902, 942]);
+    assert_eq!(whole.money.shown, crate::usage::money::MainNumber::Dollars);
+}
+
+#[test]
+fn the_money_view_keeps_to_the_reports_project_and_range() {
+    let (_root, db) = priced_store();
+    let alpha = crate::protocol::ProjectId::new("alpha").unwrap();
+    let scoped = report(&db, Some(&alpha), Some(1), 0, 7_200_000, &[]).unwrap();
+    assert_eq!(dollars(&scoped), [900; 5]);
+}
+
+#[test]
+fn with_prices_off_no_report_row_carries_a_dollar() {
+    use crate::usage::money::{self, MainNumber, MoneySettings, PriceSource};
+    let (_root, db) = priced_store();
+    money::write(
+        &db,
+        MoneySettings {
+            main_number: MainNumber::Dollars,
+            prices: PriceSource::Off,
+        },
+    )
+    .unwrap();
+    let off = report(&db, None, None, 0, 7_200_000, &[]).unwrap();
+    assert_eq!(dollars(&off), [0; 5]);
+    assert_eq!(
+        (off.money.shown, off.money.as_of.clone(), off.total.input),
+        (MainNumber::Tokens, None, 300)
+    );
+}
+
+fn with_activity(db: &Connection) {
+    db.execute_batch(
+        "INSERT INTO usage_activity(hour_ms,project,agent,model,activity,turns,edit_turns,first_try_turns) VALUES
+            (3600000,'alpha','team-1','gpt-5','coding',3,3,2),
+            (3600000,'beta','team-2','gpt-5','git',9,0,0),
+            (0,'alpha','team-1','gpt-5','testing',7,1,1);",
+    )
+    .unwrap();
+}
+
+fn activity_names(report: &UsageReport) -> Vec<&str> {
+    report
+        .activity
+        .iter()
+        .map(|row| row.activity.as_str())
+        .collect()
+}
+
+#[test]
+fn the_report_lists_models_and_activities_for_its_project_and_range() {
+    let (_root, db) = priced_store();
+    with_activity(&db);
+    let whole = report(&db, None, None, 0, 7_200_000, &[]).unwrap();
+    assert_eq!(activity_names(&whole), ["git", "testing", "coding"]);
+    assert_eq!(
+        whole
+            .models
+            .iter()
+            .map(|row| (row.model.as_str(), row.tokens.input, row.cost_nanos))
+            .collect::<Vec<_>>(),
+        [("gpt-5", 300, 942)]
+    );
+    let alpha = crate::protocol::ProjectId::new("alpha").unwrap();
+    let scoped = report(&db, Some(&alpha), Some(1), 0, 7_200_000, &[]).unwrap();
+    assert_eq!(
+        scoped.activity,
+        vec![ActivityRow {
+            activity: "coding".to_owned(),
+            turns: 3,
+            edit_turns: 3,
+            first_try_turns: 2,
+        }]
+    );
+    assert_eq!(
+        scoped
+            .models
+            .iter()
+            .map(|row| (row.tokens.input, row.cost_nanos))
+            .collect::<Vec<_>>(),
+        [(100, 900)]
+    );
+}
+
+#[test]
+fn with_prices_off_no_model_row_carries_a_dollar() {
+    use crate::usage::money::{self, MainNumber, MoneySettings, PriceSource};
+    let (_root, db) = priced_store();
+    money::write(
+        &db,
+        MoneySettings {
+            main_number: MainNumber::Dollars,
+            prices: PriceSource::Off,
+        },
+    )
+    .unwrap();
+    let off = report(&db, None, None, 0, 7_200_000, &[]).unwrap();
+    assert_eq!(
+        off.models
+            .iter()
+            .map(|row| (row.tokens.input, row.cost_nanos))
+            .collect::<Vec<_>>(),
+        [(300, 0)]
+    );
+}
+
+#[test]
+fn model_rows_shrink_with_the_rest_of_the_report_to_fit_one_reply() {
+    let (_root, db) = priced_store();
+    let mut whole = report(&db, None, None, 0, 7_200_000, &[]).unwrap();
+    whole.models = vec![
+        ModelRow {
+            model: "m".repeat(REPORT_BYTES_MAX),
+            ..ModelRow::default()
+        };
+        2
+    ];
+    let fitted = fit(whole);
+    assert!(fitted.is_ok());
+    assert_eq!(fitted.unwrap().models.len(), 0);
 }

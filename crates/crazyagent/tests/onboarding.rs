@@ -2425,7 +2425,14 @@ async fn an_own_branch_change_set_still_lands_when_the_owner_asks_to_move_the_ho
         "[user]\n\tname = Owner Example\n\temail = owner@example.invalid\n",
     )
     .unwrap();
-    let landed = crazyagent::landing::accept(&db, owner_home.path(), &id, &head, None);
+    let landed = crazyagent::landing::accept(
+        &db,
+        owner_home.path(),
+        &id,
+        &head,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    );
     assert!(
         matches!(
             landed,
@@ -2805,7 +2812,14 @@ async fn a_change_set_with_an_unfinished_step_holds_a_home_move() {
         "[user]\n\tname = Owner Example\n\temail = owner@example.invalid\n",
     )
     .unwrap();
-    let landed = crazyagent::landing::accept(&db, owner_home.path(), &id, &head, None);
+    let landed = crazyagent::landing::accept(
+        &db,
+        owner_home.path(),
+        &id,
+        &head,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    );
     assert!(
         matches!(
             landed,

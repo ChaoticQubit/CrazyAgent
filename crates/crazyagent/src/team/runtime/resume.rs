@@ -9,7 +9,7 @@ use crate::project_setup::StoredSetup;
 use crate::protocol::CredentialRef;
 use crate::recovery::{self, HeldItem, Interrupted, RunState};
 use crate::team::master::{self, InputRefused};
-use crate::team::{AgentRole, AgentStatus, launch_harness, now_ms};
+use crate::team::{AgentRole, AgentStatus, launch_harness, names, now_ms};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeSet;
@@ -476,13 +476,26 @@ impl TeamRuntime {
         worker.bound = bound.map(|(_, by)| by);
         match busy {
             Busy::Task(task) => {
-                self.connection
+                let now = now_ms();
+                let started = self
+                    .connection
                     .execute(
                         "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL
                          WHERE id=?1 AND status='queued'",
-                        params![task, run.agent, now_ms()],
+                        params![task, run.agent, now],
                     )
                     .map_err(error)?;
+                assert!(started <= 1);
+                if started == 1 {
+                    let project = &run.project;
+                    let named = names::name(&self.connection, run.agent)?
+                        .and_then(|name| name.handle)
+                        .is_some();
+                    if !named {
+                        names::assign_task_role(&self.connection, project, run.agent, task)?;
+                    }
+                    crate::activity::note_task(&self.connection, project, run.agent, task, now);
+                }
                 self.mark_agent(run.agent, AgentStatus::Working, Some(task))?;
             }
             Busy::Message(message) => {

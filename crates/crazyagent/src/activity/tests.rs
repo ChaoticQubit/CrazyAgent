@@ -105,7 +105,15 @@ fn every_kind_records_and_lists_newest_first_with_its_goal() {
         );
         assert!(!item.undone);
     }
-    assert_eq!(list(&db, &project(), 3).unwrap(), listed[..3].to_vec());
+    let (paced, others): (Vec<ActivityItem>, Vec<ActivityItem>) = listed
+        .iter()
+        .cloned()
+        .partition(|item| LOGGED_KINDS.contains(&item.kind) || WORK_KINDS.contains(&item.kind));
+    assert_eq!(
+        list(&db, &project(), 3).unwrap(),
+        [paced[0].clone(), others[0].clone(), others[1].clone()],
+        "a limit of 3 gives the agents' rows one place (T11-R2-L1)"
+    );
     assert_eq!(
         list(&db, &project(), 0).unwrap_err().0,
         "activity_limit_invalid"
@@ -389,7 +397,7 @@ fn a_read_says_when_older_events_were_left_out_by_the_limit_or_the_byte_bound() 
     let line = "x".repeat(TEXT_BYTES_MAX);
     for at_ms in 0..3 {
         let item = NewActivity {
-            kind: ActivityKind::Phase,
+            kind: ActivityKind::TaskStarted,
             actor: "Master",
             agent: None,
             goal: None,
@@ -412,7 +420,7 @@ fn a_read_says_when_older_events_were_left_out_by_the_limit_or_the_byte_bound() 
     assert!(newest.more, "the limit left one out");
     for at_ms in 3..200 {
         let item = NewActivity {
-            kind: ActivityKind::Phase,
+            kind: ActivityKind::TaskStarted,
             actor: "Master",
             agent: None,
             goal: None,
@@ -738,6 +746,230 @@ fn agent_logged_rows_keep_their_own_share_and_never_push_out_other_events() {
     assert_eq!(listed.first().map(String::as_str), Some("One more phase"));
 }
 
+/// Work verbs keep their own newest 2,000 rows beside the other shares (T11-R2-F2): an
+/// agent looping start_work and finish_work never pushes out the owner's Accept or the
+/// project's Created, and past its share only the oldest work rows go.
+#[test]
+fn work_rows_keep_their_own_share_and_never_push_out_other_events() {
+    let (_folder, db) = db();
+    note_created(&db, &project(), "Harbor Notes", 0);
+    let accepted = NewActivity {
+        kind: ActivityKind::Accepted,
+        actor: OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text: "Accepted the changes of Ada (@api): Add the login form",
+        change_set: None,
+    };
+    record(&db, &project(), &accepted, 1).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000)
+         INSERT INTO project_activity(project,at_ms,kind,actor,goal,text)
+         SELECT ?1, 1 + i, CASE i % 2 WHEN 0 THEN 'work_started' ELSE 'work_complete' END,
+                'Ada (@api)', 'Loop', 'Work ' || i FROM n",
+        [PROJECT],
+    )
+    .unwrap();
+    let start = NewActivity {
+        kind: ActivityKind::WorkStarted,
+        actor: "Ada (@api)",
+        agent: None,
+        goal: Some("Loop"),
+        text: "Started the work",
+        change_set: None,
+    };
+    record(&db, &project(), &start, 20_000).unwrap();
+    let count = |filter: &str| -> i64 {
+        db.query_row(
+            &format!("SELECT COUNT(*) FROM project_activity WHERE project=?1 AND {filter}"),
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let work = "kind IN ('work_started','work_review_ready','work_complete','work_closed')";
+    assert_eq!(
+        count("kind='accepted'"),
+        1,
+        "an agent's work verbs never push out the owner's Accept"
+    );
+    assert_eq!(count("kind='created'"), 1);
+    assert_eq!(count(work), 2_000, "work rows keep their newest 2,000");
+    assert_eq!(count(&format!("{work} AND at_ms <= 8002")), 0);
+    assert_eq!(count(&format!("{work} AND at_ms = 8003")), 1);
+}
+
+/// Writes a project's Created row at 0 and the owner's Accept at 1, then `rows` agent rows
+/// at 2 onward, phases, test runs and work starts in turn, each with `text` after its
+/// number. Takes the database, the row count and the text. Returns nothing.
+fn under_agent_rows(db: &Connection, rows: i64, text: &str) {
+    note_created(db, &project(), "Harbor Notes", 0);
+    let accepted = NewActivity {
+        kind: ActivityKind::Accepted,
+        actor: OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text: "Accepted the changes of Ada (@api): Add the login form",
+        change_set: None,
+    };
+    record(db, &project(), &accepted, 1).unwrap();
+    db.execute(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?2)
+         INSERT INTO project_activity(project,at_ms,kind,actor,text)
+         SELECT ?1, 1 + i, CASE i % 3 WHEN 0 THEN 'phase' WHEN 1 THEN 'test' ELSE 'work_started' END,
+                'Ada (@api)', 'Row ' || i || ?3 FROM n",
+        params![PROJECT, rows, text],
+    )
+    .unwrap();
+}
+
+/// Counts the phases, test runs and work verb rows agents set the pace of in one listing.
+/// Takes the listed items. Returns the count.
+fn agent_rows(items: &[ActivityItem]) -> usize {
+    items
+        .iter()
+        .filter(|item| LOGGED_KINDS.contains(&item.kind) || WORK_KINDS.contains(&item.kind))
+        .count()
+}
+
+/// A team that logs fast cannot crowd the engine's and the owner's events out of a listing
+/// (T11-R2-L1), and its rows still fill the places those events leave (team-18 r1 L1): under
+/// 1,000 newer agent rows the owner's Accept and the Created row list at every limit, the
+/// agent rows take every other place the byte bound allows, and the read says more are left.
+#[test]
+fn agent_rows_fill_the_places_other_events_leave() {
+    let (_folder, db) = db();
+    under_agent_rows(&db, 1_000, "");
+    for limit in [LIST_MAX, 200, 4] {
+        let read = listed(&db, &project(), limit).unwrap();
+        let kinds: Vec<ActivityKind> = read.items.iter().map(|item| item.kind).collect();
+        assert!(kinds.contains(&ActivityKind::Accepted), "limit {limit}");
+        assert!(kinds.contains(&ActivityKind::Created), "limit {limit}");
+        assert!(read.more, "limit {limit}: older agent rows were left out");
+        let agents = agent_rows(&read.items);
+        match limit {
+            LIST_MAX => assert!(agents > LIST_MAX.div_ceil(4), "limit {limit}: {agents}"),
+            _ => assert_eq!(agents, limit - 2, "limit {limit}"),
+        }
+    }
+}
+
+/// The byte bound never lets agent rows push the engine's and the owner's events out either
+/// (team-18 r1): under 1,000 newer agent rows of about 600 bytes each, the Accept and the
+/// Created row still list at the largest limit, where those rows fill the byte bound long
+/// before the place limit.
+#[test]
+fn long_agent_rows_never_push_other_events_out_by_bytes() {
+    let (_folder, db) = db();
+    under_agent_rows(&db, 1_000, &"x".repeat(590));
+    for limit in [LIST_MAX, 200] {
+        let read = listed(&db, &project(), limit).unwrap();
+        let kinds: Vec<ActivityKind> = read.items.iter().map(|item| item.kind).collect();
+        assert!(kinds.contains(&ActivityKind::Accepted), "limit {limit}");
+        assert!(kinds.contains(&ActivityKind::Created), "limit {limit}");
+        assert!(agent_rows(&read.items) > 0, "limit {limit}");
+        assert!(read.more, "limit {limit}");
+    }
+}
+
+/// A project with only agent rows lists as many of them as the limit asks (team-18 r1 L1):
+/// with no engine or owner event to keep a place for, the newest agent rows fill the read.
+#[test]
+fn a_project_with_only_agent_rows_lists_limit_rows() {
+    let (_folder, db) = db();
+    db.execute(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300)
+         INSERT INTO project_activity(project,at_ms,kind,actor,text)
+         SELECT ?1, i, 'phase', 'Ada (@api)', 'Phase ' || i FROM n",
+        [PROJECT],
+    )
+    .unwrap();
+    for limit in [200, 4] {
+        let read = listed(&db, &project(), limit).unwrap();
+        assert_eq!(read.items.len(), limit, "limit {limit}");
+        assert_eq!(read.items[0].at_ms, 300, "limit {limit}: newest first");
+        assert!(read.more, "limit {limit}");
+    }
+}
+
+/// A task that could not finish reads as failed, never with the done check of a finished
+/// one (TEAM-17 note): it is stored under a kind of its own beside task_finished.
+#[test]
+fn a_task_that_could_not_finish_has_its_own_kind() {
+    let (_folder, db) = db();
+    let worker = agent(&db, "sub");
+    note_task_end(&db, &project(), worker, None, true, 10);
+    note_task_end(&db, &project(), worker, None, false, 20);
+    let seen: Vec<(&str, String)> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .map(|item| (item.kind.name(), item.text))
+        .collect();
+    let actor = agent_actor(&db, worker).unwrap();
+    assert_eq!(
+        seen,
+        [
+            ("task_finished", format!("{actor} finished a task")),
+            ("task_failed", format!("{actor} could not finish a task")),
+        ]
+    );
+}
+
+/// Rows stored before a task that could not finish and a research run parked for a pool
+/// had kinds of their own move to them at engine start, matched on the exact words their
+/// writers used, while a finished task whose title holds those words stays finished and a
+/// stopped run stays stopped (TEAM-17 note, T10-R2-L1).
+#[test]
+fn old_rows_move_to_the_failed_and_waiting_kinds_at_start() {
+    let (_folder, db) = db();
+    let rows = [
+        (
+            "task_finished",
+            "Ada (@api)",
+            "Ada (@api) could not finish \u{201c}Login\u{201d}",
+        ),
+        (
+            "task_finished",
+            "Ada (@api)",
+            "Ada (@api) finished \u{201c}Why it could not finish the build\u{201d}",
+        ),
+        (
+            "research_stopped",
+            RESEARCH_ACTOR,
+            "Research waiting for a pool: Design research",
+        ),
+        (
+            "research_stopped",
+            RESEARCH_ACTOR,
+            "Research stopped: Market research",
+        ),
+    ];
+    for (at, (kind, actor, text)) in (1_i64..).zip(rows) {
+        db.execute(
+            "INSERT INTO project_activity(project,at_ms,kind,actor,text) VALUES (?1,?2,?3,?4,?5)",
+            params![PROJECT, at, kind, actor, text],
+        )
+        .unwrap();
+    }
+    initialize(&db).unwrap();
+    let kinds: Vec<String> = db
+        .prepare("SELECT kind FROM project_activity WHERE project=?1 ORDER BY at_ms")
+        .unwrap()
+        .query_map([PROJECT], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        kinds,
+        [
+            "task_failed",
+            "task_finished",
+            "research_waiting",
+            "research_stopped"
+        ]
+    );
+}
+
 /// AL2: an Accept brought in from before the engine recorded events reads as the owner's,
 /// the set named by its number when it has one and by its agent and prompt while not.
 #[test]
@@ -777,6 +1009,124 @@ fn backfilled_accepts_read_as_yours_and_name_a_numbered_set_by_its_number() {
         vec![
             format!("You accepted the changes of Sub-agent {worker}: Change cs-b"),
             format!("You accepted change set #3 (Sub-agent {worker}: Change cs-a, 2 files)"),
+        ]
+    );
+}
+
+/// rv-secreview land-16 L1: a set whose stored prompt carries a right-to-left override is
+/// backfilled with it shown as an escape, never as the raw character.
+#[test]
+fn a_backfilled_accept_shows_a_hidden_character_in_the_prompt_as_an_escape() {
+    let (_folder, db) = db();
+    let worker = agent(&db, "sub");
+    let (id, prompt) = ("cs-r", "Fix \u{202E}txt.exe");
+    db.execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+             VALUES (?1,?2,'sub',?3,?4,'/r',?5,'/g','b','h','accepted','succeeded','t',?6,2,1,0,'[]',1,2000)",
+            params![
+                id,
+                PROJECT,
+                worker.to_string(),
+                format!("Sub-agent {worker}"),
+                format!("/w/{id}"),
+                prompt
+            ],
+    )
+    .unwrap();
+    backfill(&db, &project()).unwrap();
+    let texts: Vec<String> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == ActivityKind::Accepted)
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(
+        texts,
+        vec![format!(
+            "You accepted the changes of Sub-agent {worker}: Fix \\u202etxt.exe"
+        )]
+    );
+    assert!(!texts[0].contains('\u{202E}'));
+}
+
+/// rv-secreview land-16 L1: a backfill on a store from before the message column names the set
+/// by its prompt.
+#[test]
+fn a_backfill_on_a_store_without_the_message_column_names_the_set_by_its_prompt() {
+    let (_folder, db) = db();
+    db.execute_batch("ALTER TABLE landing_change_sets DROP COLUMN message;")
+        .unwrap();
+    let worker = agent(&db, "sub");
+    let (id, prompt) = ("cs-p", "Change cs-p");
+    db.execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+             VALUES (?1,?2,'sub',?3,?4,'/r',?5,'/g','b','h','accepted','succeeded','t',?6,2,1,0,'[]',1,2000)",
+            params![
+                id,
+                PROJECT,
+                worker.to_string(),
+                format!("Sub-agent {worker}"),
+                format!("/w/{id}"),
+                prompt
+            ],
+    )
+    .unwrap();
+    backfill(&db, &project()).unwrap();
+    let texts: Vec<String> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == ActivityKind::Accepted)
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(
+        texts,
+        vec![format!(
+            "You accepted the changes of Sub-agent {worker}: Change cs-p"
+        )]
+    );
+}
+
+/// MOCKC-R1-S1: a backfilled Accept names its set by the words a live Accept row uses: the
+/// set's message before its prompt, and "Changes from <agent>" when it has neither, never the
+/// prompt alone (rv-code L2).
+#[test]
+fn a_backfilled_accept_names_its_set_as_a_live_accept_row_does() {
+    let (_folder, db) = db();
+    let worker = agent(&db, "sub");
+    for (id, message, prompt, updated) in [
+        ("cs-m", "Land the checkout", "Change cs-m", 2_000),
+        ("cs-e", "", "", 3_000),
+    ] {
+        db.execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,message)
+             VALUES (?1,?2,'sub',?3,?4,'/r',?5,'/g','b','h','accepted','succeeded','t',?6,2,1,0,'[]',1,?7,?8)",
+            params![
+                id,
+                PROJECT,
+                worker.to_string(),
+                format!("Sub-agent {worker}"),
+                format!("/w/{id}"),
+                prompt,
+                updated,
+                message
+            ],
+        )
+        .unwrap();
+    }
+    backfill(&db, &project()).unwrap();
+    let texts: Vec<String> = list(&db, &project(), LIST_MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == ActivityKind::Accepted)
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            format!(
+                "You accepted the changes of Sub-agent {worker}: Changes from Sub-agent {worker}"
+            ),
+            format!("You accepted the changes of Sub-agent {worker}: Land the checkout"),
         ]
     );
 }

@@ -3299,9 +3299,16 @@ fn a_deleted_land_on_branch_is_named_by_every_reader_and_nothing_lands_elsewhere
     };
     let head = shown(&db).head;
     assert_eq!(
-        crate::landing::accept(&db, &fixture.base, &id, &head, None)
-            .unwrap_err()
-            .0,
+        crate::landing::accept(
+            &db,
+            &fixture.base,
+            &id,
+            &head,
+            None,
+            crate::activity::AcceptPlace::Changes
+        )
+        .unwrap_err()
+        .0,
         "changes_target_invalid"
     );
     assert_eq!(
@@ -4301,8 +4308,16 @@ fn a_linked_lead_finishes_only_once_its_native_teammates_work_landed() {
             true
         )
     );
-    let landed =
-        crate::landing::accept_into(&db, &home, &waiting.id, &waiting.head, None, &branch).unwrap();
+    let landed = crate::landing::accept_into(
+        &db,
+        &home,
+        &waiting.id,
+        &waiting.head,
+        None,
+        &branch,
+        crate::activity::AcceptPlace::Changes,
+    )
+    .unwrap();
     assert!(
         matches!(landed, crate::landing::AcceptOutcome::Landed { .. }),
         "greet's work lands on the lead's task branch"

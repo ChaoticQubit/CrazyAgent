@@ -550,7 +550,14 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
                 .map(PathBuf::from)
                 .ok_or_else(|| failure("changes_owner_identity_missing"))?;
             let outcome = match target.as_deref() {
-                None => landing::accept(&db, &home, &id, &expected_head, message.as_deref())?,
+                None => landing::accept(
+                    &db,
+                    &home,
+                    &id,
+                    &expected_head,
+                    message.as_deref(),
+                    crate::activity::AcceptPlace::Changes,
+                )?,
                 Some(target) => landing::accept_into(
                     &db,
                     &home,
@@ -558,6 +565,7 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
                     &expected_head,
                     message.as_deref(),
                     target,
+                    crate::activity::AcceptPlace::Changes,
                 )?,
             };
             (Reply::Accepted { outcome }, false)
@@ -1266,8 +1274,15 @@ mod tests {
             "[user]\n\tname = O\n\temail = o@example.invalid\n",
         )
         .unwrap();
-        let accepted =
-            landing::accept(&db, &home, &id, &read.head, None).map_err(|problem| problem.0);
+        let accepted = landing::accept(
+            &db,
+            &home,
+            &id,
+            &read.head,
+            None,
+            crate::activity::AcceptPlace::Changes,
+        )
+        .map_err(|problem| problem.0);
         let kept = git(&home, &repo, &["ls-tree", "--name-only", "HEAD", "OWNER"]);
         assert_eq!(
             kept.trim(),

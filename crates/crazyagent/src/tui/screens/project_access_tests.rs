@@ -261,3 +261,36 @@ fn the_access_box_says_beside_the_level_that_saving_restarts_the_projects_ide() 
     );
     assert!(words(&rows.join(" ")).contains(POLICY_RESTARTS_IDE));
 }
+
+/// The Full access confirm box says what Full access means for the IDE, in the desktop's words.
+#[test]
+fn the_full_access_box_says_what_full_access_means_for_the_ide() {
+    use super::project_access::FULL_ACCESS_IDE;
+    let mut edit = AccessEdit::of(&view());
+    edit.key(key(KeyCode::Left));
+    assert_eq!(edit.access, AgentAccess::Full);
+    assert_eq!(edit.key(key(KeyCode::Enter)), AccessKey::Handled);
+    assert!(edit.confirm_full);
+    let look = super::new_project_view::Look::plain();
+    let shown = edit
+        .rows(&look, usize::MAX)
+        .iter()
+        .map(|row| row.text())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        FULL_ACCESS_IDE,
+        "The IDE runs with your user's permissions. The project's network choice does not limit it. The AI lock and extension approvals are written at each IDE start, and anything inside the IDE can change them until the next one. Workspace trust is on. Until you trust the folder, IDE git and extensions that need trust stay off."
+    );
+    assert!(shown.contains(FULL_ACCESS_IDE), "{shown}");
+}
+
+/// The IDE hooks line says the switch does nothing at Full access, before when it applies.
+#[test]
+fn the_ide_hooks_line_says_full_access_runs_the_owners_git() {
+    assert!(IDE_GIT_HOOKS_LINE.contains("No effect at Full access: git runs as yours."));
+    assert!(IDE_GIT_HOOKS_LINE.ends_with("Applies when the IDE next starts."));
+}

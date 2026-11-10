@@ -312,6 +312,7 @@ fn a_project_with_merges_and_no_tokens_in_the_range_has_its_row() {
         projects: vec!["gamma".to_owned()],
         more_projects: 0,
         merges: 2,
+        cost_nanos: 0,
     };
     let all = read(&db, None, MIDNIGHT, NOW).unwrap();
     assert_eq!(
@@ -1832,4 +1833,421 @@ fn removing_a_project_moves_its_turn_rows_to_the_removed_rows_with_their_counts(
             row("beta", "team-9", Some(2)),
         ]
     );
+}
+
+fn priced_rows(db: &Connection, rows: &str) {
+    db.execute_batch(&format!(
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,model,input,output,cache_read,cache_write,cost_nanos) VALUES {rows}"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn metrics_read_dollars_by_model_and_say_what_has_no_price() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','gpt-5',100,10,0,0,900),
+         (3600000,'agent','alpha','','a','team-1','codex','s2','local',50,5,0,0,0)",
+    );
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(
+        metrics
+            .models
+            .iter()
+            .map(|row| (row.model.as_str(), row.cost_nanos))
+            .collect::<Vec<_>>(),
+        vec![("gpt-5", 900), ("local", 0)]
+    );
+    assert_eq!(metrics.models[0].tokens.input, 100);
+    assert_eq!(metrics.series[0].cost_nanos, 900);
+    assert_eq!(metrics.harnesses[0].cost_nanos, 900);
+    assert_eq!(money_totals(&db, None, 0).unwrap(), (900, 55));
+}
+
+#[test]
+fn every_breakdown_carries_its_dollars() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','gpt-5',100,10,0,0,900)",
+    );
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(
+        [
+            metrics.series[0].cost_nanos,
+            metrics.runs[0].cost_nanos,
+            metrics.projects[0].cost_nanos,
+            metrics.agents[0].cost_nanos,
+            metrics.accounts[0].cost_nanos,
+            metrics.harnesses[0].cost_nanos,
+        ],
+        [900; 6]
+    );
+}
+
+#[test]
+fn with_prices_off_no_metric_carries_a_dollar() {
+    use crate::usage::money::{self, MainNumber, MoneySettings, PriceSource};
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','gpt-5',100,10,0,0,900)",
+    );
+    money::write(
+        &db,
+        MoneySettings {
+            main_number: MainNumber::Dollars,
+            prices: PriceSource::Off,
+        },
+    )
+    .unwrap();
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(
+        [
+            metrics.series[0].cost_nanos,
+            metrics.runs[0].cost_nanos,
+            metrics.projects[0].cost_nanos,
+            metrics.agents[0].cost_nanos,
+            metrics.accounts[0].cost_nanos,
+            metrics.harnesses[0].cost_nanos,
+            metrics.models[0].cost_nanos,
+        ],
+        [0; 7]
+    );
+    assert_eq!(metrics.models[0].tokens.input, 100);
+}
+
+#[test]
+fn models_sort_by_dollars_then_tokens_then_name() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','a-small',10,0,0,0,0),
+         (3600000,'agent','alpha','','a','team-1','codex','s2','b-big',100,0,0,0,0),
+         (3600000,'agent','alpha','','a','team-1','codex','s3','a-big',100,0,0,0,0),
+         (3600000,'agent','alpha','','a','team-1','codex','s4','priced',1,0,0,0,5)",
+    );
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(
+        metrics
+            .models
+            .iter()
+            .map(|row| row.model.as_str())
+            .collect::<Vec<_>>(),
+        ["priced", "a-big", "b-big", "a-small"]
+    );
+}
+
+#[test]
+fn models_keep_to_the_project_and_the_range() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','kept',1,0,0,0,5),
+         (3600000,'agent','beta','','a','team-1','codex','s2','other-project',1,0,0,0,5),
+         (0,'agent','alpha','','a','team-1','codex','s3','too-old',1,0,0,0,5)",
+    );
+    let alpha = ProjectId::new("alpha").unwrap();
+    let metrics = read(&db, Some(&alpha), 3_600_000, 7_200_000).unwrap();
+    assert_eq!(
+        metrics
+            .models
+            .iter()
+            .map(|row| row.model.as_str())
+            .collect::<Vec<_>>(),
+        ["kept"]
+    );
+}
+
+#[test]
+fn money_totals_keep_to_the_project_and_the_range_and_skip_cache_reads() {
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','paid',100,0,0,0,900),
+         (3600000,'agent','alpha','','a','team-1','codex','s2','free',10,20,1000,30,0),
+         (3600000,'agent','beta','','a','team-1','codex','s3','paid',1,0,0,0,7),
+         (0,'agent','alpha','','a','team-1','codex','s4','paid',1,0,0,0,11)",
+    );
+    assert_eq!(
+        [
+            money_totals(&db, Some("alpha"), 3_600_000).unwrap(),
+            money_totals(&db, None, 3_600_000).unwrap(),
+            money_totals(&db, Some("alpha"), 0).unwrap(),
+        ],
+        [(900, 60), (907, 60), (911, 60)]
+    );
+}
+
+#[test]
+fn model_rows_shrink_with_the_others_to_fit_one_reply() {
+    let row = ModelRow {
+        model: "m".repeat(crate::usage::report::REPORT_BYTES_MAX),
+        ..ModelRow::default()
+    };
+    let fitted = fit(Metrics {
+        models: vec![row; 2],
+        ..Metrics::default()
+    });
+    assert!(fitted.is_ok());
+    assert_eq!(fitted.unwrap().models.len(), 0);
+}
+
+#[test]
+fn tool_rows_shrink_with_the_others_to_fit_one_reply() {
+    let row = ToolBucket {
+        tool: "t".repeat(crate::usage::report::REPORT_BYTES_MAX),
+        ..ToolBucket::default()
+    };
+    let fitted = fit(Metrics {
+        tools: vec![row; 2],
+        ..Metrics::default()
+    });
+    assert!(fitted.is_ok());
+    assert_eq!(fitted.unwrap().tools.len(), 0);
+}
+
+#[test]
+fn tools_are_read_per_bar_and_per_project() {
+    let (_directory, db) = database();
+    crate::coord::ensure(&db).unwrap();
+    db.execute_batch(
+        "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,hookless) VALUES
+            (1,'alpha','sub','codex',1,'running',1,1,0),
+            (2,'beta','sub','codex',1,'running',1,1,0);
+         INSERT INTO coord_tool_hours(hour_ms,agent,tool,count) VALUES
+            (3600000,1,'Edit',3),(3600000,2,'Edit',5),(7200000,1,'Bash',2);",
+    )
+    .unwrap();
+    let all = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(all.tools_since_ms, Some(3_600_000));
+    assert_eq!(
+        all.tools
+            .iter()
+            .filter(|row| row.tool == "Edit")
+            .map(|row| row.count)
+            .sum::<u64>(),
+        8
+    );
+    let alpha = ProjectId::new("alpha").unwrap();
+    let one = read(&db, Some(&alpha), 0, 7_200_000).unwrap();
+    assert_eq!(
+        one.tools
+            .iter()
+            .filter(|row| row.tool == "Edit")
+            .map(|row| row.count)
+            .sum::<u64>(),
+        3
+    );
+}
+
+/// Stores the coordination tables and one agent in each of the projects alpha and beta.
+/// Input: the store. Output: none.
+fn tool_agents(db: &Connection) {
+    crate::coord::ensure(db).unwrap();
+    db.execute_batch(
+        "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,hookless) VALUES
+            (1,'alpha','sub','codex',1,'running',1,1,0),
+            (2,'beta','sub','codex',1,'running',1,1,0);",
+    )
+    .unwrap();
+}
+
+/// Stores one agent's calls of one tool in one hour. Inputs: the store, the hour, the agent,
+/// the tool and the calls. Output: none.
+fn tool_row(db: &Connection, hour_ms: i64, agent: i64, tool: &str, calls: i64) {
+    db.execute(
+        "INSERT INTO coord_tool_hours(hour_ms,agent,tool,count) VALUES (?1,?2,?3,?4)",
+        params![hour_ms, agent, tool, calls],
+    )
+    .unwrap();
+}
+
+#[test]
+fn tools_keep_every_bar_past_the_old_row_limit() {
+    let (_directory, db) = database();
+    tool_agents(&db);
+    for index in 0..30 {
+        tool_row(&db, 2 * HOUR, 1, &format!("new-{index:02}"), 1);
+    }
+    for index in 0..3 {
+        tool_row(&db, 0, 1, &format!("old-{index:02}"), 1);
+    }
+    let metrics = read(&db, None, 0, 4 * HOUR).unwrap();
+    assert_eq!(
+        metrics.tools.iter().filter(|row| row.start_ms == 0).count(),
+        3,
+        "the oldest bar is still there"
+    );
+    assert_eq!(metrics.tools.len(), TOOLS_PER_BAR_MAX + 3);
+}
+
+#[test]
+fn tools_keep_only_the_most_used_of_a_bar() {
+    let (_directory, db) = database();
+    tool_agents(&db);
+    for calls in 1..=TOOLS_PER_BAR_MAX as i64 + 1 {
+        tool_row(&db, 0, 1, &format!("tool-{calls:02}"), calls);
+    }
+    let metrics = read(&db, None, 0, HOUR).unwrap();
+    assert_eq!(metrics.tools.len(), TOOLS_PER_BAR_MAX);
+    assert_eq!(metrics.tools[0].count, TOOLS_PER_BAR_MAX as u64 + 1);
+    assert!(
+        metrics.tools.iter().all(|row| row.tool != "tool-01"),
+        "the least-used tool of the bar is the one left out"
+    );
+}
+
+#[test]
+fn tools_keep_the_newest_bars_the_chart_keeps() {
+    let (_directory, db) = database();
+    tool_agents(&db);
+    let bar_ms = 5 * DAY;
+    let bars = SERIES_MAX as i64 + 1;
+    for index in 0..bars {
+        tool_row(&db, index * bar_ms, 1, "Edit", 1);
+    }
+    let metrics = read(&db, None, 0, bars * bar_ms).unwrap();
+    assert_eq!(metrics.bucket_ms, bar_ms);
+    assert_eq!(metrics.tools.len(), SERIES_MAX);
+    assert_eq!(metrics.tools[0].start_ms, (bars - 1) * bar_ms);
+    assert!(
+        metrics.tools.iter().all(|row| row.start_ms != 0),
+        "the oldest bar goes, as it does in the chart"
+    );
+}
+
+#[test]
+fn tools_read_exact_bars_newest_first() {
+    let (_directory, db) = database();
+    tool_agents(&db);
+    let since_ms = HOUR / 2;
+    tool_row(&db, HOUR, 1, "Edit", 3);
+    tool_row(&db, HOUR, 2, "Edit", 5);
+    tool_row(&db, HOUR, 1, "Bash", 1);
+    tool_row(&db, 3 * HOUR, 1, "Read", 2);
+    let metrics = read(&db, None, since_ms, since_ms + 4 * HOUR).unwrap();
+    assert_eq!(metrics.bucket_ms, 2 * HOUR);
+    let rows: Vec<(i64, &str, u64)> = metrics
+        .tools
+        .iter()
+        .map(|row| (row.start_ms, row.tool.as_str(), row.count))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (since_ms + 2 * HOUR, "Read", 2),
+            (since_ms, "Edit", 8),
+            (since_ms, "Bash", 1),
+        ]
+    );
+}
+
+#[test]
+fn tools_since_follows_the_project_filter() {
+    let (_directory, db) = database();
+    tool_agents(&db);
+    tool_row(&db, HOUR, 2, "Edit", 1);
+    tool_row(&db, 3 * HOUR, 1, "Edit", 1);
+    let since = |project: Option<&str>| {
+        let project = project.map(|name| ProjectId::new(name).unwrap());
+        read(&db, project.as_ref(), 0, 4 * HOUR)
+            .unwrap()
+            .tools_since_ms
+    };
+    assert_eq!(since(None), Some(HOUR));
+    assert_eq!(since(Some("alpha")), Some(3 * HOUR));
+    assert_eq!(since(Some("gamma")), None);
+}
+
+#[test]
+fn tools_fit_keeps_more_rows_than_the_other_lists() {
+    let fitted = fit(Metrics {
+        tools: vec![ToolBucket::default(); ROWS_MAX + 1],
+        ..Metrics::default()
+    })
+    .unwrap();
+    assert_eq!(fitted.tools.len(), ROWS_MAX + 1);
+}
+
+#[test]
+fn models_with_prices_off_sort_by_tokens_not_hidden_dollars() {
+    use crate::usage::money::{self, MainNumber, MoneySettings};
+    let (_directory, db) = database();
+    priced_rows(
+        &db,
+        "(3600000,'agent','alpha','','a','team-1','codex','s1','big',100,0,0,0,0),
+         (3600000,'agent','alpha','','a','team-1','codex','s2','small',1,0,0,0,900)",
+    );
+    money::write(
+        &db,
+        MoneySettings {
+            main_number: MainNumber::Dollars,
+            prices: PriceSource::Off,
+        },
+    )
+    .unwrap();
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(
+        metrics
+            .models
+            .iter()
+            .map(|row| row.model.as_str())
+            .collect::<Vec<_>>(),
+        ["big", "small"]
+    );
+}
+
+#[test]
+fn activity_rows_are_read_largest_first() {
+    let (_directory, db) = database();
+    db.execute_batch(
+        "INSERT INTO usage_activity(hour_ms,project,agent,model,activity,turns,edit_turns,first_try_turns) VALUES
+            (3600000,'alpha','t','m','coding',2,2,1),
+            (3600000,'alpha','t','n','coding',1,1,1),
+            (3600000,'beta','t','m','git',5,0,0);",
+    )
+    .unwrap();
+    let metrics = read(&db, None, 0, 7_200_000).unwrap();
+    assert_eq!(metrics.activity_since_ms, Some(3_600_000));
+    assert_eq!(
+        metrics
+            .activity
+            .iter()
+            .map(|row| (
+                row.activity.as_str(),
+                row.turns,
+                row.edit_turns,
+                row.first_try_turns
+            ))
+            .collect::<Vec<_>>(),
+        vec![("git", 5, 0, 0), ("coding", 3, 3, 2)]
+    );
+}
+
+#[test]
+fn activity_keeps_to_the_project_and_range_and_says_when_that_project_began() {
+    let (_directory, db) = database();
+    db.execute_batch(
+        "INSERT INTO usage_activity(hour_ms,project,agent,model,activity,turns,edit_turns,first_try_turns) VALUES
+            (0,'beta','t','m','git',1,0,0),
+            (3600000,'alpha','t','m','coding',1,1,1),
+            (10800000,'alpha','t','m','testing',4,4,0),
+            (10800000,'beta','t','m','git',7,0,0);",
+    )
+    .unwrap();
+    let scoped = read(&db, Some(&alpha()), 7_200_000, 14_400_000).unwrap();
+    assert_eq!(scoped.activity_since_ms, Some(3_600_000));
+    assert_eq!(
+        scoped
+            .activity
+            .iter()
+            .map(|row| row.activity.as_str())
+            .collect::<Vec<_>>(),
+        ["testing"]
+    );
+    let other = ProjectId::new("gamma").unwrap();
+    let none = read(&db, Some(&other), 0, 14_400_000).unwrap();
+    assert_eq!((none.activity.len(), none.activity_since_ms), (0, None));
 }

@@ -1,20 +1,22 @@
 import { useState, type ReactNode } from "react";
-import type { DayTokens, LinesRow, Tokens } from "../../api-usage";
+import type { DayTokens, LinesRow, MoneyView, Tokens } from "../../api-usage";
 import { Button, Panel } from "../../ui";
+import { Figure } from "./money";
 import { compactCount, dayLabel, headlineTokens, tokenText } from "./usage-model";
 
 const PANEL_ROWS_SHOWN = 5;
 const DAYS_SHOWN = 7;
 const BAR_PERCENT_MIN = 2;
 
-/** One breakdown row: its name, its project when the breakdown spans projects, its tokens, the
- * cells of the breakdown's own columns, the key the usage read names it by when that differs
+/** One breakdown row: its name, its project when the breakdown spans projects, its tokens, its
+ * dollars, the cells of the breakdown's own columns, the key the usage read names it by when that differs
  * from `key`, and the harness that ran for it without reporting usage. */
 export interface BreakdownRow {
   key: string;
   name: string;
   project?: string;
   tokens: Tokens;
+  cost_nanos: number;
   extra: string[];
   usageKey?: string;
   notReportedBy?: string | null;
@@ -35,8 +37,9 @@ function AllColumns({ count, children }: { count: number; children: ReactNode })
 
 /** A compact panel of the first rows as the engine orders them: the largest by tokens, and
  * for runs the newest, since a run list is a timeline. Every row and column is one step away.
- * Nothing shows for an empty list. Inputs: the title, the rows and the full table. */
-export function TokenPanel({ title, rows, children }: { title: string; rows: BreakdownRow[]; children: ReactNode }) {
+ * Nothing shows for an empty list. Each row leads with the number the owner chose. Inputs: the
+ * title, the rows, the money view and the full table. */
+export function TokenPanel({ title, rows, money, children }: { title: string; rows: BreakdownRow[]; money: MoneyView; children: ReactNode }) {
   if (rows.length === 0) return null;
   const top = Math.max(1, ...rows.map((row) => headlineTokens(row.tokens)));
   return <Panel title={title}>
@@ -44,7 +47,7 @@ export function TokenPanel({ title, rows, children }: { title: string; rows: Bre
       {rows.slice(0, PANEL_ROWS_SHOWN).map((row) => <div className="mx-row" role="row" key={row.key}>
         <span className="mx-row-name" role="cell">{row.name}</span>
         <span className="mx-bar" aria-hidden="true"><i style={{ width: barWidth(headlineTokens(row.tokens), top) }} /></span>
-        <span className={row.notReportedBy ? "mx-row-main mx-row-words" : "mx-row-main"} role="cell">{tokenText(headlineTokens(row.tokens), row.notReportedBy)}</span>
+        <span className={row.notReportedBy ? "mx-row-main mx-row-words" : "mx-row-main"} role="cell">{row.notReportedBy ? tokenText(headlineTokens(row.tokens), row.notReportedBy) : <Figure tokens={row.tokens} costNanos={row.cost_nanos} money={money} />}</span>
         <span className="mx-row-side" role="cell">{row.notReportedBy && headlineTokens(row.tokens) === 0 ? "" : `${compactCount(row.tokens.cache_read)} cache read`}</span>
       </div>)}
     </div>

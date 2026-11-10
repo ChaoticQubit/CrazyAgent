@@ -1011,6 +1011,38 @@ mod import {
         assert_eq!(reads.get(), 5);
     }
 
+    /// A files checkout holding a stray `.git/reftable/tables.list`, a file no switch touches,
+    /// still stamps its branch by `.git/HEAD`, so a switch is read again and the label never
+    /// stays on the old branch (UI-9-L1).
+    #[test]
+    fn a_stray_reftable_list_in_a_files_checkout_never_keeps_an_old_branch() {
+        let checkout = Checkout::new();
+        let root = fs::canonicalize(&checkout.folder).unwrap();
+        let store = root.join(".git").join("reftable");
+        fs::create_dir(&store).unwrap();
+        fs::write(
+            store.join("tables.list"),
+            "0x000000000001-0x000000000001-00000000.ref\n",
+        )
+        .unwrap();
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            crate::landing::checked_out_branch(&root)
+        };
+        let main = Some("main".to_owned());
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(reads.get(), 1, "an unchanged HEAD is still kept");
+        checkout.git(&["checkout", "-q", "-b", "release/2.0"]);
+        assert_eq!(
+            branch_of(&root, read),
+            Some("release/2.0".to_owned()),
+            "the switch rewrote .git/HEAD, which the stamp follows, not the stray list"
+        );
+        assert_eq!(reads.get(), 2, "a branch switch is read once");
+    }
+
     #[test]
     fn a_reftable_checkout_names_the_branch_it_switched_to() {
         let tmp = tempfile::Builder::new()

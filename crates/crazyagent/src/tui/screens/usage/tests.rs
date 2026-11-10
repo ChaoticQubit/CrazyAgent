@@ -32,6 +32,7 @@ fn usage_row(key: &str) -> UsageRow {
         },
         runs: 2,
         last_ms: NOW - 5 * MINUTE,
+        cost_nanos: 0,
         not_reported_by: None,
     }
 }
@@ -98,6 +99,11 @@ fn report() -> UsageReport {
         not_reported_by: Vec::new(),
         health: Vec::new(),
         partial_homes: 0,
+        money: Default::default(),
+        recount: None,
+        counting_notice: None,
+        activity: Vec::new(),
+        models: Vec::new(),
     }
 }
 
@@ -807,4 +813,496 @@ fn a_usage_step_that_panicked_shows_one_plain_line_with_its_count_and_last_time(
         "Counting research run tokens hit an internal error 2 times since the engine started, last 4 min ago. It worked again 1 min ago."
     );
     assert_eq!(lines[8], "Account limits");
+}
+
+fn money(shown: crate::usage::money::MainNumber) -> MoneyView {
+    MoneyView {
+        shown,
+        as_of: Some("2026-11-08".into()),
+        cost_nanos: 5_000_000_000,
+        ..MoneyView::default()
+    }
+}
+
+#[test]
+fn every_tui_dollar_carries_the_label() {
+    assert_eq!(
+        money_text(5_000_000_000),
+        "$5.00 (Estimated cost at API prices)"
+    );
+    assert_eq!(
+        money_text(4_000_000),
+        "<$0.01 (Estimated cost at API prices)"
+    );
+    assert_eq!(
+        money_text(5_000_000),
+        "$0.01 (Estimated cost at API prices)"
+    );
+    assert_eq!(money_text(0), "$0.00 (Estimated cost at API prices)");
+    assert_eq!(
+        money_text(i64::MAX),
+        "$9223372036.85 (Estimated cost at API prices)"
+    );
+}
+
+#[test]
+fn a_row_leads_with_the_chosen_number_and_shows_only_tokens_without_prices() {
+    use crate::usage::money::MainNumber;
+    assert_eq!(
+        figures_text("1.2K tokens", 5_000_000_000, &money(MainNumber::Dollars)),
+        "$5.00 (Estimated cost at API prices)  1.2K tokens"
+    );
+    assert_eq!(
+        figures_text("1.2K tokens", 5_000_000_000, &money(MainNumber::Tokens)),
+        "1.2K tokens  $5.00 (Estimated cost at API prices)"
+    );
+    assert_eq!(
+        figures_text("1.2K tokens", 5_000_000_000, &MoneyView::default()),
+        "1.2K tokens"
+    );
+}
+
+#[test]
+fn the_summary_shows_each_rows_dollars_and_the_total_with_prices_on() {
+    use crate::usage::money::MainNumber;
+    let ctx = ctx(100, 40);
+    let mut priced = report();
+    priced.money = money(MainNumber::Dollars);
+    priced.projects = vec![UsageRow {
+        cost_nanos: 2_000_000_000,
+        ..usage_row("project-harbor")
+    }];
+    let shown = text(&summary(
+        &priced,
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ))
+    .join("\n");
+    assert!(
+        shown.contains("$2.00 (Estimated cost at API prices)"),
+        "{shown}"
+    );
+    assert!(
+        shown
+            .lines()
+            .any(|line| line == "$5.00 (Estimated cost at API prices)"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn the_money_keys_flip_one_setting_and_send_it() {
+    use crate::usage::money::{MainNumber, MoneySettings, PriceSource};
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    let mut answer = report();
+    answer.since_ms = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(answer)), &mut ctx);
+    let labels: Vec<(String, String)> = page
+        .hints(&ctx)
+        .into_iter()
+        .map(|hint| (hint.key, hint.label))
+        .collect();
+    assert!(
+        labels.contains(&("m".to_owned(), "Dollars or tokens".to_owned())),
+        "{labels:?}"
+    );
+    assert!(
+        labels.contains(&("p".to_owned(), "Prices on or off".to_owned())),
+        "{labels:?}"
+    );
+    let sent = |key: char, page: &mut UsagePage, ctx: &mut Ctx| -> MoneySettings {
+        assert!(matches!(page.key(&Key::Char(key), ctx), Flow::Handled));
+        let Some(Request::Settings(job)) = ctx.next_request() else {
+            panic!("the money key asks the engine");
+        };
+        let SettingsJob::SetMoney(settings) = *job else {
+            panic!("the money key sets the money choice");
+        };
+        settings
+    };
+    assert_eq!(
+        sent('m', &mut page, &mut ctx),
+        MoneySettings {
+            main_number: MainNumber::Tokens,
+            prices: PriceSource::Bundled
+        }
+    );
+    assert_eq!(
+        sent('p', &mut page, &mut ctx),
+        MoneySettings {
+            main_number: MainNumber::Dollars,
+            prices: PriceSource::Off
+        }
+    );
+}
+
+#[test]
+fn a_priced_row_at_80_columns_wraps_so_no_figure_or_label_is_cut() {
+    use crate::usage::money::MainNumber;
+    let limit = 76;
+    let ctx = ctx(80, 40);
+    let mut priced = report();
+    priced.money = money(MainNumber::Tokens);
+    priced.projects = vec![UsageRow {
+        cost_nanos: 2_000_000_000,
+        ..usage_row(&"p".repeat(32))
+    }];
+    let lines = text(&summary(
+        &priced,
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        limit,
+        &ctx,
+    ));
+    assert!(
+        lines.iter().all(|line| line.chars().count() <= limit),
+        "{lines:#?}"
+    );
+    let joined = lines
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        joined.contains("$2.00 (Estimated cost at API prices)"),
+        "{joined}"
+    );
+    assert!(joined.contains("2 runs"), "{joined}");
+}
+
+#[test]
+fn a_recount_fault_reads_in_plain_words() {
+    let line = health_line(
+        &StepHealth {
+            step: UsageStep::Recount,
+            panics: 1,
+            last_ms: NOW - 30_000,
+            recovered_ms: None,
+        },
+        NOW,
+        0,
+    );
+    assert!(
+        line.starts_with("Recounting history hit an internal error once"),
+        "{line}"
+    );
+    assert!(line.contains("the comparison may arrive later"), "{line}");
+}
+
+#[test]
+fn with_prices_off_the_main_number_key_is_not_offered_and_does_nothing() {
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    let mut answer = report();
+    answer.money.settings.prices = PriceSource::Off;
+    answer.since_ms = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(answer)), &mut ctx);
+    let keys: Vec<String> = page.hints(&ctx).into_iter().map(|hint| hint.key).collect();
+    assert!(!keys.contains(&"m".to_owned()), "{keys:?}");
+    assert!(keys.contains(&"p".to_owned()), "{keys:?}");
+    assert!(matches!(page.key(&Key::Char('m'), &mut ctx), Flow::Ignored));
+    assert!(ctx.next_screen_request().is_none());
+}
+
+#[test]
+fn the_recount_offer_shows_both_totals_and_how_to_choose() {
+    let status = RecountStatus {
+        old: Tokens {
+            input: 4000,
+            ..Tokens::default()
+        },
+        new: Tokens {
+            input: 1000,
+            ..Tokens::default()
+        },
+        new_cost_nanos: 5_000_000_000,
+        sessions_recounted: 2,
+        sessions_kept_old: 1,
+        homes_partial: 0,
+    };
+    let text: Vec<String> = recount_lines(&status, true)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(text[1].contains("Not estimated"));
+    assert!(text[2].contains("$5.00 (Estimated cost at API prices)"));
+    assert!(text[3].starts_with("2 sessions recounted, 1 keep"));
+    assert!(text[4].contains("the account their agent last used"));
+    assert!(text[5].contains("New dollars cover recounted sessions only"));
+    assert!(text[6].contains("Press n"));
+    let off: Vec<String> = recount_lines(&status, false)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(off.iter().all(|line| !line.contains('$')
+        && !line.contains("Estimated cost")
+        && !line.contains("Not estimated")));
+    assert!(off.last().unwrap().contains("Press n"));
+}
+
+fn offer() -> RecountStatus {
+    RecountStatus {
+        old: Tokens {
+            input: 4000,
+            ..Tokens::default()
+        },
+        new: Tokens {
+            input: 1000,
+            ..Tokens::default()
+        },
+        new_cost_nanos: 5_000_000_000,
+        sessions_recounted: 2,
+        sessions_kept_old: 1,
+        homes_partial: 0,
+    }
+}
+
+#[test]
+fn the_recount_offer_wraps_to_the_screen_under_its_notice() {
+    let mut view = report();
+    view.counting_notice = Some("These numbers still use the old counting.".to_owned());
+    view.recount = Some(offer());
+    let lines = text(&recount_head(&view, 60));
+    assert_eq!(lines[0], "These numbers still use the old counting.");
+    assert!(
+        lines.iter().all(|line| line.chars().count() <= 60),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with("Press n")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn the_recount_keys_work_only_while_it_is_offered() {
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    let mut answer = report();
+    answer.since_ms = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(answer.clone())), &mut ctx);
+    assert!(matches!(page.key(&Key::Char('n'), &mut ctx), Flow::Ignored));
+    answer.recount = Some(offer());
+    page.apply(&Ok(Box::new(answer)), &mut ctx);
+    for (key, expected) in [('n', true), ('o', false)] {
+        assert!(matches!(page.key(&Key::Char(key), &mut ctx), Flow::Handled));
+        let Some(Request::Settings(job)) = ctx.next_request() else {
+            panic!("the recount key asks the engine");
+        };
+        let SettingsJob::DecideRecount(use_new) = *job else {
+            panic!("the recount key sends the choice");
+        };
+        assert_eq!(use_new, expected);
+    }
+}
+
+fn activity_row(activity: &str, turns: u64, edit_turns: u64, first_try_turns: u64) -> ActivityRow {
+    ActivityRow {
+        activity: activity.to_owned(),
+        turns,
+        edit_turns,
+        first_try_turns,
+    }
+}
+
+fn model_row(model: &str, input: u64, cost_nanos: i64) -> ModelRow {
+    ModelRow {
+        model: model.to_owned(),
+        tokens: Tokens {
+            input,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+        },
+        cost_nanos,
+    }
+}
+
+#[test]
+fn the_activity_lines_end_with_the_first_try_rate() {
+    let ctx = ctx(100, 40);
+    let rows = [activity_row("coding", 4, 4, 3)];
+    assert_eq!(
+        text(&activity_lines(&rows, 96, &ctx.theme)),
+        [
+            "  Coding         4 turns",
+            "75% of 4 editing turns worked first try"
+        ]
+    );
+}
+
+#[test]
+fn the_first_try_rate_rounds_to_the_nearest_percent_and_says_one_turn() {
+    let ctx = ctx(100, 40);
+    let rate = |rows: &[ActivityRow]| text(&activity_lines(rows, 96, &ctx.theme)).pop();
+    assert_eq!(
+        rate(&[activity_row("coding", 3, 3, 2)]).as_deref(),
+        Some("67% of 3 editing turns worked first try")
+    );
+    assert_eq!(
+        rate(&[activity_row("coding", 1, 1, 1)]).as_deref(),
+        Some("100% of 1 editing turn worked first try")
+    );
+}
+
+#[test]
+fn no_first_try_rate_shows_without_an_editing_turn() {
+    let ctx = ctx(100, 40);
+    assert_eq!(
+        text(&activity_lines(
+            &[activity_row("git", 1, 0, 0)],
+            96,
+            &ctx.theme
+        )),
+        ["  Git            1 turn"]
+    );
+}
+
+#[test]
+fn activities_past_the_cap_are_counted_and_stay_in_the_rate() {
+    let ctx = ctx(100, 40);
+    let rows: Vec<ActivityRow> = [
+        "build_deploy",
+        "coding",
+        "debugging",
+        "feature",
+        "testing",
+        "refactoring",
+        "exploration",
+    ]
+    .iter()
+    .map(|name| activity_row(name, 2, 2, 1))
+    .collect();
+    let shown = text(&activity_lines(&rows, 96, &ctx.theme));
+    assert_eq!(shown[0], "  Build/deploy   2 turns");
+    assert_eq!(shown.len(), 7, "{shown:?}");
+    assert_eq!(shown[5], "  and 2 more");
+    assert_eq!(shown[6], "50% of 14 editing turns worked first try");
+}
+
+#[test]
+fn model_lines_name_the_blank_model_show_dollars_and_stop_at_the_cap() {
+    let ctx = ctx(100, 40);
+    let mut rows = vec![model_row("gpt-5", 1200, 0), model_row("", 900, 0)];
+    rows.extend((0..5).map(|n| model_row(&format!("m{n}"), 10, 0)));
+    let shown = text(&model_lines(&rows, &MoneyView::default(), 96, &ctx.theme));
+    assert_eq!(shown[0], "  gpt-5  1.2K tokens");
+    assert_eq!(shown[1], "  Model not recorded  900 tokens");
+    assert_eq!(shown.len(), 6, "{shown:?}");
+    assert_eq!(shown[5], "  and 2 more");
+    let money = MoneyView {
+        shown: MainNumber::Dollars,
+        as_of: Some("2026-11-08".to_owned()),
+        ..MoneyView::default()
+    };
+    let priced = text(&model_lines(
+        &[model_row("gpt-5", 1200, 1_000_000_000)],
+        &money,
+        96,
+        &ctx.theme,
+    ));
+    assert_eq!(
+        priced,
+        ["  gpt-5  $1.00 (Estimated cost at API prices)  1.2K tokens"]
+    );
+}
+
+#[test]
+fn the_summary_lists_models_and_activities_after_the_accounts_only_when_there_are_any() {
+    let ctx = ctx(100, 40);
+    let bare = text(&summary(
+        &report(),
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    assert!(
+        !bare
+            .iter()
+            .any(|line| line == "By model" || line == "By activity"),
+        "{bare:?}"
+    );
+    let shown = text(&summary(
+        &UsageReport {
+            models: vec![model_row("gpt-5", 1200, 0)],
+            activity: vec![activity_row("coding", 4, 4, 3)],
+            ..report()
+        },
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    let place = |wanted: &str| {
+        shown
+            .iter()
+            .position(|line| line == wanted)
+            .unwrap_or_else(|| panic!("{wanted}: {shown:?}"))
+    };
+    assert!(place("By account") < place("By model"));
+    assert!(place("By model") < place("By activity"));
+    assert_eq!(place("  gpt-5  1.2K tokens"), place("By model") + 1);
+    assert_eq!(place("  Coding         4 turns"), place("By activity") + 1);
+    assert!(place("75% of 4 editing turns worked first try") > place("By activity"));
+}
+
+#[test]
+fn model_and_activity_lines_fit_a_narrow_screen() {
+    let ctx = ctx(30, 40);
+    let limit = 24;
+    let activity = text(&activity_lines(
+        &[activity_row("build_deploy", 2, 2, 1)],
+        limit,
+        &ctx.theme,
+    ));
+    let models = text(&model_lines(
+        &[model_row(
+            "a-very-long-model-name-that-will-not-fit",
+            1200,
+            0,
+        )],
+        &MoneyView::default(),
+        limit,
+        &ctx.theme,
+    ));
+    assert!(activity.len() > 1, "{activity:?}");
+    assert!(models.len() > 1, "{models:?}");
+    for line in activity.iter().chain(&models) {
+        assert!(line.chars().count() <= limit, "{line}");
+    }
+}
+
+#[test]
+fn a_second_recount_choice_says_it_was_already_decided() {
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    let refused = Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Settings(
+        Box::new(SettingsEvent::RecountDecided(Err(
+            "usage_recount_not_ready".into(),
+        ))),
+    )));
+    page.arrive(&refused, &mut ctx);
+    let said = ctx.message().expect("the refusal is said");
+    assert_eq!(
+        (said.lead.as_str(), said.rest.as_str()),
+        (
+            "Could not apply that choice.",
+            "This recount was already decided. Press r to read again."
+        )
+    );
 }

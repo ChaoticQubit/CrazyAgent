@@ -626,6 +626,18 @@ fn what_a_git_command_printed_fits_one_bridge_frame() {
     assert_eq!(tail(&b"0123"[..], 4), (b"0123".to_vec(), false));
 }
 
+/// land-19 r2 L1: the IDE's git reads no grafts file and prints no advice about the one it
+/// is pointed at, so a push's error output, which the IDE shows, holds only what the push
+/// itself says.
+#[test]
+fn a_push_from_the_project_folder_prints_no_grafts_advice() {
+    let project = Project::new();
+    let head = project.commit("notes.md", "Planting notes.\n");
+    let pushed = landed(project.git(&["push", "origin", "main:main"]));
+    assert_eq!(project.served("main").as_deref(), Some(head.as_str()));
+    assert!(!pushed.stderr.contains("graft"), "{pushed:?}");
+}
+
 #[test]
 fn a_push_from_the_project_folder_reaches_the_daemon_with_no_hook_running() {
     let project = Project::new();

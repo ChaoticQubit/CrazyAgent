@@ -292,6 +292,38 @@ fn a_pending_set_is_one_group_named_for_its_agent_with_every_file() {
     );
 }
 
+/// AL2-PLACE: an Accept pressed in the IDE's Source Control is listed in the project's
+/// activity as made in the IDE.
+#[test]
+fn an_ide_accept_is_listed_as_made_in_the_ide() {
+    let case = Case::new();
+    case.db
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+        )
+        .unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    crate::activity::initialize(&case.db).unwrap();
+    let set = case.only(NOW);
+    let landed = accept(
+        &case.db,
+        &case.home,
+        &case.project,
+        &set.id,
+        &set.head,
+        "Land the agent's edits",
+    )
+    .unwrap();
+    assert!(matches!(landed, AcceptOutcome::Landed { .. }), "{landed:?}");
+    let places: Vec<_> = crate::activity::list(&case.db, &case.project, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.kind == crate::activity::ActivityKind::Accepted)
+        .map(|item| item.place)
+        .collect();
+    assert_eq!(places, vec![Some(crate::activity::AcceptPlace::Ide)]);
+}
+
 #[test]
 fn ide_accept_lands_through_the_engine_and_the_set_leaves_pending() {
     let case = Case::new();

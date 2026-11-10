@@ -561,13 +561,18 @@ fn a_requeued_run_records_no_stop_and_a_parked_run_says_it_waits_for_a_pool() {
         .into_iter()
         .map(|item| (item.kind, item.text))
         .collect();
+    assert_eq!(
+        seen.first().map(|(kind, _)| kind.name()),
+        Some("research_waiting"),
+        "a parked run waits under its own kind, never shown as stopped (T10-R2-L1)"
+    );
 
     let research = |kind: ActivityKind, text: &str| (kind, text.to_owned());
     assert_eq!(
         seen,
         vec![
             research(
-                ActivityKind::ResearchStopped,
+                ActivityKind::ResearchWaiting,
                 "Research waiting for a pool: Design research"
             ),
             research(

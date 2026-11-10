@@ -2,6 +2,8 @@
 use super::MappingFacts;
 use super::draft::{self, Answer, Drafted};
 use super::graph::{self, GRAPHIFY_MISSING, GraphEnding};
+#[cfg(unix)]
+use super::main_graph;
 use super::{Step, bounded_reason, now_ms};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::CredentialRef;
@@ -18,6 +20,8 @@ use crate::research::runner::{
 use crate::sandbox::SandboxError;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
+#[cfg(unix)]
+use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -36,6 +40,13 @@ const ENGINE_TICK: Duration = Duration::from_secs(2);
 /// takes effect while the claim still lets newer projects go first.
 const PAUSE_RECHECK_MS: i64 = 10_000;
 const RUN_NAME_BYTES_MAX: usize = 96;
+#[cfg(unix)]
+const ONBOARDED_MAX: i64 = 256;
+#[cfg(unix)]
+const REFRESH_PREFIX: &str = "graph-main-";
+/// How often a main graph refresh build looks for a waiting onboarding step to give way to.
+#[cfg(unix)]
+const STEP_POLL: Duration = Duration::from_secs(1);
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
 const MAPPING_HARNESSES: [ResearchHarness; 2] =
     [ResearchHarness::Codex, ResearchHarness::ClaudeCode];
@@ -145,6 +156,8 @@ struct Work {
     limits: OnboardingLimits,
     tick: Duration,
     claimer: String,
+    #[cfg(unix)]
+    main_graphs: bool,
 }
 
 /// Background loop that moves every onboarding forward one step at a time:
@@ -172,6 +185,26 @@ impl OnboardingService {
         A: Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
         G: Fn() -> Option<PathBuf> + Send + 'static,
     {
+        Self::begin(runner, accounts, graphify, limits, tick, false)
+    }
+
+    /// Starts the loop as [`OnboardingService::start`] does; with `main_graphs` set, as the
+    /// engine runs it, it also publishes each graph it builds for agents to copy and keeps
+    /// every onboarded project's main graph built and current (DEC-123).
+    fn begin<A, G>(
+        runner: Arc<ResearchRunner>,
+        accounts: A,
+        graphify: G,
+        limits: OnboardingLimits,
+        tick: Duration,
+        main_graphs: bool,
+    ) -> Self
+    where
+        A: Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
+        G: Fn() -> Option<PathBuf> + Send + 'static,
+    {
+        #[cfg(not(unix))]
+        let _ = main_graphs;
         assert!(!tick.is_zero());
         assert!(!limits.graph_time.is_zero() && !limits.mapping_time.is_zero());
         assert!(
@@ -189,6 +222,8 @@ impl OnboardingService {
             limits,
             tick,
             claimer: format!("onboarding-{}-{nanos}", std::process::id()),
+            #[cfg(unix)]
+            main_graphs,
         };
         let worker = {
             let stop = stop.clone();
@@ -240,6 +275,8 @@ fn serve(work: &Work, stop: &AtomicBool) {
         return;
     };
     let halted = || stop.load(Ordering::SeqCst) || work.runner.is_stopping();
+    #[cfg(unix)]
+    let mut refresh = Refresh::default();
     while !halted() {
         let _ = recover_stale(&database);
         match claim(&database, &work.claimer) {
@@ -249,7 +286,14 @@ fn serve(work: &Work, stop: &AtomicBool) {
                     std::thread::sleep(work.tick);
                 }
             }
-            Ok(None) | Err(_) => std::thread::sleep(work.tick),
+            Ok(None) => {
+                #[cfg(unix)]
+                if work.main_graphs && refresh_step(work, &database, &mut refresh, &halted) {
+                    continue;
+                }
+                std::thread::sleep(work.tick);
+            }
+            Err(_) => std::thread::sleep(work.tick),
         }
     }
 }
@@ -266,7 +310,19 @@ fn recover_stale(database: &Connection) -> rusqlite::Result<usize> {
     )
 }
 
-/// Claims the oldest waiting step: a graph build, or a mapping once its
+/// The onboarding rows a worker may claim, as a condition on `onboarding o`: unclaimed, and
+/// a waiting graph build, or a waiting mapping once its graph step has finished either way,
+/// while the owner has not saved the setup and no account pause it waits on is still
+/// running, or that pause was last checked [`PAUSE_RECHECK_MS`] ago. Binds `?1` the first
+/// setup revision, `?2` the time now and `?3` the pause recheck cut-off.
+const CLAIMABLE: &str = "claimer IS NULL AND (graph_state='waiting'
+    OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
+        AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2
+            OR updated_ms<=?3)
+        AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
+            AND json_extract(s.body,'$.revision')>?1)))";
+
+/// Claims the oldest waiting step ([`CLAIMABLE`]): a graph build, or a mapping once its
 /// graph step has finished either way, while the owner has not saved the
 /// setup and no account pause it waits on is still running, or that pause was
 /// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
@@ -278,14 +334,10 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
     let now = now_ms();
     let row = tx
         .query_row(
-            "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms FROM onboarding o
-             WHERE claimer IS NULL AND (graph_state='waiting'
-                OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
-                    AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2
-                        OR updated_ms<=?3)
-                    AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
-                        AND json_extract(s.body,'$.revision')>?1)))
-             ORDER BY created_ms,project LIMIT 1",
+            &format!(
+                "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms
+                 FROM onboarding o WHERE {CLAIMABLE} ORDER BY created_ms,project LIMIT 1"
+            ),
             params![
                 crate::project_setup::FIRST_REVISION as i64,
                 now,
@@ -510,6 +562,12 @@ fn graph_step(
         Ok(hidden) => hidden,
         Err(_) => return Step::failed("project hidden folders unreadable"),
     };
+    #[cfg(unix)]
+    let tip = if work.main_graphs {
+        main_tip(database, &claimed.project, &claimed.repo)
+    } else {
+        None
+    };
     match graph::update(
         &graphify,
         &claimed.repo,
@@ -520,7 +578,12 @@ fn graph_step(
         beat,
     ) {
         #[cfg(unix)]
-        Ok(GraphEnding::Built) => Step::Done,
+        Ok(GraphEnding::Built) => {
+            if let Some(tip) = tip {
+                publish_main(&claimed.repo, tip, &hidden);
+            }
+            Step::Done
+        }
         Ok(GraphEnding::Failed(reason)) => Step::failed(reason),
         #[cfg(unix)]
         Ok(GraphEnding::TimedOut) => Step::failed(GRAPH_TIMED_OUT),
@@ -528,6 +591,272 @@ fn graph_step(
         Ok(GraphEnding::Stopped) => Step::WAITING,
         Err(RunError::Uncertain(_)) => Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
         Err(error) => not_started(Kind::Graph, &error),
+    }
+}
+
+/// What the idle loop remembers between main graph checks (DEC-123): when each project
+/// was last looked at, and when its last build failed, so a project is checked at
+/// most every [`main_graph::CHECK_EVERY`] and built again after a failure only once
+/// [`main_graph::retry_waits`] lets it, whatever its tip.
+#[cfg(unix)]
+#[derive(Default)]
+struct Refresh {
+    checked: HashMap<String, Instant>,
+    failed: HashMap<String, Instant>,
+}
+
+/// Builds and publishes at most one project's main graph while no onboarding step waits
+/// (DEC-123): only while the code graph switch is on and the system builds graphs, for a
+/// project ([`refreshable`]) whose absolute folder holds a `.crazyagent` folder and whose
+/// published graph is missing or was built at another tip than its main branch holds now,
+/// which covers every landing and the owner's own commits, or while the project hid other
+/// folders than it hides now. The first pass runs at engine start. Takes the work, the
+/// worker's database, what earlier passes saw and `halted`. Returns whether a build ran.
+#[cfg(unix)]
+fn refresh_step(
+    work: &Work,
+    database: &Connection,
+    refresh: &mut Refresh,
+    halted: &dyn Fn() -> bool,
+) -> bool {
+    if !graphs_wanted(database) {
+        return false;
+    }
+    let Ok(projects) = refreshable(database) else {
+        return false;
+    };
+    assert!(projects.len() <= ONBOARDED_MAX as usize);
+    let known = |project: &String| projects.iter().any(|(id, _)| id == project);
+    refresh.checked.retain(|project, _| known(project));
+    refresh.failed.retain(|project, _| known(project));
+    let now = Instant::now();
+    for (project, repo) in &projects {
+        let looked = refresh.checked.get(project);
+        if looked.is_some_and(|at| now.duration_since(*at) < main_graph::CHECK_EVERY) {
+            continue;
+        }
+        refresh.checked.insert(project.clone(), now);
+        if !repo.is_absolute()
+            || crate::projects_home::state_folder(repo).as_path() == repo.as_path()
+        {
+            continue;
+        }
+        if main_graph::retry_waits(refresh.failed.get(project).copied(), now) {
+            continue;
+        }
+        let Some(tip) = main_tip(database, project, repo) else {
+            continue;
+        };
+        let Ok(hidden) = crate::sandbox::hidden_paths::load(database, project) else {
+            continue;
+        };
+        let published = main_graph::latest(repo);
+        if !main_graph::due(
+            published.as_ref(),
+            &tip,
+            &main_graph::hidden_digest(&hidden),
+        ) {
+            continue;
+        }
+        match refresh_build(work, database, project, repo, tip, &hidden, halted) {
+            Refreshed::Published => {
+                refresh.failed.remove(project);
+            }
+            Refreshed::Failed => {
+                refresh.failed.insert(project.clone(), Instant::now());
+            }
+            Refreshed::GaveWay => {}
+        }
+        return true;
+    }
+    false
+}
+
+/// Whether the engine builds main graphs now ([`main_graph::wanted`]), from the code graph
+/// switch as Setup stores it, read in a transaction that writes nothing. Takes the worker's
+/// database. Returns the answer; a switch that cannot be read counts as off.
+#[cfg(unix)]
+fn graphs_wanted(database: &Connection) -> bool {
+    let Ok(tx) = database.unchecked_transaction() else {
+        return false;
+    };
+    let switch = crate::storage::setup::entry_switch(&tx, crate::setup::pack::GRAPH_ENTRY)
+        .ok()
+        .flatten();
+    main_graph::wanted(switch, std::env::consts::OS)
+}
+
+/// Whether a new or ready onboarding step waits to be claimed ([`CLAIMABLE`]): a graph step,
+/// or a mapping with no account pause or one whose pause has ended. The pause recheck
+/// cut-off is bound to the smallest time, so a mapping that only rechecks its pause every
+/// [`PAUSE_RECHECK_MS`] never halts a refresh and waits one build instead. Takes the
+/// worker's database. Returns the answer; a table that cannot be read counts as no step
+/// waiting, since the claim then fails too.
+#[cfg(unix)]
+fn step_waits(database: &Connection) -> bool {
+    database
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM onboarding o WHERE {CLAIMABLE})"),
+            params![
+                crate::project_setup::FIRST_REVISION as i64,
+                now_ms(),
+                i64::MIN
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+}
+
+/// The stop a main graph refresh build polls (DEC-123): yes once the engine halts, or once
+/// an onboarding step waits to be claimed ([`step_waits`]), so a new project's onboarding
+/// never waits behind a refresh. The table is read at most every [`STEP_POLL`], and a yes
+/// stays yes. Takes the worker's database and `halted`. Returns the stop.
+#[cfg(unix)]
+fn gives_way<'a>(database: &'a Connection, halted: &'a dyn Fn() -> bool) -> impl Fn() -> bool + 'a {
+    let read: Cell<Option<Instant>> = Cell::new(None);
+    let waits = Cell::new(false);
+    move || {
+        if halted() {
+            return true;
+        }
+        if !waits.get() && read.get().is_none_or(|at| at.elapsed() >= STEP_POLL) {
+            read.set(Some(Instant::now()));
+            waits.set(step_waits(database));
+        }
+        waits.get()
+    }
+}
+
+/// The projects whose main graph the refresh looks after, with their folders, at most
+/// `ONBOARDED_MAX` in project order: each onboarded project whose graph step is over, at its
+/// onboarding folder, and each project with no onboarding row that declares a repository,
+/// its first repository standing in for its folder as the trash guards read it. Takes the
+/// worker's database. Returns the list.
+#[cfg(unix)]
+fn refreshable(database: &Connection) -> rusqlite::Result<Vec<(String, PathBuf)>> {
+    let mut statement = database.prepare(
+        "SELECT p.id,COALESCE(o.repo,json_extract(p.body,'$.spec.repositories[0]'))
+         FROM projects p LEFT JOIN onboarding o ON o.project=p.id
+         WHERE (o.project IS NULL AND json_type(p.body,'$.spec.repositories[0]')='text')
+            OR (o.claimer IS NULL AND o.graph_state NOT IN ('waiting','running'))
+         ORDER BY p.id LIMIT ?1",
+    )?;
+    let rows = statement.query_map([ONBOARDED_MAX], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            PathBuf::from(row.get::<_, String>(1)?),
+        ))
+    })?;
+    rows.collect()
+}
+
+/// The tip a project's main graph is built at ([`crate::landing::main_tip`]), only a commit
+/// id as git writes it. Takes the worker's database, the project and its folder. Returns
+/// the tip, None while it cannot be read.
+#[cfg(unix)]
+fn main_tip(database: &Connection, project: &str, repo: &Path) -> Option<String> {
+    let project = crate::protocol::ProjectId::new(project.to_owned()).ok()?;
+    crate::landing::main_tip(database, repo, &project)
+        .ok()
+        .flatten()
+        .filter(|tip| main_graph::tip_valid(tip))
+}
+
+/// How one main graph refresh ended (DEC-123).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refreshed {
+    /// Built and published.
+    Published,
+    /// Stopped for a waiting onboarding step or the engine's stop; never a failure, so the
+    /// project is tried again at its next check.
+    GaveWay,
+    /// Failed, timed out, did not start or was not published.
+    Failed,
+}
+
+/// Rebuilds one project's main graph in place through the confined graph build and
+/// publishes it at `tip` with the folders it hid ([`publish_main`]), then removes the
+/// build's run folder and profile unless its processes may still run. The build stops as
+/// soon as an onboarding step waits ([`gives_way`]). Takes the work, the worker's database,
+/// the project, its folder, the tip read before the build, the project's hidden folders
+/// and `halted`. Returns how the refresh ended.
+#[cfg(unix)]
+fn refresh_build(
+    work: &Work,
+    database: &Connection,
+    project: &str,
+    repo: &Path,
+    tip: String,
+    hidden: &[PathBuf],
+    halted: &dyn Fn() -> bool,
+) -> Refreshed {
+    let Some(graphify) = (work.graphify)() else {
+        return Refreshed::Failed;
+    };
+    let name = refresh_name(project, now_ms());
+    let ending = graph::update(
+        &graphify,
+        repo,
+        work.runner.state(),
+        &name,
+        hidden,
+        work.limits.graph_time,
+        &gives_way(database, halted),
+    );
+    if !matches!(ending, Err(RunError::Uncertain(_))) {
+        forget_run(work.runner.state(), &name);
+    }
+    match ending {
+        Ok(GraphEnding::Built) if publish_main(repo, tip, hidden) => Refreshed::Published,
+        Ok(GraphEnding::Stopped) => Refreshed::GaveWay,
+        _ => Refreshed::Failed,
+    }
+}
+
+/// The run name of one main graph refresh: `graph-main-`, the project id cut to fit, and
+/// the start time. Takes the project and the time. Returns the name, at most
+/// `RUN_NAME_BYTES_MAX` bytes.
+#[cfg(unix)]
+fn refresh_name(project: &str, now: i64) -> String {
+    assert!(project.is_ascii() && !project.is_empty());
+    let tail = format!("-{now}");
+    let room = RUN_NAME_BYTES_MAX - REFRESH_PREFIX.len() - tail.len();
+    let name = format!(
+        "{REFRESH_PREFIX}{}{tail}",
+        &project[..project.len().min(room)]
+    );
+    assert!(name.len() <= RUN_NAME_BYTES_MAX);
+    name
+}
+
+/// Removes a finished refresh's run folder and Seatbelt profile from the onboarding state,
+/// so refreshes after every landing leave nothing behind. Takes the state folder and the
+/// run name; a part that cannot be removed is left.
+#[cfg(unix)]
+fn forget_run(state: &Path, name: &str) {
+    assert!(name.starts_with(REFRESH_PREFIX));
+    let _ = std::fs::remove_dir_all(state.join("agents").join(name));
+    let _ = std::fs::remove_file(state.join("profiles").join(format!("{name}.sb")));
+}
+
+/// Publishes a graph just built for agents to copy ([`main_graph::publish`]), stamped with
+/// the tip read before its build, the time now and the digest of the folders the build hid;
+/// a failure is logged by its kind and leaves the last published graph. Takes the project
+/// folder, the tip and the hidden folders. Returns whether it was published.
+#[cfg(unix)]
+fn publish_main(repo: &Path, tip: String, hidden: &[PathBuf]) -> bool {
+    let build = main_graph::Build {
+        tip,
+        built_ms: now_ms(),
+        hidden: main_graph::hidden_digest(hidden),
+    };
+    match main_graph::publish(repo, &build) {
+        Ok(published) => published,
+        Err(error) => {
+            eprintln!("graph_publish_failed cause={:?}", error.kind());
+            false
+        }
     }
 }
 
@@ -880,7 +1209,7 @@ pub fn start_for_engine(
             .map_err(|error| error.to_string())?;
     }
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;
-    Ok(OnboardingService::start(
+    Ok(OnboardingService::begin(
         Arc::new(runner),
         move |pool: &CredentialRef, harnesses: &[ResearchHarness]| {
             resolver.pool_pick(pool, harnesses)
@@ -888,6 +1217,7 @@ pub fn start_for_engine(
         move || engine_graphify(&runtime),
         OnboardingLimits::default(),
         ENGINE_TICK,
+        true,
     ))
 }
 
