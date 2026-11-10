@@ -2001,10 +2001,14 @@ pub(super) fn wake_in(
 }
 
 fn changes(answering: &Answering<'_>) -> (String, bool) {
-    let listed = crate::landing::open(answering.landing)
-        .and_then(|db| crate::landing::list(&db, &answering.stored.project_id));
-    let sets = match listed {
-        Ok(sets) => sets,
+    let project = &answering.stored.project_id;
+    let listed = crate::landing::open(answering.landing).and_then(|db| {
+        let sets = crate::landing::list(&db, project)?;
+        let waiting = crate::landing::waiting(&db, Some(project))?;
+        Ok((sets, waiting))
+    });
+    let (sets, waiting) = match listed {
+        Ok(read) => read,
         Err(problem) => {
             return (
                 format!(
@@ -2015,7 +2019,7 @@ fn changes(answering: &Answering<'_>) -> (String, bool) {
             );
         }
     };
-    let waiting: Vec<String> = sets
+    let open: Vec<String> = sets
         .iter()
         .filter(|set| {
             matches!(
@@ -2026,30 +2030,51 @@ fn changes(answering: &Answering<'_>) -> (String, bool) {
             )
         })
         .take(CHANGES_LISTED_MAX)
-        .map(|set| {
-            let state = match set.state {
-                crate::landing::ChangeState::Conflict => "conflicts with the owner's branch",
-                crate::landing::ChangeState::Updating => "being updated",
-                _ => "waiting for review",
-            };
-            format!(
-                "- {}: {} files, +{} -{}, {state}",
-                super::bound_text(&set.agent.label, 80),
-                set.files,
-                set.added,
-                set.removed
-            )
-        })
+        .map(open_set_line)
         .collect();
-    if waiting.is_empty() {
+    if open.is_empty() {
         return ("No change set is waiting for the owner.".into(), false);
     }
+    let here = waiting.here.expect("the count was asked for this project");
     (
         format!(
-            "Change sets waiting for the owner in Changes:\n{}",
-            waiting.join("\n")
+            "Change sets open in Changes, {here} waiting for the owner:\n{}",
+            open.join("\n")
         ),
         false,
+    )
+}
+
+/// One open change set as the owner's Changes view reads it: its name, its size, the
+/// view's state words and the files it conflicts on, so the master and the owner mean
+/// the same set (HB-S5-J). Takes the open set. Returns the line.
+fn open_set_line(set: &crate::landing::ChangeSetView) -> String {
+    use crate::landing::ChangeState;
+    let state = match set.state {
+        ChangeState::Pending => "waiting for review",
+        ChangeState::Conflict => "conflicts with the owner's branch",
+        ChangeState::Updating if set.waiting => "updated, waiting for its agent",
+        ChangeState::Updating if !set.conflicts.is_empty() => {
+            "its agent is fixing conflicts with main"
+        }
+        ChangeState::Updating => "being updated",
+        ChangeState::Accepted | ChangeState::Discarded => {
+            unreachable!("only open change sets are listed")
+        }
+    };
+    let files = if set.conflicts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ": {}",
+            super::bound_text(&set.conflicts.join(", "), merge::FILES_SHOWN_MAX)
+        )
+    };
+    format!(
+        "- {}, +{} -{}, {state}{files}",
+        crate::landing::change_set_name(set),
+        set.added,
+        set.removed
     )
 }
 

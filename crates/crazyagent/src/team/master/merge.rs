@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 
 const SHOWN_MAX: usize = 64;
-const FILES_SHOWN_MAX: usize = 400;
+pub(super) const FILES_SHOWN_MAX: usize = 400;
 const COMMIT_SHOWN: usize = 12;
 
 /// Merges a finished harness's task branch into the project's Land on branch, the Master's
