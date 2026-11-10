@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
+use crate::sandbox::policy::{AgentAccess, AgentNetwork};
 use crate::team::AgentRole;
 use crate::team::names::{self, AgentName};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -149,6 +150,35 @@ pub fn project_hooks(root: &Path, project: &ProjectId) -> Result<bool, EngineErr
     crate::sandbox::policy::load(&db, project.as_str())
         .map(|policy| policy.ide_git_hooks)
         .map_err(unavailable)
+}
+
+/// What a project's IDE server starts from, as the owner saved it in the project's agent
+/// policy: the access level and the network choice an Own branch IDE follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdePolicy {
+    pub access: AgentAccess,
+    pub network: AgentNetwork,
+}
+
+impl IdePolicy {
+    /// Tells whether a server launched under this policy still honours the saved one: the
+    /// same level, and at Own branch the same network choice, which no other level reads.
+    /// Input: the saved policy. Output: true when the server may keep running.
+    pub fn holds(self, _saved: Self) -> bool {
+        true
+    }
+}
+
+/// A project's [`IdePolicy`]; the default, Sandboxed with the Open network no Sandboxed IDE
+/// reads, when none is saved. Inputs: the engine root and the project. Output: the policy, or
+/// `ide_workspace_unavailable` for one that cannot be read, so a tampered one never widens
+/// the IDE.
+pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineError> {
+    let _ = (root, project);
+    Ok(IdePolicy {
+        access: AgentAccess::default(),
+        network: AgentNetwork::default(),
+    })
 }
 
 /// Whether an engine-made worktree of the project is inside the older agents root

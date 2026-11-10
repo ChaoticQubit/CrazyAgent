@@ -1,4 +1,6 @@
 use super::*;
+use crate::ide::workspace::{IdePolicy, ide_policy};
+use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use crate::sandbox::{ProjectSandbox, SandboxNetwork};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -376,7 +378,11 @@ fn server_env_holds_only_allowlisted_names() {
     let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
     let ceiling = std::ffi::OsStr::new("/private/tmp/project/.crazyagent/worktrees");
     let git_config = Path::new("/private/tmp/ide/project/gitconfig");
-    let built = env::server_env(source, capability, socket, locked, ceiling, git_config);
+    let git = env::ServerGit {
+        ceiling,
+        config: git_config,
+    };
+    let built = env::server_env(source, capability, socket, locked, Some(git));
     assert!(built.len() <= env::ENV_MAX);
     let mut command = Command::new("/usr/bin/env");
     command
@@ -1077,6 +1083,7 @@ fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command
             folder: &folder,
             root,
             socket: &servers.socket,
+            policy: ide_policy(servers.folder.parent().unwrap(), project).unwrap(),
         },
         &info,
         writer,
@@ -1289,6 +1296,10 @@ fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsStr
             folder: &folder,
             root,
             socket: &servers.socket,
+            policy: IdePolicy {
+                access: AgentAccess::Sandboxed,
+                network: AgentNetwork::Open,
+            },
         },
         &info,
         writer,
@@ -1473,6 +1484,10 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
             folder: &folder,
             root: checkout.path(),
             socket: &socket,
+            policy: IdePolicy {
+                access: AgentAccess::Sandboxed,
+                network: AgentNetwork::Open,
+            },
         },
         &info,
         writer,
@@ -1858,4 +1873,135 @@ async fn stop_all_ends_a_recorded_server_behind_a_held_start_lock() {
     assert!(!folder.join(token::FILE).exists(), "token left behind");
     assert!(!folder.join(GROUP).exists(), "group file left behind");
     drop(held);
+}
+
+/// Saves a project's access level in the engine database of a test data root, as the owner's
+/// Save does. Inputs: the data root, the project and the level.
+fn set_level(data: &Path, project: &ProjectId, access: AgentAccess) {
+    let db = crate::landing::open(data).unwrap();
+    let policy = AgentPolicy {
+        access,
+        ..AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+}
+
+/// Runs git as a Full access server starts it: the engine's shim under no profile, with the
+/// built server's environment and a test owner's home as `HOME`. Inputs: the built command,
+/// the IDE folder, the owner's home, the working folder and git's arguments. Output: git's
+/// output.
+fn full_access_git(
+    built: &Command,
+    folder: &Path,
+    owner: &Path,
+    cwd: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
+    let mut git = Command::new(&shim);
+    git.args(args)
+        .current_dir(cwd)
+        .env_clear()
+        .envs(
+            built
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .env("HOME", owner)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::spawn_gate::output(&mut git).unwrap()
+}
+
+#[test]
+fn a_project_with_no_saved_policy_opens_sandboxed() {
+    let data = scratch();
+    let policy = ide_policy(data.path(), &project("none")).unwrap();
+    assert_eq!(policy.access, AgentAccess::Sandboxed);
+}
+
+#[test]
+fn a_saved_policy_that_cannot_be_read_never_reaches_a_launch() {
+    let data = scratch();
+    set_level(data.path(), &project("bad"), AgentAccess::Full);
+    let db = crate::landing::open(data.path()).unwrap();
+    db.execute(
+        "UPDATE project_agent_policy SET body='tampered' WHERE project='bad'",
+        [],
+    )
+    .unwrap();
+    let refused = ide_policy(data.path(), &project("bad")).unwrap_err();
+    assert_eq!(refused.0, "ide_workspace_unavailable");
+}
+
+#[test]
+fn a_saved_network_change_only_matters_at_own_branch() {
+    let at = |access, network| IdePolicy { access, network };
+    let own = at(AgentAccess::OwnBranch, AgentNetwork::Open);
+    let sandboxed = at(AgentAccess::Sandboxed, AgentNetwork::Open);
+    let full = at(AgentAccess::Full, AgentNetwork::Open);
+    assert!(own.holds(own));
+    assert!(!own.holds(at(AgentAccess::OwnBranch, AgentNetwork::Https)));
+    assert!(!own.holds(sandboxed));
+    assert!(sandboxed.holds(at(AgentAccess::Sandboxed, AgentNetwork::None)));
+    assert!(full.holds(at(AgentAccess::Full, AgentNetwork::Https)));
+}
+
+#[test]
+fn a_full_access_launch_runs_the_launcher_with_no_seatbelt() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    set_level(data.path(), &project("full"), AgentAccess::Full);
+    let (built, _) = built_server(&servers, &project("full"), &root);
+    assert_ne!(built.get_program(), crate::sandbox::SANDBOX_EXEC);
+    assert!(built.get_program().to_string_lossy().ends_with(LAUNCHER));
+}
+
+/// Full access git is the owner's own: no forced key stops the project's hook or hides the
+/// owner's identity, and the shim's count line, which needs those keys, is not written.
+#[test]
+fn a_full_access_git_runs_the_projects_hook_with_the_owners_identity() {
+    let (checkout, data, owner) = (scratch(), scratch(), owner_home_with_git_config());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    owner_repository(&root);
+    let hook = root.join(".git").join("hooks").join("pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(&hook, "#!/bin/sh\n: > hook-ran\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    set_level(data.path(), &project("full-git"), AgentAccess::Full);
+    let (built, folder) = built_server(&servers, &project("full-git"), &root);
+    let added = full_access_git(&built, &folder, owner.path(), &root, &["add", "a.txt"]);
+    assert!(added.status.success(), "{added:?}");
+    let args = ["commit", "-q", "-m", "owner"];
+    let committed = full_access_git(&built, &folder, owner.path(), &root, &args);
+    assert!(committed.status.success(), "{committed:?}");
+    assert!(root.join("hook-ran").exists());
+    let args = ["log", "-1", "--format=%an"];
+    let author = full_access_git(&built, &folder, owner.path(), &root, &args);
+    assert_eq!(
+        String::from_utf8_lossy(&author.stdout).trim(),
+        "Dana \"Q\" O\\wner"
+    );
+}
+
+/// A level change restarts the server at the next open. The row moves to Own branch so no
+/// lib test runs a real unconfined server under the test process's own home.
+#[tokio::test]
+async fn an_open_after_a_level_change_starts_a_new_server() {
+    let (checkout, data) = (scratch(), scratch());
+    let build = cached_build();
+    let moved = project("moved");
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let first = servers.open(&moved, &root, &build, false).await.unwrap();
+    let token = fs::read_to_string(&first.token_path).unwrap();
+    let group = recorded_launch(&servers.project_folder(&moved).unwrap());
+    set_level(data.path(), &moved, AgentAccess::OwnBranch);
+    let second = servers.open(&moved, &root, &build, false).await.unwrap();
+    assert_ne!(token, fs::read_to_string(&second.token_path).unwrap());
+    gone(group).await;
+    servers.stop_all().await;
 }

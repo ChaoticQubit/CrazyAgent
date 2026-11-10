@@ -1,8 +1,15 @@
 use super::*;
+use crate::sandbox::policy::{AgentAccess, AgentNetwork, ide_network};
+use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 
 const PORT: u16 = 45_731;
+
+/// The network of a server that reaches nothing, as a Sandboxed one has.
+fn closed() -> SandboxNetwork {
+    SandboxNetwork::Only(Vec::new())
+}
 
 fn folder(path: &Path) {
     fs::create_dir_all(path).unwrap();
@@ -79,7 +86,7 @@ fn a_process_launched_the_ide_way_reads_its_capability_but_no_owner_key_or_engin
         readable: &[token.as_path(), capability.as_path()],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT).unwrap();
+    let profile = install(&mine, &grants, PORT, closed()).unwrap();
     assert_eq!(profile, mine.join(PROFILE));
     let read = |path: &Path| run(&profile, "/bin/cat", &[path.as_os_str()]);
     for (path, text) in &files {
@@ -163,7 +170,10 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
         readable: &[],
         locked: &[],
     };
-    assert_eq!(profile(&grants, PORT).unwrap_err().0, "ide_sandbox_invalid");
+    assert_eq!(
+        profile(&grants, PORT, closed()).unwrap_err().0,
+        "ide_sandbox_invalid"
+    );
     let elsewhere = tempfile::Builder::new()
         .prefix("ca-ides-")
         .tempdir_in(fs::canonicalize("/tmp").unwrap())
@@ -173,8 +183,11 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
         root: &project,
         ..grants
     };
-    assert!(profile(&outside, PORT).is_ok());
-    assert_eq!(profile(&outside, 0).unwrap_err().0, "ide_sandbox_invalid");
+    assert!(profile(&outside, PORT, closed()).is_ok());
+    assert_eq!(
+        profile(&outside, 0, closed()).unwrap_err().0,
+        "ide_sandbox_invalid"
+    );
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
@@ -231,7 +244,7 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
         readable: &[],
         locked: &[machine.as_path()],
     };
-    let profile = install(&mine, &grants, PORT).unwrap();
+    let profile = install(&mine, &grants, PORT, closed()).unwrap();
     let (read, printed) = run(&profile, "/bin/cat", &[settings.as_os_str()]);
     assert!(read);
     assert_eq!(printed, engine);
@@ -309,8 +322,8 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
         readable: &[],
         locked: &[machine.as_path()],
     };
-    assert!(profile(&grants, PORT).is_ok());
-    let invalid = |grants: &Grants| profile(grants, PORT).unwrap_err().0;
+    assert!(profile(&grants, PORT, closed()).is_ok());
+    let invalid = |grants: &Grants| profile(grants, PORT, closed()).unwrap_err().0;
     for locked in [extensions.as_path(), home.as_path(), mine.as_path()] {
         let locks = [locked];
         assert_eq!(
@@ -425,7 +438,7 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         readable: &[workspace.as_path()],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT).unwrap();
+    let profile = install(&mine, &grants, PORT, closed()).unwrap();
     let read = |path: &Path| run(&profile, "/bin/cat", &[path.as_os_str()]);
     for path in &refused {
         let (ran, printed) = read(path);
@@ -582,8 +595,10 @@ fn server_git(
         &home.join("capability"),
         &home.join("owner.sock"),
         &home.join("locked-settings.json"),
-        &crate::ide::git::ceiling(root, older_agents).unwrap(),
-        &home.join("gitconfig"),
+        Some(crate::ide::env::ServerGit {
+            ceiling: &crate::ide::git::ceiling(root, older_agents).unwrap(),
+            config: &home.join("gitconfig"),
+        }),
     );
     let mut command = super::command(profile, shim);
     command
@@ -740,7 +755,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT).unwrap();
+    let profile = install(&mine, &grants, PORT, closed()).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let refuse_agents = |mode: &str| {
         for (agent, _) in &agents {
@@ -986,7 +1001,7 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT).unwrap();
+    let profile = install(&mine, &grants, PORT, closed()).unwrap();
     crate::ide::settings::write(&mine, &home, &data, None).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
 
@@ -1096,7 +1111,7 @@ fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT).unwrap();
+    let profile = install(&mine, &grants, PORT, closed()).unwrap();
     crate::ide::settings::write(&mine, &home, &data, None).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let top = |older_agents: bool, dir: &Path| {
@@ -1199,7 +1214,7 @@ fn a_research_worktree_keeps_its_git_stop_after_the_project_gains_a_crazyagent_f
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT).unwrap();
+    let profile = install(&mine, &grants, PORT, closed()).unwrap();
     crate::ide::settings::write(&mine, &home, &data, None).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let top = |dir: &Path| {
@@ -1286,7 +1301,7 @@ fn ide_git_never_prunes_an_agent_worktree() {
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT).unwrap();
+    let profile = install(&mine, &grants, PORT, closed()).unwrap();
     crate::ide::settings::write(&mine, &home, &data, None).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let said = |output: &std::process::Output| {
@@ -1374,7 +1389,7 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
         readable: &[],
         locked: &[],
     };
-    let profile = install(&mine, &grants, PORT).unwrap();
+    let profile = install(&mine, &grants, PORT, closed()).unwrap();
     crate::ide::settings::write(&mine, &home, &data, None).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
     let ide = |args: &[&str]| {
@@ -1407,4 +1422,102 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
         );
     }
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
+/// A listener on a free loopback port, with nothing behind it. Output: the listener, held
+/// while the row runs, and its port.
+fn local_listener() -> (std::net::TcpListener, u16) {
+    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
+}
+
+/// Installs a real IDE profile for `network` in a scratch layout. Input: the network. Output:
+/// the scratch folder, held while the row runs, and the installed profile.
+fn network_profile(network: SandboxNetwork) -> (tempfile::TempDir, PathBuf) {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-iden-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let (home, root) = (mine.join("server"), base.join("project"));
+    for path in [&home, &build, &root] {
+        folder(path);
+    }
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT, network).unwrap();
+    (scratch, profile)
+}
+
+/// Whether a process under the profile connects to a loopback port. Inputs: the installed
+/// profile and the port. Output: the answer, from a real connect through `sandbox-exec`.
+fn reaches(profile: &Path, port: u16) -> bool {
+    let port = port.to_string();
+    run(
+        profile,
+        "/usr/bin/nc",
+        &[
+            OsStr::new("-z"),
+            OsStr::new("-G"),
+            OsStr::new("5"),
+            OsStr::new("127.0.0.1"),
+            OsStr::new(&port),
+        ],
+    )
+    .0
+}
+
+#[test]
+fn an_own_branch_server_on_open_reaches_a_local_listener() {
+    let (_held, port) = local_listener();
+    let network = ide_network(AgentAccess::OwnBranch, AgentNetwork::Open);
+    let (_scratch, profile) = network_profile(network);
+    assert!(reaches(&profile, port));
+}
+
+#[test]
+fn an_own_branch_server_on_port_443_refuses_another_port_and_renders_the_443_rule() {
+    let (_held, port) = local_listener();
+    let network = ide_network(AgentAccess::OwnBranch, AgentNetwork::Https);
+    let (_scratch, profile) = network_profile(network);
+    assert!(!reaches(&profile, port));
+    assert!(
+        fs::read_to_string(&profile)
+            .unwrap()
+            .contains(r#"(remote ip "*:443")"#)
+    );
+}
+
+#[test]
+fn an_own_branch_server_on_none_is_the_same_as_sandboxed() {
+    let (_held, port) = local_listener();
+    let none = ide_network(AgentAccess::OwnBranch, AgentNetwork::None);
+    let (_scratch, profile) = network_profile(none.clone());
+    assert!(!reaches(&profile, port));
+    assert_eq!(
+        none,
+        ide_network(AgentAccess::Sandboxed, AgentNetwork::Open)
+    );
+}
+
+#[test]
+fn a_sandboxed_server_refuses_a_local_listener_even_on_open() {
+    let (_held, port) = local_listener();
+    let network = ide_network(AgentAccess::Sandboxed, AgentNetwork::Open);
+    let (_scratch, profile) = network_profile(network);
+    assert!(!reaches(&profile, port));
 }

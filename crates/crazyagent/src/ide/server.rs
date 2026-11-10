@@ -311,6 +311,10 @@ impl Servers {
                 folder: &folder,
                 root,
                 socket: &self.socket,
+                policy: super::workspace::IdePolicy {
+                    access: Default::default(),
+                    network: Default::default(),
+                },
             };
             let mut command =
                 command_off_thread(launch, &info, output, project_hooks, &mut start).await?;
@@ -754,6 +758,7 @@ struct Launch<'a> {
     folder: &'a Path,
     root: &'a Path,
     socket: &'a Path,
+    policy: super::workspace::IdePolicy,
 }
 
 /// [`command`] on a blocking thread, so its git lookup, which runs xcrun on a Mac without the
@@ -767,7 +772,7 @@ async fn command_off_thread(
     project_hooks: bool,
     start: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Command, EngineError> {
-    let project = launch.project.clone();
+    let (project, policy) = (launch.project.clone(), launch.policy);
     let (build, folder, root, socket) = (
         launch.build.to_path_buf(),
         launch.folder.to_path_buf(),
@@ -782,6 +787,7 @@ async fn command_off_thread(
             folder: &folder,
             root: &root,
             socket: &socket,
+            policy,
         };
         command(launch, &info, output, project_hooks)
     })
@@ -837,6 +843,7 @@ fn command(
         folder,
         root,
         socket,
+        policy: _,
     } = launch;
     let errors = output
         .try_clone()
@@ -874,7 +881,12 @@ fn command(
         ],
         locked: &[machine.as_path()],
     };
-    let profile = sandbox::install(folder, &grants, info.server_port)?;
+    let profile = sandbox::install(
+        folder,
+        &grants,
+        info.server_port,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )?;
     let mut command = sandbox::command(&profile, &build.join(LAUNCHER));
     command
         .args(["--host", "127.0.0.1", "--port"])
@@ -899,8 +911,10 @@ fn command(
             &info.capability_path,
             socket,
             &written.locked,
-            &ceiling,
-            &git_config,
+            Some(env::ServerGit {
+                ceiling: &ceiling,
+                config: &git_config,
+            }),
         ))
         .env("TMPDIR", &tmp)
         .stdin(Stdio::null())

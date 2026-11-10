@@ -434,7 +434,13 @@ fn sandboxed(case: &Case, script: &str) -> bool {
         readable: &[locked.as_path()],
         locked: &[machine.as_path()],
     };
-    let profile = install(&case.folder, &grants, 45_733).unwrap();
+    let profile = install(
+        &case.folder,
+        &grants,
+        45_733,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
     let mut shell = command(&profile, Path::new("/bin/sh"));
     shell
         .args(["-c", script])
