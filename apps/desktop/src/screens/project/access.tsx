@@ -12,6 +12,9 @@ export const FULL_ACCESS_WARNING = "Agents run with your user's permissions: the
  * but not what a Full access agent started outside its terminal. */
 export const LOWERING_STOPS_AGENTS = "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.";
 
+/** What saving a new level, hooks or network choice does to the project's open IDE, the same in the TUI. */
+export const POLICY_RESTARTS_IDE = "Changing the level, the IDE hooks switch below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.";
+
 /** What turning a toolchain off does to work already running: the engine stops each agent, research job and master turn its sandbox granted it to. */
 export const TOOLCHAIN_OFF_STOPS_AGENTS = "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it.";
 

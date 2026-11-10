@@ -323,7 +323,7 @@ impl Servers {
                 socket: &self.socket,
                 policy,
             };
-            let mut command = command_off_thread(launch, &info, output, false, &mut start).await?;
+            let mut command = command_off_thread(launch, &info, output, &mut start).await?;
             self.prepare_extensions(&build, &folder).await?;
             self.spawn(project, &slot, &info, &mut command)
         }
@@ -408,9 +408,35 @@ impl Servers {
     }
 
     /// Stops a project's server when the owner's saved policy no longer fits the one it
-    /// started under. Input: the project. Output: whether a server was stopped.
-    pub async fn follow_level(&self, _project: &ProjectId) -> bool {
-        false
+    /// started under ([`IdePolicy::holds`]), or can no longer be read. The tab's next open
+    /// starts it again at the saved level. Runs under the start lock, so a launch still
+    /// starting is judged once it is up. Input: the project. Output: whether a server was
+    /// stopped.
+    pub async fn follow_level(&self, project: &ProjectId) -> bool {
+        let Some(slot) = locked(&self.slots).get(project).cloned() else {
+            return false;
+        };
+        let mut start = Some(Arc::clone(&slot.start).lock_owned().await);
+        let saved = holding_start(&mut start, {
+            let (data, project) = (self.data_root(), project.clone());
+            move || super::workspace::ide_policy(&data, &project)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok);
+        let running = {
+            let mut state = locked(&slot.state);
+            match (state.as_ref(), saved) {
+                (Some(held), Some(saved)) if held.policy.holds(saved) => None,
+                (Some(_), _) => state.take(),
+                (None, _) => None,
+            }
+        };
+        let stopped = running.is_some();
+        if let Some(running) = running {
+            finish(running).await;
+        }
+        stopped
     }
 
     /// Whether a Delete everything holds this project's IDE refused. Asked before an open does
@@ -807,7 +833,6 @@ async fn command_off_thread(
     launch: Launch<'_>,
     info: &ServerInfo,
     output: PipeWriter,
-    project_hooks: bool,
     start: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Command, EngineError> {
     let (project, policy) = (launch.project.clone(), launch.policy);
@@ -827,7 +852,7 @@ async fn command_off_thread(
             socket: &socket,
             policy,
         };
-        command(launch, &info, output, project_hooks)
+        command(launch, &info, output)
     })
     .await?
 }
@@ -858,15 +883,14 @@ async fn holding_start<T: Send + 'static>(
 /// environment holding only [`env::server_env`], with the owner `socket` the built-in
 /// extension connects to and TMPDIR at its short temp folder; stdout and stderr into the
 /// redacting `output` pipe, and its own process group. In a confined server the git shim lets
-/// the project's hooks run in `root` only when `project_hooks` is on, and every git it starts
+/// the project's hooks run in `root` only when the policy's switch is on, and every git it starts
 /// is held by [`confined_git`]. A Full access server's git is the owner's own, hooks and
 /// config included, so its shim holds no hooks path, whose count line needs the forced keys.
-/// Inputs: the launch, the server's info, the output pipe and the hooks switch.
+/// Inputs: the launch, the server's info and the output pipe.
 fn command(
     launch: Launch<'_>,
     info: &ServerInfo,
     output: PipeWriter,
-    project_hooks: bool,
 ) -> Result<Command, EngineError> {
     let (folder, policy) = (launch.folder, launch.policy);
     let errors = output
@@ -878,7 +902,7 @@ fn command(
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
     let confined = policy.access != AgentAccess::Full;
-    let hooks = (confined && project_hooks).then_some(launch.root);
+    let hooks = (confined && policy.hooks).then_some(launch.root);
     let written = settings::write(folder, &home, data, hooks)?;
     let ceiling = confined.then(|| confined_git(data, &launch)).transpose()?;
     let places = Places {

@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
 import type { AgentAccess, AgentNetwork, AgentPolicy, PolicyView, ProjectCatalog, RemovalPreview, StoredSetup } from "../../api-projects";
 import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
-import { AccessLevels, FULL_ACCESS_WARNING, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
+import { AccessLevels, FULL_ACCESS_WARNING, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, TOOLCHAIN_OFF_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import { Button, ConfirmDialog, Dialog, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -560,6 +560,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
+    {view && <p className="pj-help">{POLICY_RESTARTS_IDE}</p>}
     {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
     {view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}</p>}

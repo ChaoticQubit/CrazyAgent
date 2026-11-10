@@ -153,11 +153,13 @@ pub struct IdePolicy {
 
 impl IdePolicy {
     /// Tells whether a server launched under this policy still honours the saved one: the
-    /// same level, and at Own branch the same network choice, which no other level reads.
-    /// Input: the saved policy. Output: true when the server may keep running.
+    /// same level, at Own branch the same network choice, which no other level reads, and
+    /// below Full access the same hooks switch, which has no effect at Full. Input: the
+    /// saved policy. Output: true when the server may keep running.
     pub fn holds(self, saved: Self) -> bool {
         self.access == saved.access
             && (saved.access != AgentAccess::OwnBranch || self.network == saved.network)
+            && (saved.access == AgentAccess::Full || self.hooks == saved.hooks)
     }
 }
 

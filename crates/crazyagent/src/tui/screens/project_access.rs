@@ -12,7 +12,7 @@ pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str = "Lowering the level stops
 
 /// What saving a new level, hooks or network choice does to the project's open IDE, the same
 /// in the desktop app.
-pub(in crate::tui) const POLICY_RESTARTS_IDE: &str = "";
+pub(in crate::tui) const POLICY_RESTARTS_IDE: &str = "Changing the level, the IDE hooks switch below Full access, or the network choice at Own branch restarts this project's IDE at once. Its terminals end, and it reopens within a minute.";
 
 /// What turning a toolchain off does to work already running: the engine stops each agent,
 /// research job and master turn whose sandbox granted it.
@@ -224,6 +224,11 @@ impl AccessEdit {
         }
         body.extend(
             wrap_words(LOWERING_STOPS_AGENTS, TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(line, look.muted)),
+        );
+        body.extend(
+            wrap_words(POLICY_RESTARTS_IDE, TEXT_WIDTH)
                 .into_iter()
                 .map(|line| Row::of(line, look.muted)),
         );

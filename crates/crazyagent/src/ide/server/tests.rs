@@ -1089,7 +1089,6 @@ fn built_server(servers: &Servers, project: &ProjectId, root: &Path) -> (Command
         },
         &info,
         writer,
-        false,
     )
     .unwrap();
     (built, folder)
@@ -1306,7 +1305,6 @@ fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsStr
         },
         &info,
         writer,
-        false,
     )
     .unwrap();
     let ceiling = command
@@ -1495,7 +1493,6 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         },
         &info,
         writer,
-        false,
     )
     .unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
