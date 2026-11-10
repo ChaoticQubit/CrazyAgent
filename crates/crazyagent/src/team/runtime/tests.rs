@@ -22510,6 +22510,69 @@ fn a_stopped_teammate_ends_with_the_reason_of_who_stopped_it() {
     team.shutdown().unwrap();
 }
 
+/// S4B-B1-L1 r1: a native teammate's end that panics on its thread still reports, as not
+/// proven, so the stop leaves no agent handed over and marks its row with the uncertain
+/// cleanup code.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
+    use crate::team::StoppedBy;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+            params![mate, PROJECT],
+        )
+        .unwrap();
+    let project = fixture.setup.project_id.clone();
+    team.unmanaged_ending.insert(
+        mate,
+        PendingEnd {
+            reason: stopped_teammate(StoppedBy::Owner),
+            stopped: Some((project.clone(), StoppedBy::Owner)),
+        },
+    );
+    let sender = team.unmanaged_ends.0.clone();
+    let ended = std::thread::spawn(move || {
+        end_reported(
+            mate,
+            sender,
+            || -> Result<bool, crate::terminal::HostError> { panic!("the end failed") },
+        );
+    })
+    .join();
+    assert!(ended.is_err(), "the end panicked");
+
+    assert_eq!(
+        stopped_unmanaged(&mut team),
+        vec![(mate, project, StoppedBy::Owner)]
+    );
+    assert!(team.unmanaged_ending.is_empty());
+    let error: Option<String> = fixture
+        .connection
+        .query_row("SELECT error FROM team_agents WHERE id=?1", [mate], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        error.as_deref(),
+        Some("The owner stopped this teammate. (harness_cleanup_uncertain)")
+    );
+    team.shutdown().unwrap();
+}
+
 /// S4B-B1: a native teammate a stop ends is proven gone like any other pane. One whose
 /// pane process ignores terminate is not confirmed, so its row says the cleanup is
 /// uncertain, and its pane is still closed. S4B-B1-L1: that end waits seconds on the pane,

@@ -1835,7 +1835,7 @@ impl TeamRuntime {
         let spawned = std::thread::Builder::new()
             .name(format!("team-end-{id}"))
             .spawn(move || {
-                let _ = sender.send((id, end_left_pane(host.as_ref(), &name, "team")));
+                end_reported(id, sender, || end_left_pane(host.as_ref(), &name, "team"));
             });
         if spawned.is_err() {
             return Ok(UnmanagedEnd::Retry);
@@ -9720,6 +9720,16 @@ enum UnmanagedEnd {
     Marked,
     Handed,
     Retry,
+}
+
+/// Runs one native teammate's end on its thread and sends what it found. Takes the agent,
+/// the channel and the end. Returns nothing.
+fn end_reported(
+    id: i64,
+    sender: Sender<PaneEnd>,
+    end: impl FnOnce() -> Result<bool, crate::terminal::HostError>,
+) {
+    let _ = sender.send((id, end()));
 }
 const OWNER_STOPPED_TEAMMATE: &str = "The owner stopped this teammate.";
 const MASTER_STOPPED_TEAMMATE: &str = "The master stopped this teammate.";
