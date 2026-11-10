@@ -175,10 +175,15 @@ impl IdePolicy {
 /// Input: the two settings files, or none for an engine that has none. Output: the ports, or
 /// `ide_settings_unavailable` for files that do not read, so a refused read stops the launch.
 pub fn kept_ports(settings: Option<&(PathBuf, PathBuf)>) -> Result<Vec<u16>, EngineError> {
-    match settings {
-        None => Ok(Vec::new()),
-        Some(_) => Err(failure("ide_settings_stub")),
-    }
+    let Some((global, project)) = settings else {
+        return Ok(Vec::new());
+    };
+    let config = crate::config::resolve_config(global, project)
+        .map_err(|_| failure("ide_settings_unavailable"))?;
+    Ok(config
+        .settings
+        .model_access
+        .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access)))
 }
 
 /// A project's [`IdePolicy`]; the default, Sandboxed with the Open network no Sandboxed IDE

@@ -119,6 +119,7 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
 /// folders readable, its own home and temp folders, and only the
 /// [`TERMINAL_VARIABLES`] given. The engine runs it outside every sandbox, since macOS
 /// refuses a second Seatbelt profile inside a sandboxed process such as the IDE server.
+/// Its listeners stay off the owner's local model ports.
 /// Input: the launch. Output: the command, or a refusal for an unlisted shell, a start
 /// outside the project folder or an unsafe root.
 #[cfg(target_os = "macos")]
@@ -154,6 +155,7 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     toolchains::prepare_cargo_home(&home, &homes)?;
     let (sandbox, _) = ProjectSandbox::new(launch.folder, &home, &tmp, SandboxNetwork::Open)?
         .guard_engine(&root)?
+        .keep_ports(launch.kept_ports)?
         .allow_tools(&Toolchains::detect(launch.folder, &homes))?
         .allow_scratch(&scratch)?
         .allow_extra_reads(launch.extra_reads)?;

@@ -61,7 +61,7 @@ pub fn profile(
     grants: &Grants,
     port: u16,
     network: SandboxNetwork,
-    _kept_ports: &[u16],
+    kept_ports: &[u16],
 ) -> Result<String, EngineError> {
     let invalid = |_| failure("ide_sandbox_invalid");
     let data = grants.data;
@@ -103,6 +103,7 @@ pub fn profile(
     let homes = ToolHomes::owner().map_err(invalid)?;
     let closed = matches!(&network, SandboxNetwork::Only(remotes) if remotes.is_empty());
     let sandbox = ProjectSandbox::new(grants.root, grants.home, grants.tmp, network)
+        .and_then(|sandbox| sandbox.keep_ports(kept_ports))
         .and_then(|sandbox| sandbox.allow_read(grants.build))
         .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
         .map_err(invalid)?;
