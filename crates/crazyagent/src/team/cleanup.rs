@@ -641,6 +641,17 @@ fn retire_claimed(
         if remove_agent_files(team, target.id).is_err() {
             return Ok(Some("cleanup_folder_failed"));
         }
+        #[cfg(target_os = "macos")]
+        if let (Some(runtime), Some(project_root)) = (team.parent(), place.repository.to_str())
+            && crate::sandbox::tool_cache::remove_agent(
+                runtime,
+                project_root,
+                &target.id.to_string(),
+            )
+            .is_err()
+        {
+            return Ok(Some("cleanup_folder_failed"));
+        }
         db.execute(
             "DELETE FROM team_agent_conversations WHERE agent=?1 AND project=?2",
             params![target.id, project.as_str()],

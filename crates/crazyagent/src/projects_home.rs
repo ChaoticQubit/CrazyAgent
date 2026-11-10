@@ -751,8 +751,8 @@ impl DeletePlan {
     }
 
     /// Names the engine's own files of this deleted project for the record its row removal
-    /// writes: each agent and each research run of its jobs, with the identity of the folder
-    /// that holds it. A folder that is no real run, or that is not there, is left out. Input:
+    /// writes: each agent, each research run of its jobs and, on macOS, the tool caches of
+    /// its folders (T8), with the identity of the folder that holds it. A folder that is no real run, or that is not there, is left out. Input:
     /// the project's research jobs. Output: the records.
     pub fn engine_files(&self, research: &[i64]) -> Vec<RecordedFile> {
         let Some(root) = self.database.parent() else {
@@ -776,6 +776,17 @@ impl DeletePlan {
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        for folder in &self.folders {
+            let Some(project) = folder.to_str() else {
+                continue;
+            };
+            let cache = crate::sandbox::tool_cache::project_folder(root, project);
+            assert_eq!(cache.parent(), Some(root.join(TOOL_CACHE_FOLDER).as_path()));
+            if let Some(digest) = cache.file_name().and_then(|name| name.to_str()) {
+                names.push(format!("{TOOL_CACHE_PREFIX}{digest}"));
+            }
+        }
         names
             .into_iter()
             .filter_map(|name| {
@@ -790,10 +801,20 @@ impl DeletePlan {
 /// it when the project's rows were dropped.
 pub type RecordedFile = (String, i64);
 
+/// The folder under the engine root that holds every project's tool caches (T8).
+const TOOL_CACHE_FOLDER: &str = "tool-cache";
+
+/// The start of the name a delete records for one project's tool caches (T8).
+const TOOL_CACHE_PREFIX: &str = "tool-cache-";
+
+/// The length of the hex digest that names one project's tool cache folder (T8).
+const TOOL_CACHE_DIGEST_BYTES: usize = 32;
+
 /// One engine file a delete's record can name.
 enum EngineFile {
     Agent(i64),
     Run,
+    ToolCache,
 }
 
 impl EngineFile {
@@ -803,14 +824,25 @@ impl EngineFile {
         match self {
             Self::Agent(_) => root.join("team").join("agents").join(name),
             Self::Run => root.join("research").join("agents").join(name),
+            Self::ToolCache => root
+                .join(TOOL_CACHE_FOLDER)
+                .join(&name[TOOL_CACHE_PREFIX.len()..]),
         }
     }
 }
 
 /// Reads a recorded name as an engine file, exact shapes only: `agent-<id>`, or
-/// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling.
-/// Input: the name. Output: what it names, or None for anything else.
+/// `job-<id>-<attempt>` with an optional `-<launch>`, each number in its one plain spelling,
+/// or `tool-cache-<digest>` with 32 lowercase hex digits (T8). Input: the name. Output: what
+/// it names, or None for anything else.
 fn engine_file(name: &str) -> Option<EngineFile> {
+    if let Some(digest) = name.strip_prefix(TOOL_CACHE_PREFIX) {
+        let plain = digest.len() == TOOL_CACHE_DIGEST_BYTES
+            && digest
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+        return plain.then_some(EngineFile::ToolCache);
+    }
     if let Some(id) = name.strip_prefix("agent-") {
         return plain_number(id).map(EngineFile::Agent);
     }
@@ -838,7 +870,7 @@ fn folder_inode(folder: &Path) -> Option<i64> {
 }
 
 /// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles and
-/// teammates' records, or a research run's folder. Only the folder the record was written for
+/// teammates' records, a research run's folder, or a project's tool caches. Only the folder the record was written for
 /// goes: under any other identity it stays, logged as `project_files_kept`, and the record is
 /// finished. A name that is no engine file removes nothing. A file left behind is logged as
 /// `project_files_left` and keeps its record. Inputs: the engine database path and the
